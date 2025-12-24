@@ -36,10 +36,10 @@ fn main() {
 
 ## ビルド
 
-`imago build`でWasmモジュールにコンパイルします。ビルドコマンドは`imago.toml`で変更できます。
+`imago dev build`でWasmモジュールにコンパイルします。ビルドコマンドは`imago.toml`で変更できます。
 
 ```bash
-imago build
+imago dev build
 ```
 
 ## デーモンの起動
