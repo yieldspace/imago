@@ -1,6 +1,7 @@
 mod dev;
 mod run;
 
+use crate::dev::DevSubCommand;
 use crate::run::Runnable;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -15,6 +16,14 @@ pub struct Cli {
 #[derive(Subcommand, Debug, Clone)]
 pub enum SubCommand {
     Dev(dev::DevCommands),
+    /// Run a service defined in the configuration
+    Run,
+    /// Stop a running service
+    Stop,
+    /// View logs from a running service
+    Logs,
+    /// List running services
+    Ps,
 }
 
 impl Cli {
@@ -33,7 +42,11 @@ impl Cli {
         };
 
         match cmd.command {
-            SubCommand::Dev(ref dev) => dev.run(path).await?,
+            SubCommand::Dev(ref dev) => match dev.command {
+                DevSubCommand::Build(ref cmd) => cmd.run(path).await?,
+                DevSubCommand::Update => {}
+            },
+            _ => todo!(),
         }
         Ok(())
     }
