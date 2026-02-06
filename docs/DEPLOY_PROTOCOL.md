@@ -1,161 +1,207 @@
-# Core ↔ Deploy Protocol（MVP）
+# Core ↔ Deploy Protocol（刷新ドラフト）
 
-このドキュメントは、imago CLI（デプロイ基盤）と imagod（コア）をつなぐプロトコルの設計案。
-MVPスコープは **build → package → upload → apply → restart**。
+このドキュメントは、imago CLI（デプロイ基盤）と imagod（コア）をつなぐ deploy プロトコルの最新版ドラフト。
+旧案（`deploy.begin -> upload -> apply -> restart`）を置換し、再開可能アップロードと非同期実行を前提にする。
 
 ## 目的
-- CLI からのデプロイ手順を **一貫した API と状態遷移**で表現する
-- 転送・検証・適用・再起動を分離して **失敗時の復旧**を簡単にする
-- 将来の拡張（resume / roll back / blue-green）に備える
+- 不安定回線でも復旧可能なデプロイを提供する
+- 冪等性と前提条件チェックを明示し、重複実行や競合更新を防ぐ
+- 長時間処理を非同期 Operation で追跡可能にする
+- 失敗時の自動ロールバックを契約化し、運用復旧を簡素化する
+
+## 現行案の問題点
+1. `deploy.begin` の再送時に冪等性が弱く、重複処理が起きうる
+2. upload が単発ストリーム前提で、中断時に全量再送が必要
+3. `apply/restart` が同期前提で、再接続後に追跡しにくい
+4. manifest が begin payload と tar 内で二重管理され不整合余地がある
+5. 失敗時ロールバックのデフォルト挙動が契約化されていない
+6. エラーが粗く、再試行可否や失敗段階の判断が難しい
+
+## 設計原則
+1. 互換維持より実装可能性を優先し、破壊的変更を許容する
+2. `idempotency_key` で冪等性を担保する
+3. artifact 転送はチャンク再開型にする
+4. 実行は非同期 Operation 型とする
+5. `auto_rollback = true` を既定値にする
 
 ## 役割
-- **client**: `imago` CLI（build/deployの実行主体）
-- **server**: `imagod`（デーモン / ランタイム / 配置の担当）
+- **client**: `imago` CLI（build/deploy の実行主体）
+- **server**: `imagod`（受信・検証・配置・起動・ロールバック）
 
 ## トランスポート
-- **QUIC + WebTransport + CBOR**
-- **mTLS 認証**（接続時に相互認証）
+- QUIC + WebTransport + CBOR
+- mTLS（接続時の相互認証）
 
 ### チャンネル設計
-- **Control stream**: CBOR メッセージ（request/response/events）
-- **Data stream**: tar.gz を raw で送るストリーム
+- **Control stream**: request/response/events
+- **Data stream**: artifact chunk 転送
 
-## メッセージ共通フォーマット
-- CBOR map を基本にする
-- MVPでは **string key** で読みやすく
+## 共通メッセージ形式
 
-例:
-```
+```json
 {
-  "type": "deploy.begin",
-  "id": "req-uuid",
-  "payload": { ... }
+  "type": "deploy.prepare",
+  "request_id": "req-uuid",
+  "correlation_id": "deploy-or-op-id",
+  "payload": {},
+  "error": null
 }
 ```
 
 ### 共通フィールド
 - `type`: メッセージ種別
-- `id`: request id（UUID推奨）
-- `payload`: 具体データ
-- `error`: 失敗時のみ（code/message）
+- `request_id`: リクエスト識別子（UUID推奨）
+- `correlation_id`: deploy/operation の追跡ID
+- `payload`: メッセージ本文
+- `error`: 失敗時のみ。`code/message/retryable/stage/details`
 
-### エラーコード（MVP）
-- `E_UNAUTHORIZED`（認証失敗）
-- `E_BAD_REQUEST`（必須項目不足）
-- `E_BAD_MANIFEST`（manifest不正）
-- `E_HASH_MISMATCH`（sha256不一致）
-- `E_BUSY`（同時デプロイ不可）
-- `E_APPLY_FAILED`（展開/配置失敗）
-- `E_NOT_FOUND`（対象なし）
-- `E_INVALID_STATE`（状態遷移不正）
-- `E_INTERNAL`（内部エラー）
+## メッセージ定義
 
-## 状態遷移（MVP）
-1. connect + hello
-2. deploy.begin
-3. deploy.upload
-4. deploy.apply
-5. runtime.restart
-
-## メッセージ定義（MVP）
-
-### 1) hello / hello.ok
-**目的**: プロトコル互換確認
+### 1) `hello.negotiate`
+**目的**: 接続初期化と制約確定
 - request payload:
-  - `protocol_version`（例: 1）
+  - `protocol_draft`
   - `client_version`
+  - `required_features`
 - response payload:
-  - `protocol_version`
+  - `accepted`（bool）
   - `server_version`
-  - `features`（例: ["upload_stream", "apply", "restart"]）
+  - `features`
+  - `limits`（chunk上限、inflight上限など）
 
-### 2) deploy.begin / deploy.accepted
-**目的**: アップロード準備と事前検証
+### 2) `deploy.prepare`
+**目的**: デプロイセッション作成と欠損レンジ決定
 - request payload:
   - `name`
   - `type`（cli/http/socket）
   - `target`（host/group）
-  - `package_sha256`
-  - `package_size`
-  - `manifest`（任意）
-  - `manifest_sha256`（任意）
+  - `artifact_digest`（sha256）
+  - `artifact_size`
+  - `manifest_digest`（sha256）
+  - `idempotency_key`
+  - `policy`（restart_policy / auto_rollback 等）
 - response payload:
   - `deploy_id`
-  - `already_uploaded`（true/false）
+  - `artifact_status`（`missing`/`partial`/`complete`）
+  - `missing_ranges`
+  - `upload_token`
+  - `session_expires_at`
 
-**補足**
-- `manifest` を送った場合、server は事前検証して NG ならこの時点でエラー
-- `already_uploaded=true` なら upload を省略可能
-
-### 3) deploy.upload.ready / deploy.upload.complete
-**目的**: tar.gz の送信
-- deploy.begin 成功後、server が `deploy.upload.ready` を返す
-- payload:
+### 3) `artifact.push`
+**目的**: チャンク転送（再開対応）
+- chunk header:
   - `deploy_id`
-  - `stream_id`（data stream の識別子）
+  - `offset`
+  - `length`
+  - `chunk_sha256`
+  - `upload_token`
+- ack event payload:
+  - `received_ranges`
+  - `next_missing_range`
+  - `accepted_bytes`
 
-**データ送信**
-- client は `stream_id` で data stream を開く
-- tar.gz の raw bytes を送る（サイズは `package_size` に一致）
-
-**完了応答**
-- server は sha256 を検証して `deploy.upload.complete`
-- payload:
-  - `deploy_id`
-  - `verified`（true/false）
-
-### 4) deploy.apply / deploy.applied
-**目的**: 展開と配置
+### 4) `artifact.commit`
+**目的**: artifact の最終検証
 - request payload:
   - `deploy_id`
-- server の処理:
-  - `/etc/imago/<name>/<hash>/` に展開
-  - manifest 登録
-  - 旧版クリーンアップ（起動前）
+  - `artifact_digest`
+  - `artifact_size`
+  - `manifest_digest`
 - response payload:
+  - `artifact_id`
+  - `verified`（bool）
+
+### 5) `deploy.execute`
+**目的**: 配置 + 起動を非同期 Operation として開始
+- request payload:
+  - `deploy_id`
+  - `expected_current_release`（CAS）
+  - `restart_policy`
+  - `auto_rollback`
+- response payload:
+  - `operation_id`
+  - `state`（`accepted`）
+
+### 6) `operation.get` / `operation.watch`
+**目的**: 進捗取得と追跡
+- response payload:
+  - `operation_id`
+  - `stage`（`validate`/`expand`/`cleanup`/`start`/`rollback` 等）
+  - `progress`（0-100）
   - `release_id`
-  - `path`
-
-### 5) runtime.restart / runtime.restarted
-**目的**: 新版起動
-- request payload:
-  - `name` もしくは `release_id`
-- response payload:
   - `process_id`
-  - `status`（running/failed）
+  - `rollback_status`
+  - `error`
 
-### 6) deploy.abort（任意）
-**目的**: クライアント都合の中断
+### 7) `operation.cancel`
+**目的**: 実行中断要求
 - request payload:
-  - `deploy_id`
-- server は一時領域をクリーンアップ
+  - `operation_id`
+- response payload:
+  - `cancellable`
+  - `final_state`
 
-## 例: デプロイシーケンス（MVP）
-- hello → hello.ok
-- deploy.begin → deploy.accepted
-- deploy.upload.ready
-- data stream で tar.gz 送信
-- deploy.upload.complete
-- deploy.apply → deploy.applied
-- runtime.restart → runtime.restarted
+## 状態遷移
+1. `connected`
+2. `negotiated`
+3. `prepared`
+4. `uploading`（resumable）
+5. `committed`
+6. `executing`（async）
+7. `succeeded` / `failed` / `rolled_back`
+
+## エラー契約
+全エラーは以下形式で返す。
+
+```json
+{
+  "code": "E_CHUNK_HASH_MISMATCH",
+  "message": "chunk digest mismatch",
+  "retryable": true,
+  "stage": "artifact.push",
+  "details": {}
+}
+```
+
+### エラーコード
+- `E_UNAUTHORIZED`
+- `E_BAD_REQUEST`
+- `E_BAD_MANIFEST`
+- `E_BUSY`
+- `E_NOT_FOUND`
+- `E_INTERNAL`
+- `E_IDEMPOTENCY_CONFLICT`
+- `E_RANGE_INVALID`
+- `E_CHUNK_HASH_MISMATCH`
+- `E_ARTIFACT_INCOMPLETE`
+- `E_PRECONDITION_FAILED`
+- `E_OPERATION_TIMEOUT`
+- `E_ROLLBACK_FAILED`
+- `E_STORAGE_QUOTA`
+
+## 既定値
+- `auto_rollback = true`
+- `chunk_size = 1MiB`
+- `max_inflight_chunks = 16`
+- `upload_session_ttl = 15m`
+- `operation_retention = 24h`
+
+## シーケンス例
+1. `hello.negotiate`
+2. `deploy.prepare`
+3. `artifact.push`（必要レンジのみ）
+4. `artifact.commit`
+5. `deploy.execute`
+6. `operation.watch`（完了まで）
 
 ## 検証ルール
 - tar.gz 内の `manifest.json` は必須
-- `manifest_sha256` を送った場合は一致必須
-- `package_sha256` は必須
+- manifest の正本は tar.gz 内とし、`manifest_digest` で照合
+- `artifact_digest` と `artifact_size` は必須
+- `idempotency_key` は必須
+- `expected_current_release` が不一致なら `E_PRECONDITION_FAILED`
 
-## 拡張ポイント（MVP後）
-- resume upload（offset 指定）
-- blue-green deploy
-- rollback
-- progress event（deploy.progress）
-- 差分転送
-
----
-
-### 参考: build/ の最小構成
+## 参考: build/ の最小構成
 - `manifest.json`
 - `app.wasm`
 - `imago.lock`（任意）
-
-この構成が tar.gz で送られる前提。
