@@ -6,6 +6,27 @@
   - **Syslog収集→一時保存→外部転送（再送あり）**
   - **NanoKVM画面キャプチャ → Discord Webhook送信**
 
+## MVP体験（clone → imago deploy だけで動く）
+- サンプルコードを clone して **`imago deploy` 実行だけで NanoKVM で起動**できる
+
+### imago（CLI）側の最小要件
+- `imago.toml` の読み込み（name / main / type / target）
+- `.env` を読み込み、**manifest.json に注入**
+- `imago dev build` 相当で `build/` を生成（`manifest.json` + `app.wasm`）
+- `build/` を **tar.gz** にパッケージング
+- **SHA-256** とサイズ算出
+- imagod へ接続（QUIC + WebTransport + CBOR / mTLS）
+- `deploy.begin → upload → apply → restart` を実行
+- `process_id` を表示（必要なら `imago logs -f` で動作確認）
+
+### imagod 側の最小要件
+- QUIC + WebTransport サーバ + mTLS
+- CBOR メッセージ処理
+- tar.gz 受領 + **SHA-256 検証**
+- apply: `/etc/imago/<name>/<hash>/` へ展開、manifest 登録、旧版クリーンアップ
+- Wasmtime で起動（まずは **cli type** のみでOK）
+- `logs` / `ps` の最低限
+
 ## MVPで必要な基盤機能（Q&Aから抽出）
 ### 1) ランタイム/デバイス対応
 - Wasmtime を **RISC‑V向け**に動作させる
