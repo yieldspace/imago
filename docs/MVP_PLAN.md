@@ -1,5 +1,7 @@
 # MVP計画（NanoKVM）
 
+実装タスク詳細: [`docs/MVP_NESTED_ISSUES.md`](./MVP_NESTED_ISSUES.md)
+
 ## 目的（MVP）
 - **NanoKVMで動作**する imago を作る
 - 次の2ユースケースを動かす
@@ -16,14 +18,14 @@
 - `build/` を **tar.gz** にパッケージング
 - **SHA-256** とサイズ算出
 - imagod へ接続（QUIC + WebTransport + CBOR / mTLS）
-- `deploy.begin → upload → apply → restart` を実行
+- `deploy.prepare → artifact.push → artifact.commit → deploy.execute → operation.watch` を実行
 - `process_id` を表示（必要なら `imago logs -f` で動作確認）
 
 ### imagod 側の最小要件
 - QUIC + WebTransport サーバ + mTLS
 - CBOR メッセージ処理
-- tar.gz 受領 + **SHA-256 検証**
-- apply: `/etc/imago/<name>/<hash>/` へ展開、manifest 登録、旧版クリーンアップ
+- tar.gz チャンク受領 + **SHA-256 検証**
+- execute: `/etc/imago/<name>/<hash>/` へ展開、manifest 登録、旧版クリーンアップ、起動（失敗時は自動ロールバック）
 - Wasmtime で起動（まずは **cli type** のみでOK）
 - `logs` / `ps` の最低限
 
@@ -35,10 +37,10 @@
 ### 2) デプロイ/実行フロー
 - `imago dev build` → `build/` に成果物生成
   - `build/manifest.json` を生成（**env/secret含め全部**）
-- `imago deploy` は **build → package → upload → apply → restart**
+- `imago deploy` は **build → package → prepare → upload → commit → execute → watch**
   - パッケージは **送信時にtar.gz化**
   - **SHA‑256**で整合性チェック
-  - applyで**展開/配置/manifest登録/旧版クリーンアップ**
+  - executeで**展開/配置/manifest登録/旧版クリーンアップ/起動**
   - 旧版クリーンアップは **起動前**
 - 配置先: **`/etc/imago/<name>/<hash>/`**
 
@@ -92,7 +94,7 @@
 
 ## 実装ステップ案
 1. **imagod基盤**（QUIC+WebTransport+CBOR、run/stop/logs/ps）
-2. **build/deploy基盤**（manifest生成、tar.gz、SHA‑256、apply）
+2. **build/deploy基盤**（manifest生成、tar.gz、SHA‑256、prepare/upload/commit/execute）
 3. **NanoKVM向け起動/配置**（/etc/imago/<name>/<hash>）
 4. **socket type実装**（TCP/UDP inbound/outbound）
 5. **syslog app**（保存/再送）
