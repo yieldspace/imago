@@ -1,0 +1,17 @@
+{
+  "name": "syslog-forwarder",
+  "main": "build/app.wasm",
+  "vars": {},
+  "secrets": {},
+  "assets": [],
+  "dependencies": [],
+  "hash": {
+    "algorithm": "sha256",
+    "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "targets": [
+      "wasm",
+      "manifest",
+      "assets"
+    ]
+  }
+}

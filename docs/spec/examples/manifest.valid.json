@@ -1,0 +1,41 @@
+{
+  "name": "syslog-forwarder",
+  "main": "build/app.wasm",
+  "type": "socket",
+  "target": {
+    "host": "nanokvm-01"
+  },
+  "vars": {
+    "SYSLOG_CACHE_DIR": "/var/tmp/imago-cache",
+    "SYSLOG_CACHE_MAX_MB": "100",
+    "SYSLOG_CACHE_TTL_SEC": "86400"
+  },
+  "secrets": {
+    "DISCORD_WEBHOOK_URL": "https://discord.example/webhook"
+  },
+  "assets": [
+    {
+      "path": "assets/certs/ca.pem",
+      "mount": "/etc/imago/certs/ca.pem",
+      "sha256": "6a33a9f6c6f48d7f1d7f03545f0f8d8df7ad2501f7f0d5b3c86f31b2c4ecfaaa",
+      "size": 2048
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "yieldspace:nanokvm-capture",
+      "version": "0.1.0",
+      "source": "ghcr.io/yieldspace/plugins/nanokvm-capture",
+      "resolved": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "hash": {
+    "algorithm": "sha256",
+    "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "targets": [
+      "wasm",
+      "manifest",
+      "assets"
+    ]
+  }
+}

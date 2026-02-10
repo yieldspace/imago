@@ -1,0 +1,20 @@
+{
+  "name": "syslog-forwarder",
+  "main": "build/app.wasm",
+  "type": "socket",
+  "target": {
+    "host": "nanokvm-01"
+  },
+  "vars": {},
+  "secrets": {},
+  "assets": [],
+  "dependencies": [],
+  "hash": {
+    "algorithm": "sha256",
+    "value": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "targets": [
+      "wasm",
+      "assets"
+    ]
+  }
+}
