@@ -5,6 +5,7 @@ mod operation_state;
 mod orchestrator;
 mod protocol_handler;
 mod runtime_wasmtime;
+mod service_supervisor;
 mod transport;
 
 use std::{path::PathBuf, sync::Arc};
@@ -15,6 +16,7 @@ use operation_state::OperationManager;
 use orchestrator::Orchestrator;
 use protocol_handler::ProtocolHandler;
 use runtime_wasmtime::WasmRuntime;
+use service_supervisor::ServiceSupervisor;
 use transport::build_server;
 use web_transport_quinn::http::StatusCode;
 
@@ -36,10 +38,32 @@ async fn run() -> Result<(), anyhow::Error> {
         .await
         .map_err(anyhow::Error::new)?;
     let operations = OperationManager::new();
-    let runtime = WasmRuntime::new();
-    let orchestrator = Orchestrator::new(&config.storage_root, artifacts.clone(), runtime);
+    let runtime = WasmRuntime::new().map_err(anyhow::Error::new)?;
+    let supervisor =
+        ServiceSupervisor::new(runtime.clone(), config.runtime.stop_grace_timeout_secs);
+    let orchestrator = Orchestrator::new(&config.storage_root, artifacts.clone(), supervisor);
 
     let handler = ProtocolHandler::new(config.clone(), artifacts, operations, orchestrator);
+
+    let epoch_runtime = runtime.clone();
+    let epoch_tick_interval =
+        std::time::Duration::from_millis(config.runtime.epoch_tick_interval_ms.max(1));
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(epoch_tick_interval);
+        loop {
+            interval.tick().await;
+            epoch_runtime.increment_epoch();
+        }
+    });
+
+    let reaper_handler = handler.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            reaper_handler.reap_finished_services().await;
+        }
+    });
 
     let mut server = build_server(&config).map_err(anyhow::Error::new)?;
     eprintln!("imagod listening on {}", config.listen_addr);

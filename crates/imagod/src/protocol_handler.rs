@@ -5,8 +5,9 @@ use imago_protocol::{
     DeployCommandPayload, DeployPrepareRequest, Envelope, ErrorCode, EventType,
     HelloNegotiateRequest, HelloNegotiateResponse, MESSAGE_ARTIFACT_COMMIT, MESSAGE_ARTIFACT_PUSH,
     MESSAGE_COMMAND_CANCEL, MESSAGE_COMMAND_EVENT, MESSAGE_COMMAND_START, MESSAGE_DEPLOY_PREPARE,
-    MESSAGE_HELLO_NEGOTIATE, MESSAGE_STATE_REQUEST, OperationState, ProtocolError, StateRequest,
-    decode_frames, encode_frame, from_cbor, to_cbor,
+    MESSAGE_HELLO_NEGOTIATE, MESSAGE_STATE_REQUEST, OperationState, ProtocolError,
+    RunCommandPayload, StateRequest, StopCommandPayload, decode_frames, encode_frame, from_cbor,
+    to_cbor,
 };
 use web_transport_quinn::{SendStream, Session};
 
@@ -116,6 +117,10 @@ impl ProtocolHandler {
         }
 
         Ok(())
+    }
+
+    pub async fn reap_finished_services(&self) {
+        self.orchestrator.reap_finished_services().await;
     }
 
     async fn handle_single(&self, request: Envelope) -> Result<Envelope, ImagodError> {
@@ -244,33 +249,10 @@ impl ProtocolHandler {
         send: &mut SendStream,
     ) -> Result<(), ImagodError> {
         let payload: CommandStartRequest = request.payload_as().map_err(protocol_bad_request)?;
-        if payload.command_type != CommandType::Deploy {
-            let error = ImagodError::new(
-                ErrorCode::BadRequest,
-                MESSAGE_COMMAND_START,
-                "command_type must be deploy in current implementation",
-            );
-            let envelope = Envelope::error(
-                MESSAGE_COMMAND_START,
-                request.request_id,
-                request.correlation_id,
-                error.to_structured(),
-            );
-            write_envelope(send, &envelope).await?;
-            return Ok(());
-        }
-
-        let deploy_payload: DeployCommandPayload = serde_json::from_value(payload.payload)
-            .map_err(|e| {
-                ImagodError::new(
-                    ErrorCode::BadRequest,
-                    MESSAGE_COMMAND_START,
-                    format!("invalid deploy payload: {e}"),
-                )
-            })?;
+        let command_type = payload.command_type;
 
         self.operations
-            .start(payload.request_id.clone(), CommandType::Deploy)
+            .start(payload.request_id.clone(), command_type)
             .await?;
 
         let accepted = Envelope::response(
@@ -286,21 +268,21 @@ impl ProtocolHandler {
             &payload.request_id,
             &request.correlation_id,
             EventType::Accepted,
-            CommandType::Deploy,
+            command_type,
             None,
             None,
         )?;
         write_envelope(send, &accepted_event).await?;
 
         self.operations
-            .set_state(&payload.request_id, OperationState::Running, "deploying")
+            .set_state(&payload.request_id, OperationState::Running, "starting")
             .await?;
         let running_event = event_envelope(
             &payload.request_id,
             &request.correlation_id,
             EventType::Progress,
-            CommandType::Deploy,
-            Some("deploying".to_string()),
+            command_type,
+            Some("starting".to_string()),
             None,
         )?;
         write_envelope(send, &running_event).await?;
@@ -311,13 +293,13 @@ impl ProtocolHandler {
             .await
         {
             self.operations
-                .finish_and_remove(&payload.request_id, OperationState::Canceled, "canceled")
+                .finish(&payload.request_id, OperationState::Canceled, "canceled")
                 .await;
             let canceled = event_envelope(
                 &payload.request_id,
                 &request.correlation_id,
                 EventType::Canceled,
-                CommandType::Deploy,
+                command_type,
                 Some("canceled".to_string()),
                 None,
             )?;
@@ -325,21 +307,79 @@ impl ProtocolHandler {
             return Ok(());
         }
 
-        match self.orchestrator.deploy(&deploy_payload).await {
-            Ok(summary) => {
+        let command_result = match command_type {
+            CommandType::Deploy => {
+                let deploy_payload: DeployCommandPayload =
+                    serde_json::from_value(payload.payload.clone()).map_err(|e| {
+                        ImagodError::new(
+                            ErrorCode::BadRequest,
+                            MESSAGE_COMMAND_START,
+                            format!("invalid deploy payload: {e}"),
+                        )
+                    })?;
+                self.orchestrator
+                    .deploy(&deploy_payload)
+                    .await
+                    .map(|summary| {
+                        (
+                            format!("release:{}:{}", summary.service_name, summary.release_hash),
+                            "spawned".to_string(),
+                        )
+                    })
+            }
+            CommandType::Run => {
+                let run_payload: RunCommandPayload =
+                    serde_json::from_value(payload.payload.clone()).map_err(|e| {
+                        ImagodError::new(
+                            ErrorCode::BadRequest,
+                            MESSAGE_COMMAND_START,
+                            format!("invalid run payload: {e}"),
+                        )
+                    })?;
+                self.orchestrator.run(&run_payload).await.map(|summary| {
+                    (
+                        format!("running:{}:{}", summary.service_name, summary.release_hash),
+                        "spawned".to_string(),
+                    )
+                })
+            }
+            CommandType::Stop => {
+                let stop_payload: StopCommandPayload =
+                    serde_json::from_value(payload.payload.clone()).map_err(|e| {
+                        ImagodError::new(
+                            ErrorCode::BadRequest,
+                            MESSAGE_COMMAND_START,
+                            format!("invalid stop payload: {e}"),
+                        )
+                    })?;
+                self.orchestrator.stop(&stop_payload).await.map(|summary| {
+                    (
+                        format!("stopped:{}", summary.service_name),
+                        "completed".to_string(),
+                    )
+                })
+            }
+        };
+
+        match command_result {
+            Ok((progress_stage, success_stage)) => {
                 self.operations
-                    .finish_and_remove(&payload.request_id, OperationState::Succeeded, "completed")
+                    .mark_spawned(&payload.request_id, &success_stage)
+                    .await?;
+                self.operations
+                    .finish(
+                        &payload.request_id,
+                        OperationState::Succeeded,
+                        &success_stage,
+                    )
                     .await;
 
                 let progress = event_envelope(
                     &payload.request_id,
                     &request.correlation_id,
                     EventType::Progress,
-                    CommandType::Deploy,
-                    Some(format!(
-                        "release:{}:{}",
-                        summary.service_name, summary.release_hash
-                    )),
+                    command_type,
+                    Some(progress_stage),
                     None,
                 )?;
                 write_envelope(send, &progress).await?;
@@ -348,22 +388,22 @@ impl ProtocolHandler {
                     &payload.request_id,
                     &request.correlation_id,
                     EventType::Succeeded,
-                    CommandType::Deploy,
-                    Some("completed".to_string()),
+                    command_type,
+                    Some(success_stage),
                     None,
                 )?;
                 write_envelope(send, &succeeded).await?;
             }
             Err(err) => {
                 self.operations
-                    .finish_and_remove(&payload.request_id, OperationState::Failed, "failed")
+                    .finish(&payload.request_id, OperationState::Failed, "failed")
                     .await;
 
                 let failed = event_envelope(
                     &payload.request_id,
                     &request.correlation_id,
                     EventType::Failed,
-                    CommandType::Deploy,
+                    command_type,
                     Some("failed".to_string()),
                     Some(err.to_structured()),
                 )?;

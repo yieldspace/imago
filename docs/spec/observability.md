@@ -31,7 +31,7 @@ micro linux（小RAM・フラッシュ書き込み抑制）環境を前提に、
 ## Command Stream イベント
 
 クライアントは WebTransport の bidirectional stream を開き、先頭で `command.start` を送信する。サーバは同一ストリームで `command.event` を push する。
-メッセージは `4byte BE length + CBOR` のフレームで順次送る。
+メッセージは `4byte BE length + CBOR` のフレームで順次送る。`deploy` / `run` / `stop` は短命オペレーションとして扱い、terminal event までをこのストリームで完結させる。
 
 ### `command.start` 必須フィールド
 
@@ -70,6 +70,7 @@ micro linux（小RAM・フラッシュ書き込み抑制）環境を前提に、
 - `updated_at`
 
 `state` は実行中状態のみ返す。完了済み・未存在の `request_id` は `E_NOT_FOUND`。
+バックグラウンドで継続する Wasm サービスの稼働状態は command stream では追跡しない。
 
 <a id="disconnect-handling"></a>
 ## 切断時の扱い
@@ -82,6 +83,7 @@ micro linux（小RAM・フラッシュ書き込み抑制）環境を前提に、
 - 不正な `command_type` は `E_BAD_REQUEST`。
 - 必須フィールド欠落は `E_BAD_REQUEST`。
 - 実行中でない `request_id` への `state.request` は `E_NOT_FOUND`。
+- `command.cancel` は起動前（spawn 前）のみ有効で、起動後は `cancellable=false`。
 
 ## 実装ノート
 

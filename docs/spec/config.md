@@ -119,3 +119,5 @@
 - `runtime.chunk_size`
 - `runtime.max_inflight_chunks`
 - `runtime.upload_session_ttl_secs`
+- `runtime.stop_grace_timeout_secs`（既定 `30`）
+- `runtime.epoch_tick_interval_ms`（既定 `50`）

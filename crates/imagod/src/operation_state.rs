@@ -13,6 +13,13 @@ struct OperationEntry {
     stage: String,
     updated_at: String,
     cancel_requested: bool,
+    phase: OperationPhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperationPhase {
+    Starting,
+    Spawned,
 }
 
 #[derive(Clone, Default)]
@@ -48,6 +55,7 @@ impl OperationManager {
                 stage: "accepted".to_string(),
                 updated_at: now_unix_secs(),
                 cancel_requested: false,
+                phase: OperationPhase::Starting,
             },
         );
         Ok(())
@@ -68,6 +76,25 @@ impl OperationManager {
             )
         })?;
         entry.state = state;
+        entry.stage = stage.into();
+        entry.updated_at = now_unix_secs();
+        Ok(())
+    }
+
+    pub async fn mark_spawned(
+        &self,
+        request_id: &str,
+        stage: impl Into<String>,
+    ) -> Result<(), ImagodError> {
+        let mut inner = self.inner.write().await;
+        let entry = inner.get_mut(request_id).ok_or_else(|| {
+            ImagodError::new(
+                ErrorCode::NotFound,
+                "operation.state",
+                "request_id is not running",
+            )
+        })?;
+        entry.phase = OperationPhase::Spawned;
         entry.stage = stage.into();
         entry.updated_at = now_unix_secs();
         Ok(())
@@ -119,6 +146,13 @@ impl OperationManager {
             });
         }
 
+        if entry.phase == OperationPhase::Spawned {
+            return Ok(CommandCancelResponse {
+                cancellable: false,
+                final_state: entry.state,
+            });
+        }
+
         entry.cancel_requested = true;
         entry.updated_at = now_unix_secs();
 
@@ -136,19 +170,15 @@ impl OperationManager {
             .unwrap_or(false)
     }
 
-    pub async fn finish_and_remove(
-        &self,
-        request_id: &str,
-        state: OperationState,
-        stage: impl Into<String>,
-    ) {
+    pub async fn finish(&self, request_id: &str, state: OperationState, stage: impl Into<String>) {
         let mut inner = self.inner.write().await;
         if let Some(entry) = inner.get_mut(request_id) {
             entry.state = state;
             entry.stage = stage.into();
             entry.updated_at = now_unix_secs();
+            entry.phase = OperationPhase::Spawned;
+            entry.cancel_requested = false;
         }
-        inner.remove(request_id);
     }
 }
 
@@ -164,4 +194,49 @@ fn is_terminal(state: OperationState) -> bool {
         state,
         OperationState::Succeeded | OperationState::Failed | OperationState::Canceled
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancel_is_allowed_before_spawned() {
+        let manager = OperationManager::new();
+        manager
+            .start("req-1", CommandType::Deploy)
+            .await
+            .expect("start should succeed");
+
+        let response = manager
+            .request_cancel("req-1")
+            .await
+            .expect("cancel should succeed");
+        assert!(response.cancellable);
+        assert_eq!(response.final_state, OperationState::Canceled);
+    }
+
+    #[tokio::test]
+    async fn cancel_is_rejected_after_spawned() {
+        let manager = OperationManager::new();
+        manager
+            .start("req-2", CommandType::Deploy)
+            .await
+            .expect("start should succeed");
+        manager
+            .set_state("req-2", OperationState::Running, "running")
+            .await
+            .expect("state update should succeed");
+        manager
+            .mark_spawned("req-2", "spawned")
+            .await
+            .expect("mark spawned should succeed");
+
+        let response = manager
+            .request_cancel("req-2")
+            .await
+            .expect("cancel should return response");
+        assert!(!response.cancellable);
+        assert_eq!(response.final_state, OperationState::Running);
+    }
 }

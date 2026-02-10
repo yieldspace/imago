@@ -35,6 +35,10 @@ pub struct RuntimeConfig {
     pub max_inflight_chunks: usize,
     #[serde(default = "default_upload_session_ttl_secs")]
     pub upload_session_ttl_secs: u64,
+    #[serde(default = "default_stop_grace_timeout_secs")]
+    pub stop_grace_timeout_secs: u64,
+    #[serde(default = "default_epoch_tick_interval_ms")]
+    pub epoch_tick_interval_ms: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -43,6 +47,8 @@ impl Default for RuntimeConfig {
             chunk_size: default_chunk_size(),
             max_inflight_chunks: default_max_inflight_chunks(),
             upload_session_ttl_secs: default_upload_session_ttl_secs(),
+            stop_grace_timeout_secs: default_stop_grace_timeout_secs(),
+            epoch_tick_interval_ms: default_epoch_tick_interval_ms(),
         }
     }
 }
@@ -112,6 +118,22 @@ impl ImagodConfig {
             ));
         }
 
+        if config.runtime.stop_grace_timeout_secs == 0 {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.load",
+                "runtime.stop_grace_timeout_secs must be greater than 0",
+            ));
+        }
+
+        if config.runtime.epoch_tick_interval_ms == 0 {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.load",
+                "runtime.epoch_tick_interval_ms must be greater than 0",
+            ));
+        }
+
         Ok(config)
     }
 }
@@ -152,6 +174,14 @@ fn default_max_inflight_chunks() -> usize {
 
 fn default_upload_session_ttl_secs() -> u64 {
     15 * 60
+}
+
+fn default_stop_grace_timeout_secs() -> u64 {
+    30
+}
+
+fn default_epoch_tick_interval_ms() -> u64 {
+    50
 }
 
 fn is_valid_compatibility_date(value: &str) -> bool {
@@ -233,6 +263,37 @@ client_ca_cert = "ca.crt"
         let message = err.to_string();
         assert!(message.contains("protocol_draft"));
         assert!(message.contains("compatibility_date"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_zero_runtime_intervals() {
+        let path = write_temp_config(
+            "rejects_zero_runtime_intervals",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_cert = "server.crt"
+server_key = "server.key"
+client_ca_cert = "ca.crt"
+
+[runtime]
+stop_grace_timeout_secs = 0
+epoch_tick_interval_ms = 0
+"#,
+        );
+
+        let err = ImagodConfig::load(&path).expect_err("config should reject zero runtime values");
+        let message = err.to_string();
+        assert!(
+            message.contains("stop_grace_timeout_secs")
+                || message.contains("epoch_tick_interval_ms")
+        );
 
         cleanup_temp_path(path);
     }

@@ -3,11 +3,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use imago_protocol::{DeployCommandPayload, ErrorCode, Manifest};
+use imago_protocol::{
+    DeployCommandPayload, ErrorCode, Manifest, RunCommandPayload, StopCommandPayload,
+};
 use sha2::{Digest, Sha256};
 use tokio::fs;
 
-use crate::{artifact_store::ArtifactStore, error::ImagodError, runtime_wasmtime::WasmRuntime};
+use crate::{
+    artifact_store::ArtifactStore,
+    error::ImagodError,
+    service_supervisor::{ServiceLaunch, ServiceSupervisor},
+};
 
 const STAGE_ORCHESTRATE: &str = "orchestration";
 
@@ -17,23 +23,43 @@ pub struct DeploySummary {
     pub release_hash: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct RunSummary {
+    pub service_name: String,
+    pub release_hash: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StopSummary {
+    pub service_name: String,
+}
+
 #[derive(Clone)]
 pub struct Orchestrator {
     storage_root: PathBuf,
     artifact_store: ArtifactStore,
-    runtime: WasmRuntime,
+    supervisor: ServiceSupervisor,
+}
+
+struct PreparedRelease {
+    service_name: String,
+    service_root: PathBuf,
+    release_hash: String,
+    active_file: PathBuf,
+    previous_release: Option<String>,
+    launch: ServiceLaunch,
 }
 
 impl Orchestrator {
     pub fn new(
         storage_root: impl AsRef<Path>,
         artifact_store: ArtifactStore,
-        runtime: WasmRuntime,
+        supervisor: ServiceSupervisor,
     ) -> Self {
         Self {
             storage_root: storage_root.as_ref().to_path_buf(),
             artifact_store,
-            runtime,
+            supervisor,
         }
     }
 
@@ -41,6 +67,63 @@ impl Orchestrator {
         &self,
         payload: &DeployCommandPayload,
     ) -> Result<DeploySummary, ImagodError> {
+        let prepared = self.prepare_release(payload).await?;
+
+        let launch = prepared.launch.clone();
+        if let Err(start_error) = self.supervisor.replace(launch).await {
+            if payload.auto_rollback {
+                self.rollback_previous_release(&prepared).await?;
+            }
+            return Err(start_error);
+        }
+
+        fs::write(&prepared.active_file, prepared.release_hash.as_bytes())
+            .await
+            .map_err(|e| map_internal(format!("active release update failed: {e}")))?;
+
+        Ok(DeploySummary {
+            service_name: prepared.service_name,
+            release_hash: prepared.release_hash,
+        })
+    }
+
+    pub async fn run(&self, payload: &RunCommandPayload) -> Result<RunSummary, ImagodError> {
+        let service_root = self.storage_root.join("services").join(&payload.name);
+        let active_file = service_root.join("active_release");
+        let active_release = read_active_release(&active_file).await?.ok_or_else(|| {
+            ImagodError::new(
+                ErrorCode::NotFound,
+                STAGE_ORCHESTRATE,
+                format!("service '{}' has no active release", payload.name),
+            )
+        })?;
+
+        let launch = self
+            .load_launch_from_release(&payload.name, &service_root, &active_release)
+            .await?;
+        self.supervisor.start(launch).await?;
+
+        Ok(RunSummary {
+            service_name: payload.name.clone(),
+            release_hash: active_release,
+        })
+    }
+
+    pub async fn stop(&self, payload: &StopCommandPayload) -> Result<StopSummary, ImagodError> {
+        self.supervisor.stop(&payload.name, payload.force).await?;
+        Ok(StopSummary {
+            service_name: payload.name.clone(),
+        })
+    }
+
+    pub async fn reap_finished_services(&self) {
+        self.supervisor.reap_finished().await;
+    }
+
+    async fn prepare_release(
+        &self,
+        payload: &DeployCommandPayload,
+    ) -> Result<PreparedRelease, ImagodError> {
         let committed = self
             .artifact_store
             .committed_artifact(&payload.deploy_id)
@@ -90,44 +173,103 @@ impl Orchestrator {
 
         cleanup_old_releases(&service_root, &release_hash, previous_release.as_deref()).await?;
 
-        let component_path = release_dir.join(&manifest.main);
-        if !component_path.exists() {
+        let launch = build_launch_from_release(&release_hash, &release_dir, &manifest)?;
+
+        Ok(PreparedRelease {
+            service_name: manifest.name,
+            service_root,
+            release_hash,
+            active_file,
+            previous_release,
+            launch,
+        })
+    }
+
+    async fn rollback_previous_release(
+        &self,
+        prepared: &PreparedRelease,
+    ) -> Result<(), ImagodError> {
+        let Some(previous_release) = prepared.previous_release.as_deref() else {
+            return Ok(());
+        };
+
+        fs::write(&prepared.active_file, previous_release.as_bytes())
+            .await
+            .map_err(|e| {
+                ImagodError::new(
+                    ErrorCode::RollbackFailed,
+                    STAGE_ORCHESTRATE,
+                    format!("failed to write rollback release: {e}"),
+                )
+            })?;
+
+        let previous_launch = self
+            .load_launch_from_release(
+                &prepared.service_name,
+                &prepared.service_root,
+                previous_release,
+            )
+            .await
+            .map_err(map_rollback_error)?;
+        self.supervisor
+            .start(previous_launch)
+            .await
+            .map_err(map_rollback_error)?;
+
+        Ok(())
+    }
+
+    async fn load_launch_from_release(
+        &self,
+        service_name: &str,
+        service_root: &Path,
+        release_hash: &str,
+    ) -> Result<ServiceLaunch, ImagodError> {
+        let release_dir = service_root.join(release_hash);
+        let manifest_path = release_dir.join("manifest.json");
+
+        let manifest_bytes = fs::read(&manifest_path)
+            .await
+            .map_err(|e| map_bad_manifest(format!("manifest read failed: {e}")))?;
+        let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
+            .map_err(|e| map_bad_manifest(format!("manifest parse failed: {e}")))?;
+
+        if manifest.name != service_name {
             return Err(map_bad_manifest(format!(
-                "component path does not exist: {}",
-                component_path.display()
+                "release manifest name mismatch: expected {}, got {}",
+                service_name, manifest.name
             )));
         }
 
-        let mut envs: BTreeMap<String, String> = manifest.vars.clone();
-        for (k, v) in &manifest.secrets {
-            envs.insert(k.clone(), v.clone());
-        }
-
-        let runtime = self.runtime.clone();
-        let run_path = component_path.clone();
-        let run_env = envs.clone();
-        let run = tokio::task::spawn_blocking(move || {
-            runtime.run_cli_component(&run_path, &[], &run_env)
-        })
-        .await
-        .map_err(|e| map_internal(format!("runtime task join failed: {e}")))?;
-
-        if let Err(run_error) = run {
-            if payload.auto_rollback {
-                rollback_active_release(&active_file, previous_release.as_deref()).await?;
-            }
-            return Err(run_error);
-        }
-
-        fs::write(&active_file, release_hash.as_bytes())
-            .await
-            .map_err(|e| map_internal(format!("active release update failed: {e}")))?;
-
-        Ok(DeploySummary {
-            service_name: manifest.name,
-            release_hash,
-        })
+        build_launch_from_release(release_hash, &release_dir, &manifest)
     }
+}
+
+fn build_launch_from_release(
+    release_hash: &str,
+    release_dir: &Path,
+    manifest: &Manifest,
+) -> Result<ServiceLaunch, ImagodError> {
+    let component_path = release_dir.join(&manifest.main);
+    if !component_path.exists() {
+        return Err(map_bad_manifest(format!(
+            "component path does not exist: {}",
+            component_path.display()
+        )));
+    }
+
+    let mut envs: BTreeMap<String, String> = manifest.vars.clone();
+    for (k, v) in &manifest.secrets {
+        envs.insert(k.clone(), v.clone());
+    }
+
+    Ok(ServiceLaunch {
+        name: manifest.name.clone(),
+        release_hash: release_hash.to_string(),
+        component_path,
+        args: Vec::new(),
+        envs,
+    })
 }
 
 async fn extract_tar(bundle: &Path, dest: &Path) -> Result<(), ImagodError> {
@@ -144,24 +286,6 @@ async fn extract_tar(bundle: &Path, dest: &Path) -> Result<(), ImagodError> {
     })
     .await
     .map_err(|e| map_internal(format!("artifact unpack task join failed: {e}")))?
-}
-
-async fn rollback_active_release(
-    active_file: &Path,
-    previous_release: Option<&str>,
-) -> Result<(), ImagodError> {
-    if let Some(previous) = previous_release {
-        fs::write(active_file, previous.as_bytes())
-            .await
-            .map_err(|e| {
-                ImagodError::new(
-                    ErrorCode::RollbackFailed,
-                    STAGE_ORCHESTRATE,
-                    format!("failed to write rollback release: {e}"),
-                )
-            })?;
-    }
-    Ok(())
 }
 
 async fn cleanup_old_releases(
@@ -231,4 +355,12 @@ fn map_internal(message: String) -> ImagodError {
 
 fn map_bad_manifest(message: String) -> ImagodError {
     ImagodError::new(ErrorCode::BadManifest, STAGE_ORCHESTRATE, message)
+}
+
+fn map_rollback_error(err: ImagodError) -> ImagodError {
+    ImagodError::new(
+        ErrorCode::RollbackFailed,
+        STAGE_ORCHESTRATE,
+        format!("rollback failed: {}", err.message),
+    )
 }

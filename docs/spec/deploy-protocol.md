@@ -51,15 +51,15 @@ CLI と daemon 間の deploy 仕様を単一仕様に固定し、micro linux 環
 3. `artifact.push`（必要チャンクのみ）
 4. `artifact.commit`
 5. `command.start` (`command_type=deploy`)
-6. `command.event*`（同一 stream で push）
-7. terminal event 受信後にクライアントが stream close
+6. `command.event*`（同一 stream で push、短命）
+7. spawn 成功時点で terminal event（`succeeded`）を返し、クライアントが stream close
 8. 必要時のみ `state.request`（現在状態の一点照会）
 
 ### Run / Stop（artifact なし）
 
 1. `hello.negotiate`
 2. `command.start` (`command_type=run|stop`)
-3. `command.event*`（同一 stream で push）
+3. `command.event*`（同一 stream で push、短命）
 4. terminal event 受信後にクライアントが stream close
 5. 必要時のみ `state.request`
 
@@ -162,6 +162,7 @@ push event payload:
 - `error`（`event_type=failed` のとき必須）
 
 順序保証は同一 stream の受信順のみ。
+`deploy` / `run` の `succeeded` は Wasm プロセス終了ではなく spawn 成功を意味する。
 
 ### `state.request`
 
@@ -188,6 +189,8 @@ response:
 
 - `cancellable`
 - `final_state`
+
+起動前（spawn 前）のみ `cancellable=true`。spawn 後は `cancellable=false` を返す。
 
 <a id="state-machine"></a>
 ## 状態遷移

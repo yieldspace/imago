@@ -28,6 +28,8 @@ client_ca_cert = "/etc/imago/certs/ca.crt"
 chunk_size = 1048576
 max_inflight_chunks = 16
 upload_session_ttl_secs = 900
+stop_grace_timeout_secs = 30
+epoch_tick_interval_ms = 50
 ```
 
 ## メッセージ運用
@@ -43,11 +45,20 @@ upload_session_ttl_secs = 900
 4. `command.start (deploy)` で artifact 展開
 5. `/etc/imago/services/<name>/<hash>/` 配下へ配置
 6. 旧版を起動前 cleanup
-7. Wasmtime (`wasi:cli/run`) で component を実行
+7. Wasmtime async (`wasi:cli/run`) で component をバックグラウンド実行
+8. deploy 完了は「spawn 成功」を意味し、component 終了待ちはしない
+
+## サービス管理
+
+- `ServiceSupervisor` が `service_name -> RunningService` を in-memory で管理する。
+- 同名の再 deploy は「旧サービス停止（graceful + timeout 強制停止）→ 新サービス起動」。
+- `command.start(run)` は active release を読み出して起動する。
+- `command.start(stop)` は対象サービスを停止する。
+- 再起動ポリシーは MVP では `never`（未実装）。
 
 ## ロールバック
 
-- `auto_rollback=true` かつ起動失敗時は直前 active release へ戻す。
+- `auto_rollback=true` かつ起動失敗時は直前 active release へ戻し、再起動を試みる。
 - 巻き戻し失敗時は `E_ROLLBACK_FAILED`。
 
 ## 状態追跡
@@ -55,3 +66,4 @@ upload_session_ttl_secs = 900
 - 状態遷移: `accepted -> running -> succeeded|failed|canceled`
 - `state.request` は実行中のみ返却
 - 完了済みは `E_NOT_FOUND`
+- `command.cancel` は起動前のみ有効（起動後は `cancellable=false`）
