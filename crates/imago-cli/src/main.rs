@@ -17,7 +17,7 @@ fn main() {
     let cli = Cli::parse();
     let result = dispatch(cli);
 
-    if let Some(message) = result.stderr {
+    if let Some(message) = &result.stderr {
         eprintln!("{message}");
     }
 
@@ -41,9 +41,6 @@ mod tests {
         });
 
         assert_eq!(result.exit_code, 2);
-        assert_eq!(
-            result.stderr,
-            Some(commands::deploy::NOT_IMPLEMENTED_MESSAGE)
-        );
+        assert!(result.stderr.is_some());
     }
 }

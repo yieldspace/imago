@@ -91,3 +91,28 @@
 
 - 設定ロードは CLI 側で厳格検証し、正規化結果を [`manifest.md`](./manifest.md) の形式で出力する。
 - runtime 側は manifest を信頼入力として扱い、再解釈を最小化する。
+
+## `target.<name>` の接続キー（deploy 通信）
+
+`imago deploy` は `target.<name>` から下記キーを読む。
+
+- `remote`: `host` または `host:port`（`https://` 省略可）
+- `server_name`: TLS SNI で利用するサーバ名（省略時は `remote` 側の host）
+- `ca_cert`: サーバ証明書検証用 CA PEM
+- `client_cert`: mTLS クライアント証明書 PEM
+- `client_key`: mTLS クライアント秘密鍵 PEM
+
+## imagod 設定ファイル
+
+`imagod` は `imagod.toml` を読む。既定パスは `/etc/imago/imagod.toml`。
+
+- `listen_addr`
+- `storage_root`
+- `server_version`
+- `protocol_draft`
+- `tls.server_cert`
+- `tls.server_key`
+- `tls.client_ca_cert`
+- `runtime.chunk_size`
+- `runtime.max_inflight_chunks`
+- `runtime.upload_session_ttl_secs`

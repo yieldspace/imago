@@ -31,6 +31,7 @@ micro linux（小RAM・フラッシュ書き込み抑制）環境を前提に、
 ## Command Stream イベント
 
 クライアントは WebTransport の bidirectional stream を開き、先頭で `command.start` を送信する。サーバは同一ストリームで `command.event` を push する。
+メッセージは `4byte BE length + CBOR` のフレームで順次送る。
 
 ### `command.start` 必須フィールド
 

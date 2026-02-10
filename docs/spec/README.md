@@ -9,6 +9,7 @@
 - マニフェスト仕様: [`manifest.md`](./manifest.md)
 - デプロイ通信仕様: [`deploy-protocol.md`](./deploy-protocol.md)
 - 追跡と観測性仕様: [`observability.md`](./observability.md)
+- サーバ実装仕様: [`imagod.md`](./imagod.md)
 - 具体例: [`examples/`](./examples/)
 
 ## 適用範囲

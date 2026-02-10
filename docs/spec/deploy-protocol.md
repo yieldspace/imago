@@ -15,6 +15,12 @@ CLI と daemon 間の deploy 仕様を単一仕様に固定し、micro linux 環
 - Transport: QUIC + WebTransport
 - Data format: CBOR
 - AuthN/AuthZ: mTLS
+- Rust実装: `quinn` + `web-transport-quinn`
+
+## フレーミング
+
+- 1 stream で複数メッセージを送るため、`4byte BE length + CBOR payload` のフレーム形式を使う。
+- `command.start` は同一 stream で `command.start response` の後に `command.event*` を送る。
 
 ## 共通メッセージ封筒
 
