@@ -112,7 +112,7 @@
 - `listen_addr`
 - `storage_root`
 - `server_version`
-- `protocol_draft`
+- `compatibility_date`（`YYYY-MM-DD`、既定値 `2026-02-10`）
 - `tls.server_cert`
 - `tls.server_key`
 - `tls.client_ca_cert`

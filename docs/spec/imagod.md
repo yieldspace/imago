@@ -17,7 +17,7 @@
 listen_addr = "[::]:4443"
 storage_root = "/etc/imago"
 server_version = "imagod/0.1.0"
-protocol_draft = "imago-mvp-v1"
+compatibility_date = "2026-02-10"
 
 [tls]
 server_cert = "/etc/imago/certs/server.crt"

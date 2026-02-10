@@ -28,6 +28,7 @@ use crate::{cli::DeployArgs, commands::CommandResult};
 
 const CHUNK_SIZE: usize = 1024 * 1024;
 const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
+const COMPATIBILITY_DATE: &str = "2026-02-10";
 
 #[derive(Debug, Deserialize)]
 struct ImagoToml {
@@ -93,7 +94,7 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
         hello_request_id.clone(),
         correlation_id.clone(),
         &HelloNegotiateRequest {
-            protocol_draft: "imago-mvp-v1".to_string(),
+            compatibility_date: COMPATIBILITY_DATE.to_string(),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
             required_features: vec![
                 "deploy.prepare".to_string(),

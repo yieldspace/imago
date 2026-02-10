@@ -1,7 +1,7 @@
 listen_addr = "127.0.0.1:4443"
 storage_root = ".imagod-data"
 server_version = "imagod/local-example"
-protocol_draft = "imago-mvp-v1"
+compatibility_date = "2026-02-10"
 
 [tls]
 server_cert = "certs/server.crt"
@@ -12,4 +12,3 @@ client_ca_cert = "certs/ca.crt"
 chunk_size = 1048576
 max_inflight_chunks = 16
 upload_session_ttl_secs = 900
-

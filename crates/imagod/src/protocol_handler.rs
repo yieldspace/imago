@@ -136,7 +136,8 @@ impl ProtocolHandler {
 
     fn handle_hello(&self, request: Envelope) -> Result<Envelope, ImagodError> {
         let payload: HelloNegotiateRequest = request.payload_as().map_err(protocol_bad_request)?;
-        let accepted = payload.protocol_draft == self.config.protocol_draft;
+        let accepted =
+            is_compatible_date_match(&payload.compatibility_date, &self.config.compatibility_date);
         let mut limits = BTreeMap::new();
         limits.insert(
             "chunk_size".to_string(),
@@ -433,4 +434,23 @@ fn now_unix_secs() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     now.as_secs().to_string()
+}
+
+fn is_compatible_date_match(request: &str, configured: &str) -> bool {
+    request == configured
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_compatible_date_match;
+
+    #[test]
+    fn accepts_same_compatibility_date() {
+        assert!(is_compatible_date_match("2026-02-10", "2026-02-10"));
+    }
+
+    #[test]
+    fn rejects_different_compatibility_date() {
+        assert!(!is_compatible_date_match("2026-02-11", "2026-02-10"));
+    }
 }

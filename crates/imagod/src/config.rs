@@ -16,8 +16,8 @@ pub struct ImagodConfig {
     pub runtime: RuntimeConfig,
     #[serde(default = "default_server_version")]
     pub server_version: String,
-    #[serde(default = "default_protocol_draft")]
-    pub protocol_draft: String,
+    #[serde(default = "default_compatibility_date")]
+    pub compatibility_date: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -60,7 +60,7 @@ impl ImagodConfig {
                 serde_json::Value::String(path.to_string_lossy().to_string()),
             )
         })?;
-        let config: Self = toml::from_str(&content).map_err(|e| {
+        let raw: toml::Value = toml::from_str(&content).map_err(|e| {
             ImagodError::new(
                 ErrorCode::BadRequest,
                 "config.load",
@@ -71,6 +71,47 @@ impl ImagodConfig {
                 serde_json::Value::String(path.to_string_lossy().to_string()),
             )
         })?;
+
+        if raw.get("protocol_draft").is_some() {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.load",
+                "protocol_draft is no longer supported; use compatibility_date (YYYY-MM-DD)",
+            )
+            .with_detail(
+                "path",
+                serde_json::Value::String(path.to_string_lossy().to_string()),
+            )
+            .with_detail(
+                "legacy_key",
+                serde_json::Value::String("protocol_draft".to_string()),
+            ));
+        }
+
+        let config: Self = raw.clone().try_into().map_err(|e| {
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.load",
+                format!("config decode failed: {e}"),
+            )
+            .with_detail(
+                "path",
+                serde_json::Value::String(path.to_string_lossy().to_string()),
+            )
+        })?;
+
+        if !is_valid_compatibility_date(&config.compatibility_date) {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.load",
+                "compatibility_date must be in YYYY-MM-DD format",
+            )
+            .with_detail(
+                "compatibility_date",
+                serde_json::Value::String(config.compatibility_date.clone()),
+            ));
+        }
+
         Ok(config)
     }
 }
@@ -97,8 +138,8 @@ fn default_server_version() -> String {
     "imagod/0.1.0".to_string()
 }
 
-fn default_protocol_draft() -> String {
-    "imago-mvp-v1".to_string()
+fn default_compatibility_date() -> String {
+    "2026-02-10".to_string()
 }
 
 fn default_chunk_size() -> usize {
@@ -111,4 +152,106 @@ fn default_max_inflight_chunks() -> usize {
 
 fn default_upload_session_ttl_secs() -> u64 {
     15 * 60
+}
+
+fn is_valid_compatibility_date(value: &str) -> bool {
+    if value.len() != 10 {
+        return false;
+    }
+
+    let bytes = value.as_bytes();
+    if bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+
+    if !bytes
+        .iter()
+        .enumerate()
+        .all(|(index, b)| matches!(index, 4 | 7) || b.is_ascii_digit())
+    {
+        return false;
+    }
+
+    let year_ok = value[0..4].parse::<u32>().is_ok();
+    let month_ok = value[5..7]
+        .parse::<u32>()
+        .map(|m| (1..=12).contains(&m))
+        .unwrap_or(false);
+    let day_ok = value[8..10]
+        .parse::<u32>()
+        .map(|d| (1..=31).contains(&d))
+        .unwrap_or(false);
+
+    year_ok && month_ok && day_ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn defaults_compatibility_date_when_missing() {
+        let path = write_temp_config(
+            "defaults_compatibility_date_when_missing",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_cert = "server.crt"
+server_key = "server.key"
+client_ca_cert = "ca.crt"
+"#,
+        );
+
+        let config = ImagodConfig::load(&path).expect("config should load");
+        assert_eq!(config.compatibility_date, "2026-02-10");
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_legacy_protocol_draft_key() {
+        let path = write_temp_config(
+            "rejects_legacy_protocol_draft_key",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+protocol_draft = "imago-mvp-v1"
+
+[tls]
+server_cert = "server.crt"
+server_key = "server.key"
+client_ca_cert = "ca.crt"
+"#,
+        );
+
+        let err = ImagodConfig::load(&path).expect_err("config should reject legacy key");
+        let message = err.to_string();
+        assert!(message.contains("protocol_draft"));
+        assert!(message.contains("compatibility_date"));
+
+        cleanup_temp_path(path);
+    }
+
+    fn write_temp_config(test_name: &str, body: &str) -> PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let base_dir = std::env::temp_dir().join(format!("imagod-config-tests-{test_name}-{ts}"));
+        std::fs::create_dir_all(&base_dir).expect("temp dir creation should succeed");
+        let path = base_dir.join("imagod.toml");
+        std::fs::write(&path, body).expect("config write should succeed");
+        path
+    }
+
+    fn cleanup_temp_path(path: PathBuf) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
 }

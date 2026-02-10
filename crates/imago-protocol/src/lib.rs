@@ -191,7 +191,7 @@ pub enum ErrorCode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HelloNegotiateRequest {
-    pub protocol_draft: String,
+    pub compatibility_date: String,
     pub client_version: String,
     #[serde(default)]
     pub required_features: Vec<String>,
@@ -477,7 +477,7 @@ mod tests {
             "r1",
             "c1",
             &HelloNegotiateRequest {
-                protocol_draft: "mvp-1".to_string(),
+                compatibility_date: "2026-02-10".to_string(),
                 client_version: "0.1.0".to_string(),
                 required_features: vec!["command-stream".to_string()],
             },
@@ -491,6 +491,17 @@ mod tests {
 
         assert_eq!(decoded.message_type, MESSAGE_HELLO_NEGOTIATE);
         assert_eq!(payload.client_version, "0.1.0");
+    }
+
+    #[test]
+    fn rejects_legacy_protocol_draft_field() {
+        let value = serde_json::json!({
+            "protocol_draft": "2026-02-10",
+            "client_version": "0.1.0",
+            "required_features": [],
+        });
+        let result = serde_json::from_value::<HelloNegotiateRequest>(value);
+        assert!(result.is_err());
     }
 
     #[test]

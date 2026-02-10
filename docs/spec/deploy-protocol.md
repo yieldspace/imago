@@ -70,7 +70,7 @@ CLI と daemon 間の deploy 仕様を単一仕様に固定し、micro linux 環
 
 request:
 
-- `protocol_draft`
+- `compatibility_date`（`YYYY-MM-DD`）
 - `client_version`
 - `required_features`
 
