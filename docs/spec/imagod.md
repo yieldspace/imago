@@ -1,34 +1,46 @@
 # imagod Server Specification (Overview)
 
-## 目的
+## 1. 目的
 
-`imagod` は deploy protocol のサーバ実装であり、`imago-cli` からの要求を受けて、artifact 受領・配置・Wasm 実行管理を担う。
+`imagod` は deploy protocol のサーバ実装であり、`imago-cli` からの要求を受けて artifact 受領・配置・Wasm 実行管理を行う。
 
-このページは**概要仕様**のみを扱う。内部構造の正本は [`imagod-internals.md`](./imagod-internals.md) とする。
+このページは概要層のみを扱う。内部構造の正本は [`imagod-internals.md`](./imagod-internals.md)。
 
-## 責務境界
+## 2. 責務境界
 
-- 通信終端: QUIC + WebTransport + CBOR メッセージ処理
-- 認証: mTLS（クライアント証明書必須）
-- deploy 実行: artifact upload/commit、release 展開、サービス起動
-- 実行管理: `run` / `stop`、同名サービス置換、終了監視
-- 状態追跡: `command.event` / `state.request` / `command.cancel`
+`imagod` の責務:
 
-以下は扱わない（または未実装）。
+- QUIC + WebTransport セッション受理
+- `ProtocolEnvelope` (`MessageType`) の decode/dispatch
+- mTLS 認証（クライアント証明書必須）
+- `deploy.prepare` / `artifact.push` / `artifact.commit`
+- `command.start` (`deploy` / `run` / `stop`) と `command.event` 配信
+- `state.request -> state.response` の実行中状態照会
+- `command.cancel` の起動前 cancel 判定
 
-- blue-green デプロイ
-- イベント永続化と再送
-- restart policy の高度化
+`imagod` の非責務（または未実装）:
+
+- イベント永続化・再送
 - 再起動跨ぎの service 状態復元
+- 高度な restart policy
+- blue-green デプロイ
 
-## 外部仕様への参照
+## 3. 外部仕様との対応
 
 - 通信仕様: [`deploy-protocol.md`](./deploy-protocol.md)
 - 観測仕様: [`observability.md`](./observability.md)
 - 設定仕様: [`config.md`](./config.md)
-- manifest 仕様: [`manifest.md`](./manifest.md)
+- protocol 型仕様: [`imago-protocol.md`](./imago-protocol.md)
 
-## 設定サマリー（`imagod.toml`）
+## 4. 互換キー方針
+
+`hello.negotiate` では `compatibility_date` を使う。
+
+- 既定値: `2026-02-10`
+- 判定: 現行は文字列一致
+- `protocol_draft` は受理しない
+
+## 5. 設定サマリー（`imagod.toml`）
 
 ```toml
 listen_addr = "[::]:4443"
@@ -49,10 +61,10 @@ stop_grace_timeout_secs = 30
 epoch_tick_interval_ms = 50
 ```
 
-詳細なバリデーション条件と既定値の意味は [`config.md`](./config.md) を参照。
+詳細は [`config.md`](./config.md) を参照。
 
-## 実装追従方針
+## 6. 実装追従方針
 
-- この概要ページは「責務境界」と「外部仕様の参照点」を維持する。
-- 内部挙動はコード断片ではなく、**ファイルパス + 構造体/関数名**で追跡する。
-- 内部挙動変更時は、必ず [`imagod-internals.md`](./imagod-internals.md) を更新する。
+- 概要ページは責務境界と外部契約の橋渡しに限定する。
+- 内部挙動は `crates/imagod/src/*` の関数/型名で追跡し、[`imagod-internals.md`](./imagod-internals.md) を更新する。
+- `imago-protocol` 側の型・検証契約を変更した場合、`imagod` 側ドキュメントを同時に更新する。

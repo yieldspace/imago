@@ -1,48 +1,52 @@
 # imago Specification
 
-このディレクトリは imago の仕様正本です。実装判断が必要な項目は、この配下だけで完結するように定義します。
+このディレクトリは imago の仕様正本です。仕様は「抽象から具体へ」の順で読めるように構成します。
 
-## 読み方
+## 読み順（抽象 → 具体）
 
-- 全体像と前提: このページ
+### Layer 0: 全体方針
+- 全体像と前提: [`README.md`](./README.md)
+
+### Layer 1: 外部契約
 - 設定仕様: [`config.md`](./config.md)
 - マニフェスト仕様: [`manifest.md`](./manifest.md)
 - デプロイ通信仕様: [`deploy-protocol.md`](./deploy-protocol.md)
-- 追跡と観測性仕様: [`observability.md`](./observability.md)
-- サーバ仕様概要: [`imagod.md`](./imagod.md)
-- サーバ内部詳細: [`imagod-internals.md`](./imagod-internals.md)
-- 具体例: [`examples/`](./examples/)
+- 観測・状態照会仕様: [`observability.md`](./observability.md)
+
+### Layer 2: サブシステム概要
+- `imagod` 概要: [`imagod.md`](./imagod.md)
+- `imago-protocol` 概要: [`imago-protocol.md`](./imago-protocol.md)
+
+### Layer 3: 実装詳細
+- `imagod` 内部詳細: [`imagod-internals.md`](./imagod-internals.md)
+- `imago-protocol` 内部詳細: [`imago-protocol-internals.md`](./imago-protocol-internals.md)
+
+### 具体例
+- サンプル JSON: [`examples/`](./examples/)
 
 ## 適用範囲
 
 - MVP の実装判断をなくすための最小仕様を定義する。
-- 対象は `imago.toml`、`build/manifest.json`、デプロイプロトコル、command stream 観測性仕様、`imagod` の内部構造。
+- 対象は `imago.toml`、`build/manifest.json`、deploy protocol、command stream 観測性、`imagod`/`imago-protocol` の責務と内部構造。
 - 実装コードより仕様を優先する。
 
 ## 共通前提
 
 - 通信方式は QUIC + WebTransport + CBOR。
 - 認証は mTLS。
-- デプロイ失敗時の `auto_rollback` 既定値は `true`。
+- `hello.negotiate` の互換キーは `compatibility_date`。
+- `ProtocolEnvelope` の `request_id` / `correlation_id` は UUID。
+- `state.request` の応答メッセージ種別は `state.response`。
 - 観測イベントは永続保存せず、再送しない。
-- 仕様間の参照はリンクで行い、重複説明を避ける。
-
-## 仕様の境界
-
-- 設定キーの意味と既定値は [`config.md`](./config.md) が正本。
-- `build/manifest.json` のフォーマットは [`manifest.md`](./manifest.md) が正本。
-- リクエスト/レスポンス仕様は [`deploy-protocol.md`](./deploy-protocol.md) が正本。
-- command stream と状態照会仕様は [`observability.md`](./observability.md) が正本。
-- `imagod` の責務境界は [`imagod.md`](./imagod.md) が正本。
-- `imagod` の内部構造は [`imagod-internals.md`](./imagod-internals.md) が正本。
 
 ## 実装反映ノート運用
 
-設計差分（プロトコル契約、既定値、バリデーション、エラー契約）の既定記録先は、該当する既存仕様ファイルの `## 実装反映ノート` とする。記載量が大きい場合のみ別ファイル化し、このページと該当仕様から参照リンクを張る。
+設計差分（プロトコル契約、既定値、バリデーション、エラー契約）の既定記録先は、該当する既存仕様ファイルの `## 実装反映ノート` とする。
+記載量が大きい場合のみ別ファイル化し、このページと該当仕様から参照リンクを張る。
 
 ## 非対象
 
-- blue-green デプロイ。
-- 差分配信。
-- 監視ダッシュボード UI。
-- メトリクスの詳細仕様。
+- blue-green デプロイ
+- 差分配信
+- 監視ダッシュボード UI
+- メトリクスの詳細仕様

@@ -1,72 +1,76 @@
 # Deploy Protocol Specification
 
-## 目的
+## 1. 目的
 
-CLI と daemon 間の deploy 仕様を単一仕様に固定し、micro linux 環境でも低コストで運用できるようにする。
+`imago-cli` と `imagod` の deploy/run/stop 通信契約を固定し、実装差分で wire 互換が壊れないようにする。
 
 関連仕様:
 
 - 設定入力: [`config.md`](./config.md)
-- manifest 仕様: [`manifest.md`](./manifest.md)
-- 観測性仕様: [`observability.md`](./observability.md)
+- マニフェスト: [`manifest.md`](./manifest.md)
+- 観測契約: [`observability.md`](./observability.md)
+- 型の正本: [`imago-protocol.md`](./imago-protocol.md)
 
-## トランスポートと認証
+## 2. トランスポート層
 
 - Transport: QUIC + WebTransport
-- Data format: CBOR
-- AuthN/AuthZ: mTLS
-- Rust実装: `quinn` + `web-transport-quinn`
+- Auth: mTLS
+- Payload format: CBOR
+- Rust 実装: `quinn` + `web-transport-quinn`
 
-## フレーミング
+### 2.1 ストリーム上のフレーミング
 
-- 1 stream で複数メッセージを送るため、`4byte BE length + CBOR payload` のフレーム形式を使う。
-- `command.start` は同一 stream で `command.start response` の後に `command.event*` を送る。
+現行実装は 1 つの bi-stream に複数メッセージを載せるため、各メッセージを次の形式で送る。
 
-## 共通メッセージ封筒
+- `4byte big-endian length`
+- `CBOR payload`
+
+`command.start` は同一 stream 上で `command.start response` と `command.event*` を返す。
+
+## 3. 共通封筒（ProtocolEnvelope）
+
+wire 上の共通形:
 
 ```json
 {
   "type": "command.start",
-  "request_id": "uuid",
-  "correlation_id": "uuid",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000",
+  "correlation_id": "d6f5fbe7-c9c2-4f4b-bc6b-3f17c60f8b9b",
   "payload": {},
   "error": null
 }
 ```
 
-### 共通フィールド
+フィールド:
 
-- `type`: メッセージ種別
-- `request_id`: コマンド実行単位の識別子
-- `correlation_id`: ログ相関用識別子
-- `payload`: 本文
-- `error`: 失敗時のみ。形式は「構造化エラー仕様」を参照
+- `type`: `MessageType`（文字列）
+- `request_id`: UUID（nil UUID 禁止）
+- `correlation_id`: UUID（nil UUID 禁止）
+- `payload`: 各メッセージ payload
+- `error`: 失敗時のみ `StructuredError`
 
-## プロトコルステップ
+## 4. プロトコルシーケンス
 
-### Deploy（artifact あり）
+### 4.1 Deploy（artifact あり）
 
 1. `hello.negotiate`
 2. `deploy.prepare`
 3. `artifact.push`（必要チャンクのみ）
 4. `artifact.commit`
 5. `command.start` (`command_type=deploy`)
-6. `command.event*`（同一 stream で push、短命）
-7. spawn 成功時点で terminal event（`succeeded`）を返し、クライアントが stream close
-8. 必要時のみ `state.request`（現在状態の一点照会）
+6. `command.event*`
+7. terminal event 受信後に stream close
 
-### Run / Stop（artifact なし）
+### 4.2 Run / Stop（artifact なし）
 
 1. `hello.negotiate`
 2. `command.start` (`command_type=run|stop`)
-3. `command.event*`（同一 stream で push、短命）
-4. terminal event 受信後にクライアントが stream close
-5. 必要時のみ `state.request`
+3. `command.event*`
+4. terminal event 受信後に stream close
 
-<a id="message-contracts"></a>
-## メッセージ仕様
+## 5. メッセージ契約
 
-### `hello.negotiate`
+### 5.1 `hello.negotiate`
 
 request:
 
@@ -81,12 +85,14 @@ response:
 - `features`
 - `limits`
 
-### `deploy.prepare`
+`compatibility_date` は `protocol_draft` に戻さない。
+
+### 5.2 `deploy.prepare`
 
 request:
 
 - `name`
-- `type`
+- `type`（Rust 型上は `app_type`）
 - `target`
 - `artifact_digest`
 - `artifact_size`
@@ -102,9 +108,9 @@ response:
 - `upload_token`
 - `session_expires_at`
 
-### `artifact.push`
+### 5.3 `artifact.push`
 
-chunk header:
+request payload:
 
 - `deploy_id`
 - `offset`
@@ -113,13 +119,13 @@ chunk header:
 - `upload_token`
 - `chunk_b64`
 
-ack:
+response payload (`artifact.push` ack):
 
 - `received_ranges`
 - `next_missing_range`
 - `accepted_bytes`
 
-### `artifact.commit`
+### 5.4 `artifact.commit`
 
 request:
 
@@ -133,15 +139,15 @@ response:
 - `artifact_id`
 - `verified`
 
-### `command.start`
+### 5.5 `command.start`
 
 request:
 
-- `request_id`
-- `command_type` (`deploy` / `run` / `stop`)
+- `request_id`（UUID）
+- `command_type`（`deploy` / `run` / `stop`）
 - `payload`
 
-`payload` の必須キー:
+`payload` は `command_type` と一致必須。
 
 - `deploy`: `deploy_id`, `expected_current_release`, `restart_policy`, `auto_rollback`
 - `run`: `name`
@@ -151,36 +157,37 @@ response:
 
 - `accepted`（bool）
 
-### `command.event`
+### 5.6 `command.event`
 
-push event payload:
+payload:
 
-- `event_type` (`accepted` / `progress` / `succeeded` / `failed` / `canceled`)
+- `event_type`（`accepted` / `progress` / `succeeded` / `failed` / `canceled`）
 - `request_id`
 - `command_type`
 - `timestamp`
-- `stage`（`event_type=progress` のとき必須）
-- `error`（`event_type=failed` のとき必須）
+- `stage`（`event_type=progress` で必須）
+- `error`（`event_type=failed` で必須）
 
-順序保証は同一 stream の受信順のみ。
-`deploy` / `run` の `succeeded` は Wasm プロセス終了ではなく spawn 成功を意味する。
+### 5.7 `state.request` / `state.response`
 
-### `state.request`
-
-request:
+`state.request` request:
 
 - `request_id`
 
-response:
+`state.response` response:
 
 - `request_id`
 - `state`
 - `stage`
 - `updated_at`
 
-対象が実行中でない場合は `E_NOT_FOUND`。
+制約:
 
-### `command.cancel`
+- `state.response.state` は `accepted` / `running` のみ。
+- terminal state を返してはならない。
+- 対象が非実行中なら `E_NOT_FOUND`。
+
+### 5.8 `command.cancel`
 
 request:
 
@@ -191,35 +198,27 @@ response:
 - `cancellable`
 - `final_state`
 
-起動前（spawn 前）のみ `cancellable=true`。spawn 後は `cancellable=false` を返す。
+現行挙動:
 
-<a id="state-machine"></a>
-## 状態遷移
+- 起動前（spawn 前）のみ `cancellable=true`。
+- 起動後（spawn 後、operation が残っている間）は `cancellable=false`。
+- 終端後（operation 削除後）は `E_NOT_FOUND`。
+
+## 6. 状態遷移
 
 `accepted -> running -> succeeded | failed | canceled`
 
-<a id="error-contract"></a>
-## 構造化エラー仕様
+## 7. 構造化エラー
 
-```json
-{
-  "code": "E_BAD_REQUEST",
-  "message": "invalid command payload",
-  "retryable": false,
-  "stage": "command.start",
-  "details": {}
-}
-```
-
-### 必須フィールド
+`error` フィールドは `StructuredError` を使う。
 
 - `code`
 - `message`
 - `retryable`
 - `stage`
-- `details`
+- `details`（`BTreeMap<String, String>`）
 
-### エラーコード
+主要コード:
 
 - `E_UNAUTHORIZED`
 - `E_BAD_REQUEST`
@@ -236,40 +235,9 @@ response:
 - `E_ROLLBACK_FAILED`
 - `E_STORAGE_QUOTA`
 
-`E_NOT_FOUND` は `state.request` / `command.cancel` で対象 `request_id` が実行中でない場合にも返す。
-
-<a id="idempotency-and-cas"></a>
-## 冪等性と前提条件
-
-- `idempotency_key` は `deploy.prepare` で必須。
-- 同一 key + 同一入力は同一 `deploy_id` を返す。
-- 同一 key + 異なる入力は `E_IDEMPOTENCY_CONFLICT`。
-- `expected_current_release` 不一致は `E_PRECONDITION_FAILED`。
-
-<a id="protocol-defaults"></a>
-## 既定値
+## 8. 既定値
 
 - `auto_rollback = true`
 - `chunk_size = 1MiB`
 - `max_inflight_chunks = 16`
 - `upload_session_ttl = 15m`
-
-## セッション運用方針
-
-- 現行 CLI では 1 実行ごとに 1 WebTransport セッションを作成し、完了後に閉じる。
-- 将来は 1 セッション内で複数 stream を開き並列実行してよい。
-
-## 非対象
-
-- blue-green デプロイ
-- 差分配信
-- イベント履歴の永続保存と再送
-
-## 実装反映ノート（Milestone Phase 1 / 2026-02-10）
-
-- `imago-protocol` の共通封筒実装では `request_id` / `correlation_id` を UUID として扱い、nil UUID を検証で拒否する。
-- `deploy.prepare.idempotency_key` は必須かつ空文字を拒否する。
-- `artifact.push.length` と `artifact.commit.artifact_size` は 0 を拒否する。
-- `command.start` は `command_type` と payload 形状の不一致を拒否する。
-- `deploy` payload の `auto_rollback` は未指定時に `true` を既定値として適用する。
-- 構造化エラーの `ErrorCode` は列挙値以外をデコード時に拒否する。
