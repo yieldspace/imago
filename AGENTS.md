@@ -37,3 +37,8 @@ PRs should include:
 - Linked issue/PR context.
 - Validation commands you ran (for example, `cargo test --workspace`, `cargo clippy ...`).
 - Notes on spec or compatibility impact when touching `docs/spec/`.
+
+## Phase / Issue 運用ルール
+- 現在の Phase は `0` とする。
+- `close/development` に紐付けるのは、現在の Phase の issue のみに限定する。
+- `close/development` へ issue を紐付けるときは、sub issue になっているものから先に行う。
