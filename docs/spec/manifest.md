@@ -2,12 +2,12 @@
 
 ## 目的
 
-`build/manifest.json` の固定フォーマットを定義し、CLI と runtime の入力契約を一致させる。
+`build/manifest.json` の固定フォーマットを定義し、CLI と runtime の入力仕様を一致させる。
 
 関連仕様:
 
 - 設定入力の正規化: [`config.md`](./config.md)
-- 転送・実行契約: [`deploy-protocol.md`](./deploy-protocol.md)
+- 転送・実行仕様: [`deploy-protocol.md`](./deploy-protocol.md)
 
 ## 出力場所
 
@@ -59,7 +59,7 @@
 - 正常例: [`examples/manifest.valid.json`](./examples/manifest.valid.json)
 - 異常例（必須欠落）: [`examples/manifest.invalid.missing-required.json`](./examples/manifest.invalid.missing-required.json)
 - 異常例（型不正）: [`examples/manifest.invalid.bad-type.json`](./examples/manifest.invalid.bad-type.json)
-- 異常例（hash 契約不一致）: [`examples/manifest.invalid.hash-mismatch.json`](./examples/manifest.invalid.hash-mismatch.json)
+- 異常例（hash 検証不一致）: [`examples/manifest.invalid.hash-mismatch.json`](./examples/manifest.invalid.hash-mismatch.json)
 - 異常例（secret 形式不正）: [`examples/manifest.invalid.secret-shape.json`](./examples/manifest.invalid.secret-shape.json)
 
 ## バリデーション要件

@@ -29,15 +29,15 @@ imago は「組込み開発の敷居を下げる」ことを目的に、Wasm Com
 
 - CLI と daemon は QUIC + WebTransport + CBOR で通信する。
 - mTLS で相互認証する。
-- deploy は再送可能アップロードと非同期 operation で実行する。
+- deploy/run/stop は command stream を開いて実行する。
 
 詳細: [`docs/spec/deploy-protocol.md`](./spec/deploy-protocol.md)
 
 ### 観測モデル
 
-- operation は切断後も追跡できる。
-- watch は型付きイベントで状態遷移を返す。
-- 履歴は 24 時間保持し、cursor で再取得する。
+- サーバは command stream 上でイベントを push する。
+- 実行中の現在状態は `state.request/state.response` で照会する。
+- micro linux 前提としてイベントの永続保存と再送は行わない。
 
 詳細: [`docs/spec/observability.md`](./spec/observability.md)
 

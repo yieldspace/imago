@@ -2,13 +2,13 @@
 
 ## 目的
 
-CLI と daemon 間の deploy 契約を単一仕様に固定し、再送・再接続・失敗復旧の判断を実装者に残さない。
+CLI と daemon 間の deploy 仕様を単一仕様に固定し、micro linux 環境でも低コストで運用できるようにする。
 
 関連仕様:
 
 - 設定入力: [`config.md`](./config.md)
-- manifest 契約: [`manifest.md`](./manifest.md)
-- operation イベント契約: [`observability.md`](./observability.md)
+- manifest 仕様: [`manifest.md`](./manifest.md)
+- 観測性仕様: [`observability.md`](./observability.md)
 
 ## トランスポートと認証
 
@@ -20,7 +20,7 @@ CLI と daemon 間の deploy 契約を単一仕様に固定し、再送・再接
 
 ```json
 {
-  "type": "deploy.prepare",
+  "type": "command.start",
   "request_id": "uuid",
   "correlation_id": "uuid",
   "payload": {},
@@ -31,22 +31,34 @@ CLI と daemon 間の deploy 契約を単一仕様に固定し、再送・再接
 ### 共通フィールド
 
 - `type`: メッセージ種別
-- `request_id`: 要求単位の識別子
-- `correlation_id`: deploy / operation 追跡識別子
+- `request_id`: コマンド実行単位の識別子
+- `correlation_id`: ログ相関用識別子
 - `payload`: 本文
-- `error`: 失敗時のみ。形式は「構造化エラー契約」を参照
+- `error`: 失敗時のみ。形式は「構造化エラー仕様」を参照
 
 ## プロトコルステップ
+
+### Deploy（artifact あり）
 
 1. `hello.negotiate`
 2. `deploy.prepare`
 3. `artifact.push`（必要チャンクのみ）
 4. `artifact.commit`
-5. `deploy.execute`
-6. `operation.watch` または `operation.get`
+5. `command.start` (`command_type=deploy`)
+6. `command.event*`（同一 stream で push）
+7. terminal event 受信後にクライアントが stream close
+8. 必要時のみ `state.request`（現在状態の一点照会）
+
+### Run / Stop（artifact なし）
+
+1. `hello.negotiate`
+2. `command.start` (`command_type=run|stop`)
+3. `command.event*`（同一 stream で push）
+4. terminal event 受信後にクライアントが stream close
+5. 必要時のみ `state.request`
 
 <a id="message-contracts"></a>
-## メッセージ契約
+## メッセージ仕様
 
 ### `hello.negotiate`
 
@@ -114,47 +126,57 @@ response:
 - `artifact_id`
 - `verified`
 
-### `deploy.execute`
+### `command.start`
 
 request:
 
-- `deploy_id`
-- `expected_current_release`
-- `restart_policy`
-- `auto_rollback`
+- `request_id`
+- `command_type` (`deploy` / `run` / `stop`)
+- `payload`
+
+`payload` の必須キー:
+
+- `deploy`: `deploy_id`, `expected_current_release`, `restart_policy`, `auto_rollback`
+- `run`: `name`
+- `stop`: `name`, `force`
 
 response:
 
-- `operation_id`
-- `state` (`accepted`)
+- `accepted`（bool）
 
-### `operation.get`
+### `command.event`
+
+push event payload:
+
+- `event_type` (`accepted` / `progress` / `succeeded` / `failed` / `canceled`)
+- `request_id`
+- `command_type`
+- `timestamp`
+- `stage`（`event_type=progress` のとき必須）
+- `error`（`event_type=failed` のとき必須）
+
+順序保証は同一 stream の受信順のみ。
+
+### `state.request`
 
 request:
 
-- `operation_id`
+- `request_id`
 
 response:
 
-- 最新スナップショット（詳細は [`observability.md`](./observability.md)）
+- `request_id`
+- `state`
+- `stage`
+- `updated_at`
 
-### `operation.watch`
+対象が実行中でない場合は `E_NOT_FOUND`。
 
-request:
-
-- `operation_id`
-- `cursor` (任意)
-- `limit` (任意)
-
-response:
-
-- イベント列（詳細は [`observability.md`](./observability.md)）
-
-### `operation.cancel`
+### `command.cancel`
 
 request:
 
-- `operation_id`
+- `request_id`
 
 response:
 
@@ -164,17 +186,17 @@ response:
 <a id="state-machine"></a>
 ## 状態遷移
 
-`connected -> negotiated -> prepared -> uploading -> committed -> executing -> succeeded | failed | rolled_back`
+`accepted -> running -> succeeded | failed | canceled`
 
 <a id="error-contract"></a>
-## 構造化エラー契約
+## 構造化エラー仕様
 
 ```json
 {
-  "code": "E_CHUNK_HASH_MISMATCH",
-  "message": "chunk digest mismatch",
-  "retryable": true,
-  "stage": "artifact.push",
+  "code": "E_BAD_REQUEST",
+  "message": "invalid command payload",
+  "retryable": false,
+  "stage": "command.start",
   "details": {}
 }
 ```
@@ -204,6 +226,8 @@ response:
 - `E_ROLLBACK_FAILED`
 - `E_STORAGE_QUOTA`
 
+`E_NOT_FOUND` は `state.request` / `command.cancel` で対象 `request_id` が実行中でない場合にも返す。
+
 <a id="idempotency-and-cas"></a>
 ## 冪等性と前提条件
 
@@ -220,9 +244,13 @@ response:
 - `max_inflight_chunks = 16`
 - `upload_session_ttl = 15m`
 
-operation の保持・再取得契約は [`observability.md`](./observability.md) を参照。
+## セッション運用方針
+
+- 現行 CLI では 1 実行ごとに 1 WebTransport セッションを作成し、完了後に閉じる。
+- 将来は 1 セッション内で複数 stream を開き並列実行してよい。
 
 ## 非対象
 
 - blue-green デプロイ
 - 差分配信
+- イベント履歴の永続保存と再送

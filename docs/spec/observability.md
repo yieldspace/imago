@@ -2,89 +2,89 @@
 
 ## 目的
 
-長時間 operation、接続断、再接続、失敗復旧時に必要な追跡契約を固定する。
+micro linux（小RAM・フラッシュ書き込み抑制）環境を前提に、`deploy` / `run` / `stop` の実行状態を軽量に追跡する仕様を固定する。
 
 関連仕様:
 
-- 実行開始契約: [`deploy-protocol.md`](./deploy-protocol.md)
+- 実行開始仕様: [`deploy-protocol.md`](./deploy-protocol.md)
+
+## 前提
+
+- イベントは永続保存しない。
+- イベントの再送はしない。
+- 順序保証は WebTransport 同一ストリームの受信順のみ。
 
 <a id="identifier-rules"></a>
 ## 識別子規約
 
 ### `request_id`
 
-- 1 リクエストに 1 つ。
-- 冪等性判定の入力には使わない。
+- 1 コマンド実行に 1 つ。
+- `command.start` と `state.request` の共通キーとして使う。
 
 ### `correlation_id`
 
-- 同一 deploy / operation を横断して追跡する ID。
-- `operation.watch` イベントに必ず含める。
+- 複数サービスのログ相関に使う補助識別子。
+- 追跡上必須なのは `request_id`。
 
-<a id="operation-snapshot"></a>
-## operation スナップショット
+<a id="command-stream-events"></a>
+## Command Stream イベント
 
-`operation.get` は以下を返す。
+クライアントは WebTransport の bidirectional stream を開き、先頭で `command.start` を送信する。サーバは同一ストリームで `command.event` を push する。
 
-- `operation_id`
-- `state` (`accepted` / `running` / `succeeded` / `failed` / `rolled_back`)
-- `stage` (`validate` / `expand` / `cleanup` / `start` / `rollback`)
-- `progress` (0-100)
-- `release_id` (任意)
-- `process_id` (任意)
-- `error` (失敗時)
+### `command.start` 必須フィールド
+
+- `request_id`
+- `command_type` (`deploy` / `run` / `stop`)
+- `payload`
+
+### `command.event` 共通フィールド
+
+- `event_type` (`accepted` / `progress` / `succeeded` / `failed` / `canceled`)
+- `request_id`
+- `command_type`
+- `timestamp`
+
+`progress` では `stage` を必須とする。`stage` の値はコマンドごとに定義する。
+
+### ストリーム終了
+
+- `succeeded` / `failed` / `canceled` を終端イベントとする。
+- 終端イベント受信後はクライアントが stream を close する。
+
+<a id="state-query"></a>
+## 状態照会
+
+`state.request` / `state.response` で現在状態のみ返す。
+
+### `state.request` 必須フィールド
+
+- `request_id`
+
+### `state.response` 必須フィールド
+
+- `request_id`
+- `state`
+- `stage`
 - `updated_at`
 
-<a id="operation-watch-events"></a>
-## `operation.watch` イベント
+`state` は実行中状態のみ返す。完了済み・未存在の `request_id` は `E_NOT_FOUND`。
 
-`operation.watch` は型付きイベントを返す。各イベントは以下共通フィールドを持つ。
+<a id="disconnect-handling"></a>
+## 切断時の扱い
 
-- `event_type`
-- `operation_id`
-- `sequence`
-- `timestamp`
-- `correlation_id`
-
-### イベント種別
-
-1. `operation.accepted`
-2. `operation.progress`
-3. `operation.succeeded`
-4. `operation.failed`
-5. `operation.rollback_started`
-6. `operation.rollback_succeeded`
-7. `operation.rollback_failed`
-
-### 種別ごとの追加必須フィールド
-
-- `operation.progress`: `stage`, `progress`
-- `operation.failed`: `stage`, `error`
-- `operation.rollback_started`: `from_stage`
-- `operation.rollback_failed`: `error`
-
-<a id="retention-and-range"></a>
-## 保持期間と取得範囲
-
-- operation 履歴保持期間は 24 時間。
-- 再取得は `cursor` + `limit` 方式。
-- `limit` の既定値は `1000`。
-- 返却順は `sequence` 昇順。
-- 取得上限到達時は `next_cursor` を返す。
-
-## 再接続時の期待動作
-
-1. クライアントは最後に受信した `sequence` に対応する `cursor` を保存する。
-2. 再接続後、`operation.watch` を `cursor` 指定で再開する。
-3. サーバは欠落イベントを順に返し、最後に最新状態へ追従させる。
+- ストリーム切断時、欠落イベントの補填はしない。
+- クライアントは必要なら新しい stream で `state.request` を送って現在状態を確認する。
 
 ## 異常系
 
-- 保持期間外の `cursor` は `E_NOT_FOUND`。
-- 不正 `cursor` は `E_BAD_REQUEST`。
-- `limit` が上限超過時はサーバ側上限に丸める。
+- 不正な `command_type` は `E_BAD_REQUEST`。
+- 必須フィールド欠落は `E_BAD_REQUEST`。
+- 実行中でない `request_id` への `state.request` は `E_NOT_FOUND`。
 
 ## 実装ノート
 
+- RAM 内の一時状態だけで動くことを優先する。
 - イベント本体に secret を含めない。
-- `operation.get` と `operation.watch` の最終状態は一致する必要がある。
+- 現行 CLI では 1 実行につき 1 WebTransport セッションを作成し、実行完了で閉じる。
+- 将来は 1 セッション内で複数 stream を並列利用してよい。
