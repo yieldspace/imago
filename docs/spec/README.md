@@ -9,13 +9,14 @@
 - マニフェスト仕様: [`manifest.md`](./manifest.md)
 - デプロイ通信仕様: [`deploy-protocol.md`](./deploy-protocol.md)
 - 追跡と観測性仕様: [`observability.md`](./observability.md)
-- サーバ実装仕様: [`imagod.md`](./imagod.md)
+- サーバ仕様概要: [`imagod.md`](./imagod.md)
+- サーバ内部詳細: [`imagod-internals.md`](./imagod-internals.md)
 - 具体例: [`examples/`](./examples/)
 
 ## 適用範囲
 
 - MVP の実装判断をなくすための最小仕様を定義する。
-- 対象は `imago.toml`、`build/manifest.json`、デプロイプロトコル、command stream 観測性仕様。
+- 対象は `imago.toml`、`build/manifest.json`、デプロイプロトコル、command stream 観測性仕様、`imagod` の内部構造。
 - 実装コードより仕様を優先する。
 
 ## 共通前提
@@ -32,6 +33,8 @@
 - `build/manifest.json` のフォーマットは [`manifest.md`](./manifest.md) が正本。
 - リクエスト/レスポンス仕様は [`deploy-protocol.md`](./deploy-protocol.md) が正本。
 - command stream と状態照会仕様は [`observability.md`](./observability.md) が正本。
+- `imagod` の責務境界は [`imagod.md`](./imagod.md) が正本。
+- `imagod` の内部構造は [`imagod-internals.md`](./imagod-internals.md) が正本。
 
 ## 非対象
 

@@ -1,17 +1,34 @@
-# imagod Server Specification
+# imagod Server Specification (Overview)
 
 ## 目的
 
-`imagod` は deploy protocol のサーバ実装であり、CLI からの artifact 受領・配置・Wasm 実行を担う。
+`imagod` は deploy protocol のサーバ実装であり、`imago-cli` からの要求を受けて、artifact 受領・配置・Wasm 実行管理を担う。
 
-## 通信スタック
+このページは**概要仕様**のみを扱う。内部構造の正本は [`imagod-internals.md`](./imagod-internals.md) とする。
 
-- QUIC 実装: `quinn`
-- WebTransport: `web-transport-quinn`
-- メッセージ: CBOR
-- 認証: mTLS
+## 責務境界
 
-## サーバ設定（`imagod.toml`）
+- 通信終端: QUIC + WebTransport + CBOR メッセージ処理
+- 認証: mTLS（クライアント証明書必須）
+- deploy 実行: artifact upload/commit、release 展開、サービス起動
+- 実行管理: `run` / `stop`、同名サービス置換、終了監視
+- 状態追跡: `command.event` / `state.request` / `command.cancel`
+
+以下は扱わない（または未実装）。
+
+- blue-green デプロイ
+- イベント永続化と再送
+- restart policy の高度化
+- 再起動跨ぎの service 状態復元
+
+## 外部仕様への参照
+
+- 通信仕様: [`deploy-protocol.md`](./deploy-protocol.md)
+- 観測仕様: [`observability.md`](./observability.md)
+- 設定仕様: [`config.md`](./config.md)
+- manifest 仕様: [`manifest.md`](./manifest.md)
+
+## 設定サマリー（`imagod.toml`）
 
 ```toml
 listen_addr = "[::]:4443"
@@ -32,41 +49,10 @@ stop_grace_timeout_secs = 30
 epoch_tick_interval_ms = 50
 ```
 
-## メッセージ運用
+詳細なバリデーション条件と既定値の意味は [`config.md`](./config.md) を参照。
 
-- 1 stream 上で length-prefix（4byte BE） + CBOR を複数フレーム送信できる。
-- `command.start` は同一 stream で `command.start response` の後に `command.event*` を push する。
+## 実装追従方針
 
-## 配置・起動
-
-1. `deploy.prepare` で upload session を確立
-2. `artifact.push` で chunk を受信（sha256 検証）
-3. `artifact.commit` で全体 digest 検証
-4. `command.start (deploy)` で artifact 展開
-5. `/etc/imago/services/<name>/<hash>/` 配下へ配置
-6. 旧版を起動前 cleanup
-7. Wasmtime async (`wasi:cli/run`) で component をバックグラウンド実行
-8. deploy 完了は「spawn 成功」を意味し、component 終了待ちはしない
-9. artifact session は `upload_session_ttl_secs` で期限切れ回収する
-10. 同名サービスの旧コミットartifactは新コミット時に削除し、最新のみ保持する
-
-## サービス管理
-
-- `ServiceSupervisor` が `service_name -> RunningService` を in-memory で管理する。
-- 同名の再 deploy は「旧サービス停止（graceful + timeout 強制停止）→ 新サービス起動」。
-- `command.start(run)` は active release を読み出して起動する。
-- `command.start(stop)` は対象サービスを停止する。
-- 再起動ポリシーは MVP では `never`（未実装）。
-
-## ロールバック
-
-- `auto_rollback=true` かつ起動失敗時は直前 active release へ戻し、再起動を試みる。
-- 巻き戻し失敗時は `E_ROLLBACK_FAILED`。
-
-## 状態追跡
-
-- 状態遷移: `accepted -> running -> succeeded|failed|canceled`
-- `state.request` は実行中のみ返却
-- 完了済みは `E_NOT_FOUND`
-- `command.cancel` は起動前のみ有効（起動後は `cancellable=false`）
-- terminal event 送信後は operation を削除するため、以後 `command.cancel` は `E_NOT_FOUND`
+- この概要ページは「責務境界」と「外部仕様の参照点」を維持する。
+- 内部挙動はコード断片ではなく、**ファイルパス + 構造体/関数名**で追跡する。
+- 内部挙動変更時は、必ず [`imagod-internals.md`](./imagod-internals.md) を更新する。
