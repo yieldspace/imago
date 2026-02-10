@@ -84,7 +84,7 @@ operation が存在しない場合の扱い:
 
 - 起動前（spawn 前）は cancel 可能。
 - 起動後は cancel 不可。
-- 終端後は operation 非保持のため `E_NOT_FOUND`。
+- 終端済み operation は `E_NOT_FOUND`（非保持に加え、終端直後の非実行状態も含む）。
 
 ## 7. 異常系
 

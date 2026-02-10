@@ -144,11 +144,11 @@ fn run_generate_inner(args: CertsGenerateArgs) -> anyhow::Result<OutputPaths> {
     let client_cert_pem = client_cert.pem();
 
     write_text(&paths.ca_crt, &ca_cert_pem)?;
-    write_text(&paths.ca_key, &ca_key_pem)?;
+    write_private_key(&paths.ca_key, &ca_key_pem)?;
     write_text(&paths.server_crt, &server_cert_pem)?;
-    write_text(&paths.server_key, &server_key_pem)?;
+    write_private_key(&paths.server_key, &server_key_pem)?;
     write_text(&paths.client_crt, &client_cert_pem)?;
-    write_text(&paths.client_key, &client_key_pem)?;
+    write_private_key(&paths.client_key, &client_key_pem)?;
     write_text(&paths.gitignore, GITIGNORE_CONTENT)?;
 
     Ok(paths)
@@ -190,10 +190,32 @@ fn write_text(path: &Path, contents: &str) -> anyhow::Result<()> {
     std::fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))
 }
 
+#[cfg(unix)]
+fn write_private_key(path: &Path, contents: &str) -> anyhow::Result<()> {
+    use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt};
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    file.write_all(contents.as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn write_private_key(path: &Path, contents: &str) -> anyhow::Result<()> {
+    write_text(path, contents)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::BufReader;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -273,6 +295,26 @@ mod tests {
         cleanup(&dir);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn private_keys_are_written_with_strict_permissions() {
+        let dir = temp_dir("private_keys_are_written_with_strict_permissions");
+        let args = CertsGenerateArgs {
+            out_dir: dir.clone(),
+            server_name: "localhost".to_string(),
+            server_ip: "127.0.0.1".to_string(),
+            days: 3650,
+            force: false,
+        };
+
+        let paths = run_generate_inner(args).expect("certificate generation should succeed");
+        assert_mode_0600(&paths.ca_key);
+        assert_mode_0600(&paths.server_key);
+        assert_mode_0600(&paths.client_key);
+
+        cleanup(&dir);
+    }
+
     fn assert_has_certificate(path: &Path) {
         let file = std::fs::File::open(path).expect("open cert");
         let mut reader = BufReader::new(file);
@@ -312,5 +354,15 @@ mod tests {
 
     fn cleanup(dir: &Path) {
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    fn assert_mode_0600(path: &Path) {
+        let mode = std::fs::metadata(path)
+            .expect("metadata should be available")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "mode for {} should be 0600", path.display());
     }
 }

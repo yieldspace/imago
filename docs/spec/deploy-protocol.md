@@ -151,6 +151,10 @@ request:
 - `command_type`（`deploy` / `run` / `stop`）
 - `payload`
 
+運用ルール:
+
+- `command.start` は envelope 側 `request_id` と payload 側 `request_id` に同一 UUID を使う。
+
 `payload` は `command_type` と一致必須。
 
 - `deploy`: `deploy_id`, `expected_current_release`, `restart_policy`, `auto_rollback`

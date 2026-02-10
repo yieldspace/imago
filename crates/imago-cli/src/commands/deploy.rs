@@ -202,20 +202,16 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
     }
 
     let command_request_id = Uuid::new_v4();
-    let command = request_envelope(
-        MessageType::CommandStart,
-        Uuid::new_v4(),
+    let command = build_command_start_envelope(
         correlation_id,
-        &CommandStartRequest {
-            request_id: command_request_id,
-            command_type: CommandType::Deploy,
-            payload: CommandPayload::Deploy(DeployCommandPayload {
-                deploy_id: prepare_response.deploy_id.clone(),
-                expected_current_release: "any".to_string(),
-                restart_policy: "never".to_string(),
-                auto_rollback: true,
-            }),
-        },
+        command_request_id,
+        CommandType::Deploy,
+        CommandPayload::Deploy(DeployCommandPayload {
+            deploy_id: prepare_response.deploy_id.clone(),
+            expected_current_release: "any".to_string(),
+            restart_policy: "never".to_string(),
+            auto_rollback: true,
+        }),
     )?;
 
     let responses = request_events(&session, &command).await?;
@@ -377,6 +373,24 @@ fn request_envelope<T: Serialize>(
         payload: serde_json::to_value(payload)?,
         error: None,
     })
+}
+
+fn build_command_start_envelope(
+    correlation_id: Uuid,
+    request_id: Uuid,
+    command_type: CommandType,
+    payload: CommandPayload,
+) -> anyhow::Result<Envelope> {
+    request_envelope(
+        MessageType::CommandStart,
+        request_id,
+        correlation_id,
+        &CommandStartRequest {
+            request_id,
+            command_type,
+            payload,
+        },
+    )
 }
 
 async fn request_response(
@@ -673,5 +687,27 @@ mod tests {
             .expect("https ipv6 should parse");
         assert_eq!(https_ipv6.host, "::1");
         assert_eq!(https_ipv6.port, 4443);
+    }
+
+    #[test]
+    fn command_start_envelope_uses_same_request_id_for_header_and_payload() {
+        let request_id = Uuid::new_v4();
+        let envelope = build_command_start_envelope(
+            Uuid::new_v4(),
+            request_id,
+            CommandType::Deploy,
+            CommandPayload::Deploy(DeployCommandPayload {
+                deploy_id: "deploy-1".to_string(),
+                expected_current_release: "any".to_string(),
+                restart_policy: "never".to_string(),
+                auto_rollback: true,
+            }),
+        )
+        .expect("envelope should be created");
+
+        assert_eq!(envelope.request_id, request_id);
+        let payload: CommandStartRequest =
+            serde_json::from_value(envelope.payload).expect("payload should deserialize");
+        assert_eq!(payload.request_id, request_id);
     }
 }

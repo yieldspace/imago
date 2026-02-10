@@ -138,10 +138,11 @@ impl OperationManager {
         })?;
 
         if is_terminal(entry.state) {
-            return Ok(CommandCancelResponse {
-                cancellable: false,
-                final_state: entry.state,
-            });
+            return Err(ImagodError::new(
+                ErrorCode::NotFound,
+                "command.cancel",
+                "request_id is not running",
+            ));
         }
 
         if entry.phase == OperationPhase::Spawned {
@@ -264,6 +265,24 @@ mod tests {
             .request_cancel(&req(3))
             .await
             .expect_err("cancel should fail after removal");
+        assert_eq!(err.code, ErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn terminal_state_is_not_cancellable() {
+        let manager = OperationManager::new();
+        manager
+            .start(req(4), CommandType::Deploy)
+            .await
+            .expect("start should succeed");
+        manager
+            .finish(&req(4), CommandState::Succeeded, "completed")
+            .await;
+
+        let err = manager
+            .request_cancel(&req(4))
+            .await
+            .expect_err("cancel should fail for terminal operation");
         assert_eq!(err.code, ErrorCode::NotFound);
     }
 }

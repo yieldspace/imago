@@ -350,10 +350,14 @@ async fn cleanup_old_releases(
         .await
         .map_err(|e| map_internal(format!("failed to iterate service root: {e}")))?
     {
-        let path = entry.path();
-        if !path.is_dir() {
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|e| map_internal(format!("failed to read entry type: {e}")))?;
+        if !file_type.is_dir() {
             continue;
         }
+        let path = entry.path();
 
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
