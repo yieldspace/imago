@@ -1,14 +1,13 @@
 use std::{collections::BTreeMap, sync::Arc, time::UNIX_EPOCH};
 
 use imago_protocol::{
-    CommandCancelRequest, CommandEvent, CommandStartRequest, CommandStartResponse, CommandType,
-    DeployCommandPayload, DeployPrepareRequest, Envelope, ErrorCode, EventType,
-    HelloNegotiateRequest, HelloNegotiateResponse, MESSAGE_ARTIFACT_COMMIT, MESSAGE_ARTIFACT_PUSH,
-    MESSAGE_COMMAND_CANCEL, MESSAGE_COMMAND_EVENT, MESSAGE_COMMAND_START, MESSAGE_DEPLOY_PREPARE,
-    MESSAGE_HELLO_NEGOTIATE, MESSAGE_STATE_REQUEST, OperationState, ProtocolError,
-    RunCommandPayload, StateRequest, StopCommandPayload, decode_frames, encode_frame, from_cbor,
-    to_cbor,
+    CommandCancelRequest, CommandEvent, CommandEventType, CommandPayload, CommandStartRequest,
+    CommandStartResponse, CommandState, CommandType, DeployPrepareRequest, MessageType,
+    ProtocolEnvelope, StateRequest, StructuredError, Validate, from_cbor, to_cbor,
 };
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::Value;
+use uuid::Uuid;
 use web_transport_quinn::{SendStream, Session};
 
 use crate::{
@@ -17,6 +16,8 @@ use crate::{
 };
 
 const MAX_STREAM_BYTES: usize = 1024 * 1024 * 16;
+
+type Envelope = ProtocolEnvelope<Value>;
 
 #[derive(Clone)]
 pub struct ProtocolHandler {
@@ -50,7 +51,7 @@ impl ProtocolHandler {
 
             let buf = recv.read_to_end(MAX_STREAM_BYTES).await.map_err(|e| {
                 ImagodError::new(
-                    ErrorCode::BadRequest,
+                    imago_protocol::ErrorCode::BadRequest,
                     "session.read",
                     format!("failed to read stream: {e}"),
                 )
@@ -59,47 +60,33 @@ impl ProtocolHandler {
             let envelopes = match parse_stream_envelopes(&buf) {
                 Ok(v) => v,
                 Err(err) => {
-                    let envelope =
-                        Envelope::error("unknown", "unknown", "unknown", protocol_error(err));
+                    let envelope = error_envelope(
+                        MessageType::CommandEvent,
+                        Uuid::new_v4(),
+                        Uuid::new_v4(),
+                        err.to_structured(),
+                    );
                     write_envelope(&mut send, &envelope).await?;
-                    send.finish().map_err(|e| {
-                        ImagodError::new(
-                            ErrorCode::Internal,
-                            "session.write",
-                            format!("failed to finish stream: {e}"),
-                        )
-                    })?;
+                    finish_stream(&mut send)?;
                     continue;
                 }
             };
 
             if envelopes.is_empty() {
-                send.finish().map_err(|e| {
-                    ImagodError::new(
-                        ErrorCode::Internal,
-                        "session.write",
-                        format!("failed to finish stream: {e}"),
-                    )
-                })?;
+                finish_stream(&mut send)?;
                 continue;
             }
 
             let request = envelopes[0].clone();
-            if request.message_type == MESSAGE_COMMAND_START {
+            if request.message_type == MessageType::CommandStart {
                 self.handle_command_start(request, &mut send).await?;
-                send.finish().map_err(|e| {
-                    ImagodError::new(
-                        ErrorCode::Internal,
-                        "session.write",
-                        format!("failed to finish stream: {e}"),
-                    )
-                })?;
+                finish_stream(&mut send)?;
                 continue;
             }
 
             let response = match self.handle_single(request.clone()).await {
                 Ok(resp) => resp,
-                Err(err) => Envelope::error(
+                Err(err) => error_envelope(
                     request.message_type,
                     request.request_id,
                     request.correlation_id,
@@ -107,13 +94,7 @@ impl ProtocolHandler {
                 ),
             };
             write_envelope(&mut send, &response).await?;
-            send.finish().map_err(|e| {
-                ImagodError::new(
-                    ErrorCode::Internal,
-                    "session.write",
-                    format!("failed to finish stream: {e}"),
-                )
-            })?;
+            finish_stream(&mut send)?;
         }
 
         Ok(())
@@ -128,15 +109,15 @@ impl ProtocolHandler {
     }
 
     async fn handle_single(&self, request: Envelope) -> Result<Envelope, ImagodError> {
-        match request.message_type.as_str() {
-            MESSAGE_HELLO_NEGOTIATE => self.handle_hello(request),
-            MESSAGE_DEPLOY_PREPARE => self.handle_prepare(request).await,
-            MESSAGE_ARTIFACT_PUSH => self.handle_push(request).await,
-            MESSAGE_ARTIFACT_COMMIT => self.handle_commit(request).await,
-            MESSAGE_STATE_REQUEST => self.handle_state_request(request).await,
-            MESSAGE_COMMAND_CANCEL => self.handle_command_cancel(request).await,
+        match request.message_type {
+            MessageType::HelloNegotiate => self.handle_hello(request),
+            MessageType::DeployPrepare => self.handle_prepare(request).await,
+            MessageType::ArtifactPush => self.handle_push(request).await,
+            MessageType::ArtifactCommit => self.handle_commit(request).await,
+            MessageType::StateRequest => self.handle_state_request(request).await,
+            MessageType::CommandCancel => self.handle_command_cancel(request).await,
             _ => Err(ImagodError::new(
-                ErrorCode::BadRequest,
+                imago_protocol::ErrorCode::BadRequest,
                 "dispatch",
                 "unsupported message type",
             )),
@@ -144,7 +125,11 @@ impl ProtocolHandler {
     }
 
     fn handle_hello(&self, request: Envelope) -> Result<Envelope, ImagodError> {
-        let payload: HelloNegotiateRequest = request.payload_as().map_err(protocol_bad_request)?;
+        let payload: imago_protocol::HelloNegotiateRequest = payload_as(&request)?;
+        payload
+            .validate()
+            .map_err(|e| bad_request("hello.negotiate", e.to_string()))?;
+
         let accepted =
             is_compatible_date_match(&payload.compatibility_date, &self.config.compatibility_date);
         let mut limits = BTreeMap::new();
@@ -161,11 +146,11 @@ impl ProtocolHandler {
             format!("{}s", self.config.runtime.upload_session_ttl_secs),
         );
 
-        Envelope::response(
-            MESSAGE_HELLO_NEGOTIATE,
+        response_envelope(
+            MessageType::HelloNegotiate,
             request.request_id,
             request.correlation_id,
-            &HelloNegotiateResponse {
+            &imago_protocol::HelloNegotiateResponse {
                 accepted,
                 server_version: self.config.server_version.clone(),
                 features: vec![
@@ -181,70 +166,85 @@ impl ProtocolHandler {
                 limits,
             },
         )
-        .map_err(protocol_bad_request)
     }
 
     async fn handle_prepare(&self, request: Envelope) -> Result<Envelope, ImagodError> {
-        let payload: DeployPrepareRequest = request.payload_as().map_err(protocol_bad_request)?;
+        let payload: DeployPrepareRequest = payload_as(&request)?;
+        payload
+            .validate()
+            .map_err(|e| bad_request("deploy.prepare", e.to_string()))?;
+
         let response = self.artifacts.prepare(payload).await?;
-        Envelope::response(
-            MESSAGE_DEPLOY_PREPARE,
+        response_envelope(
+            MessageType::DeployPrepare,
             request.request_id,
             request.correlation_id,
             &response,
         )
-        .map_err(protocol_bad_request)
     }
 
     async fn handle_push(&self, request: Envelope) -> Result<Envelope, ImagodError> {
-        let payload = request.payload_as().map_err(protocol_bad_request)?;
+        let payload: crate::artifact_store::ArtifactPushRequest = payload_as(&request)?;
+        payload
+            .header
+            .validate()
+            .map_err(|e| bad_request("artifact.push", e.to_string()))?;
+
         let response = self.artifacts.push(payload).await?;
-        Envelope::response(
-            MESSAGE_ARTIFACT_PUSH,
+        response_envelope(
+            MessageType::ArtifactPush,
             request.request_id,
             request.correlation_id,
             &response,
         )
-        .map_err(protocol_bad_request)
     }
 
     async fn handle_commit(&self, request: Envelope) -> Result<Envelope, ImagodError> {
-        let payload = request.payload_as().map_err(protocol_bad_request)?;
+        let payload: imago_protocol::ArtifactCommitRequest = payload_as(&request)?;
+        payload
+            .validate()
+            .map_err(|e| bad_request("artifact.commit", e.to_string()))?;
+
         let response = self.artifacts.commit(payload).await?;
-        Envelope::response(
-            MESSAGE_ARTIFACT_COMMIT,
+        response_envelope(
+            MessageType::ArtifactCommit,
             request.request_id,
             request.correlation_id,
             &response,
         )
-        .map_err(protocol_bad_request)
     }
 
     async fn handle_state_request(&self, request: Envelope) -> Result<Envelope, ImagodError> {
-        let payload: StateRequest = request.payload_as().map_err(protocol_bad_request)?;
+        let payload: StateRequest = payload_as(&request)?;
+        payload
+            .validate()
+            .map_err(|e| bad_request("state.request", e.to_string()))?;
+
         let response = self
             .operations
             .snapshot_running(&payload.request_id)
             .await?;
-        Envelope::response(
-            MESSAGE_STATE_REQUEST,
+        response_envelope(
+            MessageType::StateResponse,
             request.request_id,
             request.correlation_id,
             &response,
         )
-        .map_err(protocol_bad_request)
     }
 
     async fn handle_command_cancel(&self, request: Envelope) -> Result<Envelope, ImagodError> {
-        let payload: CommandCancelRequest = request.payload_as().map_err(protocol_bad_request)?;
+        let payload: CommandCancelRequest = payload_as(&request)?;
+        payload
+            .validate()
+            .map_err(|e| bad_request("command.cancel", e.to_string()))?;
+
         let response = self.operations.request_cancel(&payload.request_id).await?;
-        Envelope::response(
-            MESSAGE_COMMAND_CANCEL,
+        response_envelope(
+            MessageType::CommandCancel,
             request.request_id,
             request.correlation_id,
             &response,
         )
-        .map_err(protocol_bad_request)
     }
 
     async fn handle_command_start(
@@ -252,40 +252,41 @@ impl ProtocolHandler {
         request: Envelope,
         send: &mut SendStream,
     ) -> Result<(), ImagodError> {
-        let payload: CommandStartRequest = request.payload_as().map_err(protocol_bad_request)?;
-        let command_type = payload.command_type;
+        let payload: CommandStartRequest = payload_as(&request)?;
+        payload
+            .validate()
+            .map_err(|e| bad_request("command.start", e.to_string()))?;
 
         self.operations
-            .start(payload.request_id.clone(), command_type)
+            .start(payload.request_id, payload.command_type)
             .await?;
 
-        let accepted = Envelope::response(
-            MESSAGE_COMMAND_START,
-            request.request_id.clone(),
-            request.correlation_id.clone(),
+        let accepted = response_envelope(
+            MessageType::CommandStart,
+            request.request_id,
+            request.correlation_id,
             &CommandStartResponse { accepted: true },
-        )
-        .map_err(protocol_bad_request)?;
+        )?;
         write_envelope(send, &accepted).await?;
 
         let accepted_event = event_envelope(
-            &payload.request_id,
-            &request.correlation_id,
-            EventType::Accepted,
-            command_type,
+            payload.request_id,
+            request.correlation_id,
+            CommandEventType::Accepted,
+            payload.command_type,
             None,
             None,
         )?;
         write_envelope(send, &accepted_event).await?;
 
         self.operations
-            .set_state(&payload.request_id, OperationState::Running, "starting")
+            .set_state(&payload.request_id, CommandState::Running, "starting")
             .await?;
         let running_event = event_envelope(
-            &payload.request_id,
-            &request.correlation_id,
-            EventType::Progress,
-            command_type,
+            payload.request_id,
+            request.correlation_id,
+            CommandEventType::Progress,
+            payload.command_type,
             Some("starting".to_string()),
             None,
         )?;
@@ -297,13 +298,13 @@ impl ProtocolHandler {
             .await
         {
             self.operations
-                .finish(&payload.request_id, OperationState::Canceled, "canceled")
+                .finish(&payload.request_id, CommandState::Canceled, "canceled")
                 .await;
             let canceled = event_envelope(
-                &payload.request_id,
-                &request.correlation_id,
-                EventType::Canceled,
-                command_type,
+                payload.request_id,
+                request.correlation_id,
+                CommandEventType::Canceled,
+                payload.command_type,
                 Some("canceled".to_string()),
                 None,
             )?;
@@ -312,58 +313,38 @@ impl ProtocolHandler {
             return Ok(());
         }
 
-        let command_result = match command_type {
-            CommandType::Deploy => {
-                let deploy_payload: DeployCommandPayload =
-                    serde_json::from_value(payload.payload.clone()).map_err(|e| {
-                        ImagodError::new(
-                            ErrorCode::BadRequest,
-                            MESSAGE_COMMAND_START,
-                            format!("invalid deploy payload: {e}"),
-                        )
-                    })?;
-                self.orchestrator
-                    .deploy(&deploy_payload)
-                    .await
-                    .map(|summary| {
-                        (
-                            format!("release:{}:{}", summary.service_name, summary.release_hash),
-                            "spawned".to_string(),
-                        )
-                    })
-            }
-            CommandType::Run => {
-                let run_payload: RunCommandPayload =
-                    serde_json::from_value(payload.payload.clone()).map_err(|e| {
-                        ImagodError::new(
-                            ErrorCode::BadRequest,
-                            MESSAGE_COMMAND_START,
-                            format!("invalid run payload: {e}"),
-                        )
-                    })?;
-                self.orchestrator.run(&run_payload).await.map(|summary| {
+        let command_result = match (&payload.command_type, &payload.payload) {
+            (CommandType::Deploy, CommandPayload::Deploy(deploy_payload)) => self
+                .orchestrator
+                .deploy(deploy_payload)
+                .await
+                .map(|summary| {
+                    (
+                        format!("release:{}:{}", summary.service_name, summary.release_hash),
+                        "spawned".to_string(),
+                    )
+                }),
+            (CommandType::Run, CommandPayload::Run(run_payload)) => {
+                self.orchestrator.run(run_payload).await.map(|summary| {
                     (
                         format!("running:{}:{}", summary.service_name, summary.release_hash),
                         "spawned".to_string(),
                     )
                 })
             }
-            CommandType::Stop => {
-                let stop_payload: StopCommandPayload =
-                    serde_json::from_value(payload.payload.clone()).map_err(|e| {
-                        ImagodError::new(
-                            ErrorCode::BadRequest,
-                            MESSAGE_COMMAND_START,
-                            format!("invalid stop payload: {e}"),
-                        )
-                    })?;
-                self.orchestrator.stop(&stop_payload).await.map(|summary| {
+            (CommandType::Stop, CommandPayload::Stop(stop_payload)) => {
+                self.orchestrator.stop(stop_payload).await.map(|summary| {
                     (
                         format!("stopped:{}", summary.service_name),
                         "completed".to_string(),
                     )
                 })
             }
+            _ => Err(ImagodError::new(
+                imago_protocol::ErrorCode::BadRequest,
+                "command.start",
+                "payload does not match command_type",
+            )),
         };
 
         match command_result {
@@ -372,28 +353,24 @@ impl ProtocolHandler {
                     .mark_spawned(&payload.request_id, &success_stage)
                     .await?;
                 self.operations
-                    .finish(
-                        &payload.request_id,
-                        OperationState::Succeeded,
-                        &success_stage,
-                    )
+                    .finish(&payload.request_id, CommandState::Succeeded, &success_stage)
                     .await;
 
                 let progress = event_envelope(
-                    &payload.request_id,
-                    &request.correlation_id,
-                    EventType::Progress,
-                    command_type,
+                    payload.request_id,
+                    request.correlation_id,
+                    CommandEventType::Progress,
+                    payload.command_type,
                     Some(progress_stage),
                     None,
                 )?;
                 write_envelope(send, &progress).await?;
 
                 let succeeded = event_envelope(
-                    &payload.request_id,
-                    &request.correlation_id,
-                    EventType::Succeeded,
-                    command_type,
+                    payload.request_id,
+                    request.correlation_id,
+                    CommandEventType::Succeeded,
+                    payload.command_type,
                     Some(success_stage),
                     None,
                 )?;
@@ -402,14 +379,14 @@ impl ProtocolHandler {
             }
             Err(err) => {
                 self.operations
-                    .finish(&payload.request_id, OperationState::Failed, "failed")
+                    .finish(&payload.request_id, CommandState::Failed, "failed")
                     .await;
 
                 let failed = event_envelope(
-                    &payload.request_id,
-                    &request.correlation_id,
-                    EventType::Failed,
-                    command_type,
+                    payload.request_id,
+                    request.correlation_id,
+                    CommandEventType::Failed,
+                    payload.command_type,
                     Some("failed".to_string()),
                     Some(err.to_structured()),
                 )?;
@@ -422,20 +399,61 @@ impl ProtocolHandler {
     }
 }
 
-fn parse_stream_envelopes(buf: &[u8]) -> Result<Vec<Envelope>, ProtocolError> {
+fn response_envelope<T: Serialize>(
+    message_type: MessageType,
+    request_id: Uuid,
+    correlation_id: Uuid,
+    payload: &T,
+) -> Result<Envelope, ImagodError> {
+    let payload = serde_json::to_value(payload)
+        .map_err(|e| bad_request("protocol", format!("payload encode failed: {e}")))?;
+    Ok(Envelope {
+        message_type,
+        request_id,
+        correlation_id,
+        payload,
+        error: None,
+    })
+}
+
+fn error_envelope(
+    message_type: MessageType,
+    request_id: Uuid,
+    correlation_id: Uuid,
+    error: StructuredError,
+) -> Envelope {
+    Envelope {
+        message_type,
+        request_id,
+        correlation_id,
+        payload: Value::Null,
+        error: Some(error),
+    }
+}
+
+fn payload_as<T: DeserializeOwned>(request: &Envelope) -> Result<T, ImagodError> {
+    serde_json::from_value(request.payload.clone())
+        .map_err(|e| bad_request("protocol", format!("request payload decode failed: {e}")))
+}
+
+fn parse_stream_envelopes(buf: &[u8]) -> Result<Vec<Envelope>, ImagodError> {
     let frames = decode_frames(buf)?;
     frames
         .iter()
-        .map(|frame| from_cbor::<Envelope>(frame))
+        .map(|frame| {
+            from_cbor::<Envelope>(frame)
+                .map_err(|e| bad_request("protocol", format!("invalid frame payload: {e}")))
+        })
         .collect()
 }
 
 async fn write_envelope(send: &mut SendStream, envelope: &Envelope) -> Result<(), ImagodError> {
-    let data = to_cbor(envelope).map_err(protocol_bad_request)?;
+    let data = to_cbor(envelope)
+        .map_err(|e| bad_request("protocol", format!("cbor encode failed: {e}")))?;
     let framed = encode_frame(&data);
     send.write_all(&framed).await.map_err(|e| {
         ImagodError::new(
-            ErrorCode::Internal,
+            imago_protocol::ErrorCode::Internal,
             "session.write",
             format!("failed to send frame: {e}"),
         )
@@ -443,37 +461,38 @@ async fn write_envelope(send: &mut SendStream, envelope: &Envelope) -> Result<()
     Ok(())
 }
 
-fn protocol_bad_request(err: ProtocolError) -> ImagodError {
-    ImagodError::new(ErrorCode::BadRequest, "protocol", err.to_string())
-}
-
-fn protocol_error(err: ProtocolError) -> imago_protocol::StructuredError {
-    ImagodError::new(ErrorCode::BadRequest, "protocol", err.to_string()).to_structured()
+fn finish_stream(send: &mut SendStream) -> Result<(), ImagodError> {
+    send.finish().map_err(|e| {
+        ImagodError::new(
+            imago_protocol::ErrorCode::Internal,
+            "session.write",
+            format!("failed to finish stream: {e}"),
+        )
+    })
 }
 
 fn event_envelope(
-    request_id: &str,
-    correlation_id: &str,
-    event_type: EventType,
+    request_id: Uuid,
+    correlation_id: Uuid,
+    event_type: CommandEventType,
     command_type: CommandType,
     stage: Option<String>,
-    error: Option<imago_protocol::StructuredError>,
+    error: Option<StructuredError>,
 ) -> Result<Envelope, ImagodError> {
     let payload = CommandEvent {
         event_type,
-        request_id: request_id.to_string(),
+        request_id,
         command_type,
         timestamp: now_unix_secs(),
         stage,
         error,
     };
-    Envelope::response(
-        MESSAGE_COMMAND_EVENT,
-        request_id.to_string(),
-        correlation_id.to_string(),
+    response_envelope(
+        MessageType::CommandEvent,
+        request_id,
+        correlation_id,
         &payload,
     )
-    .map_err(protocol_bad_request)
 }
 
 fn now_unix_secs() -> String {
@@ -481,6 +500,45 @@ fn now_unix_secs() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     now.as_secs().to_string()
+}
+
+fn encode_frame(payload: &[u8]) -> Vec<u8> {
+    let len = payload.len() as u32;
+    let mut frame = Vec::with_capacity(payload.len() + 4);
+    frame.extend_from_slice(&len.to_be_bytes());
+    frame.extend_from_slice(payload);
+    frame
+}
+
+fn decode_frames(value: &[u8]) -> Result<Vec<Vec<u8>>, ImagodError> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+
+    while offset < value.len() {
+        if value.len() - offset < 4 {
+            return Err(bad_request("protocol", "truncated frame header"));
+        }
+
+        let len = u32::from_be_bytes(
+            value[offset..offset + 4]
+                .try_into()
+                .map_err(|_| bad_request("protocol", "invalid frame header"))?,
+        ) as usize;
+        offset += 4;
+
+        if value.len() - offset < len {
+            return Err(bad_request("protocol", "truncated frame payload"));
+        }
+
+        out.push(value[offset..offset + len].to_vec());
+        offset += len;
+    }
+
+    Ok(out)
+}
+
+fn bad_request(stage: &str, message: impl Into<String>) -> ImagodError {
+    ImagodError::new(imago_protocol::ErrorCode::BadRequest, stage, message)
 }
 
 fn is_compatible_date_match(request: &str, configured: &str) -> bool {

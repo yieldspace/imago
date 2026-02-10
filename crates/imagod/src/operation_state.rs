@@ -1,15 +1,14 @@
 use std::{collections::BTreeMap, sync::Arc, time::UNIX_EPOCH};
 
-use imago_protocol::{
-    CommandCancelResponse, CommandType, ErrorCode, OperationState, StateResponse,
-};
+use imago_protocol::{CommandCancelResponse, CommandState, CommandType, ErrorCode, StateResponse};
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use crate::error::ImagodError;
 
 #[derive(Debug, Clone)]
 struct OperationEntry {
-    state: OperationState,
+    state: CommandState,
     stage: String,
     updated_at: String,
     cancel_requested: bool,
@@ -24,7 +23,7 @@ enum OperationPhase {
 
 #[derive(Clone, Default)]
 pub struct OperationManager {
-    inner: Arc<RwLock<BTreeMap<String, OperationEntry>>>,
+    inner: Arc<RwLock<BTreeMap<Uuid, OperationEntry>>>,
 }
 
 impl OperationManager {
@@ -34,10 +33,9 @@ impl OperationManager {
 
     pub async fn start(
         &self,
-        request_id: impl Into<String>,
+        request_id: Uuid,
         _command_type: CommandType,
     ) -> Result<(), ImagodError> {
-        let request_id = request_id.into();
         let mut inner = self.inner.write().await;
 
         if inner.contains_key(&request_id) {
@@ -51,7 +49,7 @@ impl OperationManager {
         inner.insert(
             request_id,
             OperationEntry {
-                state: OperationState::Accepted,
+                state: CommandState::Accepted,
                 stage: "accepted".to_string(),
                 updated_at: now_unix_secs(),
                 cancel_requested: false,
@@ -63,8 +61,8 @@ impl OperationManager {
 
     pub async fn set_state(
         &self,
-        request_id: &str,
-        state: OperationState,
+        request_id: &Uuid,
+        state: CommandState,
         stage: impl Into<String>,
     ) -> Result<(), ImagodError> {
         let mut inner = self.inner.write().await;
@@ -83,7 +81,7 @@ impl OperationManager {
 
     pub async fn mark_spawned(
         &self,
-        request_id: &str,
+        request_id: &Uuid,
         stage: impl Into<String>,
     ) -> Result<(), ImagodError> {
         let mut inner = self.inner.write().await;
@@ -100,7 +98,7 @@ impl OperationManager {
         Ok(())
     }
 
-    pub async fn snapshot_running(&self, request_id: &str) -> Result<StateResponse, ImagodError> {
+    pub async fn snapshot_running(&self, request_id: &Uuid) -> Result<StateResponse, ImagodError> {
         let inner = self.inner.read().await;
         let entry = inner.get(request_id).ok_or_else(|| {
             ImagodError::new(
@@ -119,7 +117,7 @@ impl OperationManager {
         }
 
         Ok(StateResponse {
-            request_id: request_id.to_string(),
+            request_id: *request_id,
             state: entry.state,
             stage: entry.stage.clone(),
             updated_at: entry.updated_at.clone(),
@@ -128,7 +126,7 @@ impl OperationManager {
 
     pub async fn request_cancel(
         &self,
-        request_id: &str,
+        request_id: &Uuid,
     ) -> Result<CommandCancelResponse, ImagodError> {
         let mut inner = self.inner.write().await;
         let entry = inner.get_mut(request_id).ok_or_else(|| {
@@ -158,11 +156,11 @@ impl OperationManager {
 
         Ok(CommandCancelResponse {
             cancellable: true,
-            final_state: OperationState::Canceled,
+            final_state: CommandState::Canceled,
         })
     }
 
-    pub async fn is_cancel_requested(&self, request_id: &str) -> bool {
+    pub async fn is_cancel_requested(&self, request_id: &Uuid) -> bool {
         let inner = self.inner.read().await;
         inner
             .get(request_id)
@@ -170,7 +168,7 @@ impl OperationManager {
             .unwrap_or(false)
     }
 
-    pub async fn finish(&self, request_id: &str, state: OperationState, stage: impl Into<String>) {
+    pub async fn finish(&self, request_id: &Uuid, state: CommandState, stage: impl Into<String>) {
         let mut inner = self.inner.write().await;
         if let Some(entry) = inner.get_mut(request_id) {
             entry.state = state;
@@ -181,7 +179,7 @@ impl OperationManager {
         }
     }
 
-    pub async fn remove(&self, request_id: &str) {
+    pub async fn remove(&self, request_id: &Uuid) {
         let mut inner = self.inner.write().await;
         inner.remove(request_id);
     }
@@ -194,71 +192,76 @@ fn now_unix_secs() -> String {
     now.as_secs().to_string()
 }
 
-fn is_terminal(state: OperationState) -> bool {
+fn is_terminal(state: CommandState) -> bool {
     matches!(
         state,
-        OperationState::Succeeded | OperationState::Failed | OperationState::Canceled
+        CommandState::Succeeded | CommandState::Failed | CommandState::Canceled
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
+
+    fn req(id: u128) -> Uuid {
+        Uuid::from_u128(id)
+    }
 
     #[tokio::test]
     async fn cancel_is_allowed_before_spawned() {
         let manager = OperationManager::new();
         manager
-            .start("req-1", CommandType::Deploy)
+            .start(req(1), CommandType::Deploy)
             .await
             .expect("start should succeed");
 
         let response = manager
-            .request_cancel("req-1")
+            .request_cancel(&req(1))
             .await
             .expect("cancel should succeed");
         assert!(response.cancellable);
-        assert_eq!(response.final_state, OperationState::Canceled);
+        assert_eq!(response.final_state, CommandState::Canceled);
     }
 
     #[tokio::test]
     async fn cancel_is_rejected_after_spawned() {
         let manager = OperationManager::new();
         manager
-            .start("req-2", CommandType::Deploy)
+            .start(req(2), CommandType::Deploy)
             .await
             .expect("start should succeed");
         manager
-            .set_state("req-2", OperationState::Running, "running")
+            .set_state(&req(2), CommandState::Running, "running")
             .await
             .expect("state update should succeed");
         manager
-            .mark_spawned("req-2", "spawned")
+            .mark_spawned(&req(2), "spawned")
             .await
             .expect("mark spawned should succeed");
 
         let response = manager
-            .request_cancel("req-2")
+            .request_cancel(&req(2))
             .await
             .expect("cancel should return response");
         assert!(!response.cancellable);
-        assert_eq!(response.final_state, OperationState::Running);
+        assert_eq!(response.final_state, CommandState::Running);
     }
 
     #[tokio::test]
     async fn removes_operation_after_finish() {
         let manager = OperationManager::new();
         manager
-            .start("req-3", CommandType::Deploy)
+            .start(req(3), CommandType::Deploy)
             .await
             .expect("start should succeed");
         manager
-            .finish("req-3", OperationState::Succeeded, "completed")
+            .finish(&req(3), CommandState::Succeeded, "completed")
             .await;
-        manager.remove("req-3").await;
+        manager.remove(&req(3)).await;
 
         let err = manager
-            .request_cancel("req-3")
+            .request_cancel(&req(3))
             .await
             .expect_err("cancel should fail after removal");
         assert_eq!(err.code, ErrorCode::NotFound);

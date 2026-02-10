@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use imago_protocol::{ErrorCode, StructuredError};
-use serde_json::Value;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -11,7 +10,7 @@ pub struct ImagodError {
     pub stage: String,
     pub message: String,
     pub retryable: bool,
-    pub details: BTreeMap<String, Value>,
+    pub details: BTreeMap<String, String>,
 }
 
 impl ImagodError {
@@ -30,8 +29,8 @@ impl ImagodError {
         self
     }
 
-    pub fn with_detail(mut self, key: impl Into<String>, value: Value) -> Self {
-        self.details.insert(key.into(), value);
+    pub fn with_detail(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.details.insert(key.into(), value.into());
         self
     }
 

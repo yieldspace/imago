@@ -8,9 +8,10 @@ use std::{
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use imago_protocol::{
-    ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushRequest,
-    ArtifactRange, ArtifactStatus, DeployPrepareRequest, DeployPrepareResponse, ErrorCode,
+    ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushChunkHeader,
+    ArtifactStatus, ByteRange, DeployPrepareRequest, DeployPrepareResponse, ErrorCode,
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{
     fs::{self, OpenOptions},
@@ -45,9 +46,16 @@ struct UploadSession {
     manifest_digest: String,
     upload_token: String,
     file_path: PathBuf,
-    received_ranges: Vec<ArtifactRange>,
+    received_ranges: Vec<ByteRange>,
     committed: bool,
     updated_at_epoch_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactPushRequest {
+    #[serde(flatten)]
+    pub header: ArtifactPushChunkHeader,
+    pub chunk_b64: String,
 }
 
 #[derive(Default)]
@@ -197,11 +205,12 @@ impl ArtifactStore {
             ));
             cleanup_orphan_idempotency_locked(&mut state);
 
-            let session = state.sessions.get_mut(&request.deploy_id).ok_or_else(|| {
+            let header = &request.header;
+            let session = state.sessions.get_mut(&header.deploy_id).ok_or_else(|| {
                 ImagodError::new(ErrorCode::NotFound, STAGE_PUSH, "deploy_id is not found")
             })?;
 
-            if session.upload_token != request.upload_token {
+            if session.upload_token != header.upload_token {
                 return Err(ImagodError::new(
                     ErrorCode::Unauthorized,
                     STAGE_PUSH,
@@ -221,15 +230,15 @@ impl ArtifactStore {
                 map_bad_request(STAGE_PUSH, format!("chunk_b64 decode failed: {e}"))
             })?;
 
-            if chunk.len() as u64 != request.length {
+            if chunk.len() as u64 != header.length {
                 return Err(ImagodError::new(
                     ErrorCode::RangeInvalid,
                     STAGE_PUSH,
-                    "chunk length does not match request.length",
+                    "chunk length does not match header.length",
                 ));
             }
 
-            let chunk_end = request.offset.checked_add(request.length).ok_or_else(|| {
+            let chunk_end = header.length.checked_add(header.offset).ok_or_else(|| {
                 ImagodError::new(ErrorCode::RangeInvalid, STAGE_PUSH, "chunk overflow")
             })?;
             if chunk_end > session.artifact_size {
@@ -241,7 +250,7 @@ impl ArtifactStore {
             }
 
             let chunk_hash = hex::encode(Sha256::digest(&chunk));
-            if chunk_hash != request.chunk_sha256 {
+            if chunk_hash != header.chunk_sha256 {
                 return Err(ImagodError::new(
                     ErrorCode::ChunkHashMismatch,
                     STAGE_PUSH,
@@ -255,7 +264,7 @@ impl ArtifactStore {
                 .open(&session.file_path)
                 .await
                 .map_err(|e| map_internal(STAGE_PUSH, e.to_string()))?;
-            file.seek(std::io::SeekFrom::Start(request.offset))
+            file.seek(std::io::SeekFrom::Start(header.offset))
                 .await
                 .map_err(|e| map_internal(STAGE_PUSH, e.to_string()))?;
             file.write_all(&chunk)
@@ -267,7 +276,7 @@ impl ArtifactStore {
 
             merge_range(
                 &mut session.received_ranges,
-                ArtifactRange::new(request.offset, chunk_end),
+                range_from_start_end(header.offset, chunk_end),
             );
             session.updated_at_epoch_secs = now;
             let next_missing = next_missing_range(&session.received_ranges, session.artifact_size);
@@ -275,7 +284,7 @@ impl ArtifactStore {
             Ok(ArtifactPushAck {
                 received_ranges: session.received_ranges.clone(),
                 next_missing_range: next_missing,
-                accepted_bytes: request.length,
+                accepted_bytes: header.length,
             })
         };
 
@@ -539,7 +548,7 @@ fn fingerprint(request: &DeployPrepareRequest) -> String {
     format!(
         "{}|{}|{}|{}|{}|{}",
         request.name,
-        request.service_type as u8,
+        request.app_type,
         request.artifact_digest,
         request.artifact_size,
         request.manifest_digest,
@@ -568,50 +577,64 @@ async fn digest_file(path: &Path) -> Result<String, ImagodError> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn is_complete(ranges: &[ArtifactRange], total: u64) -> bool {
+fn is_complete(ranges: &[ByteRange], total: u64) -> bool {
     if ranges.len() != 1 {
         return false;
     }
     let first = &ranges[0];
-    first.start == 0 && first.end == total
+    first.offset == 0 && first.length == total
 }
 
-fn next_missing_range(ranges: &[ArtifactRange], total: u64) -> Option<ArtifactRange> {
+fn next_missing_range(ranges: &[ByteRange], total: u64) -> Option<ByteRange> {
     if total == 0 {
         return None;
     }
     if ranges.is_empty() {
-        return Some(ArtifactRange::new(0, total));
+        return Some(ByteRange {
+            offset: 0,
+            length: total,
+        });
     }
 
-    let mut cursor = 0;
+    let mut cursor = 0u64;
     for range in ranges {
-        if cursor < range.start {
-            return Some(ArtifactRange::new(cursor, range.start));
+        let start = range.offset;
+        let end = range.offset.saturating_add(range.length);
+        if cursor < start {
+            return Some(range_from_start_end(cursor, start));
         }
-        cursor = range.end;
+        cursor = end;
     }
     if cursor < total {
-        return Some(ArtifactRange::new(cursor, total));
+        return Some(range_from_start_end(cursor, total));
     }
     None
 }
 
-fn merge_range(ranges: &mut Vec<ArtifactRange>, incoming: ArtifactRange) {
+fn merge_range(ranges: &mut Vec<ByteRange>, incoming: ByteRange) {
     ranges.push(incoming);
-    ranges.sort_by_key(|r| r.start);
+    ranges.sort_by_key(|r| r.offset);
 
-    let mut merged: Vec<ArtifactRange> = Vec::with_capacity(ranges.len());
+    let mut merged: Vec<ByteRange> = Vec::with_capacity(ranges.len());
     for range in ranges.drain(..) {
         match merged.last_mut() {
-            Some(last) if range.start <= last.end => {
-                last.end = last.end.max(range.end);
+            Some(last) if range.offset <= last.offset.saturating_add(last.length) => {
+                let current_end = range.offset.saturating_add(range.length);
+                let merged_end = last.offset.saturating_add(last.length).max(current_end);
+                last.length = merged_end.saturating_sub(last.offset);
             }
             _ => merged.push(range),
         }
     }
 
     *ranges = merged;
+}
+
+fn range_from_start_end(start: u64, end: u64) -> ByteRange {
+    ByteRange {
+        offset: start,
+        length: end.saturating_sub(start),
+    }
 }
 
 fn now_epoch_secs() -> u64 {
@@ -632,7 +655,6 @@ fn map_bad_request(stage: &str, message: String) -> ImagodError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imago_protocol::ServiceType;
     use std::time::Duration;
 
     #[tokio::test]
@@ -645,7 +667,7 @@ mod tests {
         let prepare = store
             .prepare(DeployPrepareRequest {
                 name: "svc-a".to_string(),
-                service_type: ServiceType::Cli,
+                app_type: "cli".to_string(),
                 target: BTreeMap::new(),
                 artifact_digest,
                 artifact_size: artifact.len() as u64,
@@ -666,7 +688,7 @@ mod tests {
         let _ = store
             .prepare(DeployPrepareRequest {
                 name: "svc-b".to_string(),
-                service_type: ServiceType::Cli,
+                app_type: "cli".to_string(),
                 target: BTreeMap::new(),
                 artifact_digest: hex::encode(Sha256::digest(b"artifact-b")),
                 artifact_size: b"artifact-b".len() as u64,
@@ -735,7 +757,7 @@ mod tests {
         let prepare = store
             .prepare(DeployPrepareRequest {
                 name: service_name.to_string(),
-                service_type: ServiceType::Cli,
+                app_type: "cli".to_string(),
                 target: BTreeMap::new(),
                 artifact_digest: artifact_digest.clone(),
                 artifact_size: artifact.len() as u64,
@@ -749,11 +771,13 @@ mod tests {
         let chunk_hash = hex::encode(Sha256::digest(artifact));
         store
             .push(ArtifactPushRequest {
-                deploy_id: prepare.deploy_id.clone(),
-                offset: 0,
-                length: artifact.len() as u64,
-                chunk_sha256: chunk_hash,
-                upload_token: prepare.upload_token,
+                header: ArtifactPushChunkHeader {
+                    deploy_id: prepare.deploy_id.clone(),
+                    offset: 0,
+                    length: artifact.len() as u64,
+                    chunk_sha256: chunk_hash,
+                    upload_token: prepare.upload_token,
+                },
                 chunk_b64: STANDARD.encode(artifact),
             })
             .await

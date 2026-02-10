@@ -61,10 +61,7 @@ impl ImagodConfig {
                 "config.load",
                 format!("config read failed: {e}"),
             )
-            .with_detail(
-                "path",
-                serde_json::Value::String(path.to_string_lossy().to_string()),
-            )
+            .with_detail("path", path.to_string_lossy())
         })?;
         let raw: toml::Value = toml::from_str(&content).map_err(|e| {
             ImagodError::new(
@@ -72,10 +69,7 @@ impl ImagodConfig {
                 "config.load",
                 format!("config parse failed: {e}"),
             )
-            .with_detail(
-                "path",
-                serde_json::Value::String(path.to_string_lossy().to_string()),
-            )
+            .with_detail("path", path.to_string_lossy())
         })?;
 
         if raw.get("protocol_draft").is_some() {
@@ -84,14 +78,8 @@ impl ImagodConfig {
                 "config.load",
                 "protocol_draft is no longer supported; use compatibility_date (YYYY-MM-DD)",
             )
-            .with_detail(
-                "path",
-                serde_json::Value::String(path.to_string_lossy().to_string()),
-            )
-            .with_detail(
-                "legacy_key",
-                serde_json::Value::String("protocol_draft".to_string()),
-            ));
+            .with_detail("path", path.to_string_lossy())
+            .with_detail("legacy_key", "protocol_draft"));
         }
 
         let config: Self = raw.clone().try_into().map_err(|e| {
@@ -100,10 +88,7 @@ impl ImagodConfig {
                 "config.load",
                 format!("config decode failed: {e}"),
             )
-            .with_detail(
-                "path",
-                serde_json::Value::String(path.to_string_lossy().to_string()),
-            )
+            .with_detail("path", path.to_string_lossy())
         })?;
 
         if !is_valid_compatibility_date(&config.compatibility_date) {
@@ -112,10 +97,7 @@ impl ImagodConfig {
                 "config.load",
                 "compatibility_date must be in YYYY-MM-DD format",
             )
-            .with_detail(
-                "compatibility_date",
-                serde_json::Value::String(config.compatibility_date.clone()),
-            ));
+            .with_detail("compatibility_date", config.compatibility_date.clone()));
         }
 
         if config.runtime.stop_grace_timeout_secs == 0 {

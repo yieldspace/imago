@@ -27,6 +27,18 @@ Use Rust 2024 edition conventions and `rustfmt` defaults (4-space indentation). 
 
 Keep modules focused and explicit. When behavior changes, update related specs in `docs/spec/` in the same PR so implementation and documentation stay aligned.
 
+## Design Change Documentation Policy
+When implementation introduces or changes protocol contracts, defaults, validation rules, or structured error contracts, update the corresponding files under `docs/spec/` in the same PR.
+
+Default workflow:
+- Add a `## 実装反映ノート` section to the relevant existing spec file(s).
+- If the delta is too large for inline notes, create a separate document and link it from both `docs/spec/README.md` and the related spec file(s).
+
+PR body requirements for design-impacting changes:
+- A short summary of design deltas.
+- The list of updated spec files.
+- Validation command results (for example, `cargo test ...`, `cargo check ...`).
+
 ## Testing Guidelines
 Use t-wada style TDD for new behavior: Red (failing test first), Green (minimum implementation), Refactor (cleanup with tests still green). Add unit tests close to implementation using `#[cfg(test)] mod tests`. Name tests by behavior (for example, `rejects_invalid_manifest_hash`). For protocol or schema changes, add both success and failure-path tests and keep `docs/spec/examples/` synchronized. No strict coverage target exists, but new logic should cover key branches.
 

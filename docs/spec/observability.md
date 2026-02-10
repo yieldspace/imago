@@ -93,3 +93,11 @@ terminal event 送信後の operation 状態は保持しない。
 - イベント本体に secret を含めない。
 - 現行 CLI では 1 実行につき 1 WebTransport セッションを作成し、実行完了で閉じる。
 - 将来は 1 セッション内で複数 stream を並列利用してよい。
+
+## 実装反映ノート（Milestone Phase 1 / 2026-02-10）
+
+- `command.event` は `event_type=progress` のとき `stage` を必須、`event_type=failed` のとき `error` を必須として検証する。
+- `state.request` / `command.cancel` の `request_id` は UUID として扱い、nil UUID を拒否する。
+- `state.response` は `stage` と `updated_at` の空文字を拒否する。
+- `command.event.timestamp` は現時点で文字列として保持し、形式の厳密検証は行わない。
+- 完了済みまたは未存在の `request_id` に対する `E_NOT_FOUND` は、`state.request` の試験観点として扱う（issue #130 と整合）。

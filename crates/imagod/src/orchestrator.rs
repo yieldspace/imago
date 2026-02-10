@@ -1,11 +1,11 @@
 use std::{
     collections::BTreeMap,
+    collections::BTreeSet,
     path::{Path, PathBuf},
 };
 
-use imago_protocol::{
-    DeployCommandPayload, ErrorCode, Manifest, RunCommandPayload, StopCommandPayload,
-};
+use imago_protocol::{DeployCommandPayload, ErrorCode, RunCommandPayload, StopCommandPayload};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::fs;
 
@@ -16,6 +16,50 @@ use crate::{
 };
 
 const STAGE_ORCHESTRATE: &str = "orchestration";
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct Manifest {
+    name: String,
+    main: String,
+    #[serde(default)]
+    vars: BTreeMap<String, String>,
+    #[serde(default)]
+    secrets: BTreeMap<String, String>,
+    #[serde(default)]
+    assets: Vec<ManifestAsset>,
+    hash: ManifestHash,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct ManifestAsset {
+    path: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct ManifestHash {
+    algorithm: String,
+    targets: Vec<HashTarget>,
+}
+
+impl ManifestHash {
+    fn validate_targets(&self) -> bool {
+        let required = [HashTarget::Wasm, HashTarget::Manifest, HashTarget::Assets]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let actual = self.targets.iter().copied().collect::<BTreeSet<_>>();
+        required == actual && self.targets.len() == required.len()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+enum HashTarget {
+    #[serde(rename = "wasm")]
+    Wasm,
+    #[serde(rename = "manifest")]
+    Manifest,
+    #[serde(rename = "assets")]
+    Assets,
+}
 
 #[derive(Debug, Clone)]
 pub struct DeploySummary {

@@ -9,15 +9,15 @@ use std::{
 use anyhow::{Context, anyhow};
 use base64::Engine;
 use imago_protocol::{
-    ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushRequest, ArtifactStatus,
-    CommandEvent, CommandStartRequest, CommandStartResponse, CommandType, DeployCommandPayload,
-    DeployPrepareRequest, DeployPrepareResponse, Envelope, EventType, HelloNegotiateRequest,
-    HelloNegotiateResponse, MESSAGE_ARTIFACT_COMMIT, MESSAGE_ARTIFACT_PUSH, MESSAGE_COMMAND_EVENT,
-    MESSAGE_COMMAND_START, MESSAGE_DEPLOY_PREPARE, MESSAGE_HELLO_NEGOTIATE, Manifest,
-    decode_frames, encode_frame, from_cbor, to_cbor,
+    ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushChunkHeader, ArtifactStatus,
+    CommandEvent, CommandEventType, CommandPayload, CommandStartRequest, CommandStartResponse,
+    CommandType, DeployCommandPayload, DeployPrepareRequest, DeployPrepareResponse,
+    HelloNegotiateRequest, HelloNegotiateResponse, MessageType, ProtocolEnvelope, from_cbor,
+    to_cbor,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::net::lookup_host;
 use url::Url;
@@ -29,6 +29,8 @@ use crate::{cli::DeployArgs, commands::CommandResult};
 const CHUNK_SIZE: usize = 1024 * 1024;
 const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
 const COMPATIBILITY_DATE: &str = "2026-02-10";
+
+type Envelope = ProtocolEnvelope<Value>;
 
 #[derive(Debug, Deserialize)]
 struct ImagoToml {
@@ -43,6 +45,28 @@ struct TargetConfig {
     ca_cert: PathBuf,
     client_cert: PathBuf,
     client_key: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct Manifest {
+    name: String,
+    main: String,
+    #[serde(rename = "type")]
+    app_type: String,
+    #[serde(default)]
+    assets: Vec<ManifestAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestAsset {
+    path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ArtifactPushRequest {
+    #[serde(flatten)]
+    header: ArtifactPushChunkHeader,
+    chunk_b64: String,
 }
 
 pub fn run(args: DeployArgs) -> CommandResult {
@@ -86,13 +110,12 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
     let manifest_digest = hex::encode(Sha256::digest(&manifest_bytes));
 
     let session = connect_target(&target).await?;
-    let correlation_id = Uuid::new_v4().to_string();
+    let correlation_id = Uuid::new_v4();
 
-    let hello_request_id = Uuid::new_v4().to_string();
-    let hello = Envelope::request(
-        MESSAGE_HELLO_NEGOTIATE,
-        hello_request_id.clone(),
-        correlation_id.clone(),
+    let hello = request_envelope(
+        MessageType::HelloNegotiate,
+        Uuid::new_v4(),
+        correlation_id,
         &HelloNegotiateRequest {
             compatibility_date: COMPATIBILITY_DATE.to_string(),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -111,14 +134,13 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
         return Err(anyhow!("hello.negotiate was rejected by server"));
     }
 
-    let prepare_request_id = Uuid::new_v4().to_string();
-    let prepare = Envelope::request(
-        MESSAGE_DEPLOY_PREPARE,
-        prepare_request_id,
-        correlation_id.clone(),
+    let prepare = request_envelope(
+        MessageType::DeployPrepare,
+        Uuid::new_v4(),
+        correlation_id,
         &DeployPrepareRequest {
             name: manifest.name.clone(),
-            service_type: manifest.service_type,
+            app_type: manifest.app_type.clone(),
             target: normalize_target_for_protocol(&target),
             artifact_digest: artifact_digest.clone(),
             artifact_size: artifact.len() as u64,
@@ -133,7 +155,7 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
     if prepare_response.artifact_status != ArtifactStatus::Complete {
         push_artifact_chunks(
             &session,
-            &correlation_id,
+            correlation_id,
             &prepare_response.deploy_id,
             &prepare_response.upload_token,
             &artifact,
@@ -141,11 +163,10 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
         .await?;
     }
 
-    let commit_request_id = Uuid::new_v4().to_string();
-    let commit = Envelope::request(
-        MESSAGE_ARTIFACT_COMMIT,
-        commit_request_id,
-        correlation_id.clone(),
+    let commit = request_envelope(
+        MessageType::ArtifactCommit,
+        Uuid::new_v4(),
+        correlation_id,
         &ArtifactCommitRequest {
             deploy_id: prepare_response.deploy_id.clone(),
             artifact_digest: artifact_digest.clone(),
@@ -159,20 +180,20 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
         return Err(anyhow!("artifact.commit returned verified=false"));
     }
 
-    let command_request_id = Uuid::new_v4().to_string();
-    let command = Envelope::request(
-        MESSAGE_COMMAND_START,
-        command_request_id.clone(),
-        correlation_id.clone(),
+    let command_request_id = Uuid::new_v4();
+    let command = request_envelope(
+        MessageType::CommandStart,
+        Uuid::new_v4(),
+        correlation_id,
         &CommandStartRequest {
-            request_id: command_request_id.clone(),
+            request_id: command_request_id,
             command_type: CommandType::Deploy,
-            payload: serde_json::to_value(DeployCommandPayload {
+            payload: CommandPayload::Deploy(DeployCommandPayload {
                 deploy_id: prepare_response.deploy_id.clone(),
-                expected_current_release: None,
-                restart_policy: None,
+                expected_current_release: "any".to_string(),
+                restart_policy: "never".to_string(),
                 auto_rollback: true,
-            })?,
+            }),
         },
     )?;
 
@@ -188,7 +209,7 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
 
     let mut terminal: Option<CommandEvent> = None;
     for envelope in responses.iter().skip(1) {
-        if envelope.message_type != MESSAGE_COMMAND_EVENT {
+        if envelope.message_type != MessageType::CommandEvent {
             continue;
         }
         let event: CommandEvent = response_payload(envelope.clone())?;
@@ -197,7 +218,7 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
         }
         if matches!(
             event.event_type,
-            EventType::Succeeded | EventType::Failed | EventType::Canceled
+            CommandEventType::Succeeded | CommandEventType::Failed | CommandEventType::Canceled
         ) {
             terminal = Some(event);
             break;
@@ -207,8 +228,8 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
     let terminal =
         terminal.ok_or_else(|| anyhow!("command.event terminal event was not received"))?;
     match terminal.event_type {
-        EventType::Succeeded => Ok(()),
-        EventType::Failed => {
+        CommandEventType::Succeeded => Ok(()),
+        CommandEventType::Failed => {
             if let Some(err) = terminal.error {
                 Err(anyhow!(
                     "deploy failed: {} ({:?}) at {}",
@@ -220,7 +241,7 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
                 Err(anyhow!("deploy failed without structured error"))
             }
         }
-        EventType::Canceled => Err(anyhow!("deploy was canceled")),
+        CommandEventType::Canceled => Err(anyhow!("deploy was canceled")),
         _ => Err(anyhow!("unexpected terminal event")),
     }
 }
@@ -317,6 +338,21 @@ async fn parse_remote_endpoint(remote: &str) -> anyhow::Result<RemoteEndpoint> {
     })
 }
 
+fn request_envelope<T: Serialize>(
+    message_type: MessageType,
+    request_id: Uuid,
+    correlation_id: Uuid,
+    payload: &T,
+) -> anyhow::Result<Envelope> {
+    Ok(Envelope {
+        message_type,
+        request_id,
+        correlation_id,
+        payload: serde_json::to_value(payload)?,
+        error: None,
+    })
+}
+
 async fn request_response(
     session: &web_transport_quinn::Session,
     envelope: &Envelope,
@@ -350,7 +386,7 @@ async fn request_events(
 
 async fn push_artifact_chunks(
     session: &web_transport_quinn::Session,
-    correlation_id: &str,
+    correlation_id: Uuid,
     deploy_id: &str,
     upload_token: &str,
     artifact: &[u8],
@@ -362,21 +398,24 @@ async fn push_artifact_chunks(
         let chunk_hash = hex::encode(Sha256::digest(chunk));
         let chunk_b64 = base64::engine::general_purpose::STANDARD.encode(chunk);
 
-        let request = Envelope::request(
-            MESSAGE_ARTIFACT_PUSH,
-            Uuid::new_v4().to_string(),
-            correlation_id.to_string(),
+        let request = request_envelope(
+            MessageType::ArtifactPush,
+            Uuid::new_v4(),
+            correlation_id,
             &ArtifactPushRequest {
-                deploy_id: deploy_id.to_string(),
-                offset: offset as u64,
-                length: chunk.len() as u64,
-                chunk_sha256: chunk_hash,
-                upload_token: upload_token.to_string(),
+                header: ArtifactPushChunkHeader {
+                    deploy_id: deploy_id.to_string(),
+                    offset: offset as u64,
+                    length: chunk.len() as u64,
+                    chunk_sha256: chunk_hash,
+                    upload_token: upload_token.to_string(),
+                },
                 chunk_b64,
             },
         )?;
 
-        let _ = request_response(session, &request).await?;
+        let _ack: imago_protocol::ArtifactPushAck =
+            response_payload(request_response(session, &request).await?)?;
         offset = end;
     }
     Ok(())
@@ -391,8 +430,7 @@ fn response_payload<T: serde::de::DeserializeOwned>(response: Envelope) -> anyho
             error.stage
         ));
     }
-    response
-        .payload_as()
+    serde_json::from_value(response.payload)
         .map_err(|e| anyhow!("response payload decode failed: {e}"))
 }
 
@@ -485,6 +523,41 @@ fn load_private_key(path: &Path) -> anyhow::Result<PrivateKeyDer<'static>> {
         .with_context(|| format!("failed to parse private key: {}", path.display()))?
         .ok_or_else(|| anyhow!("private key is missing: {}", path.display()))?;
     Ok(key)
+}
+
+fn encode_frame(payload: &[u8]) -> Vec<u8> {
+    let len = payload.len() as u32;
+    let mut frame = Vec::with_capacity(payload.len() + 4);
+    frame.extend_from_slice(&len.to_be_bytes());
+    frame.extend_from_slice(payload);
+    frame
+}
+
+fn decode_frames(value: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+
+    while offset < value.len() {
+        if value.len() - offset < 4 {
+            return Err(anyhow!("truncated frame header"));
+        }
+
+        let len = u32::from_be_bytes(
+            value[offset..offset + 4]
+                .try_into()
+                .map_err(|_| anyhow!("invalid frame header"))?,
+        ) as usize;
+        offset += 4;
+
+        if value.len() - offset < len {
+            return Err(anyhow!("truncated frame payload"));
+        }
+
+        out.push(value[offset..offset + len].to_vec());
+        offset += len;
+    }
+
+    Ok(out)
 }
 
 #[cfg(test)]

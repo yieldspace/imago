@@ -111,6 +111,7 @@ chunk header:
 - `length`
 - `chunk_sha256`
 - `upload_token`
+- `chunk_b64`
 
 ack:
 
@@ -263,3 +264,12 @@ response:
 - blue-green デプロイ
 - 差分配信
 - イベント履歴の永続保存と再送
+
+## 実装反映ノート（Milestone Phase 1 / 2026-02-10）
+
+- `imago-protocol` の共通封筒実装では `request_id` / `correlation_id` を UUID として扱い、nil UUID を検証で拒否する。
+- `deploy.prepare.idempotency_key` は必須かつ空文字を拒否する。
+- `artifact.push.length` と `artifact.commit.artifact_size` は 0 を拒否する。
+- `command.start` は `command_type` と payload 形状の不一致を拒否する。
+- `deploy` payload の `auto_rollback` は未指定時に `true` を既定値として適用する。
+- 構造化エラーの `ErrorCode` は列挙値以外をデコード時に拒否する。
