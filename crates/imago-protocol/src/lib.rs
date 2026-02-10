@@ -1,14 +1,18 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+pub mod cbor;
+pub mod envelope;
+pub mod error;
+pub mod messages;
+pub mod validate;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use cbor::{CborError, from_cbor, to_cbor};
+pub use envelope::ProtocolEnvelope;
+pub use error::{ErrorCode, StructuredError};
+pub use messages::{
+    ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushChunkHeader,
+    ArtifactStatus, ByteRange, CommandCancelRequest, CommandCancelResponse, CommandEvent,
+    CommandEventType, CommandPayload, CommandStartRequest, CommandStartResponse, CommandState,
+    CommandType, DeployCommandPayload, DeployPrepareRequest, DeployPrepareResponse,
+    HelloNegotiateRequest, HelloNegotiateResponse, MessageType, RunCommandPayload, StateRequest,
+    StateResponse, StopCommandPayload,
+};
+pub use validate::{Validate, ValidationError};

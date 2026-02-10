@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+serde = { version = "1.0.218", features = ["derive"] }
+uuid = { version = "1.15.1", features = ["serde"] }
+ciborium = "0.2.2"
