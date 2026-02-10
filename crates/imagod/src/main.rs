@@ -60,9 +60,14 @@ async fn run() -> Result<(), anyhow::Error> {
 }
 
 fn install_rustls_provider() {
-    let _ = rustls::crypto::CryptoProvider::install_default(
-        web_transport_quinn::crypto::default_provider(),
-    );
+    if rustls::crypto::CryptoProvider::get_default().is_some() {
+        return;
+    }
+
+    let provider = web_transport_quinn::crypto::default_provider();
+    if let Some(provider) = std::sync::Arc::into_inner(provider) {
+        let _ = provider.install_default();
+    }
 }
 
 fn parse_config_arg() -> Result<Option<PathBuf>, anyhow::Error> {

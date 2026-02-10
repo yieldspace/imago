@@ -102,6 +102,9 @@
 - `client_cert`: mTLS クライアント証明書 PEM
 - `client_key`: mTLS クライアント秘密鍵 PEM
 
+ローカル検証用の証明書一式は `imago certs generate` で生成できる。
+生成先ディレクトリには `.gitignore`（`*` / `!.gitignore`）も作成される。
+
 ## imagod 設定ファイル
 
 `imagod` は `imagod.toml` を読む。既定パスは `/etc/imago/imagod.toml`。

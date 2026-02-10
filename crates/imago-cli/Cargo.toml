@@ -16,10 +16,12 @@ imago-protocol = { path = "../imago-protocol" }
 quinn = "0.11.9"
 rustls = "0.23.23"
 rustls-pemfile = "2.2.0"
+rcgen = "0.14.7"
 serde = { version = "1.0.218", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.10.8"
 tar = "0.4.44"
+time = "0.3.36"
 tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread"] }
 toml = "0.8.20"
 url = "2.5.4"

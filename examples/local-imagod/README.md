@@ -4,10 +4,10 @@
 
 ## 事前条件
 
-- `openssl` が使えること
 - Rust toolchain が使えること
 - `wasm32-wasip2` target が入っていること  
   （未導入なら `rustup target add wasm32-wasip2`）
+- `cargo run -p imago-cli -- certs generate ...` が実行できること
 
 ## ディレクトリ構成
 
@@ -44,4 +44,3 @@ cd examples/local-imagod
 ```
 
 成功時は `command.event` の終端が `succeeded` になり、`imagod` 側にも deploy 成功ログが出ます。
-

@@ -24,16 +24,10 @@ use url::Url;
 use uuid::Uuid;
 use web_transport_quinn::{Session, proto::ConnectRequest};
 
-use crate::cli::DeployArgs;
+use crate::{cli::DeployArgs, commands::CommandResult};
 
 const CHUNK_SIZE: usize = 1024 * 1024;
 const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct CommandResult {
-    pub exit_code: i32,
-    pub stderr: Option<String>,
-}
 
 #[derive(Debug, Deserialize)]
 struct ImagoToml {

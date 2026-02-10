@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser, PartialEq, Eq)]
@@ -10,6 +12,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Commands {
     Deploy(DeployArgs),
+    Certs(CertsSubcommandArgs),
 }
 
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
@@ -19,6 +22,35 @@ pub struct DeployArgs {
 
     #[arg(long, value_name = "TARGET_NAME")]
     pub target: Option<String>,
+}
+
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct CertsSubcommandArgs {
+    #[command(subcommand)]
+    pub command: CertsCommands,
+}
+
+#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
+pub enum CertsCommands {
+    Generate(CertsGenerateArgs),
+}
+
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct CertsGenerateArgs {
+    #[arg(long, value_name = "PATH", default_value = "certs")]
+    pub out_dir: PathBuf,
+
+    #[arg(long, value_name = "DNS_NAME", default_value = "localhost")]
+    pub server_name: String,
+
+    #[arg(long, value_name = "IP_ADDR", default_value = "127.0.0.1")]
+    pub server_ip: String,
+
+    #[arg(long, value_name = "DAYS", default_value_t = 3650)]
+    pub days: u32,
+
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[cfg(test)]
@@ -77,5 +109,60 @@ mod tests {
     fn rejects_unknown_subcommand() {
         let err = Cli::try_parse_from(["imago", "unknown"]).expect_err("parse should fail");
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn parses_certs_generate_with_defaults() {
+        let cli =
+            Cli::try_parse_from(["imago", "certs", "generate"]).expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Commands::Certs(CertsSubcommandArgs {
+                    command: CertsCommands::Generate(CertsGenerateArgs {
+                        out_dir: PathBuf::from("certs"),
+                        server_name: "localhost".to_string(),
+                        server_ip: "127.0.0.1".to_string(),
+                        days: 3650,
+                        force: false,
+                    }),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_certs_generate_with_overrides() {
+        let cli = Cli::try_parse_from([
+            "imago",
+            "certs",
+            "generate",
+            "--out-dir",
+            "tmp-certs",
+            "--server-name",
+            "imagod.local",
+            "--server-ip",
+            "192.168.10.2",
+            "--days",
+            "30",
+            "--force",
+        ])
+        .expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Commands::Certs(CertsSubcommandArgs {
+                    command: CertsCommands::Generate(CertsGenerateArgs {
+                        out_dir: PathBuf::from("tmp-certs"),
+                        server_name: "imagod.local".to_string(),
+                        server_ip: "192.168.10.2".to_string(),
+                        days: 30,
+                        force: true,
+                    }),
+                }),
+            }
+        );
     }
 }
