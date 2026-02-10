@@ -180,6 +180,11 @@ impl OperationManager {
             entry.cancel_requested = false;
         }
     }
+
+    pub async fn remove(&self, request_id: &str) {
+        let mut inner = self.inner.write().await;
+        inner.remove(request_id);
+    }
 }
 
 fn now_unix_secs() -> String {
@@ -238,5 +243,24 @@ mod tests {
             .expect("cancel should return response");
         assert!(!response.cancellable);
         assert_eq!(response.final_state, OperationState::Running);
+    }
+
+    #[tokio::test]
+    async fn removes_operation_after_finish() {
+        let manager = OperationManager::new();
+        manager
+            .start("req-3", CommandType::Deploy)
+            .await
+            .expect("start should succeed");
+        manager
+            .finish("req-3", OperationState::Succeeded, "completed")
+            .await;
+        manager.remove("req-3").await;
+
+        let err = manager
+            .request_cancel("req-3")
+            .await
+            .expect_err("cancel should fail after removal");
+        assert_eq!(err.code, ErrorCode::NotFound);
     }
 }

@@ -201,6 +201,13 @@ impl ServiceSupervisor {
         }
     }
 
+    pub async fn has_live_services(&self) -> bool {
+        let inner = self.inner.read().await;
+        inner
+            .values()
+            .any(|service| !service.join_handle.is_finished())
+    }
+
     async fn reap_finished_service(&self, service_name: &str) {
         let should_reap = {
             let inner = self.inner.read().await;

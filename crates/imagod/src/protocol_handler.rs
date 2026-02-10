@@ -123,6 +123,10 @@ impl ProtocolHandler {
         self.orchestrator.reap_finished_services().await;
     }
 
+    pub async fn has_live_services(&self) -> bool {
+        self.orchestrator.has_live_services().await
+    }
+
     async fn handle_single(&self, request: Envelope) -> Result<Envelope, ImagodError> {
         match request.message_type.as_str() {
             MESSAGE_HELLO_NEGOTIATE => self.handle_hello(request),
@@ -304,6 +308,7 @@ impl ProtocolHandler {
                 None,
             )?;
             write_envelope(send, &canceled).await?;
+            self.operations.remove(&payload.request_id).await;
             return Ok(());
         }
 
@@ -393,6 +398,7 @@ impl ProtocolHandler {
                     None,
                 )?;
                 write_envelope(send, &succeeded).await?;
+                self.operations.remove(&payload.request_id).await;
             }
             Err(err) => {
                 self.operations
@@ -408,6 +414,7 @@ impl ProtocolHandler {
                     Some(err.to_structured()),
                 )?;
                 write_envelope(send, &failed).await?;
+                self.operations.remove(&payload.request_id).await;
             }
         }
 

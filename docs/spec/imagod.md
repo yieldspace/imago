@@ -47,6 +47,8 @@ epoch_tick_interval_ms = 50
 6. 旧版を起動前 cleanup
 7. Wasmtime async (`wasi:cli/run`) で component をバックグラウンド実行
 8. deploy 完了は「spawn 成功」を意味し、component 終了待ちはしない
+9. artifact session は `upload_session_ttl_secs` で期限切れ回収する
+10. 同名サービスの旧コミットartifactは新コミット時に削除し、最新のみ保持する
 
 ## サービス管理
 
@@ -67,3 +69,4 @@ epoch_tick_interval_ms = 50
 - `state.request` は実行中のみ返却
 - 完了済みは `E_NOT_FOUND`
 - `command.cancel` は起動前のみ有効（起動後は `cancellable=false`）
+- terminal event 送信後は operation を削除するため、以後 `command.cancel` は `E_NOT_FOUND`

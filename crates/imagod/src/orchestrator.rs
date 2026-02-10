@@ -120,6 +120,10 @@ impl Orchestrator {
         self.supervisor.reap_finished().await;
     }
 
+    pub async fn has_live_services(&self) -> bool {
+        self.supervisor.has_live_services().await
+    }
+
     async fn prepare_release(
         &self,
         payload: &DeployCommandPayload,

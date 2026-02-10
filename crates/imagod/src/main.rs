@@ -34,7 +34,7 @@ async fn run() -> Result<(), anyhow::Error> {
     let config = Arc::new(ImagodConfig::load(&config_path).map_err(anyhow::Error::new)?);
 
     let artifact_root = config.storage_root.join("artifacts");
-    let artifacts = ArtifactStore::new(&artifact_root)
+    let artifacts = ArtifactStore::new(&artifact_root, config.runtime.upload_session_ttl_secs)
         .await
         .map_err(anyhow::Error::new)?;
     let operations = OperationManager::new();
@@ -45,23 +45,20 @@ async fn run() -> Result<(), anyhow::Error> {
 
     let handler = ProtocolHandler::new(config.clone(), artifacts, operations, orchestrator);
 
-    let epoch_runtime = runtime.clone();
-    let epoch_tick_interval =
+    let maintenance_handler = handler.clone();
+    let maintenance_runtime = runtime.clone();
+    let active_tick_interval =
         std::time::Duration::from_millis(config.runtime.epoch_tick_interval_ms.max(1));
+    let idle_tick_interval = std::time::Duration::from_secs(1);
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(epoch_tick_interval);
         loop {
-            interval.tick().await;
-            epoch_runtime.increment_epoch();
-        }
-    });
-
-    let reaper_handler = handler.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-        loop {
-            interval.tick().await;
-            reaper_handler.reap_finished_services().await;
+            maintenance_handler.reap_finished_services().await;
+            if maintenance_handler.has_live_services().await {
+                maintenance_runtime.increment_epoch();
+                tokio::time::sleep(active_tick_interval).await;
+            } else {
+                tokio::time::sleep(idle_tick_interval).await;
+            }
         }
     });
 
