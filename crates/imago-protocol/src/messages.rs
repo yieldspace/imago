@@ -26,6 +26,8 @@ pub enum MessageType {
     CommandEvent,
     #[serde(rename = "state.request")]
     StateRequest,
+    #[serde(rename = "state.response")]
+    StateResponse,
     #[serde(rename = "command.cancel")]
     CommandCancel,
 }
@@ -398,6 +400,15 @@ pub struct StateResponse {
 impl Validate for StateResponse {
     fn validate(&self) -> Result<(), ValidationError> {
         ensure_uuid_not_nil(&self.request_id, "request_id")?;
+        match self.state {
+            CommandState::Accepted | CommandState::Running => {}
+            CommandState::Succeeded | CommandState::Failed | CommandState::Canceled => {
+                return Err(ValidationError::invalid(
+                    "state",
+                    "terminal states are not allowed for state.response",
+                ));
+            }
+        }
         ensure_non_empty(&self.stage, "stage")?;
         ensure_non_empty(&self.updated_at, "updated_at")?;
         Ok(())
@@ -657,6 +668,41 @@ mod tests {
             updated_at: "".to_string(),
         };
         assert!(invalid_response.validate().is_err());
+    }
+
+    #[test]
+    fn state_response_rejects_terminal_states() {
+        let succeeded = StateResponse {
+            request_id: sample_request_id(),
+            state: CommandState::Succeeded,
+            stage: "done".to_string(),
+            updated_at: "2026-02-10T00:00:00Z".to_string(),
+        };
+        assert!(succeeded.validate().is_err());
+
+        let failed = StateResponse {
+            request_id: sample_request_id(),
+            state: CommandState::Failed,
+            stage: "rollback".to_string(),
+            updated_at: "2026-02-10T00:00:01Z".to_string(),
+        };
+        assert!(failed.validate().is_err());
+
+        let canceled = StateResponse {
+            request_id: sample_request_id(),
+            state: CommandState::Canceled,
+            stage: "cancel".to_string(),
+            updated_at: "2026-02-10T00:00:02Z".to_string(),
+        };
+        assert!(canceled.validate().is_err());
+
+        let running = StateResponse {
+            request_id: sample_request_id(),
+            state: CommandState::Running,
+            stage: "deploying".to_string(),
+            updated_at: "2026-02-10T00:00:03Z".to_string(),
+        };
+        assert!(running.validate().is_ok());
     }
 
     #[derive(Debug, Serialize)]
