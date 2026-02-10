@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
-    io::BufReader,
-    net::SocketAddr,
+    io::{BufReader, Read},
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -69,6 +69,27 @@ struct ArtifactPushRequest {
     chunk_b64: String,
 }
 
+#[derive(Debug)]
+struct TempArtifactBundle {
+    path: PathBuf,
+}
+
+impl TempArtifactBundle {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempArtifactBundle {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 pub fn run(args: DeployArgs) -> CommandResult {
     match run_inner(args) {
         Ok(()) => CommandResult {
@@ -105,8 +126,8 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow!("target '{}' is not defined in imago.toml", target_name))?
         .clone();
 
-    let artifact = build_artifact_bundle(&manifest, &manifest_path, Path::new("."))?;
-    let artifact_digest = hex::encode(Sha256::digest(&artifact));
+    let artifact = build_artifact_bundle_file(&manifest, &manifest_path, Path::new("."))?;
+    let (artifact_digest, artifact_size) = compute_file_sha256_and_size(artifact.path())?;
     let manifest_digest = hex::encode(Sha256::digest(&manifest_bytes));
 
     let session = connect_target(&target).await?;
@@ -143,7 +164,7 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
             app_type: manifest.app_type.clone(),
             target: normalize_target_for_protocol(&target),
             artifact_digest: artifact_digest.clone(),
-            artifact_size: artifact.len() as u64,
+            artifact_size,
             manifest_digest: manifest_digest.clone(),
             idempotency_key: format!("{}:{}:{}", manifest.name, artifact_digest, manifest_digest),
             policy: BTreeMap::new(),
@@ -158,7 +179,7 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
             correlation_id,
             &prepare_response.deploy_id,
             &prepare_response.upload_token,
-            &artifact,
+            artifact.path(),
         )
         .await?;
     }
@@ -170,7 +191,7 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
         &ArtifactCommitRequest {
             deploy_id: prepare_response.deploy_id.clone(),
             artifact_digest: artifact_digest.clone(),
-            artifact_size: artifact.len() as u64,
+            artifact_size,
             manifest_digest: manifest_digest.clone(),
         },
     )?;
@@ -271,16 +292,14 @@ async fn connect_target(target: &TargetConfig) -> anyhow::Result<Session> {
     let endpoint = quinn::Endpoint::client("[::]:0".parse::<SocketAddr>()?)?;
 
     let endpoint_info = parse_remote_endpoint(&target.remote).await?;
-    let sni = target
-        .server_name
-        .as_deref()
-        .unwrap_or(&endpoint_info.host)
-        .to_string();
+    let configured_host = target.server_name.as_deref().unwrap_or(&endpoint_info.host);
+    let sni = configured_host.to_string();
     let connection = endpoint
         .connect_with(quic_config, endpoint_info.remote_addr, &sni)?
         .await?;
 
-    let request_url = Url::parse(&format!("https://{}:{}/", sni, endpoint_info.port))
+    let request_host = format_host_for_url(configured_host);
+    let request_url = Url::parse(&format!("https://{}:{}/", request_host, endpoint_info.port))
         .context("failed to build webtransport request URL")?;
     let request = ConnectRequest::new(request_url);
     Session::connect(connection, request)
@@ -295,35 +314,14 @@ struct RemoteEndpoint {
 }
 
 async fn parse_remote_endpoint(remote: &str) -> anyhow::Result<RemoteEndpoint> {
-    if remote.starts_with("https://") {
-        let url = Url::parse(remote).context("remote URL parse failed")?;
-        let host = url
-            .host_str()
-            .ok_or_else(|| anyhow!("remote URL host is missing"))?
-            .to_string();
-        let port = url.port().unwrap_or(4443);
-        let mut addresses = lookup_host((host.clone(), port))
-            .await
-            .with_context(|| format!("failed to resolve remote host: {host}:{port}"))?;
-        let addr = addresses
-            .next()
-            .ok_or_else(|| anyhow!("no resolved address for remote host"))?;
-        return Ok(RemoteEndpoint {
-            remote_addr: addr,
-            host,
-            port,
-        });
-    }
-
-    let (host, port) = if let Some((host, port)) = remote.rsplit_once(':') {
-        let parsed_port = port
-            .parse::<u16>()
-            .with_context(|| format!("invalid remote port in '{remote}'"))?;
-        (host.to_string(), parsed_port)
-    } else {
-        (remote.to_string(), 4443)
-    };
-
+    let url = normalize_remote_to_url(remote)?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow!("remote URL host is missing"))?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    let port = url.port().unwrap_or(4443);
     let mut addresses = lookup_host((host.clone(), port))
         .await
         .with_context(|| format!("failed to resolve remote host: {host}:{port}"))?;
@@ -336,6 +334,34 @@ async fn parse_remote_endpoint(remote: &str) -> anyhow::Result<RemoteEndpoint> {
         host,
         port,
     })
+}
+
+fn normalize_remote_to_url(remote: &str) -> anyhow::Result<Url> {
+    if remote.contains("://") {
+        return Url::parse(remote).context("remote URL parse failed");
+    }
+
+    if let Ok(address) = remote.parse::<SocketAddr>() {
+        let host = format_host_for_url(&address.ip().to_string());
+        return Url::parse(&format!("https://{}:{}/", host, address.port()))
+            .context("remote socket address parse failed");
+    }
+
+    if let Ok(ip) = remote.parse::<IpAddr>() {
+        let host = format_host_for_url(&ip.to_string());
+        return Url::parse(&format!("https://{}:4443/", host))
+            .context("remote ip address parse failed");
+    }
+
+    Url::parse(&format!("https://{remote}")).context("remote URL parse failed")
+}
+
+fn format_host_for_url(host: &str) -> String {
+    if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
 }
 
 fn request_envelope<T: Serialize>(
@@ -389,12 +415,33 @@ async fn push_artifact_chunks(
     correlation_id: Uuid,
     deploy_id: &str,
     upload_token: &str,
-    artifact: &[u8],
+    artifact_path: &Path,
 ) -> anyhow::Result<()> {
-    let mut offset = 0usize;
-    while offset < artifact.len() {
-        let end = (offset + CHUNK_SIZE).min(artifact.len());
-        let chunk = &artifact[offset..end];
+    let mut file = tokio::fs::File::open(artifact_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to open artifact bundle: {}",
+                artifact_path.display()
+            )
+        })?;
+
+    let mut offset = 0u64;
+    let mut buffer = vec![0u8; CHUNK_SIZE];
+    loop {
+        let n = tokio::io::AsyncReadExt::read(&mut file, &mut buffer)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to read artifact bundle: {}",
+                    artifact_path.display()
+                )
+            })?;
+        if n == 0 {
+            break;
+        }
+
+        let chunk = &buffer[..n];
         let chunk_hash = hex::encode(Sha256::digest(chunk));
         let chunk_b64 = base64::engine::general_purpose::STANDARD.encode(chunk);
 
@@ -405,8 +452,8 @@ async fn push_artifact_chunks(
             &ArtifactPushRequest {
                 header: ArtifactPushChunkHeader {
                     deploy_id: deploy_id.to_string(),
-                    offset: offset as u64,
-                    length: chunk.len() as u64,
+                    offset,
+                    length: n as u64,
                     chunk_sha256: chunk_hash,
                     upload_token: upload_token.to_string(),
                 },
@@ -416,7 +463,7 @@ async fn push_artifact_chunks(
 
         let _ack: imago_protocol::ArtifactPushAck =
             response_payload(request_response(session, &request).await?)?;
-        offset = end;
+        offset = offset.saturating_add(n as u64);
     }
     Ok(())
 }
@@ -459,38 +506,61 @@ fn normalize_target_for_protocol(target: &TargetConfig) -> BTreeMap<String, Stri
     map
 }
 
-fn build_artifact_bundle(
+fn build_artifact_bundle_file(
     manifest: &Manifest,
     manifest_source: &Path,
     project_root: &Path,
-) -> anyhow::Result<Vec<u8>> {
-    let mut buffer = Vec::new();
-    {
-        let mut builder = tar::Builder::new(&mut buffer);
+) -> anyhow::Result<TempArtifactBundle> {
+    let bundle_path = std::env::temp_dir().join(format!("imago-artifact-{}.tar", Uuid::new_v4()));
+    let bundle_file = std::fs::File::create(&bundle_path).with_context(|| {
+        format!(
+            "failed to create artifact bundle file: {}",
+            bundle_path.display()
+        )
+    })?;
 
-        add_file_to_tar(
-            &mut builder,
-            project_root.join(manifest_source),
-            "manifest.json",
-        )?;
-
-        add_file_to_tar(
-            &mut builder,
-            project_root.join(&manifest.main),
-            &manifest.main,
-        )?;
-
-        for asset in &manifest.assets {
-            add_file_to_tar(&mut builder, project_root.join(&asset.path), &asset.path)?;
-        }
-
-        builder.finish()?;
+    let mut builder = tar::Builder::new(bundle_file);
+    add_file_to_tar(
+        &mut builder,
+        project_root.join(manifest_source),
+        "manifest.json",
+    )?;
+    add_file_to_tar(
+        &mut builder,
+        project_root.join(&manifest.main),
+        &manifest.main,
+    )?;
+    for asset in &manifest.assets {
+        add_file_to_tar(&mut builder, project_root.join(&asset.path), &asset.path)?;
     }
-    Ok(buffer)
+    builder.finish()?;
+
+    Ok(TempArtifactBundle::new(bundle_path))
 }
 
-fn add_file_to_tar(
-    builder: &mut tar::Builder<&mut Vec<u8>>,
+fn compute_file_sha256_and_size(path: &Path) -> anyhow::Result<(String, u64)> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open artifact bundle: {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut total = 0u64;
+
+    loop {
+        let n = file
+            .read(&mut buf)
+            .with_context(|| format!("failed to read artifact bundle: {}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total = total.saturating_add(n as u64);
+    }
+
+    Ok((hex::encode(hasher.finalize()), total))
+}
+
+fn add_file_to_tar<W: std::io::Write>(
+    builder: &mut tar::Builder<W>,
     source: PathBuf,
     entry_name: &str,
 ) -> anyhow::Result<()> {
@@ -582,5 +652,26 @@ mod tests {
         } else {
             assert_eq!(path, PathBuf::from("build/manifest.json"));
         }
+    }
+
+    #[tokio::test]
+    async fn parse_remote_endpoint_supports_ipv6_literals() {
+        let bare_ipv6 = parse_remote_endpoint("::1")
+            .await
+            .expect("bare ipv6 should parse");
+        assert_eq!(bare_ipv6.host, "::1");
+        assert_eq!(bare_ipv6.port, 4443);
+
+        let bracketed = parse_remote_endpoint("[::1]:4443")
+            .await
+            .expect("bracketed ipv6 should parse");
+        assert_eq!(bracketed.host, "::1");
+        assert_eq!(bracketed.port, 4443);
+
+        let https_ipv6 = parse_remote_endpoint("https://[::1]:4443")
+            .await
+            .expect("https ipv6 should parse");
+        assert_eq!(https_ipv6.host, "::1");
+        assert_eq!(https_ipv6.port, 4443);
     }
 }

@@ -97,6 +97,7 @@
 `imago deploy` は `target.<name>` から下記キーを読む。
 
 - `remote`: `host` または `host:port`（`https://` 省略可）
+  - IPv6 は `::1`, `[::1]`, `[::1]:4443`, `https://[::1]:4443` を許可
 - `server_name`: TLS SNI で利用するサーバ名（省略時は `remote` 側の host）
 - `ca_cert`: サーバ証明書検証用 CA PEM
 - `client_cert`: mTLS クライアント証明書 PEM

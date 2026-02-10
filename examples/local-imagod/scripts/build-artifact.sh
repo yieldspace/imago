@@ -34,8 +34,22 @@ fi
 mkdir -p "${ROOT_DIR}/build"
 cp "${WASM_SOURCE}" "${WASM_DEST}"
 
-wasm_sha="$(shasum -a 256 "${WASM_DEST}" | awk '{print $1}')"
-asset_sha="$(shasum -a 256 "${ASSET_PATH}" | awk '{print $1}')"
+sha256_file() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${file}" | awk '{print $1}'
+    return
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "${file}" | awk '{print $1}'
+    return
+  fi
+  echo "missing hash command: sha256sum or shasum is required" >&2
+  exit 1
+}
+
+wasm_sha="$(sha256_file "${WASM_DEST}")"
+asset_sha="$(sha256_file "${ASSET_PATH}")"
 asset_size="$(wc -c < "${ASSET_PATH}" | tr -d '[:space:]')"
 
 cat > "${MANIFEST_PATH}" <<EOF

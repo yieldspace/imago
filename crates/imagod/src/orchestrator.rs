@@ -221,7 +221,7 @@ impl Orchestrator {
 
         cleanup_old_releases(&service_root, &release_hash, previous_release.as_deref()).await?;
 
-        let launch = build_launch_from_release(&release_hash, &release_dir, &manifest)?;
+        let launch = build_launch_from_release(&release_hash, &release_dir, &manifest).await?;
 
         Ok(PreparedRelease {
             service_name: manifest.name,
@@ -289,20 +289,20 @@ impl Orchestrator {
             )));
         }
 
-        build_launch_from_release(release_hash, &release_dir, &manifest)
+        build_launch_from_release(release_hash, &release_dir, &manifest).await
     }
 }
 
-fn build_launch_from_release(
+async fn build_launch_from_release(
     release_hash: &str,
     release_dir: &Path,
     manifest: &Manifest,
 ) -> Result<ServiceLaunch, ImagodError> {
     let component_path = release_dir.join(&manifest.main);
-    if !component_path.exists() {
+    if let Err(err) = fs::metadata(&component_path).await {
         return Err(map_bad_manifest(format!(
-            "component path does not exist: {}",
-            component_path.display()
+            "component path is not accessible: {} ({err})",
+            component_path.display(),
         )));
     }
 

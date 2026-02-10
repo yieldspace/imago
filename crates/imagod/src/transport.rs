@@ -63,7 +63,7 @@ pub fn build_server(config: &ImagodConfig) -> Result<Server, ImagodError> {
         )
     })?;
     tls.alpn_protocols = vec![web_transport_quinn::ALPN.as_bytes().to_vec()];
-    tls.max_early_data_size = u32::MAX;
+    tls.max_early_data_size = 0;
 
     let quic_tls = quinn::crypto::rustls::QuicServerConfig::try_from(tls).map_err(|e| {
         ImagodError::new(

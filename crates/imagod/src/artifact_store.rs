@@ -545,6 +545,12 @@ async fn apply_cleanup_plan(plan: CleanupPlan) {
 }
 
 fn fingerprint(request: &DeployPrepareRequest) -> String {
+    let mut extra_hasher = Sha256::new();
+    extra_hasher.update(map_fingerprint_fragment(&request.target).as_bytes());
+    extra_hasher.update(b"|");
+    extra_hasher.update(map_fingerprint_fragment(&request.policy).as_bytes());
+    let extra_hash = hex::encode(extra_hasher.finalize());
+
     format!(
         "{}|{}|{}|{}|{}|{}",
         request.name,
@@ -552,8 +558,19 @@ fn fingerprint(request: &DeployPrepareRequest) -> String {
         request.artifact_digest,
         request.artifact_size,
         request.manifest_digest,
-        request.target.len()
+        extra_hash
     )
+}
+
+fn map_fingerprint_fragment(map: &BTreeMap<String, String>) -> String {
+    let mut fragment = String::new();
+    for (key, value) in map {
+        fragment.push_str(key);
+        fragment.push('=');
+        fragment.push_str(value);
+        fragment.push('\n');
+    }
+    fragment
 }
 
 async fn digest_file(path: &Path) -> Result<String, ImagodError> {
@@ -738,6 +755,48 @@ mod tests {
         assert_eq!(latest.deploy_id, second.deploy_id);
 
         cleanup_root(root);
+    }
+
+    #[test]
+    fn fingerprint_changes_when_target_or_policy_content_changes() {
+        let mut target_a = BTreeMap::new();
+        target_a.insert("remote".to_string(), "127.0.0.1:4443".to_string());
+        target_a.insert("region".to_string(), "local".to_string());
+
+        let mut target_b = BTreeMap::new();
+        target_b.insert("remote".to_string(), "127.0.0.1:4443".to_string());
+        target_b.insert("region".to_string(), "edge".to_string());
+
+        let mut policy_a = BTreeMap::new();
+        policy_a.insert("rollback".to_string(), "true".to_string());
+
+        let mut policy_b = BTreeMap::new();
+        policy_b.insert("rollback".to_string(), "false".to_string());
+
+        let mut request = DeployPrepareRequest {
+            name: "svc".to_string(),
+            app_type: "cli".to_string(),
+            target: target_a,
+            artifact_digest: "sha256:artifact".to_string(),
+            artifact_size: 1024,
+            manifest_digest: "sha256:manifest".to_string(),
+            idempotency_key: "idem".to_string(),
+            policy: policy_a,
+        };
+
+        let baseline = fingerprint(&request);
+
+        request.target = target_b;
+        let target_changed = fingerprint(&request);
+        assert_ne!(baseline, target_changed);
+
+        request.target = BTreeMap::from([
+            ("remote".to_string(), "127.0.0.1:4443".to_string()),
+            ("region".to_string(), "local".to_string()),
+        ]);
+        request.policy = policy_b;
+        let policy_changed = fingerprint(&request);
+        assert_ne!(baseline, policy_changed);
     }
 
     struct CommitResult {

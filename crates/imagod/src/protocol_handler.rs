@@ -77,6 +77,19 @@ impl ProtocolHandler {
                 continue;
             }
 
+            if let Err(err) = ensure_single_request_envelope(&envelopes) {
+                let first = &envelopes[0];
+                let response = error_envelope(
+                    first.message_type,
+                    first.request_id,
+                    first.correlation_id,
+                    err.to_structured(),
+                );
+                write_envelope(&mut send, &response).await?;
+                finish_stream(&mut send)?;
+                continue;
+            }
+
             let request = envelopes[0].clone();
             if request.message_type == MessageType::CommandStart {
                 self.handle_command_start(request, &mut send).await?;
@@ -447,6 +460,16 @@ fn parse_stream_envelopes(buf: &[u8]) -> Result<Vec<Envelope>, ImagodError> {
         .collect()
 }
 
+fn ensure_single_request_envelope(envelopes: &[Envelope]) -> Result<(), ImagodError> {
+    if envelopes.len() > 1 {
+        return Err(bad_request(
+            "session.protocol",
+            "multiple request envelopes on a single stream are not allowed",
+        ));
+    }
+    Ok(())
+}
+
 async fn write_envelope(send: &mut SendStream, envelope: &Envelope) -> Result<(), ImagodError> {
     let data = to_cbor(envelope)
         .map_err(|e| bad_request("protocol", format!("cbor encode failed: {e}")))?;
@@ -547,7 +570,10 @@ fn is_compatible_date_match(request: &str, configured: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_compatible_date_match;
+    use super::{ensure_single_request_envelope, is_compatible_date_match};
+    use imago_protocol::{MessageType, ProtocolEnvelope};
+    use serde_json::Value;
+    use uuid::Uuid;
 
     #[test]
     fn accepts_same_compatibility_date() {
@@ -557,5 +583,18 @@ mod tests {
     #[test]
     fn rejects_different_compatibility_date() {
         assert!(!is_compatible_date_match("2026-02-11", "2026-02-10"));
+    }
+
+    #[test]
+    fn rejects_multiple_request_envelopes_on_single_stream() {
+        let envelope = ProtocolEnvelope {
+            message_type: MessageType::HelloNegotiate,
+            request_id: Uuid::new_v4(),
+            correlation_id: Uuid::new_v4(),
+            payload: Value::Null,
+            error: None,
+        };
+        let result = ensure_single_request_envelope(&[envelope.clone(), envelope]);
+        assert!(result.is_err());
     }
 }

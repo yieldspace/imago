@@ -63,7 +63,7 @@ flowchart TD
 | モジュール | 主責務 | 主な入力 | 主な出力 | 依存方向 |
 |---|---|---|---|---|
 | `config.rs` | `imagod.toml` 読込・検証 | 設定パス | `ImagodConfig` | `error.rs`, `imago-protocol` |
-| `transport.rs` | mTLS + QUIC/WebTransport endpoint 構築 | TLS 設定, listen_addr | `web_transport_quinn::Server` | `config.rs`, `error.rs` |
+| `transport.rs` | mTLS + QUIC/WebTransport endpoint 構築（0-RTT 無効） | TLS 設定, listen_addr | `web_transport_quinn::Server` | `config.rs`, `error.rs` |
 | `protocol_handler.rs` | `ProtocolEnvelope<Value>` dispatch | bi-stream bytes | response envelope / command.event | `artifact_store`, `orchestrator`, `operation_state` |
 | `artifact_store.rs` | upload session 管理、chunk commit、GC | prepare/push/commit | prepare/ack/commit response | `error.rs` |
 | `orchestrator.rs` | deploy/run/stop の実行調停 | command payload | summary / error | `artifact_store`, `service_supervisor` |
@@ -83,6 +83,7 @@ flowchart TD
 
 - session ごとに `accept_bi` ループ。
 - stream 受信バイトは `decode_frames` でフレーム分解し、各 frame を `from_cbor::<ProtocolEnvelope<Value>>` で復号。
+- request envelope は 1 stream につき 1 件のみ許可。複数 request は `E_BAD_REQUEST`。
 - `MessageType::CommandStart` は `handle_command_start` へ分岐し、同一 stream へ `command.start response` + `command.event*` を連続送信。
 - それ以外は `handle_single` で 1 request -> 1 response。
 

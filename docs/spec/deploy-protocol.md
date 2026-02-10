@@ -20,12 +20,16 @@
 
 ### 2.1 ストリーム上のフレーミング
 
-現行実装は 1 つの bi-stream に複数メッセージを載せるため、各メッセージを次の形式で送る。
+現行実装では、stream 内メッセージを次のフレーム形式で送る。
 
 - `4byte big-endian length`
 - `CBOR payload`
 
-`command.start` は同一 stream 上で `command.start response` と `command.event*` を返す。
+運用ルール:
+
+- request は **1 stream あたり 1 envelope のみ**許可する。
+- `command.start` は同一 stream 上で `command.start response` と `command.event*` を返す（response/event は複数可）。
+- request envelope が複数ある stream は `E_BAD_REQUEST` で拒否する。
 
 ## 3. 共通封筒（ProtocolEnvelope）
 
