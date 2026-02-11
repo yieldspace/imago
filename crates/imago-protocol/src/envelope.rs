@@ -66,7 +66,7 @@ mod tests {
             Uuid::nil(),
             sample_uuid(),
             HelloNegotiateRequest {
-                protocol_draft: "2026-02-10".to_string(),
+                compatibility_date: "2026-02-10".to_string(),
                 client_version: "0.1.0".to_string(),
                 required_features: vec![],
             },
