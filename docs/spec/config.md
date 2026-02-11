@@ -114,6 +114,7 @@
 - `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
 - CLI の `name` 検証は `imagod` と同等に `..` を拒否し、path 文字を明示的に弾く。
 - `--env <name>` は manifest 出力先と `.env.<name>` 解決の双方で同一バリデーションを適用し、path traversal を拒否する。
+- `target.<name>.ca_cert` / `client_cert` / `client_key` は path traversal と不正区切りを拒否し、相対指定を `project_root` 基準の絶対パスへ解決する。
 
 ## `target.<name>` の接続キー（deploy 通信）
 
@@ -125,6 +126,9 @@
 - `ca_cert`: サーバ証明書検証用 CA PEM
 - `client_cert`: mTLS クライアント証明書 PEM
 - `client_key`: mTLS クライアント秘密鍵 PEM
+  - 上記 3 つは絶対パスまたは `project_root` 相対パスを受理する。
+  - 相対パスは `project_root` 基準で解決する。
+  - `..`、`\`、Windows ドライブプレフィックス（`C:` など）を含む値は拒否する。
 
 `imago build` が生成する `manifest.target` には、上記のうち `remote` と `server_name` のみを含める。
 

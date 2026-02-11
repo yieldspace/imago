@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::Read,
     path::{Component, Path, PathBuf},
     process::Command,
 };
@@ -160,7 +161,7 @@ pub fn build_project(
 
     let vars = parse_string_table(root.get("vars"), "vars")?;
     let dependencies = parse_dependencies(root.get("dependencies"))?;
-    let target = parse_target(&root, target_name)?;
+    let target = parse_target(&root, target_name, project_root)?;
 
     run_build_command(command.as_ref(), project_root, &secrets)?;
 
@@ -563,7 +564,11 @@ fn parse_dependencies(value: Option<&TomlValue>) -> anyhow::Result<Vec<JsonValue
     Ok(dependencies)
 }
 
-fn parse_target(root: &toml::Table, target_name: &str) -> anyhow::Result<TargetConfig> {
+fn parse_target(
+    root: &toml::Table,
+    target_name: &str,
+    project_root: &Path,
+) -> anyhow::Result<TargetConfig> {
     let targets = root
         .get("target")
         .and_then(TomlValue::as_table)
@@ -582,9 +587,9 @@ fn parse_target(root: &toml::Table, target_name: &str) -> anyhow::Result<TargetC
         .to_string();
 
     let server_name = optional_string(target_table, "server_name")?;
-    let ca_cert = optional_path(target_table, "ca_cert")?;
-    let client_cert = optional_path(target_table, "client_cert")?;
-    let client_key = optional_path(target_table, "client_key")?;
+    let ca_cert = optional_target_cert_path(target_table, "ca_cert", project_root)?;
+    let client_cert = optional_target_cert_path(target_table, "client_cert", project_root)?;
+    let client_key = optional_target_cert_path(target_table, "client_key", project_root)?;
 
     Ok(TargetConfig {
         remote,
@@ -606,14 +611,77 @@ fn optional_string(table: &toml::Table, key: &str) -> anyhow::Result<Option<Stri
     Ok(Some(text))
 }
 
-fn optional_path(table: &toml::Table, key: &str) -> anyhow::Result<Option<PathBuf>> {
+fn optional_target_cert_path(
+    table: &toml::Table,
+    key: &str,
+    project_root: &Path,
+) -> anyhow::Result<Option<PathBuf>> {
     let Some(value) = table.get(key) else {
         return Ok(None);
     };
     let text = value
         .as_str()
         .ok_or_else(|| anyhow!("target key '{}' must be a string", key))?;
-    Ok(Some(PathBuf::from(text)))
+    let normalized = normalize_target_cert_path(text, key)?;
+    if normalized.is_absolute() {
+        Ok(Some(normalized))
+    } else {
+        Ok(Some(project_root.join(normalized)))
+    }
+}
+
+fn normalize_target_cert_path(raw: &str, key: &str) -> anyhow::Result<PathBuf> {
+    if raw.is_empty() {
+        return Err(anyhow!("target key '{}' must not be empty", key));
+    }
+
+    let path = Path::new(raw);
+    if raw.contains('\\') {
+        return Err(anyhow!(
+            "target key '{}' must not contain backslashes: {}",
+            key,
+            raw
+        ));
+    }
+
+    let raw_os = path.as_os_str().to_string_lossy();
+    if raw_os.len() >= 2 && raw_os.as_bytes()[1] == b':' {
+        return Err(anyhow!(
+            "target key '{}' must not be windows-prefixed: {}",
+            key,
+            raw
+        ));
+    }
+
+    let is_absolute = path.is_absolute();
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => normalized.push(segment),
+            Component::RootDir => {}
+            Component::ParentDir => {
+                return Err(anyhow!(
+                    "target key '{}' must not contain path traversal: {}",
+                    key,
+                    raw
+                ));
+            }
+            _ => {
+                return Err(anyhow!("target key '{}' is invalid: {}", key, raw));
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(anyhow!("target key '{}' must not be empty", key));
+    }
+
+    if is_absolute {
+        Ok(Path::new("/").join(normalized))
+    } else {
+        Ok(normalized)
+    }
 }
 
 fn parse_assets(
@@ -703,10 +771,7 @@ fn compute_manifest_hash(
     manifest: &Manifest,
 ) -> anyhow::Result<String> {
     let mut hasher = Sha256::new();
-
-    let wasm_bytes = fs::read(project_root.join(main_path))
-        .with_context(|| format!("failed to read main wasm: {}", main_path.display()))?;
-    hasher.update(&wasm_bytes);
+    hash_file_into(&mut hasher, &project_root.join(main_path), "main wasm")?;
 
     let normalized_manifest =
         serde_json::to_vec(manifest).context("failed to serialize normalized manifest for hash")?;
@@ -715,22 +780,36 @@ fn compute_manifest_hash(
     let mut sorted_assets = assets.iter().collect::<Vec<_>>();
     sorted_assets.sort_by(|a, b| a.manifest_asset.path.cmp(&b.manifest_asset.path));
     for asset in sorted_assets {
-        let bytes = fs::read(project_root.join(&asset.source_path)).with_context(|| {
-            format!(
-                "failed to read asset for hash: {}",
-                asset.source_path.display()
-            )
-        })?;
-        hasher.update(&bytes);
+        hash_file_into(
+            &mut hasher,
+            &project_root.join(&asset.source_path),
+            "asset for hash",
+        )?;
     }
 
     Ok(hex::encode(hasher.finalize()))
 }
 
 fn compute_sha256_hex(path: &Path) -> anyhow::Result<String> {
-    let bytes = fs::read(path)
-        .with_context(|| format!("failed to read file for sha256: {}", path.display()))?;
-    Ok(hex::encode(Sha256::digest(bytes)))
+    let mut hasher = Sha256::new();
+    hash_file_into(&mut hasher, path, "file for sha256")?;
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn hash_file_into(hasher: &mut Sha256, path: &Path, context_label: &str) -> anyhow::Result<()> {
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("failed to read {}: {}", context_label, path.display()))?;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .with_context(|| format!("failed to read {}: {}", context_label, path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(())
 }
 
 fn ensure_build_dir(project_root: &Path) -> anyhow::Result<PathBuf> {
@@ -1165,6 +1244,152 @@ client_key = "certs/client.key"
     }
 
     #[test]
+    fn target_cert_paths_are_resolved_relative_to_project_root() {
+        let root = new_temp_dir("target-cert-relative");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+ca_cert = "certs/ca.crt"
+client_cert = "certs/client.crt"
+client_key = "certs/client.key"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let output = build_project(None, "default", &root).expect("build should succeed");
+        assert_eq!(output.target.ca_cert, Some(root.join("certs/ca.crt")));
+        assert_eq!(
+            output.target.client_cert,
+            Some(root.join("certs/client.crt"))
+        );
+        assert_eq!(
+            output.target.client_key,
+            Some(root.join("certs/client.key"))
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn target_cert_paths_allow_absolute_values() {
+        let root = new_temp_dir("target-cert-absolute");
+        let abs_ca = root.join("abs-ca.crt");
+        let abs_client_cert = root.join("abs-client.crt");
+        let abs_client_key = root.join("abs-client.key");
+        write_imago_toml(
+            &root,
+            &format!(
+                r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+ca_cert = "{}"
+client_cert = "{}"
+client_key = "{}"
+"#,
+                abs_ca.display(),
+                abs_client_cert.display(),
+                abs_client_key.display()
+            ),
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let output = build_project(None, "default", &root).expect("build should succeed");
+        assert_eq!(output.target.ca_cert, Some(abs_ca));
+        assert_eq!(output.target.client_cert, Some(abs_client_cert));
+        assert_eq!(output.target.client_key, Some(abs_client_key));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn target_cert_path_rejects_parent_traversal() {
+        let root = new_temp_dir("target-cert-dotdot");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+ca_cert = "../secrets/ca.crt"
+"#,
+        );
+
+        let err = build_project(None, "default", &root)
+            .expect_err("target cert path with parent traversal must fail");
+        assert!(
+            err.to_string()
+                .contains("target key 'ca_cert' must not contain path traversal")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn target_cert_path_rejects_backslashes() {
+        let root = new_temp_dir("target-cert-backslash");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+ca_cert = "certs\\ca.crt"
+"#,
+        );
+
+        let err =
+            build_project(None, "default", &root).expect_err("backslash path must be rejected");
+        assert!(
+            err.to_string()
+                .contains("target key 'ca_cert' must not contain backslashes")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn target_cert_path_rejects_windows_prefix() {
+        let root = new_temp_dir("target-cert-windows-prefix");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+ca_cert = "C:/certs/ca.crt"
+"#,
+        );
+
+        let err = build_project(None, "default", &root)
+            .expect_err("windows-prefixed cert path must be rejected");
+        assert!(
+            err.to_string()
+                .contains("target key 'ca_cert' must not be windows-prefixed")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn secrets_are_loaded_only_from_env_file() {
         let root = new_temp_dir("secrets-source");
         write_imago_toml(
@@ -1325,6 +1550,20 @@ remote = "127.0.0.1:4443"
             fs::read(root.join("build/app.wasm")).unwrap(),
             fs::read(root.join(second_main)).unwrap()
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compute_sha256_hex_matches_known_digest() {
+        let root = new_temp_dir("sha256-known-digest");
+        let path = root.join("payload.bin");
+        let bytes = b"known-bytes-for-hash";
+        write_file(&path, bytes);
+
+        let actual = compute_sha256_hex(&path).expect("sha256 should be computed");
+        let expected = hex::encode(Sha256::digest(bytes));
+        assert_eq!(actual, expected);
 
         let _ = fs::remove_dir_all(root);
     }
