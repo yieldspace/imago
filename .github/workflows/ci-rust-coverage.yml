@@ -8,6 +8,9 @@ on:
 
 permissions:
   contents: read
+  actions: read
+  pull-requests: write
+  statuses: write
 
 concurrency:
   group: ci-rust-coverage-${{ github.ref }}
@@ -43,6 +46,20 @@ jobs:
             echo
             cat coverage-summary.txt
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish coverage report and PR comment
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
+        uses: getsentry/codecov-action@ce48e40c99343095dc1baf15c707ee06fcb3f5a7
+        with:
+          token: ${{ github.token }}
+          files: lcov.info
+          coverage-format: lcov
+          disable-search: true
+          enable-tests: false
+          enable-coverage: true
+          post-pr-comment: true
+          fail-ci-if-error: true
+          fail-on-error: false
 
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@v4
