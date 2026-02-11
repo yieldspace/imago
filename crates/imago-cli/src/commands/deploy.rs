@@ -884,10 +884,8 @@ mod tests {
 
     #[test]
     fn returns_non_zero_when_build_step_fails() {
-        let root = std::env::temp_dir().join(format!(
-            "imago-cli-deploy-run-fail-{}",
-            Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("imago-cli-deploy-run-fail-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).expect("temp dir should be created");
 
         let result = run_with_project_root(
@@ -1048,8 +1046,7 @@ mod tests {
 
         let hashed_main =
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef-svc.wasm";
-        fs::write(root.join("build").join(hashed_main), b"wasm")
-            .expect("hashed main should exist");
+        fs::write(root.join("build").join(hashed_main), b"wasm").expect("hashed main should exist");
 
         let manifest = Manifest {
             name: "svc".to_string(),

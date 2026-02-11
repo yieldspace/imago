@@ -193,12 +193,8 @@ pub fn build_project(
         },
     };
 
-    manifest.hash.value = compute_manifest_hash(
-        project_root,
-        &materialized_main_path,
-        &assets,
-        &manifest,
-    )?;
+    manifest.hash.value =
+        compute_manifest_hash(project_root, &materialized_main_path, &assets, &manifest)?;
 
     let mut manifest_bytes =
         serde_json::to_vec_pretty(&manifest).context("failed to serialize build manifest")?;
@@ -1091,7 +1087,10 @@ remote = "127.0.0.1:4443"
 
         let err = build_project(None, "default", &root)
             .expect_err("missing required key should fail before build.command");
-        assert!(err.to_string().contains("imago.toml missing required key: name"));
+        assert!(
+            err.to_string()
+                .contains("imago.toml missing required key: name")
+        );
         assert!(!root.join("build/side-effect.txt").exists());
 
         let _ = fs::remove_dir_all(root);
