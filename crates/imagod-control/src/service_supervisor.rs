@@ -24,6 +24,7 @@ use tokio::{
     net::{UnixListener, UnixStream},
     process::{Child, Command},
     sync::{Mutex, RwLock, oneshot, oneshot::error::TryRecvError},
+    task::JoinSet,
     time,
 };
 
@@ -395,6 +396,41 @@ impl ServiceSupervisor {
                 Ok(())
             }
         }
+    }
+
+    /// Stops all currently tracked services in parallel.
+    pub async fn stop_all(&self, force: bool) -> Vec<(String, ImagodError)> {
+        let service_names = {
+            let inner = self.inner.read().await;
+            inner.keys().cloned().collect::<Vec<_>>()
+        };
+
+        let mut join_set = JoinSet::new();
+        for service_name in service_names {
+            let supervisor = self.clone();
+            join_set.spawn(async move {
+                let result = supervisor.stop(&service_name, force).await;
+                (service_name, result)
+            });
+        }
+
+        let mut errors = Vec::new();
+        while let Some(joined) = join_set.join_next().await {
+            match joined {
+                Ok((_service_name, Ok(()))) => {}
+                Ok((_service_name, Err(err))) if err.code == ErrorCode::NotFound => {}
+                Ok((service_name, Err(err))) => errors.push((service_name, err)),
+                Err(err) => errors.push((
+                    "<unknown>".to_string(),
+                    ImagodError::new(
+                        ErrorCode::Internal,
+                        STAGE_STOP,
+                        format!("stop_all task join failed: {err}"),
+                    ),
+                )),
+            }
+        }
+        errors
     }
 
     /// Reaps all finished services and logs exit outcomes.
@@ -1269,6 +1305,127 @@ mod tests {
         assert!(
             !runner_endpoint.exists(),
             "runner endpoint should be removed after force stop"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn stop_all_stops_multiple_services_in_parallel() {
+        let root = new_test_root("stop-all");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+
+        let endpoint_a = root
+            .join("runtime")
+            .join("ipc")
+            .join("runners")
+            .join("stop-all-a.sock");
+        let endpoint_b = root
+            .join("runtime")
+            .join("ipc")
+            .join("runners")
+            .join("stop-all-b.sock");
+        if let Some(parent) = endpoint_a.parent() {
+            std::fs::create_dir_all(parent).expect("runner endpoint parent should be created");
+        }
+
+        let child_a = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("child A should spawn");
+        let child_b = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("child B should spawn");
+
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(
+                "svc-stop-all-a".to_string(),
+                new_running_service(child_a, "runner-stop-all-a", endpoint_a),
+            );
+            inner.insert(
+                "svc-stop-all-b".to_string(),
+                new_running_service(child_b, "runner-stop-all-b", endpoint_b),
+            );
+        }
+
+        let result = tokio::time::timeout(Duration::from_secs(4), supervisor.stop_all(false))
+            .await
+            .expect("stop_all should complete");
+        assert!(result.is_empty(), "stop_all should have no errors");
+        assert!(
+            supervisor.inner.read().await.is_empty(),
+            "all services should be removed"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn stop_all_ignores_not_found_errors() {
+        let root = new_test_root("stop-all-not-found");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+
+        let endpoint_done = root
+            .join("runtime")
+            .join("ipc")
+            .join("runners")
+            .join("stop-all-done.sock");
+        let endpoint_live = root
+            .join("runtime")
+            .join("ipc")
+            .join("runners")
+            .join("stop-all-live.sock");
+        if let Some(parent) = endpoint_done.parent() {
+            std::fs::create_dir_all(parent).expect("runner endpoint parent should be created");
+        }
+
+        let done_child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("done child should spawn");
+        let live_child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("live child should spawn");
+
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(
+                "svc-stop-all-done".to_string(),
+                new_running_service(done_child, "runner-stop-all-done", endpoint_done),
+            );
+            inner.insert(
+                "svc-stop-all-live".to_string(),
+                new_running_service(live_child, "runner-stop-all-live", endpoint_live),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let errors = supervisor.stop_all(true).await;
+        assert!(
+            errors.is_empty(),
+            "NotFound races should be ignored in stop_all"
+        );
+        assert!(
+            supervisor.inner.read().await.is_empty(),
+            "all services should be removed"
         );
 
         let _ = std::fs::remove_dir_all(&root);

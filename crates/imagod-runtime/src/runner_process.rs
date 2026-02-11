@@ -10,7 +10,7 @@ use imagod_ipc::{
     verify_invocation_token,
 };
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncRead, AsyncReadExt},
     net::{UnixListener, UnixStream},
     sync::watch,
     task::JoinHandle,
@@ -24,7 +24,15 @@ const STAGE_SHUTDOWN: &str = "runner.shutdown";
 const STAGE_INBOUND: &str = "runner.inbound";
 const INBOUND_READ_TIMEOUT_SECS: u64 = 3;
 const INBOUND_ACCEPT_RETRY_BACKOFF_MS: u64 = 25;
+const MAX_RUNNER_BOOTSTRAP_BYTES: usize = 64 * 1024;
+const MAX_CONSECUTIVE_HEARTBEAT_FAILURES: u32 = 3;
 const STARTUP_CONFIRM_WINDOW: Duration = Duration::from_millis(200);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatDecision {
+    Continue,
+    Shutdown,
+}
 
 /// Startup observation result for runner workload task.
 enum StartupRunState {
@@ -63,23 +71,7 @@ impl Drop for SocketCleanupGuard {
 /// The function registers the runner with manager, serves inbound IPC requests,
 /// emits heartbeat signals, and exits when the component finishes or shutdown is requested.
 pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
-    let mut stdin = tokio::io::stdin();
-    let mut bootstrap_bytes = Vec::new();
-    stdin.read_to_end(&mut bootstrap_bytes).await.map_err(|e| {
-        ImagodError::new(
-            ErrorCode::BadRequest,
-            STAGE_RUNNER,
-            format!("failed to read runner bootstrap from stdin: {e}"),
-        )
-    })?;
-    let bootstrap =
-        imago_protocol::from_cbor::<RunnerBootstrap>(&bootstrap_bytes).map_err(|e| {
-            ImagodError::new(
-                ErrorCode::BadRequest,
-                STAGE_RUNNER,
-                format!("failed to decode runner bootstrap: {e}"),
-            )
-        })?;
+    let bootstrap = read_runner_bootstrap(tokio::io::stdin()).await?;
 
     prepare_socket_path(&bootstrap.runner_endpoint)?;
     let listener = UnixListener::bind(&bootstrap.runner_endpoint).map_err(|e| {
@@ -140,7 +132,11 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
         return Err(err);
     }
 
-    let heartbeat_task = tokio::spawn(send_heartbeats(bootstrap.clone(), shutdown_tx.subscribe()));
+    let heartbeat_task = tokio::spawn(send_heartbeats(
+        bootstrap.clone(),
+        shutdown_tx.clone(),
+        shutdown_tx.subscribe(),
+    ));
     let run_result = join_run_task(run_task).await;
     shutdown_runner_tasks(&shutdown_tx, inbound_task, Some(heartbeat_task), None).await;
 
@@ -190,6 +186,49 @@ fn map_run_join_error(err: tokio::task::JoinError) -> ImagodError {
         STAGE_RUNNER,
         format!("runner run task join failed: {err}"),
     )
+}
+
+async fn read_runner_bootstrap<R>(reader: R) -> Result<RunnerBootstrap, ImagodError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut limited_reader = reader.take((MAX_RUNNER_BOOTSTRAP_BYTES + 1) as u64);
+    let mut bootstrap_bytes = Vec::new();
+    limited_reader
+        .read_to_end(&mut bootstrap_bytes)
+        .await
+        .map_err(|e| {
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                STAGE_RUNNER,
+                format!("failed to read runner bootstrap from stdin: {e}"),
+            )
+        })?;
+    decode_runner_bootstrap(&bootstrap_bytes)
+}
+
+fn decode_runner_bootstrap(bootstrap_bytes: &[u8]) -> Result<RunnerBootstrap, ImagodError> {
+    validate_runner_bootstrap_size(bootstrap_bytes.len())?;
+    imago_protocol::from_cbor::<RunnerBootstrap>(bootstrap_bytes).map_err(|e| {
+        ImagodError::new(
+            ErrorCode::BadRequest,
+            STAGE_RUNNER,
+            format!("failed to decode runner bootstrap: {e}"),
+        )
+    })
+}
+
+fn validate_runner_bootstrap_size(bootstrap_len: usize) -> Result<(), ImagodError> {
+    if bootstrap_len > MAX_RUNNER_BOOTSTRAP_BYTES {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            STAGE_RUNNER,
+            format!(
+                "runner bootstrap is too large: {bootstrap_len} bytes (max {MAX_RUNNER_BOOTSTRAP_BYTES})"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Registers this runner endpoint with the manager control plane.
@@ -243,9 +282,14 @@ async fn mark_ready(bootstrap: &RunnerBootstrap) -> Result<(), ImagodError> {
 /// Sends periodic heartbeat messages until shutdown is requested.
 ///
 /// Concurrency: runs as a dedicated background task.
-async fn send_heartbeats(bootstrap: RunnerBootstrap, mut shutdown: watch::Receiver<bool>) {
+async fn send_heartbeats(
+    bootstrap: RunnerBootstrap,
+    shutdown_tx: watch::Sender<bool>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    let mut consecutive_failures = 0u32;
     loop {
-        if *shutdown.borrow() {
+        if *shutdown_rx.borrow() {
             break;
         }
         let proof = match compute_manager_auth_proof(
@@ -255,10 +299,11 @@ async fn send_heartbeats(bootstrap: RunnerBootstrap, mut shutdown: watch::Receiv
             Ok(v) => v,
             Err(err) => {
                 eprintln!("runner heartbeat auth error: {err}");
+                let _ = shutdown_tx.send(true);
                 break;
             }
         };
-        let _ = DbusP2pTransport::call_control(
+        let response = DbusP2pTransport::call_control(
             &bootstrap.manager_control_endpoint,
             &ControlRequest::Heartbeat {
                 runner_id: bootstrap.runner_id.clone(),
@@ -266,15 +311,70 @@ async fn send_heartbeats(bootstrap: RunnerBootstrap, mut shutdown: watch::Receiv
             },
         )
         .await;
+        if evaluate_heartbeat_result(response, &mut consecutive_failures)
+            == HeartbeatDecision::Shutdown
+        {
+            let _ = shutdown_tx.send(true);
+            break;
+        }
 
         tokio::select! {
             _ = time::sleep(Duration::from_secs(1)) => {}
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
                     break;
                 }
             }
         }
+    }
+}
+
+fn evaluate_heartbeat_result(
+    result: Result<ControlResponse, ImagodError>,
+    consecutive_failures: &mut u32,
+) -> HeartbeatDecision {
+    match result {
+        Ok(ControlResponse::Ack) => {
+            *consecutive_failures = 0;
+            HeartbeatDecision::Continue
+        }
+        Ok(ControlResponse::Error(err))
+            if err.code == ErrorCode::NotFound || err.code == ErrorCode::Unauthorized =>
+        {
+            eprintln!(
+                "runner heartbeat rejected by manager: code={:?} stage={} message={}",
+                err.code, err.stage, err.message
+            );
+            HeartbeatDecision::Shutdown
+        }
+        Ok(ControlResponse::Error(err)) => {
+            eprintln!(
+                "runner heartbeat error response: code={:?} stage={} message={}",
+                err.code, err.stage, err.message
+            );
+            apply_retryable_heartbeat_failure(consecutive_failures)
+        }
+        Ok(other) => {
+            eprintln!("runner heartbeat unexpected response: {other:?}");
+            apply_retryable_heartbeat_failure(consecutive_failures)
+        }
+        Err(err) => {
+            eprintln!("runner heartbeat transport error: {err}");
+            apply_retryable_heartbeat_failure(consecutive_failures)
+        }
+    }
+}
+
+fn apply_retryable_heartbeat_failure(consecutive_failures: &mut u32) -> HeartbeatDecision {
+    *consecutive_failures += 1;
+    if *consecutive_failures >= MAX_CONSECUTIVE_HEARTBEAT_FAILURES {
+        eprintln!(
+            "runner heartbeat failed {} consecutive times; requesting shutdown",
+            consecutive_failures
+        );
+        HeartbeatDecision::Shutdown
+    } else {
+        HeartbeatDecision::Continue
     }
 }
 
@@ -476,6 +576,7 @@ mod tests {
     use super::*;
     use std::{
         collections::BTreeMap,
+        io::Cursor,
         os::unix::net::UnixListener as StdUnixListener,
         path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
@@ -723,5 +824,91 @@ mod tests {
                 kind
             );
         }
+    }
+
+    #[test]
+    fn validate_runner_bootstrap_size_accepts_exact_limit() {
+        assert!(validate_runner_bootstrap_size(MAX_RUNNER_BOOTSTRAP_BYTES).is_ok());
+    }
+
+    #[test]
+    fn validate_runner_bootstrap_size_rejects_over_limit() {
+        let err = validate_runner_bootstrap_size(MAX_RUNNER_BOOTSTRAP_BYTES + 1)
+            .expect_err("oversized bootstrap should be rejected");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert!(err.message.contains("too large"));
+    }
+
+    #[test]
+    fn read_runner_bootstrap_rejects_oversized_input_before_decode() {
+        run_async_test(async {
+            let oversized = vec![0u8; MAX_RUNNER_BOOTSTRAP_BYTES + 1];
+            let err = read_runner_bootstrap(Cursor::new(oversized))
+                .await
+                .expect_err("oversized bootstrap should fail before decode");
+            assert_eq!(err.code, ErrorCode::BadRequest);
+            assert!(err.message.contains("too large"));
+        });
+    }
+
+    #[test]
+    fn heartbeat_result_shutdowns_immediately_for_not_found_and_unauthorized() {
+        let mut failures = 0;
+        let not_found = evaluate_heartbeat_result(
+            Ok(ControlResponse::Error(IpcErrorPayload {
+                code: ErrorCode::NotFound,
+                stage: STAGE_RUNNER.to_string(),
+                message: "runner missing".to_string(),
+            })),
+            &mut failures,
+        );
+        assert_eq!(not_found, HeartbeatDecision::Shutdown);
+        assert_eq!(failures, 0);
+
+        let unauthorized = evaluate_heartbeat_result(
+            Ok(ControlResponse::Error(IpcErrorPayload {
+                code: ErrorCode::Unauthorized,
+                stage: STAGE_RUNNER.to_string(),
+                message: "auth failed".to_string(),
+            })),
+            &mut failures,
+        );
+        assert_eq!(unauthorized, HeartbeatDecision::Shutdown);
+        assert_eq!(failures, 0);
+    }
+
+    #[test]
+    fn heartbeat_result_shutdowns_after_three_retryable_failures() {
+        let mut failures = 0;
+        for _ in 0..(MAX_CONSECUTIVE_HEARTBEAT_FAILURES - 1) {
+            let decision = evaluate_heartbeat_result(
+                Ok(ControlResponse::Error(IpcErrorPayload {
+                    code: ErrorCode::OperationTimeout,
+                    stage: STAGE_RUNNER.to_string(),
+                    message: "timeout".to_string(),
+                })),
+                &mut failures,
+            );
+            assert_eq!(decision, HeartbeatDecision::Continue);
+        }
+
+        let decision = evaluate_heartbeat_result(
+            Err(ImagodError::new(
+                ErrorCode::Internal,
+                STAGE_RUNNER,
+                "transport down",
+            )),
+            &mut failures,
+        );
+        assert_eq!(decision, HeartbeatDecision::Shutdown);
+        assert_eq!(failures, MAX_CONSECUTIVE_HEARTBEAT_FAILURES);
+    }
+
+    #[test]
+    fn heartbeat_result_ack_resets_failure_counter() {
+        let mut failures = 2;
+        let decision = evaluate_heartbeat_result(Ok(ControlResponse::Ack), &mut failures);
+        assert_eq!(decision, HeartbeatDecision::Continue);
+        assert_eq!(failures, 0);
     }
 }

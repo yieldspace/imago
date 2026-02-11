@@ -144,6 +144,11 @@ impl ProtocolHandler {
         self.orchestrator.has_live_services().await
     }
 
+    /// Stops all managed services.
+    pub async fn stop_all_services(&self, force: bool) -> Vec<(String, ImagodError)> {
+        self.orchestrator.stop_all_services(force).await
+    }
+
     /// Dispatches non-command-start requests to the corresponding handler.
     async fn handle_single(&self, request: Envelope) -> Result<Envelope, ImagodError> {
         match request.message_type {

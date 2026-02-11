@@ -131,6 +131,15 @@ async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyhow::Error> 
             }
         }
     }
+
+    let stop_errors = handler.stop_all_services(false).await;
+    for (service_name, err) in stop_errors {
+        eprintln!(
+            "service shutdown failed name={} code={:?} stage={} message={}",
+            service_name, err.code, err.stage, err.message
+        );
+    }
+
     let _ = shutdown_tx.send(true);
     wait_for_maintenance_shutdown(maintenance_task).await?;
 

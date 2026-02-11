@@ -203,6 +203,11 @@ impl Orchestrator {
         self.supervisor.has_live_services().await
     }
 
+    /// Stops all currently running services.
+    pub async fn stop_all_services(&self, force: bool) -> Vec<(String, ImagodError)> {
+        self.supervisor.stop_all(force).await
+    }
+
     /// Prepares a validated release and launch spec from committed artifact data.
     async fn prepare_release(
         &self,
