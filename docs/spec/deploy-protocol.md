@@ -132,7 +132,7 @@ response:
 - `artifact_status=missing`: 全体 upload
 - `artifact_status=partial`: `missing_ranges` のみ upload（全量再送しない）
 - `missing_ranges` は partial 時に「先頭1件」ではなく「全欠損レンジ集合」を返す
-- `idempotency_key` は `name/type/target/policy/artifact_* /manifest_digest` の canonical 表現を `sha256` した安定キー（`deploy:<hex64>`）を使う。
+- `idempotency_key` は `name/type/target/policy/artifact_*/manifest_digest` の canonical 表現を `sha256` した安定キー（`deploy:<hex64>`）を使う。
 - upload フェーズ（`hello.negotiate` / `deploy.prepare` / `artifact.push` / `artifact.commit`）は固定回数の自動再試行を行い、再接続後は同一 `idempotency_key` と `missing_ranges` に基づいて再開転送する。
 
 ### 5.3 `artifact.push`

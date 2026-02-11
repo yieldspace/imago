@@ -280,18 +280,22 @@ async fn run_upload_phase_with_resume(
 
                 let backoff = retry_backoff_duration(attempt);
                 eprintln!(
-                    "upload retry attempt={}/{} backoff_ms={} reason={}",
-                    attempt + 1,
-                    UPLOAD_MAX_ATTEMPTS,
-                    backoff.as_millis(),
-                    summarize_retry_error(&err)
+                    "{}",
+                    format_retry_log_message(
+                        attempt,
+                        UPLOAD_MAX_ATTEMPTS,
+                        backoff,
+                        &summarize_retry_error(&err),
+                    )
                 );
                 tokio::time::sleep(backoff).await;
             }
         }
     }
 
-    unreachable!("upload retry loop must return before exhaustion")
+    Err(anyhow!(
+        "upload retry loop exhausted unexpectedly without a terminal result"
+    ))
 }
 
 async fn run_upload_phase_once(
@@ -387,18 +391,13 @@ async fn run_upload_phase_once(
 
 fn should_retry_upload_error(err: &anyhow::Error) -> bool {
     match find_server_response_error(err) {
-        Some(server_error) => !matches!(
-            server_error.error.code,
-            ErrorCode::Unauthorized
-                | ErrorCode::BadRequest
-                | ErrorCode::BadManifest
-                | ErrorCode::IdempotencyConflict
-                | ErrorCode::RangeInvalid
-                | ErrorCode::ChunkHashMismatch
-                | ErrorCode::StorageQuota
-                | ErrorCode::PreconditionFailed
-        ),
-        None => true,
+        Some(server_error) => {
+            if is_non_retryable_error_code(server_error.error.code) {
+                return false;
+            }
+            server_error.error.retryable
+        }
+        None => !contains_unauthorized_marker(err),
     }
 }
 
@@ -421,21 +420,58 @@ fn summarize_retry_error(err: &anyhow::Error) -> String {
     truncate_log_message(&err.to_string(), 160)
 }
 
+fn format_retry_log_message(
+    attempt: usize,
+    total_attempts: usize,
+    backoff: Duration,
+    reason: &str,
+) -> String {
+    format!(
+        "upload attempt {attempt}/{total_attempts} failed, retrying in {}ms (reason={reason})",
+        backoff.as_millis()
+    )
+}
+
 fn truncate_log_message(message: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    for (idx, ch) in message.chars().enumerate() {
-        if idx >= max_chars {
-            out.push_str("...");
-            break;
-        }
-        out.push(ch);
+    let len = message.chars().count();
+    if len <= max_chars {
+        return message.to_string();
     }
-    out
+    if max_chars == 0 {
+        return String::new();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    let head = message
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    format!("{head}...")
 }
 
 fn find_server_response_error(err: &anyhow::Error) -> Option<&ServerResponseError> {
     err.chain()
         .find_map(|cause| cause.downcast_ref::<ServerResponseError>())
+}
+
+fn is_non_retryable_error_code(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::Unauthorized
+            | ErrorCode::BadRequest
+            | ErrorCode::BadManifest
+            | ErrorCode::IdempotencyConflict
+            | ErrorCode::RangeInvalid
+            | ErrorCode::ChunkHashMismatch
+            | ErrorCode::StorageQuota
+            | ErrorCode::PreconditionFailed
+    )
+}
+
+fn contains_unauthorized_marker(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.to_string().contains("E_UNAUTHORIZED"))
 }
 
 async fn connect_target(target: &build::DeployTargetConfig) -> anyhow::Result<Session> {
@@ -1351,19 +1387,19 @@ mod tests {
         assert!(err.to_string().contains("chunk_size"));
     }
 
-    fn sample_structured_error(code: ErrorCode) -> StructuredError {
+    fn sample_structured_error(code: ErrorCode, retryable: bool) -> StructuredError {
         StructuredError {
             code,
             message: "error".to_string(),
-            retryable: false,
+            retryable,
             stage: "upload".to_string(),
             details: BTreeMap::new(),
         }
     }
 
-    fn sample_server_error(code: ErrorCode) -> anyhow::Error {
+    fn sample_server_error(code: ErrorCode, retryable: bool) -> anyhow::Error {
         ServerResponseError {
-            error: sample_structured_error(code),
+            error: sample_structured_error(code, retryable),
         }
         .into()
     }
@@ -1498,20 +1534,24 @@ mod tests {
     #[test]
     fn retry_classification_retries_busy_or_internal() {
         assert!(should_retry_upload_error(&sample_server_error(
-            ErrorCode::Busy
+            ErrorCode::Busy,
+            true
         )));
         assert!(should_retry_upload_error(&sample_server_error(
-            ErrorCode::Internal
+            ErrorCode::Internal,
+            true
         )));
     }
 
     #[test]
     fn retry_classification_does_not_retry_bad_request_or_unauthorized() {
         assert!(!should_retry_upload_error(&sample_server_error(
-            ErrorCode::BadRequest
+            ErrorCode::BadRequest,
+            true
         )));
         assert!(!should_retry_upload_error(&sample_server_error(
-            ErrorCode::Unauthorized
+            ErrorCode::Unauthorized,
+            true
         )));
     }
 
@@ -1521,6 +1561,40 @@ mod tests {
         assert_eq!(retry_backoff_duration(2), Duration::from_millis(500));
         assert_eq!(retry_backoff_duration(3), Duration::from_millis(1000));
         assert_eq!(retry_backoff_duration(4), Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn retry_classification_does_not_retry_when_server_marks_non_retryable() {
+        assert!(!should_retry_upload_error(&sample_server_error(
+            ErrorCode::Busy,
+            false
+        )));
+    }
+
+    #[test]
+    fn retry_classification_does_not_retry_unstructured_unauthorized_error() {
+        let err = anyhow!(
+            "server error: certificate authentication failed (E_UNAUTHORIZED) at transport.connect"
+        );
+        assert!(!should_retry_upload_error(&err));
+    }
+
+    #[test]
+    fn truncate_log_message_never_exceeds_max_chars() {
+        assert_eq!(truncate_log_message("abc", 3), "abc");
+        assert_eq!(truncate_log_message("abcdef", 6), "abcdef");
+        assert_eq!(truncate_log_message("abcdef", 5), "ab...");
+        assert_eq!(truncate_log_message("abcdef", 3), "...");
+        assert_eq!(truncate_log_message("abcdef", 2), "..");
+        assert_eq!(truncate_log_message("abcdef", 0), "");
+    }
+
+    #[test]
+    fn format_retry_log_message_reports_failed_attempt() {
+        let message = format_retry_log_message(1, 4, Duration::from_millis(250), "E_BUSY");
+        assert!(message.contains("upload attempt 1/4 failed"));
+        assert!(message.contains("retrying in 250ms"));
+        assert!(message.contains("reason=E_BUSY"));
     }
 
     #[test]
