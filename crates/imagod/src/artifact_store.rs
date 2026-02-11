@@ -130,7 +130,12 @@ impl ArtifactStore {
         let now = now_epoch_secs();
         let mut cleanup_plan = CleanupPlan::default();
 
-        let result = {
+        enum PrepareDecision {
+            Existing(DeployPrepareResponse),
+            Create(UploadSession),
+        }
+
+        let decision: Result<PrepareDecision, ImagodError> = {
             let mut state = self.state.lock().await;
             cleanup_plan.merge(collect_expired_sessions_locked(
                 &mut state,
@@ -150,11 +155,11 @@ impl ArtifactStore {
                     ))
                 } else {
                     existing.updated_at_epoch_secs = now;
-                    Ok(build_prepare_response(
+                    Ok(PrepareDecision::Existing(build_prepare_response(
                         existing,
                         self.upload_session_ttl_secs,
                         now,
-                    ))
+                    )))
                 }
             } else {
                 let deploy_id = Uuid::new_v4().to_string();
@@ -164,29 +169,14 @@ impl ArtifactStore {
                     .join("sessions")
                     .join(format!("{deploy_id}.artifact"));
 
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .truncate(true)
-                    .write(true)
-                    .read(true)
-                    .open(&file_path)
-                    .await
-                    .map_err(|e| map_internal(STAGE_PREPARE, e.to_string()))?;
-                file.set_len(request.artifact_size)
-                    .await
-                    .map_err(|e| map_internal(STAGE_PREPARE, e.to_string()))?;
-                file.flush()
-                    .await
-                    .map_err(|e| map_internal(STAGE_PREPARE, e.to_string()))?;
-
                 let session = UploadSession {
                     deploy_id: deploy_id.clone(),
-                    service_name: request.name,
+                    service_name: request.name.clone(),
                     idempotency_key: request.idempotency_key.clone(),
                     fingerprint,
-                    artifact_digest: request.artifact_digest,
+                    artifact_digest: request.artifact_digest.clone(),
                     artifact_size: request.artifact_size,
-                    manifest_digest: request.manifest_digest,
+                    manifest_digest: request.manifest_digest.clone(),
                     upload_token,
                     file_path,
                     received_ranges: Vec::new(),
@@ -195,13 +185,83 @@ impl ArtifactStore {
                     commit_in_progress: false,
                     updated_at_epoch_secs: now,
                 };
+                Ok(PrepareDecision::Create(session))
+            }
+        };
 
-                let response = build_prepare_response(&session, self.upload_session_ttl_secs, now);
-                state
-                    .idempotency
-                    .insert(request.idempotency_key, deploy_id.clone());
-                state.sessions.insert(deploy_id, session);
-                Ok(response)
+        let decision = match decision {
+            Ok(decision) => decision,
+            Err(err) => {
+                apply_cleanup_plan(cleanup_plan).await;
+                return Err(err);
+            }
+        };
+
+        let result = match decision {
+            PrepareDecision::Existing(response) => Ok(response),
+            PrepareDecision::Create(session_candidate) => {
+                if let Err(err) = create_preallocated_file(
+                    &session_candidate.file_path,
+                    session_candidate.artifact_size,
+                )
+                .await
+                {
+                    apply_cleanup_plan(cleanup_plan).await;
+                    return Err(err);
+                }
+
+                let now_after_io = now_epoch_secs();
+                let mut created_file_path_to_cleanup: Option<PathBuf> = None;
+                let mut session_candidate = session_candidate;
+                let result = {
+                    let mut state = self.state.lock().await;
+                    cleanup_plan.merge(collect_expired_sessions_locked(
+                        &mut state,
+                        now_after_io,
+                        self.upload_session_ttl_secs,
+                    ));
+                    cleanup_orphan_idempotency_locked(&mut state);
+
+                    if let Some(existing_id) = state
+                        .idempotency
+                        .get(&session_candidate.idempotency_key)
+                        .cloned()
+                        && let Some(existing) = state.sessions.get_mut(&existing_id)
+                    {
+                        created_file_path_to_cleanup = Some(session_candidate.file_path.clone());
+                        if existing.fingerprint != session_candidate.fingerprint {
+                            Err(ImagodError::new(
+                                ErrorCode::IdempotencyConflict,
+                                STAGE_PREPARE,
+                                "idempotency_key is reused with different payload",
+                            ))
+                        } else {
+                            existing.updated_at_epoch_secs = now_after_io;
+                            Ok(build_prepare_response(
+                                existing,
+                                self.upload_session_ttl_secs,
+                                now_after_io,
+                            ))
+                        }
+                    } else {
+                        session_candidate.updated_at_epoch_secs = now_after_io;
+                        let deploy_id = session_candidate.deploy_id.clone();
+                        let idempotency_key = session_candidate.idempotency_key.clone();
+                        let response = build_prepare_response(
+                            &session_candidate,
+                            self.upload_session_ttl_secs,
+                            now_after_io,
+                        );
+                        state.idempotency.insert(idempotency_key, deploy_id.clone());
+                        state.sessions.insert(deploy_id, session_candidate);
+                        Ok(response)
+                    }
+                };
+
+                if let Some(path) = created_file_path_to_cleanup {
+                    cleanup_plan.files.push(path);
+                }
+                result
             }
         };
 
@@ -641,6 +701,23 @@ async fn apply_cleanup_plan(plan: CleanupPlan) {
     }
 }
 
+async fn create_preallocated_file(path: &Path, artifact_size: u64) -> Result<(), ImagodError> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .read(true)
+        .open(path)
+        .await
+        .map_err(|e| map_internal(STAGE_PREPARE, e.to_string()))?;
+    file.set_len(artifact_size)
+        .await
+        .map_err(|e| map_internal(STAGE_PREPARE, e.to_string()))?;
+    file.flush()
+        .await
+        .map_err(|e| map_internal(STAGE_PREPARE, e.to_string()))
+}
+
 async fn write_chunk_to_file(path: &Path, offset: u64, chunk: &[u8]) -> Result<(), ImagodError> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -917,6 +994,74 @@ mod tests {
         request.policy = policy_b;
         let policy_changed = fingerprint(&request);
         assert_ne!(baseline, policy_changed);
+    }
+
+    #[tokio::test]
+    async fn prepare_idempotency_conflict_does_not_create_extra_session_file() {
+        let (store, root) = new_store("prepare_idempotency_conflict_cleanup", 60).await;
+        let artifact = b"artifact-idempotency";
+        let artifact_digest = hex::encode(Sha256::digest(artifact));
+        let manifest_digest = hex::encode(Sha256::digest(b"manifest-idempotency"));
+
+        let mut first_target = BTreeMap::new();
+        first_target.insert("region".to_string(), "local".to_string());
+        let first = store
+            .prepare(DeployPrepareRequest {
+                name: "svc-idem".to_string(),
+                app_type: "cli".to_string(),
+                target: first_target,
+                artifact_digest: artifact_digest.clone(),
+                artifact_size: artifact.len() as u64,
+                manifest_digest: manifest_digest.clone(),
+                idempotency_key: "idem-shared".to_string(),
+                policy: BTreeMap::new(),
+            })
+            .await
+            .expect("first prepare should succeed");
+
+        let second_same = store
+            .prepare(DeployPrepareRequest {
+                name: "svc-idem".to_string(),
+                app_type: "cli".to_string(),
+                target: BTreeMap::from([("region".to_string(), "local".to_string())]),
+                artifact_digest: artifact_digest.clone(),
+                artifact_size: artifact.len() as u64,
+                manifest_digest: manifest_digest.clone(),
+                idempotency_key: "idem-shared".to_string(),
+                policy: BTreeMap::new(),
+            })
+            .await
+            .expect("same fingerprint should reuse session");
+        assert_eq!(first.deploy_id, second_same.deploy_id);
+
+        let err = store
+            .prepare(DeployPrepareRequest {
+                name: "svc-idem".to_string(),
+                app_type: "cli".to_string(),
+                target: BTreeMap::from([("region".to_string(), "edge".to_string())]),
+                artifact_digest,
+                artifact_size: artifact.len() as u64,
+                manifest_digest,
+                idempotency_key: "idem-shared".to_string(),
+                policy: BTreeMap::new(),
+            })
+            .await
+            .expect_err("different fingerprint should be rejected");
+        assert_eq!(err.code, ErrorCode::IdempotencyConflict);
+
+        let session_files = std::fs::read_dir(root.join("sessions"))
+            .expect("session dir should be readable")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext == "artifact")
+            })
+            .count();
+        assert_eq!(session_files, 1, "conflict must not leave extra files");
+
+        cleanup_root(root);
     }
 
     #[tokio::test]

@@ -205,10 +205,7 @@ impl ProtocolHandler {
 
     async fn handle_push(&self, request: Envelope) -> Result<Envelope, ImagodError> {
         let payload: ArtifactPushRequest = payload_as(&request)?;
-        payload
-            .header
-            .validate()
-            .map_err(|e| bad_request("artifact.push", e.to_string()))?;
+        validate_push_payload(&payload)?;
 
         let response = self.artifacts.push(payload).await?;
         response_envelope(
@@ -601,13 +598,21 @@ fn ensure_command_start_request_id_match(
     ))
 }
 
+fn validate_push_payload(payload: &ArtifactPushRequest) -> Result<(), ImagodError> {
+    payload
+        .validate()
+        .map_err(|e| bad_request("artifact.push", e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ensure_command_start_request_id_match, ensure_non_nil_envelope_ids,
-        ensure_single_request_envelope, is_compatible_date_match,
+        ensure_single_request_envelope, is_compatible_date_match, validate_push_payload,
     };
-    use imago_protocol::{MessageType, ProtocolEnvelope};
+    use imago_protocol::{
+        ArtifactPushChunkHeader, ArtifactPushRequest, MessageType, ProtocolEnvelope,
+    };
     use serde_json::Value;
     use uuid::Uuid;
 
@@ -672,5 +677,21 @@ mod tests {
             error: None,
         };
         assert!(ensure_non_nil_envelope_ids(&envelope).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_chunk_b64_in_handle_push_validation() {
+        let payload = ArtifactPushRequest {
+            header: ArtifactPushChunkHeader {
+                deploy_id: "deploy-1".to_string(),
+                offset: 0,
+                length: 4,
+                chunk_sha256: "abcd".to_string(),
+                upload_token: "token-1".to_string(),
+            },
+            chunk_b64: String::new(),
+        };
+        let err = validate_push_payload(&payload).expect_err("empty chunk_b64 should be rejected");
+        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
     }
 }

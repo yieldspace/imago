@@ -178,6 +178,8 @@ spawn 遷移前 cancel 成立時:
 
 - `prepare`: `artifact_size > 0`
 - `prepare`: `artifact_size <= max_artifact_size_bytes`
+- `prepare`: idempotency 判定は lock 内で行い、artifact ファイル作成 (`open`/`set_len`/`flush`) は lock 外で行う
+- `prepare`: lock 外 I/O 後に lock を再取得して最終挿入し、競合時は作成済みファイルを cleanup plan で削除
 - `push`: `upload_token` 一致、range 妥当、`length <= max_chunk_size`、chunk hash 一致
 - `push`: `inflight_writes < max_inflight_chunks`（超過時 `E_BUSY`）
 - `commit`: metadata 一致、`inflight_writes == 0`、必要 range 完了、digest 一致
@@ -189,7 +191,7 @@ spawn 遷移前 cancel 成立時:
 - TTL 超過の未完了 session を削除（`inflight_writes > 0` / `commit_in_progress` は除外）
 - 同一 service の旧コミット artifact/session/idempotency を削除し、最新のみ保持
 - lock 内は削除対象の計画生成のみ、実ファイル削除は lock 外で実行
-- `push` / `commit` は lock を2段階に分割し、ファイル I/O と digest 計算を lock 外で実施
+- `prepare` / `push` / `commit` は lock を分割し、ファイル I/O と digest 計算を lock 外で実施
 
 ## 7. Orchestrator 詳細
 
@@ -248,6 +250,12 @@ deploy 経路の要点:
 
 - `force=false`: shutdown signal -> grace timeout 待機 -> 必要なら abort
 - `force=true`: 即 abort
+- `stop` は join 待機中に `stopping_count` を加算し、`has_live_services` が false にならないようにする
+
+起動ポリシー:
+
+- `start` は spawn 後すぐ成功返却せず、3 秒の startup probe を行う
+- probe 中に task が終了した場合は即座に join 結果をエラー化して返し、deploy 側で rollback 経路へ入れる
 
 ## 9. Wasmtime 実行詳細
 

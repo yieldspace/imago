@@ -123,3 +123,11 @@
 - `runtime.upload_session_ttl_secs`
 - `runtime.stop_grace_timeout_secs`（既定 `30`）
 - `runtime.epoch_tick_interval_ms`（既定 `50`）
+
+`imagod` の runtime 検証制約:
+
+- `runtime.chunk_size`: `1..=8388608`（1 byte 以上 8 MiB 以下）
+- `runtime.max_inflight_chunks`: `1` 以上
+- `runtime.max_artifact_size_bytes`: `1` 以上
+- `runtime.stop_grace_timeout_secs`: `1` 以上
+- `runtime.epoch_tick_interval_ms`: `1` 以上

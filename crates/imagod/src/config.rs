@@ -5,6 +5,8 @@ use serde::Deserialize;
 use crate::error::ImagodError;
 use imago_protocol::ErrorCode;
 
+const MAX_CHUNK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ImagodConfig {
     #[serde(default = "default_listen_addr")]
@@ -124,6 +126,33 @@ impl ImagodConfig {
                 ErrorCode::BadRequest,
                 "config.load",
                 "runtime.max_artifact_size_bytes must be greater than 0",
+            ));
+        }
+
+        if config.runtime.chunk_size == 0 {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.load",
+                "runtime.chunk_size must be greater than 0",
+            ));
+        }
+
+        if config.runtime.chunk_size > MAX_CHUNK_SIZE_BYTES {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.load",
+                format!(
+                    "runtime.chunk_size must be less than or equal to {}",
+                    MAX_CHUNK_SIZE_BYTES
+                ),
+            ));
+        }
+
+        if config.runtime.max_inflight_chunks == 0 {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.load",
+                "runtime.max_inflight_chunks must be greater than 0",
             ));
         }
 
@@ -318,6 +347,86 @@ max_artifact_size_bytes = 0
 
         let err = ImagodConfig::load(&path).expect_err("config should reject zero artifact size");
         assert!(err.to_string().contains("max_artifact_size_bytes"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_zero_chunk_size() {
+        let path = write_temp_config(
+            "rejects_zero_chunk_size",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_cert = "server.crt"
+server_key = "server.key"
+client_ca_cert = "ca.crt"
+
+[runtime]
+chunk_size = 0
+"#,
+        );
+
+        let err = ImagodConfig::load(&path).expect_err("config should reject zero chunk size");
+        assert!(err.to_string().contains("runtime.chunk_size"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_zero_max_inflight_chunks() {
+        let path = write_temp_config(
+            "rejects_zero_max_inflight_chunks",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_cert = "server.crt"
+server_key = "server.key"
+client_ca_cert = "ca.crt"
+
+[runtime]
+max_inflight_chunks = 0
+"#,
+        );
+
+        let err =
+            ImagodConfig::load(&path).expect_err("config should reject zero max_inflight_chunks");
+        assert!(err.to_string().contains("runtime.max_inflight_chunks"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_chunk_size_over_8mib() {
+        let path = write_temp_config(
+            "rejects_chunk_size_over_8mib",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_cert = "server.crt"
+server_key = "server.key"
+client_ca_cert = "ca.crt"
+
+[runtime]
+chunk_size = 8388609
+"#,
+        );
+
+        let err =
+            ImagodConfig::load(&path).expect_err("config should reject chunk_size above 8MiB");
+        assert!(err.to_string().contains("runtime.chunk_size"));
 
         cleanup_temp_path(path);
     }
