@@ -23,6 +23,7 @@ const STAGE_RUNNER: &str = "runner.process";
 const STAGE_SHUTDOWN: &str = "runner.shutdown";
 const STAGE_INBOUND: &str = "runner.inbound";
 const INBOUND_READ_TIMEOUT_SECS: u64 = 3;
+const INBOUND_ACCEPT_RETRY_BACKOFF_MS: u64 = 25;
 const STARTUP_CONFIRM_WINDOW: Duration = Duration::from_millis(200);
 
 /// Startup observation result for runner workload task.
@@ -300,6 +301,11 @@ async fn run_inbound_server(
         let (mut stream, _) = match accepted {
             Ok(v) => v,
             Err(err) => {
+                if should_retry_inbound_accept(&err) {
+                    eprintln!("runner inbound accept transient error: {err}");
+                    time::sleep(Duration::from_millis(INBOUND_ACCEPT_RETRY_BACKOFF_MS)).await;
+                    continue;
+                }
                 eprintln!("runner inbound accept error: {err}");
                 break;
             }
@@ -311,6 +317,16 @@ async fn run_inbound_server(
             handle_inbound_connection(&mut stream, bootstrap, shutdown_tx).await;
         });
     }
+}
+
+fn should_retry_inbound_accept(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::TimedOut
+    )
 }
 
 async fn handle_inbound_connection(
@@ -670,5 +686,42 @@ mod tests {
 
         drop(listener);
         let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn should_retry_inbound_accept_true_for_transient_kinds() {
+        let transient = [
+            std::io::ErrorKind::Interrupted,
+            std::io::ErrorKind::WouldBlock,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::TimedOut,
+        ];
+
+        for kind in transient {
+            let err = std::io::Error::new(kind, "transient");
+            assert!(
+                should_retry_inbound_accept(&err),
+                "kind {:?} should be retried",
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn should_retry_inbound_accept_false_for_non_transient_kinds() {
+        let non_transient = [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::InvalidInput,
+            std::io::ErrorKind::AddrInUse,
+        ];
+
+        for kind in non_transient {
+            let err = std::io::Error::new(kind, "fatal");
+            assert!(
+                !should_retry_inbound_accept(&err),
+                "kind {:?} should not be retried",
+                kind
+            );
+        }
     }
 }

@@ -1,7 +1,7 @@
 //! Service process supervisor and manager-side control-plane server.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::{
@@ -121,6 +121,7 @@ pub struct ServiceSupervisor {
     manager_control_endpoint: PathBuf,
     inner: Arc<RwLock<BTreeMap<String, RunningService>>>,
     pending_ready: Arc<Mutex<PendingReadyMap>>,
+    starting_services: Arc<Mutex<BTreeSet<String>>>,
     stopping_count: Arc<AtomicUsize>,
 }
 
@@ -179,6 +180,7 @@ impl ServiceSupervisor {
             manager_control_endpoint,
             inner: Arc::new(RwLock::new(BTreeMap::new())),
             pending_ready: Arc::new(Mutex::new(BTreeMap::new())),
+            starting_services: Arc::new(Mutex::new(BTreeSet::new())),
             stopping_count: Arc::new(AtomicUsize::new(0)),
         };
         supervisor.spawn_manager_control_server(listener);
@@ -188,107 +190,102 @@ impl ServiceSupervisor {
     /// Starts a service by spawning a runner child process.
     pub async fn start(&self, launch: ServiceLaunch) -> Result<(), ImagodError> {
         self.reap_finished_service(&launch.name).await;
+        self.reserve_start(&launch.name).await?;
+        let service_name = launch.name.clone();
+        let result = async {
+            let runner_id = uuid::Uuid::new_v4().to_string();
+            let manager_auth_secret = random_secret_hex();
+            let invocation_secret = random_secret_hex();
+            let runner_endpoint = self.runner_endpoint_for(&launch.name, &runner_id);
 
-        {
-            let inner = self.inner.read().await;
-            if inner.contains_key(&launch.name) {
-                return Err(ImagodError::new(
-                    ErrorCode::Busy,
-                    STAGE_START,
-                    format!("service '{}' is already running", launch.name),
-                ));
+            let bootstrap = RunnerBootstrap {
+                runner_id: runner_id.clone(),
+                service_name: launch.name.clone(),
+                release_hash: launch.release_hash.clone(),
+                component_path: launch.component_path.clone(),
+                args: launch.args.clone(),
+                envs: launch.envs.clone(),
+                bindings: launch.bindings.clone(),
+                manager_control_endpoint: self.manager_control_endpoint.clone(),
+                runner_endpoint: runner_endpoint.clone(),
+                manager_auth_secret: manager_auth_secret.clone(),
+                invocation_secret: invocation_secret.clone(),
+                epoch_tick_interval_ms: self.epoch_tick_interval_ms,
+            };
+
+            let (ready_tx, mut ready_rx) = oneshot::channel::<Result<(), ImagodError>>();
+            self.pending_ready
+                .lock()
+                .await
+                .insert(runner_id.clone(), ready_tx);
+
+            let mut child = match self.spawn_runner_child(&bootstrap) {
+                Ok(child) => child,
+                Err(err) => {
+                    self.pending_ready.lock().await.remove(&runner_id);
+                    return Err(err);
+                }
+            };
+
+            let stdout_log = Arc::new(Mutex::new(BoundedLogBuffer::new(
+                self.runner_log_buffer_bytes / 2,
+            )));
+            let stderr_log = Arc::new(Mutex::new(BoundedLogBuffer::new(
+                self.runner_log_buffer_bytes / 2,
+            )));
+
+            if let Some(stdout) = child.stdout.take() {
+                spawn_log_drain(stdout, stdout_log.clone(), launch.name.clone(), "stdout");
             }
-        }
+            if let Some(stderr) = child.stderr.take() {
+                spawn_log_drain(stderr, stderr_log.clone(), launch.name.clone(), "stderr");
+            }
 
-        let runner_id = uuid::Uuid::new_v4().to_string();
-        let manager_auth_secret = random_secret_hex();
-        let invocation_secret = random_secret_hex();
-        let runner_endpoint = self.runner_endpoint_for(&launch.name, &runner_id);
+            {
+                let mut inner = self.inner.write().await;
+                inner.insert(
+                    launch.name.clone(),
+                    RunningService {
+                        release_hash: launch.release_hash,
+                        started_at: now_unix_secs().to_string(),
+                        status: RunningStatus::Running,
+                        runner_id: runner_id.clone(),
+                        runner_endpoint,
+                        manager_auth_secret,
+                        invocation_secret,
+                        bindings: launch.bindings,
+                        child,
+                        _stdout_log: stdout_log,
+                        _stderr_log: stderr_log,
+                        last_heartbeat_at: now_unix_secs().to_string(),
+                    },
+                );
+            }
 
-        let bootstrap = RunnerBootstrap {
-            runner_id: runner_id.clone(),
-            service_name: launch.name.clone(),
-            release_hash: launch.release_hash.clone(),
-            component_path: launch.component_path.clone(),
-            args: launch.args.clone(),
-            envs: launch.envs.clone(),
-            bindings: launch.bindings.clone(),
-            manager_control_endpoint: self.manager_control_endpoint.clone(),
-            runner_endpoint: runner_endpoint.clone(),
-            manager_auth_secret: manager_auth_secret.clone(),
-            invocation_secret: invocation_secret.clone(),
-            epoch_tick_interval_ms: self.epoch_tick_interval_ms,
-        };
-
-        let (ready_tx, mut ready_rx) = oneshot::channel::<Result<(), ImagodError>>();
-        self.pending_ready
-            .lock()
-            .await
-            .insert(runner_id.clone(), ready_tx);
-
-        let mut child = match self.spawn_runner_child(&bootstrap) {
-            Ok(child) => child,
-            Err(err) => {
+            if let Err(err) = self
+                .write_bootstrap_to_running_service(&launch.name, &bootstrap)
+                .await
+            {
                 self.pending_ready.lock().await.remove(&runner_id);
+                self.cleanup_start_failure(&launch.name).await;
                 return Err(err);
             }
-        };
 
-        let stdout_log = Arc::new(Mutex::new(BoundedLogBuffer::new(
-            self.runner_log_buffer_bytes / 2,
-        )));
-        let stderr_log = Arc::new(Mutex::new(BoundedLogBuffer::new(
-            self.runner_log_buffer_bytes / 2,
-        )));
-
-        if let Some(stdout) = child.stdout.take() {
-            spawn_log_drain(stdout, stdout_log.clone(), launch.name.clone(), "stdout");
-        }
-        if let Some(stderr) = child.stderr.take() {
-            spawn_log_drain(stderr, stderr_log.clone(), launch.name.clone(), "stderr");
-        }
-
-        {
-            let mut inner = self.inner.write().await;
-            inner.insert(
-                launch.name.clone(),
-                RunningService {
-                    release_hash: launch.release_hash,
-                    started_at: now_unix_secs().to_string(),
-                    status: RunningStatus::Running,
-                    runner_id: runner_id.clone(),
-                    runner_endpoint,
-                    manager_auth_secret,
-                    invocation_secret,
-                    bindings: launch.bindings,
-                    child,
-                    _stdout_log: stdout_log,
-                    _stderr_log: stderr_log,
-                    last_heartbeat_at: now_unix_secs().to_string(),
-                },
-            );
-        }
-
-        if let Err(err) = self
-            .write_bootstrap_to_running_service(&launch.name, &bootstrap)
-            .await
-        {
+            let ready_result = self
+                .wait_for_runner_ready(&launch.name, &runner_id, &mut ready_rx)
+                .await;
             self.pending_ready.lock().await.remove(&runner_id);
-            self.cleanup_start_failure(&launch.name).await;
-            return Err(err);
+
+            if let Err(err) = ready_result {
+                self.cleanup_start_failure(&launch.name).await;
+                return Err(err);
+            }
+
+            Ok(())
         }
-
-        let ready_result = self
-            .wait_for_runner_ready(&launch.name, &runner_id, &mut ready_rx)
-            .await;
-        self.pending_ready.lock().await.remove(&runner_id);
-
-        if let Err(err) = ready_result {
-            self.cleanup_start_failure(&launch.name).await;
-            return Err(err);
-        }
-
-        Ok(())
+        .await;
+        self.release_start(&service_name).await;
+        result
     }
 
     /// Replaces an existing service using stop-then-start sequence.
@@ -305,6 +302,8 @@ impl ServiceSupervisor {
     pub async fn stop(&self, service_name: &str, force: bool) -> Result<(), ImagodError> {
         let _stopping_guard = StoppingCounterGuard::new(self.stopping_count.clone());
         let mut service = self.take_running(service_name).await?;
+        let _runner_endpoint_cleanup =
+            RunnerEndpointCleanupGuard::new(service.runner_endpoint.clone());
 
         if let Ok(Some(exit_status)) = service.child.try_wait() {
             log_exit_outcome(
@@ -435,6 +434,7 @@ impl ServiceSupervisor {
                 service.status,
                 status,
             );
+            remove_runner_endpoint_best_effort(&service.runner_endpoint);
         }
     }
 
@@ -560,6 +560,30 @@ impl ServiceSupervisor {
         }
     }
 
+    async fn reserve_start(&self, service_name: &str) -> Result<(), ImagodError> {
+        {
+            let mut starting_services = self.starting_services.lock().await;
+            if starting_services.contains(service_name) {
+                return Err(start_busy_error(service_name));
+            }
+            starting_services.insert(service_name.to_string());
+        }
+
+        let already_running = {
+            let inner = self.inner.read().await;
+            inner.contains_key(service_name)
+        };
+        if already_running {
+            self.release_start(service_name).await;
+            return Err(start_busy_error(service_name));
+        }
+        Ok(())
+    }
+
+    async fn release_start(&self, service_name: &str) {
+        self.starting_services.lock().await.remove(service_name);
+    }
+
     async fn cleanup_start_failure(&self, service_name: &str) {
         let service = {
             let mut inner = self.inner.write().await;
@@ -568,6 +592,7 @@ impl ServiceSupervisor {
         if let Some(mut service) = service {
             let _ = service.child.start_kill();
             let _ = service.child.wait().await;
+            remove_runner_endpoint_best_effort(&service.runner_endpoint);
         }
     }
 
@@ -633,6 +658,7 @@ impl ServiceSupervisor {
                                 service.status,
                                 status,
                             );
+                            remove_runner_endpoint_best_effort(&service.runner_endpoint);
                         }
                         true
                     }
@@ -937,13 +963,23 @@ fn spawn_log_drain<R>(
 
 /// Sends kill signal to child and waits for termination.
 async fn kill_and_wait(child: &mut Child) -> Result<(), ImagodError> {
-    child.start_kill().map_err(|e| {
-        ImagodError::new(
-            ErrorCode::Internal,
-            STAGE_STOP,
-            format!("failed to signal runner kill: {e}"),
-        )
-    })?;
+    if let Err(err) = child.start_kill() {
+        return match child.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(ImagodError::new(
+                ErrorCode::Internal,
+                STAGE_STOP,
+                format!("failed to signal runner kill: {err}"),
+            )),
+            Err(wait_err) => Err(ImagodError::new(
+                ErrorCode::Internal,
+                STAGE_STOP,
+                format!(
+                    "failed to signal runner kill: {err}; failed to check child state: {wait_err}"
+                ),
+            )),
+        };
+    }
     let _ = child.wait().await.map_err(|e| {
         ImagodError::new(
             ErrorCode::Internal,
@@ -952,6 +988,22 @@ async fn kill_and_wait(child: &mut Child) -> Result<(), ImagodError> {
         )
     })?;
     Ok(())
+}
+
+fn remove_runner_endpoint_best_effort(path: &Path) {
+    if let Err(err) = std::fs::remove_file(path)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("failed to remove runner endpoint {}: {err}", path.display());
+    }
+}
+
+fn start_busy_error(service_name: &str) -> ImagodError {
+    ImagodError::new(
+        ErrorCode::Busy,
+        STAGE_START,
+        format!("service '{service_name}' is already running"),
+    )
 }
 
 fn log_exit_outcome(
@@ -983,6 +1035,22 @@ impl StoppingCounterGuard {
 impl Drop for StoppingCounterGuard {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct RunnerEndpointCleanupGuard {
+    path: PathBuf,
+}
+
+impl RunnerEndpointCleanupGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for RunnerEndpointCleanupGuard {
+    fn drop(&mut self) {
+        remove_runner_endpoint_best_effort(&self.path);
     }
 }
 
@@ -1051,6 +1119,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[tokio::test]
+    async fn reserve_start_rejects_duplicate_service_name() {
+        let root = new_test_root("start-reserve");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+
+        supervisor
+            .reserve_start("svc-reserve")
+            .await
+            .expect("first reservation should succeed");
+        let err = supervisor
+            .reserve_start("svc-reserve")
+            .await
+            .expect_err("second reservation should fail");
+        assert_eq!(err.code, ErrorCode::Busy);
+
+        supervisor.release_start("svc-reserve").await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn bindings_allow_target_and_wit_pair_only() {
         let bindings = vec![ServiceBinding {
@@ -1072,6 +1160,25 @@ mod tests {
         let err = validate_manager_auth(&secret, "runner-1", "invalid-proof")
             .expect_err("proof validation should fail");
         assert_eq!(err.code, ErrorCode::Unauthorized);
+    }
+
+    #[tokio::test]
+    async fn kill_and_wait_succeeds_when_child_already_exited() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("child process should spawn");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let result = kill_and_wait(&mut child).await;
+        assert!(
+            result.is_ok(),
+            "already exited child should be treated as stopped"
+        );
     }
 
     #[tokio::test]
@@ -1121,6 +1228,49 @@ mod tests {
 
         server_task.abort();
         let _ = std::fs::remove_file(&runner_endpoint);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn stop_force_removes_runner_endpoint() {
+        let root = new_test_root("stop-force-cleanup");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+
+        let runner_endpoint = root
+            .join("runtime")
+            .join("ipc")
+            .join("runners")
+            .join("force-cleanup.sock");
+        if let Some(parent) = runner_endpoint.parent() {
+            std::fs::create_dir_all(parent).expect("runner endpoint parent should be created");
+        }
+        std::fs::write(&runner_endpoint, b"stale")
+            .expect("runner endpoint fixture should be created");
+
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep process should spawn");
+
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(
+                "svc-force-cleanup".to_string(),
+                new_running_service(child, "runner-force-cleanup", runner_endpoint.clone()),
+            );
+        }
+
+        let stop_result = supervisor.stop("svc-force-cleanup", true).await;
+        assert!(stop_result.is_ok(), "force stop should succeed");
+        assert!(
+            !runner_endpoint.exists(),
+            "runner endpoint should be removed after force stop"
+        );
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1205,6 +1355,56 @@ mod tests {
         assert!(err.message.contains("exited before ready"));
 
         supervisor.cleanup_start_failure(service_name).await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn reap_finished_removes_runner_endpoint() {
+        let root = new_test_root("reap-cleanup");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let service_name = "svc-reap-cleanup";
+        let runner_endpoint = root
+            .join("runtime")
+            .join("ipc")
+            .join("runners")
+            .join("reap-cleanup.sock");
+        if let Some(parent) = runner_endpoint.parent() {
+            std::fs::create_dir_all(parent).expect("runner endpoint parent should be created");
+        }
+        std::fs::write(&runner_endpoint, b"stale")
+            .expect("runner endpoint fixture should be created");
+
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("child process should spawn");
+
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(
+                service_name.to_string(),
+                new_running_service(child, "runner-reap-cleanup", runner_endpoint.clone()),
+            );
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        supervisor.reap_finished().await;
+
+        assert!(
+            !runner_endpoint.exists(),
+            "runner endpoint should be removed after reap"
+        );
+        let inner = supervisor.inner.read().await;
+        assert!(
+            !inner.contains_key(service_name),
+            "finished service should be removed from supervisor map"
+        );
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
