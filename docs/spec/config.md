@@ -20,12 +20,12 @@
 
 | キー | 型 | 制約 | 説明 |
 |---|---|---|---|
-| `name` | string | 1-63 文字、空文字不可 | サービス識別名 |
+| `name` | string | 1-63 文字、空文字不可、`/` `\` `..` 禁止 | サービス識別名 |
 | `main` | string | 相対パス、空文字不可 | 実行対象の Wasm パス |
 | `type` | string | `cli` / `http` / `socket` のいずれか | 実行モデル |
 | `target` | table | 必須 | デプロイ先設定 |
 
-`name` の推奨文字集合は英数字、`-`、`_`。実装は不正文字を明確なエラーで拒否する。
+`name` の許可文字は ASCII 英数字、`.`、`-`、`_`。`/`、`\`、`..` は path 文字として拒否する。
 
 ## 推奨キー
 
@@ -46,6 +46,8 @@
 3. `--env <name>` 指定時に読み込む環境変数ファイルは `.env.<name>` のみ。
 4. マージ範囲はトップレベルキー単位。`[env.<name>]` で指定したキーは base 側の同名キーを丸ごと置換する。
 5. 指定された env 名が存在しない場合はエラー。
+
+`<name>` の許可文字は ASCII 英数字、`.`、`-`、`_`。`/`、`\`、`..` は禁止する。
 
 ## build コマンド設定
 
@@ -93,6 +95,7 @@
 ## 異常系
 
 - 存在しない env 指定。
+- 不正な env 名（`/`、`\`、`..` を含む、または許可文字外を含む）。
 - `.env.<name>` の読み込み失敗。
 - 型不正（例: `shutdown_timeout = "abc"`）。
 - 不正な `type`。
@@ -109,6 +112,8 @@
 - `build.command` は必須キー (`name`/`main`/`type`/`target`) と `vars`/`dependencies` の検証完了後に実行する。不正設定時は実行しない。
 - `imago build --env <name>` は `build/manifest.<name>.json` を生成し、`build/manifest.json` は更新しない。
 - `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
+- CLI の `name` 検証は `imagod` と同等に `..` を拒否し、path 文字を明示的に弾く。
+- `--env <name>` は manifest 出力先と `.env.<name>` 解決の双方で同一バリデーションを適用し、path traversal を拒否する。
 
 ## `target.<name>` の接続キー（deploy 通信）
 

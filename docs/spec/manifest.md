@@ -13,6 +13,7 @@
 
 - 固定パス: `build/manifest.json`
 - `imago build --env <name>` 時: `build/manifest.<name>.json`
+  - `<name>` の許可文字は ASCII 英数字、`.`、`-`、`_`。`/`、`\`、`..` は禁止。
 
 <a id="required-fields"></a>
 ## 必須フィールド

@@ -141,6 +141,9 @@ pub fn build_project(
     target_name: &str,
     project_root: &Path,
 ) -> anyhow::Result<BuildOutput> {
+    if let Some(env_name) = env {
+        validate_env_name(env_name)?;
+    }
     let root = load_resolved_toml(project_root, env)?;
     let secrets = load_env_file(project_root, env)?;
 
@@ -200,7 +203,7 @@ pub fn build_project(
         serde_json::to_vec_pretty(&manifest).context("failed to serialize build manifest")?;
     manifest_bytes.push(b'\n');
 
-    let manifest_path = resolve_manifest_output_path(env);
+    let manifest_path = resolve_manifest_output_path(env)?;
     let output_path = project_root.join(&manifest_path);
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent).with_context(|| {
@@ -336,6 +339,7 @@ fn load_env_file(
     let Some(env_name) = env else {
         return Ok(BTreeMap::new());
     };
+    validate_env_name(env_name)?;
 
     let path = project_root.join(format!(".env.{env_name}"));
     let raw = fs::read_to_string(&path)
@@ -409,11 +413,36 @@ fn validate_service_name(name: &str) -> anyhow::Result<()> {
     if name.len() > 63 {
         return Err(anyhow!("name must be 63 characters or fewer"));
     }
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(anyhow!("name contains invalid path characters: {}", name));
+    }
     if !name
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     {
         return Err(anyhow!("name contains unsupported characters: {}", name));
+    }
+    Ok(())
+}
+
+fn validate_env_name(env_name: &str) -> anyhow::Result<()> {
+    if env_name.is_empty() {
+        return Err(anyhow!("env name must not be empty"));
+    }
+    if env_name.contains('/') || env_name.contains('\\') || env_name.contains("..") {
+        return Err(anyhow!(
+            "env name contains invalid path characters: {}",
+            env_name
+        ));
+    }
+    if !env_name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(anyhow!(
+            "env name contains unsupported characters: {}",
+            env_name
+        ));
     }
     Ok(())
 }
@@ -767,10 +796,13 @@ fn copy_materialized_wasm(source: &Path, destination: &Path) -> anyhow::Result<(
     Ok(())
 }
 
-pub fn resolve_manifest_output_path(env: Option<&str>) -> PathBuf {
+pub fn resolve_manifest_output_path(env: Option<&str>) -> anyhow::Result<PathBuf> {
     match env {
-        Some(env_name) => PathBuf::from(format!("build/manifest.{env_name}.json")),
-        None => PathBuf::from("build/manifest.json"),
+        Some(env_name) => {
+            validate_env_name(env_name)?;
+            Ok(PathBuf::from(format!("build/manifest.{env_name}.json")))
+        }
+        None => Ok(PathBuf::from("build/manifest.json")),
     }
 }
 
@@ -1316,12 +1348,106 @@ remote = "127.0.0.1:4443"
     #[test]
     fn resolve_manifest_output_path_follows_env_rule() {
         assert_eq!(
-            resolve_manifest_output_path(None),
+            resolve_manifest_output_path(None).expect("default manifest path should resolve"),
             PathBuf::from("build/manifest.json")
         );
         assert_eq!(
-            resolve_manifest_output_path(Some("prod")),
+            resolve_manifest_output_path(Some("prod"))
+                .expect("env manifest path should resolve for valid env"),
             PathBuf::from("build/manifest.prod.json")
         );
+    }
+
+    #[test]
+    fn resolve_manifest_output_path_rejects_path_traversal_env() {
+        let err = resolve_manifest_output_path(Some("../../../outside"))
+            .expect_err("path traversal env must be rejected");
+        assert!(err.to_string().contains("invalid path characters"));
+    }
+
+    #[test]
+    fn build_rejects_service_name_containing_path_traversal_sequence() {
+        let root = new_temp_dir("service-name-dotdot");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc..bad"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("service name containing path traversal must fail");
+        assert!(
+            err.to_string()
+                .contains("name contains invalid path characters")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_invalid_env_name_before_manifest_write() {
+        let root = new_temp_dir("invalid-env-name");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+
+[env."../../../outside"]
+type = "cli"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project(Some("../../../outside"), "default", &root)
+            .expect_err("invalid env name must fail before any manifest write");
+        assert!(
+            err.to_string()
+                .contains("env name contains invalid path characters")
+        );
+        assert!(!root.join("build/manifest.json").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_still_succeeds_for_valid_env_name() {
+        let root = new_temp_dir("valid-env-name");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+
+[env.prod]
+type = "http"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(&root.join(".env.prod"), b"TOKEN=ok\n");
+
+        let output = build_project(Some("prod"), "default", &root)
+            .expect("valid env name should continue to work");
+        assert_eq!(
+            output.manifest_path,
+            PathBuf::from("build/manifest.prod.json")
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }
