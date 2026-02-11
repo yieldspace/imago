@@ -82,6 +82,7 @@ flowchart TD
 処理モデル:
 
 - session ごとに `accept_bi` ループ。
+- stream 受信は `read_to_end` を 30 秒 timeout 付きで実行し、timeout 時は `E_OPERATION_TIMEOUT` で stream を閉じる。
 - stream 受信バイトは `decode_frames` でフレーム分解し、各 frame を `from_cbor::<ProtocolEnvelope<Value>>` で復号。
 - request envelope は 1 stream につき 1 件のみ許可。複数 request は `E_BAD_REQUEST`。
 - `MessageType::CommandStart` は `handle_command_start` へ分岐し、同一 stream へ `command.start response` + `command.event*` を連続送信。
@@ -181,6 +182,7 @@ spawn 遷移前 cancel 成立時:
 - `prepare`: idempotency 判定は lock 内で行い、artifact ファイル作成 (`open`/`set_len`/`flush`) は lock 外で行う
 - `prepare`: lock 外 I/O 後に lock を再取得して最終挿入し、競合時は作成済みファイルを cleanup plan で削除
 - `push`: `upload_token` 一致、range 妥当、`length <= max_chunk_size`、chunk hash 一致
+- `push`: decode 前に `chunk_b64` encoded 長を検証し、`header.length` 由来上限を超える入力を拒否
 - `push`: `inflight_writes < max_inflight_chunks`（超過時 `E_BUSY`）
 - `commit`: metadata 一致、`inflight_writes == 0`、必要 range 完了、digest 一致
 - `committed_artifact`: `committed=true` の session のみ返却

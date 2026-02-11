@@ -10,7 +10,7 @@ use anyhow::{Context, anyhow};
 use base64::Engine;
 use imago_protocol::{
     ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushChunkHeader, ArtifactPushRequest,
-    ArtifactStatus, CommandEvent, CommandEventType, CommandPayload, CommandStartRequest,
+    ArtifactStatus, ByteRange, CommandEvent, CommandEventType, CommandPayload, CommandStartRequest,
     CommandStartResponse, CommandType, DeployCommandPayload, DeployPrepareRequest,
     DeployPrepareResponse, HelloNegotiateRequest, HelloNegotiateResponse, MessageType,
     ProtocolEnvelope, from_cbor, to_cbor,
@@ -19,8 +19,11 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tokio::net::lookup_host;
-use tokio::task::JoinSet;
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt},
+    net::lookup_host,
+    task::JoinSet,
+};
 use url::Url;
 use uuid::Uuid;
 use web_transport_quinn::{Session, proto::ConnectRequest};
@@ -38,6 +41,14 @@ type Envelope = ProtocolEnvelope<Value>;
 struct UploadLimits {
     chunk_size: usize,
     max_inflight_chunks: usize,
+}
+
+#[derive(Clone, Copy)]
+struct UploadRequestContext<'a> {
+    session: &'a web_transport_quinn::Session,
+    correlation_id: Uuid,
+    deploy_id: &'a str,
+    upload_token: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,13 +186,23 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
     let prepare_response: DeployPrepareResponse =
         response_payload(request_response(&session, &prepare).await?)?;
 
-    if prepare_response.artifact_status != ArtifactStatus::Complete {
-        push_artifact_chunks(
-            &session,
+    let upload_ranges = upload_ranges_for_prepare(
+        prepare_response.artifact_status,
+        &prepare_response.missing_ranges,
+        artifact_size,
+    )?;
+    if !upload_ranges.is_empty() {
+        let upload_context = UploadRequestContext {
+            session: &session,
             correlation_id,
-            &prepare_response.deploy_id,
-            &prepare_response.upload_token,
+            deploy_id: &prepare_response.deploy_id,
+            upload_token: &prepare_response.upload_token,
+        };
+        push_artifact_ranges(
+            upload_context,
             artifact.path(),
+            artifact_size,
+            &upload_ranges,
             upload_limits,
         )
         .await?;
@@ -490,14 +511,77 @@ async fn request_events(
     Ok(envelopes)
 }
 
-async fn push_artifact_chunks(
-    session: &web_transport_quinn::Session,
-    correlation_id: Uuid,
-    deploy_id: &str,
-    upload_token: &str,
+fn upload_ranges_for_prepare(
+    status: ArtifactStatus,
+    missing_ranges: &[ByteRange],
+    artifact_size: u64,
+) -> anyhow::Result<Vec<ByteRange>> {
+    match status {
+        ArtifactStatus::Complete => Ok(Vec::new()),
+        ArtifactStatus::Missing => Ok(vec![ByteRange {
+            offset: 0,
+            length: artifact_size,
+        }]),
+        ArtifactStatus::Partial => {
+            if missing_ranges.is_empty() {
+                return Err(anyhow!(
+                    "server reported artifact_status=partial but missing_ranges is empty"
+                ));
+            }
+            Ok(missing_ranges.to_vec())
+        }
+    }
+}
+
+fn build_upload_chunk_plan(
+    ranges: &[ByteRange],
+    artifact_size: u64,
+    chunk_size: usize,
+) -> anyhow::Result<Vec<(u64, usize)>> {
+    if chunk_size == 0 {
+        return Err(anyhow!("chunk_size must be greater than 0"));
+    }
+
+    let chunk_size_u64 = u64::try_from(chunk_size).context("chunk_size conversion failed")?;
+    let mut chunks = Vec::new();
+    for range in ranges {
+        if range.length == 0 {
+            return Err(anyhow!("missing range length must be greater than 0"));
+        }
+        let range_end = range
+            .offset
+            .checked_add(range.length)
+            .ok_or_else(|| anyhow!("missing range overflow: offset+length"))?;
+        if range_end > artifact_size {
+            return Err(anyhow!(
+                "missing range is outside artifact size: end={} artifact_size={}",
+                range_end,
+                artifact_size
+            ));
+        }
+
+        let mut cursor = range.offset;
+        while cursor < range_end {
+            let remaining = range_end - cursor;
+            let chunk_len_u64 = remaining.min(chunk_size_u64);
+            let chunk_len =
+                usize::try_from(chunk_len_u64).context("chunk length conversion failed")?;
+            chunks.push((cursor, chunk_len));
+            cursor = cursor.saturating_add(chunk_len_u64);
+        }
+    }
+    Ok(chunks)
+}
+
+async fn push_artifact_ranges(
+    context: UploadRequestContext<'_>,
     artifact_path: &Path,
+    artifact_size: u64,
+    ranges: &[ByteRange],
     limits: UploadLimits,
 ) -> anyhow::Result<()> {
+    let chunk_plan = build_upload_chunk_plan(ranges, artifact_size, limits.chunk_size)?;
+
     let mut file = tokio::fs::File::open(artifact_path)
         .await
         .with_context(|| {
@@ -507,13 +591,11 @@ async fn push_artifact_chunks(
             )
         })?;
 
-    let mut offset = 0u64;
-    let mut buffer = vec![0u8; limits.chunk_size];
     let mut uploads = JoinSet::new();
-    let deploy_id = Arc::<str>::from(deploy_id.to_string());
-    let upload_token = Arc::<str>::from(upload_token.to_string());
+    let deploy_id = Arc::<str>::from(context.deploy_id.to_string());
+    let upload_token = Arc::<str>::from(context.upload_token.to_string());
 
-    loop {
+    for (offset, chunk_len) in chunk_plan {
         while uploads.len() >= limits.max_inflight_chunks {
             let completed = uploads
                 .join_next()
@@ -522,26 +604,28 @@ async fn push_artifact_chunks(
             completed.map_err(|err| anyhow!("upload task join failed: {err}"))??;
         }
 
-        let n = tokio::io::AsyncReadExt::read(&mut file, &mut buffer)
+        let mut chunk = vec![0u8; chunk_len];
+        file.seek(std::io::SeekFrom::Start(offset))
             .await
             .with_context(|| {
                 format!(
-                    "failed to read artifact bundle: {}",
+                    "failed to seek artifact bundle: {}",
                     artifact_path.display()
                 )
             })?;
-        if n == 0 {
-            break;
-        }
-
-        let chunk = buffer[..n].to_vec();
-        let task_session = session.clone();
+        file.read_exact(&mut chunk).await.with_context(|| {
+            format!(
+                "failed to read artifact bundle chunk: {}",
+                artifact_path.display()
+            )
+        })?;
+        let task_session = context.session.clone();
         let task_deploy_id = deploy_id.clone();
         let task_upload_token = upload_token.clone();
         uploads.spawn(async move {
             push_single_artifact_chunk(
                 task_session,
-                correlation_id,
+                context.correlation_id,
                 task_deploy_id,
                 task_upload_token,
                 offset,
@@ -549,7 +633,6 @@ async fn push_artifact_chunks(
             )
             .await
         });
-        offset = offset.saturating_add(n as u64);
     }
 
     while let Some(completed) = uploads.join_next().await {
@@ -867,5 +950,39 @@ mod tests {
             candidates[1],
             "0.0.0.0:0".parse::<SocketAddr>().expect("valid address")
         );
+    }
+
+    #[test]
+    fn upload_ranges_for_partial_requires_missing_ranges() {
+        let err = upload_ranges_for_prepare(ArtifactStatus::Partial, &[], 1024)
+            .expect_err("partial without missing_ranges must fail");
+        assert!(err.to_string().contains("missing_ranges"));
+    }
+
+    #[test]
+    fn build_upload_chunk_plan_uses_requested_ranges_only() {
+        let ranges = vec![
+            ByteRange {
+                offset: 0,
+                length: 4,
+            },
+            ByteRange {
+                offset: 10,
+                length: 3,
+            },
+        ];
+        let plan = build_upload_chunk_plan(&ranges, 32, 2).expect("chunk plan should build");
+        assert_eq!(plan, vec![(0, 2), (2, 2), (10, 2), (12, 1)]);
+    }
+
+    #[test]
+    fn build_upload_chunk_plan_rejects_out_of_bounds_range() {
+        let ranges = vec![ByteRange {
+            offset: 8,
+            length: 4,
+        }];
+        let err = build_upload_chunk_plan(&ranges, 10, 2)
+            .expect_err("range outside artifact size must fail");
+        assert!(err.to_string().contains("outside artifact size"));
     }
 }

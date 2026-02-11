@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, sync::Arc, time::UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    sync::Arc,
+    time::{Duration, UNIX_EPOCH},
+};
 
 use imago_protocol::{
     ArtifactPushRequest, CommandCancelRequest, CommandEvent, CommandEventType, CommandPayload,
@@ -19,6 +23,7 @@ use crate::{
 };
 
 const MAX_STREAM_BYTES: usize = 1024 * 1024 * 16;
+const STREAM_READ_TIMEOUT_SECS: u64 = 30;
 
 type Envelope = ProtocolEnvelope<Value>;
 
@@ -52,13 +57,25 @@ impl ProtocolHandler {
                 Err(_) => break,
             };
 
-            let buf = recv.read_to_end(MAX_STREAM_BYTES).await.map_err(|e| {
-                ImagodError::new(
-                    imago_protocol::ErrorCode::BadRequest,
-                    "session.read",
-                    format!("failed to read stream: {e}"),
-                )
-            })?;
+            let buf = match read_stream_with_timeout(
+                recv.read_to_end(MAX_STREAM_BYTES),
+                Duration::from_secs(STREAM_READ_TIMEOUT_SECS),
+            )
+            .await
+            {
+                Ok(buf) => buf,
+                Err(err) => {
+                    let envelope = error_envelope(
+                        MessageType::CommandEvent,
+                        Uuid::new_v4(),
+                        Uuid::new_v4(),
+                        err.to_structured(),
+                    );
+                    write_envelope(&mut send, &envelope).await?;
+                    finish_stream(&mut send)?;
+                    continue;
+                }
+            };
 
             let envelopes = match parse_stream_envelopes(&buf) {
                 Ok(v) => v,
@@ -463,6 +480,37 @@ fn parse_stream_envelopes(buf: &[u8]) -> Result<Vec<Envelope>, ImagodError> {
         .collect()
 }
 
+async fn read_stream_with_timeout<F, E>(
+    read_future: F,
+    timeout_duration: Duration,
+) -> Result<Vec<u8>, ImagodError>
+where
+    F: std::future::Future<Output = Result<Vec<u8>, E>>,
+    E: std::fmt::Display,
+{
+    match tokio::time::timeout(timeout_duration, read_future).await {
+        Ok(result) => result.map_err(|e| {
+            ImagodError::new(
+                imago_protocol::ErrorCode::BadRequest,
+                "session.read",
+                format!("failed to read stream: {e}"),
+            )
+        }),
+        Err(_) => Err(stream_read_timeout_error()),
+    }
+}
+
+fn stream_read_timeout_error() -> ImagodError {
+    ImagodError::new(
+        imago_protocol::ErrorCode::OperationTimeout,
+        "session.read",
+        format!(
+            "stream read timed out after {} seconds",
+            STREAM_READ_TIMEOUT_SECS
+        ),
+    )
+}
+
 fn ensure_non_nil_envelope_ids(envelope: &Envelope) -> Result<(), ImagodError> {
     if envelope.request_id.is_nil() {
         return Err(bad_request("protocol", "request_id must not be nil UUID"));
@@ -608,12 +656,14 @@ fn validate_push_payload(payload: &ArtifactPushRequest) -> Result<(), ImagodErro
 mod tests {
     use super::{
         ensure_command_start_request_id_match, ensure_non_nil_envelope_ids,
-        ensure_single_request_envelope, is_compatible_date_match, validate_push_payload,
+        ensure_single_request_envelope, is_compatible_date_match, read_stream_with_timeout,
+        stream_read_timeout_error, validate_push_payload,
     };
     use imago_protocol::{
         ArtifactPushChunkHeader, ArtifactPushRequest, MessageType, ProtocolEnvelope,
     };
     use serde_json::Value;
+    use std::time::Duration;
     use uuid::Uuid;
 
     #[test]
@@ -693,5 +743,23 @@ mod tests {
         };
         let err = validate_push_payload(&payload).expect_err("empty chunk_b64 should be rejected");
         assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+    }
+
+    #[tokio::test]
+    async fn read_stream_timeout_returns_operation_timeout() {
+        let err = read_stream_with_timeout(
+            std::future::pending::<Result<Vec<u8>, std::io::Error>>(),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect_err("pending read should timeout");
+        assert_eq!(err.code, imago_protocol::ErrorCode::OperationTimeout);
+    }
+
+    #[test]
+    fn stream_timeout_error_has_session_read_stage() {
+        let err = stream_read_timeout_error();
+        assert_eq!(err.code, imago_protocol::ErrorCode::OperationTimeout);
+        assert_eq!(err.stage, "session.read");
     }
 }

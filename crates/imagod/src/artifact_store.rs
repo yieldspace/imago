@@ -283,6 +283,24 @@ impl ArtifactStore {
             .with_detail("chunk_size", max_chunk_size.to_string()));
         }
 
+        let max_chunk_b64_len = max_base64_len_for_decoded_len(header.length).ok_or_else(|| {
+            ImagodError::new(
+                ErrorCode::RangeInvalid,
+                STAGE_PUSH,
+                "chunk length is too large to validate base64 payload",
+            )
+        })?;
+        if request.chunk_b64.len() > max_chunk_b64_len {
+            return Err(ImagodError::new(
+                ErrorCode::RangeInvalid,
+                STAGE_PUSH,
+                "chunk_b64 length exceeds declared header.length",
+            )
+            .with_detail("chunk_b64_len", request.chunk_b64.len().to_string())
+            .with_detail("max_chunk_b64_len", max_chunk_b64_len.to_string())
+            .with_detail("chunk_length", header.length.to_string()));
+        }
+
         let chunk = STANDARD
             .decode(request.chunk_b64.as_bytes())
             .map_err(|e| map_bad_request(STAGE_PUSH, format!("chunk_b64 decode failed: {e}")))?;
@@ -765,6 +783,12 @@ fn map_fingerprint_fragment(map: &BTreeMap<String, String>) -> String {
     fragment
 }
 
+fn max_base64_len_for_decoded_len(decoded_len: u64) -> Option<usize> {
+    let groups = decoded_len.checked_add(2)?.checked_div(3)?;
+    let encoded_len = groups.checked_mul(4)?;
+    usize::try_from(encoded_len).ok()
+}
+
 async fn digest_file(path: &Path) -> Result<String, ImagodError> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -1190,6 +1214,53 @@ mod tests {
             .await
             .expect_err("push should fail when max_inflight_chunks is reached");
         assert_eq!(err.code, ErrorCode::Busy);
+
+        cleanup_root(root);
+    }
+
+    #[tokio::test]
+    async fn push_rejects_oversized_base64_payload_before_decode() {
+        let (store, root) = new_store_with_limits(
+            "push_rejects_oversized_base64_payload_before_decode",
+            60,
+            TEST_CHUNK_SIZE,
+            TEST_MAX_INFLIGHT,
+            TEST_MAX_ARTIFACT_SIZE,
+        )
+        .await;
+        let artifact = b"abcd";
+        let artifact_digest = hex::encode(Sha256::digest(artifact));
+        let manifest_digest = hex::encode(Sha256::digest(b"manifest"));
+
+        let prepare = store
+            .prepare(DeployPrepareRequest {
+                name: "svc-b64-limit".to_string(),
+                app_type: "cli".to_string(),
+                target: BTreeMap::new(),
+                artifact_digest,
+                artifact_size: artifact.len() as u64,
+                manifest_digest,
+                idempotency_key: "idem-b64-limit".to_string(),
+                policy: BTreeMap::new(),
+            })
+            .await
+            .expect("prepare should succeed");
+
+        let err = store
+            .push(ArtifactPushRequest {
+                header: ArtifactPushChunkHeader {
+                    deploy_id: prepare.deploy_id,
+                    offset: 0,
+                    length: 1,
+                    chunk_sha256: "irrelevant".to_string(),
+                    upload_token: prepare.upload_token,
+                },
+                chunk_b64: "A".repeat(1024),
+            })
+            .await
+            .expect_err("oversized base64 payload should be rejected before decode");
+        assert_eq!(err.code, ErrorCode::RangeInvalid);
+        assert!(err.to_string().contains("chunk_b64"));
 
         cleanup_root(root);
     }

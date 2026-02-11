@@ -65,6 +65,11 @@ wire 上の共通形:
 6. `command.event*`
 7. terminal event 受信後に stream close
 
+補足:
+
+- server は request stream の read を 30 秒で timeout 監視し、無期限待機を避ける。
+- timeout 時は `E_OPERATION_TIMEOUT` を返し stream を閉じる。
+
 ### 4.2 Run / Stop（artifact なし）
 
 1. `hello.negotiate`
@@ -120,6 +125,12 @@ response:
 - `upload_token`
 - `session_expires_at`
 
+クライアント挙動:
+
+- `artifact_status=complete`: upload なし
+- `artifact_status=missing`: 全体 upload
+- `artifact_status=partial`: `missing_ranges` のみ upload（全量再送しない）
+
 ### 5.3 `artifact.push`
 
 request payload:
@@ -136,6 +147,7 @@ request payload:
 - `length <= hello.limits.chunk_size`
 - 同一 deploy session の同時 push は `hello.limits.max_inflight_chunks` を上限として `E_BUSY` で制御する。
 - `imago-cli` は `hello.limits` の `chunk_size` / `max_inflight_chunks` を実際の upload 送信パラメータに適用する。
+- server は decode 前に `chunk_b64` encoded 長を `header.length` 由来の上限で検証し、過大入力を `E_RANGE_INVALID` で拒否する。
 
 response payload (`artifact.push` ack):
 
