@@ -406,10 +406,10 @@ fn map_webtransport_client_error(err: web_transport_quinn::ClientError) -> anyho
         }
         web_transport_quinn::ClientError::HttpError(connect_err) => {
             let rendered = connect_err.to_string();
-            if let Some(status) = parse_connect_error_status(&rendered) {
-                if let Some(mapped) = map_connect_rejection_status(status, &rendered) {
-                    return mapped;
-                }
+            if let Some(status) = parse_connect_error_status(&rendered)
+                && let Some(mapped) = map_connect_rejection_status(status, &rendered)
+            {
+                return mapped;
             }
             anyhow!("failed to establish webtransport session: {connect_err}")
         }
