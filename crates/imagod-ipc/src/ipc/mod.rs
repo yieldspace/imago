@@ -8,6 +8,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use hmac::{Hmac, Mac};
 use imago_protocol::ErrorCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -19,6 +20,7 @@ pub mod dbus_p2p;
 
 const STAGE_IPC: &str = "ipc";
 const STAGE_TOKEN: &str = "ipc.token";
+type HmacSha256 = Hmac<Sha256>;
 
 #[allow(dead_code)]
 /// Boxed future used by transport traits to avoid exposing concrete future types.
@@ -230,10 +232,7 @@ pub fn compute_manager_auth_proof(
     runner_id: &str,
 ) -> Result<String, ImagodError> {
     let secret = decode_secret_hex(secret_hex)?;
-    let mut hasher = Sha256::new();
-    hasher.update(&secret);
-    hasher.update(runner_id.as_bytes());
-    Ok(hex::encode(hasher.finalize()))
+    compute_hmac_signature(&secret, runner_id.as_bytes())
 }
 
 /// Issues a short-lived invocation token signed by the given secret.
@@ -306,10 +305,19 @@ fn compute_token_signature(
             format!("claims encode failed: {e}"),
         )
     })?;
-    let mut hasher = Sha256::new();
-    hasher.update(secret);
-    hasher.update(&claims_bytes);
-    Ok(hex::encode(hasher.finalize()))
+    compute_hmac_signature(secret, &claims_bytes)
+}
+
+fn compute_hmac_signature(secret: &[u8], payload: &[u8]) -> Result<String, ImagodError> {
+    let mut mac = HmacSha256::new_from_slice(secret).map_err(|e| {
+        ImagodError::new(
+            ErrorCode::Internal,
+            STAGE_TOKEN,
+            format!("hmac initialization failed: {e}"),
+        )
+    })?;
+    mac.update(payload);
+    Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 fn decode_secret_hex(secret_hex: &str) -> Result<Vec<u8>, ImagodError> {

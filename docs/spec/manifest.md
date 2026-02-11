@@ -59,7 +59,7 @@
 
 ## `bindings` フィールド
 
-- `bindings` は `[{\"target\": \"<service>\", \"wit\": \"<interface-id>\"}, ...]` の配列。
+- `bindings` は `[{"target": "<service>", "wit": "<interface-id>"}, ...]` の配列。
 - `target` は service 名文字制約（`name` と同等）に従う。
 - `wit` は非空文字列。
 - `bindings` 未指定 manifest は `[]` と同等に扱う（後方互換）。

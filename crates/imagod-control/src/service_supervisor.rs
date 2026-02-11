@@ -18,6 +18,7 @@ use imagod_ipc::{
     ServiceBinding, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport, issue_invocation_token,
     now_unix_secs, random_secret_hex,
 };
+use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
@@ -483,11 +484,17 @@ impl ServiceSupervisor {
     }
 
     fn runner_endpoint_for(&self, service_name: &str, runner_id: &str) -> PathBuf {
+        let mut hasher = Sha256::new();
+        hasher.update(service_name.as_bytes());
+        hasher.update(b":");
+        hasher.update(runner_id.as_bytes());
+        let endpoint_hash = hex::encode(hasher.finalize());
+
         self.storage_root
             .join("runtime")
             .join("ipc")
             .join("runners")
-            .join(format!("{}-{}.sock", service_name, runner_id))
+            .join(format!("runner-{endpoint_hash}.sock"))
     }
 
     /// Waits until runner-ready arrives, child exits, or timeout elapses.
@@ -983,12 +990,54 @@ mod tests {
         PathBuf::from(format!("/tmp/iss-{prefix}-{id}"))
     }
 
+    fn new_running_service(
+        child: Child,
+        runner_id: &str,
+        runner_endpoint: PathBuf,
+    ) -> RunningService {
+        RunningService {
+            release_hash: "release-a".to_string(),
+            started_at: now_unix_secs().to_string(),
+            status: RunningStatus::Running,
+            runner_id: runner_id.to_string(),
+            runner_endpoint,
+            manager_auth_secret: random_secret_hex(),
+            invocation_secret: random_secret_hex(),
+            bindings: Vec::new(),
+            child,
+            _stdout_log: Arc::new(Mutex::new(BoundedLogBuffer::new(64))),
+            _stderr_log: Arc::new(Mutex::new(BoundedLogBuffer::new(64))),
+            last_heartbeat_at: now_unix_secs().to_string(),
+        }
+    }
+
     #[test]
     fn bounded_log_buffer_keeps_latest_bytes_only() {
         let mut buffer = BoundedLogBuffer::new(5);
         buffer.push(b"abc");
         buffer.push(b"def");
         assert_eq!(buffer.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn runner_endpoint_for_uses_fixed_length_hash_name() {
+        let root = new_test_root("endpoint-hash");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+
+        let long_service_name = "svc-".to_string() + &"x".repeat(200);
+        let endpoint = supervisor.runner_endpoint_for(&long_service_name, "runner-1");
+        let file_name = endpoint
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("runner endpoint should have UTF-8 file name");
+
+        assert!(file_name.starts_with("runner-"));
+        assert!(file_name.ends_with(".sock"));
+        assert_eq!(file_name.len(), "runner-".len() + 64 + ".sock".len());
+
+        drop(supervisor);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1044,20 +1093,7 @@ mod tests {
             let mut inner = supervisor.inner.write().await;
             inner.insert(
                 "svc-stop-timeout".to_string(),
-                RunningService {
-                    release_hash: "release-a".to_string(),
-                    started_at: now_unix_secs().to_string(),
-                    status: RunningStatus::Running,
-                    runner_id: "runner-stop-timeout".to_string(),
-                    runner_endpoint: runner_endpoint.clone(),
-                    manager_auth_secret: random_secret_hex(),
-                    invocation_secret: random_secret_hex(),
-                    bindings: Vec::new(),
-                    child,
-                    _stdout_log: Arc::new(Mutex::new(BoundedLogBuffer::new(64))),
-                    _stderr_log: Arc::new(Mutex::new(BoundedLogBuffer::new(64))),
-                    last_heartbeat_at: now_unix_secs().to_string(),
-                },
+                new_running_service(child, "runner-stop-timeout", runner_endpoint.clone()),
             );
         }
 
@@ -1074,6 +1110,90 @@ mod tests {
 
         server_task.abort();
         let _ = std::fs::remove_file(&runner_endpoint);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn wait_for_runner_ready_times_out_without_ready_signal() {
+        let root = new_test_root("ready-timeout");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let service_name = "svc-ready-timeout";
+        let runner_id = "runner-ready-timeout";
+        let runner_endpoint = root.join("runtime").join("ipc").join("ready-timeout.sock");
+
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep process should spawn");
+
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(
+                service_name.to_string(),
+                new_running_service(child, runner_id, runner_endpoint),
+            );
+        }
+
+        let (_ready_tx, mut ready_rx) = oneshot::channel::<Result<(), ImagodError>>();
+        let err = tokio::time::timeout(
+            Duration::from_secs(3),
+            supervisor.wait_for_runner_ready(service_name, runner_id, &mut ready_rx),
+        )
+        .await
+        .expect("runner ready wait should return")
+        .expect_err("runner ready wait should timeout");
+
+        assert_eq!(err.code, ErrorCode::OperationTimeout);
+        assert!(err.message.contains("did not send runner_ready in time"));
+
+        supervisor.cleanup_start_failure(service_name).await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn wait_for_runner_ready_fails_when_child_exits_early() {
+        let root = new_test_root("ready-exit");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let service_name = "svc-ready-exit";
+        let runner_id = "runner-ready-exit";
+        let runner_endpoint = root.join("runtime").join("ipc").join("ready-exit.sock");
+
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("child process should spawn");
+
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(
+                service_name.to_string(),
+                new_running_service(child, runner_id, runner_endpoint),
+            );
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (_ready_tx, mut ready_rx) = oneshot::channel::<Result<(), ImagodError>>();
+        let err = tokio::time::timeout(
+            Duration::from_secs(2),
+            supervisor.wait_for_runner_ready(service_name, runner_id, &mut ready_rx),
+        )
+        .await
+        .expect("runner ready wait should return")
+        .expect_err("runner ready wait should fail when child exits");
+
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(err.message.contains("exited before ready"));
+
+        supervisor.cleanup_start_failure(service_name).await;
         let _ = std::fs::remove_dir_all(&root);
     }
 

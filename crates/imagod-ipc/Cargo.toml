@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 base64 = { workspace = true }
 hex = { workspace = true }
+hmac = { workspace = true }
 imago-protocol = { workspace = true }
 imagod-common = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
