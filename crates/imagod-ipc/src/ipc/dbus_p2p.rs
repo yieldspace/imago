@@ -1,18 +1,16 @@
 use std::path::Path;
 
 use imago_protocol::ErrorCode;
+use imagod_common::ImagodError;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
 };
 
-use crate::{
-    error::ImagodError,
-    ipc::{
-        BoxFutureResult, ControlPlaneTransport, ControlRequest, ControlResponse,
-        InvocationTransport, RunnerInboundRequest, RunnerInboundResponse, map_ipc_error,
-    },
+use crate::ipc::{
+    BoxFutureResult, ControlPlaneTransport, ControlRequest, ControlResponse, InvocationTransport,
+    RunnerInboundRequest, RunnerInboundResponse, map_ipc_error,
 };
 
 const STAGE: &str = "ipc.dbus_p2p";

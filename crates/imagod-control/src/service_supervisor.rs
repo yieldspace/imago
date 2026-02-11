@@ -10,21 +10,18 @@ use std::{
 };
 
 use imago_protocol::ErrorCode;
+use imagod_common::ImagodError;
+use imagod_ipc::{
+    ControlRequest, ControlResponse, IpcErrorPayload, RunnerBootstrap, RunnerInboundRequest,
+    ServiceBinding, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport, issue_invocation_token,
+    now_unix_secs, random_secret_hex,
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::UnixListener,
     process::{Child, Command},
     sync::{Mutex, RwLock, oneshot, oneshot::error::TryRecvError},
     time,
-};
-
-use crate::{
-    error::ImagodError,
-    ipc::{
-        ControlRequest, ControlResponse, IpcErrorPayload, RunnerBootstrap, RunnerInboundRequest,
-        ServiceBinding, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
-        issue_invocation_token, now_unix_secs, random_secret_hex,
-    },
 };
 
 const STAGE_START: &str = "service.start";
@@ -740,7 +737,7 @@ async fn handle_control_request(
                 return control_error(ErrorCode::NotFound, "target service is not running");
             };
 
-            let claims = crate::ipc::InvocationTokenClaims {
+            let claims = imagod_ipc::InvocationTokenClaims {
                 source_service: source_service_name.clone(),
                 target_service: target_service.clone(),
                 wit: wit.clone(),

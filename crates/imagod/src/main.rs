@@ -1,25 +1,9 @@
-mod artifact_store;
-mod config;
-mod error;
-mod ipc;
-mod operation_state;
-mod orchestrator;
-mod protocol_handler;
-mod runner_process;
-mod runtime_wasmtime;
-mod service_supervisor;
-mod transport;
-
 use std::{path::PathBuf, sync::Arc};
 
-use artifact_store::ArtifactStore;
-use config::{ImagodConfig, resolve_config_path};
-use operation_state::OperationManager;
-use orchestrator::Orchestrator;
-use protocol_handler::ProtocolHandler;
-use runner_process::run_runner_from_stdin;
-use service_supervisor::ServiceSupervisor;
-use transport::build_server;
+use imagod_config::{ImagodConfig, resolve_config_path};
+use imagod_control::{ArtifactStore, OperationManager, Orchestrator, ServiceSupervisor};
+use imagod_runtime::run_runner_from_stdin;
+use imagod_server::{ProtocolHandler, build_server};
 use web_transport_quinn::http::StatusCode;
 
 const MAINTENANCE_SHUTDOWN_TIMEOUT_SECS: u64 = 30;

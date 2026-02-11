@@ -5,6 +5,8 @@ use std::{
 };
 
 use imago_protocol::{DeployCommandPayload, ErrorCode, RunCommandPayload, StopCommandPayload};
+use imagod_common::ImagodError;
+use imagod_ipc::ServiceBinding;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::fs;
@@ -12,7 +14,6 @@ use uuid::Uuid;
 
 use crate::{
     artifact_store::ArtifactStore,
-    error::ImagodError,
     service_supervisor::{ServiceLaunch, ServiceSupervisor},
 };
 
@@ -338,7 +339,7 @@ async fn build_launch_from_release(
             .bindings
             .iter()
             .filter(|binding| !binding.target.is_empty() && !binding.wit.is_empty())
-            .map(|binding| crate::ipc::ServiceBinding {
+            .map(|binding| ServiceBinding {
                 target: binding.target.clone(),
                 wit: binding.wit.clone(),
             })

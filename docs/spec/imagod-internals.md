@@ -2,7 +2,7 @@
 
 この文書は `imagod` の内部実装を、実装者と運用者が同じ前提で追える粒度で記述する。
 
-- 対象コード: `crates/imagod/src/*.rs`
+- 対象コード: `crates/imagod/src/main.rs` + `crates/imagod-*/src/*`
 - 概要仕様: [`imagod.md`](./imagod.md)
 - 関連仕様: [`deploy-protocol.md`](./deploy-protocol.md), [`observability.md`](./observability.md), [`imago-protocol.md`](./imago-protocol.md)
 
@@ -68,24 +68,24 @@ flowchart TD
 
 | モジュール | 主責務 | 主な入力 | 主な出力 | 依存方向 |
 |---|---|---|---|---|
-| `config.rs` | `imagod.toml` 読込・検証 | 設定パス | `ImagodConfig` | `error.rs`, `imago-protocol` |
-| `transport.rs` | mTLS + QUIC/WebTransport endpoint 構築（0-RTT 無効） | TLS 設定, listen_addr | `web_transport_quinn::Server` | `config.rs`, `error.rs` |
-| `protocol_handler.rs` | `ProtocolEnvelope<Value>` dispatch | bi-stream bytes | response envelope / command.event | `artifact_store`, `orchestrator`, `operation_state` |
-| `artifact_store.rs` | upload session 管理、chunk commit、GC | prepare/push/commit | prepare/ack/commit response | `error.rs` |
-| `orchestrator.rs` | deploy/run/stop の実行調停 | command payload | summary / error | `artifact_store`, `service_supervisor` |
-| `service_supervisor.rs` | runner child process 監督、control plane | `ServiceLaunch` | start/stop/replace/reap | `ipc`, `runner_process` |
-| `runner_process.rs` | runner モード実行（bootstrap, heartbeat, invoke受信） | `RunnerBootstrap` | run result / inbound response | `runtime_wasmtime`, `ipc` |
-| `runtime_wasmtime.rs` | runner 内 Wasmtime component 実行 | release path + env + shutdown | `Result<()>` | `error.rs` |
-| `ipc/*` | manager-runner/runner-runner IPC 抽象 + 実装 | control/invoke message | response/token | `error.rs` |
-| `operation_state.rs` | 短命 operation 状態管理 | UUID + state | `StateResponse`, cancel 判定 | `error.rs` |
-| `error.rs` | 内部エラーの構造化 | stage, message, code | `StructuredError` | `imago-protocol` |
-| `main.rs` | wiring と maintenance 制御 | config | process lifecycle | 全モジュール |
+| `imagod-config (lib.rs)` | `imagod.toml` 読込・検証 | 設定パス | `ImagodConfig` | `imagod-common`, `imago-protocol` |
+| `imagod-server::transport` | mTLS + QUIC/WebTransport endpoint 構築（0-RTT 無効） | TLS 設定, listen_addr | `web_transport_quinn::Server` | `imagod-config`, `imagod-common` |
+| `imagod-server::protocol_handler` | `ProtocolEnvelope<Value>` dispatch | bi-stream bytes | response envelope / command.event | `imagod-control`, `imagod-config` |
+| `imagod-control::artifact_store` | upload session 管理、chunk commit、GC | prepare/push/commit | prepare/ack/commit response | `imagod-common` |
+| `imagod-control::orchestrator` | deploy/run/stop の実行調停 | command payload | summary / error | `artifact_store`, `service_supervisor` |
+| `imagod-control::service_supervisor` | runner child process 監督、control plane | `ServiceLaunch` | start/stop/replace/reap | `imagod-ipc` |
+| `imagod-runtime::runner_process` | runner モード実行（bootstrap, heartbeat, invoke受信） | `RunnerBootstrap` | run result / inbound response | `runtime_wasmtime`, `imagod-ipc` |
+| `imagod-runtime::runtime_wasmtime` | runner 内 Wasmtime component 実行 | release path + env + shutdown | `Result<()>` | `imagod-common` |
+| `imagod-ipc::ipc/*` | manager-runner/runner-runner IPC 抽象 + 実装 | control/invoke message | response/token | `imagod-common` |
+| `imagod-control::operation_state` | 短命 operation 状態管理 | UUID + state | `StateResponse`, cancel 判定 | `imagod-common` |
+| `imagod-common (lib.rs)` | 内部エラーの構造化 | stage, message, code | `StructuredError` | `imago-protocol` |
+| `imagod (main.rs)` | wiring と maintenance 制御 | config | process lifecycle | 全 internal crate |
 
 ## 4. 通信処理モデル
 
 対象読者: 実装者, 運用者
 
-通信入口は `crates/imagod/src/protocol_handler.rs` の `handle_session`。
+通信入口は `crates/imagod-server/src/protocol_handler.rs` の `handle_session`。
 
 処理モデル:
 
@@ -119,7 +119,7 @@ sequenceDiagram
 
 対象読者: 実装者, 運用者
 
-実装箇所: `crates/imagod/src/protocol_handler.rs` `handle_command_start`
+実装箇所: `crates/imagod-server/src/protocol_handler.rs` `handle_command_start`
 
 共通処理:
 
@@ -162,7 +162,7 @@ spawn 遷移前 cancel 成立時:
 
 対象読者: 実装者, 運用者
 
-実装箇所: `crates/imagod/src/artifact_store.rs`
+実装箇所: `crates/imagod-control/src/artifact_store.rs`
 
 ### 6.1 データモデル
 
@@ -210,7 +210,7 @@ spawn 遷移前 cancel 成立時:
 
 対象読者: 実装者, 運用者
 
-実装箇所: `crates/imagod/src/orchestrator.rs`
+実装箇所: `crates/imagod-control/src/orchestrator.rs`
 
 主要経路:
 
@@ -244,7 +244,7 @@ deploy 経路の要点:
 
 対象読者: 実装者, 運用者
 
-実装箇所: `crates/imagod/src/service_supervisor.rs`
+実装箇所: `crates/imagod-control/src/service_supervisor.rs`
 
 内部状態:
 
@@ -290,7 +290,7 @@ deploy 経路の要点:
 
 対象読者: 実装者
 
-実装箇所: `crates/imagod/src/runtime_wasmtime.rs`
+実装箇所: `crates/imagod-runtime/src/runtime_wasmtime.rs`
 
 設定:
 
@@ -315,7 +315,7 @@ deploy 経路の要点:
 
 対象読者: 実装者, 運用者
 
-実装箇所: `crates/imagod/src/operation_state.rs`
+実装箇所: `crates/imagod-control/src/operation_state.rs`
 
 状態モデル:
 
@@ -352,7 +352,7 @@ stateDiagram-v2
 
 対象読者: 実装者, 運用者
 
-実装箇所: `crates/imagod/src/error.rs`
+実装箇所: `crates/imagod-common/src/lib.rs`
 
 `ImagodError` 主要項目:
 
@@ -455,17 +455,17 @@ flowchart TD
 ## 実装参照インデックス
 
 - 起動/配線: `crates/imagod/src/main.rs`
-- 設定: `crates/imagod/src/config.rs`
-- transport: `crates/imagod/src/transport.rs`
-- protocol handler: `crates/imagod/src/protocol_handler.rs`
-- artifact store: `crates/imagod/src/artifact_store.rs`
-- orchestrator: `crates/imagod/src/orchestrator.rs`
-- service supervisor: `crates/imagod/src/service_supervisor.rs`
-- runner process: `crates/imagod/src/runner_process.rs`
-- ipc transport: `crates/imagod/src/ipc/*`
-- runtime: `crates/imagod/src/runtime_wasmtime.rs`
-- operation state: `crates/imagod/src/operation_state.rs`
-- error: `crates/imagod/src/error.rs`
+- 設定: `crates/imagod-config/src/lib.rs`
+- transport: `crates/imagod-server/src/transport.rs`
+- protocol handler: `crates/imagod-server/src/protocol_handler.rs`
+- artifact store: `crates/imagod-control/src/artifact_store.rs`
+- orchestrator: `crates/imagod-control/src/orchestrator.rs`
+- service supervisor: `crates/imagod-control/src/service_supervisor.rs`
+- runner process: `crates/imagod-runtime/src/runner_process.rs`
+- ipc transport: `crates/imagod-ipc/src/ipc/*`
+- runtime: `crates/imagod-runtime/src/runtime_wasmtime.rs`
+- operation state: `crates/imagod-control/src/operation_state.rs`
+- error: `crates/imagod-common/src/lib.rs`
 
 ## 実装反映ノート（Multi-process Runner / 2026-02-11）
 
@@ -489,3 +489,16 @@ flowchart TD
 - epoch 割り込みの駆動点を変更した。
   - 旧: manager の maintenance loop で `increment_epoch`
   - 新: runner 内で `epoch_tick_interval_ms` 周期の tick task が `increment_epoch`
+
+## 実装反映ノート（Crate Split 6+1 / 2026-02-11）
+
+- `imagod` の内部実装を単一 crate から以下の 6+1 構成に分割した。
+  - `imagod`（bin, 配線）
+  - `imagod-common`
+  - `imagod-config`
+  - `imagod-ipc`
+  - `imagod-runtime`
+  - `imagod-control`
+  - `imagod-server`
+- バイナリ互換は維持し、起動方式（`imagod`, `imagod --runner`）は変更しない。
+- deploy protocol の wire 契約は変更しない（内部実装のみの再編）。

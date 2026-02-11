@@ -19,7 +19,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::error::ImagodError;
+use imagod_common::ImagodError;
 
 const STAGE_PREPARE: &str = "deploy.prepare";
 const STAGE_PUSH: &str = "artifact.push";

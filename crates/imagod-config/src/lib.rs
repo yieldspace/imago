@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::error::ImagodError;
 use imago_protocol::ErrorCode;
+use imagod_common::ImagodError;
 
 const MAX_CHUNK_SIZE_BYTES: usize = 8 * 1024 * 1024;
 

@@ -4,7 +4,7 @@ use imago_protocol::{CommandCancelResponse, CommandState, CommandType, ErrorCode
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::error::ImagodError;
+use imagod_common::ImagodError;
 
 #[derive(Debug, Clone)]
 struct OperationEntry {

@@ -72,5 +72,11 @@ epoch_tick_interval_ms = 50
 ## 6. 実装追従方針
 
 - 概要ページは責務境界と外部契約の橋渡しに限定する。
-- 内部挙動は `crates/imagod/src/*` の関数/型名で追跡し、[`imagod-internals.md`](./imagod-internals.md) を更新する。
+- 内部挙動は `crates/imagod/src/main.rs` と `crates/imagod-*/src/*` の関数/型名で追跡し、[`imagod-internals.md`](./imagod-internals.md) を更新する。
 - `imago-protocol` 側の型・検証契約を変更した場合、`imagod` 側ドキュメントを同時に更新する。
+
+## 実装反映ノート（Crate Split 6+1 / 2026-02-11）
+
+- `imagod` の内部構成を単一 crate から 6+1 構成（`imagod` + `imagod-*`）へ分割した。
+- 外部公開の実行形式は維持し、`imagod` バイナリ名と `imagod --runner` は不変。
+- deploy protocol / manifest の外部 wire 契約は変更せず、内部責務分離のみ実施した。

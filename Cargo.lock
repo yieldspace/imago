@@ -1252,24 +1252,91 @@ name = "imagod"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "imagod-config",
+ "imagod-control",
+ "imagod-runtime",
+ "imagod-server",
+ "rustls",
+ "tokio",
+ "web-transport-quinn",
+]
+
+[[package]]
+name = "imagod-common"
+version = "0.1.0"
+dependencies = [
+ "imago-protocol",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "imagod-config"
+version = "0.1.0"
+dependencies = [
+ "imago-protocol",
+ "imagod-common",
+ "serde",
+ "toml 0.8.23",
+]
+
+[[package]]
+name = "imagod-control"
+version = "0.1.0"
+dependencies = [
  "base64",
  "hex",
  "imago-protocol",
+ "imagod-common",
+ "imagod-ipc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "imagod-ipc"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hex",
+ "imago-protocol",
+ "imagod-common",
+ "serde",
+ "sha2",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "imagod-runtime"
+version = "0.1.0"
+dependencies = [
+ "imago-protocol",
+ "imagod-common",
+ "imagod-ipc",
+ "tokio",
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
+name = "imagod-server"
+version = "0.1.0"
+dependencies = [
+ "imago-protocol",
+ "imagod-common",
+ "imagod-config",
+ "imagod-control",
  "quinn",
  "rustls",
  "rustls-pemfile",
  "serde",
  "serde_json",
- "sha2",
- "tar",
- "thiserror 2.0.18",
  "tokio",
- "toml 0.8.23",
- "url",
  "uuid",
- "walkdir",
- "wasmtime",
- "wasmtime-wasi",
  "web-transport-quinn",
 ]
 

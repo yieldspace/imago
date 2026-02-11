@@ -1,0 +1,12 @@
+[package]
+name = "imagod-runtime"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+imago-protocol = { path = "../imago-protocol" }
+imagod-common = { path = "../imagod-common" }
+imagod-ipc = { path = "../imagod-ipc" }
+tokio = { version = "1.49.0", features = ["io-util", "net", "rt", "sync", "time"] }
+wasmtime = { version = "41.0.3", features = ["component-model"] }
+wasmtime-wasi = "41.0.3"

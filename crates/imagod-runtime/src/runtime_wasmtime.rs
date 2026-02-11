@@ -11,7 +11,7 @@ use wasmtime_wasi::{
     p2::{add_to_linker_async, bindings::Command},
 };
 
-use crate::error::ImagodError;
+use imagod_common::ImagodError;
 
 const STAGE_RUNTIME: &str = "runtime.start";
 

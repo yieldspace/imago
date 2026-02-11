@@ -311,3 +311,8 @@ response:
 - `imagod` の実行アーキテクチャは manager/runner のマルチプロセス構成へ変更した。
 - ただし deploy protocol の wire 契約（`MessageType`, payload schema, state/cancel semantics）は変更しない。
 - manager-runner / runner-runner 間の IPC は内部実装であり、本仕様の外部互換性に影響しない。
+
+## 実装反映ノート（Crate Split 6+1 / 2026-02-11）
+
+- `imagod` 実装を複数 crate へ分割したが、本仕様の wire 契約は変更しない。
+- 変更は `imagod` 内部モジュール境界の再編のみであり、`MessageType` と payload schema は不変。

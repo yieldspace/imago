@@ -1,10 +1,10 @@
 use std::{io::BufReader, path::Path, sync::Arc};
 
 use imago_protocol::ErrorCode;
+use imagod_common::ImagodError;
+use imagod_config::ImagodConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use web_transport_quinn::Server;
-
-use crate::{config::ImagodConfig, error::ImagodError};
 
 const STAGE_TRANSPORT: &str = "transport.setup";
 

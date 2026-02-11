@@ -10,7 +10,7 @@ use imago_protocol::ErrorCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::error::ImagodError;
+use imagod_common::ImagodError;
 
 pub mod dbus_p2p;
 
