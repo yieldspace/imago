@@ -16,6 +16,8 @@ use crate::{
 };
 
 const STAGE_ORCHESTRATE: &str = "orchestration";
+const EXPECTED_CURRENT_RELEASE_ANY: &str = "any";
+const RESTART_POLICY_NEVER: &str = "never";
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 struct Manifest {
@@ -197,6 +199,7 @@ impl Orchestrator {
                 "manifest hash metadata is invalid".to_string(),
             ));
         }
+        validate_service_name(&manifest.name)?;
 
         let manifest_digest = hex::encode(Sha256::digest(&manifest_bytes));
         if manifest_digest != committed.manifest_digest {
@@ -205,11 +208,12 @@ impl Orchestrator {
             ));
         }
 
-        let release_hash = short_hash(&committed.artifact_digest);
+        let release_hash = release_id_from_artifact_digest(&committed.artifact_digest);
         let service_root = self.storage_root.join("services").join(&manifest.name);
         let release_dir = service_root.join(&release_hash);
         let active_file = service_root.join("active_release");
         let previous_release = read_active_release(&active_file).await?;
+        validate_deploy_preconditions(payload, previous_release.as_deref())?;
 
         fs::create_dir_all(&service_root)
             .await
@@ -298,7 +302,14 @@ async fn build_launch_from_release(
     release_dir: &Path,
     manifest: &Manifest,
 ) -> Result<ServiceLaunch, ImagodError> {
-    let component_path = release_dir.join(&manifest.main);
+    let normalized_main = normalize_manifest_main_path(&manifest.main)?;
+    let component_path = release_dir.join(&normalized_main);
+    if !component_path.starts_with(release_dir) {
+        return Err(map_bad_manifest(format!(
+            "manifest main path resolved outside release dir: {}",
+            manifest.main
+        )));
+    }
     if let Err(err) = fs::metadata(&component_path).await {
         return Err(map_bad_manifest(format!(
             "component path is not accessible: {} ({err})",
@@ -435,6 +446,112 @@ fn normalize_archive_entry_path(path: &Path) -> Result<PathBuf, ImagodError> {
     Ok(normalized)
 }
 
+fn normalize_manifest_main_path(main: &str) -> Result<PathBuf, ImagodError> {
+    let path = Path::new(main);
+    if main.is_empty() || path.as_os_str().is_empty() {
+        return Err(map_bad_manifest(
+            "manifest.main must not be empty".to_string(),
+        ));
+    }
+    if path.is_absolute() {
+        return Err(map_bad_manifest(format!(
+            "manifest.main must be a relative path: {}",
+            main
+        )));
+    }
+
+    let raw = path.as_os_str().to_string_lossy();
+    if raw.len() >= 2 && raw.as_bytes()[1] == b':' {
+        return Err(map_bad_manifest(format!(
+            "manifest.main must not be windows-prefixed: {main}"
+        )));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => normalized.push(segment),
+            Component::ParentDir | Component::RootDir => {
+                return Err(map_bad_manifest(format!(
+                    "manifest.main contains invalid path traversal: {main}"
+                )));
+            }
+            _ => {
+                return Err(map_bad_manifest(format!(
+                    "manifest.main contains invalid path component: {main}"
+                )));
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(map_bad_manifest(format!(
+            "manifest.main is invalid: {main}"
+        )));
+    }
+
+    Ok(normalized)
+}
+
+fn validate_service_name(name: &str) -> Result<(), ImagodError> {
+    if name.is_empty() {
+        return Err(map_bad_manifest(
+            "manifest.name must not be empty".to_string(),
+        ));
+    }
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(map_bad_manifest(format!(
+            "manifest.name contains invalid path characters: {name}"
+        )));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(map_bad_manifest(format!(
+            "manifest.name contains unsupported characters: {name}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_deploy_preconditions(
+    payload: &DeployCommandPayload,
+    active_release: Option<&str>,
+) -> Result<(), ImagodError> {
+    if payload.restart_policy != RESTART_POLICY_NEVER {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            STAGE_ORCHESTRATE,
+            format!(
+                "unsupported restart_policy '{}': only '{}' is supported",
+                payload.restart_policy, RESTART_POLICY_NEVER
+            ),
+        ));
+    }
+
+    if payload.expected_current_release == EXPECTED_CURRENT_RELEASE_ANY {
+        return Ok(());
+    }
+
+    let actual = active_release.unwrap_or("none");
+    if payload.expected_current_release == actual {
+        return Ok(());
+    }
+
+    Err(ImagodError::new(
+        ErrorCode::PreconditionFailed,
+        STAGE_ORCHESTRATE,
+        "expected_current_release does not match active release",
+    )
+    .with_detail(
+        "expected_current_release",
+        payload.expected_current_release.clone(),
+    )
+    .with_detail("actual_current_release", actual.to_string()))
+}
+
 async fn cleanup_old_releases(
     service_root: &Path,
     new_release: &str,
@@ -496,8 +613,10 @@ async fn clean_dir(path: &Path) -> Result<(), ImagodError> {
     }
 }
 
-fn short_hash(full: &str) -> String {
-    full.chars().take(16).collect()
+fn release_id_from_artifact_digest(full: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(full.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 fn map_internal(message: String) -> ImagodError {
@@ -518,7 +637,11 @@ fn map_rollback_error(err: ImagodError) -> ImagodError {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_tar, normalize_archive_entry_path};
+    use super::{
+        extract_tar, normalize_archive_entry_path, normalize_manifest_main_path,
+        release_id_from_artifact_digest, validate_deploy_preconditions, validate_service_name,
+    };
+    use imago_protocol::DeployCommandPayload;
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -536,6 +659,73 @@ mod tests {
         assert!(normalize_archive_entry_path(Path::new("/etc/passwd")).is_err());
         assert!(normalize_archive_entry_path(Path::new("C:\\windows\\system32")).is_err());
         assert!(normalize_archive_entry_path(Path::new("")).is_err());
+    }
+
+    #[test]
+    fn release_id_is_stable_64_hex_hash() {
+        let release = release_id_from_artifact_digest("sha256:artifact-digest");
+        assert_eq!(release.len(), 64);
+        assert!(release.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn normalize_manifest_main_rejects_unsafe_paths() {
+        assert!(normalize_manifest_main_path("../evil.wasm").is_err());
+        assert!(normalize_manifest_main_path("/tmp/evil.wasm").is_err());
+        assert!(normalize_manifest_main_path("C:\\evil.wasm").is_err());
+        assert!(normalize_manifest_main_path("").is_err());
+    }
+
+    #[test]
+    fn validate_service_name_rejects_invalid_values() {
+        assert!(validate_service_name("svc-good_1.0").is_ok());
+        assert!(validate_service_name("../evil").is_err());
+        assert!(validate_service_name("svc/evil").is_err());
+        assert!(validate_service_name("svc\\evil").is_err());
+        assert!(validate_service_name("svc evil").is_err());
+        assert!(validate_service_name("").is_err());
+    }
+
+    #[test]
+    fn deploy_precondition_accepts_any_and_matching_release() {
+        let payload_any = DeployCommandPayload {
+            deploy_id: "deploy-1".to_string(),
+            expected_current_release: "any".to_string(),
+            restart_policy: "never".to_string(),
+            auto_rollback: true,
+        };
+        assert!(validate_deploy_preconditions(&payload_any, None).is_ok());
+
+        let payload_match = DeployCommandPayload {
+            deploy_id: "deploy-1".to_string(),
+            expected_current_release: "release-abc".to_string(),
+            restart_policy: "never".to_string(),
+            auto_rollback: true,
+        };
+        assert!(validate_deploy_preconditions(&payload_match, Some("release-abc")).is_ok());
+    }
+
+    #[test]
+    fn deploy_precondition_rejects_mismatch_and_bad_restart_policy() {
+        let mismatch_payload = DeployCommandPayload {
+            deploy_id: "deploy-1".to_string(),
+            expected_current_release: "release-expected".to_string(),
+            restart_policy: "never".to_string(),
+            auto_rollback: true,
+        };
+        let mismatch = validate_deploy_preconditions(&mismatch_payload, Some("release-actual"))
+            .expect_err("mismatch should be rejected");
+        assert_eq!(mismatch.code, imago_protocol::ErrorCode::PreconditionFailed);
+
+        let bad_policy_payload = DeployCommandPayload {
+            deploy_id: "deploy-1".to_string(),
+            expected_current_release: "any".to_string(),
+            restart_policy: "always".to_string(),
+            auto_rollback: true,
+        };
+        let bad_policy = validate_deploy_preconditions(&bad_policy_payload, None)
+            .expect_err("unsupported restart policy should be rejected");
+        assert_eq!(bad_policy.code, imago_protocol::ErrorCode::BadRequest);
     }
 
     #[tokio::test]

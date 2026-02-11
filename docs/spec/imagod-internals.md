@@ -219,6 +219,11 @@ deploy 経路の要点:
 
 - staging 展開
 - manifest/hash 検証
+- `manifest.name` は `[A-Za-z0-9._-]` のみ許可し、path separator/traversal を拒否
+- `manifest.main` は相対パスのみ許可し、絶対/`..`/Windows prefix を拒否
+- release ID は `sha256(artifact_digest文字列)` の 64 hex を採用（16桁切り詰めはしない）
+- `expected_current_release` は CAS で検証（`any` は比較スキップ、不一致は `E_PRECONDITION_FAILED`）
+- `restart_policy` は `never` のみ受理し、他値は `E_BAD_REQUEST`
 - `services/<name>/<release_hash>/` 配置
 - 旧 release cleanup
 - supervisor 起動置換
