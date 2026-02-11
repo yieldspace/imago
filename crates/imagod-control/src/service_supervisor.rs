@@ -20,7 +20,7 @@ use imagod_ipc::{
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
-    net::UnixListener,
+    net::{UnixListener, UnixStream},
     process::{Child, Command},
     sync::{Mutex, RwLock, oneshot, oneshot::error::TryRecvError},
     time,
@@ -327,19 +327,41 @@ impl ServiceSupervisor {
             return Ok(());
         }
 
-        let shutdown_response = DbusP2pTransport::call_runner(
-            &service.runner_endpoint,
-            &RunnerInboundRequest::ShutdownRunner,
+        let stop_deadline = time::Instant::now() + self.stop_grace_timeout;
+        let shutdown_timeout = self.runner_ready_timeout.min(self.stop_grace_timeout);
+        match time::timeout(
+            shutdown_timeout,
+            DbusP2pTransport::call_runner(
+                &service.runner_endpoint,
+                &RunnerInboundRequest::ShutdownRunner,
+            ),
         )
-        .await;
-        if let Err(err) = shutdown_response {
-            eprintln!(
-                "service graceful shutdown request failed name={} release={} error={}",
-                service_name, service.release_hash, err
-            );
+        .await
+        {
+            Ok(Ok(_response)) => {}
+            Ok(Err(err)) => {
+                eprintln!(
+                    "service graceful shutdown request failed name={} release={} error={}",
+                    service_name, service.release_hash, err
+                );
+            }
+            Err(_) => {
+                eprintln!(
+                    "service graceful shutdown request timed out name={} release={} timeout_ms={}",
+                    service_name,
+                    service.release_hash,
+                    shutdown_timeout.as_millis()
+                );
+            }
         }
 
-        match time::timeout(self.stop_grace_timeout, service.child.wait()).await {
+        let remaining = stop_deadline.saturating_duration_since(time::Instant::now());
+        if remaining.is_zero() {
+            kill_and_wait(&mut service.child).await?;
+            return Ok(());
+        }
+
+        match time::timeout(remaining, service.child.wait()).await {
             Ok(wait_result) => {
                 let status = wait_result.map_err(|e| {
                     ImagodError::new(
@@ -417,9 +439,10 @@ impl ServiceSupervisor {
     fn spawn_manager_control_server(&self, listener: UnixListener) {
         let inner = self.inner.clone();
         let pending_ready = self.pending_ready.clone();
+        let read_timeout = self.runner_ready_timeout;
         tokio::spawn(async move {
             loop {
-                let (mut stream, _) = match listener.accept().await {
+                let (stream, _) = match listener.accept().await {
                     Ok(v) => v,
                     Err(err) => {
                         eprintln!("manager control accept failed: {err}");
@@ -427,21 +450,11 @@ impl ServiceSupervisor {
                     }
                 };
 
-                let request =
-                    match DbusP2pTransport::read_message::<ControlRequest>(&mut stream).await {
-                        Ok(v) => v,
-                        Err(err) => {
-                            let _ = DbusP2pTransport::write_message(
-                                &mut stream,
-                                &ControlResponse::Error(IpcErrorPayload::from_error(&err)),
-                            )
-                            .await;
-                            continue;
-                        }
-                    };
-
-                let response = handle_control_request(&inner, &pending_ready, request).await;
-                let _ = DbusP2pTransport::write_message(&mut stream, &response).await;
+                let inner = inner.clone();
+                let pending_ready = pending_ready.clone();
+                tokio::spawn(async move {
+                    handle_control_connection(stream, inner, pending_ready, read_timeout).await;
+                });
             }
         });
     }
@@ -785,6 +798,50 @@ async fn handle_control_request(
     }
 }
 
+async fn handle_control_connection(
+    mut stream: UnixStream,
+    inner: Arc<RwLock<BTreeMap<String, RunningService>>>,
+    pending_ready: Arc<Mutex<PendingReadyMap>>,
+    read_timeout: Duration,
+) {
+    let request = match time::timeout(
+        read_timeout,
+        DbusP2pTransport::read_message::<ControlRequest>(&mut stream),
+    )
+    .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(err)) => {
+            let _ = DbusP2pTransport::write_message(
+                &mut stream,
+                &ControlResponse::Error(IpcErrorPayload::from_error(&err)),
+            )
+            .await;
+            return;
+        }
+        Err(_) => {
+            let timeout_error = IpcErrorPayload {
+                code: ErrorCode::OperationTimeout,
+                stage: STAGE_CONTROL.to_string(),
+                message: format!(
+                    "manager control request read timed out after {} ms",
+                    read_timeout.as_millis()
+                ),
+            };
+            if let Err(err) =
+                DbusP2pTransport::write_message(&mut stream, &ControlResponse::Error(timeout_error))
+                    .await
+            {
+                eprintln!("manager control timeout response write failed: {err}");
+            }
+            return;
+        }
+    };
+
+    let response = handle_control_request(&inner, &pending_ready, request).await;
+    let _ = DbusP2pTransport::write_message(&mut stream, &response).await;
+}
+
 /// Validates manager proof generated from shared secret and runner id.
 fn validate_manager_auth(secret: &str, runner_id: &str, proof: &str) -> Result<(), ImagodError> {
     let expected = compute_manager_auth_proof(secret, runner_id)?;
@@ -914,6 +971,17 @@ impl Drop for StoppingCounterGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use tokio::{net::UnixListener, process::Command};
+
+    fn new_test_root(prefix: &str) -> PathBuf {
+        let _ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let id = &uuid::Uuid::new_v4().simple().to_string()[..8];
+        PathBuf::from(format!("/tmp/iss-{prefix}-{id}"))
+    }
 
     #[test]
     fn bounded_log_buffer_keeps_latest_bytes_only() {
@@ -944,5 +1012,102 @@ mod tests {
         let err = validate_manager_auth(&secret, "runner-1", "invalid-proof")
             .expect_err("proof validation should fail");
         assert_eq!(err.code, ErrorCode::Unauthorized);
+    }
+
+    #[tokio::test]
+    async fn stop_returns_when_shutdown_ipc_hangs() {
+        let root = new_test_root("stop-timeout");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+
+        let runner_endpoint = root.join("runtime").join("ipc").join("hung-runner.sock");
+        if let Some(parent) = runner_endpoint.parent() {
+            std::fs::create_dir_all(parent).expect("runner endpoint parent should be created");
+        }
+        let _ = std::fs::remove_file(&runner_endpoint);
+        let listener = UnixListener::bind(&runner_endpoint).expect("runner listener should bind");
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept should succeed");
+            let _ = DbusP2pTransport::read_message::<RunnerInboundRequest>(&mut stream).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep process should spawn");
+
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(
+                "svc-stop-timeout".to_string(),
+                RunningService {
+                    release_hash: "release-a".to_string(),
+                    started_at: now_unix_secs().to_string(),
+                    status: RunningStatus::Running,
+                    runner_id: "runner-stop-timeout".to_string(),
+                    runner_endpoint: runner_endpoint.clone(),
+                    manager_auth_secret: random_secret_hex(),
+                    invocation_secret: random_secret_hex(),
+                    bindings: Vec::new(),
+                    child,
+                    _stdout_log: Arc::new(Mutex::new(BoundedLogBuffer::new(64))),
+                    _stderr_log: Arc::new(Mutex::new(BoundedLogBuffer::new(64))),
+                    last_heartbeat_at: now_unix_secs().to_string(),
+                },
+            );
+        }
+
+        let stop_result = tokio::time::timeout(
+            Duration::from_secs(3),
+            supervisor.stop("svc-stop-timeout", false),
+        )
+        .await;
+        assert!(stop_result.is_ok(), "stop should not hang");
+        assert!(
+            stop_result.expect("timeout should not elapse").is_ok(),
+            "stop should succeed after timeout fallback"
+        );
+
+        server_task.abort();
+        let _ = std::fs::remove_file(&runner_endpoint);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn manager_control_idle_connection_does_not_block_next_request() {
+        let root = new_test_root("control-parallel");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+
+        let idle = tokio::net::UnixStream::connect(&supervisor.manager_control_endpoint)
+            .await
+            .expect("idle connection should open");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            DbusP2pTransport::call_control(
+                &supervisor.manager_control_endpoint,
+                &ControlRequest::Heartbeat {
+                    runner_id: "missing-runner".to_string(),
+                    manager_auth_proof: "proof".to_string(),
+                },
+            ),
+        )
+        .await
+        .expect("second request should not be blocked")
+        .expect("call_control should return response");
+
+        match response {
+            ControlResponse::Error(err) => assert_eq!(err.code, ErrorCode::NotFound),
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        drop(idle);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
