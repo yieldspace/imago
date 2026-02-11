@@ -4,6 +4,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     path::{Component, Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, anyhow};
@@ -12,8 +13,8 @@ use imago_protocol::{
     ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushChunkHeader, ArtifactPushRequest,
     ArtifactStatus, ByteRange, CommandEvent, CommandEventType, CommandPayload, CommandStartRequest,
     CommandStartResponse, CommandType, DeployCommandPayload, DeployPrepareRequest,
-    DeployPrepareResponse, HelloNegotiateRequest, HelloNegotiateResponse, MessageType,
-    ProtocolEnvelope, from_cbor, to_cbor,
+    DeployPrepareResponse, ErrorCode, HelloNegotiateRequest, HelloNegotiateResponse, MessageType,
+    ProtocolEnvelope, StructuredError, from_cbor, to_cbor,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
@@ -38,6 +39,9 @@ const COMPATIBILITY_DATE: &str = "2026-02-10";
 const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
 const DEFAULT_MAX_INFLIGHT_CHUNKS: usize = 16;
 const TRANSPORT_CONNECT_STAGE: &str = "transport.connect";
+const UPLOAD_MAX_ATTEMPTS: usize = 4;
+const UPLOAD_RETRY_BASE_BACKOFF_MS: u64 = 250;
+const UPLOAD_RETRY_MAX_BACKOFF_MS: u64 = 1000;
 
 type Envelope = ProtocolEnvelope<Value>;
 
@@ -54,6 +58,52 @@ struct UploadRequestContext<'a> {
     deploy_id: &'a str,
     upload_token: &'a str,
 }
+
+struct UploadPhaseInputs<'a> {
+    target: &'a build::DeployTargetConfig,
+    target_for_protocol: &'a BTreeMap<String, String>,
+    policy: &'a BTreeMap<String, String>,
+    manifest: &'a Manifest,
+    artifact_path: &'a Path,
+    artifact_digest: &'a str,
+    artifact_size: u64,
+    manifest_digest: &'a str,
+    idempotency_key: &'a str,
+    correlation_id: Uuid,
+}
+
+struct UploadPhaseResult {
+    session: Session,
+    deploy_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct ServerResponseError {
+    error: StructuredError,
+}
+
+impl std::fmt::Display for ServerResponseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "server error: {} ({:?}) at {}",
+            self.error.message, self.error.code, self.error.stage
+        )
+    }
+}
+
+impl std::error::Error for ServerResponseError {}
+
+#[derive(Debug)]
+struct CommitNotVerifiedError;
+
+impl std::fmt::Display for CommitNotVerifiedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "artifact.commit returned verified=false")
+    }
+}
+
+impl std::error::Error for CommitNotVerifiedError {}
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
@@ -137,89 +187,32 @@ async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> 
     let artifact = build_artifact_bundle_file(&manifest, &manifest_path, project_root)?;
     let (artifact_digest, artifact_size) = compute_file_sha256_and_size(artifact.path())?;
     let manifest_digest = hex::encode(Sha256::digest(&manifest_bytes));
-
-    let session = connect_target(&target).await?;
     let correlation_id = Uuid::new_v4();
-
-    let hello = request_envelope(
-        MessageType::HelloNegotiate,
-        Uuid::new_v4(),
-        correlation_id,
-        &HelloNegotiateRequest {
-            compatibility_date: COMPATIBILITY_DATE.to_string(),
-            client_version: env!("CARGO_PKG_VERSION").to_string(),
-            required_features: vec![
-                "deploy.prepare".to_string(),
-                "artifact.push".to_string(),
-                "artifact.commit".to_string(),
-                "command.start".to_string(),
-                "command.event".to_string(),
-            ],
-        },
-    )?;
-    let hello_response: HelloNegotiateResponse =
-        response_payload(request_response(&session, &hello).await?)?;
-    if !hello_response.accepted {
-        return Err(anyhow!("hello.negotiate was rejected by server"));
-    }
-    let upload_limits = parse_upload_limits(&hello_response)?;
-
-    let prepare = request_envelope(
-        MessageType::DeployPrepare,
-        Uuid::new_v4(),
-        correlation_id,
-        &DeployPrepareRequest {
-            name: manifest.name.clone(),
-            app_type: manifest.app_type.clone(),
-            target: normalize_target_for_protocol(&target),
-            artifact_digest: artifact_digest.clone(),
-            artifact_size,
-            manifest_digest: manifest_digest.clone(),
-            idempotency_key: format!("{}:{}:{}", manifest.name, artifact_digest, manifest_digest),
-            policy: BTreeMap::new(),
-        },
-    )?;
-    let prepare_response: DeployPrepareResponse =
-        response_payload(request_response(&session, &prepare).await?)?;
-
-    let upload_ranges = upload_ranges_for_prepare(
-        prepare_response.artifact_status,
-        &prepare_response.missing_ranges,
+    let target_for_protocol = normalize_target_for_protocol(&target);
+    let policy = BTreeMap::new();
+    let idempotency_key = build_idempotency_key(
+        &manifest.name,
+        &manifest.app_type,
+        &target_for_protocol,
+        &policy,
+        &artifact_digest,
         artifact_size,
-    )?;
-    if !upload_ranges.is_empty() {
-        let upload_context = UploadRequestContext {
-            session: &session,
-            correlation_id,
-            deploy_id: &prepare_response.deploy_id,
-            upload_token: &prepare_response.upload_token,
-        };
-        push_artifact_ranges(
-            upload_context,
-            artifact.path(),
-            artifact_size,
-            &upload_ranges,
-            upload_limits,
-        )
-        .await?;
-    }
+        &manifest_digest,
+    );
 
-    let commit = request_envelope(
-        MessageType::ArtifactCommit,
-        Uuid::new_v4(),
+    let upload_result = run_upload_phase_with_resume(UploadPhaseInputs {
+        target: &target,
+        target_for_protocol: &target_for_protocol,
+        policy: &policy,
+        manifest: &manifest,
+        artifact_path: artifact.path(),
+        artifact_digest: &artifact_digest,
+        artifact_size,
+        manifest_digest: &manifest_digest,
+        idempotency_key: &idempotency_key,
         correlation_id,
-        &ArtifactCommitRequest {
-            deploy_id: prepare_response.deploy_id.clone(),
-            artifact_digest: artifact_digest.clone(),
-            artifact_size,
-            manifest_digest: manifest_digest.clone(),
-        },
-    )?;
-    let commit_response: ArtifactCommitResponse =
-        response_payload(request_response(&session, &commit).await?)?;
-    if !commit_response.verified {
-        return Err(anyhow!("artifact.commit returned verified=false"));
-    }
+    })
+    .await?;
 
     let command_request_id = Uuid::new_v4();
     let command = build_command_start_envelope(
@@ -227,14 +220,14 @@ async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> 
         command_request_id,
         CommandType::Deploy,
         CommandPayload::Deploy(DeployCommandPayload {
-            deploy_id: prepare_response.deploy_id.clone(),
+            deploy_id: upload_result.deploy_id.clone(),
             expected_current_release: "any".to_string(),
             restart_policy: "never".to_string(),
             auto_rollback: true,
         }),
     )?;
 
-    let responses = request_events(&session, &command).await?;
+    let responses = request_events(&upload_result.session, &command).await?;
     if responses.is_empty() {
         return Err(anyhow!("command.start returned empty response stream"));
     }
@@ -281,6 +274,227 @@ async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> 
         CommandEventType::Canceled => Err(anyhow!("deploy was canceled")),
         _ => Err(anyhow!("unexpected terminal event")),
     }
+}
+
+async fn run_upload_phase_with_resume(
+    inputs: UploadPhaseInputs<'_>,
+) -> anyhow::Result<UploadPhaseResult> {
+    for attempt in 1..=UPLOAD_MAX_ATTEMPTS {
+        match run_upload_phase_once(&inputs).await {
+            Ok(result) => return Ok(result),
+            Err(err) => {
+                if attempt >= UPLOAD_MAX_ATTEMPTS || !should_retry_upload_error(&err) {
+                    return Err(err.context(format!(
+                        "upload phase failed on attempt {attempt}/{UPLOAD_MAX_ATTEMPTS}"
+                    )));
+                }
+
+                let backoff = retry_backoff_duration(attempt);
+                eprintln!(
+                    "{}",
+                    format_retry_log_message(
+                        attempt,
+                        UPLOAD_MAX_ATTEMPTS,
+                        backoff,
+                        &summarize_retry_error(&err),
+                    )
+                );
+                tokio::time::sleep(backoff).await;
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "upload retry loop exhausted unexpectedly without a terminal result"
+    ))
+}
+
+async fn run_upload_phase_once(
+    inputs: &UploadPhaseInputs<'_>,
+) -> anyhow::Result<UploadPhaseResult> {
+    let session = connect_target(inputs.target).await?;
+
+    let hello = request_envelope(
+        MessageType::HelloNegotiate,
+        Uuid::new_v4(),
+        inputs.correlation_id,
+        &HelloNegotiateRequest {
+            compatibility_date: COMPATIBILITY_DATE.to_string(),
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            required_features: vec![
+                "deploy.prepare".to_string(),
+                "artifact.push".to_string(),
+                "artifact.commit".to_string(),
+                "command.start".to_string(),
+                "command.event".to_string(),
+            ],
+        },
+    )?;
+    let hello_response: HelloNegotiateResponse =
+        response_payload(request_response(&session, &hello).await?)?;
+    if !hello_response.accepted {
+        return Err(anyhow!("hello.negotiate was rejected by server"));
+    }
+    let upload_limits = parse_upload_limits(&hello_response)?;
+
+    let prepare = request_envelope(
+        MessageType::DeployPrepare,
+        Uuid::new_v4(),
+        inputs.correlation_id,
+        &DeployPrepareRequest {
+            name: inputs.manifest.name.clone(),
+            app_type: inputs.manifest.app_type.clone(),
+            target: inputs.target_for_protocol.clone(),
+            artifact_digest: inputs.artifact_digest.to_string(),
+            artifact_size: inputs.artifact_size,
+            manifest_digest: inputs.manifest_digest.to_string(),
+            idempotency_key: inputs.idempotency_key.to_string(),
+            policy: inputs.policy.clone(),
+        },
+    )?;
+    let prepare_response: DeployPrepareResponse =
+        response_payload(request_response(&session, &prepare).await?)?;
+
+    let upload_ranges = upload_ranges_for_prepare(
+        prepare_response.artifact_status,
+        &prepare_response.missing_ranges,
+        inputs.artifact_size,
+    )?;
+    if !upload_ranges.is_empty() {
+        let upload_context = UploadRequestContext {
+            session: &session,
+            correlation_id: inputs.correlation_id,
+            deploy_id: &prepare_response.deploy_id,
+            upload_token: &prepare_response.upload_token,
+        };
+        push_artifact_ranges(
+            upload_context,
+            inputs.artifact_path,
+            inputs.artifact_size,
+            &upload_ranges,
+            upload_limits,
+        )
+        .await?;
+    }
+
+    let commit = request_envelope(
+        MessageType::ArtifactCommit,
+        Uuid::new_v4(),
+        inputs.correlation_id,
+        &ArtifactCommitRequest {
+            deploy_id: prepare_response.deploy_id.clone(),
+            artifact_digest: inputs.artifact_digest.to_string(),
+            artifact_size: inputs.artifact_size,
+            manifest_digest: inputs.manifest_digest.to_string(),
+        },
+    )?;
+    let commit_response: ArtifactCommitResponse =
+        response_payload(request_response(&session, &commit).await?)?;
+    if !commit_response.verified {
+        return Err(CommitNotVerifiedError.into());
+    }
+
+    Ok(UploadPhaseResult {
+        session,
+        deploy_id: prepare_response.deploy_id,
+    })
+}
+
+fn should_retry_upload_error(err: &anyhow::Error) -> bool {
+    if contains_commit_not_verified_error(err) {
+        return false;
+    }
+
+    match find_server_response_error(err) {
+        Some(server_error) => {
+            if is_non_retryable_error_code(server_error.error.code) {
+                return false;
+            }
+            if server_error.error.code == ErrorCode::Busy {
+                return true;
+            }
+            server_error.error.retryable
+        }
+        None => !contains_unauthorized_marker(err),
+    }
+}
+
+fn retry_backoff_duration(retry_index: usize) -> Duration {
+    let shift = retry_index.saturating_sub(1).min(8) as u32;
+    let factor = 1u64 << shift;
+    let millis = UPLOAD_RETRY_BASE_BACKOFF_MS
+        .saturating_mul(factor)
+        .min(UPLOAD_RETRY_MAX_BACKOFF_MS);
+    Duration::from_millis(millis)
+}
+
+fn summarize_retry_error(err: &anyhow::Error) -> String {
+    if let Some(server_error) = find_server_response_error(err) {
+        return format!(
+            "{:?} at {}",
+            server_error.error.code, server_error.error.stage
+        );
+    }
+    truncate_log_message(&err.to_string(), 160)
+}
+
+fn format_retry_log_message(
+    attempt: usize,
+    total_attempts: usize,
+    backoff: Duration,
+    reason: &str,
+) -> String {
+    format!(
+        "upload attempt {attempt}/{total_attempts} failed, retrying in {}ms (reason={reason})",
+        backoff.as_millis()
+    )
+}
+
+fn truncate_log_message(message: &str, max_chars: usize) -> String {
+    let len = message.chars().count();
+    if len <= max_chars {
+        return message.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    let head = message
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    format!("{head}...")
+}
+
+fn find_server_response_error(err: &anyhow::Error) -> Option<&ServerResponseError> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<ServerResponseError>())
+}
+
+fn contains_commit_not_verified_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<CommitNotVerifiedError>().is_some())
+}
+
+fn is_non_retryable_error_code(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::Unauthorized
+            | ErrorCode::BadRequest
+            | ErrorCode::BadManifest
+            | ErrorCode::IdempotencyConflict
+            | ErrorCode::RangeInvalid
+            | ErrorCode::ChunkHashMismatch
+            | ErrorCode::StorageQuota
+            | ErrorCode::PreconditionFailed
+    )
+}
+
+fn contains_unauthorized_marker(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.to_string().contains("E_UNAUTHORIZED"))
 }
 
 async fn connect_target(target: &build::DeployTargetConfig) -> anyhow::Result<Session> {
@@ -762,15 +976,48 @@ async fn push_single_artifact_chunk(
 
 fn response_payload<T: serde::de::DeserializeOwned>(response: Envelope) -> anyhow::Result<T> {
     if let Some(error) = response.error {
-        return Err(anyhow!(
-            "server error: {} ({:?}) at {}",
-            error.message,
-            error.code,
-            error.stage
-        ));
+        return Err(ServerResponseError { error }.into());
     }
     serde_json::from_value(response.payload)
         .map_err(|e| anyhow!("response payload decode failed: {e}"))
+}
+
+fn build_idempotency_key(
+    name: &str,
+    app_type: &str,
+    target: &BTreeMap<String, String>,
+    policy: &BTreeMap<String, String>,
+    artifact_digest: &str,
+    artifact_size: u64,
+    manifest_digest: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    update_canonical_field(&mut hasher, "name", name);
+    update_canonical_field(&mut hasher, "app_type", app_type);
+    update_canonical_field(&mut hasher, "artifact_digest", artifact_digest);
+    update_canonical_field(&mut hasher, "artifact_size", &artifact_size.to_string());
+    update_canonical_field(&mut hasher, "manifest_digest", manifest_digest);
+    update_canonical_map(&mut hasher, "target", target);
+    update_canonical_map(&mut hasher, "policy", policy);
+    format!("deploy:{}", hex::encode(hasher.finalize()))
+}
+
+fn update_canonical_field(hasher: &mut Sha256, key: &str, value: &str) {
+    hasher.update(key.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(value.len().to_string().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(value.as_bytes());
+    hasher.update(b"\0");
+}
+
+fn update_canonical_map(hasher: &mut Sha256, key: &str, map: &BTreeMap<String, String>) {
+    hasher.update(key.as_bytes());
+    hasher.update(b"\0");
+    for (entry_key, entry_value) in map {
+        update_canonical_field(hasher, entry_key, entry_value);
+    }
+    hasher.update(b"\0");
 }
 
 fn normalize_target_for_protocol(target: &build::DeployTargetConfig) -> BTreeMap<String, String> {
@@ -1163,6 +1410,23 @@ mod tests {
         assert!(err.to_string().contains("chunk_size"));
     }
 
+    fn sample_structured_error(code: ErrorCode, retryable: bool) -> StructuredError {
+        StructuredError {
+            code,
+            message: "error".to_string(),
+            retryable,
+            stage: "upload".to_string(),
+            details: BTreeMap::new(),
+        }
+    }
+
+    fn sample_server_error(code: ErrorCode, retryable: bool) -> anyhow::Error {
+        ServerResponseError {
+            error: sample_structured_error(code, retryable),
+        }
+        .into()
+    }
+
     #[test]
     fn client_bind_candidates_include_ipv6_then_ipv4_fallback() {
         let candidates = client_bind_candidates();
@@ -1208,6 +1472,170 @@ mod tests {
         let err = build_upload_chunk_plan(&ranges, 10, 2)
             .expect_err("range outside artifact size must fail");
         assert!(err.to_string().contains("outside artifact size"));
+    }
+
+    #[test]
+    fn idempotency_key_is_stable_for_same_payload() {
+        let target = BTreeMap::from([
+            ("remote".to_string(), "127.0.0.1:4443".to_string()),
+            ("server_name".to_string(), "imagod.local".to_string()),
+        ]);
+        let policy = BTreeMap::from([("rollout".to_string(), "safe".to_string())]);
+
+        let first = build_idempotency_key(
+            "svc",
+            "cli",
+            &target,
+            &policy,
+            "digest-a",
+            1024,
+            "manifest-a",
+        );
+        let second = build_idempotency_key(
+            "svc",
+            "cli",
+            &target,
+            &policy,
+            "digest-a",
+            1024,
+            "manifest-a",
+        );
+
+        assert_eq!(first, second);
+        assert!(first.starts_with("deploy:"));
+        assert_eq!(first.len(), "deploy:".len() + 64);
+    }
+
+    #[test]
+    fn idempotency_key_changes_when_target_changes() {
+        let key_a = build_idempotency_key(
+            "svc",
+            "cli",
+            &BTreeMap::from([("remote".to_string(), "127.0.0.1:4443".to_string())]),
+            &BTreeMap::new(),
+            "digest-a",
+            1024,
+            "manifest-a",
+        );
+        let key_b = build_idempotency_key(
+            "svc",
+            "cli",
+            &BTreeMap::from([("remote".to_string(), "127.0.0.1:5555".to_string())]),
+            &BTreeMap::new(),
+            "digest-a",
+            1024,
+            "manifest-a",
+        );
+
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn idempotency_key_changes_when_policy_changes() {
+        let key_a = build_idempotency_key(
+            "svc",
+            "cli",
+            &BTreeMap::new(),
+            &BTreeMap::from([("rollout".to_string(), "safe".to_string())]),
+            "digest-a",
+            1024,
+            "manifest-a",
+        );
+        let key_b = build_idempotency_key(
+            "svc",
+            "cli",
+            &BTreeMap::new(),
+            &BTreeMap::from([("rollout".to_string(), "fast".to_string())]),
+            "digest-a",
+            1024,
+            "manifest-a",
+        );
+
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn retry_classification_retries_busy_or_internal() {
+        assert!(should_retry_upload_error(&sample_server_error(
+            ErrorCode::Busy,
+            false
+        )));
+        assert!(should_retry_upload_error(&sample_server_error(
+            ErrorCode::Busy,
+            true
+        )));
+        assert!(should_retry_upload_error(&sample_server_error(
+            ErrorCode::Internal,
+            true
+        )));
+    }
+
+    #[test]
+    fn retry_classification_does_not_retry_bad_request_or_unauthorized() {
+        assert!(!should_retry_upload_error(&sample_server_error(
+            ErrorCode::BadRequest,
+            true
+        )));
+        assert!(!should_retry_upload_error(&sample_server_error(
+            ErrorCode::Unauthorized,
+            true
+        )));
+    }
+
+    #[test]
+    fn retry_backoff_is_bounded_and_increasing() {
+        assert_eq!(retry_backoff_duration(1), Duration::from_millis(250));
+        assert_eq!(retry_backoff_duration(2), Duration::from_millis(500));
+        assert_eq!(retry_backoff_duration(3), Duration::from_millis(1000));
+        assert_eq!(retry_backoff_duration(4), Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn retry_classification_does_not_retry_when_server_marks_non_retryable() {
+        assert!(!should_retry_upload_error(&sample_server_error(
+            ErrorCode::Internal,
+            false
+        )));
+    }
+
+    #[test]
+    fn retry_classification_retries_busy_even_when_server_marks_non_retryable() {
+        assert!(should_retry_upload_error(&sample_server_error(
+            ErrorCode::Busy,
+            false
+        )));
+    }
+
+    #[test]
+    fn retry_classification_does_not_retry_unstructured_unauthorized_error() {
+        let err = anyhow!(
+            "server error: certificate authentication failed (E_UNAUTHORIZED) at transport.connect"
+        );
+        assert!(!should_retry_upload_error(&err));
+    }
+
+    #[test]
+    fn retry_classification_does_not_retry_commit_not_verified_error() {
+        let err: anyhow::Error = CommitNotVerifiedError.into();
+        assert!(!should_retry_upload_error(&err));
+    }
+
+    #[test]
+    fn truncate_log_message_never_exceeds_max_chars() {
+        assert_eq!(truncate_log_message("abc", 3), "abc");
+        assert_eq!(truncate_log_message("abcdef", 6), "abcdef");
+        assert_eq!(truncate_log_message("abcdef", 5), "ab...");
+        assert_eq!(truncate_log_message("abcdef", 3), "...");
+        assert_eq!(truncate_log_message("abcdef", 2), "..");
+        assert_eq!(truncate_log_message("abcdef", 0), "");
+    }
+
+    #[test]
+    fn format_retry_log_message_reports_failed_attempt() {
+        let message = format_retry_log_message(1, 4, Duration::from_millis(250), "E_BUSY");
+        assert!(message.contains("upload attempt 1/4 failed"));
+        assert!(message.contains("retrying in 250ms"));
+        assert!(message.contains("reason=E_BUSY"));
     }
 
     #[test]
