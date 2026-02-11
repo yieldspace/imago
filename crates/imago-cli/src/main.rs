@@ -1,8 +1,6 @@
 mod cli;
 mod commands;
 
-use std::path::Path;
-
 use clap::Parser;
 use cli::{CertsCommands, CertsSubcommandArgs, Cli, Commands};
 use commands::CommandResult;
@@ -18,7 +16,7 @@ fn dispatch(cli: Cli) -> CommandResult {
 }
 
 #[cfg(test)]
-fn dispatch_with_project_root(cli: Cli, project_root: &Path) -> CommandResult {
+fn dispatch_with_project_root(cli: Cli, project_root: &std::path::Path) -> CommandResult {
     match cli.command {
         Commands::Build(args) => commands::build::run_with_project_root(args, project_root),
         Commands::Deploy(args) => commands::deploy::run_with_project_root(args, project_root),

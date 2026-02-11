@@ -1060,9 +1060,8 @@ mod tests {
 
         let file = std::fs::File::open(bundle.path()).expect("bundle file should open");
         let mut archive = tar::Archive::new(file);
-        let mut entries = archive.entries().expect("tar entries should be readable");
         let mut names = Vec::new();
-        while let Some(entry) = entries.next() {
+        for entry in archive.entries().expect("tar entries should be readable") {
             let entry = entry.expect("tar entry should read");
             let path = entry.path().expect("entry path should parse");
             names.push(path.to_string_lossy().to_string());
