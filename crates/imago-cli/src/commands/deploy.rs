@@ -37,6 +37,7 @@ const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
 const COMPATIBILITY_DATE: &str = "2026-02-10";
 const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
 const DEFAULT_MAX_INFLIGHT_CHUNKS: usize = 16;
+const TRANSPORT_CONNECT_STAGE: &str = "transport.connect";
 
 type Envelope = ProtocolEnvelope<Value>;
 
@@ -309,9 +310,10 @@ async fn connect_target(target: &build::DeployTargetConfig) -> anyhow::Result<Se
     let endpoint_info = parse_remote_endpoint(&target.remote).await?;
     let configured_host = target.server_name.as_deref().unwrap_or(&endpoint_info.host);
     let sni = configured_host.to_string();
-    let connection = endpoint
-        .connect_with(quic_config, endpoint_info.remote_addr, &sni)?
-        .await?;
+    let connecting = endpoint
+        .connect_with(quic_config, endpoint_info.remote_addr, &sni)
+        .map_err(|e| anyhow!("failed to start quic connection: {e}"))?;
+    let connection = connecting.await.map_err(map_connect_connection_error)?;
 
     let request_host = format_host_for_url(configured_host);
     let request_url = Url::parse(&format!("https://{}:{}/", request_host, endpoint_info.port))
@@ -319,7 +321,100 @@ async fn connect_target(target: &build::DeployTargetConfig) -> anyhow::Result<Se
     let request = ConnectRequest::new(request_url);
     Session::connect(connection, request)
         .await
-        .map_err(Into::into)
+        .map_err(map_webtransport_client_error)
+}
+
+fn is_certificate_alert_transport_code(code: quinn::TransportErrorCode) -> bool {
+    let raw_code = u64::from(code);
+    if !(0x100..0x200).contains(&raw_code) {
+        return false;
+    }
+    let alert_code = (raw_code & 0xff) as u8;
+    is_certificate_alert_code(alert_code)
+}
+
+fn is_certificate_alert_code(alert_code: u8) -> bool {
+    matches!(
+        alert_code,
+        code if code == u8::from(rustls::AlertDescription::NoCertificate)
+            || code == u8::from(rustls::AlertDescription::BadCertificate)
+            || code == u8::from(rustls::AlertDescription::UnsupportedCertificate)
+            || code == u8::from(rustls::AlertDescription::CertificateRevoked)
+            || code == u8::from(rustls::AlertDescription::CertificateExpired)
+            || code == u8::from(rustls::AlertDescription::CertificateUnknown)
+            || code == u8::from(rustls::AlertDescription::UnknownCA)
+            || code == u8::from(rustls::AlertDescription::AccessDenied)
+            || code == u8::from(rustls::AlertDescription::BadCertificateStatusResponse)
+            || code == u8::from(rustls::AlertDescription::BadCertificateHashValue)
+            || code == u8::from(rustls::AlertDescription::CertificateRequired)
+    )
+}
+
+fn is_certificate_auth_connection_error(err: &quinn::ConnectionError) -> bool {
+    match err {
+        quinn::ConnectionError::TransportError(transport_error) => {
+            is_certificate_alert_transport_code(transport_error.code)
+        }
+        quinn::ConnectionError::ConnectionClosed(close) => {
+            is_certificate_alert_transport_code(close.error_code)
+        }
+        _ => false,
+    }
+}
+
+fn unauthorized_connect_error(source: impl std::fmt::Display) -> anyhow::Error {
+    anyhow!(
+        "server error: certificate authentication failed (E_UNAUTHORIZED) at {TRANSPORT_CONNECT_STAGE}: {source}"
+    )
+}
+
+fn map_connect_rejection_status(
+    status: web_transport_quinn::http::StatusCode,
+    source: impl std::fmt::Display,
+) -> Option<anyhow::Error> {
+    if status == web_transport_quinn::http::StatusCode::UNAUTHORIZED
+        || status == web_transport_quinn::http::StatusCode::FORBIDDEN
+    {
+        return Some(unauthorized_connect_error(source));
+    }
+    None
+}
+
+fn parse_connect_error_status(message: &str) -> Option<web_transport_quinn::http::StatusCode> {
+    message
+        .split(|ch: char| !ch.is_ascii_digit())
+        .find_map(|part| {
+            if part.len() != 3 {
+                return None;
+            }
+            let code = part.parse::<u16>().ok()?;
+            web_transport_quinn::http::StatusCode::from_u16(code).ok()
+        })
+}
+
+fn map_connect_connection_error(err: quinn::ConnectionError) -> anyhow::Error {
+    if is_certificate_auth_connection_error(&err) {
+        return unauthorized_connect_error(err);
+    }
+    anyhow!("failed to establish quic connection: {err}")
+}
+
+fn map_webtransport_client_error(err: web_transport_quinn::ClientError) -> anyhow::Error {
+    match err {
+        web_transport_quinn::ClientError::Connection(connection_err) => {
+            map_connect_connection_error(connection_err)
+        }
+        web_transport_quinn::ClientError::HttpError(connect_err) => {
+            let rendered = connect_err.to_string();
+            if let Some(status) = parse_connect_error_status(&rendered) {
+                if let Some(mapped) = map_connect_rejection_status(status, &rendered) {
+                    return mapped;
+                }
+            }
+            anyhow!("failed to establish webtransport session: {connect_err}")
+        }
+        other => anyhow!("failed to establish webtransport session: {other}"),
+    }
 }
 
 fn parse_upload_limits(response: &HelloNegotiateResponse) -> anyhow::Result<UploadLimits> {
@@ -881,6 +976,72 @@ fn decode_frames(value: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn maps_unknown_ca_transport_error_to_e_unauthorized() {
+        let unknown_ca_code =
+            quinn::TransportErrorCode::crypto(u8::from(rustls::AlertDescription::UnknownCA));
+        assert!(is_certificate_alert_transport_code(unknown_ca_code));
+
+        let err = quinn::ConnectionError::ConnectionClosed(quinn::ConnectionClose {
+            error_code: unknown_ca_code,
+            frame_type: None,
+            reason: "unknown ca".into(),
+        });
+
+        let mapped = map_connect_connection_error(err);
+        let message = mapped.to_string();
+        assert!(message.contains("E_UNAUTHORIZED"));
+        assert!(message.contains("transport.connect"));
+    }
+
+    #[test]
+    fn maps_certificate_required_connection_closed_to_e_unauthorized() {
+        let err = quinn::ConnectionError::ConnectionClosed(quinn::ConnectionClose {
+            error_code: quinn::TransportErrorCode::crypto(u8::from(
+                rustls::AlertDescription::CertificateRequired,
+            )),
+            frame_type: None,
+            reason: "certificate required".into(),
+        });
+
+        let mapped = map_connect_connection_error(err);
+        let message = mapped.to_string();
+        assert!(message.contains("E_UNAUTHORIZED"));
+        assert!(message.contains("transport.connect"));
+    }
+
+    #[test]
+    fn does_not_map_non_certificate_tls_alert_to_e_unauthorized() {
+        let no_alpn_code = quinn::TransportErrorCode::crypto(u8::from(
+            rustls::AlertDescription::NoApplicationProtocol,
+        ));
+        assert!(!is_certificate_alert_transport_code(no_alpn_code));
+
+        let err = quinn::ConnectionError::ConnectionClosed(quinn::ConnectionClose {
+            error_code: no_alpn_code,
+            frame_type: None,
+            reason: "no application protocol".into(),
+        });
+
+        let mapped = map_connect_connection_error(err);
+        let message = mapped.to_string();
+        assert!(!message.contains("E_UNAUTHORIZED"));
+        assert!(message.contains("failed to establish quic connection"));
+    }
+
+    #[test]
+    fn maps_http_401_to_e_unauthorized() {
+        let mapped = map_connect_rejection_status(
+            web_transport_quinn::http::StatusCode::UNAUTHORIZED,
+            "http error status: 401 Unauthorized",
+        )
+        .expect("http 401 should map to unauthorized");
+
+        let message = mapped.to_string();
+        assert!(message.contains("E_UNAUTHORIZED"));
+        assert!(message.contains("transport.connect"));
+    }
 
     #[test]
     fn returns_non_zero_when_build_step_fails() {
