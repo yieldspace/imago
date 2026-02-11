@@ -8,11 +8,11 @@ name = "imagod"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0.101"
-imagod-config = { path = "../imagod-config" }
-imagod-control = { path = "../imagod-control" }
-imagod-runtime = { path = "../imagod-runtime" }
-imagod-server = { path = "../imagod-server" }
-rustls = "0.23.36"
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
-web-transport-quinn = "0.11.1"
+anyhow = { workspace = true }
+imagod-config = { workspace = true }
+imagod-control = { workspace = true }
+imagod-runtime = { workspace = true }
+imagod-server = { workspace = true }
+rustls = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+web-transport-quinn = { workspace = true }

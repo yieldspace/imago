@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-base64 = "0.22.1"
-hex = "0.4.3"
-imago-protocol = { path = "../imago-protocol" }
-imagod-common = { path = "../imagod-common" }
-serde = { version = "1.0.228", features = ["derive"] }
-sha2 = "0.10.9"
-tokio = { version = "1.49.0", features = ["io-util", "macros", "net", "rt"] }
-uuid = { version = "1.20.0", features = ["v4"] }
+base64 = { workspace = true }
+hex = { workspace = true }
+imago-protocol = { workspace = true }
+imagod-common = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }
+uuid = { workspace = true, features = ["v4"] }

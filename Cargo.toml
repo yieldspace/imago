@@ -1,3 +1,35 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+
+[workspace.dependencies]
+anyhow = "1.0.101"
+base64 = "0.22.1"
+ciborium = "0.2.2"
+clap = "4.5.31"
+hex = "0.4.3"
+quinn = "0.11.9"
+rcgen = "0.14.7"
+rustls = "0.23.36"
+rustls-pemfile = "2.2.0"
+serde = "1.0.228"
+serde_json = "1.0.149"
+sha2 = "0.10.9"
+tar = "0.4.44"
+thiserror = "2.0.18"
+time = "0.3.36"
+tokio = "1.49.0"
+toml = "0.8.23"
+url = "2.5.4"
+uuid = "1.20.0"
+wasmtime = "41.0.3"
+wasmtime-wasi = "41.0.3"
+web-transport-quinn = "0.11.1"
+
+imago-protocol = { path = "crates/imago-protocol" }
+imagod-common = { path = "crates/imagod-common" }
+imagod-config = { path = "crates/imagod-config" }
+imagod-control = { path = "crates/imagod-control" }
+imagod-ipc = { path = "crates/imagod-ipc" }
+imagod-runtime = { path = "crates/imagod-runtime" }
+imagod-server = { path = "crates/imagod-server" }
