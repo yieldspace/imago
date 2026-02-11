@@ -30,6 +30,7 @@
 ## 推奨キー
 
 - `args`
+- `build`
 - `capabilities`
 - `limits`
 - `runtime`
@@ -43,8 +44,17 @@
 1. `--env` 未指定時は base 設定のみを使う。
 2. `--env <name>` 指定時は `[env.<name>]` を base 設定にマージする。
 3. `--env <name>` 指定時に読み込む環境変数ファイルは `.env.<name>` のみ。
-4. マージ範囲は設定全体。競合時は env 側を優先する。
+4. マージ範囲はトップレベルキー単位。`[env.<name>]` で指定したキーは base 側の同名キーを丸ごと置換する。
 5. 指定された env 名が存在しない場合はエラー。
+
+## build コマンド設定
+
+- `imago build` は `imago.toml` の `[build].command` を参照する。
+- `build.command` は次のいずれかを受け付ける。
+  - string: `sh -c "<command>"` として実行
+  - array: `["cmd", "arg1", ...]` として直接実行
+- `build.command` 未指定時はビルドコマンドを実行せず、`main` の存在検証のみ行う。
+- `--env <name>` 指定時は `.env.<name>` の値を build サブプロセス環境へ注入する。
 
 <a id="capability-model"></a>
 ## 権限モデル
@@ -92,6 +102,13 @@
 - 設定ロードは CLI 側で厳格検証し、正規化結果を [`manifest.md`](./manifest.md) の形式で出力する。
 - runtime 側は manifest を信頼入力として扱い、再解釈を最小化する。
 
+## 実装反映ノート
+
+- `[env.<name>]` の反映はトップレベルキー単位の置換で実装する。
+- `build.command` は string / array の両形式を受理する。
+- `imago build --env <name>` は `build/manifest.<name>.json` を生成し、`build/manifest.json` は更新しない。
+- `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には materialize 後パスを書き込む。
+
 ## `target.<name>` の接続キー（deploy 通信）
 
 `imago deploy` は `target.<name>` から下記キーを読む。
@@ -102,6 +119,8 @@
 - `ca_cert`: サーバ証明書検証用 CA PEM
 - `client_cert`: mTLS クライアント証明書 PEM
 - `client_key`: mTLS クライアント秘密鍵 PEM
+
+`imago build` が生成する `manifest.target` には、上記のうち `remote` と `server_name` のみを含める。
 
 ローカル検証用の証明書一式は `imago certs generate` で生成できる。
 生成先ディレクトリには `.gitignore`（`*` / `!.gitignore`）も作成される。

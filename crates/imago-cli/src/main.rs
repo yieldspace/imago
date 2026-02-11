@@ -7,6 +7,7 @@ use commands::CommandResult;
 
 fn dispatch(cli: Cli) -> CommandResult {
     match cli.command {
+        Commands::Build(args) => commands::build::run(args),
         Commands::Deploy(args) => commands::deploy::run(args),
         Commands::Certs(CertsSubcommandArgs { command }) => match command {
             CertsCommands::Generate(args) => commands::certs::run_generate(args),
@@ -42,7 +43,20 @@ fn install_rustls_provider() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::DeployArgs;
+    use crate::cli::{BuildArgs, DeployArgs};
+
+    #[test]
+    fn dispatches_build_and_returns_non_zero_without_imago_toml() {
+        let result = dispatch(Cli {
+            command: Commands::Build(BuildArgs {
+                env: None,
+                target: "default".to_string(),
+            }),
+        });
+
+        assert_eq!(result.exit_code, 2);
+        assert!(result.stderr.is_some());
+    }
 
     #[test]
     fn dispatches_deploy_and_returns_non_zero() {

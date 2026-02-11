@@ -11,14 +11,13 @@
 
 ## ディレクトリ構成
 
-- `imago.toml`: `imago deploy` が読む接続設定
+- `imago.toml`: build/deploy 設定（`[build].command` で直下 `Cargo.toml` を `cargo build --target wasm32-wasip2 --release` 実行し、`main` は `target/.../*.wasm` を参照）
 - `imagod.toml`: `imagod` が読むサーバ設定
-- `app/`: 配置対象の最小 CLI Wasm アプリ
+- `Cargo.toml`, `src/`: 配置対象の最小 CLI Wasm アプリ
 - `assets/`: bundle に含めるサンプル asset
 - `scripts/generate-certs.sh`: ローカル mTLS 証明書生成
-- `scripts/build-artifact.sh`: Wasm build + `build/manifest.json` 生成
 - `scripts/run-imagod.sh`: ローカル `imagod` 起動
-- `scripts/deploy.sh`: build + deploy 実行
+- `scripts/deploy.sh`: deploy 実行（内部で build も実行）
 
 ## 手順
 

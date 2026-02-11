@@ -1,3 +1,4 @@
+pub mod build;
 pub mod certs;
 pub mod deploy;
 
