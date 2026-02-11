@@ -20,6 +20,8 @@ use service_supervisor::ServiceSupervisor;
 use transport::build_server;
 use web_transport_quinn::http::StatusCode;
 
+const MAINTENANCE_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
+
 #[tokio::main]
 async fn main() {
     if let Err(err) = run().await {
@@ -62,8 +64,29 @@ async fn run() -> Result<(), anyhow::Error> {
             if *shutdown_rx.borrow() {
                 break;
             }
-            maintenance_handler.reap_finished_services().await;
-            let sleep_duration = if maintenance_handler.has_live_services().await {
+            let mut reap_future = std::pin::pin!(maintenance_handler.reap_finished_services());
+            tokio::select! {
+                _ = &mut reap_future => {}
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                    continue;
+                }
+            }
+
+            let mut has_live_services = std::pin::pin!(maintenance_handler.has_live_services());
+            let has_live_services = tokio::select! {
+                live = &mut has_live_services => live,
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                    continue;
+                }
+            };
+
+            let sleep_duration = if has_live_services {
                 maintenance_runtime.increment_epoch();
                 active_tick_interval
             } else {
@@ -107,11 +130,27 @@ async fn run() -> Result<(), anyhow::Error> {
         }
     }
     let _ = shutdown_tx.send(true);
-    maintenance_task
-        .await
-        .map_err(|err| anyhow::anyhow!("maintenance task join failed: {err}"))?;
+    wait_for_maintenance_shutdown(maintenance_task).await?;
 
     Ok(())
+}
+
+async fn wait_for_maintenance_shutdown(
+    maintenance_task: tokio::task::JoinHandle<()>,
+) -> Result<(), anyhow::Error> {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(MAINTENANCE_SHUTDOWN_TIMEOUT_SECS),
+        maintenance_task,
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(anyhow::anyhow!("maintenance task join failed: {err}")),
+        Err(_) => Err(anyhow::anyhow!(
+            "maintenance task did not shut down within {} seconds",
+            MAINTENANCE_SHUTDOWN_TIMEOUT_SECS
+        )),
+    }
 }
 
 fn install_rustls_provider() {

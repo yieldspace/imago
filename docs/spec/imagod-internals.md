@@ -354,6 +354,8 @@ stateDiagram-v2
   - `reap_finished_services`
   - live service あり: `increment_epoch` + active interval sleep
   - live service なし: idle 1 秒 sleep
+  - shutdown signal を await 境界（reap/has_live/sleep）で優先確認し、停止遅延を抑制
+  - shutdown 後は maintenance task の join を待機し、30秒 timeout 超過時は process をエラー終了
 
 ```mermaid
 flowchart TD
