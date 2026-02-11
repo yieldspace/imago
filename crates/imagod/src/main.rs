@@ -56,32 +56,60 @@ async fn run() -> Result<(), anyhow::Error> {
     let active_tick_interval =
         std::time::Duration::from_millis(config.runtime.epoch_tick_interval_ms.max(1));
     let idle_tick_interval = std::time::Duration::from_secs(1);
-    tokio::spawn(async move {
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let maintenance_task = tokio::spawn(async move {
         loop {
+            if *shutdown_rx.borrow() {
+                break;
+            }
             maintenance_handler.reap_finished_services().await;
-            if maintenance_handler.has_live_services().await {
+            let sleep_duration = if maintenance_handler.has_live_services().await {
                 maintenance_runtime.increment_epoch();
-                tokio::time::sleep(active_tick_interval).await;
+                active_tick_interval
             } else {
-                tokio::time::sleep(idle_tick_interval).await;
+                idle_tick_interval
+            };
+            tokio::select! {
+                _ = tokio::time::sleep(sleep_duration) => {}
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
             }
         }
     });
 
     let mut server = build_server(&config).map_err(anyhow::Error::new)?;
     eprintln!("imagod listening on {}", config.listen_addr);
+    let mut shutdown_signal = std::pin::pin!(tokio::signal::ctrl_c());
 
-    while let Some(request) = server.accept().await {
-        let handler = handler.clone();
-        tokio::spawn(async move {
-            let Ok(session) = request.respond(StatusCode::OK).await else {
-                return;
-            };
-            if let Err(err) = handler.handle_session(session).await {
-                eprintln!("session error: {err}");
+    loop {
+        tokio::select! {
+            _ = &mut shutdown_signal => {
+                eprintln!("shutdown signal received");
+                break;
             }
-        });
+            request = server.accept() => {
+                let Some(request): Option<web_transport_quinn::Request> = request else {
+                    break;
+                };
+                let handler = handler.clone();
+                tokio::spawn(async move {
+                    let Ok(session) = request.respond(StatusCode::OK).await else {
+                        return;
+                    };
+                    if let Err(err) = handler.handle_session(session).await {
+                        eprintln!("session error: {err}");
+                    }
+                });
+            }
+        }
     }
+    let _ = shutdown_tx.send(true);
+    maintenance_task
+        .await
+        .map_err(|err| anyhow::anyhow!("maintenance task join failed: {err}"))?;
 
     Ok(())
 }
