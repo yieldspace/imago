@@ -381,15 +381,10 @@ fn map_connect_rejection_status(
 }
 
 fn parse_connect_error_status(message: &str) -> Option<web_transport_quinn::http::StatusCode> {
-    message
-        .split(|ch: char| !ch.is_ascii_digit())
-        .find_map(|part| {
-            if part.len() != 3 {
-                return None;
-            }
-            let code = part.parse::<u16>().ok()?;
-            web_transport_quinn::http::StatusCode::from_u16(code).ok()
-        })
+    let (_, status_with_reason) = message.rsplit_once("http error status: ")?;
+    let status_token = status_with_reason.split_ascii_whitespace().next()?;
+    let code = status_token.parse::<u16>().ok()?;
+    web_transport_quinn::http::StatusCode::from_u16(code).ok()
 }
 
 fn map_connect_connection_error(err: quinn::ConnectionError) -> anyhow::Error {
@@ -1041,6 +1036,32 @@ mod tests {
         let message = mapped.to_string();
         assert!(message.contains("E_UNAUTHORIZED"));
         assert!(message.contains("transport.connect"));
+    }
+
+    #[test]
+    fn parse_connect_error_status_ignores_unrelated_numbers_before_status() {
+        let status = parse_connect_error_status(
+            "connection to 127.0.0.1:443 failed: http error status: 401 Unauthorized",
+        );
+        assert_eq!(
+            status,
+            Some(web_transport_quinn::http::StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn parse_connect_error_status_parses_403_from_http_error_prefix() {
+        let status = parse_connect_error_status("http error status: 403 Forbidden");
+        assert_eq!(
+            status,
+            Some(web_transport_quinn::http::StatusCode::FORBIDDEN)
+        );
+    }
+
+    #[test]
+    fn parse_connect_error_status_returns_none_without_http_error_prefix() {
+        let status = parse_connect_error_status("connection to 127.0.0.1:443 failed");
+        assert_eq!(status, None);
     }
 
     #[test]
