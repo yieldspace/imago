@@ -17,6 +17,7 @@
 - Auth: mTLS
 - Payload format: CBOR
 - Rust 実装: `quinn` + `web-transport-quinn`
+- `imago deploy` は接続確立フェーズで証明書認証失敗を `E_UNAUTHORIZED` として報告する（stage: `transport.connect`）。
 
 ### 2.1 ストリーム上のフレーミング
 
@@ -290,3 +291,9 @@ response:
 - `max_inflight_chunks = 16`
 - `upload_session_ttl = 15m`
 - `max_artifact_size_bytes = 64MiB`
+
+## 実装反映ノート（Issue #64 / 2026-02-11）
+
+- `imago-cli` の `deploy` 接続フェーズで、証明書認証失敗（Unknown CA / 不正証明書 / 証明書必須違反など）を `E_UNAUTHORIZED` に正規化する。
+- 将来の CONNECT 拒否との整合のため、HTTP status `401` / `403` も `E_UNAUTHORIZED` として扱う。
+- 対象は CLI のエラー正規化のみで、mTLS 検証位置（TLS handshake）および protocol wire 契約は変更しない。
