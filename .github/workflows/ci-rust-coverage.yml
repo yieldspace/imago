@@ -1,0 +1,55 @@
+name: ci-rust-coverage
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-rust-coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate lcov report
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+      - name: Build coverage summary
+        run: |
+          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+          {
+            echo "## Rust Coverage Summary"
+            echo
+            cat coverage-summary.txt
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-coverage-lcov
+          path: |
+            lcov.info
+            coverage-summary.txt
+          if-no-files-found: error
+          retention-days: 14
