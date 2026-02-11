@@ -17,6 +17,9 @@
 - `command.start` (`deploy` / `run` / `stop`) と `command.event` 配信
 - `state.request -> state.response` の実行中状態照会
 - `command.cancel` の起動前 cancel 判定
+- manager/runner のマルチプロセス実行制御（1 service = 1 runner process）
+- manager-runner / runner-runner の IPC（DBus over UDS, trait 抽象）
+- runner stdout/stderr のパイプ回収とメモリ上限付きバッファ保持
 
 `imagod` の非責務（または未実装）:
 
@@ -24,6 +27,7 @@
 - 再起動跨ぎの service 状態復元
 - 高度な restart policy
 - blue-green デプロイ
+- runner invoke の実関数実行（現行は配線と認可のみ）
 
 ## 3. 外部仕様との対応
 
@@ -58,6 +62,8 @@ chunk_size = 1048576
 max_inflight_chunks = 16
 upload_session_ttl_secs = 900
 stop_grace_timeout_secs = 30
+runner_ready_timeout_secs = 3
+runner_log_buffer_bytes = 262144
 epoch_tick_interval_ms = 50
 ```
 

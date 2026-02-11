@@ -85,6 +85,8 @@ struct Manifest {
     vars: BTreeMap<String, String>,
     secrets: BTreeMap<String, String>,
     assets: Vec<ManifestAsset>,
+    #[serde(default)]
+    bindings: Vec<ManifestBinding>,
     dependencies: Vec<JsonValue>,
     hash: ManifestHash,
 }
@@ -94,6 +96,12 @@ struct ManifestAsset {
     path: String,
     #[serde(flatten)]
     extra: BTreeMap<String, JsonValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ManifestBinding {
+    target: String,
+    wit: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +168,7 @@ pub fn build_project(
     validate_app_type(&app_type)?;
 
     let vars = parse_string_table(root.get("vars"), "vars")?;
+    let bindings = parse_bindings(root.get("bindings"))?;
     let dependencies = parse_dependencies(root.get("dependencies"))?;
     let target = parse_target(&root, target_name, project_root)?;
 
@@ -185,6 +194,7 @@ pub fn build_project(
             .iter()
             .map(|entry| entry.manifest_asset.clone())
             .collect(),
+        bindings,
         dependencies,
         hash: ManifestHash {
             algorithm: "sha256".to_string(),
@@ -562,6 +572,50 @@ fn parse_dependencies(value: Option<&TomlValue>) -> anyhow::Result<Vec<JsonValue
         dependencies.push(toml_to_json_normalized(item)?);
     }
     Ok(dependencies)
+}
+
+fn parse_bindings(value: Option<&TomlValue>) -> anyhow::Result<Vec<ManifestBinding>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+
+    let array = value
+        .as_array()
+        .ok_or_else(|| anyhow!("bindings must be an array"))?;
+    let mut bindings = Vec::with_capacity(array.len());
+    for (index, entry) in array.iter().enumerate() {
+        let table = entry
+            .as_table()
+            .ok_or_else(|| anyhow!("bindings[{index}] must be a table"))?;
+        let target = table
+            .get("target")
+            .and_then(TomlValue::as_str)
+            .ok_or_else(|| anyhow!("bindings[{index}].target must be a string"))?
+            .trim()
+            .to_string();
+        let wit = table
+            .get("wit")
+            .and_then(TomlValue::as_str)
+            .ok_or_else(|| anyhow!("bindings[{index}].wit must be a string"))?
+            .trim()
+            .to_string();
+
+        if target.is_empty() {
+            return Err(anyhow!("bindings[{index}].target must not be empty"));
+        }
+        if wit.is_empty() {
+            return Err(anyhow!("bindings[{index}].wit must not be empty"));
+        }
+        validate_service_name(&target).map_err(|e| {
+            anyhow!(
+                "bindings[{index}].target is invalid: {}",
+                e.to_string().replace("name ", "")
+            )
+        })?;
+
+        bindings.push(ManifestBinding { target, wit });
+    }
+    Ok(bindings)
 }
 
 fn parse_target(
@@ -1239,6 +1293,61 @@ client_key = "certs/client.key"
             Some(&"localhost".to_string())
         );
         assert_eq!(manifest.target.len(), 2);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manifest_includes_bindings_from_imago_toml() {
+        let root = new_temp_dir("manifest-bindings");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-a"
+main = "build/app.wasm"
+type = "cli"
+
+[[bindings]]
+target = "svc-b"
+wit = "yieldspace:svc/invoke"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let output = build_project(None, "default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        assert_eq!(manifest.bindings.len(), 1);
+        assert_eq!(manifest.bindings[0].target, "svc-b");
+        assert_eq!(manifest.bindings[0].wit, "yieldspace:svc/invoke");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_invalid_bindings_shape() {
+        let root = new_temp_dir("manifest-bindings-invalid-shape");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-a"
+main = "build/app.wasm"
+type = "cli"
+
+[[bindings]]
+target = "svc-b"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("build must fail when bindings.wit is missing");
+        assert!(err.to_string().contains("bindings[0].wit"));
 
         let _ = fs::remove_dir_all(root);
     }

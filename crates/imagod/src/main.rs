@@ -1,9 +1,11 @@
 mod artifact_store;
 mod config;
 mod error;
+mod ipc;
 mod operation_state;
 mod orchestrator;
 mod protocol_handler;
+mod runner_process;
 mod runtime_wasmtime;
 mod service_supervisor;
 mod transport;
@@ -15,7 +17,7 @@ use config::{ImagodConfig, resolve_config_path};
 use operation_state::OperationManager;
 use orchestrator::Orchestrator;
 use protocol_handler::ProtocolHandler;
-use runtime_wasmtime::WasmRuntime;
+use runner_process::run_runner_from_stdin;
 use service_supervisor::ServiceSupervisor;
 use transport::build_server;
 use web_transport_quinn::http::StatusCode;
@@ -24,15 +26,23 @@ const MAINTENANCE_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 
 #[tokio::main]
 async fn main() {
-    if let Err(err) = run().await {
+    if let Err(err) = dispatch().await {
         eprintln!("{err}");
         std::process::exit(1);
     }
 }
 
-async fn run() -> Result<(), anyhow::Error> {
+async fn dispatch() -> Result<(), anyhow::Error> {
     install_rustls_provider();
-    let config_path = resolve_config_path(parse_config_arg()?);
+    let cli = parse_cli_args()?;
+    match cli.mode {
+        RunMode::Runner => run_runner_from_stdin().await.map_err(anyhow::Error::new),
+        RunMode::Manager => run_manager(cli.config_path).await,
+    }
+}
+
+async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyhow::Error> {
+    let config_path = resolve_config_path(config_path);
     let config = Arc::new(ImagodConfig::load(&config_path).map_err(anyhow::Error::new)?);
 
     let artifact_root = config.storage_root.join("artifacts");
@@ -46,15 +56,19 @@ async fn run() -> Result<(), anyhow::Error> {
     .await
     .map_err(anyhow::Error::new)?;
     let operations = OperationManager::new();
-    let runtime = WasmRuntime::new().map_err(anyhow::Error::new)?;
-    let supervisor =
-        ServiceSupervisor::new(runtime.clone(), config.runtime.stop_grace_timeout_secs);
+    let supervisor = ServiceSupervisor::new(
+        &config.storage_root,
+        config.runtime.stop_grace_timeout_secs,
+        config.runtime.runner_ready_timeout_secs,
+        config.runtime.runner_log_buffer_bytes,
+        config.runtime.epoch_tick_interval_ms,
+    )
+    .map_err(anyhow::Error::new)?;
     let orchestrator = Orchestrator::new(&config.storage_root, artifacts.clone(), supervisor);
 
     let handler = ProtocolHandler::new(config.clone(), artifacts, operations, orchestrator);
 
     let maintenance_handler = handler.clone();
-    let maintenance_runtime = runtime.clone();
     let active_tick_interval =
         std::time::Duration::from_millis(config.runtime.epoch_tick_interval_ms.max(1));
     let idle_tick_interval = std::time::Duration::from_secs(1);
@@ -87,7 +101,6 @@ async fn run() -> Result<(), anyhow::Error> {
             };
 
             let sleep_duration = if has_live_services {
-                maintenance_runtime.increment_epoch();
                 active_tick_interval
             } else {
                 idle_tick_interval
@@ -164,11 +177,28 @@ fn install_rustls_provider() {
     }
 }
 
-fn parse_config_arg() -> Result<Option<PathBuf>, anyhow::Error> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunMode {
+    Manager,
+    Runner,
+}
+
+#[derive(Debug, Clone)]
+struct CliArgs {
+    config_path: Option<PathBuf>,
+    mode: RunMode,
+}
+
+fn parse_cli_args() -> Result<CliArgs, anyhow::Error> {
     let mut args = std::env::args().skip(1);
     let mut config: Option<PathBuf> = None;
+    let mut mode = RunMode::Manager;
 
     while let Some(arg) = args.next() {
+        if arg == "--runner" {
+            mode = RunMode::Runner;
+            continue;
+        }
         if arg == "--config" {
             let path = args
                 .next()
@@ -183,5 +213,8 @@ fn parse_config_arg() -> Result<Option<PathBuf>, anyhow::Error> {
         }
     }
 
-    Ok(config)
+    Ok(CliArgs {
+        config_path: config,
+        mode,
+    })
 }

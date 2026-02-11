@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 use imago_protocol::ErrorCode;
 use tokio::sync::watch;
@@ -53,12 +53,23 @@ impl WasmRuntime {
         self.engine.increment_epoch();
     }
 
+    pub fn validate_component(&self, component_path: &Path) -> Result<(), ImagodError> {
+        Component::from_file(&self.engine, component_path).map_err(|e| {
+            map_runtime_error(format!(
+                "failed to load component {}: {e}",
+                component_path.display()
+            ))
+        })?;
+        Ok(())
+    }
+
     pub async fn run_cli_component_async(
         &self,
         component_path: &Path,
         args: &[String],
         envs: &BTreeMap<String, String>,
         mut shutdown: watch::Receiver<bool>,
+        epoch_tick_interval_ms: u64,
     ) -> Result<(), ImagodError> {
         let component = Component::from_file(&self.engine, component_path).map_err(|e| {
             map_runtime_error(format!(
@@ -111,10 +122,34 @@ impl WasmRuntime {
             })
         };
 
-        tokio::select! {
+        let tick_runtime = self.clone();
+        let (tick_stop_tx, mut tick_stop_rx) = watch::channel(false);
+        let tick_interval = Duration::from_millis(epoch_tick_interval_ms.max(1));
+        let tick_task = tokio::spawn(async move {
+            loop {
+                if *tick_stop_rx.borrow() {
+                    break;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(tick_interval) => {
+                        tick_runtime.increment_epoch();
+                    }
+                    changed = tick_stop_rx.changed() => {
+                        if changed.is_err() || *tick_stop_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let result = tokio::select! {
             _ = wait_for_shutdown(&mut shutdown) => Ok(()),
             result = run_future => result,
-        }
+        };
+        let _ = tick_stop_tx.send(true);
+        let _ = tick_task.await;
+        result
     }
 }
 

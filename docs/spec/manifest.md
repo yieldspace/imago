@@ -27,6 +27,7 @@
 | `vars` | object | env 反映後の公開変数 |
 | `secrets` | object | env 反映後の secret 値 |
 | `assets` | array | 同梱アセット一覧 |
+| `bindings` | array | service 間呼び出し許可一覧（省略時は `[]`） |
 | `dependencies` | array | 依存解決結果 |
 | `hash` | object | 全体整合性情報 |
 
@@ -56,6 +57,13 @@
 - runtime 側は `secrets` をログへ出力してはいけない。
 - CLI 側は `--dry-run` を除き `secrets` の実値を表示してはいけない。
 
+## `bindings` フィールド
+
+- `bindings` は `[{\"target\": \"<service>\", \"wit\": \"<interface-id>\"}, ...]` の配列。
+- `target` は service 名文字制約（`name` と同等）に従う。
+- `wit` は非空文字列。
+- `bindings` 未指定 manifest は `[]` と同等に扱う（後方互換）。
+
 ## 正常例と異常例
 
 - 正常例: [`examples/manifest.valid.json`](./examples/manifest.valid.json)
@@ -71,6 +79,7 @@
 - `hash.algorithm != "sha256"` は拒否。
 - `hash.targets` が不足または重複なら拒否。
 - `secrets` は key-value オブジェクトのみ許可。
+- `bindings` 指定時は配列のみ許可し、各要素は `target` / `wit` の非空文字列を必須とする。
 
 ## 実装ノート
 
@@ -84,3 +93,4 @@
 - CLI は `main` の実体 wasm を `build/<sha256>-<name>.wasm` へ配置し、`manifest.main` には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
 - `build/<sha256>-<name>.wasm` が既に存在する場合でも、内容の sha256 が不一致なら `main` の実体 wasm から上書き再生成する。
 - `hash.value` の wasm 対象は `manifest.main` が指す materialize 後ファイルとする。
+- CLI は `imago.toml` の `[[bindings]]` を `manifest.bindings[]` に正規化して出力する。

@@ -1,0 +1,289 @@
+use std::path::Path;
+
+use imago_protocol::ErrorCode;
+use tokio::{
+    io::AsyncReadExt,
+    net::UnixListener,
+    sync::watch,
+    time::{self, Duration},
+};
+
+use crate::{
+    error::ImagodError,
+    ipc::{
+        ControlRequest, ControlResponse, IpcErrorPayload, RunnerBootstrap, RunnerInboundRequest,
+        RunnerInboundResponse, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
+        verify_invocation_token,
+    },
+    runtime_wasmtime::WasmRuntime,
+};
+
+const STAGE_RUNNER: &str = "runner.process";
+
+pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
+    let mut stdin = tokio::io::stdin();
+    let mut bootstrap_bytes = Vec::new();
+    stdin.read_to_end(&mut bootstrap_bytes).await.map_err(|e| {
+        ImagodError::new(
+            ErrorCode::BadRequest,
+            STAGE_RUNNER,
+            format!("failed to read runner bootstrap from stdin: {e}"),
+        )
+    })?;
+    let bootstrap =
+        imago_protocol::from_cbor::<RunnerBootstrap>(&bootstrap_bytes).map_err(|e| {
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                STAGE_RUNNER,
+                format!("failed to decode runner bootstrap: {e}"),
+            )
+        })?;
+
+    prepare_socket_path(&bootstrap.runner_endpoint)?;
+    let listener = UnixListener::bind(&bootstrap.runner_endpoint).map_err(|e| {
+        ImagodError::new(
+            ErrorCode::Internal,
+            STAGE_RUNNER,
+            format!(
+                "failed to bind runner endpoint {}: {e}",
+                bootstrap.runner_endpoint.display()
+            ),
+        )
+    })?;
+
+    let runtime = WasmRuntime::new()?;
+    runtime.validate_component(&bootstrap.component_path)?;
+
+    register_runner(&bootstrap).await?;
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let inbound_task = tokio::spawn(run_inbound_server(
+        listener,
+        bootstrap.clone(),
+        shutdown_tx.clone(),
+        shutdown_rx.clone(),
+    ));
+
+    mark_ready(&bootstrap).await?;
+
+    let heartbeat_task = tokio::spawn(send_heartbeats(bootstrap.clone(), shutdown_rx.clone()));
+
+    let run_result = runtime
+        .run_cli_component_async(
+            &bootstrap.component_path,
+            &bootstrap.args,
+            &bootstrap.envs,
+            shutdown_rx,
+            bootstrap.epoch_tick_interval_ms,
+        )
+        .await;
+
+    let _ = shutdown_tx.send(true);
+    let _ = heartbeat_task.await;
+    let _ = inbound_task.await;
+    let _ = std::fs::remove_file(&bootstrap.runner_endpoint);
+
+    run_result
+}
+
+async fn register_runner(bootstrap: &RunnerBootstrap) -> Result<(), ImagodError> {
+    let proof = compute_manager_auth_proof(&bootstrap.manager_auth_secret, &bootstrap.runner_id)?;
+    let response = DbusP2pTransport::call_control(
+        &bootstrap.manager_control_endpoint,
+        &ControlRequest::RegisterRunner {
+            runner_id: bootstrap.runner_id.clone(),
+            service_name: bootstrap.service_name.clone(),
+            release_hash: bootstrap.release_hash.clone(),
+            runner_endpoint: bootstrap.runner_endpoint.clone(),
+            manager_auth_proof: proof,
+        },
+    )
+    .await?;
+    match response {
+        ControlResponse::Ack => Ok(()),
+        ControlResponse::Error(err) => Err(err.to_error()),
+        _ => Err(ImagodError::new(
+            ErrorCode::Internal,
+            STAGE_RUNNER,
+            "unexpected manager response for register_runner",
+        )),
+    }
+}
+
+async fn mark_ready(bootstrap: &RunnerBootstrap) -> Result<(), ImagodError> {
+    let proof = compute_manager_auth_proof(&bootstrap.manager_auth_secret, &bootstrap.runner_id)?;
+    let response = DbusP2pTransport::call_control(
+        &bootstrap.manager_control_endpoint,
+        &ControlRequest::RunnerReady {
+            runner_id: bootstrap.runner_id.clone(),
+            manager_auth_proof: proof,
+        },
+    )
+    .await?;
+
+    match response {
+        ControlResponse::Ack => Ok(()),
+        ControlResponse::Error(err) => Err(err.to_error()),
+        _ => Err(ImagodError::new(
+            ErrorCode::Internal,
+            STAGE_RUNNER,
+            "unexpected manager response for runner_ready",
+        )),
+    }
+}
+
+async fn send_heartbeats(bootstrap: RunnerBootstrap, mut shutdown: watch::Receiver<bool>) {
+    loop {
+        if *shutdown.borrow() {
+            break;
+        }
+        let proof = match compute_manager_auth_proof(
+            &bootstrap.manager_auth_secret,
+            &bootstrap.runner_id,
+        ) {
+            Ok(v) => v,
+            Err(err) => {
+                eprintln!("runner heartbeat auth error: {err}");
+                break;
+            }
+        };
+        let _ = DbusP2pTransport::call_control(
+            &bootstrap.manager_control_endpoint,
+            &ControlRequest::Heartbeat {
+                runner_id: bootstrap.runner_id.clone(),
+                manager_auth_proof: proof,
+            },
+        )
+        .await;
+
+        tokio::select! {
+            _ = time::sleep(Duration::from_secs(1)) => {}
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn run_inbound_server(
+    listener: UnixListener,
+    bootstrap: RunnerBootstrap,
+    shutdown_tx: watch::Sender<bool>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    loop {
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    break;
+                }
+                continue;
+            }
+        };
+
+        let (mut stream, _) = match accepted {
+            Ok(v) => v,
+            Err(err) => {
+                eprintln!("runner inbound accept error: {err}");
+                break;
+            }
+        };
+
+        let request =
+            match DbusP2pTransport::read_message::<RunnerInboundRequest>(&mut stream).await {
+                Ok(v) => v,
+                Err(err) => {
+                    let _ = DbusP2pTransport::write_message(
+                        &mut stream,
+                        &RunnerInboundResponse::Error(IpcErrorPayload::from_error(&err)),
+                    )
+                    .await;
+                    continue;
+                }
+            };
+
+        let response = handle_inbound_request(&bootstrap, request, &shutdown_tx).await;
+        let _ = DbusP2pTransport::write_message(&mut stream, &response).await;
+    }
+}
+
+async fn handle_inbound_request(
+    bootstrap: &RunnerBootstrap,
+    request: RunnerInboundRequest,
+    shutdown_tx: &watch::Sender<bool>,
+) -> RunnerInboundResponse {
+    match request {
+        RunnerInboundRequest::ShutdownRunner => {
+            let _ = shutdown_tx.send(true);
+            RunnerInboundResponse::Ack
+        }
+        RunnerInboundRequest::Invoke {
+            interface_id,
+            function,
+            payload_cbor: _,
+            token,
+        } => {
+            let claims = match verify_invocation_token(&bootstrap.invocation_secret, &token) {
+                Ok(claims) => claims,
+                Err(err) => {
+                    return RunnerInboundResponse::Error(IpcErrorPayload::from_error(&err));
+                }
+            };
+
+            if claims.target_service != bootstrap.service_name {
+                return RunnerInboundResponse::Error(IpcErrorPayload {
+                    code: ErrorCode::Unauthorized,
+                    stage: "runner.invoke".to_string(),
+                    message: "invocation target mismatch".to_string(),
+                });
+            }
+
+            if claims.wit != interface_id {
+                return RunnerInboundResponse::Error(IpcErrorPayload {
+                    code: ErrorCode::Unauthorized,
+                    stage: "runner.invoke".to_string(),
+                    message: "invocation interface mismatch".to_string(),
+                });
+            }
+
+            RunnerInboundResponse::Error(IpcErrorPayload {
+                code: ErrorCode::Internal,
+                stage: "runner.invoke".to_string(),
+                message: format!(
+                    "invoke is not implemented yet (interface={}, function={})",
+                    interface_id, function
+                ),
+            })
+        }
+    }
+}
+
+fn prepare_socket_path(path: &Path) -> Result<(), ImagodError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            ImagodError::new(
+                ErrorCode::Internal,
+                STAGE_RUNNER,
+                format!(
+                    "failed to create runner socket parent {}: {e}",
+                    parent.display()
+                ),
+            )
+        })?;
+    }
+
+    if path.exists() {
+        std::fs::remove_file(path).map_err(|e| {
+            ImagodError::new(
+                ErrorCode::Internal,
+                STAGE_RUNNER,
+                format!("failed to remove existing socket {}: {e}", path.display()),
+            )
+        })?;
+    }
+
+    Ok(())
+}

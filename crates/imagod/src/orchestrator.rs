@@ -30,12 +30,20 @@ struct Manifest {
     secrets: BTreeMap<String, String>,
     #[serde(default)]
     assets: Vec<ManifestAsset>,
+    #[serde(default)]
+    bindings: Vec<ManifestBinding>,
     hash: ManifestHash,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 struct ManifestAsset {
     path: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct ManifestBinding {
+    target: String,
+    wit: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -326,6 +334,15 @@ async fn build_launch_from_release(
         component_path,
         args: Vec::new(),
         envs,
+        bindings: manifest
+            .bindings
+            .iter()
+            .filter(|binding| !binding.target.is_empty() && !binding.wit.is_empty())
+            .map(|binding| crate::ipc::ServiceBinding {
+                target: binding.target.clone(),
+                wit: binding.wit.clone(),
+            })
+            .collect(),
     })
 }
 

@@ -41,6 +41,10 @@ pub struct RuntimeConfig {
     pub upload_session_ttl_secs: u64,
     #[serde(default = "default_stop_grace_timeout_secs")]
     pub stop_grace_timeout_secs: u64,
+    #[serde(default = "default_runner_ready_timeout_secs")]
+    pub runner_ready_timeout_secs: u64,
+    #[serde(default = "default_runner_log_buffer_bytes")]
+    pub runner_log_buffer_bytes: usize,
     #[serde(default = "default_epoch_tick_interval_ms")]
     pub epoch_tick_interval_ms: u64,
 }
@@ -53,6 +57,8 @@ impl Default for RuntimeConfig {
             max_artifact_size_bytes: default_max_artifact_size_bytes(),
             upload_session_ttl_secs: default_upload_session_ttl_secs(),
             stop_grace_timeout_secs: default_stop_grace_timeout_secs(),
+            runner_ready_timeout_secs: default_runner_ready_timeout_secs(),
+            runner_log_buffer_bytes: default_runner_log_buffer_bytes(),
             epoch_tick_interval_ms: default_epoch_tick_interval_ms(),
         }
     }
@@ -118,6 +124,22 @@ impl ImagodConfig {
                 ErrorCode::BadRequest,
                 "config.load",
                 "runtime.epoch_tick_interval_ms must be greater than 0",
+            ));
+        }
+
+        if config.runtime.runner_ready_timeout_secs == 0 {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.load",
+                "runtime.runner_ready_timeout_secs must be greater than 0",
+            ));
+        }
+
+        if config.runtime.runner_log_buffer_bytes == 0 {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.load",
+                "runtime.runner_log_buffer_bytes must be greater than 0",
             ));
         }
 
@@ -206,6 +228,14 @@ fn default_stop_grace_timeout_secs() -> u64 {
     30
 }
 
+fn default_runner_ready_timeout_secs() -> u64 {
+    3
+}
+
+fn default_runner_log_buffer_bytes() -> usize {
+    256 * 1024
+}
+
 fn default_epoch_tick_interval_ms() -> u64 {
     50
 }
@@ -265,6 +295,8 @@ client_ca_cert = "ca.crt"
         let config = ImagodConfig::load(&path).expect("config should load");
         assert_eq!(config.compatibility_date, "2026-02-10");
         assert_eq!(config.runtime.max_artifact_size_bytes, 64 * 1024 * 1024);
+        assert_eq!(config.runtime.runner_ready_timeout_secs, 3);
+        assert_eq!(config.runtime.runner_log_buffer_bytes, 256 * 1024);
 
         cleanup_temp_path(path);
     }
@@ -347,6 +379,63 @@ max_artifact_size_bytes = 0
 
         let err = ImagodConfig::load(&path).expect_err("config should reject zero artifact size");
         assert!(err.to_string().contains("max_artifact_size_bytes"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_zero_runner_ready_timeout() {
+        let path = write_temp_config(
+            "rejects_zero_runner_ready_timeout",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_cert = "server.crt"
+server_key = "server.key"
+client_ca_cert = "ca.crt"
+
+[runtime]
+runner_ready_timeout_secs = 0
+"#,
+        );
+
+        let err =
+            ImagodConfig::load(&path).expect_err("config should reject zero runner_ready_timeout");
+        assert!(
+            err.to_string()
+                .contains("runtime.runner_ready_timeout_secs")
+        );
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_zero_runner_log_buffer_bytes() {
+        let path = write_temp_config(
+            "rejects_zero_runner_log_buffer_bytes",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_cert = "server.crt"
+server_key = "server.key"
+client_ca_cert = "ca.crt"
+
+[runtime]
+runner_log_buffer_bytes = 0
+"#,
+        );
+
+        let err = ImagodConfig::load(&path)
+            .expect_err("config should reject zero runner_log_buffer_bytes");
+        assert!(err.to_string().contains("runtime.runner_log_buffer_bytes"));
 
         cleanup_temp_path(path);
     }

@@ -21,6 +21,12 @@
       "size": 2048
     }
   ],
+  "bindings": [
+    {
+      "target": "capture-service",
+      "wit": "yieldspace:service/invoke"
+    }
+  ],
   "dependencies": [
     {
       "name": "yieldspace:nanokvm-capture",
