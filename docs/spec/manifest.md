@@ -12,6 +12,8 @@
 ## 出力場所
 
 - 固定パス: `build/manifest.json`
+- `imago build --env <name>` 時: `build/manifest.<name>.json`
+  - `<name>` の許可文字は ASCII 英数字、`.`、`-`、`_`。`/`、`\`、`..` は禁止。
 
 <a id="required-fields"></a>
 ## 必須フィールド
@@ -41,7 +43,7 @@
 
 全体 hash は次を対象に計算する。
 
-1. `app.wasm` のバイト列
+1. `manifest.main` が指す wasm のバイト列
 2. `manifest.json` の正規化 JSON バイト列
 3. `assets` 配下ファイルのバイト列（パス昇順）
 
@@ -74,3 +76,11 @@
 
 - manifest は deploy リクエストの入力正本とする。
 - runtime 側での再計算結果が `hash.value` と一致しない場合は整合性エラーとして扱う。
+
+## 実装反映ノート
+
+- CLI の `hash.value` 計算は `hash.value` を空文字にした中間 manifest JSON を使って実行する。
+  - 連結順序は `main`（wasm bytes）→ 中間 manifest JSON bytes → assets bytes（`path` 昇順）。
+- CLI は `main` の実体 wasm を `build/<sha256>-<name>.wasm` へ配置し、`manifest.main` には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
+- `build/<sha256>-<name>.wasm` が既に存在する場合でも、内容の sha256 が不一致なら `main` の実体 wasm から上書き再生成する。
+- `hash.value` の wasm 対象は `manifest.main` が指す materialize 後ファイルとする。

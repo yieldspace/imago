@@ -11,8 +11,18 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Commands {
+    Build(BuildArgs),
     Deploy(DeployArgs),
     Certs(CertsSubcommandArgs),
+}
+
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct BuildArgs {
+    #[arg(long, value_name = "ENV_NAME")]
+    pub env: Option<String>,
+
+    #[arg(long, value_name = "TARGET_NAME", default_value = "default")]
+    pub target: String,
 }
 
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
@@ -57,6 +67,37 @@ pub struct CertsGenerateArgs {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn parses_build_without_options() {
+        let cli = Cli::try_parse_from(["imago", "build"]).expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Commands::Build(BuildArgs {
+                    env: None,
+                    target: "default".to_string(),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_build_with_env_and_target() {
+        let cli = Cli::try_parse_from(["imago", "build", "--env", "prod", "--target", "edge"])
+            .expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Commands::Build(BuildArgs {
+                    env: Some("prod".to_string()),
+                    target: "edge".to_string(),
+                }),
+            }
+        );
+    }
 
     #[test]
     fn parses_deploy_without_options() {

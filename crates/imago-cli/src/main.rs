@@ -7,7 +7,19 @@ use commands::CommandResult;
 
 fn dispatch(cli: Cli) -> CommandResult {
     match cli.command {
+        Commands::Build(args) => commands::build::run(args),
         Commands::Deploy(args) => commands::deploy::run(args),
+        Commands::Certs(CertsSubcommandArgs { command }) => match command {
+            CertsCommands::Generate(args) => commands::certs::run_generate(args),
+        },
+    }
+}
+
+#[cfg(test)]
+fn dispatch_with_project_root(cli: Cli, project_root: &std::path::Path) -> CommandResult {
+    match cli.command {
+        Commands::Build(args) => commands::build::run_with_project_root(args, project_root),
+        Commands::Deploy(args) => commands::deploy::run_with_project_root(args, project_root),
         Commands::Certs(CertsSubcommandArgs { command }) => match command {
             CertsCommands::Generate(args) => commands::certs::run_generate(args),
         },
@@ -42,19 +54,58 @@ fn install_rustls_provider() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::DeployArgs;
+    use crate::cli::{BuildArgs, DeployArgs};
+    use std::path::PathBuf;
+
+    fn new_temp_dir(test_name: &str) -> PathBuf {
+        let unique = format!(
+            "imago-cli-main-tests-{}-{}-{}",
+            test_name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after UNIX_EPOCH")
+                .as_nanos(),
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root).expect("temp dir should be created");
+        root
+    }
 
     #[test]
-    fn dispatches_deploy_and_returns_non_zero() {
-        let result = dispatch(Cli {
-            command: Commands::Deploy(DeployArgs {
-                env: None,
-                target: None,
-            }),
-        });
+    fn dispatches_build_and_returns_non_zero_without_imago_toml() {
+        let root = new_temp_dir("dispatch-build");
+        let result = dispatch_with_project_root(
+            Cli {
+                command: Commands::Build(BuildArgs {
+                    env: None,
+                    target: "default".to_string(),
+                }),
+            },
+            &root,
+        );
 
         assert_eq!(result.exit_code, 2);
         assert!(result.stderr.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dispatches_deploy_and_returns_non_zero() {
+        let root = new_temp_dir("dispatch-deploy");
+        let result = dispatch_with_project_root(
+            Cli {
+                command: Commands::Deploy(DeployArgs {
+                    env: None,
+                    target: None,
+                }),
+            },
+            &root,
+        );
+
+        assert_eq!(result.exit_code, 2);
+        assert!(result.stderr.is_some());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

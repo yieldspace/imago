@@ -28,7 +28,10 @@ use url::Url;
 use uuid::Uuid;
 use web_transport_quinn::{Session, proto::ConnectRequest};
 
-use crate::{cli::DeployArgs, commands::CommandResult};
+use crate::{
+    cli::DeployArgs,
+    commands::{CommandResult, build},
+};
 
 const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
 const COMPATIBILITY_DATE: &str = "2026-02-10";
@@ -49,21 +52,6 @@ struct UploadRequestContext<'a> {
     correlation_id: Uuid,
     deploy_id: &'a str,
     upload_token: &'a str,
-}
-
-#[derive(Debug, Deserialize)]
-struct ImagoToml {
-    #[serde(default)]
-    target: BTreeMap<String, TargetConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct TargetConfig {
-    remote: String,
-    server_name: Option<String>,
-    ca_cert: PathBuf,
-    client_cert: PathBuf,
-    client_key: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,7 +91,11 @@ impl Drop for TempArtifactBundle {
 }
 
 pub fn run(args: DeployArgs) -> CommandResult {
-    match run_inner(args) {
+    run_with_project_root(args, Path::new("."))
+}
+
+pub(crate) fn run_with_project_root(args: DeployArgs, project_root: &Path) -> CommandResult {
+    match run_inner(args, project_root) {
         Ok(()) => CommandResult {
             exit_code: 0,
             stderr: None,
@@ -115,30 +107,33 @@ pub fn run(args: DeployArgs) -> CommandResult {
     }
 }
 
-fn run_inner(args: DeployArgs) -> anyhow::Result<()> {
+fn run_inner(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("failed to create tokio runtime")?;
-    runtime.block_on(run_async(args))
+    runtime.block_on(run_async(args, project_root))
 }
 
-async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
-    let manifest_path = resolve_manifest_path(args.env.as_deref());
-    let manifest_bytes = std::fs::read(&manifest_path)
-        .with_context(|| format!("failed to read manifest: {}", manifest_path.display()))?;
+async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> {
+    let target_name = args
+        .target
+        .clone()
+        .unwrap_or_else(|| build::default_target_name().to_string());
+    let build_output = build::build_project(args.env.as_deref(), &target_name, project_root)
+        .context("failed to run build before deploy")?;
+
+    let manifest_path = build_output.manifest_path;
+    let manifest_bytes = build_output.manifest_bytes;
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).context("failed to parse manifest json")?;
 
-    let imago_toml = load_imago_toml(Path::new("imago.toml"))?;
-    let target_name = args.target.unwrap_or_else(|| "default".to_string());
-    let target = imago_toml
+    let target = build_output
         .target
-        .get(&target_name)
-        .ok_or_else(|| anyhow!("target '{}' is not defined in imago.toml", target_name))?
-        .clone();
+        .require_deploy_credentials()
+        .context("target settings are invalid for deploy")?;
 
-    let artifact = build_artifact_bundle_file(&manifest, &manifest_path, Path::new("."))?;
+    let artifact = build_artifact_bundle_file(&manifest, &manifest_path, project_root)?;
     let (artifact_digest, artifact_size) = compute_file_sha256_and_size(artifact.path())?;
     let manifest_digest = hex::encode(Sha256::digest(&manifest_bytes));
 
@@ -287,7 +282,7 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
     }
 }
 
-async fn connect_target(target: &TargetConfig) -> anyhow::Result<Session> {
+async fn connect_target(target: &build::DeployTargetConfig) -> anyhow::Result<Session> {
     let ca_chain = load_certs(&target.ca_cert)?;
     let client_chain = load_certs(&target.client_cert)?;
     let client_key = load_private_key(&target.client_key)?;
@@ -688,23 +683,7 @@ fn response_payload<T: serde::de::DeserializeOwned>(response: Envelope) -> anyho
         .map_err(|e| anyhow!("response payload decode failed: {e}"))
 }
 
-fn resolve_manifest_path(env: Option<&str>) -> PathBuf {
-    if let Some(env_name) = env {
-        let env_path = PathBuf::from(format!("build/manifest.{env_name}.json"));
-        if env_path.exists() {
-            return env_path;
-        }
-    }
-    PathBuf::from("build/manifest.json")
-}
-
-fn load_imago_toml(path: &Path) -> anyhow::Result<ImagoToml> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-    toml::from_str(&raw).context("failed to parse imago.toml")
-}
-
-fn normalize_target_for_protocol(target: &TargetConfig) -> BTreeMap<String, String> {
+fn normalize_target_for_protocol(target: &build::DeployTargetConfig) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     map.insert("remote".to_string(), target.remote.clone());
     if let Some(name) = &target.server_name {
@@ -732,11 +711,12 @@ fn build_artifact_bundle_file(
         project_root.join(manifest_source),
         "manifest.json",
     )?;
+    let manifest_base_dir = manifest_source.parent().unwrap_or_else(|| Path::new(""));
     let normalized_main = normalize_bundle_entry_path(&manifest.main, "manifest.main")?;
     let main_entry = normalized_tar_entry_name(&normalized_main);
     add_file_to_tar(
         &mut builder,
-        project_root.join(&normalized_main),
+        project_root.join(manifest_base_dir).join(&normalized_main),
         &main_entry,
     )?;
     for asset in &manifest.assets {
@@ -903,23 +883,24 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn returns_non_zero_when_manifest_missing() {
-        let result = run(DeployArgs {
-            env: None,
-            target: None,
-        });
-        assert_eq!(result.exit_code, 2);
-        assert!(result.stderr.is_some());
-    }
+    fn returns_non_zero_when_build_step_fails() {
+        let root =
+            std::env::temp_dir().join(format!("imago-cli-deploy-run-fail-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("temp dir should be created");
 
-    #[test]
-    fn resolves_env_manifest_when_exists() {
-        let path = resolve_manifest_path(Some("prod"));
-        if Path::new("build/manifest.prod.json").exists() {
-            assert_eq!(path, PathBuf::from("build/manifest.prod.json"));
-        } else {
-            assert_eq!(path, PathBuf::from("build/manifest.json"));
-        }
+        let result = run_with_project_root(
+            DeployArgs {
+                env: None,
+                target: None,
+            },
+            &root,
+        );
+
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.expect("stderr should be present");
+        assert!(stderr.contains("failed to run build before deploy"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -1058,6 +1039,41 @@ mod tests {
     }
 
     #[test]
+    fn build_artifact_bundle_file_includes_hashed_main_wasm() {
+        let root = std::env::temp_dir().join(format!("imago-cli-bundle-hashed-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("build")).expect("build dir should be created");
+        fs::write(root.join("build/manifest.json"), "{}").expect("manifest source should exist");
+
+        let hashed_main =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef-svc.wasm";
+        fs::write(root.join("build").join(hashed_main), b"wasm").expect("hashed main should exist");
+
+        let manifest = Manifest {
+            name: "svc".to_string(),
+            main: hashed_main.to_string(),
+            app_type: "cli".to_string(),
+            assets: vec![],
+        };
+
+        let bundle = build_artifact_bundle_file(&manifest, Path::new("build/manifest.json"), &root)
+            .expect("bundle should be created");
+
+        let file = std::fs::File::open(bundle.path()).expect("bundle file should open");
+        let mut archive = tar::Archive::new(file);
+        let mut names = Vec::new();
+        for entry in archive.entries().expect("tar entries should be readable") {
+            let entry = entry.expect("tar entry should read");
+            let path = entry.path().expect("entry path should parse");
+            names.push(path.to_string_lossy().to_string());
+        }
+
+        assert!(names.contains(&"manifest.json".to_string()));
+        assert!(names.contains(&hashed_main.to_string()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn build_artifact_bundle_file_rejects_unsafe_manifest_main() {
         let root = std::env::temp_dir().join(format!("imago-cli-bundle-main-{}", Uuid::new_v4()));
         fs::create_dir_all(root.join("build")).expect("build dir should be created");
@@ -1081,13 +1097,12 @@ mod tests {
     fn build_artifact_bundle_file_rejects_unsafe_asset_path() {
         let root = std::env::temp_dir().join(format!("imago-cli-bundle-asset-{}", Uuid::new_v4()));
         fs::create_dir_all(root.join("build")).expect("build dir should be created");
-        fs::create_dir_all(root.join("app")).expect("app dir should be created");
         fs::write(root.join("build/manifest.json"), "{}").expect("manifest source should exist");
-        fs::write(root.join("app/main.wasm"), b"00").expect("main wasm should exist");
+        fs::write(root.join("build/main.wasm"), b"00").expect("main wasm should exist");
 
         let manifest = Manifest {
             name: "svc".to_string(),
-            main: "app/main.wasm".to_string(),
+            main: "main.wasm".to_string(),
             app_type: "cli".to_string(),
             assets: vec![ManifestAsset {
                 path: "../secret.txt".to_string(),

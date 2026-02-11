@@ -1,7 +1,17 @@
+name = "local-imagod-app"
+main = "target/wasm32-wasip2/release/local-imagod-app.wasm"
+type = "cli"
+
+[build]
+command = "CARGO_TARGET_DIR=target cargo build --target wasm32-wasip2 --release"
+
+[[assets]]
+path = "assets/message.txt"
+mount = "/app/message.txt"
+
 [target.default]
 remote = "127.0.0.1:4443"
 server_name = "localhost"
 ca_cert = "certs/ca.crt"
 client_cert = "certs/client.crt"
 client_key = "certs/client.key"
-
