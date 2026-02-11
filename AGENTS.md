@@ -2,6 +2,7 @@
 
 ## Project Structure & Module Organization
 This repository is a Rust workspace for embedded Linux use cases. The root `Cargo.toml` defines members under `crates/`, and the current crate is `crates/imago-protocol`. Core Rust code lives in `crates/imago-protocol/src/` (`lib.rs`). Protocol documentation is in `docs/spec/`, with JSON samples in `docs/spec/examples/`. Keep generated artifacts in `target/` out of commits.
+Define dependency versions and internal path dependencies in the root `workspace.dependencies`, and reference them from member crates with `workspace = true`.
 
 ## Build, Test, and Development Commands
 - `cargo check --workspace`: fast compile-time validation without producing full build artifacts.
