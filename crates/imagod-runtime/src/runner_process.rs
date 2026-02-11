@@ -11,7 +11,7 @@ use imagod_ipc::{
 };
 use tokio::{
     io::AsyncReadExt,
-    net::UnixListener,
+    net::{UnixListener, UnixStream},
     sync::watch,
     time::{self, Duration},
 };
@@ -19,6 +19,9 @@ use tokio::{
 use crate::runtime_wasmtime::WasmRuntime;
 
 const STAGE_RUNNER: &str = "runner.process";
+const STAGE_SHUTDOWN: &str = "runner.shutdown";
+const STAGE_INBOUND: &str = "runner.inbound";
+const INBOUND_READ_TIMEOUT_SECS: u64 = 3;
 
 /// Starts runner mode by reading `RunnerBootstrap` from stdin and executing the component.
 ///
@@ -204,21 +207,66 @@ async fn run_inbound_server(
             }
         };
 
-        let request =
-            match DbusP2pTransport::read_message::<RunnerInboundRequest>(&mut stream).await {
-                Ok(v) => v,
-                Err(err) => {
-                    let _ = DbusP2pTransport::write_message(
-                        &mut stream,
-                        &RunnerInboundResponse::Error(IpcErrorPayload::from_error(&err)),
-                    )
-                    .await;
-                    continue;
-                }
-            };
+        let bootstrap = bootstrap.clone();
+        let shutdown_tx = shutdown_tx.clone();
+        tokio::spawn(async move {
+            handle_inbound_connection(&mut stream, bootstrap, shutdown_tx).await;
+        });
+    }
+}
 
-        let response = handle_inbound_request(&bootstrap, request, &shutdown_tx).await;
-        let _ = DbusP2pTransport::write_message(&mut stream, &response).await;
+async fn handle_inbound_connection(
+    stream: &mut UnixStream,
+    bootstrap: RunnerBootstrap,
+    shutdown_tx: watch::Sender<bool>,
+) {
+    let request = match time::timeout(
+        Duration::from_secs(INBOUND_READ_TIMEOUT_SECS),
+        DbusP2pTransport::read_message::<RunnerInboundRequest>(stream),
+    )
+    .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(err)) => {
+            let _ = DbusP2pTransport::write_message(
+                stream,
+                &RunnerInboundResponse::Error(IpcErrorPayload::from_error(&err)),
+            )
+            .await;
+            return;
+        }
+        Err(_) => {
+            let _ = DbusP2pTransport::write_message(
+                stream,
+                &RunnerInboundResponse::Error(IpcErrorPayload::from_error(&ImagodError::new(
+                    ErrorCode::OperationTimeout,
+                    STAGE_INBOUND,
+                    "runner inbound request timed out",
+                ))),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let response = handle_inbound_request(&bootstrap, request, &shutdown_tx).await;
+    let _ = DbusP2pTransport::write_message(stream, &response).await;
+}
+
+fn validate_shutdown_auth(
+    manager_auth_secret: &str,
+    runner_id: &str,
+    manager_auth_proof: &str,
+) -> Result<(), ImagodError> {
+    let expected = compute_manager_auth_proof(manager_auth_secret, runner_id)?;
+    if manager_auth_proof == expected {
+        Ok(())
+    } else {
+        Err(ImagodError::new(
+            ErrorCode::Unauthorized,
+            STAGE_SHUTDOWN,
+            "manager auth proof mismatch",
+        ))
     }
 }
 
@@ -229,7 +277,14 @@ async fn handle_inbound_request(
     shutdown_tx: &watch::Sender<bool>,
 ) -> RunnerInboundResponse {
     match request {
-        RunnerInboundRequest::ShutdownRunner => {
+        RunnerInboundRequest::ShutdownRunner { manager_auth_proof } => {
+            if let Err(err) = validate_shutdown_auth(
+                &bootstrap.manager_auth_secret,
+                &bootstrap.runner_id,
+                &manager_auth_proof,
+            ) {
+                return RunnerInboundResponse::Error(IpcErrorPayload::from_error(&err));
+            }
             let _ = shutdown_tx.send(true);
             RunnerInboundResponse::Ack
         }
@@ -300,4 +355,123 @@ fn prepare_socket_path(path: &Path) -> Result<(), ImagodError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::BTreeMap,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use imagod_ipc::{RunnerInboundResponse, random_secret_hex};
+
+    use super::*;
+
+    fn new_test_root(prefix: &str) -> PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        PathBuf::from(format!("/tmp/iss-runner-{prefix}-{ts}"))
+    }
+
+    fn new_test_bootstrap(root: &Path, runner_socket_name: &str) -> RunnerBootstrap {
+        let runner_id = "runner-1".to_string();
+        RunnerBootstrap {
+            runner_id: runner_id.clone(),
+            service_name: "svc-test".to_string(),
+            release_hash: "release-test".to_string(),
+            component_path: root.join("component.wasm"),
+            args: Vec::new(),
+            envs: BTreeMap::new(),
+            bindings: Vec::new(),
+            manager_control_endpoint: root.join("manager-control.sock"),
+            runner_endpoint: root.join(runner_socket_name),
+            manager_auth_secret: random_secret_hex(),
+            invocation_secret: random_secret_hex(),
+            epoch_tick_interval_ms: 50,
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_runner_rejects_invalid_manager_auth_proof() {
+        let root = new_test_root("shutdown-auth");
+        let bootstrap = new_test_bootstrap(&root, "runner.sock");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let response = handle_inbound_request(
+            &bootstrap,
+            RunnerInboundRequest::ShutdownRunner {
+                manager_auth_proof: "invalid-proof".to_string(),
+            },
+            &shutdown_tx,
+        )
+        .await;
+
+        match response {
+            RunnerInboundResponse::Error(err) => assert_eq!(err.code, ErrorCode::Unauthorized),
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert!(
+            !*shutdown_rx.borrow(),
+            "shutdown signal should not be accepted without valid auth"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn inbound_server_keeps_accepting_when_first_connection_stalls() {
+        let root = new_test_root("inbound-hol");
+        let bootstrap = new_test_bootstrap(&root, "runner.sock");
+        prepare_socket_path(&bootstrap.runner_endpoint).expect("socket path should prepare");
+        let listener =
+            UnixListener::bind(&bootstrap.runner_endpoint).expect("runner listener should bind");
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let mut shutdown_observer = shutdown_tx.subscribe();
+        let server_task = tokio::spawn(run_inbound_server(
+            listener,
+            bootstrap.clone(),
+            shutdown_tx.clone(),
+            shutdown_rx,
+        ));
+
+        let idle = tokio::net::UnixStream::connect(&bootstrap.runner_endpoint)
+            .await
+            .expect("idle connection should open");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let manager_auth_proof =
+            compute_manager_auth_proof(&bootstrap.manager_auth_secret, &bootstrap.runner_id)
+                .expect("manager proof should compute");
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            DbusP2pTransport::call_runner(
+                &bootstrap.runner_endpoint,
+                &RunnerInboundRequest::ShutdownRunner { manager_auth_proof },
+            ),
+        )
+        .await
+        .expect("shutdown request should not be blocked by idle peer")
+        .expect("shutdown request should return response");
+        assert!(matches!(response, RunnerInboundResponse::Ack));
+
+        tokio::time::timeout(Duration::from_secs(2), shutdown_observer.changed())
+            .await
+            .expect("shutdown signal should be observed")
+            .expect("shutdown observer should remain active");
+        assert!(*shutdown_observer.borrow(), "shutdown should become true");
+
+        drop(idle);
+        tokio::time::timeout(Duration::from_secs(2), server_task)
+            .await
+            .expect("server task should exit after shutdown")
+            .expect("server task should join cleanly");
+
+        let _ = std::fs::remove_file(&bootstrap.runner_endpoint);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

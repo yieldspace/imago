@@ -480,6 +480,7 @@ flowchart TD
   - trait: `ControlPlaneTransport`, `InvocationTransport`
   - 実装: `DbusP2pTransport`（UDS 上の frame + CBOR）
   - manager-runner 制御: `register_runner`, `runner_ready`, `shutdown_runner`, `heartbeat`, `resolve_invocation_target`
+  - `shutdown_runner` は `manager_auth_proof` を必須とし、runner 側で照合する。
 - runner 間 direct invoke の基盤を追加した（実関数実行は未実装）。
   - `resolve_invocation_target` は `manifest.bindings` を用いた interface 単位 ACL を適用する。
   - manager は target runner 秘密鍵で短命 token を発行し、callee runner が検証する。

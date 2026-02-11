@@ -330,28 +330,39 @@ impl ServiceSupervisor {
 
         let stop_deadline = time::Instant::now() + self.stop_grace_timeout;
         let shutdown_timeout = self.runner_ready_timeout.min(self.stop_grace_timeout);
-        match time::timeout(
-            shutdown_timeout,
-            DbusP2pTransport::call_runner(
-                &service.runner_endpoint,
-                &RunnerInboundRequest::ShutdownRunner,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(_response)) => {}
-            Ok(Err(err)) => {
-                eprintln!(
-                    "service graceful shutdown request failed name={} release={} error={}",
-                    service_name, service.release_hash, err
-                );
+
+        match compute_manager_auth_proof(&service.manager_auth_secret, &service.runner_id) {
+            Ok(manager_auth_proof) => {
+                match time::timeout(
+                    shutdown_timeout,
+                    DbusP2pTransport::call_runner(
+                        &service.runner_endpoint,
+                        &RunnerInboundRequest::ShutdownRunner { manager_auth_proof },
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(_response)) => {}
+                    Ok(Err(err)) => {
+                        eprintln!(
+                            "service graceful shutdown request failed name={} release={} error={}",
+                            service_name, service.release_hash, err
+                        );
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "service graceful shutdown request timed out name={} release={} timeout_ms={}",
+                            service_name,
+                            service.release_hash,
+                            shutdown_timeout.as_millis()
+                        );
+                    }
+                }
             }
-            Err(_) => {
+            Err(err) => {
                 eprintln!(
-                    "service graceful shutdown request timed out name={} release={} timeout_ms={}",
-                    service_name,
-                    service.release_hash,
-                    shutdown_timeout.as_millis()
+                    "service graceful shutdown auth proof failed name={} release={} error={}",
+                    service_name, service.release_hash, err
                 );
             }
         }

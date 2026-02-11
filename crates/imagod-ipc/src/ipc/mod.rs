@@ -127,7 +127,10 @@ pub enum ControlResponse {
 /// Runner inbound request issued by manager or other runners.
 pub enum RunnerInboundRequest {
     /// Requests graceful runner shutdown.
-    ShutdownRunner,
+    ShutdownRunner {
+        /// Proof derived from manager secret and runner id.
+        manager_auth_proof: String,
+    },
     /// Requests interface function invocation on the runner.
     Invoke {
         /// Interface identifier to invoke.
