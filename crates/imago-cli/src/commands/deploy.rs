@@ -707,11 +707,12 @@ fn build_artifact_bundle_file(
         project_root.join(manifest_source),
         "manifest.json",
     )?;
+    let manifest_base_dir = manifest_source.parent().unwrap_or_else(|| Path::new(""));
     let normalized_main = normalize_bundle_entry_path(&manifest.main, "manifest.main")?;
     let main_entry = normalized_tar_entry_name(&normalized_main);
     add_file_to_tar(
         &mut builder,
-        project_root.join(&normalized_main),
+        project_root.join(manifest_base_dir).join(&normalized_main),
         &main_entry,
     )?;
     for asset in &manifest.assets {
@@ -1030,8 +1031,9 @@ mod tests {
         fs::write(root.join("build/manifest.json"), "{}").expect("manifest source should exist");
 
         let hashed_main =
-            "build/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef-svc.wasm";
-        fs::write(root.join(hashed_main), b"wasm").expect("hashed main should exist");
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef-svc.wasm";
+        fs::write(root.join("build").join(hashed_main), b"wasm")
+            .expect("hashed main should exist");
 
         let manifest = Manifest {
             name: "svc".to_string(),
@@ -1083,13 +1085,12 @@ mod tests {
     fn build_artifact_bundle_file_rejects_unsafe_asset_path() {
         let root = std::env::temp_dir().join(format!("imago-cli-bundle-asset-{}", Uuid::new_v4()));
         fs::create_dir_all(root.join("build")).expect("build dir should be created");
-        fs::create_dir_all(root.join("app")).expect("app dir should be created");
         fs::write(root.join("build/manifest.json"), "{}").expect("manifest source should exist");
-        fs::write(root.join("app/main.wasm"), b"00").expect("main wasm should exist");
+        fs::write(root.join("build/main.wasm"), b"00").expect("main wasm should exist");
 
         let manifest = Manifest {
             name: "svc".to_string(),
-            main: "app/main.wasm".to_string(),
+            main: "main.wasm".to_string(),
             app_type: "cli".to_string(),
             assets: vec![ManifestAsset {
                 path: "../secret.txt".to_string(),

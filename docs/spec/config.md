@@ -107,7 +107,7 @@
 - `[env.<name>]` の反映はトップレベルキー単位の置換で実装する。
 - `build.command` は string / array の両形式を受理する。
 - `imago build --env <name>` は `build/manifest.<name>.json` を生成し、`build/manifest.json` は更新しない。
-- `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には materialize 後パスを書き込む。
+- `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
 
 ## `target.<name>` の接続キー（deploy 通信）
 

@@ -42,7 +42,7 @@
 
 全体 hash は次を対象に計算する。
 
-1. `app.wasm` のバイト列
+1. `manifest.main` が指す wasm のバイト列
 2. `manifest.json` の正規化 JSON バイト列
 3. `assets` 配下ファイルのバイト列（パス昇順）
 
@@ -80,5 +80,5 @@
 
 - CLI の `hash.value` 計算は `hash.value` を空文字にした中間 manifest JSON を使って実行する。
   - 連結順序は `main`（wasm bytes）→ 中間 manifest JSON bytes → assets bytes（`path` 昇順）。
-- CLI は `main` の実体 wasm を `build/<sha256>-<name>.wasm` へ配置し、`manifest.main` はこの materialize 済みファイルを指す。
+- CLI は `main` の実体 wasm を `build/<sha256>-<name>.wasm` へ配置し、`manifest.main` には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
 - `hash.value` の wasm 対象は `manifest.main` が指す materialize 後ファイルとする。

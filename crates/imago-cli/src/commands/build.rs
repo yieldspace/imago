@@ -149,7 +149,11 @@ pub fn build_project(
     let main_raw = required_string(&root, "main")?;
     let source_main_path = normalize_relative_path(&main_raw, "main")?;
     ensure_file_exists(project_root, &source_main_path, "main")?;
-    let main_path = materialize_hashed_wasm(project_root, &source_main_path, &name)?;
+    let materialized_main_path = materialize_hashed_wasm(project_root, &source_main_path, &name)?;
+    let manifest_main = materialized_main_path
+        .file_name()
+        .ok_or_else(|| anyhow!("materialized wasm filename is missing"))?
+        .to_os_string();
 
     let app_type = required_string(&root, "type")?;
     validate_app_type(&app_type)?;
@@ -162,7 +166,7 @@ pub fn build_project(
 
     let mut manifest = Manifest {
         name,
-        main: normalized_path_to_string(&main_path),
+        main: normalized_path_to_string(Path::new(&manifest_main)),
         app_type,
         target: target.as_manifest_target_map(),
         vars,
@@ -183,7 +187,12 @@ pub fn build_project(
         },
     };
 
-    manifest.hash.value = compute_manifest_hash(project_root, &main_path, &assets, &manifest)?;
+    manifest.hash.value = compute_manifest_hash(
+        project_root,
+        &materialized_main_path,
+        &assets,
+        &manifest,
+    )?;
 
     let mut manifest_bytes =
         serde_json::to_vec_pretty(&manifest).context("failed to serialize build manifest")?;
@@ -789,8 +798,19 @@ mod tests {
 
     fn assert_hashed_main_path(manifest: &Manifest, service_name: &str) -> PathBuf {
         assert!(
-            manifest.main.starts_with("build/"),
-            "manifest.main must start with build/: {}",
+            !manifest.main.contains('/'),
+            "manifest.main must not contain slash: {}",
+            manifest.main
+        );
+        assert!(
+            !manifest.main.contains('\\'),
+            "manifest.main must not contain backslash: {}",
+            manifest.main
+        );
+
+        assert!(
+            !manifest.main.starts_with("build/"),
+            "manifest.main must not start with build/: {}",
             manifest.main
         );
 
@@ -804,8 +824,6 @@ mod tests {
 
         let stem = manifest
             .main
-            .strip_prefix("build/")
-            .expect("build prefix should exist")
             .strip_suffix(&expected_suffix)
             .expect("expected suffix should exist");
         assert_eq!(stem.len(), 64, "sha256 prefix must have 64 hex chars");
@@ -815,7 +833,7 @@ mod tests {
             stem
         );
 
-        PathBuf::from(&manifest.main)
+        PathBuf::from("build").join(&manifest.main)
     }
 
     #[test]

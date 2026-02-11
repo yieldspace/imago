@@ -1,6 +1,6 @@
 {
   "name": "syslog-forwarder",
-  "main": "build/app.wasm",
+  "main": "app.wasm",
   "type": "worker",
   "target": {
     "host": "nanokvm-01"
