@@ -141,13 +141,22 @@ pub fn build_project(
     let secrets = load_env_file(project_root, env)?;
 
     let command = parse_build_command(&root)?;
-    run_build_command(command.as_ref(), project_root, &secrets)?;
 
     let name = required_string(&root, "name")?;
     validate_service_name(&name)?;
 
     let main_raw = required_string(&root, "main")?;
     let source_main_path = normalize_relative_path(&main_raw, "main")?;
+
+    let app_type = required_string(&root, "type")?;
+    validate_app_type(&app_type)?;
+
+    let vars = parse_string_table(root.get("vars"), "vars")?;
+    let dependencies = parse_dependencies(root.get("dependencies"))?;
+    let target = parse_target(&root, target_name)?;
+
+    run_build_command(command.as_ref(), project_root, &secrets)?;
+
     ensure_file_exists(project_root, &source_main_path, "main")?;
     let materialized_main_path = materialize_hashed_wasm(project_root, &source_main_path, &name)?;
     let manifest_main = materialized_main_path
@@ -155,13 +164,6 @@ pub fn build_project(
         .ok_or_else(|| anyhow!("materialized wasm filename is missing"))?
         .to_os_string();
 
-    let app_type = required_string(&root, "type")?;
-    validate_app_type(&app_type)?;
-
-    let vars = parse_string_table(root.get("vars"), "vars")?;
-    let dependencies = parse_dependencies(root.get("dependencies"))?;
-
-    let target = parse_target(&root, target_name)?;
     let assets = parse_assets(root.get("assets"), project_root)?;
 
     let mut manifest = Manifest {
@@ -733,14 +735,18 @@ fn materialize_hashed_wasm(
                 destination.display()
             ));
         }
-    } else {
-        fs::copy(&source, &destination).with_context(|| {
+
+        let existing_digest = compute_sha256_hex(&destination).with_context(|| {
             format!(
-                "failed to copy wasm from {} to {}",
-                source.display(),
+                "failed to verify materialized wasm hash: {}",
                 destination.display()
             )
         })?;
+        if existing_digest != digest {
+            copy_materialized_wasm(&source, &destination)?;
+        }
+    } else {
+        copy_materialized_wasm(&source, &destination)?;
     }
 
     Ok(PathBuf::from("build").join(
@@ -748,6 +754,17 @@ fn materialize_hashed_wasm(
             .file_name()
             .ok_or_else(|| anyhow!("materialized wasm filename is missing"))?,
     ))
+}
+
+fn copy_materialized_wasm(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    fs::copy(source, destination).with_context(|| {
+        format!(
+            "failed to copy wasm from {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    Ok(())
 }
 
 pub fn resolve_manifest_output_path(env: Option<&str>) -> PathBuf {
@@ -1052,6 +1069,31 @@ remote = "127.0.0.1:4443"
     }
 
     #[test]
+    fn does_not_run_build_command_when_required_config_is_invalid() {
+        let root = new_temp_dir("command-not-run-on-invalid-config");
+        write_imago_toml(
+            &root,
+            r#"
+main = "build/app.wasm"
+type = "cli"
+
+[build]
+command = "mkdir -p build && printf side-effect > build/side-effect.txt"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+
+        let err = build_project(None, "default", &root)
+            .expect_err("missing required key should fail before build.command");
+        assert!(err.to_string().contains("imago.toml missing required key: name"));
+        assert!(!root.join("build/side-effect.txt").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn manifest_target_contains_only_remote_and_server_name() {
         let root = new_temp_dir("target-shape");
         write_imago_toml(
@@ -1213,6 +1255,41 @@ remote = "127.0.0.1:4443"
         assert_ne!(first_main, second_main);
         assert!(root.join(first_main).exists());
         assert!(root.join(second_main).exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn materialized_wasm_is_rewritten_when_existing_file_is_corrupted() {
+        let root = new_temp_dir("rewrite-corrupted-materialized");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let first = build_project(None, "default", &root).expect("first build should succeed");
+        let first_manifest = read_manifest(&root, &first.manifest_path);
+        let first_main = assert_hashed_main_path(&first_manifest, "svc");
+
+        write_file(&root.join(&first_main), b"tampered");
+
+        let second = build_project(None, "default", &root).expect("second build should succeed");
+        let second_manifest = read_manifest(&root, &second.manifest_path);
+        let second_main = assert_hashed_main_path(&second_manifest, "svc");
+
+        assert_eq!(first_main, second_main);
+        assert_eq!(
+            fs::read(root.join("build/app.wasm")).unwrap(),
+            fs::read(root.join(second_main)).unwrap()
+        );
 
         let _ = fs::remove_dir_all(root);
     }
