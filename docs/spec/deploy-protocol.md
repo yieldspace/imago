@@ -132,6 +132,8 @@ response:
 - `artifact_status=missing`: 全体 upload
 - `artifact_status=partial`: `missing_ranges` のみ upload（全量再送しない）
 - `missing_ranges` は partial 時に「先頭1件」ではなく「全欠損レンジ集合」を返す
+- `idempotency_key` は `name/type/target/policy/artifact_* /manifest_digest` の canonical 表現を `sha256` した安定キー（`deploy:<hex64>`）を使う。
+- upload フェーズ（`hello.negotiate` / `deploy.prepare` / `artifact.push` / `artifact.commit`）は固定回数の自動再試行を行い、再接続後は同一 `idempotency_key` と `missing_ranges` に基づいて再開転送する。
 
 ### 5.3 `artifact.push`
 
@@ -297,3 +299,9 @@ response:
 - `imago-cli` の `deploy` 接続フェーズで、証明書認証失敗（Unknown CA / 不正証明書 / 証明書必須違反など）を `E_UNAUTHORIZED` に正規化する。
 - 将来の CONNECT 拒否との整合のため、HTTP status `401` / `403` も `E_UNAUTHORIZED` として扱う。
 - 対象は CLI のエラー正規化のみで、mTLS 検証位置（TLS handshake）および protocol wire 契約は変更しない。
+
+## 実装反映ノート（Issue #71 / 2026-02-11）
+
+- `imago-cli deploy` の `idempotency_key` を `name/type/target/policy/artifact_digest/artifact_size/manifest_digest` 由来の安定ハッシュへ変更した。
+- upload フェーズに自動 retry/resume を導入した（最大 4 試行、待機 250ms -> 500ms -> 1s 上限）。
+- 非再試行エラー（`E_UNAUTHORIZED`, `E_BAD_REQUEST`, `E_BAD_MANIFEST`, `E_IDEMPOTENCY_CONFLICT`, `E_RANGE_INVALID`, `E_CHUNK_HASH_MISMATCH`, `E_STORAGE_QUOTA`, `E_PRECONDITION_FAILED`）は即時失敗とする。
