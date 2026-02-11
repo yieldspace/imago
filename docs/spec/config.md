@@ -119,6 +119,7 @@
 - `tls.client_ca_cert`
 - `runtime.chunk_size`
 - `runtime.max_inflight_chunks`
+- `runtime.max_artifact_size_bytes`（既定 `67108864` = 64 MiB）
 - `runtime.upload_session_ttl_secs`
 - `runtime.stop_grace_timeout_secs`（既定 `30`）
 - `runtime.epoch_tick_interval_ms`（既定 `50`）

@@ -34,9 +34,15 @@ async fn run() -> Result<(), anyhow::Error> {
     let config = Arc::new(ImagodConfig::load(&config_path).map_err(anyhow::Error::new)?);
 
     let artifact_root = config.storage_root.join("artifacts");
-    let artifacts = ArtifactStore::new(&artifact_root, config.runtime.upload_session_ttl_secs)
-        .await
-        .map_err(anyhow::Error::new)?;
+    let artifacts = ArtifactStore::new(
+        &artifact_root,
+        config.runtime.upload_session_ttl_secs,
+        config.runtime.chunk_size,
+        config.runtime.max_inflight_chunks,
+        config.runtime.max_artifact_size_bytes,
+    )
+    .await
+    .map_err(anyhow::Error::new)?;
     let operations = OperationManager::new();
     let runtime = WasmRuntime::new().map_err(anyhow::Error::new)?;
     let supervisor =

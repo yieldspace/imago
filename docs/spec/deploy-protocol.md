@@ -89,6 +89,13 @@ response:
 - `features`
 - `limits`
 
+`limits` に含まれる主要キー:
+
+- `chunk_size`
+- `max_inflight_chunks`
+- `max_artifact_size_bytes`
+- `upload_session_ttl`
+
 `compatibility_date` は `protocol_draft` に戻さない。
 
 ### 5.2 `deploy.prepare`
@@ -123,6 +130,11 @@ request payload:
 - `upload_token`
 - `chunk_b64`
 
+制約:
+
+- `length <= hello.limits.chunk_size`
+- 同一 deploy session の同時 push は `hello.limits.max_inflight_chunks` を上限として `E_BUSY` で制御する。
+
 response payload (`artifact.push` ack):
 
 - `received_ranges`
@@ -142,6 +154,11 @@ response:
 
 - `artifact_id`
 - `verified`
+
+制約:
+
+- `deploy.prepare.artifact_size <= hello.limits.max_artifact_size_bytes`
+- 上限超過時は `E_STORAGE_QUOTA`
 
 ### 5.5 `command.start`
 
@@ -249,3 +266,4 @@ response:
 - `chunk_size = 1MiB`
 - `max_inflight_chunks = 16`
 - `upload_session_ttl = 15m`
+- `max_artifact_size_bytes = 64MiB`

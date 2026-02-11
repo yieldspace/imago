@@ -115,12 +115,13 @@ sequenceDiagram
 共通処理:
 
 1. `CommandStartRequest` decode + `Validate`
-2. `OperationManager::start`
-3. `CommandStartResponse { accepted: true }` 送信
-4. `accepted` event 送信
-5. `set_state(running, "starting")`
-6. `progress(stage="starting")` 送信
-7. 早期 cancel 判定（spawn 前）
+2. envelope `request_id` と payload `request_id` の一致検証（一致しない場合 `E_BAD_REQUEST`）
+3. `OperationManager::start`
+4. `CommandStartResponse { accepted: true }` 送信
+5. `accepted` event 送信
+6. `set_state(running, "starting")`
+7. `progress(stage="starting")` 送信
+8. 早期 cancel 判定（spawn 前）
 
 コマンド分岐:
 
@@ -165,22 +166,32 @@ sequenceDiagram
   - `upload_token`
   - `received_ranges`
   - `committed`
+  - `inflight_writes`
+  - `commit_in_progress`
   - `updated_at_epoch_secs`
   - `file_path`
+
+- `ArtifactStore` 追加制約パラメータ:
+  - `max_chunk_size`
+  - `max_inflight_chunks`
+  - `max_artifact_size_bytes`
 
 ### 6.2 不変条件
 
 - `prepare`: `artifact_size > 0`
-- `push`: `upload_token` 一致、range 妥当、chunk hash 一致
-- `commit`: metadata 一致、必要 range 完了、digest 一致
+- `prepare`: `artifact_size <= max_artifact_size_bytes`
+- `push`: `upload_token` 一致、range 妥当、`length <= max_chunk_size`、chunk hash 一致
+- `push`: `inflight_writes < max_inflight_chunks`（超過時 `E_BUSY`）
+- `commit`: metadata 一致、`inflight_writes == 0`、必要 range 完了、digest 一致
 - `committed_artifact`: `committed=true` の session のみ返却
 
 ### 6.3 GC / 保持方針
 
 - 入口 GC: `prepare` / `push` / `commit` / `committed_artifact`
-- TTL 超過の未完了 session を削除
+- TTL 超過の未完了 session を削除（`inflight_writes > 0` / `commit_in_progress` は除外）
 - 同一 service の旧コミット artifact/session/idempotency を削除し、最新のみ保持
 - lock 内は削除対象の計画生成のみ、実ファイル削除は lock 外で実行
+- `push` / `commit` は lock を2段階に分割し、ファイル I/O と digest 計算を lock 外で実施
 
 ## 7. Orchestrator 詳細
 

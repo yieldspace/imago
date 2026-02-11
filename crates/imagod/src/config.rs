@@ -33,6 +33,8 @@ pub struct RuntimeConfig {
     pub chunk_size: usize,
     #[serde(default = "default_max_inflight_chunks")]
     pub max_inflight_chunks: usize,
+    #[serde(default = "default_max_artifact_size_bytes")]
+    pub max_artifact_size_bytes: u64,
     #[serde(default = "default_upload_session_ttl_secs")]
     pub upload_session_ttl_secs: u64,
     #[serde(default = "default_stop_grace_timeout_secs")]
@@ -46,6 +48,7 @@ impl Default for RuntimeConfig {
         Self {
             chunk_size: default_chunk_size(),
             max_inflight_chunks: default_max_inflight_chunks(),
+            max_artifact_size_bytes: default_max_artifact_size_bytes(),
             upload_session_ttl_secs: default_upload_session_ttl_secs(),
             stop_grace_timeout_secs: default_stop_grace_timeout_secs(),
             epoch_tick_interval_ms: default_epoch_tick_interval_ms(),
@@ -116,6 +119,14 @@ impl ImagodConfig {
             ));
         }
 
+        if config.runtime.max_artifact_size_bytes == 0 {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.load",
+                "runtime.max_artifact_size_bytes must be greater than 0",
+            ));
+        }
+
         Ok(config)
     }
 }
@@ -152,6 +163,10 @@ fn default_chunk_size() -> usize {
 
 fn default_max_inflight_chunks() -> usize {
     16
+}
+
+fn default_max_artifact_size_bytes() -> u64 {
+    64 * 1024 * 1024
 }
 
 fn default_upload_session_ttl_secs() -> u64 {
@@ -220,6 +235,7 @@ client_ca_cert = "ca.crt"
 
         let config = ImagodConfig::load(&path).expect("config should load");
         assert_eq!(config.compatibility_date, "2026-02-10");
+        assert_eq!(config.runtime.max_artifact_size_bytes, 64 * 1024 * 1024);
 
         cleanup_temp_path(path);
     }
@@ -276,6 +292,32 @@ epoch_tick_interval_ms = 0
             message.contains("stop_grace_timeout_secs")
                 || message.contains("epoch_tick_interval_ms")
         );
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_zero_max_artifact_size() {
+        let path = write_temp_config(
+            "rejects_zero_max_artifact_size",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_cert = "server.crt"
+server_key = "server.key"
+client_ca_cert = "ca.crt"
+
+[runtime]
+max_artifact_size_bytes = 0
+"#,
+        );
+
+        let err = ImagodConfig::load(&path).expect_err("config should reject zero artifact size");
+        assert!(err.to_string().contains("max_artifact_size_bytes"));
 
         cleanup_temp_path(path);
     }

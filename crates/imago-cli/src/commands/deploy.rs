@@ -9,11 +9,11 @@ use std::{
 use anyhow::{Context, anyhow};
 use base64::Engine;
 use imago_protocol::{
-    ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushChunkHeader, ArtifactStatus,
-    CommandEvent, CommandEventType, CommandPayload, CommandStartRequest, CommandStartResponse,
-    CommandType, DeployCommandPayload, DeployPrepareRequest, DeployPrepareResponse,
-    HelloNegotiateRequest, HelloNegotiateResponse, MessageType, ProtocolEnvelope, from_cbor,
-    to_cbor,
+    ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushChunkHeader, ArtifactPushRequest,
+    ArtifactStatus, CommandEvent, CommandEventType, CommandPayload, CommandStartRequest,
+    CommandStartResponse, CommandType, DeployCommandPayload, DeployPrepareRequest,
+    DeployPrepareResponse, HelloNegotiateRequest, HelloNegotiateResponse, MessageType,
+    ProtocolEnvelope, from_cbor, to_cbor,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
@@ -60,13 +60,6 @@ struct Manifest {
 #[derive(Debug, Deserialize)]
 struct ManifestAsset {
     path: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ArtifactPushRequest {
-    #[serde(flatten)]
-    header: ArtifactPushChunkHeader,
-    chunk_b64: String,
 }
 
 #[derive(Debug)]

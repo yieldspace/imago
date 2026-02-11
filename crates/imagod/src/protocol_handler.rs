@@ -1,9 +1,9 @@
 use std::{collections::BTreeMap, sync::Arc, time::UNIX_EPOCH};
 
 use imago_protocol::{
-    CommandCancelRequest, CommandEvent, CommandEventType, CommandPayload, CommandStartRequest,
-    CommandStartResponse, CommandState, CommandType, DeployPrepareRequest, MessageType,
-    ProtocolEnvelope, StateRequest, StructuredError, Validate, from_cbor, to_cbor,
+    ArtifactPushRequest, CommandCancelRequest, CommandEvent, CommandEventType, CommandPayload,
+    CommandStartRequest, CommandStartResponse, CommandState, CommandType, DeployPrepareRequest,
+    MessageType, ProtocolEnvelope, StateRequest, StructuredError, Validate, from_cbor, to_cbor,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -155,6 +155,10 @@ impl ProtocolHandler {
             self.config.runtime.max_inflight_chunks.to_string(),
         );
         limits.insert(
+            "max_artifact_size_bytes".to_string(),
+            self.config.runtime.max_artifact_size_bytes.to_string(),
+        );
+        limits.insert(
             "upload_session_ttl".to_string(),
             format!("{}s", self.config.runtime.upload_session_ttl_secs),
         );
@@ -197,7 +201,7 @@ impl ProtocolHandler {
     }
 
     async fn handle_push(&self, request: Envelope) -> Result<Envelope, ImagodError> {
-        let payload: crate::artifact_store::ArtifactPushRequest = payload_as(&request)?;
+        let payload: ArtifactPushRequest = payload_as(&request)?;
         payload
             .header
             .validate()
@@ -270,8 +274,11 @@ impl ProtocolHandler {
             .validate()
             .map_err(|e| bad_request("command.start", e.to_string()))?;
 
+        ensure_command_start_request_id_match(request.request_id, payload.request_id)?;
+        let operation_id = request.request_id;
+
         self.operations
-            .start(payload.request_id, payload.command_type)
+            .start(operation_id, payload.command_type)
             .await?;
 
         let accepted = response_envelope(
@@ -283,7 +290,7 @@ impl ProtocolHandler {
         write_envelope(send, &accepted).await?;
 
         let accepted_event = event_envelope(
-            payload.request_id,
+            operation_id,
             request.correlation_id,
             CommandEventType::Accepted,
             payload.command_type,
@@ -293,10 +300,10 @@ impl ProtocolHandler {
         write_envelope(send, &accepted_event).await?;
 
         self.operations
-            .set_state(&payload.request_id, CommandState::Running, "starting")
+            .set_state(&operation_id, CommandState::Running, "starting")
             .await?;
         let running_event = event_envelope(
-            payload.request_id,
+            operation_id,
             request.correlation_id,
             CommandEventType::Progress,
             payload.command_type,
@@ -305,16 +312,12 @@ impl ProtocolHandler {
         )?;
         write_envelope(send, &running_event).await?;
 
-        if self
-            .operations
-            .is_cancel_requested(&payload.request_id)
-            .await
-        {
+        if self.operations.is_cancel_requested(&operation_id).await {
             self.operations
-                .finish(&payload.request_id, CommandState::Canceled, "canceled")
+                .finish(&operation_id, CommandState::Canceled, "canceled")
                 .await;
             let canceled = event_envelope(
-                payload.request_id,
+                operation_id,
                 request.correlation_id,
                 CommandEventType::Canceled,
                 payload.command_type,
@@ -322,7 +325,7 @@ impl ProtocolHandler {
                 None,
             )?;
             write_envelope(send, &canceled).await?;
-            self.operations.remove(&payload.request_id).await;
+            self.operations.remove(&operation_id).await;
             return Ok(());
         }
 
@@ -363,14 +366,14 @@ impl ProtocolHandler {
         match command_result {
             Ok((progress_stage, success_stage)) => {
                 self.operations
-                    .mark_spawned(&payload.request_id, &success_stage)
+                    .mark_spawned(&operation_id, &success_stage)
                     .await?;
                 self.operations
-                    .finish(&payload.request_id, CommandState::Succeeded, &success_stage)
+                    .finish(&operation_id, CommandState::Succeeded, &success_stage)
                     .await;
 
                 let progress = event_envelope(
-                    payload.request_id,
+                    operation_id,
                     request.correlation_id,
                     CommandEventType::Progress,
                     payload.command_type,
@@ -380,7 +383,7 @@ impl ProtocolHandler {
                 write_envelope(send, &progress).await?;
 
                 let succeeded = event_envelope(
-                    payload.request_id,
+                    operation_id,
                     request.correlation_id,
                     CommandEventType::Succeeded,
                     payload.command_type,
@@ -388,15 +391,15 @@ impl ProtocolHandler {
                     None,
                 )?;
                 write_envelope(send, &succeeded).await?;
-                self.operations.remove(&payload.request_id).await;
+                self.operations.remove(&operation_id).await;
             }
             Err(err) => {
                 self.operations
-                    .finish(&payload.request_id, CommandState::Failed, "failed")
+                    .finish(&operation_id, CommandState::Failed, "failed")
                     .await;
 
                 let failed = event_envelope(
-                    payload.request_id,
+                    operation_id,
                     request.correlation_id,
                     CommandEventType::Failed,
                     payload.command_type,
@@ -404,7 +407,7 @@ impl ProtocolHandler {
                     Some(err.to_structured()),
                 )?;
                 write_envelope(send, &failed).await?;
-                self.operations.remove(&payload.request_id).await;
+                self.operations.remove(&operation_id).await;
             }
         }
 
@@ -568,9 +571,26 @@ fn is_compatible_date_match(request: &str, configured: &str) -> bool {
     request == configured
 }
 
+fn ensure_command_start_request_id_match(
+    envelope_request_id: Uuid,
+    payload_request_id: Uuid,
+) -> Result<(), ImagodError> {
+    if envelope_request_id == payload_request_id {
+        return Ok(());
+    }
+
+    Err(bad_request(
+        "command.start",
+        "envelope request_id and payload request_id must match",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ensure_single_request_envelope, is_compatible_date_match};
+    use super::{
+        ensure_command_start_request_id_match, ensure_single_request_envelope,
+        is_compatible_date_match,
+    };
     use imago_protocol::{MessageType, ProtocolEnvelope};
     use serde_json::Value;
     use uuid::Uuid;
@@ -596,5 +616,21 @@ mod tests {
         };
         let result = ensure_single_request_envelope(&[envelope.clone(), envelope]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn command_start_request_ids_must_match() {
+        let envelope_request_id = Uuid::new_v4();
+        let payload_request_id = Uuid::new_v4();
+        let err = ensure_command_start_request_id_match(envelope_request_id, payload_request_id)
+            .expect_err("mismatched request ids should be rejected");
+        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+    }
+
+    #[test]
+    fn command_start_request_ids_can_match() {
+        let request_id = Uuid::new_v4();
+        let result = ensure_command_start_request_id_match(request_id, request_id);
+        assert!(result.is_ok());
     }
 }

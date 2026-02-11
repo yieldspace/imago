@@ -8,10 +8,9 @@ use std::{
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use imago_protocol::{
-    ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushChunkHeader,
+    ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushRequest,
     ArtifactStatus, ByteRange, DeployPrepareRequest, DeployPrepareResponse, ErrorCode,
 };
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{
     fs::{self, OpenOptions},
@@ -48,14 +47,9 @@ struct UploadSession {
     file_path: PathBuf,
     received_ranges: Vec<ByteRange>,
     committed: bool,
+    inflight_writes: usize,
+    commit_in_progress: bool,
     updated_at_epoch_secs: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArtifactPushRequest {
-    #[serde(flatten)]
-    pub header: ArtifactPushChunkHeader,
-    pub chunk_b64: String,
 }
 
 #[derive(Default)]
@@ -80,12 +74,18 @@ pub struct ArtifactStore {
     root: Arc<PathBuf>,
     state: Arc<Mutex<StoreState>>,
     upload_session_ttl_secs: u64,
+    max_chunk_size: usize,
+    max_inflight_chunks: usize,
+    max_artifact_size_bytes: u64,
 }
 
 impl ArtifactStore {
     pub async fn new(
         root: impl AsRef<Path>,
         upload_session_ttl_secs: u64,
+        max_chunk_size: usize,
+        max_inflight_chunks: usize,
+        max_artifact_size_bytes: u64,
     ) -> Result<Self, ImagodError> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(root.join("sessions"))
@@ -96,6 +96,9 @@ impl ArtifactStore {
             root: Arc::new(root),
             state: Arc::new(Mutex::new(StoreState::default())),
             upload_session_ttl_secs: upload_session_ttl_secs.max(1),
+            max_chunk_size: max_chunk_size.max(1),
+            max_inflight_chunks: max_inflight_chunks.max(1),
+            max_artifact_size_bytes: max_artifact_size_bytes.max(1),
         })
     }
 
@@ -108,6 +111,18 @@ impl ArtifactStore {
                 ErrorCode::BadRequest,
                 STAGE_PREPARE,
                 "artifact_size must be > 0",
+            ));
+        }
+        if request.artifact_size > self.max_artifact_size_bytes {
+            return Err(ImagodError::new(
+                ErrorCode::StorageQuota,
+                STAGE_PREPARE,
+                "artifact_size exceeds max_artifact_size_bytes",
+            )
+            .with_detail("artifact_size", request.artifact_size.to_string())
+            .with_detail(
+                "max_artifact_size_bytes",
+                self.max_artifact_size_bytes.to_string(),
             ));
         }
 
@@ -176,6 +191,8 @@ impl ArtifactStore {
                     file_path,
                     received_ranges: Vec::new(),
                     committed: false,
+                    inflight_writes: 0,
+                    commit_in_progress: false,
                     updated_at_epoch_secs: now,
                 };
 
@@ -194,9 +211,44 @@ impl ArtifactStore {
 
     pub async fn push(&self, request: ArtifactPushRequest) -> Result<ArtifactPushAck, ImagodError> {
         let now = now_epoch_secs();
-        let mut cleanup_plan = CleanupPlan::default();
+        let header = request.header;
+        let max_chunk_size = u64::try_from(self.max_chunk_size).unwrap_or(u64::MAX);
+        if header.length > max_chunk_size {
+            return Err(ImagodError::new(
+                ErrorCode::RangeInvalid,
+                STAGE_PUSH,
+                "chunk length exceeds configured chunk_size",
+            )
+            .with_detail("chunk_length", header.length.to_string())
+            .with_detail("chunk_size", max_chunk_size.to_string()));
+        }
 
-        let result = {
+        let chunk = STANDARD
+            .decode(request.chunk_b64.as_bytes())
+            .map_err(|e| map_bad_request(STAGE_PUSH, format!("chunk_b64 decode failed: {e}")))?;
+        if chunk.len() as u64 != header.length {
+            return Err(ImagodError::new(
+                ErrorCode::RangeInvalid,
+                STAGE_PUSH,
+                "chunk length does not match header.length",
+            ));
+        }
+
+        let chunk_hash = hex::encode(Sha256::digest(&chunk));
+        if chunk_hash != header.chunk_sha256 {
+            return Err(ImagodError::new(
+                ErrorCode::ChunkHashMismatch,
+                STAGE_PUSH,
+                "chunk sha256 mismatch",
+            ));
+        }
+
+        let chunk_end = header.length.checked_add(header.offset).ok_or_else(|| {
+            ImagodError::new(ErrorCode::RangeInvalid, STAGE_PUSH, "chunk overflow")
+        })?;
+
+        let mut cleanup_plan = CleanupPlan::default();
+        let prepare_write = {
             let mut state = self.state.lock().await;
             cleanup_plan.merge(collect_expired_sessions_locked(
                 &mut state,
@@ -205,7 +257,6 @@ impl ArtifactStore {
             ));
             cleanup_orphan_idempotency_locked(&mut state);
 
-            let header = &request.header;
             let session = state.sessions.get_mut(&header.deploy_id).ok_or_else(|| {
                 ImagodError::new(ErrorCode::NotFound, STAGE_PUSH, "deploy_id is not found")
             })?;
@@ -218,6 +269,14 @@ impl ArtifactStore {
                 ));
             }
 
+            if session.commit_in_progress {
+                return Err(ImagodError::new(
+                    ErrorCode::Busy,
+                    STAGE_PUSH,
+                    "artifact commit is in progress",
+                ));
+            }
+
             if session.committed {
                 return Err(ImagodError::new(
                     ErrorCode::BadRequest,
@@ -226,21 +285,6 @@ impl ArtifactStore {
                 ));
             }
 
-            let chunk = STANDARD.decode(request.chunk_b64.as_bytes()).map_err(|e| {
-                map_bad_request(STAGE_PUSH, format!("chunk_b64 decode failed: {e}"))
-            })?;
-
-            if chunk.len() as u64 != header.length {
-                return Err(ImagodError::new(
-                    ErrorCode::RangeInvalid,
-                    STAGE_PUSH,
-                    "chunk length does not match header.length",
-                ));
-            }
-
-            let chunk_end = header.length.checked_add(header.offset).ok_or_else(|| {
-                ImagodError::new(ErrorCode::RangeInvalid, STAGE_PUSH, "chunk overflow")
-            })?;
             if chunk_end > session.artifact_size {
                 return Err(ImagodError::new(
                     ErrorCode::RangeInvalid,
@@ -249,38 +293,49 @@ impl ArtifactStore {
                 ));
             }
 
-            let chunk_hash = hex::encode(Sha256::digest(&chunk));
-            if chunk_hash != header.chunk_sha256 {
+            if session.inflight_writes >= self.max_inflight_chunks {
                 return Err(ImagodError::new(
-                    ErrorCode::ChunkHashMismatch,
+                    ErrorCode::Busy,
                     STAGE_PUSH,
-                    "chunk sha256 mismatch",
+                    "max_inflight_chunks limit reached",
                 ));
             }
 
-            let mut file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&session.file_path)
-                .await
-                .map_err(|e| map_internal(STAGE_PUSH, e.to_string()))?;
-            file.seek(std::io::SeekFrom::Start(header.offset))
-                .await
-                .map_err(|e| map_internal(STAGE_PUSH, e.to_string()))?;
-            file.write_all(&chunk)
-                .await
-                .map_err(|e| map_internal(STAGE_PUSH, e.to_string()))?;
-            file.flush()
-                .await
-                .map_err(|e| map_internal(STAGE_PUSH, e.to_string()))?;
+            session.inflight_writes += 1;
+            session.updated_at_epoch_secs = now;
+            Ok(session.file_path.clone())
+        };
 
+        let file_path = match prepare_write {
+            Ok(path) => path,
+            Err(err) => {
+                apply_cleanup_plan(cleanup_plan).await;
+                return Err(err);
+            }
+        };
+
+        let write_result = write_chunk_to_file(&file_path, header.offset, &chunk).await;
+
+        let result = {
+            let mut state = self.state.lock().await;
+            let session = state.sessions.get_mut(&header.deploy_id).ok_or_else(|| {
+                map_internal(
+                    STAGE_PUSH,
+                    "session disappeared during artifact.push".to_string(),
+                )
+            })?;
+
+            if session.inflight_writes > 0 {
+                session.inflight_writes -= 1;
+            }
+
+            write_result?;
             merge_range(
                 &mut session.received_ranges,
                 range_from_start_end(header.offset, chunk_end),
             );
             session.updated_at_epoch_secs = now;
             let next_missing = next_missing_range(&session.received_ranges, session.artifact_size);
-
             Ok(ArtifactPushAck {
                 received_ranges: session.received_ranges.clone(),
                 next_missing_range: next_missing,
@@ -299,7 +354,7 @@ impl ArtifactStore {
         let now = now_epoch_secs();
         let mut cleanup_plan = CleanupPlan::default();
 
-        let result = {
+        let prepare_commit = {
             let mut state = self.state.lock().await;
             cleanup_plan.merge(collect_expired_sessions_locked(
                 &mut state,
@@ -323,6 +378,22 @@ impl ArtifactStore {
                 ));
             }
 
+            if session.commit_in_progress {
+                return Err(ImagodError::new(
+                    ErrorCode::Busy,
+                    STAGE_COMMIT,
+                    "artifact commit is already in progress",
+                ));
+            }
+
+            if session.inflight_writes > 0 {
+                return Err(ImagodError::new(
+                    ErrorCode::Busy,
+                    STAGE_COMMIT,
+                    "artifact has in-flight writes",
+                ));
+            }
+
             if !is_complete(&session.received_ranges, session.artifact_size) {
                 return Err(ImagodError::new(
                     ErrorCode::ArtifactIncomplete,
@@ -331,8 +402,35 @@ impl ArtifactStore {
                 ));
             }
 
-            let digest = digest_file(&session.file_path).await?;
-            if digest != session.artifact_digest {
+            session.commit_in_progress = true;
+            session.updated_at_epoch_secs = now;
+            Ok((session.file_path.clone(), session.artifact_digest.clone()))
+        };
+
+        let (file_path, expected_digest) = match prepare_commit {
+            Ok(values) => values,
+            Err(err) => {
+                apply_cleanup_plan(cleanup_plan).await;
+                return Err(err);
+            }
+        };
+
+        let digest_result = digest_file(&file_path).await;
+
+        let result = {
+            let mut state = self.state.lock().await;
+            let session = state.sessions.get_mut(&request.deploy_id).ok_or_else(|| {
+                map_internal(
+                    STAGE_COMMIT,
+                    "session disappeared during artifact.commit".to_string(),
+                )
+            })?;
+
+            session.commit_in_progress = false;
+            session.updated_at_epoch_secs = now;
+
+            let digest = digest_result?;
+            if digest != expected_digest {
                 return Err(ImagodError::new(
                     ErrorCode::BadManifest,
                     STAGE_COMMIT,
@@ -341,7 +439,6 @@ impl ArtifactStore {
             }
 
             session.committed = true;
-            session.updated_at_epoch_secs = now;
             let service_name = session.service_name.clone();
             let current_deploy_id = session.deploy_id.clone();
             let artifact_id = session.artifact_digest.clone();
@@ -449,7 +546,7 @@ fn collect_expired_sessions_locked(
         .sessions
         .iter()
         .filter_map(|(deploy_id, session)| {
-            if session.committed {
+            if session.committed || session.inflight_writes > 0 || session.commit_in_progress {
                 return None;
             }
 
@@ -542,6 +639,24 @@ async fn apply_cleanup_plan(plan: CleanupPlan) {
             }
         }
     }
+}
+
+async fn write_chunk_to_file(path: &Path, offset: u64, chunk: &[u8]) -> Result<(), ImagodError> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .await
+        .map_err(|e| map_internal(STAGE_PUSH, e.to_string()))?;
+    file.seek(std::io::SeekFrom::Start(offset))
+        .await
+        .map_err(|e| map_internal(STAGE_PUSH, e.to_string()))?;
+    file.write_all(chunk)
+        .await
+        .map_err(|e| map_internal(STAGE_PUSH, e.to_string()))?;
+    file.flush()
+        .await
+        .map_err(|e| map_internal(STAGE_PUSH, e.to_string()))
 }
 
 fn fingerprint(request: &DeployPrepareRequest) -> String {
@@ -672,7 +787,12 @@ fn map_bad_request(stage: &str, message: String) -> ImagodError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use imago_protocol::ArtifactPushChunkHeader;
     use std::time::Duration;
+
+    const TEST_CHUNK_SIZE: usize = 1024 * 1024;
+    const TEST_MAX_INFLIGHT: usize = 16;
+    const TEST_MAX_ARTIFACT_SIZE: u64 = 64 * 1024 * 1024;
 
     #[tokio::test]
     async fn expires_incomplete_sessions_and_deletes_files() {
@@ -799,6 +919,180 @@ mod tests {
         assert_ne!(baseline, policy_changed);
     }
 
+    #[tokio::test]
+    async fn prepare_rejects_artifact_size_over_limit() {
+        let (store, root) = new_store_with_limits(
+            "prepare_rejects_artifact_size_over_limit",
+            60,
+            TEST_CHUNK_SIZE,
+            TEST_MAX_INFLIGHT,
+            4,
+        )
+        .await;
+
+        let err = store
+            .prepare(DeployPrepareRequest {
+                name: "svc-limit".to_string(),
+                app_type: "cli".to_string(),
+                target: BTreeMap::new(),
+                artifact_digest: "sha256:artifact".to_string(),
+                artifact_size: 5,
+                manifest_digest: "sha256:manifest".to_string(),
+                idempotency_key: "idem-limit".to_string(),
+                policy: BTreeMap::new(),
+            })
+            .await
+            .expect_err("prepare should reject artifact over configured limit");
+        assert_eq!(err.code, ErrorCode::StorageQuota);
+
+        cleanup_root(root);
+    }
+
+    #[tokio::test]
+    async fn push_rejects_chunks_over_configured_size() {
+        let (store, root) = new_store_with_limits(
+            "push_rejects_chunks_over_configured_size",
+            60,
+            2,
+            TEST_MAX_INFLIGHT,
+            TEST_MAX_ARTIFACT_SIZE,
+        )
+        .await;
+        let artifact = b"abcd";
+        let artifact_digest = hex::encode(Sha256::digest(artifact));
+        let manifest_digest = hex::encode(Sha256::digest(b"manifest"));
+
+        let prepare = store
+            .prepare(DeployPrepareRequest {
+                name: "svc-chunk-limit".to_string(),
+                app_type: "cli".to_string(),
+                target: BTreeMap::new(),
+                artifact_digest,
+                artifact_size: artifact.len() as u64,
+                manifest_digest,
+                idempotency_key: "idem-chunk-limit".to_string(),
+                policy: BTreeMap::new(),
+            })
+            .await
+            .expect("prepare should succeed");
+
+        let err = store
+            .push(ArtifactPushRequest {
+                header: ArtifactPushChunkHeader {
+                    deploy_id: prepare.deploy_id,
+                    offset: 0,
+                    length: artifact.len() as u64,
+                    chunk_sha256: hex::encode(Sha256::digest(artifact)),
+                    upload_token: prepare.upload_token,
+                },
+                chunk_b64: STANDARD.encode(artifact),
+            })
+            .await
+            .expect_err("push should fail when chunk exceeds configured limit");
+        assert_eq!(err.code, ErrorCode::RangeInvalid);
+
+        cleanup_root(root);
+    }
+
+    #[tokio::test]
+    async fn push_rejects_when_max_inflight_reached() {
+        let (store, root) = new_store_with_limits(
+            "push_rejects_when_max_inflight_reached",
+            60,
+            TEST_CHUNK_SIZE,
+            1,
+            TEST_MAX_ARTIFACT_SIZE,
+        )
+        .await;
+        let artifact = b"abcd";
+        let artifact_digest = hex::encode(Sha256::digest(artifact));
+        let manifest_digest = hex::encode(Sha256::digest(b"manifest"));
+
+        let prepare = store
+            .prepare(DeployPrepareRequest {
+                name: "svc-inflight-limit".to_string(),
+                app_type: "cli".to_string(),
+                target: BTreeMap::new(),
+                artifact_digest,
+                artifact_size: artifact.len() as u64,
+                manifest_digest,
+                idempotency_key: "idem-inflight-limit".to_string(),
+                policy: BTreeMap::new(),
+            })
+            .await
+            .expect("prepare should succeed");
+
+        {
+            let mut state = store.state.lock().await;
+            let session = state
+                .sessions
+                .get_mut(&prepare.deploy_id)
+                .expect("session should exist");
+            session.inflight_writes = 1;
+        }
+
+        let err = store
+            .push(ArtifactPushRequest {
+                header: ArtifactPushChunkHeader {
+                    deploy_id: prepare.deploy_id,
+                    offset: 0,
+                    length: artifact.len() as u64,
+                    chunk_sha256: hex::encode(Sha256::digest(artifact)),
+                    upload_token: prepare.upload_token,
+                },
+                chunk_b64: STANDARD.encode(artifact),
+            })
+            .await
+            .expect_err("push should fail when max_inflight_chunks is reached");
+        assert_eq!(err.code, ErrorCode::Busy);
+
+        cleanup_root(root);
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_when_inflight_writes_exist() {
+        let (store, root) = new_store("commit_rejects_when_inflight_writes_exist", 60).await;
+        let artifact = b"artifact-a";
+        let artifact_digest = hex::encode(Sha256::digest(artifact));
+        let manifest_digest = hex::encode(Sha256::digest(b"manifest-a"));
+
+        let prepare = store
+            .prepare(DeployPrepareRequest {
+                name: "svc-commit-busy".to_string(),
+                app_type: "cli".to_string(),
+                target: BTreeMap::new(),
+                artifact_digest: artifact_digest.clone(),
+                artifact_size: artifact.len() as u64,
+                manifest_digest: manifest_digest.clone(),
+                idempotency_key: "idem-commit-busy".to_string(),
+                policy: BTreeMap::new(),
+            })
+            .await
+            .expect("prepare should succeed");
+
+        {
+            let mut state = store.state.lock().await;
+            let session = state
+                .sessions
+                .get_mut(&prepare.deploy_id)
+                .expect("session should exist");
+            session.inflight_writes = 1;
+        }
+
+        let err = store
+            .commit(ArtifactCommitRequest {
+                deploy_id: prepare.deploy_id,
+                artifact_digest,
+                artifact_size: artifact.len() as u64,
+                manifest_digest,
+            })
+            .await
+            .expect_err("commit should fail when artifact has in-flight writes");
+        assert_eq!(err.code, ErrorCode::Busy);
+
+        cleanup_root(root);
+    }
+
     struct CommitResult {
         deploy_id: String,
     }
@@ -859,14 +1153,37 @@ mod tests {
     }
 
     async fn new_store(test_name: &str, ttl_secs: u64) -> (ArtifactStore, PathBuf) {
+        new_store_with_limits(
+            test_name,
+            ttl_secs,
+            TEST_CHUNK_SIZE,
+            TEST_MAX_INFLIGHT,
+            TEST_MAX_ARTIFACT_SIZE,
+        )
+        .await
+    }
+
+    async fn new_store_with_limits(
+        test_name: &str,
+        ttl_secs: u64,
+        chunk_size: usize,
+        max_inflight_chunks: usize,
+        max_artifact_size_bytes: u64,
+    ) -> (ArtifactStore, PathBuf) {
         let root = std::env::temp_dir().join(format!(
             "imagod-artifact-store-tests-{}-{}",
             test_name,
             now_epoch_secs()
         ));
-        let store = ArtifactStore::new(&root, ttl_secs)
-            .await
-            .expect("store init should succeed");
+        let store = ArtifactStore::new(
+            &root,
+            ttl_secs,
+            chunk_size,
+            max_inflight_chunks,
+            max_artifact_size_bytes,
+        )
+        .await
+        .expect("store init should succeed");
         (store, root)
     }
 
