@@ -94,6 +94,17 @@ impl std::fmt::Display for ServerResponseError {
 
 impl std::error::Error for ServerResponseError {}
 
+#[derive(Debug)]
+struct CommitNotVerifiedError;
+
+impl std::fmt::Display for CommitNotVerifiedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "artifact.commit returned verified=false")
+    }
+}
+
+impl std::error::Error for CommitNotVerifiedError {}
+
 #[derive(Debug, Deserialize)]
 struct Manifest {
     name: String,
@@ -380,7 +391,7 @@ async fn run_upload_phase_once(
     let commit_response: ArtifactCommitResponse =
         response_payload(request_response(&session, &commit).await?)?;
     if !commit_response.verified {
-        return Err(anyhow!("artifact.commit returned verified=false"));
+        return Err(CommitNotVerifiedError.into());
     }
 
     Ok(UploadPhaseResult {
@@ -390,10 +401,17 @@ async fn run_upload_phase_once(
 }
 
 fn should_retry_upload_error(err: &anyhow::Error) -> bool {
+    if contains_commit_not_verified_error(err) {
+        return false;
+    }
+
     match find_server_response_error(err) {
         Some(server_error) => {
             if is_non_retryable_error_code(server_error.error.code) {
                 return false;
+            }
+            if server_error.error.code == ErrorCode::Busy {
+                return true;
             }
             server_error.error.retryable
         }
@@ -453,6 +471,11 @@ fn truncate_log_message(message: &str, max_chars: usize) -> String {
 fn find_server_response_error(err: &anyhow::Error) -> Option<&ServerResponseError> {
     err.chain()
         .find_map(|cause| cause.downcast_ref::<ServerResponseError>())
+}
+
+fn contains_commit_not_verified_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<CommitNotVerifiedError>().is_some())
 }
 
 fn is_non_retryable_error_code(code: ErrorCode) -> bool {
@@ -1535,6 +1558,10 @@ mod tests {
     fn retry_classification_retries_busy_or_internal() {
         assert!(should_retry_upload_error(&sample_server_error(
             ErrorCode::Busy,
+            false
+        )));
+        assert!(should_retry_upload_error(&sample_server_error(
+            ErrorCode::Busy,
             true
         )));
         assert!(should_retry_upload_error(&sample_server_error(
@@ -1566,6 +1593,14 @@ mod tests {
     #[test]
     fn retry_classification_does_not_retry_when_server_marks_non_retryable() {
         assert!(!should_retry_upload_error(&sample_server_error(
+            ErrorCode::Internal,
+            false
+        )));
+    }
+
+    #[test]
+    fn retry_classification_retries_busy_even_when_server_marks_non_retryable() {
+        assert!(should_retry_upload_error(&sample_server_error(
             ErrorCode::Busy,
             false
         )));
@@ -1576,6 +1611,12 @@ mod tests {
         let err = anyhow!(
             "server error: certificate authentication failed (E_UNAUTHORIZED) at transport.connect"
         );
+        assert!(!should_retry_upload_error(&err));
+    }
+
+    #[test]
+    fn retry_classification_does_not_retry_commit_not_verified_error() {
+        let err: anyhow::Error = CommitNotVerifiedError.into();
         assert!(!should_retry_upload_error(&err));
     }
 
