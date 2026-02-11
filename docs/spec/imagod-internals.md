@@ -491,6 +491,15 @@ flowchart TD
   - 旧: manager の maintenance loop で `increment_epoch`
   - 新: runner 内で `epoch_tick_interval_ms` 周期の tick task が `increment_epoch`
 
+## 実装反映ノート（Runner 起動確認窓と socket cleanup / 2026-02-11）
+
+- runner 起動時に固定 200ms の起動確認窓を導入した。
+  - manager への `runner_ready` 通知前に、Wasm 実行タスクの早期終了を監視する。
+- 起動確認窓内に Wasm 実行が `Err` で終了した場合、`runner_ready` を送信せず start 失敗として扱う。
+- 互換維持のため、起動確認窓内に Wasm 実行が `Ok(())` で終了した場合は成功扱いを維持する。
+- runner endpoint socket の削除を RAII で保証した。
+  - 正常終了だけでなく `register_runner` / `runner_ready` 失敗などの早期 return 経路でも socket を自動クリーンアップする。
+
 ## 実装反映ノート（Crate Split 6+1 / 2026-02-11）
 
 - `imagod` の内部実装を単一 crate から以下の 6+1 構成に分割した。

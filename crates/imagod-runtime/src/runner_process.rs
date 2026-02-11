@@ -1,6 +1,6 @@
 //! Runner process bootstrap and inbound control loop.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
@@ -13,6 +13,7 @@ use tokio::{
     io::AsyncReadExt,
     net::{UnixListener, UnixStream},
     sync::watch,
+    task::JoinHandle,
     time::{self, Duration},
 };
 
@@ -22,6 +23,39 @@ const STAGE_RUNNER: &str = "runner.process";
 const STAGE_SHUTDOWN: &str = "runner.shutdown";
 const STAGE_INBOUND: &str = "runner.inbound";
 const INBOUND_READ_TIMEOUT_SECS: u64 = 3;
+const STARTUP_CONFIRM_WINDOW: Duration = Duration::from_millis(200);
+
+/// Startup observation result for runner workload task.
+enum StartupRunState {
+    /// Workload is still running after startup confirmation window.
+    StillRunning,
+    /// Workload exited during startup confirmation window.
+    Finished(Result<(), ImagodError>),
+}
+
+/// Ensures runner endpoint socket path is removed when function scope exits.
+struct SocketCleanupGuard {
+    path: PathBuf,
+}
+
+impl SocketCleanupGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for SocketCleanupGuard {
+    fn drop(&mut self) {
+        if let Err(err) = std::fs::remove_file(&self.path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!(
+                "failed to remove runner endpoint {}: {err}",
+                self.path.display()
+            );
+        }
+    }
+}
 
 /// Starts runner mode by reading `RunnerBootstrap` from stdin and executing the component.
 ///
@@ -57,6 +91,7 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
             ),
         )
     })?;
+    let _socket_cleanup_guard = SocketCleanupGuard::new(bootstrap.runner_endpoint.clone());
 
     let runtime = WasmRuntime::new()?;
     runtime.validate_component(&bootstrap.component_path)?;
@@ -71,26 +106,89 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
         shutdown_rx.clone(),
     ));
 
-    mark_ready(&bootstrap).await?;
+    let runtime_for_run = runtime.clone();
+    let bootstrap_for_run = bootstrap.clone();
+    let mut run_task = tokio::spawn(async move {
+        runtime_for_run
+            .run_cli_component_async(
+                &bootstrap_for_run.component_path,
+                &bootstrap_for_run.args,
+                &bootstrap_for_run.envs,
+                shutdown_rx,
+                bootstrap_for_run.epoch_tick_interval_ms,
+            )
+            .await
+    });
 
-    let heartbeat_task = tokio::spawn(send_heartbeats(bootstrap.clone(), shutdown_rx.clone()));
+    match observe_startup_window(&mut run_task, STARTUP_CONFIRM_WINDOW).await? {
+        StartupRunState::Finished(run_result) => {
+            if run_result.is_ok()
+                && let Err(err) = mark_ready(&bootstrap).await
+            {
+                shutdown_runner_tasks(&shutdown_tx, inbound_task, None, None).await;
+                return Err(err);
+            }
+            shutdown_runner_tasks(&shutdown_tx, inbound_task, None, None).await;
+            return run_result;
+        }
+        StartupRunState::StillRunning => {}
+    }
 
-    let run_result = runtime
-        .run_cli_component_async(
-            &bootstrap.component_path,
-            &bootstrap.args,
-            &bootstrap.envs,
-            shutdown_rx,
-            bootstrap.epoch_tick_interval_ms,
-        )
-        .await;
+    if let Err(err) = mark_ready(&bootstrap).await {
+        shutdown_runner_tasks(&shutdown_tx, inbound_task, None, Some(run_task)).await;
+        return Err(err);
+    }
 
-    let _ = shutdown_tx.send(true);
-    let _ = heartbeat_task.await;
-    let _ = inbound_task.await;
-    let _ = std::fs::remove_file(&bootstrap.runner_endpoint);
+    let heartbeat_task = tokio::spawn(send_heartbeats(bootstrap.clone(), shutdown_tx.subscribe()));
+    let run_result = join_run_task(run_task).await;
+    shutdown_runner_tasks(&shutdown_tx, inbound_task, Some(heartbeat_task), None).await;
 
     run_result
+}
+
+/// Observes run task during startup confirmation window.
+async fn observe_startup_window(
+    run_task: &mut JoinHandle<Result<(), ImagodError>>,
+    window: Duration,
+) -> Result<StartupRunState, ImagodError> {
+    tokio::select! {
+        joined = run_task => {
+            let run_result = joined.map_err(map_run_join_error)?;
+            Ok(StartupRunState::Finished(run_result))
+        }
+        _ = time::sleep(window) => Ok(StartupRunState::StillRunning),
+    }
+}
+
+/// Joins workload run task and maps join errors to internal runner errors.
+async fn join_run_task(run_task: JoinHandle<Result<(), ImagodError>>) -> Result<(), ImagodError> {
+    run_task.await.map_err(map_run_join_error)?
+}
+
+/// Signals shutdown and waits for remaining background tasks.
+async fn shutdown_runner_tasks(
+    shutdown_tx: &watch::Sender<bool>,
+    inbound_task: JoinHandle<()>,
+    heartbeat_task: Option<JoinHandle<()>>,
+    run_task: Option<JoinHandle<Result<(), ImagodError>>>,
+) {
+    let _ = shutdown_tx.send(true);
+    if let Some(task) = heartbeat_task {
+        let _ = task.await;
+    }
+    if let Some(task) = run_task {
+        let _ = task.await;
+    }
+    let _ = inbound_task.await;
+}
+
+/// Converts spawned run task join failures to a unified error.
+fn map_run_join_error(err: tokio::task::JoinError) -> ImagodError {
+    ImagodError::new(
+        ErrorCode::Internal,
+        STAGE_RUNNER,
+        format!("runner run task join failed: {err}"),
+    )
 }
 
 /// Registers this runner endpoint with the manager control plane.
@@ -359,15 +457,26 @@ fn prepare_socket_path(path: &Path) -> Result<(), ImagodError> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::{
         collections::BTreeMap,
-        path::PathBuf,
+        os::unix::net::UnixListener as StdUnixListener,
+        path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use imagod_ipc::{RunnerInboundResponse, random_secret_hex};
 
-    use super::*;
+    fn run_async_test<F>(future: F)
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build")
+            .block_on(future);
+    }
 
     fn new_test_root(prefix: &str) -> PathBuf {
         let ts = SystemTime::now()
@@ -375,6 +484,20 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         PathBuf::from(format!("/tmp/iss-runner-{prefix}-{ts}"))
+    }
+
+    fn new_test_socket_path(prefix: &str) -> PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+
+        let root = PathBuf::from(format!(
+            "/tmp/imago-runtime-runner-test-{prefix}-{}-{ts}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("test root should be created");
+        root.join("runner.sock")
     }
 
     fn new_test_bootstrap(root: &Path, runner_socket_name: &str) -> RunnerBootstrap {
@@ -473,5 +596,79 @@ mod tests {
 
         let _ = std::fs::remove_file(&bootstrap.runner_endpoint);
         let _ = std::fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn startup_window_detects_early_error_exit() {
+        run_async_test(async {
+            let mut run_task = tokio::spawn(async {
+                Err(ImagodError::new(
+                    ErrorCode::Internal,
+                    STAGE_RUNNER,
+                    "early startup failure",
+                ))
+            });
+            let state = observe_startup_window(&mut run_task, STARTUP_CONFIRM_WINDOW)
+                .await
+                .expect("startup observation should succeed");
+            match state {
+                StartupRunState::Finished(Err(err)) => assert_eq!(err.code, ErrorCode::Internal),
+                _ => panic!("startup should classify early error as finished failure"),
+            }
+        });
+    }
+
+    #[test]
+    fn startup_window_keeps_early_ok_exit_compatible() {
+        run_async_test(async {
+            let mut run_task = tokio::spawn(async { Ok(()) });
+            let state = observe_startup_window(&mut run_task, STARTUP_CONFIRM_WINDOW)
+                .await
+                .expect("startup observation should succeed");
+            match state {
+                StartupRunState::Finished(Ok(())) => {}
+                _ => panic!("startup should classify early ok as finished success"),
+            }
+        });
+    }
+
+    #[test]
+    fn startup_window_recognizes_running_task_after_window() {
+        run_async_test(async {
+            let mut run_task = tokio::spawn(async {
+                time::sleep(Duration::from_millis(80)).await;
+                Ok(())
+            });
+            let state = observe_startup_window(&mut run_task, Duration::from_millis(10))
+                .await
+                .expect("startup observation should succeed");
+            assert!(matches!(state, StartupRunState::StillRunning));
+            let run_result = join_run_task(run_task)
+                .await
+                .expect("run task should complete successfully");
+            assert_eq!(run_result, ());
+        });
+    }
+
+    #[test]
+    fn socket_cleanup_guard_removes_endpoint_on_drop() {
+        let socket_path = new_test_socket_path("cleanup");
+        let parent = socket_path
+            .parent()
+            .expect("socket parent should exist")
+            .to_path_buf();
+        prepare_socket_path(&socket_path).expect("socket parent preparation should succeed");
+
+        let listener = StdUnixListener::bind(&socket_path).expect("socket bind should succeed");
+        assert!(socket_path.exists());
+        {
+            let _cleanup_guard = SocketCleanupGuard::new(socket_path.clone());
+        }
+        assert!(
+            !socket_path.exists(),
+            "socket path should be removed by cleanup guard"
+        );
+
+        drop(listener);
+        let _ = std::fs::remove_dir_all(parent);
     }
 }
