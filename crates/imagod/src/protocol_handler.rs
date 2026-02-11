@@ -11,8 +11,11 @@ use uuid::Uuid;
 use web_transport_quinn::{SendStream, Session};
 
 use crate::{
-    artifact_store::ArtifactStore, config::ImagodConfig, error::ImagodError,
-    operation_state::OperationManager, orchestrator::Orchestrator,
+    artifact_store::ArtifactStore,
+    config::ImagodConfig,
+    error::ImagodError,
+    operation_state::{OperationManager, SpawnTransition},
+    orchestrator::Orchestrator,
 };
 
 const MAX_STREAM_BYTES: usize = 1024 * 1024 * 16;
@@ -312,10 +315,11 @@ impl ProtocolHandler {
         )?;
         write_envelope(send, &running_event).await?;
 
-        if self.operations.is_cancel_requested(&operation_id).await {
-            self.operations
-                .finish(&operation_id, CommandState::Canceled, "canceled")
-                .await;
+        let spawn_transition = self
+            .operations
+            .mark_spawned_if_not_canceled(&operation_id, "spawned")
+            .await?;
+        if spawn_transition == SpawnTransition::Canceled {
             let canceled = event_envelope(
                 operation_id,
                 request.correlation_id,
@@ -365,9 +369,6 @@ impl ProtocolHandler {
 
         match command_result {
             Ok((progress_stage, success_stage)) => {
-                self.operations
-                    .mark_spawned(&operation_id, &success_stage)
-                    .await?;
                 self.operations
                     .finish(&operation_id, CommandState::Succeeded, &success_stage)
                     .await;
@@ -457,10 +458,25 @@ fn parse_stream_envelopes(buf: &[u8]) -> Result<Vec<Envelope>, ImagodError> {
     frames
         .iter()
         .map(|frame| {
-            from_cbor::<Envelope>(frame)
-                .map_err(|e| bad_request("protocol", format!("invalid frame payload: {e}")))
+            let envelope = from_cbor::<Envelope>(frame)
+                .map_err(|e| bad_request("protocol", format!("invalid frame payload: {e}")))?;
+            ensure_non_nil_envelope_ids(&envelope)?;
+            Ok(envelope)
         })
         .collect()
+}
+
+fn ensure_non_nil_envelope_ids(envelope: &Envelope) -> Result<(), ImagodError> {
+    if envelope.request_id.is_nil() {
+        return Err(bad_request("protocol", "request_id must not be nil UUID"));
+    }
+    if envelope.correlation_id.is_nil() {
+        return Err(bad_request(
+            "protocol",
+            "correlation_id must not be nil UUID",
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_single_request_envelope(envelopes: &[Envelope]) -> Result<(), ImagodError> {
@@ -588,8 +604,8 @@ fn ensure_command_start_request_id_match(
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_command_start_request_id_match, ensure_single_request_envelope,
-        is_compatible_date_match,
+        ensure_command_start_request_id_match, ensure_non_nil_envelope_ids,
+        ensure_single_request_envelope, is_compatible_date_match,
     };
     use imago_protocol::{MessageType, ProtocolEnvelope};
     use serde_json::Value;
@@ -632,5 +648,29 @@ mod tests {
         let request_id = Uuid::new_v4();
         let result = ensure_command_start_request_id_match(request_id, request_id);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn rejects_nil_request_id_in_envelope() {
+        let envelope = ProtocolEnvelope {
+            message_type: MessageType::HelloNegotiate,
+            request_id: Uuid::nil(),
+            correlation_id: Uuid::new_v4(),
+            payload: Value::Null,
+            error: None,
+        };
+        assert!(ensure_non_nil_envelope_ids(&envelope).is_err());
+    }
+
+    #[test]
+    fn rejects_nil_correlation_id_in_envelope() {
+        let envelope = ProtocolEnvelope {
+            message_type: MessageType::HelloNegotiate,
+            request_id: Uuid::new_v4(),
+            correlation_id: Uuid::nil(),
+            payload: Value::Null,
+            error: None,
+        };
+        assert!(ensure_non_nil_envelope_ids(&envelope).is_err());
     }
 }

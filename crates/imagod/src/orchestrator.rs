@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     collections::BTreeSet,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use imago_protocol::{DeployCommandPayload, ErrorCode, RunCommandPayload, StopCommandPayload};
@@ -327,13 +327,112 @@ async fn extract_tar(bundle: &Path, dest: &Path) -> Result<(), ImagodError> {
         let file = std::fs::File::open(&bundle)
             .map_err(|e| map_bad_manifest(format!("artifact open failed: {e}")))?;
         let mut archive = tar::Archive::new(file);
-        archive
-            .unpack(&dest)
-            .map_err(|e| map_bad_manifest(format!("artifact unpack failed: {e}")))?;
+
+        let entries = archive
+            .entries()
+            .map_err(|e| map_bad_manifest(format!("artifact entries failed: {e}")))?;
+        for entry in entries {
+            let mut entry =
+                entry.map_err(|e| map_bad_manifest(format!("artifact entry read failed: {e}")))?;
+            let entry_type = entry.header().entry_type();
+            if !(entry_type.is_file() || entry_type.is_dir()) {
+                return Err(map_bad_manifest(format!(
+                    "artifact contains unsupported entry type: {entry_type:?}"
+                )));
+            }
+
+            let entry_path = entry
+                .path()
+                .map_err(|e| map_bad_manifest(format!("artifact entry path failed: {e}")))?;
+            let relative = normalize_archive_entry_path(entry_path.as_ref())?;
+            let output_path = dest.join(relative);
+
+            if !output_path.starts_with(&dest) {
+                return Err(map_bad_manifest(
+                    "artifact entry resolved outside destination".to_string(),
+                ));
+            }
+
+            if entry_type.is_dir() {
+                std::fs::create_dir_all(&output_path).map_err(|e| {
+                    map_bad_manifest(format!(
+                        "artifact directory create failed {}: {e}",
+                        output_path.display()
+                    ))
+                })?;
+                continue;
+            }
+
+            if let Some(parent) = output_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    map_bad_manifest(format!(
+                        "artifact parent directory create failed {}: {e}",
+                        parent.display()
+                    ))
+                })?;
+            }
+
+            entry.unpack(&output_path).map_err(|e| {
+                map_bad_manifest(format!(
+                    "artifact unpack failed for {}: {e}",
+                    output_path.display()
+                ))
+            })?;
+        }
         Ok(())
     })
     .await
     .map_err(|e| map_internal(format!("artifact unpack task join failed: {e}")))?
+}
+
+fn normalize_archive_entry_path(path: &Path) -> Result<PathBuf, ImagodError> {
+    if path.as_os_str().is_empty() {
+        return Err(map_bad_manifest(
+            "artifact contains empty entry path".to_string(),
+        ));
+    }
+    if path.is_absolute() {
+        return Err(map_bad_manifest(format!(
+            "artifact contains absolute entry path: {}",
+            path.display()
+        )));
+    }
+
+    let raw = path.as_os_str().to_string_lossy();
+    if raw.len() >= 2 && raw.as_bytes()[1] == b':' {
+        return Err(map_bad_manifest(format!(
+            "artifact contains windows-prefixed entry path: {raw}"
+        )));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => normalized.push(segment),
+            Component::ParentDir | Component::RootDir => {
+                return Err(map_bad_manifest(format!(
+                    "artifact contains invalid entry path: {}",
+                    path.display()
+                )));
+            }
+            _ => {
+                return Err(map_bad_manifest(format!(
+                    "artifact contains invalid entry path: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(map_bad_manifest(format!(
+            "artifact contains invalid entry path: {}",
+            path.display()
+        )));
+    }
+
+    Ok(normalized)
 }
 
 async fn cleanup_old_releases(
@@ -415,4 +514,61 @@ fn map_rollback_error(err: ImagodError) -> ImagodError {
         STAGE_ORCHESTRATE,
         format!("rollback failed: {}", err.message),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_tar, normalize_archive_entry_path};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+    use tar::{Builder, Header};
+    use uuid::Uuid;
+
+    fn temp_dir_path(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("imago-{prefix}-{}", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn normalize_archive_entry_path_rejects_traversal_and_absolute_paths() {
+        assert!(normalize_archive_entry_path(Path::new("../evil")).is_err());
+        assert!(normalize_archive_entry_path(Path::new("/etc/passwd")).is_err());
+        assert!(normalize_archive_entry_path(Path::new("C:\\windows\\system32")).is_err());
+        assert!(normalize_archive_entry_path(Path::new("")).is_err());
+    }
+
+    #[tokio::test]
+    async fn extract_tar_rejects_path_traversal_entry() {
+        let root = temp_dir_path("orchestrator-tar");
+        let dest = root.join("dest");
+        fs::create_dir_all(&dest).expect("destination should be created");
+
+        let tar_path = root.join("artifact.tar");
+        let tar_file = fs::File::create(&tar_path).expect("tar file should be created");
+        let mut builder = Builder::new(tar_file);
+
+        let payload = b"evil";
+        let mut header = Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        {
+            let bytes = header.as_mut_bytes();
+            bytes[..100].fill(0);
+            let name = b"../evil.txt";
+            bytes[..name.len()].copy_from_slice(name);
+        }
+        header.set_cksum();
+        builder
+            .append(&header, &payload[..])
+            .expect("malicious entry should be written");
+        builder.finish().expect("tar should finish");
+
+        let result = extract_tar(&tar_path, &dest).await;
+        assert!(result.is_err());
+        assert!(!dest.join("evil.txt").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
 }

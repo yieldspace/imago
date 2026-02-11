@@ -93,6 +93,7 @@ impl Validate for ByteRange {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HelloNegotiateRequest {
     pub compatibility_date: String,
     pub client_version: String,
@@ -499,6 +500,28 @@ mod tests {
         let encoded = to_cbor(&HelloNegotiateMissingRequiredFeatures {
             compatibility_date: "2026-02-10",
             client_version: "0.1.0",
+        })
+        .expect("encoding should succeed");
+
+        let decoded = from_cbor::<HelloNegotiateRequest>(&encoded);
+        assert!(decoded.is_err());
+    }
+
+    #[derive(Debug, Serialize)]
+    struct HelloNegotiateWithLegacyField<'a> {
+        compatibility_date: &'a str,
+        client_version: &'a str,
+        required_features: Vec<&'a str>,
+        protocol_draft: &'a str,
+    }
+
+    #[test]
+    fn hello_negotiate_rejects_legacy_protocol_draft_field() {
+        let encoded = to_cbor(&HelloNegotiateWithLegacyField {
+            compatibility_date: "2026-02-10",
+            client_version: "0.1.0",
+            required_features: vec![],
+            protocol_draft: "2026-02-10",
         })
         .expect("encoding should succeed");
 

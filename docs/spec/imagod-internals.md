@@ -121,7 +121,7 @@ sequenceDiagram
 5. `accepted` event 送信
 6. `set_state(running, "starting")`
 7. `progress(stage="starting")` 送信
-8. 早期 cancel 判定（spawn 前）
+8. `mark_spawned_if_not_canceled` で cancel フラグ確認と phase 遷移を原子的に実行
 
 コマンド分岐:
 
@@ -131,7 +131,6 @@ sequenceDiagram
 
 成功時:
 
-- `mark_spawned`
 - `finish(succeeded, success_stage)`
 - `progress`（詳細 stage）
 - `succeeded`
@@ -143,9 +142,8 @@ sequenceDiagram
 - `failed(error=StructuredError)`
 - `remove(request_id)`
 
-早期 cancel 成立時:
+spawn 遷移前 cancel 成立時:
 
-- `finish(canceled, "canceled")`
 - `canceled`
 - `remove(request_id)`
 
@@ -288,7 +286,7 @@ deploy 経路の要点:
 
 cancel 境界:
 
-- `starting` の間のみ cancel 可能
+- `starting` かつ `mark_spawned_if_not_canceled` 実行前のみ cancel 可能
 - `spawned` 以降は cancel 不可
 
 終端後:

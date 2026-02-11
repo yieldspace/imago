@@ -21,6 +21,12 @@ enum OperationPhase {
     Spawned,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnTransition {
+    Spawned,
+    Canceled,
+}
+
 #[derive(Clone, Default)]
 pub struct OperationManager {
     inner: Arc<RwLock<BTreeMap<Uuid, OperationEntry>>>,
@@ -79,11 +85,11 @@ impl OperationManager {
         Ok(())
     }
 
-    pub async fn mark_spawned(
+    pub async fn mark_spawned_if_not_canceled(
         &self,
         request_id: &Uuid,
         stage: impl Into<String>,
-    ) -> Result<(), ImagodError> {
+    ) -> Result<SpawnTransition, ImagodError> {
         let mut inner = self.inner.write().await;
         let entry = inner.get_mut(request_id).ok_or_else(|| {
             ImagodError::new(
@@ -92,10 +98,20 @@ impl OperationManager {
                 "request_id is not running",
             )
         })?;
+
+        if entry.cancel_requested {
+            entry.state = CommandState::Canceled;
+            entry.stage = "canceled".to_string();
+            entry.updated_at = now_unix_secs();
+            entry.phase = OperationPhase::Spawned;
+            entry.cancel_requested = false;
+            return Ok(SpawnTransition::Canceled);
+        }
+
         entry.phase = OperationPhase::Spawned;
         entry.stage = stage.into();
         entry.updated_at = now_unix_secs();
-        Ok(())
+        Ok(SpawnTransition::Spawned)
     }
 
     pub async fn snapshot_running(&self, request_id: &Uuid) -> Result<StateResponse, ImagodError> {
@@ -159,14 +175,6 @@ impl OperationManager {
             cancellable: true,
             final_state: CommandState::Canceled,
         })
-    }
-
-    pub async fn is_cancel_requested(&self, request_id: &Uuid) -> bool {
-        let inner = self.inner.read().await;
-        inner
-            .get(request_id)
-            .map(|e| e.cancel_requested)
-            .unwrap_or(false)
     }
 
     pub async fn finish(&self, request_id: &Uuid, state: CommandState, stage: impl Into<String>) {
@@ -237,7 +245,7 @@ mod tests {
             .await
             .expect("state update should succeed");
         manager
-            .mark_spawned(&req(2), "spawned")
+            .mark_spawned_if_not_canceled(&req(2), "spawned")
             .await
             .expect("mark spawned should succeed");
 
@@ -247,6 +255,36 @@ mod tests {
             .expect("cancel should return response");
         assert!(!response.cancellable);
         assert_eq!(response.final_state, CommandState::Running);
+    }
+
+    #[tokio::test]
+    async fn mark_spawned_returns_canceled_when_cancel_was_requested() {
+        let manager = OperationManager::new();
+        manager
+            .start(req(20), CommandType::Deploy)
+            .await
+            .expect("start should succeed");
+        manager
+            .set_state(&req(20), CommandState::Running, "running")
+            .await
+            .expect("state update should succeed");
+        let cancel_response = manager
+            .request_cancel(&req(20))
+            .await
+            .expect("cancel request should succeed");
+        assert!(cancel_response.cancellable);
+
+        let transition = manager
+            .mark_spawned_if_not_canceled(&req(20), "spawned")
+            .await
+            .expect("mark spawned should succeed");
+        assert_eq!(transition, SpawnTransition::Canceled);
+
+        let state = manager
+            .snapshot_running(&req(20))
+            .await
+            .expect_err("canceled state should not be observable as running");
+        assert_eq!(state.code, ErrorCode::NotFound);
     }
 
     #[tokio::test]

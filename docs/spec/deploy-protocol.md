@@ -97,6 +97,7 @@ response:
 - `upload_session_ttl`
 
 `compatibility_date` は `protocol_draft` に戻さない。
+`hello.negotiate` request は unknown field を受理しない（legacy `protocol_draft` を含め拒否）。
 
 ### 5.2 `deploy.prepare`
 
@@ -134,6 +135,7 @@ request payload:
 
 - `length <= hello.limits.chunk_size`
 - 同一 deploy session の同時 push は `hello.limits.max_inflight_chunks` を上限として `E_BUSY` で制御する。
+- `imago-cli` は `hello.limits` の `chunk_size` / `max_inflight_chunks` を実際の upload 送信パラメータに適用する。
 
 response payload (`artifact.push` ack):
 
@@ -225,7 +227,7 @@ response:
 
 現行挙動:
 
-- 起動前（spawn 前）のみ `cancellable=true`。
+- 起動前（spawn 直前の原子的遷移より前）のみ `cancellable=true`。
 - 起動後（spawn 後、operation が残っている間）は `cancellable=false`。
 - 終端後（operation 削除後）は `E_NOT_FOUND`。
 

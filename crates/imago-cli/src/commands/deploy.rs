@@ -20,17 +20,25 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::net::lookup_host;
+use tokio::task::JoinSet;
 use url::Url;
 use uuid::Uuid;
 use web_transport_quinn::{Session, proto::ConnectRequest};
 
 use crate::{cli::DeployArgs, commands::CommandResult};
 
-const CHUNK_SIZE: usize = 1024 * 1024;
 const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
 const COMPATIBILITY_DATE: &str = "2026-02-10";
+const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
+const DEFAULT_MAX_INFLIGHT_CHUNKS: usize = 16;
 
 type Envelope = ProtocolEnvelope<Value>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UploadLimits {
+    chunk_size: usize,
+    max_inflight_chunks: usize,
+}
 
 #[derive(Debug, Deserialize)]
 struct ImagoToml {
@@ -147,6 +155,7 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
     if !hello_response.accepted {
         return Err(anyhow!("hello.negotiate was rejected by server"));
     }
+    let upload_limits = parse_upload_limits(&hello_response)?;
 
     let prepare = request_envelope(
         MessageType::DeployPrepare,
@@ -173,6 +182,7 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
             &prepare_response.deploy_id,
             &prepare_response.upload_token,
             artifact.path(),
+            upload_limits,
         )
         .await?;
     }
@@ -278,7 +288,7 @@ async fn connect_target(target: &TargetConfig) -> anyhow::Result<Session> {
 
     let quic_tls = quinn::crypto::rustls::QuicClientConfig::try_from(tls)?;
     let quic_config = quinn::ClientConfig::new(Arc::new(quic_tls));
-    let endpoint = quinn::Endpoint::client("[::]:0".parse::<SocketAddr>()?)?;
+    let endpoint = create_client_endpoint()?;
 
     let endpoint_info = parse_remote_endpoint(&target.remote).await?;
     let configured_host = target.server_name.as_deref().unwrap_or(&endpoint_info.host);
@@ -294,6 +304,69 @@ async fn connect_target(target: &TargetConfig) -> anyhow::Result<Session> {
     Session::connect(connection, request)
         .await
         .map_err(Into::into)
+}
+
+fn parse_upload_limits(response: &HelloNegotiateResponse) -> anyhow::Result<UploadLimits> {
+    let chunk_size = parse_positive_limit(
+        &response.limits,
+        "chunk_size",
+        DEFAULT_CHUNK_SIZE,
+        "hello.negotiate response chunk_size",
+    )?;
+    let max_inflight_chunks = parse_positive_limit(
+        &response.limits,
+        "max_inflight_chunks",
+        DEFAULT_MAX_INFLIGHT_CHUNKS,
+        "hello.negotiate response max_inflight_chunks",
+    )?;
+
+    Ok(UploadLimits {
+        chunk_size,
+        max_inflight_chunks,
+    })
+}
+
+fn parse_positive_limit(
+    limits: &BTreeMap<String, String>,
+    key: &str,
+    default: usize,
+    label: &str,
+) -> anyhow::Result<usize> {
+    match limits.get(key) {
+        Some(raw) => {
+            let parsed = raw
+                .parse::<usize>()
+                .with_context(|| format!("failed to parse {label} as integer: {raw}"))?;
+            if parsed == 0 {
+                return Err(anyhow!("{label} must be greater than 0"));
+            }
+            Ok(parsed)
+        }
+        None => Ok(default),
+    }
+}
+
+fn client_bind_candidates() -> [SocketAddr; 2] {
+    [
+        "[::]:0".parse().expect("valid ipv6 wildcard address"),
+        "0.0.0.0:0".parse().expect("valid ipv4 wildcard address"),
+    ]
+}
+
+fn create_client_endpoint() -> anyhow::Result<quinn::Endpoint> {
+    let mut last_error: Option<anyhow::Error> = None;
+    for bind_addr in client_bind_candidates() {
+        match quinn::Endpoint::client(bind_addr) {
+            Ok(endpoint) => return Ok(endpoint),
+            Err(err) => {
+                last_error = Some(anyhow!(
+                    "failed to bind client endpoint on {bind_addr}: {err}"
+                ));
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow!("failed to bind client endpoint")))
 }
 
 struct RemoteEndpoint {
@@ -423,6 +496,7 @@ async fn push_artifact_chunks(
     deploy_id: &str,
     upload_token: &str,
     artifact_path: &Path,
+    limits: UploadLimits,
 ) -> anyhow::Result<()> {
     let mut file = tokio::fs::File::open(artifact_path)
         .await
@@ -434,8 +508,20 @@ async fn push_artifact_chunks(
         })?;
 
     let mut offset = 0u64;
-    let mut buffer = vec![0u8; CHUNK_SIZE];
+    let mut buffer = vec![0u8; limits.chunk_size];
+    let mut uploads = JoinSet::new();
+    let deploy_id = Arc::<str>::from(deploy_id.to_string());
+    let upload_token = Arc::<str>::from(upload_token.to_string());
+
     loop {
+        while uploads.len() >= limits.max_inflight_chunks {
+            let completed = uploads
+                .join_next()
+                .await
+                .ok_or_else(|| anyhow!("upload task set was unexpectedly empty"))?;
+            completed.map_err(|err| anyhow!("upload task join failed: {err}"))??;
+        }
+
         let n = tokio::io::AsyncReadExt::read(&mut file, &mut buffer)
             .await
             .with_context(|| {
@@ -448,30 +534,61 @@ async fn push_artifact_chunks(
             break;
         }
 
-        let chunk = &buffer[..n];
-        let chunk_hash = hex::encode(Sha256::digest(chunk));
-        let chunk_b64 = base64::engine::general_purpose::STANDARD.encode(chunk);
-
-        let request = request_envelope(
-            MessageType::ArtifactPush,
-            Uuid::new_v4(),
-            correlation_id,
-            &ArtifactPushRequest {
-                header: ArtifactPushChunkHeader {
-                    deploy_id: deploy_id.to_string(),
-                    offset,
-                    length: n as u64,
-                    chunk_sha256: chunk_hash,
-                    upload_token: upload_token.to_string(),
-                },
-                chunk_b64,
-            },
-        )?;
-
-        let _ack: imago_protocol::ArtifactPushAck =
-            response_payload(request_response(session, &request).await?)?;
+        let chunk = buffer[..n].to_vec();
+        let task_session = session.clone();
+        let task_deploy_id = deploy_id.clone();
+        let task_upload_token = upload_token.clone();
+        uploads.spawn(async move {
+            push_single_artifact_chunk(
+                task_session,
+                correlation_id,
+                task_deploy_id,
+                task_upload_token,
+                offset,
+                chunk,
+            )
+            .await
+        });
         offset = offset.saturating_add(n as u64);
     }
+
+    while let Some(completed) = uploads.join_next().await {
+        completed.map_err(|err| anyhow!("upload task join failed: {err}"))??;
+    }
+
+    Ok(())
+}
+
+async fn push_single_artifact_chunk(
+    session: Session,
+    correlation_id: Uuid,
+    deploy_id: Arc<str>,
+    upload_token: Arc<str>,
+    offset: u64,
+    chunk: Vec<u8>,
+) -> anyhow::Result<()> {
+    let chunk_hash = hex::encode(Sha256::digest(&chunk));
+    let chunk_b64 = base64::engine::general_purpose::STANDARD.encode(&chunk);
+    let length = u64::try_from(chunk.len()).context("chunk length conversion failed")?;
+
+    let request = request_envelope(
+        MessageType::ArtifactPush,
+        Uuid::new_v4(),
+        correlation_id,
+        &ArtifactPushRequest {
+            header: ArtifactPushChunkHeader {
+                deploy_id: deploy_id.as_ref().to_string(),
+                offset,
+                length,
+                chunk_sha256: chunk_hash,
+                upload_token: upload_token.as_ref().to_string(),
+            },
+            chunk_b64,
+        },
+    )?;
+
+    let _ack: imago_protocol::ArtifactPushAck =
+        response_payload(request_response(&session, &request).await?)?;
     Ok(())
 }
 
@@ -702,5 +819,53 @@ mod tests {
         let payload: CommandStartRequest =
             serde_json::from_value(envelope.payload).expect("payload should deserialize");
         assert_eq!(payload.request_id, request_id);
+    }
+
+    #[test]
+    fn parse_upload_limits_uses_hello_limits_values() {
+        let response = HelloNegotiateResponse {
+            accepted: true,
+            server_version: "imagod-test".to_string(),
+            features: vec![],
+            limits: BTreeMap::from([
+                ("chunk_size".to_string(), "2048".to_string()),
+                ("max_inflight_chunks".to_string(), "4".to_string()),
+            ]),
+        };
+
+        let limits = parse_upload_limits(&response).expect("limits should parse");
+        assert_eq!(
+            limits,
+            UploadLimits {
+                chunk_size: 2048,
+                max_inflight_chunks: 4
+            }
+        );
+    }
+
+    #[test]
+    fn parse_upload_limits_rejects_zero_values() {
+        let response = HelloNegotiateResponse {
+            accepted: true,
+            server_version: "imagod-test".to_string(),
+            features: vec![],
+            limits: BTreeMap::from([("chunk_size".to_string(), "0".to_string())]),
+        };
+
+        let err = parse_upload_limits(&response).expect_err("zero chunk_size must fail");
+        assert!(err.to_string().contains("chunk_size"));
+    }
+
+    #[test]
+    fn client_bind_candidates_include_ipv6_then_ipv4_fallback() {
+        let candidates = client_bind_candidates();
+        assert_eq!(
+            candidates[0],
+            "[::]:0".parse::<SocketAddr>().expect("valid address")
+        );
+        assert_eq!(
+            candidates[1],
+            "0.0.0.0:0".parse::<SocketAddr>().expect("valid address")
+        );
     }
 }
