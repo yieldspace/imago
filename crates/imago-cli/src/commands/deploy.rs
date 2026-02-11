@@ -91,7 +91,11 @@ impl Drop for TempArtifactBundle {
 }
 
 pub fn run(args: DeployArgs) -> CommandResult {
-    match run_inner(args) {
+    run_with_project_root(args, Path::new("."))
+}
+
+pub(crate) fn run_with_project_root(args: DeployArgs, project_root: &Path) -> CommandResult {
+    match run_inner(args, project_root) {
         Ok(()) => CommandResult {
             exit_code: 0,
             stderr: None,
@@ -103,20 +107,20 @@ pub fn run(args: DeployArgs) -> CommandResult {
     }
 }
 
-fn run_inner(args: DeployArgs) -> anyhow::Result<()> {
+fn run_inner(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("failed to create tokio runtime")?;
-    runtime.block_on(run_async(args))
+    runtime.block_on(run_async(args, project_root))
 }
 
-async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
+async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> {
     let target_name = args
         .target
         .clone()
         .unwrap_or_else(|| build::default_target_name().to_string());
-    let build_output = build::build_project(args.env.as_deref(), &target_name, Path::new("."))
+    let build_output = build::build_project(args.env.as_deref(), &target_name, project_root)
         .context("failed to run build before deploy")?;
 
     let manifest_path = build_output.manifest_path;
@@ -129,7 +133,7 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
         .require_deploy_credentials()
         .context("target settings are invalid for deploy")?;
 
-    let artifact = build_artifact_bundle_file(&manifest, &manifest_path, Path::new("."))?;
+    let artifact = build_artifact_bundle_file(&manifest, &manifest_path, project_root)?;
     let (artifact_digest, artifact_size) = compute_file_sha256_and_size(artifact.path())?;
     let manifest_digest = hex::encode(Sha256::digest(&manifest_bytes));
 
@@ -880,13 +884,25 @@ mod tests {
 
     #[test]
     fn returns_non_zero_when_build_step_fails() {
-        let result = run(DeployArgs {
-            env: None,
-            target: None,
-        });
+        let root = std::env::temp_dir().join(format!(
+            "imago-cli-deploy-run-fail-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("temp dir should be created");
+
+        let result = run_with_project_root(
+            DeployArgs {
+                env: None,
+                target: None,
+            },
+            &root,
+        );
+
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.expect("stderr should be present");
         assert!(stderr.contains("failed to run build before deploy"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]

@@ -115,7 +115,11 @@ enum BuildCommand {
 }
 
 pub fn run(args: BuildArgs) -> CommandResult {
-    match run_inner(args) {
+    run_with_project_root(args, Path::new("."))
+}
+
+pub(crate) fn run_with_project_root(args: BuildArgs, project_root: &Path) -> CommandResult {
+    match run_inner(args, project_root) {
         Ok(()) => CommandResult {
             exit_code: 0,
             stderr: None,
@@ -127,8 +131,8 @@ pub fn run(args: BuildArgs) -> CommandResult {
     }
 }
 
-fn run_inner(args: BuildArgs) -> anyhow::Result<()> {
-    build_project(args.env.as_deref(), &args.target, Path::new("."))?;
+fn run_inner(args: BuildArgs, project_root: &Path) -> anyhow::Result<()> {
+    build_project(args.env.as_deref(), &args.target, project_root)?;
     Ok(())
 }
 
