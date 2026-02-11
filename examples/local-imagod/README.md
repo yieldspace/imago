@@ -4,7 +4,7 @@
 
 ## 事前条件
 
-- Rust toolchain が使えること
+- Rust toolchain（`rustc 1.90` 以上）が使えること
 - `wasm32-wasip2` target が入っていること  
   （未導入なら `rustup target add wasm32-wasip2`）
 - `cargo run -p imago-cli -- certs generate ...` が実行できること

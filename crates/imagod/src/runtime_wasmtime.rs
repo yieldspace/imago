@@ -6,7 +6,10 @@ use wasmtime::{
     Config, Engine, Store,
     component::{Component, Linker, ResourceTable},
 };
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView, add_to_linker_async, bindings::Command};
+use wasmtime_wasi::{
+    WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
+    p2::{add_to_linker_async, bindings::Command},
+};
 
 use crate::error::ImagodError;
 
@@ -18,12 +21,11 @@ struct WasiState {
 }
 
 impl WasiView for WasiState {
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
-    }
-
-    fn ctx(&mut self) -> &mut WasiCtx {
-        &mut self.wasi
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
     }
 }
 

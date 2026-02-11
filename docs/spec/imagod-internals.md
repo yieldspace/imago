@@ -265,8 +265,8 @@ deploy 経路の要点:
 
 実行:
 
-- `wasmtime_wasi::add_to_linker_async`
-- `Command::instantiate_async`
+- `wasmtime_wasi::p2::add_to_linker_async`
+- `wasmtime_wasi::p2::bindings::Command::instantiate_async`
 - `call_run(...).await`
 - `Store::set_epoch_deadline(1)`
 - `Store::epoch_deadline_async_yield_and_update(1)`
