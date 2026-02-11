@@ -186,6 +186,7 @@ spawn 遷移前 cancel 成立時:
 - `push`: `inflight_writes < max_inflight_chunks`（超過時 `E_BUSY`）
 - `commit`: metadata 一致、`inflight_writes == 0`、必要 range 完了、digest 一致
 - `committed_artifact`: `committed=true` の session のみ返却
+- `build_prepare_response`: partial 時の `missing_ranges` は欠損レンジ全件を列挙して返す
 
 ### 6.3 GC / 保持方針
 

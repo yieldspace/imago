@@ -599,9 +599,7 @@ fn build_prepare_response(
 
     let missing_ranges = match artifact_status {
         ArtifactStatus::Complete => Vec::new(),
-        _ => next_missing_range(&session.received_ranges, session.artifact_size)
-            .map(|v| vec![v])
-            .unwrap_or_default(),
+        _ => all_missing_ranges(&session.received_ranges, session.artifact_size),
     };
 
     DeployPrepareResponse {
@@ -842,6 +840,36 @@ fn next_missing_range(ranges: &[ByteRange], total: u64) -> Option<ByteRange> {
         return Some(range_from_start_end(cursor, total));
     }
     None
+}
+
+fn all_missing_ranges(ranges: &[ByteRange], total: u64) -> Vec<ByteRange> {
+    if total == 0 {
+        return Vec::new();
+    }
+    if ranges.is_empty() {
+        return vec![ByteRange {
+            offset: 0,
+            length: total,
+        }];
+    }
+
+    let mut missing = Vec::new();
+    let mut cursor = 0u64;
+    for range in ranges {
+        let start = range.offset;
+        let end = range.offset.saturating_add(range.length);
+        if cursor < start {
+            missing.push(range_from_start_end(cursor, start));
+        }
+        cursor = cursor.max(end);
+        if cursor >= total {
+            break;
+        }
+    }
+    if cursor < total {
+        missing.push(range_from_start_end(cursor, total));
+    }
+    missing
 }
 
 fn merge_range(ranges: &mut Vec<ByteRange>, incoming: ByteRange) {
@@ -1405,5 +1433,91 @@ mod tests {
 
     fn cleanup_root(root: PathBuf) {
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn test_session_with_ranges(ranges: Vec<ByteRange>, artifact_size: u64) -> UploadSession {
+        UploadSession {
+            deploy_id: "deploy-test".to_string(),
+            service_name: "svc-test".to_string(),
+            idempotency_key: "idem-test".to_string(),
+            fingerprint: "fingerprint-test".to_string(),
+            artifact_digest: "sha256:artifact".to_string(),
+            artifact_size,
+            manifest_digest: "sha256:manifest".to_string(),
+            upload_token: "upload-token".to_string(),
+            file_path: PathBuf::from("/tmp/imagod-artifact-store-test.artifact"),
+            received_ranges: ranges,
+            committed: false,
+            inflight_writes: 0,
+            commit_in_progress: false,
+            updated_at_epoch_secs: 1,
+        }
+    }
+
+    #[test]
+    fn build_prepare_response_partial_returns_all_missing_ranges() {
+        let session = test_session_with_ranges(
+            vec![
+                ByteRange {
+                    offset: 0,
+                    length: 10,
+                },
+                ByteRange {
+                    offset: 20,
+                    length: 10,
+                },
+                ByteRange {
+                    offset: 40,
+                    length: 10,
+                },
+            ],
+            60,
+        );
+
+        let response = build_prepare_response(&session, 900, 100);
+        assert_eq!(response.artifact_status, ArtifactStatus::Partial);
+        assert_eq!(
+            response.missing_ranges,
+            vec![
+                ByteRange {
+                    offset: 10,
+                    length: 10,
+                },
+                ByteRange {
+                    offset: 30,
+                    length: 10,
+                },
+                ByteRange {
+                    offset: 50,
+                    length: 10,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn build_prepare_response_missing_and_complete_have_expected_ranges() {
+        let missing_session = test_session_with_ranges(Vec::new(), 128);
+        let missing = build_prepare_response(&missing_session, 900, 100);
+        assert_eq!(missing.artifact_status, ArtifactStatus::Missing);
+        assert_eq!(
+            missing.missing_ranges,
+            vec![ByteRange {
+                offset: 0,
+                length: 128,
+            }]
+        );
+
+        let mut complete_session = test_session_with_ranges(
+            vec![ByteRange {
+                offset: 0,
+                length: 128,
+            }],
+            128,
+        );
+        complete_session.committed = true;
+        let complete = build_prepare_response(&complete_session, 900, 100);
+        assert_eq!(complete.artifact_status, ArtifactStatus::Complete);
+        assert!(complete.missing_ranges.is_empty());
     }
 }

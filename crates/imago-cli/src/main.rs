@@ -59,7 +59,15 @@ mod tests {
 
     #[test]
     fn dispatches_certs_generate_and_returns_zero() {
-        let temp = std::env::temp_dir().join("imago-cli-dispatch-certs-generate");
+        let unique = format!(
+            "imago-cli-dispatch-certs-generate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after UNIX_EPOCH")
+                .as_nanos(),
+        );
+        let temp = std::env::temp_dir().join(unique);
         let _ = std::fs::remove_dir_all(&temp);
 
         let result = dispatch(Cli {

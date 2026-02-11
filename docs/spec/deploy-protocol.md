@@ -130,6 +130,7 @@ response:
 - `artifact_status=complete`: upload なし
 - `artifact_status=missing`: 全体 upload
 - `artifact_status=partial`: `missing_ranges` のみ upload（全量再送しない）
+- `missing_ranges` は partial 時に「先頭1件」ではなく「全欠損レンジ集合」を返す
 
 ### 5.3 `artifact.push`
 
