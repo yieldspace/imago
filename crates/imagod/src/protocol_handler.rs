@@ -100,7 +100,7 @@ impl ProtocolHandler {
             if let Err(err) = ensure_single_request_envelope(&envelopes) {
                 let first = &envelopes[0];
                 let response = error_envelope(
-                    first.message_type,
+                    response_message_type_for_request(first.message_type),
                     first.request_id,
                     first.correlation_id,
                     err.to_structured(),
@@ -120,7 +120,7 @@ impl ProtocolHandler {
             let response = match self.handle_single(request.clone()).await {
                 Ok(resp) => resp,
                 Err(err) => error_envelope(
-                    request.message_type,
+                    response_message_type_for_request(request.message_type),
                     request.request_id,
                     request.correlation_id,
                     err.to_structured(),
@@ -342,8 +342,15 @@ impl ProtocolHandler {
                 Some("canceled".to_string()),
                 None,
             )?;
-            write_envelope(send, &canceled).await?;
-            self.operations.remove(&operation_id).await;
+            let canceled_write = write_envelope(send, &canceled).await;
+            finalize_operation_after_terminal_event(
+                &self.operations,
+                &operation_id,
+                CommandState::Canceled,
+                "canceled",
+                canceled_write,
+            )
+            .await?;
             return Ok(());
         }
 
@@ -383,10 +390,7 @@ impl ProtocolHandler {
 
         match command_result {
             Ok((progress_stage, success_stage)) => {
-                self.operations
-                    .finish(&operation_id, CommandState::Succeeded, &success_stage)
-                    .await;
-
+                let success_stage_for_event = success_stage.clone();
                 let progress = event_envelope(
                     operation_id,
                     request.correlation_id,
@@ -402,17 +406,20 @@ impl ProtocolHandler {
                     request.correlation_id,
                     CommandEventType::Succeeded,
                     payload.command_type,
-                    Some(success_stage),
+                    Some(success_stage_for_event),
                     None,
                 )?;
-                write_envelope(send, &succeeded).await?;
-                self.operations.remove(&operation_id).await;
+                let succeeded_write = write_envelope(send, &succeeded).await;
+                finalize_operation_after_terminal_event(
+                    &self.operations,
+                    &operation_id,
+                    CommandState::Succeeded,
+                    success_stage,
+                    succeeded_write,
+                )
+                .await?;
             }
             Err(err) => {
-                self.operations
-                    .finish(&operation_id, CommandState::Failed, "failed")
-                    .await;
-
                 let failed = event_envelope(
                     operation_id,
                     request.correlation_id,
@@ -421,8 +428,15 @@ impl ProtocolHandler {
                     Some("failed".to_string()),
                     Some(err.to_structured()),
                 )?;
-                write_envelope(send, &failed).await?;
-                self.operations.remove(&operation_id).await;
+                let failed_write = write_envelope(send, &failed).await;
+                finalize_operation_after_terminal_event(
+                    &self.operations,
+                    &operation_id,
+                    CommandState::Failed,
+                    "failed",
+                    failed_write,
+                )
+                .await?;
             }
         }
 
@@ -459,6 +473,13 @@ fn error_envelope(
         correlation_id,
         payload: Value::Null,
         error: Some(error),
+    }
+}
+
+fn response_message_type_for_request(request_type: MessageType) -> MessageType {
+    match request_type {
+        MessageType::StateRequest => MessageType::StateResponse,
+        _ => request_type,
     }
 }
 
@@ -652,15 +673,32 @@ fn validate_push_payload(payload: &ArtifactPushRequest) -> Result<(), ImagodErro
         .map_err(|e| bad_request("artifact.push", e.to_string()))
 }
 
+async fn finalize_operation_after_terminal_event(
+    operations: &OperationManager,
+    request_id: &Uuid,
+    terminal_state: CommandState,
+    stage: impl Into<String>,
+    terminal_write_result: Result<(), ImagodError>,
+) -> Result<(), ImagodError> {
+    operations
+        .finish(request_id, terminal_state, stage.into())
+        .await;
+    operations.remove(request_id).await;
+    terminal_write_result
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_command_start_request_id_match, ensure_non_nil_envelope_ids,
-        ensure_single_request_envelope, is_compatible_date_match, read_stream_with_timeout,
-        stream_read_timeout_error, validate_push_payload,
+        ImagodError, OperationManager, ensure_command_start_request_id_match,
+        ensure_non_nil_envelope_ids, ensure_single_request_envelope,
+        finalize_operation_after_terminal_event, is_compatible_date_match,
+        read_stream_with_timeout, response_message_type_for_request, stream_read_timeout_error,
+        validate_push_payload,
     };
     use imago_protocol::{
-        ArtifactPushChunkHeader, ArtifactPushRequest, MessageType, ProtocolEnvelope,
+        ArtifactPushChunkHeader, ArtifactPushRequest, CommandState, CommandType, ErrorCode,
+        MessageType, ProtocolEnvelope,
     };
     use serde_json::Value;
     use std::time::Duration;
@@ -687,6 +725,22 @@ mod tests {
         };
         let result = ensure_single_request_envelope(&[envelope.clone(), envelope]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn state_request_errors_use_state_response_message_type() {
+        assert_eq!(
+            response_message_type_for_request(MessageType::StateRequest),
+            MessageType::StateResponse
+        );
+    }
+
+    #[test]
+    fn non_state_request_errors_keep_original_message_type() {
+        assert_eq!(
+            response_message_type_for_request(MessageType::DeployPrepare),
+            MessageType::DeployPrepare
+        );
     }
 
     #[test]
@@ -761,5 +815,36 @@ mod tests {
         let err = stream_read_timeout_error();
         assert_eq!(err.code, imago_protocol::ErrorCode::OperationTimeout);
         assert_eq!(err.stage, "session.read");
+    }
+
+    #[tokio::test]
+    async fn finalize_terminal_operation_removes_operation_even_when_stream_write_failed() {
+        let operations = OperationManager::new();
+        let request_id = Uuid::new_v4();
+        operations
+            .start(request_id, CommandType::Deploy)
+            .await
+            .expect("start should succeed");
+        operations
+            .set_state(&request_id, CommandState::Running, "running")
+            .await
+            .expect("state update should succeed");
+
+        let write_error = ImagodError::new(ErrorCode::Internal, "session.write", "stream closed");
+        let result = finalize_operation_after_terminal_event(
+            &operations,
+            &request_id,
+            CommandState::Failed,
+            "failed",
+            Err(write_error),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let snapshot = operations.snapshot_running(&request_id).await;
+        assert!(
+            snapshot.is_err(),
+            "operation should be removed after finalize"
+        );
     }
 }

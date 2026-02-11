@@ -100,8 +100,7 @@ impl OperationManager {
         })?;
 
         if entry.cancel_requested {
-            entry.state = CommandState::Canceled;
-            entry.stage = "canceled".to_string();
+            entry.stage = "cancel-pending".to_string();
             entry.updated_at = now_unix_secs();
             entry.phase = OperationPhase::Spawned;
             entry.cancel_requested = false;
@@ -283,8 +282,9 @@ mod tests {
         let state = manager
             .snapshot_running(&req(20))
             .await
-            .expect_err("canceled state should not be observable as running");
-        assert_eq!(state.code, ErrorCode::NotFound);
+            .expect("cancel-pending state should remain observable before terminal event");
+        assert_eq!(state.state, CommandState::Running);
+        assert_eq!(state.stage, "cancel-pending");
     }
 
     #[tokio::test]

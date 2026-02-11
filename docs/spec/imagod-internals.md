@@ -132,21 +132,23 @@ sequenceDiagram
 
 成功時:
 
-- `finish(succeeded, success_stage)`
 - `progress`（詳細 stage）
 - `succeeded`
+- `finish(succeeded, success_stage)`
 - `remove(request_id)`
 
 失敗時:
 
-- `finish(failed, "failed")`
 - `failed(error=StructuredError)`
+- `finish(failed, "failed")`
 - `remove(request_id)`
 
 spawn 遷移前 cancel 成立時:
 
 - `canceled`
+- `finish(canceled, "canceled")`
 - `remove(request_id)`
+- `mark_spawned_if_not_canceled` の cancel 分岐は terminal state を直接設定せず、イベント送信後に終端化する
 
 ## 6. ArtifactStore 詳細
 
@@ -227,6 +229,7 @@ deploy 経路の要点:
 - `restart_policy` は `never` のみ受理し、他値は `E_BAD_REQUEST`
 - `services/<name>/<release_hash>/` 配置
 - 旧 release cleanup
+- release 配置は `staging -> release` を安全な swap で実施し、失敗時は backup から復元する
 - supervisor 起動置換
 
 ## 8. ServiceSupervisor 詳細

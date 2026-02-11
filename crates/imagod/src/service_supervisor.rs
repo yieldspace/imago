@@ -121,8 +121,8 @@ impl ServiceSupervisor {
     }
 
     pub async fn stop(&self, service_name: &str, force: bool) -> Result<(), ImagodError> {
-        let mut service = self.take_running(service_name).await?;
         let _stopping_guard = StoppingCounterGuard::new(self.stopping_count.clone());
+        let mut service = self.take_running(service_name).await?;
 
         if service.join_handle.is_finished() {
             let result = service.join_handle.await;
@@ -466,5 +466,21 @@ mod tests {
             .expect_err("start should fail when component path is missing");
         assert_eq!(err.code, ErrorCode::Internal);
         assert!(!supervisor.has_live_services().await);
+    }
+
+    #[tokio::test]
+    async fn stop_not_found_keeps_live_state_false() {
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let supervisor = ServiceSupervisor::new(runtime, 1);
+
+        let err = supervisor
+            .stop("missing-service", false)
+            .await
+            .expect_err("missing service should return not found");
+        assert_eq!(err.code, ErrorCode::NotFound);
+        assert!(
+            !supervisor.has_live_services().await,
+            "stopping_count guard should be released on early NotFound"
+        );
     }
 }

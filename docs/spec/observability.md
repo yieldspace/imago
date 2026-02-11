@@ -53,7 +53,8 @@
 ### 4.3 終端
 
 - `succeeded` / `failed` / `canceled` を終端イベントとする。
-- 終端イベント送信後、operation は削除される。
+- operation は終端イベント送信後に terminal 状態へ更新され、その後削除される。
+- 終端イベント送信が失敗した場合でも、operation は終端化して削除される（リーク防止）。
 
 ## 5. 状態照会契約
 
@@ -72,6 +73,7 @@
 operation が存在しない場合の扱い:
 
 - `state.request`: `E_NOT_FOUND`
+- `state.request` のエラー応答 envelope `type` は `state.response`
 
 ## 6. cancel 契約
 

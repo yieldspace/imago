@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     io::{BufReader, Read},
     net::{IpAddr, SocketAddr},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
@@ -732,17 +732,77 @@ fn build_artifact_bundle_file(
         project_root.join(manifest_source),
         "manifest.json",
     )?;
+    let normalized_main = normalize_bundle_entry_path(&manifest.main, "manifest.main")?;
+    let main_entry = normalized_tar_entry_name(&normalized_main);
     add_file_to_tar(
         &mut builder,
-        project_root.join(&manifest.main),
-        &manifest.main,
+        project_root.join(&normalized_main),
+        &main_entry,
     )?;
     for asset in &manifest.assets {
-        add_file_to_tar(&mut builder, project_root.join(&asset.path), &asset.path)?;
+        let normalized_asset = normalize_bundle_entry_path(&asset.path, "assets[].path")?;
+        let asset_entry = normalized_tar_entry_name(&normalized_asset);
+        add_file_to_tar(
+            &mut builder,
+            project_root.join(&normalized_asset),
+            &asset_entry,
+        )?;
     }
     builder.finish()?;
 
     Ok(TempArtifactBundle::new(bundle_path))
+}
+
+fn normalize_bundle_entry_path(raw: &str, field_name: &str) -> anyhow::Result<PathBuf> {
+    if raw.is_empty() {
+        return Err(anyhow!("{field_name} must not be empty"));
+    }
+
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        return Err(anyhow!("{field_name} must be a relative path: {raw}"));
+    }
+    if raw.contains('\\') {
+        return Err(anyhow!(
+            "{field_name} must not contain backslash separators: {raw}"
+        ));
+    }
+
+    let raw_os = path.as_os_str().to_string_lossy();
+    if raw_os.len() >= 2 && raw_os.as_bytes()[1] == b':' {
+        return Err(anyhow!("{field_name} must not be windows-prefixed: {raw}"));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => normalized.push(segment),
+            Component::ParentDir | Component::RootDir => {
+                return Err(anyhow!(
+                    "{field_name} must not contain path traversal: {raw}"
+                ));
+            }
+            _ => {
+                return Err(anyhow!(
+                    "{field_name} contains unsupported path component: {raw}"
+                ));
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(anyhow!("{field_name} is invalid: {raw}"));
+    }
+
+    Ok(normalized)
+}
+
+fn normalized_tar_entry_name(path: &Path) -> String {
+    path.iter()
+        .map(|segment| segment.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn compute_file_sha256_and_size(path: &Path) -> anyhow::Result<(String, u64)> {
@@ -840,6 +900,7 @@ fn decode_frames(value: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn returns_non_zero_when_manifest_missing() {
@@ -984,5 +1045,59 @@ mod tests {
         let err = build_upload_chunk_plan(&ranges, 10, 2)
             .expect_err("range outside artifact size must fail");
         assert!(err.to_string().contains("outside artifact size"));
+    }
+
+    #[test]
+    fn normalize_bundle_entry_path_rejects_unsafe_values() {
+        assert!(normalize_bundle_entry_path("../evil.wasm", "manifest.main").is_err());
+        assert!(normalize_bundle_entry_path("/etc/passwd", "manifest.main").is_err());
+        assert!(normalize_bundle_entry_path("C:\\evil.wasm", "manifest.main").is_err());
+        assert!(normalize_bundle_entry_path("..\\evil.wasm", "manifest.main").is_err());
+        assert!(normalize_bundle_entry_path("", "manifest.main").is_err());
+        assert!(normalize_bundle_entry_path("app/main.wasm", "manifest.main").is_ok());
+    }
+
+    #[test]
+    fn build_artifact_bundle_file_rejects_unsafe_manifest_main() {
+        let root = std::env::temp_dir().join(format!("imago-cli-bundle-main-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("build")).expect("build dir should be created");
+        fs::write(root.join("build/manifest.json"), "{}").expect("manifest source should exist");
+
+        let manifest = Manifest {
+            name: "svc".to_string(),
+            main: "../evil.wasm".to_string(),
+            app_type: "cli".to_string(),
+            assets: vec![],
+        };
+
+        let err = build_artifact_bundle_file(&manifest, Path::new("build/manifest.json"), &root)
+            .expect_err("unsafe manifest.main should be rejected");
+        assert!(err.to_string().contains("manifest.main"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_artifact_bundle_file_rejects_unsafe_asset_path() {
+        let root = std::env::temp_dir().join(format!("imago-cli-bundle-asset-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("build")).expect("build dir should be created");
+        fs::create_dir_all(root.join("app")).expect("app dir should be created");
+        fs::write(root.join("build/manifest.json"), "{}").expect("manifest source should exist");
+        fs::write(root.join("app/main.wasm"), b"00").expect("main wasm should exist");
+
+        let manifest = Manifest {
+            name: "svc".to_string(),
+            main: "app/main.wasm".to_string(),
+            app_type: "cli".to_string(),
+            assets: vec![ManifestAsset {
+                path: "../secret.txt".to_string(),
+            }],
+        };
+
+        let err = build_artifact_bundle_file(&manifest, Path::new("build/manifest.json"), &root)
+            .expect_err("unsafe asset path should be rejected");
+        assert!(err.to_string().contains("assets[].path"));
+
+        let _ = fs::remove_dir_all(root);
     }
 }

@@ -233,6 +233,7 @@ payload:
 - `state.response.state` は `accepted` / `running` のみ。
 - terminal state を返してはならない。
 - 対象が非実行中なら `E_NOT_FOUND`。
+- `state.request` のエラー応答 envelope `type` も `state.response` を使う。
 
 ### 5.8 `command.cancel`
 

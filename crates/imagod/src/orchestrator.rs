@@ -8,6 +8,7 @@ use imago_protocol::{DeployCommandPayload, ErrorCode, RunCommandPayload, StopCom
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::fs;
+use uuid::Uuid;
 
 use crate::{
     artifact_store::ArtifactStore,
@@ -218,10 +219,7 @@ impl Orchestrator {
         fs::create_dir_all(&service_root)
             .await
             .map_err(|e| map_internal(format!("service root creation failed: {e}")))?;
-        clean_dir(&release_dir).await?;
-        fs::rename(&staging_dir, &release_dir)
-            .await
-            .map_err(|e| map_internal(format!("release move failed: {e}")))?;
+        promote_staging_release(&staging_dir, &release_dir).await?;
 
         cleanup_old_releases(&service_root, &release_hash, previous_release.as_deref()).await?;
 
@@ -613,6 +611,60 @@ async fn clean_dir(path: &Path) -> Result<(), ImagodError> {
     }
 }
 
+async fn promote_staging_release(
+    staging_dir: &Path,
+    release_dir: &Path,
+) -> Result<(), ImagodError> {
+    match fs::metadata(release_dir).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return fs::rename(staging_dir, release_dir)
+                .await
+                .map_err(|err| map_internal(format!("release move failed: {err}")));
+        }
+        Err(e) => {
+            return Err(map_internal(format!(
+                "failed to inspect release dir {}: {e}",
+                release_dir.display()
+            )));
+        }
+    }
+
+    let release_name = release_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("release");
+    let backup_dir =
+        release_dir.with_file_name(format!("{}.swap-backup-{}", release_name, Uuid::new_v4()));
+
+    fs::rename(release_dir, &backup_dir)
+        .await
+        .map_err(|e| map_internal(format!("failed to move release to backup: {e}")))?;
+
+    match fs::rename(staging_dir, release_dir).await {
+        Ok(_) => {
+            fs::remove_dir_all(&backup_dir).await.map_err(|e| {
+                map_internal(format!(
+                    "failed to cleanup release backup {}: {e}",
+                    backup_dir.display()
+                ))
+            })?;
+            Ok(())
+        }
+        Err(e) => {
+            let restore_err = fs::rename(&backup_dir, release_dir).await.err();
+            if let Some(restore_err) = restore_err {
+                return Err(map_internal(format!(
+                    "release move failed: {e}; rollback restore failed: {restore_err}"
+                )));
+            }
+            Err(map_internal(format!(
+                "release move failed and backup restored: {e}"
+            )))
+        }
+    }
+}
+
 fn release_id_from_artifact_digest(full: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(full.as_bytes());
@@ -639,9 +691,10 @@ fn map_rollback_error(err: ImagodError) -> ImagodError {
 mod tests {
     use super::{
         extract_tar, normalize_archive_entry_path, normalize_manifest_main_path,
-        release_id_from_artifact_digest, validate_deploy_preconditions, validate_service_name,
+        promote_staging_release, release_id_from_artifact_digest, validate_deploy_preconditions,
+        validate_service_name,
     };
-    use imago_protocol::DeployCommandPayload;
+    use imago_protocol::{DeployCommandPayload, ErrorCode};
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -758,6 +811,61 @@ mod tests {
         let result = extract_tar(&tar_path, &dest).await;
         assert!(result.is_err());
         assert!(!dest.join("evil.txt").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn promote_staging_release_swaps_and_cleans_backup() {
+        let root = temp_dir_path("orchestrator-promote-swap");
+        let staging = root.join("staging");
+        let release = root.join("release");
+        fs::create_dir_all(&staging).expect("staging dir should be created");
+        fs::create_dir_all(&release).expect("release dir should be created");
+        fs::write(staging.join("new.txt"), b"new").expect("new file should be written");
+        fs::write(release.join("old.txt"), b"old").expect("old file should be written");
+
+        promote_staging_release(&staging, &release)
+            .await
+            .expect("release promotion should succeed");
+
+        assert!(!staging.exists(), "staging should be moved");
+        assert!(
+            release.join("new.txt").exists(),
+            "new release contents should exist"
+        );
+        assert!(
+            !release.join("old.txt").exists(),
+            "old release contents should be replaced"
+        );
+
+        let backups = fs::read_dir(&root)
+            .expect("root should be readable")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains(".swap-backup-"))
+            .collect::<Vec<_>>();
+        assert!(backups.is_empty(), "backup dir should be cleaned up");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn promote_staging_release_restores_previous_on_move_failure() {
+        let root = temp_dir_path("orchestrator-promote-restore");
+        let missing_staging = root.join("missing-staging");
+        let release = root.join("release");
+        fs::create_dir_all(&release).expect("release dir should be created");
+        fs::write(release.join("active.txt"), b"active").expect("active file should be written");
+
+        let err = promote_staging_release(&missing_staging, &release)
+            .await
+            .expect_err("promotion should fail when staging is missing");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(
+            release.join("active.txt").exists(),
+            "existing release should be restored after failure"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
