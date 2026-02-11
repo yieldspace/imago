@@ -1,3 +1,5 @@
+//! WebTransport server bootstrap with TLS and client certificate validation.
+
 use std::{io::BufReader, path::Path, sync::Arc};
 
 use imago_protocol::ErrorCode;
@@ -8,6 +10,7 @@ use web_transport_quinn::Server;
 
 const STAGE_TRANSPORT: &str = "transport.setup";
 
+/// Builds a WebTransport server endpoint from validated configuration.
 pub fn build_server(config: &ImagodConfig) -> Result<Server, ImagodError> {
     let listen_addr = config.listen_addr.parse().map_err(|e| {
         ImagodError::new(
@@ -84,6 +87,7 @@ pub fn build_server(config: &ImagodConfig) -> Result<Server, ImagodError> {
     Ok(web_transport_quinn::Server::new(endpoint))
 }
 
+/// Loads one or more certificates from a PEM file.
 fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, ImagodError> {
     let file = std::fs::File::open(path).map_err(|e| {
         ImagodError::new(
@@ -112,6 +116,7 @@ fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, ImagodError> 
     Ok(certs)
 }
 
+/// Loads a private key from a PEM file.
 fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, ImagodError> {
     let file = std::fs::File::open(path).map_err(|e| {
         ImagodError::new(

@@ -1,3 +1,5 @@
+//! Service process supervisor and manager-side control-plane server.
+
 use std::{
     collections::{BTreeMap, VecDeque},
     path::{Path, PathBuf},
@@ -29,24 +31,36 @@ const STAGE_STOP: &str = "service.stop";
 const STAGE_CONTROL: &str = "service.control";
 const STARTUP_PROBE_POLL_INTERVAL_MS: u64 = 25;
 const INVOCATION_TOKEN_TTL_SECS: u64 = 30;
+type PendingReadyMap = BTreeMap<String, oneshot::Sender<Result<(), ImagodError>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Launch specification used to spawn one runner process.
 pub struct ServiceLaunch {
+    /// Service name.
     pub name: String,
+    /// Release hash to execute.
     pub release_hash: String,
+    /// Component file path.
     pub component_path: PathBuf,
+    /// WASI CLI arguments.
     pub args: Vec<String>,
+    /// Environment variables for runtime.
     pub envs: BTreeMap<String, String>,
+    /// Allowed invocation bindings for this service.
     pub bindings: Vec<ServiceBinding>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Runtime status tracked for each supervised service.
 pub enum RunningStatus {
+    /// Service is running.
     Running,
+    /// Service is being stopped.
     Stopping,
 }
 
 #[derive(Debug)]
+/// Internal mutable state for one supervised runner process.
 struct RunningService {
     release_hash: String,
     started_at: String,
@@ -63,12 +77,14 @@ struct RunningService {
 }
 
 #[derive(Debug)]
+/// Bounded byte ring used for per-stream runner log capture.
 struct BoundedLogBuffer {
     max_bytes: usize,
     bytes: VecDeque<u8>,
 }
 
 impl BoundedLogBuffer {
+    /// Creates a new bounded log buffer.
     fn new(max_bytes: usize) -> Self {
         Self {
             max_bytes: max_bytes.max(1),
@@ -76,6 +92,7 @@ impl BoundedLogBuffer {
         }
     }
 
+    /// Appends bytes and evicts oldest data when capacity is exceeded.
     fn push(&mut self, chunk: &[u8]) {
         if chunk.is_empty() {
             return;
@@ -93,6 +110,7 @@ impl BoundedLogBuffer {
 }
 
 #[derive(Clone)]
+/// Supervises service runner processes and manager-runner control traffic.
 pub struct ServiceSupervisor {
     storage_root: PathBuf,
     stop_grace_timeout: Duration,
@@ -101,11 +119,12 @@ pub struct ServiceSupervisor {
     epoch_tick_interval_ms: u64,
     manager_control_endpoint: PathBuf,
     inner: Arc<RwLock<BTreeMap<String, RunningService>>>,
-    pending_ready: Arc<Mutex<BTreeMap<String, oneshot::Sender<Result<(), ImagodError>>>>>,
+    pending_ready: Arc<Mutex<PendingReadyMap>>,
     stopping_count: Arc<AtomicUsize>,
 }
 
 impl ServiceSupervisor {
+    /// Creates a service supervisor and starts manager control socket server.
     pub fn new(
         storage_root: impl AsRef<Path>,
         stop_grace_timeout_secs: u64,
@@ -165,6 +184,7 @@ impl ServiceSupervisor {
         Ok(supervisor)
     }
 
+    /// Starts a service by spawning a runner child process.
     pub async fn start(&self, launch: ServiceLaunch) -> Result<(), ImagodError> {
         self.reap_finished_service(&launch.name).await;
 
@@ -270,6 +290,7 @@ impl ServiceSupervisor {
         Ok(())
     }
 
+    /// Replaces an existing service using stop-then-start sequence.
     pub async fn replace(&self, launch: ServiceLaunch) -> Result<(), ImagodError> {
         match self.stop(&launch.name, false).await {
             Ok(()) => {}
@@ -279,6 +300,7 @@ impl ServiceSupervisor {
         self.start(launch).await
     }
 
+    /// Stops a running service, optionally forcing immediate kill.
     pub async fn stop(&self, service_name: &str, force: bool) -> Result<(), ImagodError> {
         let _stopping_guard = StoppingCounterGuard::new(self.stopping_count.clone());
         let mut service = self.take_running(service_name).await?;
@@ -342,6 +364,7 @@ impl ServiceSupervisor {
         }
     }
 
+    /// Reaps all finished services and logs exit outcomes.
     pub async fn reap_finished(&self) {
         let mut finished = Vec::new();
         {
@@ -362,10 +385,10 @@ impl ServiceSupervisor {
                     },
                     None => None,
                 };
-                if let Some(exit_status) = status {
-                    if let Some(service) = inner.remove(&name) {
-                        finished.push((name, service, exit_status));
-                    }
+                if let Some(exit_status) = status
+                    && let Some(service) = inner.remove(&name)
+                {
+                    finished.push((name, service, exit_status));
                 }
             }
         }
@@ -381,6 +404,7 @@ impl ServiceSupervisor {
         }
     }
 
+    /// Returns true if at least one service is running or stopping.
     pub async fn has_live_services(&self) -> bool {
         if self.stopping_count.load(Ordering::SeqCst) > 0 {
             return true;
@@ -389,6 +413,7 @@ impl ServiceSupervisor {
         !inner.is_empty()
     }
 
+    /// Spawns the async manager control server loop on the provided listener.
     fn spawn_manager_control_server(&self, listener: UnixListener) {
         let inner = self.inner.clone();
         let pending_ready = self.pending_ready.clone();
@@ -421,6 +446,7 @@ impl ServiceSupervisor {
         });
     }
 
+    /// Spawns the `imagod --runner` child process with piped stdio.
     fn spawn_runner_child(&self, _bootstrap: &RunnerBootstrap) -> Result<Child, ImagodError> {
         let exe = std::env::current_exe().map_err(|e| {
             ImagodError::new(
@@ -451,6 +477,7 @@ impl ServiceSupervisor {
             .join(format!("{}-{}.sock", service_name, runner_id))
     }
 
+    /// Waits until runner-ready arrives, child exits, or timeout elapses.
     async fn wait_for_runner_ready(
         &self,
         service_name: &str,
@@ -614,9 +641,10 @@ impl ServiceSupervisor {
     }
 }
 
+/// Handles one control request received on manager control socket.
 async fn handle_control_request(
     inner: &Arc<RwLock<BTreeMap<String, RunningService>>>,
-    pending_ready: &Arc<Mutex<BTreeMap<String, oneshot::Sender<Result<(), ImagodError>>>>>,
+    pending_ready: &Arc<Mutex<PendingReadyMap>>,
     request: ControlRequest,
 ) -> ControlResponse {
     match request {
@@ -757,6 +785,7 @@ async fn handle_control_request(
     }
 }
 
+/// Validates manager proof generated from shared secret and runner id.
 fn validate_manager_auth(secret: &str, runner_id: &str, proof: &str) -> Result<(), ImagodError> {
     let expected = compute_manager_auth_proof(secret, runner_id)?;
     if expected == proof {
@@ -778,12 +807,16 @@ fn control_error(code: ErrorCode, message: impl Into<String>) -> ControlResponse
     })
 }
 
+/// Returns whether a binding list allows the target service/interface pair.
 fn is_binding_allowed(bindings: &[ServiceBinding], target_service: &str, wit: &str) -> bool {
     bindings
         .iter()
         .any(|binding| binding.target == target_service && binding.wit == wit)
 }
 
+/// Drains one child output stream into bounded in-memory log buffer.
+///
+/// Concurrency: runs as a detached task per stream.
 fn spawn_log_drain<R>(
     mut reader: R,
     buffer: Arc<Mutex<BoundedLogBuffer>>,
@@ -827,6 +860,7 @@ fn spawn_log_drain<R>(
     });
 }
 
+/// Sends kill signal to child and waits for termination.
 async fn kill_and_wait(child: &mut Child) -> Result<(), ImagodError> {
     child.start_kill().map_err(|e| {
         ImagodError::new(
@@ -858,11 +892,13 @@ fn log_exit_outcome(
     );
 }
 
+/// RAII guard that tracks number of concurrent stop operations.
 struct StoppingCounterGuard {
     counter: Arc<AtomicUsize>,
 }
 
 impl StoppingCounterGuard {
+    /// Increments stop counter and returns a guard that decrements on drop.
     fn new(counter: Arc<AtomicUsize>) -> Self {
         counter.fetch_add(1, Ordering::SeqCst);
         Self { counter }

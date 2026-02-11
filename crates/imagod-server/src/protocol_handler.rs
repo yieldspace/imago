@@ -1,3 +1,5 @@
+//! Deploy protocol session handler and message dispatch implementation.
+
 use std::{
     collections::BTreeMap,
     sync::Arc,
@@ -20,9 +22,11 @@ use web_transport_quinn::{SendStream, Session};
 const MAX_STREAM_BYTES: usize = 1024 * 1024 * 16;
 const STREAM_READ_TIMEOUT_SECS: u64 = 30;
 
+/// JSON-backed envelope type used by stream decode/encode flow.
 type Envelope = ProtocolEnvelope<Value>;
 
 #[derive(Clone)]
+/// Handles one WebTransport session and dispatches protocol messages.
 pub struct ProtocolHandler {
     config: Arc<ImagodConfig>,
     artifacts: ArtifactStore,
@@ -31,6 +35,7 @@ pub struct ProtocolHandler {
 }
 
 impl ProtocolHandler {
+    /// Creates a protocol handler with shared manager dependencies.
     pub fn new(
         config: Arc<ImagodConfig>,
         artifacts: ArtifactStore,
@@ -45,6 +50,7 @@ impl ProtocolHandler {
         }
     }
 
+    /// Serves one WebTransport session until peer closes it.
     pub async fn handle_session(&self, session: Session) -> Result<(), ImagodError> {
         loop {
             let (mut send, mut recv) = match session.accept_bi().await {
@@ -128,14 +134,17 @@ impl ProtocolHandler {
         Ok(())
     }
 
+    /// Reaps finished services via orchestrator.
     pub async fn reap_finished_services(&self) {
         self.orchestrator.reap_finished_services().await;
     }
 
+    /// Returns whether any managed services are currently alive.
     pub async fn has_live_services(&self) -> bool {
         self.orchestrator.has_live_services().await
     }
 
+    /// Dispatches non-command-start requests to the corresponding handler.
     async fn handle_single(&self, request: Envelope) -> Result<Envelope, ImagodError> {
         match request.message_type {
             MessageType::HelloNegotiate => self.handle_hello(request),
@@ -276,6 +285,7 @@ impl ProtocolHandler {
         )
     }
 
+    /// Handles `command.start` and emits accepted/progress/terminal events.
     async fn handle_command_start(
         &self,
         request: Envelope,
@@ -483,6 +493,7 @@ fn payload_as<T: DeserializeOwned>(request: &Envelope) -> Result<T, ImagodError>
         .map_err(|e| bad_request("protocol", format!("request payload decode failed: {e}")))
 }
 
+/// Decodes one stream payload into protocol envelopes.
 fn parse_stream_envelopes(buf: &[u8]) -> Result<Vec<Envelope>, ImagodError> {
     let frames = decode_frames(buf)?;
     frames
@@ -540,6 +551,7 @@ fn ensure_non_nil_envelope_ids(envelope: &Envelope) -> Result<(), ImagodError> {
     Ok(())
 }
 
+/// Ensures the stream carries at most one request envelope.
 fn ensure_single_request_envelope(envelopes: &[Envelope]) -> Result<(), ImagodError> {
     if envelopes.len() > 1 {
         return Err(bad_request(
@@ -613,6 +625,7 @@ fn encode_frame(payload: &[u8]) -> Vec<u8> {
     frame
 }
 
+/// Decodes length-prefixed frame data into individual payload buffers.
 fn decode_frames(value: &[u8]) -> Result<Vec<Vec<u8>>, ImagodError> {
     let mut out = Vec::new();
     let mut offset = 0usize;
@@ -668,6 +681,7 @@ fn validate_push_payload(payload: &ArtifactPushRequest) -> Result<(), ImagodErro
         .map_err(|e| bad_request("artifact.push", e.to_string()))
 }
 
+/// Finalizes operation bookkeeping after writing terminal event.
 async fn finalize_operation_after_terminal_event(
     operations: &OperationManager,
     request_id: &Uuid,

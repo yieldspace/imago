@@ -1,3 +1,5 @@
+//! Wasmtime runtime integration used by runner processes.
+
 use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 use imago_protocol::ErrorCode;
@@ -15,6 +17,7 @@ use imagod_common::ImagodError;
 
 const STAGE_RUNTIME: &str = "runtime.start";
 
+/// Internal WASI host state stored in the Wasmtime store.
 struct WasiState {
     table: ResourceTable,
     wasi: WasiCtx,
@@ -30,11 +33,13 @@ impl WasiView for WasiState {
 }
 
 #[derive(Clone)]
+/// Runner-local wrapper around a configured Wasmtime engine.
 pub struct WasmRuntime {
     engine: Arc<Engine>,
 }
 
 impl WasmRuntime {
+    /// Creates a runtime with component model, async support, and epoch interruption enabled.
     pub fn new() -> Result<Self, ImagodError> {
         let mut config = Config::new();
         config.wasm_component_model(true);
@@ -49,10 +54,12 @@ impl WasmRuntime {
         })
     }
 
+    /// Increments the engine epoch to unblock interruption-aware execution.
     pub fn increment_epoch(&self) {
         self.engine.increment_epoch();
     }
 
+    /// Validates that the component file can be loaded by the configured engine.
     pub fn validate_component(&self, component_path: &Path) -> Result<(), ImagodError> {
         Component::from_file(&self.engine, component_path).map_err(|e| {
             map_runtime_error(format!(
@@ -63,6 +70,9 @@ impl WasmRuntime {
         Ok(())
     }
 
+    /// Instantiates and runs a WASI CLI component asynchronously.
+    ///
+    /// Returns when execution completes or when shutdown is requested.
     pub async fn run_cli_component_async(
         &self,
         component_path: &Path,
@@ -153,10 +163,12 @@ impl WasmRuntime {
     }
 }
 
+/// Maps runtime-originated failures to a unified internal error shape.
 fn map_runtime_error(message: String) -> ImagodError {
     ImagodError::new(ErrorCode::Internal, STAGE_RUNTIME, message)
 }
 
+/// Waits until shutdown flag is set or sender side is dropped.
 async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
     loop {
         if *shutdown.borrow() {

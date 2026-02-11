@@ -1,3 +1,5 @@
+//! High-level orchestration for deploy/run/stop commands.
+
 use std::{
     collections::BTreeMap,
     collections::BTreeSet,
@@ -22,6 +24,7 @@ const EXPECTED_CURRENT_RELEASE_ANY: &str = "any";
 const RESTART_POLICY_NEVER: &str = "never";
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+/// Release manifest loaded from extracted artifact.
 struct Manifest {
     name: String,
     main: String,
@@ -37,17 +40,20 @@ struct Manifest {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+/// Manifest-declared asset path.
 struct ManifestAsset {
     path: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+/// Manifest binding authorization entry.
 struct ManifestBinding {
     target: String,
     wit: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+/// Manifest hash metadata describing required verification targets.
 struct ManifestHash {
     algorithm: String,
     targets: Vec<HashTarget>,
@@ -64,6 +70,7 @@ impl ManifestHash {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+/// Hash verification targets required by manifest metadata.
 enum HashTarget {
     #[serde(rename = "wasm")]
     Wasm,
@@ -74,29 +81,39 @@ enum HashTarget {
 }
 
 #[derive(Debug, Clone)]
+/// Result summary returned after successful deploy.
 pub struct DeploySummary {
+    /// Service name that was deployed.
     pub service_name: String,
+    /// Release hash activated for the service.
     pub release_hash: String,
 }
 
 #[derive(Debug, Clone)]
+/// Result summary returned after successful run command.
 pub struct RunSummary {
+    /// Service name that was started.
     pub service_name: String,
+    /// Active release hash used for start.
     pub release_hash: String,
 }
 
 #[derive(Debug, Clone)]
+/// Result summary returned after successful stop command.
 pub struct StopSummary {
+    /// Service name that was stopped.
     pub service_name: String,
 }
 
 #[derive(Clone)]
+/// Coordinates artifact validation, release promotion, and process supervision.
 pub struct Orchestrator {
     storage_root: PathBuf,
     artifact_store: ArtifactStore,
     supervisor: ServiceSupervisor,
 }
 
+/// Prepared release context passed from deploy preparation into final activation.
 struct PreparedRelease {
     service_name: String,
     service_root: PathBuf,
@@ -107,6 +124,7 @@ struct PreparedRelease {
 }
 
 impl Orchestrator {
+    /// Creates an orchestrator with shared storage and supervisor handles.
     pub fn new(
         storage_root: impl AsRef<Path>,
         artifact_store: ArtifactStore,
@@ -119,6 +137,7 @@ impl Orchestrator {
         }
     }
 
+    /// Handles deploy orchestration and service replacement.
     pub async fn deploy(
         &self,
         payload: &DeployCommandPayload,
@@ -143,6 +162,7 @@ impl Orchestrator {
         })
     }
 
+    /// Starts a service from its currently active release.
     pub async fn run(&self, payload: &RunCommandPayload) -> Result<RunSummary, ImagodError> {
         let service_root = self.storage_root.join("services").join(&payload.name);
         let active_file = service_root.join("active_release");
@@ -165,6 +185,7 @@ impl Orchestrator {
         })
     }
 
+    /// Stops a running service.
     pub async fn stop(&self, payload: &StopCommandPayload) -> Result<StopSummary, ImagodError> {
         self.supervisor.stop(&payload.name, payload.force).await?;
         Ok(StopSummary {
@@ -172,14 +193,17 @@ impl Orchestrator {
         })
     }
 
+    /// Reaps finished runner processes from supervisor state.
     pub async fn reap_finished_services(&self) {
         self.supervisor.reap_finished().await;
     }
 
+    /// Returns whether any services are currently running or stopping.
     pub async fn has_live_services(&self) -> bool {
         self.supervisor.has_live_services().await
     }
 
+    /// Prepares a validated release and launch spec from committed artifact data.
     async fn prepare_release(
         &self,
         payload: &DeployCommandPayload,
@@ -244,6 +268,7 @@ impl Orchestrator {
         })
     }
 
+    /// Attempts to roll back active release marker when replacement start fails.
     async fn rollback_previous_release(
         &self,
         prepared: &PreparedRelease,
@@ -278,6 +303,7 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Loads launch information from an existing promoted release.
     async fn load_launch_from_release(
         &self,
         service_name: &str,
@@ -304,6 +330,7 @@ impl Orchestrator {
     }
 }
 
+/// Builds launch metadata for supervisor from a promoted release directory.
 async fn build_launch_from_release(
     release_hash: &str,
     release_dir: &Path,
@@ -347,6 +374,7 @@ async fn build_launch_from_release(
     })
 }
 
+/// Extracts a tar archive into destination while rejecting unsupported entries.
 async fn extract_tar(bundle: &Path, dest: &Path) -> Result<(), ImagodError> {
     let bundle = bundle.to_path_buf();
     let dest = dest.to_path_buf();
@@ -532,6 +560,7 @@ fn validate_service_name(name: &str) -> Result<(), ImagodError> {
     Ok(())
 }
 
+/// Validates deploy preconditions against currently active release.
 fn validate_deploy_preconditions(
     payload: &DeployCommandPayload,
     active_release: Option<&str>,
@@ -629,6 +658,7 @@ async fn clean_dir(path: &Path) -> Result<(), ImagodError> {
     }
 }
 
+/// Promotes staging release directory into the service release path atomically.
 async fn promote_staging_release(
     staging_dir: &Path,
     release_dir: &Path,

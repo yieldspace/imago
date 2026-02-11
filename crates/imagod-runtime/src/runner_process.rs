@@ -1,3 +1,5 @@
+//! Runner process bootstrap and inbound control loop.
+
 use std::path::Path;
 
 use imago_protocol::ErrorCode;
@@ -18,6 +20,10 @@ use crate::runtime_wasmtime::WasmRuntime;
 
 const STAGE_RUNNER: &str = "runner.process";
 
+/// Starts runner mode by reading `RunnerBootstrap` from stdin and executing the component.
+///
+/// The function registers the runner with manager, serves inbound IPC requests,
+/// emits heartbeat signals, and exits when the component finishes or shutdown is requested.
 pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
     let mut stdin = tokio::io::stdin();
     let mut bootstrap_bytes = Vec::new();
@@ -84,6 +90,7 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
     run_result
 }
 
+/// Registers this runner endpoint with the manager control plane.
 async fn register_runner(bootstrap: &RunnerBootstrap) -> Result<(), ImagodError> {
     let proof = compute_manager_auth_proof(&bootstrap.manager_auth_secret, &bootstrap.runner_id)?;
     let response = DbusP2pTransport::call_control(
@@ -108,6 +115,7 @@ async fn register_runner(bootstrap: &RunnerBootstrap) -> Result<(), ImagodError>
     }
 }
 
+/// Notifies manager that runner initialization has completed.
 async fn mark_ready(bootstrap: &RunnerBootstrap) -> Result<(), ImagodError> {
     let proof = compute_manager_auth_proof(&bootstrap.manager_auth_secret, &bootstrap.runner_id)?;
     let response = DbusP2pTransport::call_control(
@@ -130,6 +138,9 @@ async fn mark_ready(bootstrap: &RunnerBootstrap) -> Result<(), ImagodError> {
     }
 }
 
+/// Sends periodic heartbeat messages until shutdown is requested.
+///
+/// Concurrency: runs as a dedicated background task.
 async fn send_heartbeats(bootstrap: RunnerBootstrap, mut shutdown: watch::Receiver<bool>) {
     loop {
         if *shutdown.borrow() {
@@ -165,6 +176,9 @@ async fn send_heartbeats(bootstrap: RunnerBootstrap, mut shutdown: watch::Receiv
     }
 }
 
+/// Accepts inbound runner requests and writes one response per request.
+///
+/// Concurrency: runs as a dedicated background task.
 async fn run_inbound_server(
     listener: UnixListener,
     bootstrap: RunnerBootstrap,
@@ -208,6 +222,7 @@ async fn run_inbound_server(
     }
 }
 
+/// Handles a single inbound request and performs token validation for invoke calls.
 async fn handle_inbound_request(
     bootstrap: &RunnerBootstrap,
     request: RunnerInboundRequest,
@@ -259,6 +274,7 @@ async fn handle_inbound_request(
     }
 }
 
+/// Ensures runner socket parent exists and removes stale socket files before bind.
 fn prepare_socket_path(path: &Path) -> Result<(), ImagodError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {

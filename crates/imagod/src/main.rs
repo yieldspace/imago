@@ -1,3 +1,8 @@
+//! `imagod` binary entrypoint.
+//!
+//! This binary runs in manager mode by default and switches to runner mode
+//! when `--runner` is passed by the manager supervisor.
+
 use std::{path::PathBuf, sync::Arc};
 
 use imagod_config::{ImagodConfig, resolve_config_path};

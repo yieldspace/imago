@@ -1,3 +1,5 @@
+//! DBus-like peer-to-peer transport backed by Unix domain sockets and CBOR frames.
+
 use std::path::Path;
 
 use imago_protocol::ErrorCode;
@@ -17,9 +19,11 @@ const STAGE: &str = "ipc.dbus_p2p";
 const MAX_FRAME_BYTES: usize = 1024 * 1024 * 8;
 
 #[derive(Debug, Clone, Default)]
+/// P2P transport implementation used by manager/runner IPC.
 pub struct DbusP2pTransport;
 
 impl DbusP2pTransport {
+    /// Sends one control-plane request and waits for its response.
     pub async fn call_control(
         endpoint: &Path,
         request: &ControlRequest,
@@ -27,6 +31,7 @@ impl DbusP2pTransport {
         call(endpoint, request).await
     }
 
+    /// Sends one runner inbound request and waits for its response.
     pub async fn call_runner(
         endpoint: &Path,
         request: &RunnerInboundRequest,
@@ -34,6 +39,7 @@ impl DbusP2pTransport {
         call(endpoint, request).await
     }
 
+    /// Reads one length-prefixed CBOR message from a stream.
     pub async fn read_message<T>(stream: &mut UnixStream) -> Result<T, ImagodError>
     where
         T: DeserializeOwned,
@@ -48,6 +54,7 @@ impl DbusP2pTransport {
         })
     }
 
+    /// Encodes and writes one length-prefixed CBOR message to a stream.
     pub async fn write_message<T>(stream: &mut UnixStream, value: &T) -> Result<(), ImagodError>
     where
         T: Serialize,
@@ -101,6 +108,7 @@ where
     DbusP2pTransport::read_message::<Resp>(&mut stream).await
 }
 
+/// Writes one big-endian length-prefixed frame.
 async fn write_frame(stream: &mut UnixStream, payload: &[u8]) -> Result<(), ImagodError> {
     let len = payload.len();
     if len > MAX_FRAME_BYTES {
@@ -140,6 +148,7 @@ async fn write_frame(stream: &mut UnixStream, payload: &[u8]) -> Result<(), Imag
     Ok(())
 }
 
+/// Reads one big-endian length-prefixed frame.
 async fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>, ImagodError> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await.map_err(|e| {
