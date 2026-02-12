@@ -180,8 +180,6 @@ async fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>, ImagodError> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use tokio::net::UnixListener;
 
     use super::*;
@@ -223,6 +221,6 @@ mod tests {
         assert!(matches!(response, ControlResponse::Ack));
 
         server.await.expect("server task should finish");
-        let _ = std::fs::remove_file(PathBuf::from(socket_path));
+        let _ = std::fs::remove_file(socket_path);
     }
 }

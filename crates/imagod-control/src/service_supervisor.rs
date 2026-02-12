@@ -1097,10 +1097,12 @@ async fn kill_and_wait(child: &mut Child) -> Result<(), ImagodError> {
 }
 
 fn remove_socket_best_effort(path: &Path, socket_name: &str) {
-    if let Err(err) = std::fs::remove_file(path) {
-        if err.kind() != std::io::ErrorKind::NotFound {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
             eprintln!("failed to remove {socket_name} {}: {err}", path.display());
         }
+        Err(_) => {}
     }
 }
 

@@ -55,13 +55,15 @@ impl SocketCleanupGuard {
 
 impl Drop for SocketCleanupGuard {
     fn drop(&mut self) {
-        if let Err(err) = std::fs::remove_file(&self.path) {
-            if err.kind() != std::io::ErrorKind::NotFound {
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
                 eprintln!(
                     "failed to remove runner endpoint {}: {err}",
                     self.path.display()
                 );
             }
+            Err(_) => {}
         }
     }
 }
@@ -759,10 +761,9 @@ mod tests {
                 .await
                 .expect("startup observation should succeed");
             assert!(matches!(state, StartupRunState::StillRunning));
-            let run_result = join_run_task(run_task)
+            join_run_task(run_task)
                 .await
                 .expect("run task should complete successfully");
-            assert_eq!(run_result, ());
         });
     }
 
