@@ -23,8 +23,8 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
     process::{Child, Command},
-    sync::{Mutex, RwLock, oneshot, oneshot::error::TryRecvError},
-    task::JoinSet,
+    sync::{Mutex, RwLock, oneshot, oneshot::error::TryRecvError, watch},
+    task::{JoinHandle, JoinSet},
     time,
 };
 
@@ -33,6 +33,7 @@ const STAGE_STOP: &str = "service.stop";
 const STAGE_CONTROL: &str = "service.control";
 const STARTUP_PROBE_POLL_INTERVAL_MS: u64 = 25;
 const INVOCATION_TOKEN_TTL_SECS: u64 = 30;
+const RUNNER_ENDPOINT_HASH_BYTES: usize = 16;
 type PendingReadyMap = BTreeMap<String, oneshot::Sender<Result<(), ImagodError>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +112,21 @@ impl BoundedLogBuffer {
     }
 }
 
+#[derive(Debug)]
+struct ManagerControlServer {
+    endpoint: PathBuf,
+    shutdown_tx: watch::Sender<bool>,
+    task: JoinHandle<()>,
+}
+
+impl Drop for ManagerControlServer {
+    fn drop(&mut self) {
+        let _ = self.shutdown_tx.send(true);
+        self.task.abort();
+        remove_manager_control_endpoint_best_effort(&self.endpoint);
+    }
+}
+
 #[derive(Clone)]
 /// Supervises service runner processes and manager-runner control traffic.
 pub struct ServiceSupervisor {
@@ -124,6 +140,7 @@ pub struct ServiceSupervisor {
     pending_ready: Arc<Mutex<PendingReadyMap>>,
     starting_services: Arc<Mutex<BTreeSet<String>>>,
     stopping_count: Arc<AtomicUsize>,
+    _manager_control_server: Arc<ManagerControlServer>,
 }
 
 impl ServiceSupervisor {
@@ -137,6 +154,9 @@ impl ServiceSupervisor {
     ) -> Result<Self, ImagodError> {
         let storage_root = storage_root.as_ref().to_path_buf();
         let runtime_root = storage_root.join("runtime").join("ipc");
+        let stop_grace_timeout = Duration::from_secs(stop_grace_timeout_secs.max(1));
+        let runner_ready_timeout = Duration::from_secs(runner_ready_timeout_secs.max(1));
+
         std::fs::create_dir_all(&runtime_root).map_err(|e| {
             ImagodError::new(
                 ErrorCode::Internal,
@@ -172,19 +192,31 @@ impl ServiceSupervisor {
             )
         })?;
 
+        let inner = Arc::new(RwLock::new(BTreeMap::new()));
+        let pending_ready = Arc::new(Mutex::new(BTreeMap::new()));
+        let starting_services = Arc::new(Mutex::new(BTreeSet::new()));
+        let stopping_count = Arc::new(AtomicUsize::new(0));
+        let manager_control_server = Arc::new(Self::spawn_manager_control_server(
+            listener,
+            manager_control_endpoint.clone(),
+            inner.clone(),
+            pending_ready.clone(),
+            runner_ready_timeout,
+        ));
+
         let supervisor = Self {
             storage_root,
-            stop_grace_timeout: Duration::from_secs(stop_grace_timeout_secs.max(1)),
-            runner_ready_timeout: Duration::from_secs(runner_ready_timeout_secs.max(1)),
+            stop_grace_timeout,
+            runner_ready_timeout,
             runner_log_buffer_bytes: runner_log_buffer_bytes.max(1024),
             epoch_tick_interval_ms: epoch_tick_interval_ms.max(1),
             manager_control_endpoint,
-            inner: Arc::new(RwLock::new(BTreeMap::new())),
-            pending_ready: Arc::new(Mutex::new(BTreeMap::new())),
-            starting_services: Arc::new(Mutex::new(BTreeSet::new())),
-            stopping_count: Arc::new(AtomicUsize::new(0)),
+            inner,
+            pending_ready,
+            starting_services,
+            stopping_count,
+            _manager_control_server: manager_control_server,
         };
-        supervisor.spawn_manager_control_server(listener);
         Ok(supervisor)
     }
 
@@ -484,27 +516,46 @@ impl ServiceSupervisor {
     }
 
     /// Spawns the async manager control server loop on the provided listener.
-    fn spawn_manager_control_server(&self, listener: UnixListener) {
-        let inner = self.inner.clone();
-        let pending_ready = self.pending_ready.clone();
-        let read_timeout = self.runner_ready_timeout;
-        tokio::spawn(async move {
+    fn spawn_manager_control_server(
+        listener: UnixListener,
+        endpoint: PathBuf,
+        inner: Arc<RwLock<BTreeMap<String, RunningService>>>,
+        pending_ready: Arc<Mutex<PendingReadyMap>>,
+        read_timeout: Duration,
+    ) -> ManagerControlServer {
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(async move {
             loop {
-                let (stream, _) = match listener.accept().await {
-                    Ok(v) => v,
-                    Err(err) => {
-                        eprintln!("manager control accept failed: {err}");
-                        continue;
+                tokio::select! {
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
                     }
-                };
+                    accepted = listener.accept() => {
+                        let (stream, _) = match accepted {
+                            Ok(v) => v,
+                            Err(err) => {
+                                eprintln!("manager control accept failed: {err}");
+                                continue;
+                            }
+                        };
 
-                let inner = inner.clone();
-                let pending_ready = pending_ready.clone();
-                tokio::spawn(async move {
-                    handle_control_connection(stream, inner, pending_ready, read_timeout).await;
-                });
+                        let inner = inner.clone();
+                        let pending_ready = pending_ready.clone();
+                        tokio::spawn(async move {
+                            handle_control_connection(stream, inner, pending_ready, read_timeout).await;
+                        });
+                    }
+                }
             }
         });
+
+        ManagerControlServer {
+            endpoint,
+            shutdown_tx,
+            task,
+        }
     }
 
     /// Spawns the `imagod --runner` child process with piped stdio.
@@ -531,17 +582,7 @@ impl ServiceSupervisor {
     }
 
     fn runner_endpoint_for(&self, service_name: &str, runner_id: &str) -> PathBuf {
-        let mut hasher = Sha256::new();
-        hasher.update(service_name.as_bytes());
-        hasher.update(b":");
-        hasher.update(runner_id.as_bytes());
-        let endpoint_hash = hex::encode(hasher.finalize());
-
-        self.storage_root
-            .join("runtime")
-            .join("ipc")
-            .join("runners")
-            .join(format!("runner-{endpoint_hash}.sock"))
+        build_runner_endpoint(&self.storage_root, service_name, runner_id)
     }
 
     /// Waits until runner-ready arrives, child exits, or timeout elapses.
@@ -732,6 +773,21 @@ impl ServiceSupervisor {
             )
         })
     }
+}
+
+fn build_runner_endpoint(storage_root: &Path, service_name: &str, runner_id: &str) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(service_name.as_bytes());
+    hasher.update(b":");
+    hasher.update(runner_id.as_bytes());
+    let digest = hasher.finalize();
+    let endpoint_hash = hex::encode(&digest[..RUNNER_ENDPOINT_HASH_BYTES]);
+
+    storage_root
+        .join("runtime")
+        .join("ipc")
+        .join("runners")
+        .join(format!("runner-{endpoint_hash}.sock"))
 }
 
 /// Handles one control request received on manager control socket.
@@ -1026,12 +1082,20 @@ async fn kill_and_wait(child: &mut Child) -> Result<(), ImagodError> {
     Ok(())
 }
 
-fn remove_runner_endpoint_best_effort(path: &Path) {
+fn remove_socket_best_effort(path: &Path, socket_name: &str) {
     if let Err(err) = std::fs::remove_file(path)
         && err.kind() != std::io::ErrorKind::NotFound
     {
-        eprintln!("failed to remove runner endpoint {}: {err}", path.display());
+        eprintln!("failed to remove {socket_name} {}: {err}", path.display());
     }
+}
+
+fn remove_runner_endpoint_best_effort(path: &Path) {
+    remove_socket_best_effort(path, "runner endpoint");
+}
+
+fn remove_manager_control_endpoint_best_effort(path: &Path) {
+    remove_socket_best_effort(path, "manager control endpoint");
 }
 
 fn start_busy_error(service_name: &str) -> ImagodError {
@@ -1149,10 +1213,24 @@ mod tests {
 
         assert!(file_name.starts_with("runner-"));
         assert!(file_name.ends_with(".sock"));
-        assert_eq!(file_name.len(), "runner-".len() + 64 + ".sock".len());
+        assert_eq!(
+            file_name.len(),
+            "runner-".len() + (RUNNER_ENDPOINT_HASH_BYTES * 2) + ".sock".len()
+        );
 
         drop(supervisor);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn runner_endpoint_path_fits_unix_limit_for_var_lib_imago() {
+        let long_service_name = "svc-".to_string() + &"x".repeat(200);
+        let endpoint = build_runner_endpoint(Path::new("/var/lib/imago"), &long_service_name, "r1");
+        let path_len = endpoint.to_string_lossy().len();
+        assert!(
+            path_len <= 107,
+            "runner endpoint path must fit AF_UNIX limit: {path_len}"
+        );
     }
 
     #[tokio::test]
@@ -1596,6 +1674,56 @@ mod tests {
         }
 
         drop(idle);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn dropping_supervisor_removes_manager_control_endpoint() {
+        let root = new_test_root("control-cleanup");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let endpoint = supervisor.manager_control_endpoint.clone();
+        assert!(
+            endpoint.exists(),
+            "manager control endpoint should exist while supervisor is alive"
+        );
+
+        drop(supervisor);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(
+            !endpoint.exists(),
+            "manager control endpoint should be cleaned up on drop"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn manager_control_server_stops_accepting_after_drop() {
+        let root = new_test_root("control-shutdown");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let endpoint = supervisor.manager_control_endpoint.clone();
+
+        let initial = tokio::net::UnixStream::connect(&endpoint)
+            .await
+            .expect("initial connection should open");
+        drop(initial);
+
+        drop(supervisor);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let reconnect = tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::net::UnixStream::connect(&endpoint),
+        )
+        .await
+        .expect("reconnect should complete quickly");
+        assert!(
+            reconnect.is_err(),
+            "manager control server should not accept new connections after drop"
+        );
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -11,7 +11,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
 use imago_protocol::ErrorCode;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 
 use imagod_common::ImagodError;
 
@@ -335,10 +335,10 @@ fn decode_secret_hex(secret_hex: &str) -> Result<Vec<u8>, ImagodError> {
 
 /// Generates a pseudo-random hex secret for ephemeral IPC auth.
 pub fn random_secret_hex() -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(uuid::Uuid::new_v4().as_bytes());
-    hasher.update(now_unix_secs().to_be_bytes());
-    hex::encode(hasher.finalize())
+    let mut secret = [0_u8; 32];
+    secret[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    secret[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    hex::encode(secret)
 }
 
 /// Returns the current Unix time in seconds.
@@ -361,6 +361,14 @@ pub fn map_ipc_error(stage: &str, message: impl Into<String>) -> ImagodError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn random_secret_hex_has_32_bytes() {
+        let secret_hex = random_secret_hex();
+        assert_eq!(secret_hex.len(), 64);
+        let secret = hex::decode(secret_hex).expect("secret should be valid hex");
+        assert_eq!(secret.len(), 32);
+    }
 
     #[test]
     fn invocation_token_round_trip() {
