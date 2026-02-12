@@ -361,22 +361,45 @@ async fn build_launch_from_release(
         envs.insert(k.clone(), v.clone());
     }
 
+    let bindings = validate_manifest_bindings(&manifest.bindings)?;
+
     Ok(ServiceLaunch {
         name: manifest.name.clone(),
         release_hash: release_hash.to_string(),
         component_path,
         args: Vec::new(),
         envs,
-        bindings: manifest
-            .bindings
-            .iter()
-            .filter(|binding| !binding.target.is_empty() && !binding.wit.is_empty())
-            .map(|binding| ServiceBinding {
-                target: binding.target.clone(),
-                wit: binding.wit.clone(),
-            })
-            .collect(),
+        bindings,
     })
+}
+
+fn validate_manifest_bindings(
+    bindings: &[ManifestBinding],
+) -> Result<Vec<ServiceBinding>, ImagodError> {
+    let mut normalized = Vec::with_capacity(bindings.len());
+    for (idx, binding) in bindings.iter().enumerate() {
+        if binding.target.is_empty() {
+            return Err(map_bad_manifest(format!(
+                "manifest.bindings[{idx}].target must not be empty"
+            )));
+        }
+        if binding.wit.is_empty() {
+            return Err(map_bad_manifest(format!(
+                "manifest.bindings[{idx}].wit must not be empty"
+            )));
+        }
+        if let Err(err) = validate_service_name(&binding.target) {
+            return Err(map_bad_manifest(format!(
+                "manifest.bindings[{idx}].target is invalid '{}': {}",
+                binding.target, err.message
+            )));
+        }
+        normalized.push(ServiceBinding {
+            target: binding.target.clone(),
+            wit: binding.wit.clone(),
+        });
+    }
+    Ok(normalized)
 }
 
 /// Extracts a tar archive into destination while rejecting unsupported entries.
@@ -743,12 +766,14 @@ fn map_rollback_error(err: ImagodError) -> ImagodError {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_tar, normalize_archive_entry_path, normalize_manifest_main_path,
-        promote_staging_release, release_id_from_artifact_digest, validate_deploy_preconditions,
-        validate_service_name,
+        HashTarget, Manifest, ManifestAsset, ManifestBinding, ManifestHash,
+        build_launch_from_release, extract_tar, normalize_archive_entry_path,
+        normalize_manifest_main_path, promote_staging_release, release_id_from_artifact_digest,
+        validate_deploy_preconditions, validate_service_name,
     };
     use imago_protocol::{DeployCommandPayload, ErrorCode};
     use std::{
+        collections::BTreeMap,
         fs,
         path::{Path, PathBuf},
     };
@@ -757,6 +782,21 @@ mod tests {
 
     fn temp_dir_path(prefix: &str) -> PathBuf {
         std::env::temp_dir().join(format!("imago-{prefix}-{}", Uuid::new_v4()))
+    }
+
+    fn valid_manifest() -> Manifest {
+        Manifest {
+            name: "svc-a".to_string(),
+            main: "component.wasm".to_string(),
+            vars: BTreeMap::new(),
+            secrets: BTreeMap::new(),
+            assets: Vec::<ManifestAsset>::new(),
+            bindings: Vec::new(),
+            hash: ManifestHash {
+                algorithm: "sha256".to_string(),
+                targets: vec![HashTarget::Wasm, HashTarget::Manifest, HashTarget::Assets],
+            },
+        }
     }
 
     #[test]
@@ -919,6 +959,69 @@ mod tests {
             release.join("active.txt").exists(),
             "existing release should be restored after failure"
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_binding_with_empty_target() {
+        let root = temp_dir_path("orchestrator-binding-empty-target");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.bindings = vec![ManifestBinding {
+            target: String::new(),
+            wit: "yieldspace:service/invoke".to_string(),
+        }];
+
+        let err = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect_err("empty binding target should be rejected");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("bindings[0].target"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_binding_with_empty_wit() {
+        let root = temp_dir_path("orchestrator-binding-empty-wit");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.bindings = vec![ManifestBinding {
+            target: "svc-b".to_string(),
+            wit: String::new(),
+        }];
+
+        let err = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect_err("empty binding wit should be rejected");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("bindings[0].wit"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_binding_with_invalid_target_name() {
+        let root = temp_dir_path("orchestrator-binding-invalid-target");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.bindings = vec![ManifestBinding {
+            target: "svc/invalid".to_string(),
+            wit: "yieldspace:service/invoke".to_string(),
+        }];
+
+        let err = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect_err("invalid binding target should be rejected");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("bindings[0].target is invalid"));
 
         let _ = fs::remove_dir_all(root);
     }

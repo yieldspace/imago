@@ -624,6 +624,18 @@ impl ServiceSupervisor {
 
             let now = time::Instant::now();
             if now >= deadline {
+                match ready_rx.try_recv() {
+                    Ok(Ok(())) => return Ok(()),
+                    Ok(Err(err)) => return Err(err),
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Closed) => {
+                        return Err(ImagodError::new(
+                            ErrorCode::Internal,
+                            STAGE_START,
+                            format!("runner '{runner_id}' readiness channel closed unexpectedly"),
+                        ));
+                    }
+                }
                 return Err(ImagodError::new(
                     ErrorCode::OperationTimeout,
                     STAGE_START,
@@ -1083,10 +1095,10 @@ async fn kill_and_wait(child: &mut Child) -> Result<(), ImagodError> {
 }
 
 fn remove_socket_best_effort(path: &Path, socket_name: &str) {
-    if let Err(err) = std::fs::remove_file(path)
-        && err.kind() != std::io::ErrorKind::NotFound
-    {
-        eprintln!("failed to remove {socket_name} {}: {err}", path.display());
+    if let Err(err) = std::fs::remove_file(path) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("failed to remove {socket_name} {}: {err}", path.display());
+        }
     }
 }
 
@@ -1590,6 +1602,59 @@ mod tests {
         assert!(err.message.contains("exited before ready"));
 
         supervisor.cleanup_start_failure(service_name).await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn wait_for_runner_ready_accepts_ready_arriving_at_timeout_boundary() {
+        let root = new_test_root("ready-boundary");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let service_name = "svc-ready-boundary".to_string();
+        let runner_id = "runner-ready-boundary".to_string();
+        let runner_endpoint = root.join("runtime").join("ipc").join("ready-boundary.sock");
+
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep process should spawn");
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(
+                service_name.clone(),
+                new_running_service(child, &runner_id, runner_endpoint),
+            );
+        }
+
+        let (ready_tx, mut ready_rx) = oneshot::channel::<Result<(), ImagodError>>();
+        let lock_guard = supervisor.inner.write().await;
+        let wait_supervisor = supervisor.clone();
+        let wait_service_name = service_name.clone();
+        let wait_runner_id = runner_id.clone();
+        let wait_task = tokio::spawn(async move {
+            wait_supervisor
+                .wait_for_runner_ready(&wait_service_name, &wait_runner_id, &mut ready_rx)
+                .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        ready_tx.send(Ok(())).expect("ready signal should send");
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        drop(lock_guard);
+
+        let result = tokio::time::timeout(Duration::from_secs(2), wait_task)
+            .await
+            .expect("wait task should finish")
+            .expect("wait task should not panic");
+        assert!(
+            result.is_ok(),
+            "ready arriving by deadline should avoid false timeout"
+        );
+
+        supervisor.cleanup_start_failure(&service_name).await;
         let _ = std::fs::remove_dir_all(&root);
     }
 

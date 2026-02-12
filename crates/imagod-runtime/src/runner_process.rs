@@ -55,13 +55,13 @@ impl SocketCleanupGuard {
 
 impl Drop for SocketCleanupGuard {
     fn drop(&mut self) {
-        if let Err(err) = std::fs::remove_file(&self.path)
-            && err.kind() != std::io::ErrorKind::NotFound
-        {
-            eprintln!(
-                "failed to remove runner endpoint {}: {err}",
-                self.path.display()
-            );
+        if let Err(err) = std::fs::remove_file(&self.path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                eprintln!(
+                    "failed to remove runner endpoint {}: {err}",
+                    self.path.display()
+                );
+            }
         }
     }
 }
