@@ -858,6 +858,18 @@ impl ServiceSupervisor {
                 "service stop recovery skipped insert because '{}' already exists",
                 service_name
             );
+            drop(inner);
+            match kill_and_wait(&mut service.child).await {
+                Ok(()) => {
+                    remove_runner_endpoint_best_effort(&service.runner_endpoint);
+                }
+                Err(err) => {
+                    eprintln!(
+                        "service stop recovery failed to terminate displaced runner name={} release={} error={}",
+                        service_name, service.release_hash, err
+                    );
+                }
+            }
             return;
         }
         inner.insert(service_name.to_string(), service);
@@ -1782,6 +1794,91 @@ mod tests {
             "runner endpoint should be removed after successful stop"
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn stop_recovery_terminates_displaced_child_when_service_name_is_taken() {
+        let root = new_test_root("stop-recovery-displaced");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let displaced_endpoint = root
+            .join("runtime")
+            .join("ipc")
+            .join("runners")
+            .join("displaced-old.sock");
+        let active_endpoint = root
+            .join("runtime")
+            .join("ipc")
+            .join("runners")
+            .join("displaced-new.sock");
+        if let Some(parent) = displaced_endpoint.parent() {
+            std::fs::create_dir_all(parent).expect("runner endpoint parent should be created");
+        }
+        std::fs::write(&displaced_endpoint, b"stale")
+            .expect("displaced endpoint fixture should be created");
+
+        let displaced_child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("displaced child should spawn");
+        let displaced_pid = displaced_child
+            .id()
+            .expect("displaced pid should be available");
+        let active_child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("active child should spawn");
+
+        let displaced_service = new_running_service(
+            displaced_child,
+            "runner-displaced",
+            displaced_endpoint.clone(),
+        );
+        let active_service =
+            new_running_service(active_child, "runner-active", active_endpoint.clone());
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert("svc-displaced".to_string(), active_service);
+        }
+
+        supervisor
+            .restore_service_after_stop_error("svc-displaced", displaced_service)
+            .await;
+
+        {
+            let inner = supervisor.inner.read().await;
+            let existing = inner
+                .get("svc-displaced")
+                .expect("existing service should remain tracked");
+            assert_eq!(existing.runner_id, "runner-active");
+            assert_eq!(existing.runner_endpoint, active_endpoint);
+        }
+        assert!(
+            !displaced_endpoint.exists(),
+            "displaced endpoint should be cleaned up after forced termination"
+        );
+
+        let process_exists = Command::new("kill")
+            .arg("-0")
+            .arg(displaced_pid.to_string())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .expect("kill probe should run")
+            .success();
+        assert!(
+            !process_exists,
+            "displaced child should be terminated when reinsertion is skipped"
+        );
+
+        stop_running_service_best_effort(&supervisor.inner, "svc-displaced").await;
         let _ = std::fs::remove_dir_all(&root);
     }
 

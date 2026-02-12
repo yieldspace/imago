@@ -12,6 +12,7 @@ use imagod_server::{ProtocolHandler, build_server};
 use web_transport_quinn::http::StatusCode;
 
 const MAINTENANCE_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
+const SESSION_TASK_DRAIN_TIMEOUT_SECS: u64 = 15;
 
 #[tokio::main]
 async fn main() {
@@ -108,19 +109,28 @@ async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyhow::Error> 
     let mut server = build_server(&config).map_err(anyhow::Error::new)?;
     eprintln!("imagod listening on {}", config.listen_addr);
     let mut shutdown_signal = std::pin::pin!(tokio::signal::ctrl_c());
+    let mut session_tasks = tokio::task::JoinSet::new();
+    let mut shutdown_started = false;
 
     loop {
         tokio::select! {
             _ = &mut shutdown_signal => {
                 eprintln!("shutdown signal received");
+                handler.begin_shutdown();
+                shutdown_started = true;
                 break;
+            }
+            joined = session_tasks.join_next(), if !session_tasks.is_empty() => {
+                if let Some(joined) = joined {
+                    log_session_task_join_result(joined);
+                }
             }
             request = server.accept() => {
                 let Some(request): Option<web_transport_quinn::Request> = request else {
                     break;
                 };
                 let handler = handler.clone();
-                tokio::spawn(async move {
+                session_tasks.spawn(async move {
                     let Ok(session) = request.respond(StatusCode::OK).await else {
                         return;
                     };
@@ -132,12 +142,30 @@ async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyhow::Error> 
         }
     }
 
+    if !shutdown_started {
+        handler.begin_shutdown();
+    }
+    drain_session_tasks(
+        &mut session_tasks,
+        std::time::Duration::from_secs(SESSION_TASK_DRAIN_TIMEOUT_SECS),
+    )
+    .await;
+
     let stop_errors = handler.stop_all_services(false).await;
     for (service_name, err) in stop_errors {
         eprintln!(
             "service shutdown failed name={} code={:?} stage={} message={}",
             service_name, err.code, err.stage, err.message
         );
+    }
+    if handler.has_live_services().await {
+        let force_stop_errors = handler.stop_all_services(true).await;
+        for (service_name, err) in force_stop_errors {
+            eprintln!(
+                "service force-shutdown failed name={} code={:?} stage={} message={}",
+                service_name, err.code, err.stage, err.message
+            );
+        }
     }
 
     let _ = shutdown_tx.send(true);
@@ -161,6 +189,42 @@ async fn wait_for_maintenance_shutdown(
             "maintenance task did not shut down within {} seconds",
             MAINTENANCE_SHUTDOWN_TIMEOUT_SECS
         )),
+    }
+}
+
+async fn drain_session_tasks(
+    session_tasks: &mut tokio::task::JoinSet<()>,
+    timeout: std::time::Duration,
+) {
+    let drain = async {
+        while let Some(joined) = session_tasks.join_next().await {
+            log_session_task_join_result(joined);
+        }
+    };
+
+    if tokio::time::timeout(timeout, drain).await.is_ok() {
+        return;
+    }
+
+    eprintln!(
+        "session task drain timed out after {} seconds; aborting remaining tasks",
+        timeout.as_secs()
+    );
+    session_tasks.abort_all();
+    while let Some(joined) = session_tasks.join_next().await {
+        log_session_task_join_result(joined);
+    }
+}
+
+fn log_session_task_join_result(joined: Result<(), tokio::task::JoinError>) {
+    match joined {
+        Ok(()) => {}
+        Err(err) if err.is_cancelled() => {
+            eprintln!("session task cancelled during shutdown");
+        }
+        Err(err) => {
+            eprintln!("session task join failed: {err}");
+        }
     }
 }
 
@@ -215,4 +279,46 @@ fn parse_cli_args() -> Result<CliArgs, anyhow::Error> {
         config_path: config,
         mode,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drain_session_tasks;
+    use std::time::Duration;
+    use tokio::task::JoinSet;
+
+    #[tokio::test]
+    async fn drain_session_tasks_completes_finished_tasks() {
+        let mut session_tasks = JoinSet::new();
+        session_tasks.spawn(async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        });
+        session_tasks.spawn(async {});
+
+        drain_session_tasks(&mut session_tasks, Duration::from_secs(1)).await;
+        assert!(
+            session_tasks.is_empty(),
+            "all finished tasks should be drained"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_session_tasks_aborts_stuck_tasks_after_timeout() {
+        let mut session_tasks = JoinSet::new();
+        session_tasks.spawn(async {
+            std::future::pending::<()>().await;
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            drain_session_tasks(&mut session_tasks, Duration::from_millis(20)),
+        )
+        .await
+        .expect("drain should finish by aborting stuck tasks");
+
+        assert!(
+            session_tasks.is_empty(),
+            "stuck tasks should be aborted and drained"
+        );
+    }
 }
