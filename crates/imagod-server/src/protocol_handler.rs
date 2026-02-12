@@ -1,6 +1,11 @@
+//! Deploy protocol session handler and message dispatch implementation.
+
 use std::{
     collections::BTreeMap,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, UNIX_EPOCH},
 };
 
@@ -9,33 +14,32 @@ use imago_protocol::{
     CommandStartRequest, CommandStartResponse, CommandState, CommandType, DeployPrepareRequest,
     MessageType, ProtocolEnvelope, StateRequest, StructuredError, Validate, from_cbor, to_cbor,
 };
+use imagod_common::ImagodError;
+use imagod_config::ImagodConfig;
+use imagod_control::{ArtifactStore, OperationManager, Orchestrator, SpawnTransition};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use uuid::Uuid;
 use web_transport_quinn::{SendStream, Session};
 
-use crate::{
-    artifact_store::ArtifactStore,
-    config::ImagodConfig,
-    error::ImagodError,
-    operation_state::{OperationManager, SpawnTransition},
-    orchestrator::Orchestrator,
-};
-
 const MAX_STREAM_BYTES: usize = 1024 * 1024 * 16;
 const STREAM_READ_TIMEOUT_SECS: u64 = 30;
 
+/// JSON-backed envelope type used by stream decode/encode flow.
 type Envelope = ProtocolEnvelope<Value>;
 
 #[derive(Clone)]
+/// Handles one WebTransport session and dispatches protocol messages.
 pub struct ProtocolHandler {
     config: Arc<ImagodConfig>,
     artifacts: ArtifactStore,
     operations: OperationManager,
     orchestrator: Orchestrator,
+    shutdown_requested: Arc<AtomicBool>,
 }
 
 impl ProtocolHandler {
+    /// Creates a protocol handler with shared manager dependencies.
     pub fn new(
         config: Arc<ImagodConfig>,
         artifacts: ArtifactStore,
@@ -47,9 +51,16 @@ impl ProtocolHandler {
             artifacts,
             operations,
             orchestrator,
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
         }
     }
 
+    /// Rejects new start commands and transitions handler into shutdown mode.
+    pub fn begin_shutdown(&self) {
+        self.shutdown_requested.store(true, Ordering::SeqCst);
+    }
+
+    /// Serves one WebTransport session until peer closes it.
     pub async fn handle_session(&self, session: Session) -> Result<(), ImagodError> {
         loop {
             let (mut send, mut recv) = match session.accept_bi().await {
@@ -133,14 +144,22 @@ impl ProtocolHandler {
         Ok(())
     }
 
+    /// Reaps finished services via orchestrator.
     pub async fn reap_finished_services(&self) {
         self.orchestrator.reap_finished_services().await;
     }
 
+    /// Returns whether any managed services are currently alive.
     pub async fn has_live_services(&self) -> bool {
         self.orchestrator.has_live_services().await
     }
 
+    /// Stops all managed services.
+    pub async fn stop_all_services(&self, force: bool) -> Vec<(String, ImagodError)> {
+        self.orchestrator.stop_all_services(force).await
+    }
+
+    /// Dispatches non-command-start requests to the corresponding handler.
     async fn handle_single(&self, request: Envelope) -> Result<Envelope, ImagodError> {
         match request.message_type {
             MessageType::HelloNegotiate => self.handle_hello(request),
@@ -281,6 +300,7 @@ impl ProtocolHandler {
         )
     }
 
+    /// Handles `command.start` and emits accepted/progress/terminal events.
     async fn handle_command_start(
         &self,
         request: Envelope,
@@ -292,6 +312,7 @@ impl ProtocolHandler {
             .map_err(|e| bad_request("command.start", e.to_string()))?;
 
         ensure_command_start_request_id_match(request.request_id, payload.request_id)?;
+        ensure_command_start_allowed(&self.shutdown_requested)?;
         let operation_id = request.request_id;
 
         self.operations
@@ -488,6 +509,7 @@ fn payload_as<T: DeserializeOwned>(request: &Envelope) -> Result<T, ImagodError>
         .map_err(|e| bad_request("protocol", format!("request payload decode failed: {e}")))
 }
 
+/// Decodes one stream payload into protocol envelopes.
 fn parse_stream_envelopes(buf: &[u8]) -> Result<Vec<Envelope>, ImagodError> {
     let frames = decode_frames(buf)?;
     frames
@@ -545,6 +567,7 @@ fn ensure_non_nil_envelope_ids(envelope: &Envelope) -> Result<(), ImagodError> {
     Ok(())
 }
 
+/// Ensures the stream carries at most one request envelope.
 fn ensure_single_request_envelope(envelopes: &[Envelope]) -> Result<(), ImagodError> {
     if envelopes.len() > 1 {
         return Err(bad_request(
@@ -618,6 +641,7 @@ fn encode_frame(payload: &[u8]) -> Vec<u8> {
     frame
 }
 
+/// Decodes length-prefixed frame data into individual payload buffers.
 fn decode_frames(value: &[u8]) -> Result<Vec<Vec<u8>>, ImagodError> {
     let mut out = Vec::new();
     let mut offset = 0usize;
@@ -667,12 +691,25 @@ fn ensure_command_start_request_id_match(
     ))
 }
 
+fn ensure_command_start_allowed(shutdown_requested: &AtomicBool) -> Result<(), ImagodError> {
+    if !shutdown_requested.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    Err(ImagodError::new(
+        imago_protocol::ErrorCode::Busy,
+        "command.start",
+        "server is shutting down",
+    ))
+}
+
 fn validate_push_payload(payload: &ArtifactPushRequest) -> Result<(), ImagodError> {
     payload
         .validate()
         .map_err(|e| bad_request("artifact.push", e.to_string()))
 }
 
+/// Finalizes operation bookkeeping after writing terminal event.
 async fn finalize_operation_after_terminal_event(
     operations: &OperationManager,
     request_id: &Uuid,
@@ -690,18 +727,18 @@ async fn finalize_operation_after_terminal_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        ImagodError, OperationManager, ensure_command_start_request_id_match,
-        ensure_non_nil_envelope_ids, ensure_single_request_envelope,
-        finalize_operation_after_terminal_event, is_compatible_date_match,
-        read_stream_with_timeout, response_message_type_for_request, stream_read_timeout_error,
-        validate_push_payload,
+        ImagodError, OperationManager, ensure_command_start_allowed,
+        ensure_command_start_request_id_match, ensure_non_nil_envelope_ids,
+        ensure_single_request_envelope, finalize_operation_after_terminal_event,
+        is_compatible_date_match, read_stream_with_timeout, response_message_type_for_request,
+        stream_read_timeout_error, validate_push_payload,
     };
     use imago_protocol::{
         ArtifactPushChunkHeader, ArtifactPushRequest, CommandState, CommandType, ErrorCode,
         MessageType, ProtocolEnvelope,
     };
     use serde_json::Value;
-    use std::time::Duration;
+    use std::{sync::atomic::AtomicBool, time::Duration};
     use uuid::Uuid;
 
     #[test]
@@ -757,6 +794,16 @@ mod tests {
         let request_id = Uuid::new_v4();
         let result = ensure_command_start_request_id_match(request_id, request_id);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn command_start_is_rejected_when_shutdown_requested() {
+        let shutdown_requested = AtomicBool::new(true);
+        let err = ensure_command_start_allowed(&shutdown_requested)
+            .expect_err("shutdown mode should reject command.start");
+        assert_eq!(err.code, imago_protocol::ErrorCode::Busy);
+        assert_eq!(err.stage, "command.start");
+        assert_eq!(err.message, "server is shutting down");
     }
 
     #[test]

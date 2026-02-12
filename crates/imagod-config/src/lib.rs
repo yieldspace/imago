@@ -1,47 +1,73 @@
+//! Configuration loader and validation for the `imagod` manager process.
+
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::error::ImagodError;
 use imago_protocol::ErrorCode;
+use imagod_common::ImagodError;
 
 const MAX_CHUNK_SIZE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
+/// Root runtime configuration loaded from `imagod.toml`.
 pub struct ImagodConfig {
     #[serde(default = "default_listen_addr")]
+    /// WebTransport listen address.
     pub listen_addr: String,
+    /// TLS certificate and key paths.
     pub tls: TlsConfig,
     #[serde(default = "default_storage_root")]
+    /// Storage root used for artifacts, runtime state, and releases.
     pub storage_root: PathBuf,
     #[serde(default)]
+    /// Runtime limits and process-control knobs.
     pub runtime: RuntimeConfig,
     #[serde(default = "default_server_version")]
+    /// Server version reported via negotiate response.
     pub server_version: String,
     #[serde(default = "default_compatibility_date")]
+    /// Compatibility key used by hello negotiation.
     pub compatibility_date: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+/// TLS material locations for mTLS server startup.
 pub struct TlsConfig {
+    /// Server certificate chain in PEM format.
     pub server_cert: PathBuf,
+    /// Server private key in PEM format.
     pub server_key: PathBuf,
+    /// Client CA certificate bundle for client verification.
     pub client_ca_cert: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+/// Runtime limits and timeouts applied by manager and runner.
 pub struct RuntimeConfig {
     #[serde(default = "default_chunk_size")]
+    /// Maximum chunk size accepted by `artifact.push`.
     pub chunk_size: usize,
     #[serde(default = "default_max_inflight_chunks")]
+    /// Max concurrent chunk writes per upload session.
     pub max_inflight_chunks: usize,
     #[serde(default = "default_max_artifact_size_bytes")]
+    /// Upper bound for accepted artifact archive size.
     pub max_artifact_size_bytes: u64,
     #[serde(default = "default_upload_session_ttl_secs")]
+    /// Upload session time-to-live in seconds.
     pub upload_session_ttl_secs: u64,
     #[serde(default = "default_stop_grace_timeout_secs")]
+    /// Grace period for service stop before forced kill.
     pub stop_grace_timeout_secs: u64,
+    #[serde(default = "default_runner_ready_timeout_secs")]
+    /// Deadline for waiting runner-ready handshake.
+    pub runner_ready_timeout_secs: u64,
+    #[serde(default = "default_runner_log_buffer_bytes")]
+    /// Total per-runner log ring capacity in bytes.
+    pub runner_log_buffer_bytes: usize,
     #[serde(default = "default_epoch_tick_interval_ms")]
+    /// Runner epoch-tick interval in milliseconds.
     pub epoch_tick_interval_ms: u64,
 }
 
@@ -53,12 +79,18 @@ impl Default for RuntimeConfig {
             max_artifact_size_bytes: default_max_artifact_size_bytes(),
             upload_session_ttl_secs: default_upload_session_ttl_secs(),
             stop_grace_timeout_secs: default_stop_grace_timeout_secs(),
+            runner_ready_timeout_secs: default_runner_ready_timeout_secs(),
+            runner_log_buffer_bytes: default_runner_log_buffer_bytes(),
             epoch_tick_interval_ms: default_epoch_tick_interval_ms(),
         }
     }
 }
 
 impl ImagodConfig {
+    /// Loads and validates `imagod.toml` from disk.
+    ///
+    /// Returns `ImagodError` with `ErrorCode::BadRequest` when decode or
+    /// validation fails.
     pub fn load(path: &Path) -> Result<Self, ImagodError> {
         let content = std::fs::read_to_string(path).map_err(|e| {
             ImagodError::new(
@@ -121,6 +153,22 @@ impl ImagodConfig {
             ));
         }
 
+        if config.runtime.runner_ready_timeout_secs == 0 {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.load",
+                "runtime.runner_ready_timeout_secs must be greater than 0",
+            ));
+        }
+
+        if config.runtime.runner_log_buffer_bytes == 0 {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.load",
+                "runtime.runner_log_buffer_bytes must be greater than 0",
+            ));
+        }
+
         if config.runtime.max_artifact_size_bytes == 0 {
             return Err(ImagodError::new(
                 ErrorCode::BadRequest,
@@ -160,6 +208,8 @@ impl ImagodConfig {
     }
 }
 
+/// Resolves the config file path in priority order:
+/// CLI `--config`, `IMAGOD_CONFIG`, then default system path.
 pub fn resolve_config_path(cli_path: Option<PathBuf>) -> PathBuf {
     if let Some(path) = cli_path {
         return path;
@@ -204,6 +254,14 @@ fn default_upload_session_ttl_secs() -> u64 {
 
 fn default_stop_grace_timeout_secs() -> u64 {
     30
+}
+
+fn default_runner_ready_timeout_secs() -> u64 {
+    3
+}
+
+fn default_runner_log_buffer_bytes() -> usize {
+    256 * 1024
 }
 
 fn default_epoch_tick_interval_ms() -> u64 {
@@ -265,6 +323,8 @@ client_ca_cert = "ca.crt"
         let config = ImagodConfig::load(&path).expect("config should load");
         assert_eq!(config.compatibility_date, "2026-02-10");
         assert_eq!(config.runtime.max_artifact_size_bytes, 64 * 1024 * 1024);
+        assert_eq!(config.runtime.runner_ready_timeout_secs, 3);
+        assert_eq!(config.runtime.runner_log_buffer_bytes, 256 * 1024);
 
         cleanup_temp_path(path);
     }
@@ -347,6 +407,63 @@ max_artifact_size_bytes = 0
 
         let err = ImagodConfig::load(&path).expect_err("config should reject zero artifact size");
         assert!(err.to_string().contains("max_artifact_size_bytes"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_zero_runner_ready_timeout() {
+        let path = write_temp_config(
+            "rejects_zero_runner_ready_timeout",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_cert = "server.crt"
+server_key = "server.key"
+client_ca_cert = "ca.crt"
+
+[runtime]
+runner_ready_timeout_secs = 0
+"#,
+        );
+
+        let err =
+            ImagodConfig::load(&path).expect_err("config should reject zero runner_ready_timeout");
+        assert!(
+            err.to_string()
+                .contains("runtime.runner_ready_timeout_secs")
+        );
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_zero_runner_log_buffer_bytes() {
+        let path = write_temp_config(
+            "rejects_zero_runner_log_buffer_bytes",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_cert = "server.crt"
+server_key = "server.key"
+client_ca_cert = "ca.crt"
+
+[runtime]
+runner_log_buffer_bytes = 0
+"#,
+        );
+
+        let err = ImagodConfig::load(&path)
+            .expect_err("config should reject zero runner_log_buffer_bytes");
+        assert!(err.to_string().contains("runtime.runner_log_buffer_bytes"));
 
         cleanup_temp_path(path);
     }

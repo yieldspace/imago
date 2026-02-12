@@ -1,3 +1,5 @@
+//! Artifact upload session management and commit verification logic.
+
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -19,7 +21,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::error::ImagodError;
+use imagod_common::ImagodError;
 
 const STAGE_PREPARE: &str = "deploy.prepare";
 const STAGE_PUSH: &str = "artifact.push";
@@ -27,14 +29,20 @@ const STAGE_COMMIT: &str = "artifact.commit";
 const STAGE_ORCHESTRATE: &str = "orchestration";
 
 #[derive(Debug, Clone)]
+/// A fully committed artifact resolved by `deploy_id`.
 pub struct CommittedArtifact {
+    /// Deployment identifier that owns this artifact.
     pub deploy_id: String,
+    /// Path to the persisted artifact archive on local storage.
     pub path: PathBuf,
+    /// Manifest digest recorded during commit.
     pub manifest_digest: String,
+    /// Artifact digest recorded during commit.
     pub artifact_digest: String,
 }
 
 #[derive(Debug, Clone)]
+/// Internal mutable state for one upload session.
 struct UploadSession {
     deploy_id: String,
     service_name: String,
@@ -53,23 +61,27 @@ struct UploadSession {
 }
 
 #[derive(Default)]
+/// In-memory index of active sessions and idempotency keys.
 struct StoreState {
     sessions: BTreeMap<String, UploadSession>,
     idempotency: BTreeMap<String, String>,
 }
 
 #[derive(Default)]
+/// Deferred filesystem cleanup actions collected while lock is held.
 struct CleanupPlan {
     files: Vec<PathBuf>,
 }
 
 impl CleanupPlan {
+    /// Merges file removal actions from another cleanup plan.
     fn merge(&mut self, other: CleanupPlan) {
         self.files.extend(other.files);
     }
 }
 
 #[derive(Clone)]
+/// Artifact storage service for prepare/push/commit operations.
 pub struct ArtifactStore {
     root: Arc<PathBuf>,
     state: Arc<Mutex<StoreState>>,
@@ -80,6 +92,7 @@ pub struct ArtifactStore {
 }
 
 impl ArtifactStore {
+    /// Creates a new artifact store rooted at `root`.
     pub async fn new(
         root: impl AsRef<Path>,
         upload_session_ttl_secs: u64,
@@ -102,6 +115,7 @@ impl ArtifactStore {
         })
     }
 
+    /// Handles `deploy.prepare` by creating or resuming an upload session.
     pub async fn prepare(
         &self,
         request: DeployPrepareRequest,
@@ -269,6 +283,7 @@ impl ArtifactStore {
         result
     }
 
+    /// Handles `artifact.push` by validating and writing one chunk.
     pub async fn push(&self, request: ArtifactPushRequest) -> Result<ArtifactPushAck, ImagodError> {
         let now = now_epoch_secs();
         let header = request.header;
@@ -425,6 +440,7 @@ impl ArtifactStore {
         result
     }
 
+    /// Handles `artifact.commit` by verifying digest and finalizing session state.
     pub async fn commit(
         &self,
         request: ArtifactCommitRequest,
@@ -537,6 +553,7 @@ impl ArtifactStore {
         result
     }
 
+    /// Returns committed artifact metadata for a completed deploy id.
     pub async fn committed_artifact(
         &self,
         deploy_id: &str,
@@ -583,6 +600,7 @@ impl ArtifactStore {
     }
 }
 
+/// Builds a prepare response from session progress and configured expiry.
 fn build_prepare_response(
     session: &UploadSession,
     upload_session_ttl_secs: u64,
@@ -613,6 +631,7 @@ fn build_prepare_response(
     }
 }
 
+/// Collects expired sessions and removes their indexes while lock is held.
 fn collect_expired_sessions_locked(
     state: &mut StoreState,
     now_epoch_secs: u64,
@@ -638,6 +657,7 @@ fn collect_expired_sessions_locked(
     collect_sessions_for_removal_locked(state, expired_ids)
 }
 
+/// Collects old committed sessions for one service except the deploy id to keep.
 fn collect_old_committed_sessions_locked(
     state: &mut StoreState,
     service_name: &str,
@@ -661,6 +681,7 @@ fn collect_old_committed_sessions_locked(
     collect_sessions_for_removal_locked(state, old_ids)
 }
 
+/// Removes selected sessions from indexes and returns files to delete.
 fn collect_sessions_for_removal_locked(
     state: &mut StoreState,
     deploy_ids: Vec<String>,
@@ -683,6 +704,7 @@ fn collect_sessions_for_removal_locked(
     plan
 }
 
+/// Removes stale idempotency entries that no longer have backing sessions.
 fn cleanup_orphan_idempotency_locked(state: &mut StoreState) {
     let orphan_keys = state
         .idempotency
@@ -701,6 +723,7 @@ fn cleanup_orphan_idempotency_locked(state: &mut StoreState) {
     }
 }
 
+/// Executes filesystem cleanup outside lock scope.
 async fn apply_cleanup_plan(plan: CleanupPlan) {
     for path in plan.files {
         match fs::remove_file(&path).await {
@@ -816,6 +839,7 @@ fn is_complete(ranges: &[ByteRange], total: u64) -> bool {
     first.offset == 0 && first.length == total
 }
 
+/// Computes the next missing byte range for a partially uploaded artifact.
 fn next_missing_range(ranges: &[ByteRange], total: u64) -> Option<ByteRange> {
     if total == 0 {
         return None;
@@ -842,6 +866,7 @@ fn next_missing_range(ranges: &[ByteRange], total: u64) -> Option<ByteRange> {
     None
 }
 
+/// Computes all missing byte ranges for a partially uploaded artifact.
 fn all_missing_ranges(ranges: &[ByteRange], total: u64) -> Vec<ByteRange> {
     if total == 0 {
         return Vec::new();
@@ -872,6 +897,7 @@ fn all_missing_ranges(ranges: &[ByteRange], total: u64) -> Vec<ByteRange> {
     missing
 }
 
+/// Merges an incoming range into sorted, non-overlapping range list.
 fn merge_range(ranges: &mut Vec<ByteRange>, incoming: ByteRange) {
     ranges.push(incoming);
     ranges.sort_by_key(|r| r.offset);

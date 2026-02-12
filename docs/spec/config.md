@@ -37,6 +37,7 @@
 - `vars`
 - `assets`
 - `dependencies`
+- `bindings`
 
 <a id="env-override"></a>
 ## `--env` 上書き規則
@@ -57,6 +58,15 @@
   - array: `["cmd", "arg1", ...]` として直接実行
 - `build.command` 未指定時はビルドコマンドを実行せず、`main` の存在検証のみ行う。
 - `--env <name>` 指定時は `.env.<name>` の値を build サブプロセス環境へ注入する。
+
+## `[[bindings]]`（service 間呼び出し許可）
+
+- `[[bindings]]` は service 間関数呼び出しの許可ルールを定義する。
+- 各要素は以下を必須とする。
+  - `target`: 呼び出し先 service 名（`name` と同じ文字制約）
+  - `wit`: interface 識別子文字列
+- `imago build` はこの設定を `manifest.bindings[]` に正規化して出力する。
+- 未指定時は `manifest.bindings=[]` として扱い、runtime は deny-by-default で拒否する。
 
 <a id="capability-model"></a>
 ## 権限モデル
@@ -112,6 +122,7 @@
 - `build.command` は必須キー (`name`/`main`/`type`/`target`) と `vars`/`dependencies` の検証完了後に実行する。不正設定時は実行しない。
 - `imago build --env <name>` は `build/manifest.<name>.json` を生成し、`build/manifest.json` は更新しない。
 - `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
+- `[[bindings]]` は `manifest.bindings[]` へ正規化し、runtime の呼び出し認可入力として扱う。
 - CLI の `name` 検証は `imagod` と同等に `..` を拒否し、path 文字を明示的に弾く。
 - `--env <name>` は manifest 出力先と `.env.<name>` 解決の双方で同一バリデーションを適用し、path traversal を拒否する。
 - `target.<name>.ca_cert` / `client_cert` / `client_key` は path traversal と不正区切りを拒否し、相対指定を `project_root` 基準の絶対パスへ解決する。
@@ -151,6 +162,8 @@
 - `runtime.max_artifact_size_bytes`（既定 `67108864` = 64 MiB）
 - `runtime.upload_session_ttl_secs`
 - `runtime.stop_grace_timeout_secs`（既定 `30`）
+- `runtime.runner_ready_timeout_secs`（既定 `3`）
+- `runtime.runner_log_buffer_bytes`（既定 `262144`）
 - `runtime.epoch_tick_interval_ms`（既定 `50`）
 
 `imagod` の runtime 検証制約:
@@ -159,4 +172,6 @@
 - `runtime.max_inflight_chunks`: `1` 以上
 - `runtime.max_artifact_size_bytes`: `1` 以上
 - `runtime.stop_grace_timeout_secs`: `1` 以上
+- `runtime.runner_ready_timeout_secs`: `1` 以上
+- `runtime.runner_log_buffer_bytes`: `1` 以上
 - `runtime.epoch_tick_interval_ms`: `1` 以上

@@ -305,3 +305,14 @@ response:
 - `imago-cli deploy` の `idempotency_key` を `name/type/target/policy/artifact_digest/artifact_size/manifest_digest` 由来の安定ハッシュへ変更した。
 - upload フェーズに自動 retry/resume を導入した（最大 4 試行、待機 250ms -> 500ms -> 1s 上限）。
 - 非再試行エラー（`E_UNAUTHORIZED`, `E_BAD_REQUEST`, `E_BAD_MANIFEST`, `E_IDEMPOTENCY_CONFLICT`, `E_RANGE_INVALID`, `E_CHUNK_HASH_MISMATCH`, `E_STORAGE_QUOTA`, `E_PRECONDITION_FAILED`）は即時失敗とする。
+
+## 実装反映ノート（Multi-process Runner / 2026-02-11）
+
+- `imagod` の実行アーキテクチャは manager/runner のマルチプロセス構成へ変更した。
+- ただし deploy protocol の wire 契約（`MessageType`, payload schema, state/cancel semantics）は変更しない。
+- manager-runner / runner-runner 間の IPC は内部実装であり、本仕様の外部互換性に影響しない。
+
+## 実装反映ノート（Crate Split 6+1 / 2026-02-11）
+
+- `imagod` 実装を複数 crate へ分割したが、本仕様の wire 契約は変更しない。
+- 変更は `imagod` 内部モジュール境界の再編のみであり、`MessageType` と payload schema は不変。

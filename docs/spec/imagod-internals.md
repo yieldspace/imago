@@ -2,7 +2,7 @@
 
 この文書は `imagod` の内部実装を、実装者と運用者が同じ前提で追える粒度で記述する。
 
-- 対象コード: `crates/imagod/src/*.rs`
+- 対象コード: `crates/imagod/src/main.rs` + `crates/imagod-*/src/*`
 - 概要仕様: [`imagod.md`](./imagod.md)
 - 関連仕様: [`deploy-protocol.md`](./deploy-protocol.md), [`observability.md`](./observability.md), [`imago-protocol.md`](./imago-protocol.md)
 
@@ -24,36 +24,42 @@
 
 対象読者: 実装者, 運用者
 
-実行起点は `crates/imagod/src/main.rs` の `main` / `run`。
+実行起点は `crates/imagod/src/main.rs` の `main` / `dispatch`。
 
 初期化順序:
 
 1. `install_rustls_provider`
-2. `parse_config_arg` + `resolve_config_path` + `ImagodConfig::load`
-3. `ArtifactStore::new`
-4. `OperationManager::new`
-5. `WasmRuntime::new`
-6. `ServiceSupervisor::new`
-7. `Orchestrator::new`
-8. `ProtocolHandler::new`
-9. maintenance loop 起動
-10. `build_server` で WebTransport サーバ構築
-11. `accept` ループで session task を `tokio::spawn`
+2. CLI 解析（`manager` / `--runner`）
+3. manager モード:
+4. `resolve_config_path` + `ImagodConfig::load`
+5. `ArtifactStore::new`
+6. `OperationManager::new`
+7. `ServiceSupervisor::new`（manager control socket 起動）
+8. `Orchestrator::new`
+9. `ProtocolHandler::new`
+10. maintenance loop 起動
+11. `build_server` で WebTransport サーバ構築
+12. `accept` ループで session task を `tokio::spawn`
+13. runner モード:
+14. stdin から `RunnerBootstrap` を読込
+15. `WasmRuntime::new` + component 実行
 
 ```mermaid
 flowchart TD
-  A["main"] --> B["run"]
+  A["main"] --> B["dispatch"]
   B --> C["install_rustls_provider"]
-  B --> D["ImagodConfig::load"]
-  D --> E["ArtifactStore"]
-  D --> F["WasmRuntime"]
-  F --> G["ServiceSupervisor"]
-  E --> H["Orchestrator"]
+  B --> D{"mode"}
+  D -->|manager| E["ImagodConfig::load"]
+  E --> F["ArtifactStore"]
+  E --> G["ServiceSupervisor"]
+  F --> H["Orchestrator"]
   G --> H
   H --> I["ProtocolHandler"]
   I --> J["maintenance loop"]
   I --> K["WebTransport server"]
   K --> L["session task"]
+  D -->|runner| M["RunnerBootstrap(from stdin)"]
+  M --> N["WasmRuntime::new + run component"]
 ```
 
 ## 3. モジュール責務マップ
@@ -62,22 +68,24 @@ flowchart TD
 
 | モジュール | 主責務 | 主な入力 | 主な出力 | 依存方向 |
 |---|---|---|---|---|
-| `config.rs` | `imagod.toml` 読込・検証 | 設定パス | `ImagodConfig` | `error.rs`, `imago-protocol` |
-| `transport.rs` | mTLS + QUIC/WebTransport endpoint 構築（0-RTT 無効） | TLS 設定, listen_addr | `web_transport_quinn::Server` | `config.rs`, `error.rs` |
-| `protocol_handler.rs` | `ProtocolEnvelope<Value>` dispatch | bi-stream bytes | response envelope / command.event | `artifact_store`, `orchestrator`, `operation_state` |
-| `artifact_store.rs` | upload session 管理、chunk commit、GC | prepare/push/commit | prepare/ack/commit response | `error.rs` |
-| `orchestrator.rs` | deploy/run/stop の実行調停 | command payload | summary / error | `artifact_store`, `service_supervisor` |
-| `service_supervisor.rs` | バックグラウンド Wasm 実行管理 | `ServiceLaunch` | start/stop/replace/reap | `runtime_wasmtime` |
-| `runtime_wasmtime.rs` | Wasmtime component 実行 | release path + env | `Result<()>` | `error.rs` |
-| `operation_state.rs` | 短命 operation 状態管理 | UUID + state | `StateResponse`, cancel 判定 | `error.rs` |
-| `error.rs` | 内部エラーの構造化 | stage, message, code | `StructuredError` | `imago-protocol` |
-| `main.rs` | wiring と maintenance 制御 | config | process lifecycle | 全モジュール |
+| `imagod-config (lib.rs)` | `imagod.toml` 読込・検証 | 設定パス | `ImagodConfig` | `imagod-common`, `imago-protocol` |
+| `imagod-server::transport` | mTLS + QUIC/WebTransport endpoint 構築（0-RTT 無効） | TLS 設定, listen_addr | `web_transport_quinn::Server` | `imagod-config`, `imagod-common` |
+| `imagod-server::protocol_handler` | `ProtocolEnvelope<Value>` dispatch | bi-stream bytes | response envelope / command.event | `imagod-control`, `imagod-config` |
+| `imagod-control::artifact_store` | upload session 管理、chunk commit、GC | prepare/push/commit | prepare/ack/commit response | `imagod-common` |
+| `imagod-control::orchestrator` | deploy/run/stop の実行調停 | command payload | summary / error | `artifact_store`, `service_supervisor` |
+| `imagod-control::service_supervisor` | runner child process 監督、control plane | `ServiceLaunch` | start/stop/replace/reap | `imagod-ipc` |
+| `imagod-runtime::runner_process` | runner モード実行（bootstrap, heartbeat, invoke受信） | `RunnerBootstrap` | run result / inbound response | `runtime_wasmtime`, `imagod-ipc` |
+| `imagod-runtime::runtime_wasmtime` | runner 内 Wasmtime component 実行 | release path + env + shutdown | `Result<()>` | `imagod-common` |
+| `imagod-ipc::ipc/*` | manager-runner/runner-runner IPC 抽象 + 実装 | control/invoke message | response/token | `imagod-common` |
+| `imagod-control::operation_state` | 短命 operation 状態管理 | UUID + state | `StateResponse`, cancel 判定 | `imagod-common` |
+| `imagod-common (lib.rs)` | 内部エラーの構造化 | stage, message, code | `StructuredError` | `imago-protocol` |
+| `imagod (main.rs)` | wiring と maintenance 制御 | config | process lifecycle | 全 internal crate |
 
 ## 4. 通信処理モデル
 
 対象読者: 実装者, 運用者
 
-通信入口は `crates/imagod/src/protocol_handler.rs` の `handle_session`。
+通信入口は `crates/imagod-server/src/protocol_handler.rs` の `handle_session`。
 
 処理モデル:
 
@@ -111,7 +119,7 @@ sequenceDiagram
 
 対象読者: 実装者, 運用者
 
-実装箇所: `crates/imagod/src/protocol_handler.rs` `handle_command_start`
+実装箇所: `crates/imagod-server/src/protocol_handler.rs` `handle_command_start`
 
 共通処理:
 
@@ -154,7 +162,7 @@ spawn 遷移前 cancel 成立時:
 
 対象読者: 実装者, 運用者
 
-実装箇所: `crates/imagod/src/artifact_store.rs`
+実装箇所: `crates/imagod-control/src/artifact_store.rs`
 
 ### 6.1 データモデル
 
@@ -202,7 +210,7 @@ spawn 遷移前 cancel 成立時:
 
 対象読者: 実装者, 運用者
 
-実装箇所: `crates/imagod/src/orchestrator.rs`
+実装箇所: `crates/imagod-control/src/orchestrator.rs`
 
 主要経路:
 
@@ -236,7 +244,7 @@ deploy 経路の要点:
 
 対象読者: 実装者, 運用者
 
-実装箇所: `crates/imagod/src/service_supervisor.rs`
+実装箇所: `crates/imagod-control/src/service_supervisor.rs`
 
 内部状態:
 
@@ -245,9 +253,18 @@ deploy 経路の要点:
   - `release_hash`
   - `started_at`
   - `status`
-  - `shutdown_tx`
-  - `abort_handle`
-  - `join_handle`
+  - `runner_id`
+  - `runner_endpoint`
+  - `manager_auth_secret`
+  - `invocation_secret`
+  - `bindings`
+  - `child`（`tokio::process::Child`）
+  - `stdout/stderr` ring buffer
+  - `last_heartbeat_at`
+- manager control endpoint:
+  - `runtime/ipc/manager-control.sock`
+- pending readiness:
+  - `pending_ready[runner_id] -> oneshot sender`
 
 主要 API:
 
@@ -259,20 +276,21 @@ deploy 経路の要点:
 
 停止ポリシー:
 
-- `force=false`: shutdown signal -> grace timeout 待機 -> 必要なら abort
-- `force=true`: 即 abort
-- `stop` は join 待機中に `stopping_count` を加算し、`has_live_services` が false にならないようにする
+- `force=false`: `shutdown_runner`（IPC）-> grace timeout 待機 -> 必要なら kill
+- `force=true`: 即 kill
+- `stop` は待機中に `stopping_count` を加算し、`has_live_services` が false にならないようにする
 
 起動ポリシー:
 
-- `start` は spawn 後すぐ成功返却せず、3 秒の startup probe を行う
-- probe 中に task が終了した場合は即座に join 結果をエラー化して返し、deploy 側で rollback 経路へ入れる
+- `start` は `imagod --runner` を `spawn+exec` し、stdin で `RunnerBootstrap` を渡す
+- `start` は spawn 後すぐ成功返却せず、`runner_ready_timeout_secs` 以内の `runner_ready` を待つ
+- timeout / ready 前終了時は起動失敗として child を回収し、deploy 側で rollback 経路へ入れる
 
 ## 9. Wasmtime 実行詳細
 
 対象読者: 実装者
 
-実装箇所: `crates/imagod/src/runtime_wasmtime.rs`
+実装箇所: `crates/imagod-runtime/src/runtime_wasmtime.rs`
 
 設定:
 
@@ -291,12 +309,13 @@ deploy 経路の要点:
 停止連携:
 
 - `watch::Receiver<bool>` の shutdown signal と run future を `tokio::select!` で競合実行
+- runner 内の epoch tick task が `epoch_tick_interval_ms` 周期で `Engine::increment_epoch()` を呼び、停止時の割り込み余地を維持する
 
 ## 10. 状態管理と cancel セマンティクス
 
 対象読者: 実装者, 運用者
 
-実装箇所: `crates/imagod/src/operation_state.rs`
+実装箇所: `crates/imagod-control/src/operation_state.rs`
 
 状態モデル:
 
@@ -333,7 +352,7 @@ stateDiagram-v2
 
 対象読者: 実装者, 運用者
 
-実装箇所: `crates/imagod/src/error.rs`
+実装箇所: `crates/imagod-common/src/lib.rs`
 
 `ImagodError` 主要項目:
 
@@ -371,17 +390,22 @@ stateDiagram-v2
 - session task（session ごとに spawn）
 - maintenance loop（単一）
   - `reap_finished_services`
-  - live service あり: `increment_epoch` + active interval sleep
+  - live service あり: active interval sleep
   - live service なし: idle 1 秒 sleep
   - shutdown signal を await 境界（reap/has_live/sleep）で優先確認し、停止遅延を抑制
   - shutdown 後は maintenance task の join を待機し、30秒 timeout 超過時は process をエラー終了
+- manager control server（単一）
+  - `register_runner` / `runner_ready` / `heartbeat` / `resolve_invocation_target`
+- runner process 内 task
+  - inbound server（`shutdown_runner` / `invoke`）
+  - heartbeat sender
+  - epoch tick task（`increment_epoch`）
 
 ```mermaid
 flowchart TD
   A["maintenance loop"] --> B["reap_finished_services"]
   B --> C{"has_live_services"}
-  C -->|yes| D["increment_epoch"]
-  D --> E["sleep active interval"]
+  C -->|yes| E["sleep active interval"]
   C -->|no| F["sleep idle 1s"]
   E --> A
   F --> A
@@ -431,12 +455,60 @@ flowchart TD
 ## 実装参照インデックス
 
 - 起動/配線: `crates/imagod/src/main.rs`
-- 設定: `crates/imagod/src/config.rs`
-- transport: `crates/imagod/src/transport.rs`
-- protocol handler: `crates/imagod/src/protocol_handler.rs`
-- artifact store: `crates/imagod/src/artifact_store.rs`
-- orchestrator: `crates/imagod/src/orchestrator.rs`
-- service supervisor: `crates/imagod/src/service_supervisor.rs`
-- runtime: `crates/imagod/src/runtime_wasmtime.rs`
-- operation state: `crates/imagod/src/operation_state.rs`
-- error: `crates/imagod/src/error.rs`
+- 設定: `crates/imagod-config/src/lib.rs`
+- transport: `crates/imagod-server/src/transport.rs`
+- protocol handler: `crates/imagod-server/src/protocol_handler.rs`
+- artifact store: `crates/imagod-control/src/artifact_store.rs`
+- orchestrator: `crates/imagod-control/src/orchestrator.rs`
+- service supervisor: `crates/imagod-control/src/service_supervisor.rs`
+- runner process: `crates/imagod-runtime/src/runner_process.rs`
+- ipc transport: `crates/imagod-ipc/src/ipc/*`
+- runtime: `crates/imagod-runtime/src/runtime_wasmtime.rs`
+- operation state: `crates/imagod-control/src/operation_state.rs`
+- error: `crates/imagod-common/src/lib.rs`
+
+## 実装反映ノート（Multi-process Runner / 2026-02-11）
+
+- Wasmtime 実行主体を manager process から runner process へ移行した。
+  - `main.rs` は `manager` / `--runner` の2モードで起動する。
+  - runner は stdin で受け取る `RunnerBootstrap`（CBOR）を使って初期化する。
+- `ServiceSupervisor` は task 監督から child process 監督へ変更した。
+  - `tokio::process::Command` で `imagod --runner` を起動する。
+  - `start` は `runner_ready_timeout_secs` 内に `runner_ready` を受信するまで待機する。
+  - `stop(force=false)` は `shutdown_runner` 要求（IPC）→ grace timeout → kill fallback。
+- IPC は `ipc` モジュールに抽象化した。
+  - trait: `ControlPlaneTransport`, `InvocationTransport`
+  - 実装: `DbusP2pTransport`（UDS 上の frame + CBOR）
+  - manager-runner 制御: `register_runner`, `runner_ready`, `shutdown_runner`, `heartbeat`, `resolve_invocation_target`
+  - `shutdown_runner` は `manager_auth_proof` を必須とし、runner 側で照合する。
+- runner 間 direct invoke の基盤を追加した（実関数実行は未実装）。
+  - `resolve_invocation_target` は `manifest.bindings` を用いた interface 単位 ACL を適用する。
+  - manager は target runner 秘密鍵で短命 token を発行し、callee runner が検証する。
+- ログ回収を追加した。
+  - runner stdout/stderr を pipe で manager が回収する。
+  - service ごとに容量上限付き ring buffer（`runner_log_buffer_bytes`）へ保持する。
+- epoch 割り込みの駆動点を変更した。
+  - 旧: manager の maintenance loop で `increment_epoch`
+  - 新: runner 内で `epoch_tick_interval_ms` 周期の tick task が `increment_epoch`
+
+## 実装反映ノート（Runner 起動確認窓と socket cleanup / 2026-02-11）
+
+- runner 起動時に固定 200ms の起動確認窓を導入した。
+  - manager への `runner_ready` 通知前に、Wasm 実行タスクの早期終了を監視する。
+- 起動確認窓内に Wasm 実行が `Err` で終了した場合、`runner_ready` を送信せず start 失敗として扱う。
+- 互換維持のため、起動確認窓内に Wasm 実行が `Ok(())` で終了した場合は成功扱いを維持する。
+- runner endpoint socket の削除を RAII で保証した。
+  - 正常終了だけでなく `register_runner` / `runner_ready` 失敗などの早期 return 経路でも socket を自動クリーンアップする。
+
+## 実装反映ノート（Crate Split 6+1 / 2026-02-11）
+
+- `imagod` の内部実装を単一 crate から以下の 6+1 構成に分割した。
+  - `imagod`（bin, 配線）
+  - `imagod-common`
+  - `imagod-config`
+  - `imagod-ipc`
+  - `imagod-runtime`
+  - `imagod-control`
+  - `imagod-server`
+- バイナリ互換は維持し、起動方式（`imagod`, `imagod --runner`）は変更しない。
+- deploy protocol の wire 契約は変更しない（内部実装のみの再編）。

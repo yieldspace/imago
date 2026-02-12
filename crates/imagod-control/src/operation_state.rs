@@ -1,10 +1,12 @@
+//! In-memory state machine for command start/cancel/status requests.
+
 use std::{collections::BTreeMap, sync::Arc, time::UNIX_EPOCH};
 
 use imago_protocol::{CommandCancelResponse, CommandState, CommandType, ErrorCode, StateResponse};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::error::ImagodError;
+use imagod_common::ImagodError;
 
 #[derive(Debug, Clone)]
 struct OperationEntry {
@@ -22,21 +24,27 @@ enum OperationPhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of spawn transition after checking cancel intent.
 pub enum SpawnTransition {
+    /// Spawn should continue.
     Spawned,
+    /// Cancel request won the race before spawn completion.
     Canceled,
 }
 
 #[derive(Clone, Default)]
+/// Manages short-lived command operation state keyed by request id.
 pub struct OperationManager {
     inner: Arc<RwLock<BTreeMap<Uuid, OperationEntry>>>,
 }
 
 impl OperationManager {
+    /// Creates an empty operation manager.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Registers a new operation in `accepted` state.
     pub async fn start(
         &self,
         request_id: Uuid,
@@ -65,6 +73,7 @@ impl OperationManager {
         Ok(())
     }
 
+    /// Updates operation state and stage for a running request.
     pub async fn set_state(
         &self,
         request_id: &Uuid,
@@ -85,6 +94,7 @@ impl OperationManager {
         Ok(())
     }
 
+    /// Atomically marks operation as spawned unless cancel was requested first.
     pub async fn mark_spawned_if_not_canceled(
         &self,
         request_id: &Uuid,
@@ -113,6 +123,7 @@ impl OperationManager {
         Ok(SpawnTransition::Spawned)
     }
 
+    /// Returns a snapshot for `state.request` when operation is still active.
     pub async fn snapshot_running(&self, request_id: &Uuid) -> Result<StateResponse, ImagodError> {
         let inner = self.inner.read().await;
         let entry = inner.get(request_id).ok_or_else(|| {
@@ -139,6 +150,7 @@ impl OperationManager {
         })
     }
 
+    /// Handles `command.cancel` semantics for a still-tracked operation.
     pub async fn request_cancel(
         &self,
         request_id: &Uuid,
@@ -176,6 +188,7 @@ impl OperationManager {
         })
     }
 
+    /// Moves the operation to a terminal state while keeping entry for response flow.
     pub async fn finish(&self, request_id: &Uuid, state: CommandState, stage: impl Into<String>) {
         let mut inner = self.inner.write().await;
         if let Some(entry) = inner.get_mut(request_id) {
@@ -187,6 +200,7 @@ impl OperationManager {
         }
     }
 
+    /// Removes operation entry after terminal handling is complete.
     pub async fn remove(&self, request_id: &Uuid) {
         let mut inner = self.inner.write().await;
         inner.remove(request_id);

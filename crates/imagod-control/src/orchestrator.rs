@@ -1,3 +1,5 @@
+//! High-level orchestration for deploy/run/stop commands.
+
 use std::{
     collections::BTreeMap,
     collections::BTreeSet,
@@ -5,6 +7,8 @@ use std::{
 };
 
 use imago_protocol::{DeployCommandPayload, ErrorCode, RunCommandPayload, StopCommandPayload};
+use imagod_common::ImagodError;
+use imagod_ipc::ServiceBinding;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::fs;
@@ -12,7 +16,6 @@ use uuid::Uuid;
 
 use crate::{
     artifact_store::ArtifactStore,
-    error::ImagodError,
     service_supervisor::{ServiceLaunch, ServiceSupervisor},
 };
 
@@ -21,6 +24,7 @@ const EXPECTED_CURRENT_RELEASE_ANY: &str = "any";
 const RESTART_POLICY_NEVER: &str = "never";
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+/// Release manifest loaded from extracted artifact.
 struct Manifest {
     name: String,
     main: String,
@@ -30,15 +34,26 @@ struct Manifest {
     secrets: BTreeMap<String, String>,
     #[serde(default)]
     assets: Vec<ManifestAsset>,
+    #[serde(default)]
+    bindings: Vec<ManifestBinding>,
     hash: ManifestHash,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+/// Manifest-declared asset path.
 struct ManifestAsset {
     path: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+/// Manifest binding authorization entry.
+struct ManifestBinding {
+    target: String,
+    wit: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+/// Manifest hash metadata describing required verification targets.
 struct ManifestHash {
     algorithm: String,
     targets: Vec<HashTarget>,
@@ -55,6 +70,7 @@ impl ManifestHash {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+/// Hash verification targets required by manifest metadata.
 enum HashTarget {
     #[serde(rename = "wasm")]
     Wasm,
@@ -65,29 +81,39 @@ enum HashTarget {
 }
 
 #[derive(Debug, Clone)]
+/// Result summary returned after successful deploy.
 pub struct DeploySummary {
+    /// Service name that was deployed.
     pub service_name: String,
+    /// Release hash activated for the service.
     pub release_hash: String,
 }
 
 #[derive(Debug, Clone)]
+/// Result summary returned after successful run command.
 pub struct RunSummary {
+    /// Service name that was started.
     pub service_name: String,
+    /// Active release hash used for start.
     pub release_hash: String,
 }
 
 #[derive(Debug, Clone)]
+/// Result summary returned after successful stop command.
 pub struct StopSummary {
+    /// Service name that was stopped.
     pub service_name: String,
 }
 
 #[derive(Clone)]
+/// Coordinates artifact validation, release promotion, and process supervision.
 pub struct Orchestrator {
     storage_root: PathBuf,
     artifact_store: ArtifactStore,
     supervisor: ServiceSupervisor,
 }
 
+/// Prepared release context passed from deploy preparation into final activation.
 struct PreparedRelease {
     service_name: String,
     service_root: PathBuf,
@@ -98,6 +124,7 @@ struct PreparedRelease {
 }
 
 impl Orchestrator {
+    /// Creates an orchestrator with shared storage and supervisor handles.
     pub fn new(
         storage_root: impl AsRef<Path>,
         artifact_store: ArtifactStore,
@@ -110,6 +137,7 @@ impl Orchestrator {
         }
     }
 
+    /// Handles deploy orchestration and service replacement.
     pub async fn deploy(
         &self,
         payload: &DeployCommandPayload,
@@ -134,6 +162,7 @@ impl Orchestrator {
         })
     }
 
+    /// Starts a service from its currently active release.
     pub async fn run(&self, payload: &RunCommandPayload) -> Result<RunSummary, ImagodError> {
         let service_root = self.storage_root.join("services").join(&payload.name);
         let active_file = service_root.join("active_release");
@@ -156,6 +185,7 @@ impl Orchestrator {
         })
     }
 
+    /// Stops a running service.
     pub async fn stop(&self, payload: &StopCommandPayload) -> Result<StopSummary, ImagodError> {
         self.supervisor.stop(&payload.name, payload.force).await?;
         Ok(StopSummary {
@@ -163,14 +193,22 @@ impl Orchestrator {
         })
     }
 
+    /// Reaps finished runner processes from supervisor state.
     pub async fn reap_finished_services(&self) {
         self.supervisor.reap_finished().await;
     }
 
+    /// Returns whether any services are currently running or stopping.
     pub async fn has_live_services(&self) -> bool {
         self.supervisor.has_live_services().await
     }
 
+    /// Stops all currently running services.
+    pub async fn stop_all_services(&self, force: bool) -> Vec<(String, ImagodError)> {
+        self.supervisor.stop_all(force).await
+    }
+
+    /// Prepares a validated release and launch spec from committed artifact data.
     async fn prepare_release(
         &self,
         payload: &DeployCommandPayload,
@@ -235,6 +273,7 @@ impl Orchestrator {
         })
     }
 
+    /// Attempts to roll back active release marker when replacement start fails.
     async fn rollback_previous_release(
         &self,
         prepared: &PreparedRelease,
@@ -269,6 +308,7 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Loads launch information from an existing promoted release.
     async fn load_launch_from_release(
         &self,
         service_name: &str,
@@ -295,6 +335,7 @@ impl Orchestrator {
     }
 }
 
+/// Builds launch metadata for supervisor from a promoted release directory.
 async fn build_launch_from_release(
     release_hash: &str,
     release_dir: &Path,
@@ -320,15 +361,48 @@ async fn build_launch_from_release(
         envs.insert(k.clone(), v.clone());
     }
 
+    let bindings = validate_manifest_bindings(&manifest.bindings)?;
+
     Ok(ServiceLaunch {
         name: manifest.name.clone(),
         release_hash: release_hash.to_string(),
         component_path,
         args: Vec::new(),
         envs,
+        bindings,
     })
 }
 
+fn validate_manifest_bindings(
+    bindings: &[ManifestBinding],
+) -> Result<Vec<ServiceBinding>, ImagodError> {
+    let mut normalized = Vec::with_capacity(bindings.len());
+    for (idx, binding) in bindings.iter().enumerate() {
+        if binding.target.is_empty() {
+            return Err(map_bad_manifest(format!(
+                "manifest.bindings[{idx}].target must not be empty"
+            )));
+        }
+        if binding.wit.is_empty() {
+            return Err(map_bad_manifest(format!(
+                "manifest.bindings[{idx}].wit must not be empty"
+            )));
+        }
+        if let Err(err) = validate_service_name(&binding.target) {
+            return Err(map_bad_manifest(format!(
+                "manifest.bindings[{idx}].target is invalid '{}': {}",
+                binding.target, err.message
+            )));
+        }
+        normalized.push(ServiceBinding {
+            target: binding.target.clone(),
+            wit: binding.wit.clone(),
+        });
+    }
+    Ok(normalized)
+}
+
+/// Extracts a tar archive into destination while rejecting unsupported entries.
 async fn extract_tar(bundle: &Path, dest: &Path) -> Result<(), ImagodError> {
     let bundle = bundle.to_path_buf();
     let dest = dest.to_path_buf();
@@ -514,6 +588,7 @@ fn validate_service_name(name: &str) -> Result<(), ImagodError> {
     Ok(())
 }
 
+/// Validates deploy preconditions against currently active release.
 fn validate_deploy_preconditions(
     payload: &DeployCommandPayload,
     active_release: Option<&str>,
@@ -611,6 +686,7 @@ async fn clean_dir(path: &Path) -> Result<(), ImagodError> {
     }
 }
 
+/// Promotes staging release directory into the service release path atomically.
 async fn promote_staging_release(
     staging_dir: &Path,
     release_dir: &Path,
@@ -690,12 +766,14 @@ fn map_rollback_error(err: ImagodError) -> ImagodError {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_tar, normalize_archive_entry_path, normalize_manifest_main_path,
-        promote_staging_release, release_id_from_artifact_digest, validate_deploy_preconditions,
-        validate_service_name,
+        HashTarget, Manifest, ManifestAsset, ManifestBinding, ManifestHash,
+        build_launch_from_release, extract_tar, normalize_archive_entry_path,
+        normalize_manifest_main_path, promote_staging_release, release_id_from_artifact_digest,
+        validate_deploy_preconditions, validate_service_name,
     };
     use imago_protocol::{DeployCommandPayload, ErrorCode};
     use std::{
+        collections::BTreeMap,
         fs,
         path::{Path, PathBuf},
     };
@@ -704,6 +782,21 @@ mod tests {
 
     fn temp_dir_path(prefix: &str) -> PathBuf {
         std::env::temp_dir().join(format!("imago-{prefix}-{}", Uuid::new_v4()))
+    }
+
+    fn valid_manifest() -> Manifest {
+        Manifest {
+            name: "svc-a".to_string(),
+            main: "component.wasm".to_string(),
+            vars: BTreeMap::new(),
+            secrets: BTreeMap::new(),
+            assets: Vec::<ManifestAsset>::new(),
+            bindings: Vec::new(),
+            hash: ManifestHash {
+                algorithm: "sha256".to_string(),
+                targets: vec![HashTarget::Wasm, HashTarget::Manifest, HashTarget::Assets],
+            },
+        }
     }
 
     #[test]
@@ -866,6 +959,69 @@ mod tests {
             release.join("active.txt").exists(),
             "existing release should be restored after failure"
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_binding_with_empty_target() {
+        let root = temp_dir_path("orchestrator-binding-empty-target");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.bindings = vec![ManifestBinding {
+            target: String::new(),
+            wit: "yieldspace:service/invoke".to_string(),
+        }];
+
+        let err = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect_err("empty binding target should be rejected");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("bindings[0].target"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_binding_with_empty_wit() {
+        let root = temp_dir_path("orchestrator-binding-empty-wit");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.bindings = vec![ManifestBinding {
+            target: "svc-b".to_string(),
+            wit: String::new(),
+        }];
+
+        let err = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect_err("empty binding wit should be rejected");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("bindings[0].wit"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_binding_with_invalid_target_name() {
+        let root = temp_dir_path("orchestrator-binding-invalid-target");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.bindings = vec![ManifestBinding {
+            target: "svc/invalid".to_string(),
+            wit: "yieldspace:service/invoke".to_string(),
+        }];
+
+        let err = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect_err("invalid binding target should be rejected");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("bindings[0].target is invalid"));
 
         let _ = fs::remove_dir_all(root);
     }
