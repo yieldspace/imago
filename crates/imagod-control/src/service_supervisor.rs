@@ -70,6 +70,7 @@ struct RunningService {
     release_hash: String,
     started_at: String,
     status: RunningStatus,
+    is_ready: bool,
     runner_id: String,
     runner_endpoint: PathBuf,
     manager_auth_secret: String,
@@ -285,6 +286,7 @@ impl ServiceSupervisor {
                         release_hash: launch.release_hash,
                         started_at: now_unix_secs().to_string(),
                         status: RunningStatus::Running,
+                        is_ready: false,
                         runner_id: runner_id.clone(),
                         runner_endpoint,
                         manager_auth_secret,
@@ -954,6 +956,7 @@ async fn handle_control_request(
                     return ControlResponse::Error(IpcErrorPayload::from_error(&err));
                 }
 
+                service.is_ready = true;
                 service.last_heartbeat_at = now_unix_secs().to_string();
             }
 
@@ -1018,6 +1021,9 @@ async fn handle_control_request(
             let Some(target_runner) = guard.get(&target_service) else {
                 return control_error(ErrorCode::NotFound, "target service is not running");
             };
+            if !target_runner.is_ready {
+                return control_error(ErrorCode::NotFound, "target service is not running");
+            }
 
             let claims = imagod_ipc::InvocationTokenClaims {
                 source_service: source_service_name.clone(),
@@ -1298,6 +1304,7 @@ mod tests {
             release_hash: "release-a".to_string(),
             started_at: now_unix_secs().to_string(),
             status: RunningStatus::Running,
+            is_ready: true,
             runner_id: runner_id.to_string(),
             runner_endpoint,
             manager_auth_secret: random_secret_hex(),
@@ -1307,6 +1314,19 @@ mod tests {
             _stdout_log: Arc::new(Mutex::new(BoundedLogBuffer::new(64))),
             _stderr_log: Arc::new(Mutex::new(BoundedLogBuffer::new(64))),
             last_heartbeat_at: now_unix_secs().to_string(),
+        }
+    }
+
+    async fn stop_running_service_best_effort(
+        inner: &Arc<RwLock<BTreeMap<String, RunningService>>>,
+        service_name: &str,
+    ) {
+        let service = {
+            let mut guard = inner.write().await;
+            guard.remove(service_name)
+        };
+        if let Some(mut service) = service {
+            let _ = kill_and_wait(&mut service.child).await;
         }
     }
 
@@ -1423,6 +1443,171 @@ mod tests {
             compute_manager_auth_proof(&secret, "runner-1").expect("proof should be generated");
         validate_manager_auth(&secret, "runner-1", &proof)
             .expect("proof validation should succeed");
+    }
+
+    #[tokio::test]
+    async fn resolve_invocation_target_rejects_target_before_runner_ready() {
+        let root = new_test_root("resolve-not-ready");
+        let inner = Arc::new(RwLock::new(BTreeMap::new()));
+        let pending_ready = Arc::new(Mutex::new(BTreeMap::new()));
+        let source_service_name = "svc-source".to_string();
+        let target_service_name = "svc-target".to_string();
+        let source_runner_id = "runner-source";
+        let target_runner_id = "runner-target";
+        let wit = "pkg:iface/invoke".to_string();
+        let source_endpoint = root.join("source.sock");
+        let target_endpoint = root.join("target.sock");
+
+        let source_child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("source child should spawn");
+        let target_child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("target child should spawn");
+
+        let mut source = new_running_service(source_child, source_runner_id, source_endpoint);
+        source.bindings = vec![ServiceBinding {
+            target: target_service_name.clone(),
+            wit: wit.clone(),
+        }];
+        let source_secret = source.manager_auth_secret.clone();
+
+        let mut target = new_running_service(target_child, target_runner_id, target_endpoint);
+        target.is_ready = false;
+
+        {
+            let mut guard = inner.write().await;
+            guard.insert(source_service_name.clone(), source);
+            guard.insert(target_service_name.clone(), target);
+        }
+
+        let manager_auth_proof = compute_manager_auth_proof(&source_secret, source_runner_id)
+            .expect("proof should be generated");
+        let response = handle_control_request(
+            &inner,
+            &pending_ready,
+            ControlRequest::ResolveInvocationTarget {
+                runner_id: source_runner_id.to_string(),
+                manager_auth_proof,
+                target_service: target_service_name.clone(),
+                wit: wit.clone(),
+            },
+        )
+        .await;
+
+        match response {
+            ControlResponse::Error(err) => {
+                assert_eq!(err.code, ErrorCode::NotFound);
+                assert_eq!(err.message, "target service is not running");
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        stop_running_service_best_effort(&inner, &source_service_name).await;
+        stop_running_service_best_effort(&inner, &target_service_name).await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn resolve_invocation_target_accepts_target_after_runner_ready() {
+        let root = new_test_root("resolve-ready");
+        let inner = Arc::new(RwLock::new(BTreeMap::new()));
+        let pending_ready = Arc::new(Mutex::new(BTreeMap::new()));
+        let source_service_name = "svc-source".to_string();
+        let target_service_name = "svc-target".to_string();
+        let source_runner_id = "runner-source";
+        let target_runner_id = "runner-target";
+        let wit = "pkg:iface/invoke".to_string();
+        let source_endpoint = root.join("source.sock");
+        let target_endpoint = root.join("target.sock");
+
+        let source_child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("source child should spawn");
+        let target_child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("target child should spawn");
+
+        let mut source = new_running_service(source_child, source_runner_id, source_endpoint);
+        source.bindings = vec![ServiceBinding {
+            target: target_service_name.clone(),
+            wit: wit.clone(),
+        }];
+        let source_secret = source.manager_auth_secret.clone();
+
+        let mut target =
+            new_running_service(target_child, target_runner_id, target_endpoint.clone());
+        target.is_ready = false;
+        let target_secret = target.manager_auth_secret.clone();
+        let target_invocation_secret = target.invocation_secret.clone();
+
+        {
+            let mut guard = inner.write().await;
+            guard.insert(source_service_name.clone(), source);
+            guard.insert(target_service_name.clone(), target);
+        }
+
+        let target_ready_proof = compute_manager_auth_proof(&target_secret, target_runner_id)
+            .expect("target ready proof should be generated");
+        let ready_response = handle_control_request(
+            &inner,
+            &pending_ready,
+            ControlRequest::RunnerReady {
+                runner_id: target_runner_id.to_string(),
+                manager_auth_proof: target_ready_proof,
+            },
+        )
+        .await;
+        assert!(
+            matches!(ready_response, ControlResponse::Ack),
+            "runner ready should be accepted"
+        );
+
+        let manager_auth_proof = compute_manager_auth_proof(&source_secret, source_runner_id)
+            .expect("source proof should be generated");
+        let response = handle_control_request(
+            &inner,
+            &pending_ready,
+            ControlRequest::ResolveInvocationTarget {
+                runner_id: source_runner_id.to_string(),
+                manager_auth_proof,
+                target_service: target_service_name.clone(),
+                wit: wit.clone(),
+            },
+        )
+        .await;
+
+        match response {
+            ControlResponse::ResolvedInvocationTarget { endpoint, token } => {
+                assert_eq!(endpoint, target_endpoint);
+                let claims = imagod_ipc::verify_invocation_token(&target_invocation_secret, &token)
+                    .expect("returned invocation token should verify");
+                assert_eq!(claims.source_service, source_service_name);
+                assert_eq!(claims.target_service, target_service_name);
+                assert_eq!(claims.wit, wit);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        stop_running_service_best_effort(&inner, "svc-source").await;
+        stop_running_service_best_effort(&inner, "svc-target").await;
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
