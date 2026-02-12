@@ -23,7 +23,7 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
     process::{Child, Command},
-    sync::{Mutex, RwLock, oneshot, oneshot::error::TryRecvError, watch},
+    sync::{Mutex, RwLock, Semaphore, oneshot, oneshot::error::TryRecvError, watch},
     task::{JoinHandle, JoinSet},
     time,
 };
@@ -34,6 +34,8 @@ const STAGE_CONTROL: &str = "service.control";
 const STARTUP_PROBE_POLL_INTERVAL_MS: u64 = 25;
 const INVOCATION_TOKEN_TTL_SECS: u64 = 30;
 const RUNNER_ENDPOINT_HASH_BYTES: usize = 16;
+const MAX_MANAGER_CONTROL_CONNECTION_HANDLERS: usize = 32;
+const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
 type PendingReadyMap = BTreeMap<String, oneshot::Sender<Result<(), ImagodError>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,6 +170,7 @@ impl ServiceSupervisor {
             )
         })?;
         let manager_control_endpoint = runtime_root.join("manager-control.sock");
+        validate_unix_socket_path_len(&manager_control_endpoint, "manager control endpoint")?;
         if manager_control_endpoint.exists() {
             std::fs::remove_file(&manager_control_endpoint).map_err(|e| {
                 ImagodError::new(
@@ -335,8 +338,6 @@ impl ServiceSupervisor {
     pub async fn stop(&self, service_name: &str, force: bool) -> Result<(), ImagodError> {
         let _stopping_guard = StoppingCounterGuard::new(self.stopping_count.clone());
         let mut service = self.take_running(service_name).await?;
-        let _runner_endpoint_cleanup =
-            RunnerEndpointCleanupGuard::new(service.runner_endpoint.clone());
 
         if let Ok(Some(exit_status)) = service.child.try_wait() {
             log_exit_outcome(
@@ -346,6 +347,7 @@ impl ServiceSupervisor {
                 service.status,
                 exit_status,
             );
+            remove_runner_endpoint_best_effort(&service.runner_endpoint);
             return Err(ImagodError::new(
                 ErrorCode::NotFound,
                 STAGE_STOP,
@@ -355,77 +357,92 @@ impl ServiceSupervisor {
 
         service.status = RunningStatus::Stopping;
 
-        if force {
-            kill_and_wait(&mut service.child).await?;
-            return Ok(());
-        }
+        let stop_result = async {
+            if force {
+                kill_and_wait(&mut service.child).await?;
+                return Ok(());
+            }
 
-        let stop_deadline = time::Instant::now() + self.stop_grace_timeout;
-        let shutdown_timeout = self.runner_ready_timeout.min(self.stop_grace_timeout);
+            let stop_deadline = time::Instant::now() + self.stop_grace_timeout;
+            let shutdown_timeout = self.runner_ready_timeout.min(self.stop_grace_timeout);
 
-        match compute_manager_auth_proof(&service.manager_auth_secret, &service.runner_id) {
-            Ok(manager_auth_proof) => {
-                match time::timeout(
-                    shutdown_timeout,
-                    DbusP2pTransport::call_runner(
-                        &service.runner_endpoint,
-                        &RunnerInboundRequest::ShutdownRunner { manager_auth_proof },
-                    ),
-                )
-                .await
-                {
-                    Ok(Ok(_response)) => {}
-                    Ok(Err(err)) => {
-                        eprintln!(
-                            "service graceful shutdown request failed name={} release={} error={}",
-                            service_name, service.release_hash, err
-                        );
-                    }
-                    Err(_) => {
-                        eprintln!(
-                            "service graceful shutdown request timed out name={} release={} timeout_ms={}",
-                            service_name,
-                            service.release_hash,
-                            shutdown_timeout.as_millis()
-                        );
+            match compute_manager_auth_proof(&service.manager_auth_secret, &service.runner_id) {
+                Ok(manager_auth_proof) => {
+                    match time::timeout(
+                        shutdown_timeout,
+                        DbusP2pTransport::call_runner(
+                            &service.runner_endpoint,
+                            &RunnerInboundRequest::ShutdownRunner { manager_auth_proof },
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(Ok(_response)) => {}
+                        Ok(Err(err)) => {
+                            eprintln!(
+                                "service graceful shutdown request failed name={} release={} error={}",
+                                service_name, service.release_hash, err
+                            );
+                        }
+                        Err(_) => {
+                            eprintln!(
+                                "service graceful shutdown request timed out name={} release={} timeout_ms={}",
+                                service_name,
+                                service.release_hash,
+                                shutdown_timeout.as_millis()
+                            );
+                        }
                     }
                 }
+                Err(err) => {
+                    eprintln!(
+                        "service graceful shutdown auth proof failed name={} release={} error={}",
+                        service_name, service.release_hash, err
+                    );
+                }
+            }
+
+            let remaining = stop_deadline.saturating_duration_since(time::Instant::now());
+            if remaining.is_zero() {
+                kill_and_wait(&mut service.child).await?;
+                return Ok(());
+            }
+
+            match time::timeout(remaining, service.child.wait()).await {
+                Ok(wait_result) => {
+                    let status = wait_result.map_err(|e| {
+                        ImagodError::new(
+                            ErrorCode::Internal,
+                            STAGE_STOP,
+                            format!("runner wait failed: {e}"),
+                        )
+                    })?;
+                    log_exit_outcome(
+                        service_name,
+                        &service.release_hash,
+                        &service.started_at,
+                        service.status,
+                        status,
+                    );
+                    Ok(())
+                }
+                Err(_) => {
+                    kill_and_wait(&mut service.child).await?;
+                    Ok(())
+                }
+            }
+        }
+        .await;
+
+        match stop_result {
+            Ok(()) => {
+                remove_runner_endpoint_best_effort(&service.runner_endpoint);
+                Ok(())
             }
             Err(err) => {
-                eprintln!(
-                    "service graceful shutdown auth proof failed name={} release={} error={}",
-                    service_name, service.release_hash, err
-                );
-            }
-        }
-
-        let remaining = stop_deadline.saturating_duration_since(time::Instant::now());
-        if remaining.is_zero() {
-            kill_and_wait(&mut service.child).await?;
-            return Ok(());
-        }
-
-        match time::timeout(remaining, service.child.wait()).await {
-            Ok(wait_result) => {
-                let status = wait_result.map_err(|e| {
-                    ImagodError::new(
-                        ErrorCode::Internal,
-                        STAGE_STOP,
-                        format!("runner wait failed: {e}"),
-                    )
-                })?;
-                log_exit_outcome(
-                    service_name,
-                    &service.release_hash,
-                    &service.started_at,
-                    service.status,
-                    status,
-                );
-                Ok(())
-            }
-            Err(_) => {
-                kill_and_wait(&mut service.child).await?;
-                Ok(())
+                self.restore_service_after_stop_error(service_name, service)
+                    .await;
+                Err(err)
             }
         }
     }
@@ -524,30 +541,50 @@ impl ServiceSupervisor {
         read_timeout: Duration,
     ) -> ManagerControlServer {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let concurrency = Arc::new(Semaphore::new(MAX_MANAGER_CONTROL_CONNECTION_HANDLERS));
         let task = tokio::spawn(async move {
             loop {
-                tokio::select! {
+                let permit = tokio::select! {
+                    acquired = concurrency.clone().acquire_owned() => {
+                        match acquired {
+                            Ok(permit) => permit,
+                            Err(_) => break,
+                        }
+                    }
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             break;
                         }
+                        continue;
                     }
-                    accepted = listener.accept() => {
-                        let (stream, _) = match accepted {
-                            Ok(v) => v,
-                            Err(err) => {
-                                eprintln!("manager control accept failed: {err}");
-                                continue;
-                            }
-                        };
+                };
 
-                        let inner = inner.clone();
-                        let pending_ready = pending_ready.clone();
-                        tokio::spawn(async move {
-                            handle_control_connection(stream, inner, pending_ready, read_timeout).await;
-                        });
+                let accepted = tokio::select! {
+                    accepted = listener.accept() => accepted,
+                    changed = shutdown_rx.changed() => {
+                        drop(permit);
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                        continue;
                     }
-                }
+                };
+
+                let (stream, _) = match accepted {
+                    Ok(v) => v,
+                    Err(err) => {
+                        drop(permit);
+                        eprintln!("manager control accept failed: {err}");
+                        continue;
+                    }
+                };
+
+                let inner = inner.clone();
+                let pending_ready = pending_ready.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    handle_control_connection(stream, inner, pending_ready, read_timeout).await;
+                });
             }
         });
 
@@ -785,6 +822,44 @@ impl ServiceSupervisor {
             )
         })
     }
+
+    async fn restore_service_after_stop_error(
+        &self,
+        service_name: &str,
+        mut service: RunningService,
+    ) {
+        match service.child.try_wait() {
+            Ok(Some(exit_status)) => {
+                log_exit_outcome(
+                    service_name,
+                    &service.release_hash,
+                    &service.started_at,
+                    service.status,
+                    exit_status,
+                );
+                remove_runner_endpoint_best_effort(&service.runner_endpoint);
+                return;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!(
+                    "service stop recovery try_wait failed name={} release={} error={}",
+                    service_name, service.release_hash, err
+                );
+            }
+        }
+
+        service.status = RunningStatus::Running;
+        let mut inner = self.inner.write().await;
+        if inner.contains_key(service_name) {
+            eprintln!(
+                "service stop recovery skipped insert because '{}' already exists",
+                service_name
+            );
+            return;
+        }
+        inner.insert(service_name.to_string(), service);
+    }
 }
 
 fn build_runner_endpoint(storage_root: &Path, service_name: &str, runner_id: &str) -> PathBuf {
@@ -800,6 +875,22 @@ fn build_runner_endpoint(storage_root: &Path, service_name: &str, runner_id: &st
         .join("ipc")
         .join("runners")
         .join(format!("runner-{endpoint_hash}.sock"))
+}
+
+fn validate_unix_socket_path_len(path: &Path, socket_name: &str) -> Result<(), ImagodError> {
+    let path_len = path.to_string_lossy().len();
+    if path_len <= MAX_UNIX_SOCKET_PATH_BYTES {
+        return Ok(());
+    }
+
+    Err(ImagodError::new(
+        ErrorCode::Internal,
+        STAGE_CONTROL,
+        format!(
+            "{socket_name} path is too long for AF_UNIX: actual length {path_len}, max {MAX_UNIX_SOCKET_PATH_BYTES}, path={}",
+            path.display()
+        ),
+    ))
 }
 
 /// Handles one control request received on manager control socket.
@@ -1071,7 +1162,24 @@ fn spawn_log_drain<R>(
 }
 
 /// Sends kill signal to child and waits for termination.
+#[allow(clippy::collapsible_if)]
 async fn kill_and_wait(child: &mut Child) -> Result<(), ImagodError> {
+    #[cfg(test)]
+    {
+        if let Some(pid) = child.id() {
+            if FAIL_KILL_AND_WAIT_FOR_PID
+                .compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return Err(ImagodError::new(
+                    ErrorCode::Internal,
+                    STAGE_STOP,
+                    format!("injected kill_and_wait failure for pid {pid}"),
+                ));
+            }
+        }
+    }
+
     if let Err(err) = child.start_kill() {
         return match child.try_wait() {
             Ok(Some(_)) => Ok(()),
@@ -1157,20 +1265,13 @@ impl Drop for StoppingCounterGuard {
     }
 }
 
-struct RunnerEndpointCleanupGuard {
-    path: PathBuf,
-}
+#[cfg(test)]
+static FAIL_KILL_AND_WAIT_FOR_PID: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 
-impl RunnerEndpointCleanupGuard {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
-}
-
-impl Drop for RunnerEndpointCleanupGuard {
-    fn drop(&mut self) {
-        remove_runner_endpoint_best_effort(&self.path);
-    }
+#[cfg(test)]
+fn inject_kill_and_wait_failure_for_pid(pid: u32) {
+    FAIL_KILL_AND_WAIT_FOR_PID.store(pid, Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -1250,6 +1351,26 @@ mod tests {
             path_len <= 107,
             "runner endpoint path must fit AF_UNIX limit: {path_len}"
         );
+    }
+
+    #[test]
+    fn manager_control_endpoint_path_too_long_is_rejected_before_bind() {
+        let root = PathBuf::from(format!("/tmp/iss-control-too-long-{}", "x".repeat(90)));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let err = match ServiceSupervisor::new(&root, 1, 1, 4096, 50) {
+            Ok(_) => panic!("too long manager control endpoint should be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(
+            err.message
+                .contains("manager control endpoint path is too long for AF_UNIX"),
+            "unexpected error message: {}",
+            err.message
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
@@ -1411,6 +1532,69 @@ mod tests {
         assert!(
             !runner_endpoint.exists(),
             "runner endpoint should be removed after force stop"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn stop_failure_reinserts_service_into_supervisor_state() {
+        let root = new_test_root("stop-reinsert");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+
+        let runner_endpoint = root
+            .join("runtime")
+            .join("ipc")
+            .join("runners")
+            .join("stop-reinsert.sock");
+        if let Some(parent) = runner_endpoint.parent() {
+            std::fs::create_dir_all(parent).expect("runner endpoint parent should be created");
+        }
+        std::fs::write(&runner_endpoint, b"stale")
+            .expect("runner endpoint fixture should be created");
+
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep process should spawn");
+        let pid = child.id().expect("child pid should be available");
+
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(
+                "svc-stop-reinsert".to_string(),
+                new_running_service(child, "runner-stop-reinsert", runner_endpoint.clone()),
+            );
+        }
+
+        inject_kill_and_wait_failure_for_pid(pid);
+        let err = supervisor
+            .stop("svc-stop-reinsert", true)
+            .await
+            .expect_err("forced stop should surface injected failure");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(
+            runner_endpoint.exists(),
+            "runner endpoint should remain on failed stop"
+        );
+
+        {
+            let inner = supervisor.inner.read().await;
+            let service = inner
+                .get("svc-stop-reinsert")
+                .expect("service should be reinserted after stop failure");
+            assert_eq!(service.status, RunningStatus::Running);
+        }
+
+        let retry = supervisor.stop("svc-stop-reinsert", true).await;
+        assert!(retry.is_ok(), "second force stop should succeed");
+        assert!(
+            !runner_endpoint.exists(),
+            "runner endpoint should be removed after successful stop"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1755,6 +1939,54 @@ mod tests {
         }
 
         drop(idle);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn manager_control_server_limits_concurrent_handlers() {
+        let root = new_test_root("control-limit");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 5, 4096, 50).expect("supervisor should initialize");
+        let mut idle_connections = Vec::new();
+
+        for _ in 0..MAX_MANAGER_CONTROL_CONNECTION_HANDLERS {
+            let stream = tokio::net::UnixStream::connect(&supervisor.manager_control_endpoint)
+                .await
+                .expect("idle connection should open");
+            idle_connections.push(stream);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let endpoint = supervisor.manager_control_endpoint.clone();
+        let request_task = tokio::spawn(async move {
+            DbusP2pTransport::call_control(
+                &endpoint,
+                &ControlRequest::Heartbeat {
+                    runner_id: "missing-runner".to_string(),
+                    manager_auth_proof: "proof".to_string(),
+                },
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !request_task.is_finished(),
+            "request should wait while all handler permits are consumed"
+        );
+
+        drop(idle_connections.pop());
+        let response = tokio::time::timeout(Duration::from_secs(2), request_task)
+            .await
+            .expect("request should complete after one permit is released")
+            .expect("request task should join")
+            .expect("call_control should return response");
+        match response {
+            ControlResponse::Error(err) => assert_eq!(err.code, ErrorCode::NotFound),
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        drop(idle_connections);
         let _ = std::fs::remove_dir_all(&root);
     }
 
