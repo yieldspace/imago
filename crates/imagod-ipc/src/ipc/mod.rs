@@ -20,6 +20,7 @@ pub mod dbus_p2p;
 
 const STAGE_IPC: &str = "ipc";
 const STAGE_TOKEN: &str = "ipc.token";
+const MAX_INVOCATION_TOKEN_CHARS: usize = 4096;
 type HmacSha256 = Hmac<Sha256>;
 
 #[allow(dead_code)]
@@ -238,6 +239,23 @@ pub fn compute_manager_auth_proof(
     compute_hmac_signature(&secret, runner_id.as_bytes())
 }
 
+/// Verifies manager-auth proof from secret and runner id using constant-time comparison.
+pub fn verify_manager_auth_proof(
+    secret_hex: &str,
+    runner_id: &str,
+    proof_hex: &str,
+) -> Result<(), ImagodError> {
+    let secret = decode_secret_hex(secret_hex)?;
+    verify_hmac_signature_hex(
+        &secret,
+        runner_id.as_bytes(),
+        proof_hex,
+        STAGE_IPC,
+        "manager auth proof decode failed",
+        "manager auth proof mismatch",
+    )
+}
+
 /// Issues a short-lived invocation token signed by the given secret.
 pub fn issue_invocation_token(
     secret_hex: &str,
@@ -261,6 +279,17 @@ pub fn verify_invocation_token(
     secret_hex: &str,
     token: &str,
 ) -> Result<InvocationTokenClaims, ImagodError> {
+    if token.len() > MAX_INVOCATION_TOKEN_CHARS {
+        return Err(ImagodError::new(
+            ErrorCode::Unauthorized,
+            STAGE_TOKEN,
+            format!(
+                "token is too large: {} chars (max {MAX_INVOCATION_TOKEN_CHARS})",
+                token.len()
+            ),
+        ));
+    }
+
     let secret = decode_secret_hex(secret_hex)?;
     let bytes = URL_SAFE_NO_PAD.decode(token).map_err(|e| {
         ImagodError::new(
@@ -277,14 +306,21 @@ pub fn verify_invocation_token(
         )
     })?;
 
-    let expected = compute_token_signature(&secret, &envelope.claims)?;
-    if envelope.signature != expected {
-        return Err(ImagodError::new(
-            ErrorCode::Unauthorized,
+    let claims_bytes = imago_protocol::to_cbor(&envelope.claims).map_err(|e| {
+        ImagodError::new(
+            ErrorCode::Internal,
             STAGE_TOKEN,
-            "token signature mismatch",
-        ));
-    }
+            format!("claims encode failed: {e}"),
+        )
+    })?;
+    verify_hmac_signature_hex(
+        &secret,
+        &claims_bytes,
+        &envelope.signature,
+        STAGE_TOKEN,
+        "token signature decode failed",
+        "token signature mismatch",
+    )?;
 
     if envelope.claims.exp <= now_unix_secs() {
         return Err(ImagodError::new(
@@ -321,6 +357,33 @@ fn compute_hmac_signature(secret: &[u8], payload: &[u8]) -> Result<String, Imago
     })?;
     mac.update(payload);
     Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+fn verify_hmac_signature_hex(
+    secret: &[u8],
+    payload: &[u8],
+    signature_hex: &str,
+    stage: &str,
+    decode_error_message: &str,
+    mismatch_message: &str,
+) -> Result<(), ImagodError> {
+    let provided = hex::decode(signature_hex).map_err(|e| {
+        ImagodError::new(
+            ErrorCode::Unauthorized,
+            stage,
+            format!("{decode_error_message}: {e}"),
+        )
+    })?;
+    let mut mac = HmacSha256::new_from_slice(secret).map_err(|e| {
+        ImagodError::new(
+            ErrorCode::Internal,
+            stage,
+            format!("hmac initialization failed: {e}"),
+        )
+    })?;
+    mac.update(payload);
+    mac.verify_slice(&provided)
+        .map_err(|_| ImagodError::new(ErrorCode::Unauthorized, stage, mismatch_message.to_string()))
 }
 
 fn decode_secret_hex(secret_hex: &str) -> Result<Vec<u8>, ImagodError> {
@@ -397,5 +460,34 @@ mod tests {
         let p1 = compute_manager_auth_proof(&secret, "runner-1").expect("proof should succeed");
         let p2 = compute_manager_auth_proof(&secret, "runner-1").expect("proof should succeed");
         assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn verify_manager_auth_proof_accepts_valid_proof() {
+        let secret = random_secret_hex();
+        let proof = compute_manager_auth_proof(&secret, "runner-1").expect("proof should succeed");
+        verify_manager_auth_proof(&secret, "runner-1", &proof).expect("valid proof should verify");
+    }
+
+    #[test]
+    fn verify_manager_auth_proof_rejects_invalid_and_malformed_proof() {
+        let secret = random_secret_hex();
+        let mismatch = verify_manager_auth_proof(&secret, "runner-1", "deadbeef")
+            .expect_err("mismatched proof should be rejected");
+        assert_eq!(mismatch.code, ErrorCode::Unauthorized);
+
+        let malformed = verify_manager_auth_proof(&secret, "runner-1", "not-hex")
+            .expect_err("malformed proof should be rejected");
+        assert_eq!(malformed.code, ErrorCode::Unauthorized);
+    }
+
+    #[test]
+    fn verify_invocation_token_rejects_oversized_token_before_decode() {
+        let secret = random_secret_hex();
+        let oversized = "a".repeat(MAX_INVOCATION_TOKEN_CHARS + 1);
+        let err = verify_invocation_token(&secret, &oversized)
+            .expect_err("oversized token should be rejected");
+        assert_eq!(err.code, ErrorCode::Unauthorized);
+        assert!(err.message.contains("too large"));
     }
 }

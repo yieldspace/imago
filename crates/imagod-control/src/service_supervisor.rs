@@ -16,7 +16,7 @@ use imagod_common::ImagodError;
 use imagod_ipc::{
     ControlRequest, ControlResponse, IpcErrorPayload, RunnerBootstrap, RunnerInboundRequest,
     ServiceBinding, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport, issue_invocation_token,
-    now_unix_secs, random_secret_hex,
+    now_unix_secs, random_secret_hex, verify_manager_auth_proof,
 };
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -994,16 +994,19 @@ async fn handle_control_connection(
 
 /// Validates manager proof generated from shared secret and runner id.
 fn validate_manager_auth(secret: &str, runner_id: &str, proof: &str) -> Result<(), ImagodError> {
-    let expected = compute_manager_auth_proof(secret, runner_id)?;
-    if expected == proof {
-        return Ok(());
+    match verify_manager_auth_proof(secret, runner_id, proof) {
+        Ok(()) => Ok(()),
+        Err(err) if err.code == ErrorCode::Unauthorized => Err(ImagodError::new(
+            ErrorCode::Unauthorized,
+            STAGE_CONTROL,
+            "manager auth proof mismatch",
+        )),
+        Err(err) => Err(ImagodError::new(
+            err.code,
+            STAGE_CONTROL,
+            format!("manager auth proof verification failed: {}", err.message),
+        )),
     }
-
-    Err(ImagodError::new(
-        ErrorCode::Unauthorized,
-        STAGE_CONTROL,
-        "manager auth proof mismatch",
-    ))
 }
 
 fn control_error(code: ErrorCode, message: impl Into<String>) -> ControlResponse {
@@ -1290,6 +1293,15 @@ mod tests {
         let err = validate_manager_auth(&secret, "runner-1", "invalid-proof")
             .expect_err("proof validation should fail");
         assert_eq!(err.code, ErrorCode::Unauthorized);
+    }
+
+    #[test]
+    fn manager_auth_validation_accepts_correct_proof() {
+        let secret = random_secret_hex();
+        let proof =
+            compute_manager_auth_proof(&secret, "runner-1").expect("proof should be generated");
+        validate_manager_auth(&secret, "runner-1", &proof)
+            .expect("proof validation should succeed");
     }
 
     #[tokio::test]

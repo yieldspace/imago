@@ -1,18 +1,21 @@
 //! Runner process bootstrap and inbound control loop.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{
     ControlRequest, ControlResponse, IpcErrorPayload, RunnerBootstrap, RunnerInboundRequest,
     RunnerInboundResponse, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
-    verify_invocation_token,
+    verify_invocation_token, verify_manager_auth_proof,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     net::{UnixListener, UnixStream},
-    sync::watch,
+    sync::{Semaphore, watch},
     task::JoinHandle,
     time::{self, Duration},
 };
@@ -24,6 +27,8 @@ const STAGE_SHUTDOWN: &str = "runner.shutdown";
 const STAGE_INBOUND: &str = "runner.inbound";
 const INBOUND_READ_TIMEOUT_SECS: u64 = 3;
 const INBOUND_ACCEPT_RETRY_BACKOFF_MS: u64 = 25;
+const HEARTBEAT_RPC_TIMEOUT_SECS: u64 = 2;
+const MAX_INBOUND_CONNECTION_HANDLERS: usize = 32;
 const MAX_RUNNER_BOOTSTRAP_BYTES: usize = 64 * 1024;
 const MAX_CONSECUTIVE_HEARTBEAT_FAILURES: u32 = 3;
 const STARTUP_CONFIRM_WINDOW: Duration = Duration::from_millis(200);
@@ -305,14 +310,27 @@ async fn send_heartbeats(
                 break;
             }
         };
-        let response = DbusP2pTransport::call_control(
-            &bootstrap.manager_control_endpoint,
-            &ControlRequest::Heartbeat {
-                runner_id: bootstrap.runner_id.clone(),
-                manager_auth_proof: proof,
-            },
+        let response = match time::timeout(
+            Duration::from_secs(HEARTBEAT_RPC_TIMEOUT_SECS),
+            DbusP2pTransport::call_control(
+                &bootstrap.manager_control_endpoint,
+                &ControlRequest::Heartbeat {
+                    runner_id: bootstrap.runner_id.clone(),
+                    manager_auth_proof: proof,
+                },
+            ),
         )
-        .await;
+        .await
+        {
+            Ok(response) => response,
+            Err(_) => Err(ImagodError::new(
+                ErrorCode::OperationTimeout,
+                STAGE_RUNNER,
+                format!(
+                    "runner heartbeat request timed out after {HEARTBEAT_RPC_TIMEOUT_SECS} seconds"
+                ),
+            )),
+        };
         if evaluate_heartbeat_result(response, &mut consecutive_failures)
             == HeartbeatDecision::Shutdown
         {
@@ -389,10 +407,27 @@ async fn run_inbound_server(
     shutdown_tx: watch::Sender<bool>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
+    let concurrency = Arc::new(Semaphore::new(MAX_INBOUND_CONNECTION_HANDLERS));
     loop {
+        let permit = tokio::select! {
+            acquired = concurrency.clone().acquire_owned() => {
+                match acquired {
+                    Ok(permit) => permit,
+                    Err(_) => break,
+                }
+            }
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    break;
+                }
+                continue;
+            }
+        };
+
         let accepted = tokio::select! {
             accepted = listener.accept() => accepted,
             changed = shutdown_rx.changed() => {
+                drop(permit);
                 if changed.is_err() || *shutdown_rx.borrow() {
                     break;
                 }
@@ -403,6 +438,7 @@ async fn run_inbound_server(
         let (mut stream, _) = match accepted {
             Ok(v) => v,
             Err(err) => {
+                drop(permit);
                 if should_retry_inbound_accept(&err) {
                     eprintln!("runner inbound accept transient error: {err}");
                     time::sleep(Duration::from_millis(INBOUND_ACCEPT_RETRY_BACKOFF_MS)).await;
@@ -416,6 +452,7 @@ async fn run_inbound_server(
         let bootstrap = bootstrap.clone();
         let shutdown_tx = shutdown_tx.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             handle_inbound_connection(&mut stream, bootstrap, shutdown_tx).await;
         });
     }
@@ -474,15 +511,18 @@ fn validate_shutdown_auth(
     runner_id: &str,
     manager_auth_proof: &str,
 ) -> Result<(), ImagodError> {
-    let expected = compute_manager_auth_proof(manager_auth_secret, runner_id)?;
-    if manager_auth_proof == expected {
-        Ok(())
-    } else {
-        Err(ImagodError::new(
+    match verify_manager_auth_proof(manager_auth_secret, runner_id, manager_auth_proof) {
+        Ok(()) => Ok(()),
+        Err(err) if err.code == ErrorCode::Unauthorized => Err(ImagodError::new(
             ErrorCode::Unauthorized,
             STAGE_SHUTDOWN,
             "manager auth proof mismatch",
-        ))
+        )),
+        Err(err) => Err(ImagodError::new(
+            err.code,
+            STAGE_SHUTDOWN,
+            format!("manager auth proof verification failed: {}", err.message),
+        )),
     }
 }
 
@@ -583,6 +623,7 @@ mod tests {
         path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
+    use tokio::sync::oneshot;
 
     use imagod_ipc::{RunnerInboundResponse, random_secret_hex};
 
@@ -665,6 +706,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_runner_accepts_valid_manager_auth_proof() {
+        let root = new_test_root("shutdown-auth-valid");
+        let bootstrap = new_test_bootstrap(&root, "runner.sock");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let manager_auth_proof =
+            compute_manager_auth_proof(&bootstrap.manager_auth_secret, &bootstrap.runner_id)
+                .expect("manager proof should compute");
+        let response = handle_inbound_request(
+            &bootstrap,
+            RunnerInboundRequest::ShutdownRunner { manager_auth_proof },
+            &shutdown_tx,
+        )
+        .await;
+
+        assert!(
+            matches!(response, RunnerInboundResponse::Ack),
+            "valid auth should be accepted"
+        );
+        assert!(*shutdown_rx.borrow(), "shutdown signal should be requested");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
     async fn inbound_server_keeps_accepting_when_first_connection_stalls() {
         let root = new_test_root("inbound-hol");
         let bootstrap = new_test_bootstrap(&root, "runner.sock");
@@ -714,6 +780,51 @@ mod tests {
             .expect("server task should join cleanly");
 
         let _ = std::fs::remove_file(&bootstrap.runner_endpoint);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_task_can_shutdown_while_manager_never_responds() {
+        let root = new_test_root("heartbeat-timeout");
+        let bootstrap = new_test_bootstrap(&root, "runner-timeout.sock");
+        if let Some(parent) = bootstrap.manager_control_endpoint.parent() {
+            std::fs::create_dir_all(parent).expect("manager control parent should be created");
+        }
+        let _ = std::fs::remove_file(&bootstrap.manager_control_endpoint);
+        let listener =
+            UnixListener::bind(&bootstrap.manager_control_endpoint).expect("listener should bind");
+
+        let (accepted_tx, accepted_rx) = oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept should succeed");
+            let _ = accepted_tx.send(());
+            let _ = DbusP2pTransport::read_message::<ControlRequest>(&mut stream).await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let heartbeat_task = tokio::spawn(send_heartbeats(
+            bootstrap.clone(),
+            shutdown_tx.clone(),
+            shutdown_rx,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(2), accepted_rx)
+            .await
+            .expect("heartbeat should connect manager socket")
+            .expect("accept signal should be sent");
+
+        let _ = shutdown_tx.send(true);
+        tokio::time::timeout(
+            Duration::from_secs(HEARTBEAT_RPC_TIMEOUT_SECS + 2),
+            heartbeat_task,
+        )
+        .await
+        .expect("heartbeat task should finish after timeout")
+        .expect("heartbeat task should join");
+
+        server_task.abort();
+        let _ = std::fs::remove_file(&bootstrap.manager_control_endpoint);
         let _ = std::fs::remove_dir_all(&root);
     }
     #[test]
