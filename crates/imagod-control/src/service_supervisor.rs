@@ -836,7 +836,9 @@ async fn handle_control_request(
                 return control_error(ErrorCode::BadRequest, "register_runner metadata mismatch");
             }
 
-            service.runner_endpoint = runner_endpoint;
+            if service.runner_endpoint != runner_endpoint {
+                return control_error(ErrorCode::BadRequest, "register_runner endpoint mismatch");
+            }
             service.last_heartbeat_at = now_unix_secs().to_string();
             ControlResponse::Ack
         }
