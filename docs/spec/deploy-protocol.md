@@ -32,6 +32,14 @@
 - `command.start` は同一 stream 上で `command.start response` と `command.event*` を返す（response/event は複数可）。
 - request envelope が複数ある stream は `E_BAD_REQUEST` で拒否する。
 
+### 2.2 DATAGRAM 設定
+
+- `logs` 本文転送は QUIC DATAGRAM を使用する。
+- サーバ/クライアントとも `quinn::TransportConfig` で DATAGRAM バッファを明示設定する。
+  - `datagram_send_buffer_size = 1MiB`
+  - `datagram_receive_buffer_size = Some(1MiB)`
+- `logs.chunk` payload は `Session::max_datagram_size()` と実装上限（目安 1024 bytes）を同時に満たすサイズで分割送信する。
+
 ## 3. 共通封筒（ProtocolEnvelope）
 
 wire 上の共通形:
@@ -255,6 +263,42 @@ response:
 - 起動後（spawn 後、operation が残っている間）は `cancellable=false`。
 - 終端後（operation 削除後）は `E_NOT_FOUND`。
 
+### 5.9 `logs.request` / `logs.chunk` / `logs.end`
+
+`logs.request` request:
+
+- `process_id: Option<String>`
+- `follow: bool`
+- `tail_lines: u32`
+
+制約:
+
+- `process_id=None` は「リクエスト時点で running の全サービス」を対象とする。
+- 全サービス購読では `tail_lines` は各サービス単位で適用する。
+- 受理前エラー（対象未存在・未起動など）は stream 応答の `error` で返す。
+
+`logs.chunk` datagram payload:
+
+- `request_id`
+- `seq`
+- `process_id`
+- `stream_kind` (`stdout` / `stderr` / `composite`)
+- `bytes`
+- `is_last`
+
+`logs.end` datagram payload:
+
+- `request_id`
+- `seq`
+- `error`（任意）
+
+運用ルール:
+
+- `logs.request` 自体は stream で ACK を返し、ログ本文は DATAGRAM のみで送る。
+- `seq` は欠損検知専用であり、再送制御は行わない。
+- `follow=false` は `logs.end`（または `is_last`）で終端する。
+- `follow=true` は明示中断または配信側終了時に `logs.end` を受けて終端する。
+
 ## 6. 状態遷移
 
 `accepted -> running -> succeeded | failed | canceled`
@@ -316,3 +360,9 @@ response:
 
 - `imagod` 実装を複数 crate へ分割したが、本仕様の wire 契約は変更しない。
 - 変更は `imagod` 内部モジュール境界の再編のみであり、`MessageType` と payload schema は不変。
+
+## 実装反映ノート（Issue #31 / 2026-02-13）
+
+- `imago logs` の本文転送を stream から DATAGRAM へ移し、`logs.request`（stream）+ `logs.chunk`/`logs.end`（DATAGRAM）へ分離した。
+- `process_id=None` を全サービス購読として定義し、対象はリクエスト時点の running サービスに固定した。
+- `seq` は欠損検知のみとし、再送や順序補正は導入しない。

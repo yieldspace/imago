@@ -30,6 +30,12 @@ pub enum MessageType {
     StateResponse,
     #[serde(rename = "command.cancel")]
     CommandCancel,
+    #[serde(rename = "logs.request")]
+    LogsRequest,
+    #[serde(rename = "logs.chunk")]
+    LogsChunk,
+    #[serde(rename = "logs.end")]
+    LogsEnd,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,6 +459,95 @@ impl Validate for CommandCancelResponse {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogRequest {
+    pub process_id: Option<String>,
+    pub follow: bool,
+    pub tail_lines: u32,
+}
+
+impl Validate for LogRequest {
+    fn validate(&self) -> Result<(), ValidationError> {
+        if let Some(process_id) = self.process_id.as_deref() {
+            ensure_non_empty(process_id, "process_id")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LogStreamKind {
+    #[serde(rename = "stdout")]
+    Stdout,
+    #[serde(rename = "stderr")]
+    Stderr,
+    #[serde(rename = "composite")]
+    Composite,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogChunk {
+    pub request_id: Uuid,
+    pub seq: u64,
+    pub process_id: String,
+    pub stream_kind: LogStreamKind,
+    pub bytes: Vec<u8>,
+    pub is_last: bool,
+}
+
+impl Validate for LogChunk {
+    fn validate(&self) -> Result<(), ValidationError> {
+        ensure_uuid_not_nil(&self.request_id, "request_id")?;
+        ensure_non_empty(&self.process_id, "process_id")?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LogErrorCode {
+    #[serde(rename = "process_not_found")]
+    ProcessNotFound,
+    #[serde(rename = "process_not_running")]
+    ProcessNotRunning,
+    #[serde(rename = "permission_denied")]
+    PermissionDenied,
+    #[serde(rename = "internal")]
+    Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogError {
+    pub code: LogErrorCode,
+    pub message: String,
+}
+
+impl Validate for LogError {
+    fn validate(&self) -> Result<(), ValidationError> {
+        ensure_non_empty(&self.message, "message")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogEnd {
+    pub request_id: Uuid,
+    pub seq: u64,
+    pub error: Option<LogError>,
+}
+
+impl Validate for LogEnd {
+    fn validate(&self) -> Result<(), ValidationError> {
+        ensure_uuid_not_nil(&self.request_id, "request_id")?;
+        if let Some(error) = &self.error {
+            error.validate()?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -808,5 +903,66 @@ mod tests {
             .expect("encoding should succeed");
         let decoded = from_cbor::<CommandCancelResponse>(&encoded);
         assert!(decoded.is_err());
+    }
+
+    #[test]
+    fn log_request_accepts_optional_process_id() {
+        let all = LogRequest {
+            process_id: None,
+            follow: false,
+            tail_lines: 0,
+        };
+        assert!(all.validate().is_ok());
+
+        let named = LogRequest {
+            process_id: Some("svc-a".to_string()),
+            follow: true,
+            tail_lines: 200,
+        };
+        assert!(named.validate().is_ok());
+
+        let encoded = to_cbor(&named).expect("encoding should succeed");
+        let decoded = from_cbor::<LogRequest>(&encoded).expect("decoding should succeed");
+        assert_eq!(decoded, named);
+    }
+
+    #[test]
+    fn log_chunk_requires_request_id_and_process_id() {
+        let invalid = LogChunk {
+            request_id: Uuid::nil(),
+            seq: 1,
+            process_id: "".to_string(),
+            stream_kind: LogStreamKind::Stdout,
+            bytes: b"abc".to_vec(),
+            is_last: false,
+        };
+        assert!(invalid.validate().is_err());
+
+        let valid = LogChunk {
+            request_id: sample_request_id(),
+            seq: 2,
+            process_id: "svc-a".to_string(),
+            stream_kind: LogStreamKind::Composite,
+            bytes: b"line\n".to_vec(),
+            is_last: true,
+        };
+        assert!(valid.validate().is_ok());
+    }
+
+    #[test]
+    fn log_end_round_trip_with_error() {
+        let end = LogEnd {
+            request_id: sample_request_id(),
+            seq: 10,
+            error: Some(LogError {
+                code: LogErrorCode::ProcessNotRunning,
+                message: "service is not running".to_string(),
+            }),
+        };
+
+        end.validate().expect("log end should be valid");
+        let encoded = to_cbor(&end).expect("encoding should succeed");
+        let decoded = from_cbor::<LogEnd>(&encoded).expect("decoding should succeed");
+        assert_eq!(decoded, end);
     }
 }

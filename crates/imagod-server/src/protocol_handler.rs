@@ -12,18 +12,24 @@ use std::{
 use imago_protocol::{
     ArtifactPushRequest, CommandCancelRequest, CommandEvent, CommandEventType, CommandPayload,
     CommandStartRequest, CommandStartResponse, CommandState, CommandType, DeployPrepareRequest,
-    MessageType, ProtocolEnvelope, StateRequest, StructuredError, Validate, from_cbor, to_cbor,
+    LogChunk, LogEnd, LogError, LogErrorCode, LogRequest, LogStreamKind, MessageType,
+    ProtocolEnvelope, StateRequest, StructuredError, Validate, from_cbor, to_cbor,
 };
 use imagod_common::ImagodError;
 use imagod_config::ImagodConfig;
-use imagod_control::{ArtifactStore, OperationManager, Orchestrator, SpawnTransition};
+use imagod_control::{
+    ArtifactStore, OperationManager, Orchestrator, ServiceLogEvent, ServiceLogStream,
+    ServiceLogSubscription, SpawnTransition,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 use web_transport_quinn::{SendStream, Session};
 
 const MAX_STREAM_BYTES: usize = 1024 * 1024 * 16;
 const STREAM_READ_TIMEOUT_SECS: u64 = 30;
+const LOG_DATAGRAM_TARGET_BYTES: usize = 1024;
 
 /// JSON-backed envelope type used by stream decode/encode flow.
 type Envelope = ProtocolEnvelope<Value>;
@@ -127,6 +133,22 @@ impl ProtocolHandler {
                 finish_stream(&mut send)?;
                 continue;
             }
+            if request.message_type == MessageType::LogsRequest {
+                if let Err(err) = self
+                    .handle_logs_request(session.clone(), request.clone(), &mut send)
+                    .await
+                {
+                    let response = error_envelope(
+                        MessageType::LogsRequest,
+                        request.request_id,
+                        request.correlation_id,
+                        err.to_structured(),
+                    );
+                    write_envelope(&mut send, &response).await?;
+                }
+                finish_stream(&mut send)?;
+                continue;
+            }
 
             let response = match self.handle_single(request.clone()).await {
                 Ok(resp) => resp,
@@ -218,6 +240,9 @@ impl ProtocolHandler {
                     "command.event".to_string(),
                     "state.request".to_string(),
                     "command.cancel".to_string(),
+                    "logs.request".to_string(),
+                    "logs.chunk".to_string(),
+                    "logs.end".to_string(),
                 ],
                 limits,
             },
@@ -298,6 +323,74 @@ impl ProtocolHandler {
             request.correlation_id,
             &response,
         )
+    }
+
+    /// Handles `logs.request`, returns stream ACK and starts datagram forwarding.
+    async fn handle_logs_request(
+        &self,
+        session: Session,
+        request: Envelope,
+        send: &mut SendStream,
+    ) -> Result<(), ImagodError> {
+        let payload: LogRequest = payload_as(&request)?;
+        payload
+            .validate()
+            .map_err(|e| bad_request("logs.request", e.to_string()))?;
+
+        let service_names = match payload.process_id {
+            Some(process_id) => vec![process_id],
+            None => {
+                let names = self.orchestrator.running_service_names().await;
+                if names.is_empty() {
+                    return Err(ImagodError::new(
+                        imago_protocol::ErrorCode::NotFound,
+                        "logs.request",
+                        "no running services are available",
+                    ));
+                }
+                names
+            }
+        };
+
+        let mut subscriptions = Vec::with_capacity(service_names.len());
+        for service_name in &service_names {
+            let subscription = self
+                .orchestrator
+                .open_logs(service_name, payload.tail_lines, payload.follow)
+                .await?;
+            subscriptions.push(subscription);
+        }
+
+        #[derive(Serialize)]
+        struct LogsRequestAck {
+            accepted: bool,
+            process_ids: Vec<String>,
+            follow: bool,
+        }
+
+        let ack = response_envelope(
+            MessageType::LogsRequest,
+            request.request_id,
+            request.correlation_id,
+            &LogsRequestAck {
+                accepted: true,
+                process_ids: service_names,
+                follow: payload.follow,
+            },
+        )?;
+        write_envelope(send, &ack).await?;
+
+        tokio::spawn(async move {
+            run_logs_forwarder(
+                session,
+                request.request_id,
+                request.correlation_id,
+                subscriptions,
+            )
+            .await;
+        });
+
+        Ok(())
     }
 
     /// Handles `command.start` and emits accepted/progress/terminal events.
@@ -462,6 +555,315 @@ impl ProtocolHandler {
         }
 
         Ok(())
+    }
+}
+
+async fn run_logs_forwarder(
+    session: Session,
+    request_id: Uuid,
+    correlation_id: Uuid,
+    subscriptions: Vec<ServiceLogSubscription>,
+) {
+    if subscriptions.is_empty() {
+        return;
+    }
+
+    let max_datagram_size = session.max_datagram_size();
+    let fallback_process_id = subscriptions[0].service_name.clone();
+    let mut seq = 0u64;
+    let mut last_process_id: Option<String> = None;
+
+    let stream_result = stream_logs_datagrams(
+        &session,
+        request_id,
+        correlation_id,
+        max_datagram_size,
+        subscriptions,
+        &mut seq,
+        &mut last_process_id,
+    )
+    .await;
+
+    match stream_result {
+        Ok(()) => {
+            let terminal_process = last_process_id.unwrap_or(fallback_process_id);
+            let _ = send_single_log_chunk(
+                &session,
+                request_id,
+                correlation_id,
+                max_datagram_size,
+                &mut seq,
+                &terminal_process,
+                LogStreamKind::Composite,
+                Vec::new(),
+                true,
+            );
+            let _ = send_logs_end_datagram(
+                &session,
+                request_id,
+                correlation_id,
+                max_datagram_size,
+                seq,
+                None,
+            );
+        }
+        Err(err) => {
+            let _ = send_logs_end_datagram(
+                &session,
+                request_id,
+                correlation_id,
+                max_datagram_size,
+                seq,
+                Some(log_error_from_imagod_error(&err)),
+            );
+        }
+    }
+}
+
+async fn stream_logs_datagrams(
+    session: &Session,
+    request_id: Uuid,
+    correlation_id: Uuid,
+    max_datagram_size: usize,
+    subscriptions: Vec<ServiceLogSubscription>,
+    seq: &mut u64,
+    last_process_id: &mut Option<String>,
+) -> Result<(), ImagodError> {
+    for subscription in &subscriptions {
+        send_log_data_chunks(
+            session,
+            request_id,
+            correlation_id,
+            max_datagram_size,
+            seq,
+            &subscription.service_name,
+            LogStreamKind::Composite,
+            &subscription.snapshot_bytes,
+            last_process_id,
+        )?;
+    }
+
+    let mut follow_targets = subscriptions
+        .into_iter()
+        .filter_map(|subscription| {
+            subscription
+                .receiver
+                .map(|receiver| (subscription.service_name, receiver))
+        })
+        .collect::<Vec<_>>();
+    if follow_targets.is_empty() {
+        return Ok(());
+    }
+
+    let (tx, mut rx) = mpsc::channel::<(String, ServiceLogEvent)>(128);
+    for (service_name, mut receiver) in follow_targets.drain(..) {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(event) => {
+                        if tx.send((service_name.clone(), event)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+    drop(tx);
+
+    while let Some((service_name, event)) = rx.recv().await {
+        send_log_data_chunks(
+            session,
+            request_id,
+            correlation_id,
+            max_datagram_size,
+            seq,
+            &service_name,
+            service_log_stream_to_protocol(event.stream),
+            &event.bytes,
+            last_process_id,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn send_log_data_chunks(
+    session: &Session,
+    request_id: Uuid,
+    correlation_id: Uuid,
+    max_datagram_size: usize,
+    seq: &mut u64,
+    process_id: &str,
+    stream_kind: LogStreamKind,
+    bytes: &[u8],
+    last_process_id: &mut Option<String>,
+) -> Result<(), ImagodError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let chunk_budget = log_chunk_budget(
+        request_id,
+        correlation_id,
+        *seq,
+        process_id,
+        stream_kind,
+        max_datagram_size,
+    )?;
+
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let end = bytes.len().min(offset.saturating_add(chunk_budget));
+        send_single_log_chunk(
+            session,
+            request_id,
+            correlation_id,
+            max_datagram_size,
+            seq,
+            process_id,
+            stream_kind,
+            bytes[offset..end].to_vec(),
+            false,
+        )?;
+        *last_process_id = Some(process_id.to_string());
+        offset = end;
+    }
+
+    Ok(())
+}
+
+fn send_single_log_chunk(
+    session: &Session,
+    request_id: Uuid,
+    correlation_id: Uuid,
+    max_datagram_size: usize,
+    seq: &mut u64,
+    process_id: &str,
+    stream_kind: LogStreamKind,
+    bytes: Vec<u8>,
+    is_last: bool,
+) -> Result<(), ImagodError> {
+    let chunk = LogChunk {
+        request_id,
+        seq: *seq,
+        process_id: process_id.to_string(),
+        stream_kind,
+        bytes,
+        is_last,
+    };
+    let envelope = response_envelope(MessageType::LogsChunk, request_id, correlation_id, &chunk)?;
+    send_datagram_envelope(session, &envelope, max_datagram_size)?;
+    *seq = seq.saturating_add(1);
+    Ok(())
+}
+
+fn send_logs_end_datagram(
+    session: &Session,
+    request_id: Uuid,
+    correlation_id: Uuid,
+    max_datagram_size: usize,
+    seq: u64,
+    error: Option<LogError>,
+) -> Result<(), ImagodError> {
+    let end = LogEnd {
+        request_id,
+        seq,
+        error,
+    };
+    let envelope = response_envelope(MessageType::LogsEnd, request_id, correlation_id, &end)?;
+    send_datagram_envelope(session, &envelope, max_datagram_size)
+}
+
+fn send_datagram_envelope(
+    session: &Session,
+    envelope: &Envelope,
+    max_datagram_size: usize,
+) -> Result<(), ImagodError> {
+    let bytes = to_cbor(envelope).map_err(|e| {
+        ImagodError::new(
+            imago_protocol::ErrorCode::Internal,
+            "logs.datagram",
+            format!("failed to encode datagram payload: {e}"),
+        )
+    })?;
+    if bytes.len() > max_datagram_size {
+        return Err(ImagodError::new(
+            imago_protocol::ErrorCode::Internal,
+            "logs.datagram",
+            format!(
+                "datagram payload too large: size={} max={}",
+                bytes.len(),
+                max_datagram_size
+            ),
+        ));
+    }
+    session.send_datagram(bytes.into()).map_err(|e| {
+        ImagodError::new(
+            imago_protocol::ErrorCode::Internal,
+            "logs.datagram",
+            format!("failed to send datagram: {e}"),
+        )
+    })
+}
+
+fn log_chunk_budget(
+    request_id: Uuid,
+    correlation_id: Uuid,
+    seq: u64,
+    process_id: &str,
+    stream_kind: LogStreamKind,
+    max_datagram_size: usize,
+) -> Result<usize, ImagodError> {
+    let probe = LogChunk {
+        request_id,
+        seq,
+        process_id: process_id.to_string(),
+        stream_kind,
+        bytes: Vec::new(),
+        is_last: false,
+    };
+    let envelope = response_envelope(MessageType::LogsChunk, request_id, correlation_id, &probe)?;
+    let overhead = to_cbor(&envelope).map_err(|e| {
+        bad_request(
+            "logs.datagram",
+            format!("failed to encode datagram probe: {e}"),
+        )
+    })?;
+    if overhead.len() + 1 > max_datagram_size {
+        return Err(ImagodError::new(
+            imago_protocol::ErrorCode::Internal,
+            "logs.datagram",
+            "datagram size is too small for logs payload",
+        ));
+    }
+
+    let budget = max_datagram_size
+        .saturating_sub(overhead.len().saturating_add(32))
+        .max(1)
+        .min(LOG_DATAGRAM_TARGET_BYTES);
+    Ok(budget)
+}
+
+fn service_log_stream_to_protocol(stream: ServiceLogStream) -> LogStreamKind {
+    match stream {
+        ServiceLogStream::Stdout => LogStreamKind::Stdout,
+        ServiceLogStream::Stderr => LogStreamKind::Stderr,
+    }
+}
+
+fn log_error_from_imagod_error(err: &ImagodError) -> LogError {
+    let code = match err.code {
+        imago_protocol::ErrorCode::NotFound => LogErrorCode::ProcessNotFound,
+        imago_protocol::ErrorCode::Unauthorized => LogErrorCode::PermissionDenied,
+        _ => LogErrorCode::Internal,
+    };
+
+    LogError {
+        code,
+        message: err.message.clone(),
     }
 }
 
@@ -730,13 +1132,15 @@ mod tests {
         ImagodError, OperationManager, ensure_command_start_allowed,
         ensure_command_start_request_id_match, ensure_non_nil_envelope_ids,
         ensure_single_request_envelope, finalize_operation_after_terminal_event,
-        is_compatible_date_match, read_stream_with_timeout, response_message_type_for_request,
-        stream_read_timeout_error, validate_push_payload,
+        is_compatible_date_match, log_chunk_budget, log_error_from_imagod_error,
+        read_stream_with_timeout, response_message_type_for_request,
+        service_log_stream_to_protocol, stream_read_timeout_error, validate_push_payload,
     };
     use imago_protocol::{
         ArtifactPushChunkHeader, ArtifactPushRequest, CommandState, CommandType, ErrorCode,
-        MessageType, ProtocolEnvelope,
+        LogErrorCode, LogStreamKind, MessageType, ProtocolEnvelope,
     };
+    use imagod_control::ServiceLogStream;
     use serde_json::Value;
     use std::{sync::atomic::AtomicBool, time::Duration};
     use uuid::Uuid;
@@ -892,6 +1296,44 @@ mod tests {
         assert!(
             snapshot.is_err(),
             "operation should be removed after finalize"
+        );
+    }
+
+    #[test]
+    fn log_chunk_budget_is_bounded_by_target_size() {
+        let budget = log_chunk_budget(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            0,
+            "svc-a",
+            LogStreamKind::Composite,
+            1200,
+        )
+        .expect("budget should be computed");
+        assert!(budget <= 1024);
+        assert!(budget > 0);
+    }
+
+    #[test]
+    fn log_error_mapping_preserves_common_error_kinds() {
+        let not_found = ImagodError::new(ErrorCode::NotFound, "logs", "missing service");
+        let mapped_not_found = log_error_from_imagod_error(&not_found);
+        assert_eq!(mapped_not_found.code, LogErrorCode::ProcessNotFound);
+
+        let unauthorized = ImagodError::new(ErrorCode::Unauthorized, "logs", "denied");
+        let mapped_unauthorized = log_error_from_imagod_error(&unauthorized);
+        assert_eq!(mapped_unauthorized.code, LogErrorCode::PermissionDenied);
+    }
+
+    #[test]
+    fn service_log_stream_maps_to_protocol_stream_kind() {
+        assert_eq!(
+            service_log_stream_to_protocol(ServiceLogStream::Stdout),
+            LogStreamKind::Stdout
+        );
+        assert_eq!(
+            service_log_stream_to_protocol(ServiceLogStream::Stderr),
+            LogStreamKind::Stderr
         );
     }
 }

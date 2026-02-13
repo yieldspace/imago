@@ -11,7 +11,7 @@
 
 - CBOR エンコード/デコード API（`to_cbor` / `from_cbor`）
 - 共通封筒型 `ProtocolEnvelope<T>`
-- deploy/command/state/cancel 各メッセージの型定義
+- deploy/command/state/cancel/logs 各メッセージの型定義
 - 構造化エラー `StructuredError` と `ErrorCode`
 - バリデーション契約 `Validate`
 
@@ -51,6 +51,9 @@
 - `command.start` は `command_type` と `payload` の組み合わせ一致を必須とする。
 - `state.request` の応答メッセージ種別は `state.response`。
 - `state.response.state` は `accepted`/`running` のみ許可し、terminal state を禁止する。
+- `logs.request` は `process_id: Option<String>` を持ち、`None` は「現在稼働中の全サービス」を意味する。
+- `logs.chunk` は DATAGRAM 用 payload であり、`seq` は欠損検知用（再送制御なし）として扱う。
+- `logs.end` はログ購読の終端メッセージで、配信開始後の異常は `error` に格納する。
 - `StructuredError.details` は `BTreeMap<String, String>`。
 
 ## 関連仕様
@@ -59,3 +62,9 @@
 - 観測仕様: [`observability.md`](./observability.md)
 - `imagod` 概要: [`imagod.md`](./imagod.md)
 - `imago-protocol` 内部詳細: [`imago-protocol-internals.md`](./imago-protocol-internals.md)
+
+## 実装反映ノート（Issue #31 / 2026-02-13）
+
+- `MessageType` に `logs.request` / `logs.chunk` / `logs.end` を追加した。
+- `LogRequest` / `LogChunk` / `LogEnd` / `LogError` / `LogStreamKind` を公開 API として追加した。
+- `logs` 本文転送は DATAGRAM 前提で、順序保証なし・欠損許容（`seq` で検知のみ）を前提とする。

@@ -42,8 +42,9 @@ const TRANSPORT_CONNECT_STAGE: &str = "transport.connect";
 const UPLOAD_MAX_ATTEMPTS: usize = 4;
 const UPLOAD_RETRY_BASE_BACKOFF_MS: u64 = 250;
 const UPLOAD_RETRY_MAX_BACKOFF_MS: u64 = 1000;
+const DATAGRAM_BUFFER_BYTES: usize = 1024 * 1024;
 
-type Envelope = ProtocolEnvelope<Value>;
+pub(crate) type Envelope = ProtocolEnvelope<Value>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct UploadLimits {
@@ -497,7 +498,7 @@ fn contains_unauthorized_marker(err: &anyhow::Error) -> bool {
         .any(|cause| cause.to_string().contains("E_UNAUTHORIZED"))
 }
 
-async fn connect_target(target: &build::DeployTargetConfig) -> anyhow::Result<Session> {
+pub(crate) async fn connect_target(target: &build::DeployTargetConfig) -> anyhow::Result<Session> {
     let ca_chain = load_certs(&target.ca_cert)?;
     let client_chain = load_certs(&target.client_cert)?;
     let client_key = load_private_key(&target.client_key)?;
@@ -518,7 +519,11 @@ async fn connect_target(target: &build::DeployTargetConfig) -> anyhow::Result<Se
     tls.alpn_protocols = vec![web_transport_quinn::ALPN.as_bytes().to_vec()];
 
     let quic_tls = quinn::crypto::rustls::QuicClientConfig::try_from(tls)?;
-    let quic_config = quinn::ClientConfig::new(Arc::new(quic_tls));
+    let mut quic_config = quinn::ClientConfig::new(Arc::new(quic_tls));
+    let mut transport = quinn::TransportConfig::default();
+    transport.datagram_send_buffer_size(DATAGRAM_BUFFER_BYTES);
+    transport.datagram_receive_buffer_size(Some(DATAGRAM_BUFFER_BYTES));
+    quic_config.transport_config(Arc::new(transport));
     let endpoint = create_client_endpoint()?;
 
     let endpoint_info = parse_remote_endpoint(&target.remote).await?;
@@ -746,7 +751,7 @@ fn format_host_for_url(host: &str) -> String {
     }
 }
 
-fn request_envelope<T: Serialize>(
+pub(crate) fn request_envelope<T: Serialize>(
     message_type: MessageType,
     request_id: Uuid,
     correlation_id: Uuid,
@@ -779,7 +784,7 @@ fn build_command_start_envelope(
     )
 }
 
-async fn request_response(
+pub(crate) async fn request_response(
     session: &web_transport_quinn::Session,
     envelope: &Envelope,
 ) -> anyhow::Result<Envelope> {
@@ -974,7 +979,9 @@ async fn push_single_artifact_chunk(
     Ok(())
 }
 
-fn response_payload<T: serde::de::DeserializeOwned>(response: Envelope) -> anyhow::Result<T> {
+pub(crate) fn response_payload<T: serde::de::DeserializeOwned>(
+    response: Envelope,
+) -> anyhow::Result<T> {
     if let Some(error) = response.error {
         return Err(ServerResponseError { error }.into());
     }

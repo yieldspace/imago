@@ -100,6 +100,9 @@
   - `state.request`
   - `state.response`
   - `command.cancel`
+  - `logs.request`
+  - `logs.chunk`
+  - `logs.end`
 - `ArtifactStatus`: `missing` / `partial` / `complete`
 - `CommandType`: `deploy` / `run` / `stop`
 - `CommandEventType`: `accepted` / `progress` / `succeeded` / `failed` / `canceled`
@@ -296,6 +299,66 @@
 - `cancellable: bool`
 - `final_state: CommandState`
 
+### 6.6 logs
+
+`LogRequest`:
+
+- `process_id: Option<String>`
+- `follow: bool`
+- `tail_lines: u32`
+
+`Validate`:
+
+- `process_id=Some` の場合のみ非空文字列を必須化
+- `tail_lines=0` は許可（snapshot なし）
+
+`LogStreamKind`:
+
+- `stdout`
+- `stderr`
+- `composite`
+
+`LogChunk`:
+
+- `request_id: Uuid`
+- `seq: u64`
+- `process_id: String`
+- `stream_kind: LogStreamKind`
+- `bytes: Vec<u8>`
+- `is_last: bool`
+
+`Validate`:
+
+- `request_id` nil UUID 禁止
+- `process_id` 非空
+
+`LogErrorCode`:
+
+- `process_not_found`
+- `process_not_running`
+- `permission_denied`
+- `internal`
+
+`LogError`:
+
+- `code: LogErrorCode`
+- `message: String`
+
+`Validate`:
+
+- `message` 非空
+
+`LogEnd`:
+
+- `request_id: Uuid`
+- `seq: u64`
+- `error: Option<LogError>`
+
+`Validate`:
+
+- `request_id` nil UUID 禁止
+- `error` がある場合は `LogError.validate()` 成功必須
+
 ## 7. Validate 基盤（`validate.rs`）
 
 `ValidationError`:
@@ -318,6 +381,11 @@
 主なテスト群:
 
 - `messages.rs`
+
+## 実装反映ノート（Issue #31 / 2026-02-13）
+
+- `messages.rs` に logs 用 payload 型を追加し、`lib.rs` で再 export した。
+- logs payload は DATAGRAM 前提のため `seq` を明示し、欠損検知のみ可能な設計を採用した。
   - `hello_negotiate_round_trip_and_validate`
   - `command_start_rejects_payload_command_mismatch`
   - `state_response_rejects_terminal_states`
