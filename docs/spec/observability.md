@@ -111,6 +111,7 @@ operation が存在しない場合の扱い:
 ### 9.2 payload 契約
 
 - `logs.chunk.seq` は request 単位で単調増加し、欠損検知専用とする。
+- follow 配信で内部購読が `Lagged` になった場合、サーバは欠落分の `seq` を前進させて欠損を可視化する（欠落 chunk 自体は再送しない）。
 - `logs.chunk.is_last=true` は最終データチャンクを示す。
 - `logs.end` は購読終端を示し、配信開始後の異常は `logs.end.error` で返す。
 
@@ -137,3 +138,8 @@ operation が存在しない場合の扱い:
 - `logs.request` は stream、`logs.chunk` / `logs.end` は DATAGRAM で扱う契約へ拡張した。
 - `seq` ギャップは欠損検知のみを目的とし、再送制御は行わない。
 - `process_id=None` の全サービス購読は「現在 running のみ・後起動は非対象」と定義した。
+
+## 実装反映ノート（PR #145 follow-up / 2026-02-13）
+
+- follow 配信中に内部 `broadcast` が `Lagged` した場合、サーバは `seq` を前進させてクライアント側の欠損警告を可能にした。
+- 欠落ログの再送制御は追加せず、必要時は `--tail` を使った再購読で補う方針を維持する。

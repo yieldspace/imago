@@ -296,6 +296,7 @@ response:
 
 - `logs.request` 自体は stream で ACK を返し、ログ本文は DATAGRAM のみで送る。
 - `seq` は欠損検知専用であり、再送制御は行わない。
+- follow 配信で内部購読が `Lagged` した場合、サーバは `seq` を前進させて欠損をクライアントへ通知する（欠落 chunk は送られない）。
 - `follow=false` は `logs.end`（または `is_last`）で終端する。
 - `follow=true` は明示中断または配信側終了時に `logs.end` を受けて終端する。
 
@@ -366,3 +367,8 @@ response:
 - `imago logs` の本文転送を stream から DATAGRAM へ移し、`logs.request`（stream）+ `logs.chunk`/`logs.end`（DATAGRAM）へ分離した。
 - `process_id=None` を全サービス購読として定義し、対象はリクエスト時点の running サービスに固定した。
 - `seq` は欠損検知のみとし、再送や順序補正は導入しない。
+
+## 実装反映ノート（PR #145 follow-up / 2026-02-13）
+
+- follow 配信中に内部 `broadcast` が `Lagged` した場合、欠落を隠蔽しないため `seq` を前進させる挙動を追加した。
+- これによりクライアントは `seq` ギャップから `<<logs truncated>>` 警告を表示できる。

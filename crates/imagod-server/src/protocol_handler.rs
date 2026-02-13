@@ -776,7 +776,18 @@ async fn stream_logs_datagrams(
         return Ok(());
     }
 
-    let (tx, mut rx) = mpsc::channel::<(String, ServiceLogEvent)>(128);
+    enum FollowForwardMsg {
+        Event {
+            service_name: String,
+            event: ServiceLogEvent,
+        },
+        Lagged {
+            service_name: String,
+            dropped: u64,
+        },
+    }
+
+    let (tx, mut rx) = mpsc::channel::<FollowForwardMsg>(128);
     let mut forward_tasks = Vec::new();
     for (service_name, mut receiver) in follow_targets.drain(..) {
         let tx = tx.clone();
@@ -784,11 +795,29 @@ async fn stream_logs_datagrams(
             loop {
                 match receiver.recv().await {
                     Ok(event) => {
-                        if tx.send((service_name.clone(), event)).await.is_err() {
+                        if tx
+                            .send(FollowForwardMsg::Event {
+                                service_name: service_name.clone(),
+                                event,
+                            })
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
+                        if tx
+                            .send(FollowForwardMsg::Lagged {
+                                service_name: service_name.clone(),
+                                dropped,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
@@ -799,17 +828,25 @@ async fn stream_logs_datagrams(
 
     loop {
         tokio::select! {
-            maybe_event = rx.recv() => {
-                let Some((service_name, event)) = maybe_event else {
+            maybe_msg = rx.recv() => {
+                let Some(message) = maybe_msg else {
                     break;
                 };
-                sender.send_log_data_chunks(
-                    seq,
-                    &service_name,
-                    service_log_stream_to_protocol(event.stream),
-                    &event.bytes,
-                    last_process_id,
-                )?;
+                match message {
+                    FollowForwardMsg::Event { service_name, event } => {
+                        sender.send_log_data_chunks(
+                            seq,
+                            &service_name,
+                            service_log_stream_to_protocol(event.stream),
+                            &event.bytes,
+                            last_process_id,
+                        )?;
+                    }
+                    FollowForwardMsg::Lagged { service_name, dropped } => {
+                        *last_process_id = Some(service_name);
+                        advance_seq_for_lagged(seq, dropped);
+                    }
+                }
             }
             _ = session.closed() => break,
         }
@@ -820,6 +857,10 @@ async fn stream_logs_datagrams(
     }
 
     Ok(())
+}
+
+fn advance_seq_for_lagged(seq: &mut u64, dropped: u64) {
+    *seq = seq.saturating_add(dropped);
 }
 
 fn send_datagram_envelope<T: Serialize>(
@@ -1180,7 +1221,7 @@ async fn finalize_operation_after_terminal_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        ImagodError, OperationManager, ensure_command_start_allowed,
+        ImagodError, OperationManager, advance_seq_for_lagged, ensure_command_start_allowed,
         ensure_command_start_request_id_match, ensure_non_nil_envelope_ids,
         ensure_single_request_envelope, finalize_operation_after_terminal_event,
         fixed_log_chunk_size, is_compatible_date_match, log_error_from_imagod_error,
@@ -1443,5 +1484,19 @@ mod tests {
             service_log_stream_to_protocol(ServiceLogStream::Stderr),
             LogStreamKind::Stderr
         );
+    }
+
+    #[test]
+    fn advance_seq_for_lagged_increments_seq_by_dropped_count() {
+        let mut seq = 42u64;
+        advance_seq_for_lagged(&mut seq, 7);
+        assert_eq!(seq, 49);
+    }
+
+    #[test]
+    fn advance_seq_for_lagged_saturates_on_overflow() {
+        let mut seq = u64::MAX - 1;
+        advance_seq_for_lagged(&mut seq, 3);
+        assert_eq!(seq, u64::MAX);
     }
 }
