@@ -9,6 +9,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use web_transport_quinn::Server;
 
 const STAGE_TRANSPORT: &str = "transport.setup";
+const DATAGRAM_BUFFER_BYTES: usize = 1024 * 1024;
 
 /// Builds a WebTransport server endpoint from validated configuration.
 pub fn build_server(config: &ImagodConfig) -> Result<Server, ImagodError> {
@@ -75,7 +76,11 @@ pub fn build_server(config: &ImagodConfig) -> Result<Server, ImagodError> {
             format!("quic tls conversion failed: {e}"),
         )
     })?;
-    let quic_server = quinn::ServerConfig::with_crypto(Arc::new(quic_tls));
+    let mut quic_server = quinn::ServerConfig::with_crypto(Arc::new(quic_tls));
+    let mut transport = quinn::TransportConfig::default();
+    transport.datagram_send_buffer_size(DATAGRAM_BUFFER_BYTES);
+    transport.datagram_receive_buffer_size(Some(DATAGRAM_BUFFER_BYTES));
+    quic_server.transport_config(Arc::new(transport));
     let endpoint = quinn::Endpoint::server(quic_server, listen_addr).map_err(|e| {
         ImagodError::new(
             ErrorCode::Internal,

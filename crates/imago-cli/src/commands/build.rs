@@ -145,6 +145,18 @@ fn run_inner(args: BuildArgs, project_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn load_target_config(
+    env: Option<&str>,
+    target_name: &str,
+    project_root: &Path,
+) -> anyhow::Result<TargetConfig> {
+    if let Some(env_name) = env {
+        validate_env_name(env_name)?;
+    }
+    let root = load_resolved_toml(project_root, env)?;
+    parse_target(&root, target_name, project_root)
+}
+
 pub fn build_project(
     env: Option<&str>,
     target_name: &str,

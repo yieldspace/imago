@@ -23,7 +23,7 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
     process::{Child, Command},
-    sync::{Mutex, RwLock, Semaphore, oneshot, oneshot::error::TryRecvError, watch},
+    sync::{Mutex, RwLock, Semaphore, broadcast, oneshot, oneshot::error::TryRecvError, watch},
     task::{JoinHandle, JoinSet},
     time,
 };
@@ -31,11 +31,13 @@ use tokio::{
 const STAGE_START: &str = "service.start";
 const STAGE_STOP: &str = "service.stop";
 const STAGE_CONTROL: &str = "service.control";
+const STAGE_LOGS: &str = "service.logs";
 const STARTUP_PROBE_POLL_INTERVAL_MS: u64 = 25;
 const INVOCATION_TOKEN_TTL_SECS: u64 = 30;
 const RUNNER_ENDPOINT_HASH_BYTES: usize = 16;
 const MAX_MANAGER_CONTROL_CONNECTION_HANDLERS: usize = 32;
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
+const LOG_CHANNEL_CAPACITY: usize = 256;
 type PendingReadyMap = BTreeMap<String, oneshot::Sender<Result<(), ImagodError>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +66,28 @@ pub enum RunningStatus {
     Stopping,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Logical stream of one emitted log event.
+pub enum ServiceLogStream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Incremental log event emitted from one running service.
+pub struct ServiceLogEvent {
+    pub stream: ServiceLogStream,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug)]
+/// Result returned for a logs subscription request.
+pub struct ServiceLogSubscription {
+    pub service_name: String,
+    pub snapshot_bytes: Vec<u8>,
+    pub receiver: Option<broadcast::Receiver<ServiceLogEvent>>,
+}
+
 #[derive(Debug)]
 /// Internal mutable state for one supervised runner process.
 struct RunningService {
@@ -79,6 +103,8 @@ struct RunningService {
     child: Child,
     _stdout_log: Arc<Mutex<BoundedLogBuffer>>,
     _stderr_log: Arc<Mutex<BoundedLogBuffer>>,
+    composite_log: Arc<Mutex<BoundedLogBuffer>>,
+    log_sender: broadcast::Sender<ServiceLogEvent>,
     last_heartbeat_at: String,
 }
 
@@ -107,6 +133,10 @@ impl BoundedLogBuffer {
         while self.bytes.len() > self.max_bytes {
             let _ = self.bytes.pop_front();
         }
+    }
+
+    fn snapshot(&self) -> Vec<u8> {
+        self.bytes.iter().copied().collect()
     }
 
     #[cfg(test)]
@@ -270,12 +300,32 @@ impl ServiceSupervisor {
             let stderr_log = Arc::new(Mutex::new(BoundedLogBuffer::new(
                 self.runner_log_buffer_bytes / 2,
             )));
+            let composite_log = Arc::new(Mutex::new(BoundedLogBuffer::new(
+                self.runner_log_buffer_bytes,
+            )));
+            let (log_sender, _) = broadcast::channel(LOG_CHANNEL_CAPACITY);
 
             if let Some(stdout) = child.stdout.take() {
-                spawn_log_drain(stdout, stdout_log.clone(), launch.name.clone(), "stdout");
+                spawn_log_drain(
+                    stdout,
+                    stdout_log.clone(),
+                    composite_log.clone(),
+                    log_sender.clone(),
+                    launch.name.clone(),
+                    "stdout",
+                    ServiceLogStream::Stdout,
+                );
             }
             if let Some(stderr) = child.stderr.take() {
-                spawn_log_drain(stderr, stderr_log.clone(), launch.name.clone(), "stderr");
+                spawn_log_drain(
+                    stderr,
+                    stderr_log.clone(),
+                    composite_log.clone(),
+                    log_sender.clone(),
+                    launch.name.clone(),
+                    "stderr",
+                    ServiceLogStream::Stderr,
+                );
             }
 
             {
@@ -295,6 +345,8 @@ impl ServiceSupervisor {
                         child,
                         _stdout_log: stdout_log,
                         _stderr_log: stderr_log,
+                        composite_log,
+                        log_sender,
                         last_heartbeat_at: now_unix_secs().to_string(),
                     },
                 );
@@ -532,6 +584,64 @@ impl ServiceSupervisor {
         }
         let inner = self.inner.read().await;
         !inner.is_empty()
+    }
+
+    /// Returns currently running service names.
+    pub async fn running_service_names(&self) -> Vec<String> {
+        let inner = self.inner.read().await;
+        inner
+            .iter()
+            .filter_map(|(name, service)| {
+                if service.status == RunningStatus::Running {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Opens one service log snapshot and optional follow stream.
+    pub async fn open_logs(
+        &self,
+        service_name: &str,
+        tail_lines: u32,
+        follow: bool,
+    ) -> Result<ServiceLogSubscription, ImagodError> {
+        let (snapshot_source, receiver) = {
+            let inner = self.inner.read().await;
+            let service = inner.get(service_name).ok_or_else(|| {
+                ImagodError::new(
+                    ErrorCode::NotFound,
+                    STAGE_LOGS,
+                    format!("service '{service_name}' is not running"),
+                )
+            })?;
+            if service.status != RunningStatus::Running {
+                return Err(ImagodError::new(
+                    ErrorCode::NotFound,
+                    STAGE_LOGS,
+                    format!("service '{service_name}' is not running"),
+                ));
+            }
+            let receiver = if follow {
+                Some(service.log_sender.subscribe())
+            } else {
+                None
+            };
+            (service.composite_log.clone(), receiver)
+        };
+
+        let snapshot_bytes = {
+            let buffer = snapshot_source.lock().await;
+            tail_lines_from_bytes(&buffer.snapshot(), tail_lines)
+        };
+
+        Ok(ServiceLogSubscription {
+            service_name: service_name.to_string(),
+            snapshot_bytes,
+            receiver,
+        })
     }
 
     /// Spawns the async manager control server loop on the provided listener.
@@ -1139,8 +1249,11 @@ fn is_binding_allowed(bindings: &[ServiceBinding], target_service: &str, wit: &s
 fn spawn_log_drain<R>(
     mut reader: R,
     buffer: Arc<Mutex<BoundedLogBuffer>>,
+    composite_buffer: Arc<Mutex<BoundedLogBuffer>>,
+    sender: broadcast::Sender<ServiceLogEvent>,
     service_name: String,
     stream_name: &'static str,
+    stream: ServiceLogStream,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -1164,6 +1277,14 @@ fn spawn_log_drain<R>(
                 let mut guard = buffer.lock().await;
                 guard.push(&chunk[..read]);
             }
+            {
+                let mut guard = composite_buffer.lock().await;
+                guard.push(&chunk[..read]);
+            }
+            let _ = sender.send(ServiceLogEvent {
+                stream,
+                bytes: chunk[..read].to_vec(),
+            });
 
             let text = String::from_utf8_lossy(&chunk[..read]);
             for line in text.lines() {
@@ -1177,6 +1298,25 @@ fn spawn_log_drain<R>(
             }
         }
     });
+}
+
+fn tail_lines_from_bytes(bytes: &[u8], tail_lines: u32) -> Vec<u8> {
+    if tail_lines == 0 || bytes.is_empty() {
+        return Vec::new();
+    }
+
+    let mut line_starts = vec![0usize];
+    for (idx, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' && idx + 1 < bytes.len() {
+            line_starts.push(idx + 1);
+        }
+    }
+
+    if tail_lines as usize >= line_starts.len() {
+        return bytes.to_vec();
+    }
+    let start = line_starts[line_starts.len() - tail_lines as usize];
+    bytes[start..].to_vec()
 }
 
 /// Sends kill signal to child and waits for termination.
@@ -1312,6 +1452,7 @@ mod tests {
         runner_id: &str,
         runner_endpoint: PathBuf,
     ) -> RunningService {
+        let (log_sender, _) = broadcast::channel(LOG_CHANNEL_CAPACITY);
         RunningService {
             release_hash: "release-a".to_string(),
             started_at: now_unix_secs().to_string(),
@@ -1325,6 +1466,8 @@ mod tests {
             child,
             _stdout_log: Arc::new(Mutex::new(BoundedLogBuffer::new(64))),
             _stderr_log: Arc::new(Mutex::new(BoundedLogBuffer::new(64))),
+            composite_log: Arc::new(Mutex::new(BoundedLogBuffer::new(128))),
+            log_sender,
             last_heartbeat_at: now_unix_secs().to_string(),
         }
     }
@@ -1350,6 +1493,14 @@ mod tests {
         assert_eq!(buffer.len(), 5);
     }
 
+    #[test]
+    fn tail_lines_from_bytes_returns_last_n_lines() {
+        let value = b"l1\nl2\nl3\n";
+        assert_eq!(tail_lines_from_bytes(value, 1), b"l3\n");
+        assert_eq!(tail_lines_from_bytes(value, 2), b"l2\nl3\n");
+        assert_eq!(tail_lines_from_bytes(value, 0), b"");
+    }
+
     #[tokio::test]
     async fn runner_endpoint_for_uses_fixed_length_hash_name() {
         let root = new_test_root("endpoint-hash");
@@ -1371,6 +1522,137 @@ mod tests {
         );
 
         drop(supervisor);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn open_logs_returns_tail_snapshot_and_follow_receiver() {
+        let root = new_test_root("open-logs");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let service_name = "svc-open-logs";
+        let runner_endpoint = root.join("runtime").join("ipc").join("open-logs.sock");
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep process should spawn");
+
+        let service = new_running_service(child, "runner-open-logs", runner_endpoint);
+        {
+            let mut log = service.composite_log.lock().await;
+            log.push(b"a\nb\nc\n");
+        }
+
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(service_name.to_string(), service);
+        }
+
+        let subscription = supervisor
+            .open_logs(service_name, 2, true)
+            .await
+            .expect("open_logs should succeed");
+        assert_eq!(subscription.service_name, service_name);
+        assert_eq!(subscription.snapshot_bytes, b"b\nc\n");
+        assert!(subscription.receiver.is_some(), "follow should subscribe");
+
+        stop_running_service_best_effort(&supervisor.inner, service_name).await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn open_logs_subscribes_before_snapshot_read_for_follow() {
+        let root = new_test_root("open-logs-order");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let service_name = "svc-open-logs-order";
+        let runner_endpoint = root
+            .join("runtime")
+            .join("ipc")
+            .join("open-logs-order.sock");
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep process should spawn");
+
+        let service = new_running_service(child, "runner-open-logs-order", runner_endpoint);
+        let composite_log = service.composite_log.clone();
+        let log_sender = service.log_sender.clone();
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(service_name.to_string(), service);
+        }
+
+        let held_snapshot_lock = composite_log.lock().await;
+        let open_task = {
+            let supervisor = supervisor.clone();
+            tokio::spawn(async move { supervisor.open_logs(service_name, 10, true).await })
+        };
+
+        time::timeout(Duration::from_millis(200), async {
+            while log_sender.receiver_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("follow receiver should be registered before snapshot lock is released");
+
+        drop(held_snapshot_lock);
+        let subscription = open_task
+            .await
+            .expect("open_logs task should complete")
+            .expect("open_logs should succeed");
+        assert!(subscription.receiver.is_some(), "follow should subscribe");
+
+        stop_running_service_best_effort(&supervisor.inner, service_name).await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn running_service_names_returns_running_only() {
+        let root = new_test_root("running-names");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+
+        let endpoint_a = root.join("runtime").join("ipc").join("running-a.sock");
+        let endpoint_b = root.join("runtime").join("ipc").join("running-b.sock");
+        let child_a = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("child A should spawn");
+        let child_b = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("child B should spawn");
+
+        let service_a = new_running_service(child_a, "runner-running-a", endpoint_a);
+        let mut service_b = new_running_service(child_b, "runner-running-b", endpoint_b);
+        service_b.status = RunningStatus::Stopping;
+
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert("svc-running-a".to_string(), service_a);
+            inner.insert("svc-running-b".to_string(), service_b);
+        }
+
+        let mut names = supervisor.running_service_names().await;
+        names.sort();
+        assert_eq!(names, vec!["svc-running-a".to_string()]);
+
+        stop_running_service_best_effort(&supervisor.inner, "svc-running-a").await;
+        stop_running_service_best_effort(&supervisor.inner, "svc-running-b").await;
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -1,6 +1,7 @@
 pub mod build;
 pub mod certs;
 pub mod deploy;
+pub mod logs;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandResult {

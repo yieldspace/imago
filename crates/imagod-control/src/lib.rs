@@ -16,4 +16,7 @@ pub use operation_state::{OperationManager, SpawnTransition};
 /// Re-export of deployment/run orchestration entry point.
 pub use orchestrator::Orchestrator;
 /// Re-exports for service supervision primitives.
-pub use service_supervisor::{RunningStatus, ServiceLaunch, ServiceSupervisor};
+pub use service_supervisor::{
+    RunningStatus, ServiceLaunch, ServiceLogEvent, ServiceLogStream, ServiceLogSubscription,
+    ServiceSupervisor,
+};
