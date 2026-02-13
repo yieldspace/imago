@@ -14,9 +14,9 @@ use std::{
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{
-    ControlRequest, ControlResponse, IpcErrorPayload, RunnerBootstrap, RunnerInboundRequest,
-    ServiceBinding, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport, issue_invocation_token,
-    now_unix_secs, random_secret_hex, verify_manager_auth_proof,
+    ControlRequest, ControlResponse, IpcErrorPayload, RunnerAppType, RunnerBootstrap,
+    RunnerInboundRequest, ServiceBinding, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
+    issue_invocation_token, now_unix_secs, random_secret_hex, verify_manager_auth_proof,
 };
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -47,6 +47,8 @@ pub struct ServiceLaunch {
     pub name: String,
     /// Release hash to execute.
     pub release_hash: String,
+    /// Runtime execution model.
+    pub app_type: RunnerAppType,
     /// Component file path.
     pub component_path: PathBuf,
     /// WASI CLI arguments.
@@ -269,6 +271,7 @@ impl ServiceSupervisor {
                 runner_id: runner_id.clone(),
                 service_name: launch.name.clone(),
                 release_hash: launch.release_hash.clone(),
+                app_type: launch.app_type,
                 component_path: launch.component_path.clone(),
                 args: launch.args.clone(),
                 envs: launch.envs.clone(),

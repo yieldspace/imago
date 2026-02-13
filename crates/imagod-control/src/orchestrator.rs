@@ -8,7 +8,7 @@ use std::{
 
 use imago_protocol::{DeployCommandPayload, ErrorCode, RunCommandPayload, StopCommandPayload};
 use imagod_common::ImagodError;
-use imagod_ipc::ServiceBinding;
+use imagod_ipc::{RunnerAppType, ServiceBinding};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::fs;
@@ -28,6 +28,8 @@ const RESTART_POLICY_NEVER: &str = "never";
 struct Manifest {
     name: String,
     main: String,
+    #[serde(rename = "type")]
+    app_type: RunnerAppType,
     #[serde(default)]
     vars: BTreeMap<String, String>,
     #[serde(default)]
@@ -383,6 +385,7 @@ async fn build_launch_from_release(
     Ok(ServiceLaunch {
         name: manifest.name.clone(),
         release_hash: release_hash.to_string(),
+        app_type: manifest.app_type,
         component_path,
         args: Vec::new(),
         envs,
@@ -783,7 +786,7 @@ fn map_rollback_error(err: ImagodError) -> ImagodError {
 #[cfg(test)]
 mod tests {
     use super::{
-        HashTarget, Manifest, ManifestAsset, ManifestBinding, ManifestHash,
+        HashTarget, Manifest, ManifestAsset, ManifestBinding, ManifestHash, RunnerAppType,
         build_launch_from_release, extract_tar, normalize_archive_entry_path,
         normalize_manifest_main_path, promote_staging_release, release_id_from_artifact_digest,
         validate_deploy_preconditions, validate_service_name,
@@ -805,6 +808,7 @@ mod tests {
         Manifest {
             name: "svc-a".to_string(),
             main: "component.wasm".to_string(),
+            app_type: RunnerAppType::Cli,
             vars: BTreeMap::new(),
             secrets: BTreeMap::new(),
             assets: Vec::<ManifestAsset>::new(),
@@ -999,6 +1003,47 @@ mod tests {
         assert!(err.message.contains("bindings[0].target"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_keeps_manifest_app_type() {
+        let root = temp_dir_path("orchestrator-app-type");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.app_type = RunnerAppType::Http;
+
+        let launch = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect("launch should be built");
+        assert_eq!(launch.app_type, RunnerAppType::Http);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manifest_parse_rejects_unknown_type_variant() {
+        let manifest_json = r#"{
+  "name": "svc-a",
+  "main": "component.wasm",
+  "type": "worker",
+  "vars": {},
+  "secrets": {},
+  "assets": [],
+  "bindings": [],
+  "hash": {
+    "algorithm": "sha256",
+    "targets": ["wasm", "manifest", "assets"]
+  }
+}"#;
+
+        let err = serde_json::from_str::<Manifest>(manifest_json)
+            .expect_err("unknown type should be rejected");
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "unexpected parse error: {err}"
+        );
     }
 
     #[tokio::test]

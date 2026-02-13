@@ -3,6 +3,7 @@
 use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 use imago_protocol::ErrorCode;
+use imagod_ipc::RunnerAppType;
 use tokio::sync::watch;
 use wasmtime::{
     Config, Engine, Store,
@@ -12,8 +13,13 @@ use wasmtime_wasi::{
     WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
     p2::{add_to_linker_async, bindings::Command},
 };
+use wasmtime_wasi_http::{
+    WasiHttpCtx, WasiHttpView, add_only_http_to_linker_async, bindings::Proxy,
+};
 
 use imagod_common::ImagodError;
+
+use crate::runtime::{ComponentRuntime, RuntimeRunFuture, RuntimeRunRequest};
 
 const STAGE_RUNTIME: &str = "runtime.start";
 
@@ -21,6 +27,7 @@ const STAGE_RUNTIME: &str = "runtime.start";
 struct WasiState {
     table: ResourceTable,
     wasi: WasiCtx,
+    http: WasiHttpCtx,
 }
 
 impl WasiView for WasiState {
@@ -29,6 +36,16 @@ impl WasiView for WasiState {
             ctx: &mut self.wasi,
             table: &mut self.table,
         }
+    }
+}
+
+impl WasiHttpView for WasiState {
+    fn ctx(&mut self) -> &mut WasiHttpCtx {
+        &mut self.http
+    }
+
+    fn table(&mut self) -> &mut ResourceTable {
+        &mut self.table
     }
 }
 
@@ -59,8 +76,7 @@ impl WasmRuntime {
         self.engine.increment_epoch();
     }
 
-    /// Validates that the component file can be loaded by the configured engine.
-    pub fn validate_component(&self, component_path: &Path) -> Result<(), ImagodError> {
+    fn validate_component_loadable(&self, component_path: &Path) -> Result<(), ImagodError> {
         Component::from_file(&self.engine, component_path).map_err(|e| {
             map_runtime_error(format!(
                 "failed to load component {}: {e}",
@@ -70,10 +86,39 @@ impl WasmRuntime {
         Ok(())
     }
 
+    fn build_store(
+        &self,
+        args: &[String],
+        envs: &BTreeMap<String, String>,
+    ) -> Result<Store<WasiState>, ImagodError> {
+        let mut builder = WasiCtxBuilder::new();
+        builder.inherit_stdio();
+        if !args.is_empty() {
+            builder.args(args);
+        }
+        if !envs.is_empty() {
+            let vars = envs
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>();
+            builder.envs(&vars);
+        }
+
+        let state = WasiState {
+            table: ResourceTable::new(),
+            wasi: builder.build(),
+            http: WasiHttpCtx::new(),
+        };
+        let mut store = Store::new(&self.engine, state);
+        store.set_epoch_deadline(1);
+        store.epoch_deadline_async_yield_and_update(1);
+        Ok(store)
+    }
+
     /// Instantiates and runs a WASI CLI component asynchronously.
     ///
     /// Returns when execution completes or when shutdown is requested.
-    pub async fn run_cli_component_async(
+    async fn run_cli_component_async(
         &self,
         component_path: &Path,
         args: &[String],
@@ -92,26 +137,7 @@ impl WasmRuntime {
         add_to_linker_async(&mut linker)
             .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
 
-        let mut builder = WasiCtxBuilder::new();
-        builder.inherit_stdio();
-        if !args.is_empty() {
-            builder.args(args);
-        }
-        if !envs.is_empty() {
-            let vars = envs
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect::<Vec<_>>();
-            builder.envs(&vars);
-        }
-
-        let state = WasiState {
-            table: ResourceTable::new(),
-            wasi: builder.build(),
-        };
-        let mut store = Store::new(&self.engine, state);
-        store.set_epoch_deadline(1);
-        store.epoch_deadline_async_yield_and_update(1);
+        let mut store = self.build_store(args, envs)?;
 
         let run_future = async {
             let command = Command::instantiate_async(&mut store, &component, &linker)
@@ -161,6 +187,77 @@ impl WasmRuntime {
         let _ = tick_task.await;
         result
     }
+
+    /// Instantiates a WASI HTTP incoming-handler and waits for shutdown.
+    async fn run_http_component_async(
+        &self,
+        component_path: &Path,
+        args: &[String],
+        envs: &BTreeMap<String, String>,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> Result<(), ImagodError> {
+        let component = Component::from_file(&self.engine, component_path).map_err(|e| {
+            map_runtime_error(format!(
+                "failed to load component {}: {e}",
+                component_path.display()
+            ))
+        })?;
+
+        let mut linker = Linker::new(&self.engine);
+        add_to_linker_async(&mut linker)
+            .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
+        add_only_http_to_linker_async(&mut linker)
+            .map_err(|e| map_runtime_error(format!("failed to add WASI HTTP linker: {e}")))?;
+
+        let mut store = self.build_store(args, envs)?;
+        let _proxy = Proxy::instantiate_async(&mut store, &component, &linker)
+            .await
+            .map_err(|e| map_runtime_error(format!("http component instantiate failed: {e}")))?;
+
+        wait_for_shutdown(&mut shutdown).await;
+        Ok(())
+    }
+}
+
+impl ComponentRuntime for WasmRuntime {
+    fn validate_component(&self, component_path: &Path) -> Result<(), ImagodError> {
+        self.validate_component_loadable(component_path)
+    }
+
+    fn run_component<'a>(&'a self, request: RuntimeRunRequest) -> RuntimeRunFuture<'a> {
+        Box::pin(async move {
+            let RuntimeRunRequest {
+                app_type,
+                component_path,
+                args,
+                envs,
+                shutdown,
+                epoch_tick_interval_ms,
+            } = request;
+
+            match app_type {
+                RunnerAppType::Cli => {
+                    self.run_cli_component_async(
+                        &component_path,
+                        &args,
+                        &envs,
+                        shutdown,
+                        epoch_tick_interval_ms,
+                    )
+                    .await
+                }
+                RunnerAppType::Http => {
+                    self.run_http_component_async(&component_path, &args, &envs, shutdown)
+                        .await
+                }
+                RunnerAppType::Socket => Err(ImagodError::new(
+                    ErrorCode::Internal,
+                    STAGE_RUNTIME,
+                    "socket runtime type is not implemented yet",
+                )),
+            }
+        })
+    }
 }
 
 /// Maps runtime-originated failures to a unified internal error shape.
@@ -177,5 +274,60 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
         if shutdown.changed().await.is_err() {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::RuntimeRunRequest;
+    use imagod_ipc::RunnerAppType;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn socket_type_returns_not_implemented_error() {
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let (_shutdown_tx, shutdown_rx) = watch::channel(true);
+        let err = runtime
+            .run_component(RuntimeRunRequest {
+                app_type: RunnerAppType::Socket,
+                component_path: PathBuf::from("/tmp/unused.wasm"),
+                args: Vec::new(),
+                envs: BTreeMap::new(),
+                shutdown: shutdown_rx,
+                epoch_tick_interval_ms: 50,
+            })
+            .await
+            .expect_err("socket type should be rejected");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(
+            err.message.contains("not implemented"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn http_type_uses_http_execution_branch() {
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let (_shutdown_tx, shutdown_rx) = watch::channel(true);
+        let err = runtime
+            .run_component(RuntimeRunRequest {
+                app_type: RunnerAppType::Http,
+                component_path: PathBuf::from("/tmp/non-existent-http-component.wasm"),
+                args: Vec::new(),
+                envs: BTreeMap::new(),
+                shutdown: shutdown_rx,
+                epoch_tick_interval_ms: 50,
+            })
+            .await
+            .expect_err("missing component path should fail");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(
+            err.message.contains("failed to load component"),
+            "unexpected message: {}",
+            err.message
+        );
     }
 }

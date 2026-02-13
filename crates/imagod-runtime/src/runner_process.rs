@@ -20,7 +20,10 @@ use tokio::{
     time::{self, Duration},
 };
 
-use crate::runtime_wasmtime::WasmRuntime;
+use crate::{
+    runtime::{ComponentRuntime, RuntimeRunRequest},
+    runtime_wasmtime::WasmRuntime,
+};
 
 const STAGE_RUNNER: &str = "runner.process";
 const STAGE_SHUTDOWN: &str = "runner.shutdown";
@@ -93,7 +96,7 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
     })?;
     let _socket_cleanup_guard = SocketCleanupGuard::new(bootstrap.runner_endpoint.clone());
 
-    let runtime = WasmRuntime::new()?;
+    let runtime: Arc<dyn ComponentRuntime> = Arc::new(WasmRuntime::new()?);
     runtime.validate_component(&bootstrap.component_path)?;
 
     register_runner(&bootstrap).await?;
@@ -110,13 +113,14 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
     let bootstrap_for_run = bootstrap.clone();
     let mut run_task = tokio::spawn(async move {
         runtime_for_run
-            .run_cli_component_async(
-                &bootstrap_for_run.component_path,
-                &bootstrap_for_run.args,
-                &bootstrap_for_run.envs,
-                shutdown_rx,
-                bootstrap_for_run.epoch_tick_interval_ms,
-            )
+            .run_component(RuntimeRunRequest {
+                app_type: bootstrap_for_run.app_type,
+                component_path: bootstrap_for_run.component_path.clone(),
+                args: bootstrap_for_run.args.clone(),
+                envs: bootstrap_for_run.envs.clone(),
+                shutdown: shutdown_rx,
+                epoch_tick_interval_ms: bootstrap_for_run.epoch_tick_interval_ms,
+            })
             .await
     });
 
@@ -625,7 +629,7 @@ mod tests {
     };
     use tokio::sync::oneshot;
 
-    use imagod_ipc::{RunnerInboundResponse, random_secret_hex};
+    use imagod_ipc::{RunnerAppType, RunnerInboundResponse, random_secret_hex};
 
     fn run_async_test<F>(future: F)
     where
@@ -666,6 +670,7 @@ mod tests {
             runner_id: runner_id.clone(),
             service_name: "svc-test".to_string(),
             release_hash: "release-test".to_string(),
+            app_type: RunnerAppType::Cli,
             component_path: root.join("component.wasm"),
             args: Vec::new(),
             envs: BTreeMap::new(),

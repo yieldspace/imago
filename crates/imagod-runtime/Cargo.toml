@@ -10,3 +10,4 @@ imagod-ipc = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net", "rt", "sync", "time"] }
 wasmtime = { workspace = true, features = ["component-model"] }
 wasmtime-wasi = { workspace = true }
+wasmtime-wasi-http = { workspace = true }
