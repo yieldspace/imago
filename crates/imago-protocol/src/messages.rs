@@ -493,6 +493,7 @@ pub struct LogChunk {
     pub seq: u64,
     pub process_id: String,
     pub stream_kind: LogStreamKind,
+    #[serde(with = "serde_bytes")]
     pub bytes: Vec<u8>,
     pub is_last: bool,
 }

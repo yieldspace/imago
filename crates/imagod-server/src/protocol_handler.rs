@@ -570,14 +570,38 @@ async fn run_logs_forwarder(
 
     let max_datagram_size = session.max_datagram_size();
     let fallback_process_id = subscriptions[0].service_name.clone();
+    let service_names = subscriptions
+        .iter()
+        .map(|subscription| subscription.service_name.clone())
+        .collect::<Vec<_>>();
     let mut seq = 0u64;
     let mut last_process_id: Option<String> = None;
+    let chunk_size = match fixed_log_chunk_size(
+        request_id,
+        correlation_id,
+        max_datagram_size,
+        &service_names,
+    ) {
+        Ok(size) => size,
+        Err(err) => {
+            let _ = send_logs_end_datagram(
+                &session,
+                request_id,
+                correlation_id,
+                max_datagram_size,
+                seq,
+                Some(log_error_from_imagod_error(&err)),
+            );
+            return;
+        }
+    };
 
     let stream_result = stream_logs_datagrams(
         &session,
         request_id,
         correlation_id,
         max_datagram_size,
+        chunk_size,
         subscriptions,
         &mut seq,
         &mut last_process_id,
@@ -625,6 +649,7 @@ async fn stream_logs_datagrams(
     request_id: Uuid,
     correlation_id: Uuid,
     max_datagram_size: usize,
+    chunk_size: usize,
     subscriptions: Vec<ServiceLogSubscription>,
     seq: &mut u64,
     last_process_id: &mut Option<String>,
@@ -635,6 +660,7 @@ async fn stream_logs_datagrams(
             request_id,
             correlation_id,
             max_datagram_size,
+            chunk_size,
             seq,
             &subscription.service_name,
             LogStreamKind::Composite,
@@ -680,6 +706,7 @@ async fn stream_logs_datagrams(
             request_id,
             correlation_id,
             max_datagram_size,
+            chunk_size,
             seq,
             &service_name,
             service_log_stream_to_protocol(event.stream),
@@ -696,6 +723,7 @@ fn send_log_data_chunks(
     request_id: Uuid,
     correlation_id: Uuid,
     max_datagram_size: usize,
+    chunk_size: usize,
     seq: &mut u64,
     process_id: &str,
     stream_kind: LogStreamKind,
@@ -705,18 +733,17 @@ fn send_log_data_chunks(
     if bytes.is_empty() {
         return Ok(());
     }
-    let chunk_budget = log_chunk_budget(
-        request_id,
-        correlation_id,
-        *seq,
-        process_id,
-        stream_kind,
-        max_datagram_size,
-    )?;
+    if chunk_size == 0 {
+        return Err(ImagodError::new(
+            imago_protocol::ErrorCode::Internal,
+            "logs.datagram",
+            "computed logs chunk size must be greater than zero",
+        ));
+    }
 
     let mut offset = 0usize;
     while offset < bytes.len() {
-        let end = bytes.len().min(offset.saturating_add(chunk_budget));
+        let end = bytes.len().min(offset.saturating_add(chunk_size));
         send_single_log_chunk(
             session,
             request_id,
@@ -754,7 +781,7 @@ fn send_single_log_chunk(
         bytes,
         is_last,
     };
-    let envelope = response_envelope(MessageType::LogsChunk, request_id, correlation_id, &chunk)?;
+    let envelope = ProtocolEnvelope::new(MessageType::LogsChunk, request_id, correlation_id, chunk);
     send_datagram_envelope(session, &envelope, max_datagram_size)?;
     *seq = seq.saturating_add(1);
     Ok(())
@@ -773,13 +800,13 @@ fn send_logs_end_datagram(
         seq,
         error,
     };
-    let envelope = response_envelope(MessageType::LogsEnd, request_id, correlation_id, &end)?;
+    let envelope = ProtocolEnvelope::new(MessageType::LogsEnd, request_id, correlation_id, end);
     send_datagram_envelope(session, &envelope, max_datagram_size)
 }
 
-fn send_datagram_envelope(
+fn send_datagram_envelope<T: Serialize>(
     session: &Session,
-    envelope: &Envelope,
+    envelope: &ProtocolEnvelope<T>,
     max_datagram_size: usize,
 ) -> Result<(), ImagodError> {
     let bytes = to_cbor(envelope).map_err(|e| {
@@ -809,42 +836,48 @@ fn send_datagram_envelope(
     })
 }
 
-fn log_chunk_budget(
+fn fixed_log_chunk_size(
     request_id: Uuid,
     correlation_id: Uuid,
-    seq: u64,
-    process_id: &str,
-    stream_kind: LogStreamKind,
     max_datagram_size: usize,
+    service_names: &[String],
 ) -> Result<usize, ImagodError> {
+    let process_id = service_names
+        .iter()
+        .max_by_key(|name| name.len())
+        .cloned()
+        .unwrap_or_else(|| "logs".to_string());
     let probe = LogChunk {
         request_id,
-        seq,
-        process_id: process_id.to_string(),
-        stream_kind,
+        seq: u64::MAX,
+        process_id,
+        stream_kind: LogStreamKind::Composite,
         bytes: Vec::new(),
         is_last: false,
     };
-    let envelope = response_envelope(MessageType::LogsChunk, request_id, correlation_id, &probe)?;
+    let envelope = ProtocolEnvelope::new(MessageType::LogsChunk, request_id, correlation_id, probe);
     let overhead = to_cbor(&envelope).map_err(|e| {
-        bad_request(
+        ImagodError::new(
+            imago_protocol::ErrorCode::Internal,
             "logs.datagram",
             format!("failed to encode datagram probe: {e}"),
         )
     })?;
-    if overhead.len() + 1 > max_datagram_size {
+    let computed_limit = max_datagram_size.saturating_sub(overhead.len().saturating_add(2));
+    let chunk_size = computed_limit.min(LOG_DATAGRAM_TARGET_BYTES);
+    if chunk_size == 0 {
         return Err(ImagodError::new(
             imago_protocol::ErrorCode::Internal,
             "logs.datagram",
-            "datagram size is too small for logs payload",
+            format!(
+                "datagram size is too small for logs payload: max={} overhead={}",
+                max_datagram_size,
+                overhead.len()
+            ),
         ));
     }
 
-    let budget = max_datagram_size
-        .saturating_sub(overhead.len().saturating_add(32))
-        .max(1)
-        .min(LOG_DATAGRAM_TARGET_BYTES);
-    Ok(budget)
+    Ok(chunk_size)
 }
 
 fn service_log_stream_to_protocol(stream: ServiceLogStream) -> LogStreamKind {
@@ -1132,13 +1165,13 @@ mod tests {
         ImagodError, OperationManager, ensure_command_start_allowed,
         ensure_command_start_request_id_match, ensure_non_nil_envelope_ids,
         ensure_single_request_envelope, finalize_operation_after_terminal_event,
-        is_compatible_date_match, log_chunk_budget, log_error_from_imagod_error,
+        fixed_log_chunk_size, is_compatible_date_match, log_error_from_imagod_error,
         read_stream_with_timeout, response_message_type_for_request,
         service_log_stream_to_protocol, stream_read_timeout_error, validate_push_payload,
     };
     use imago_protocol::{
         ArtifactPushChunkHeader, ArtifactPushRequest, CommandState, CommandType, ErrorCode,
-        LogErrorCode, LogStreamKind, MessageType, ProtocolEnvelope,
+        LogChunk, LogErrorCode, LogStreamKind, MessageType, ProtocolEnvelope, to_cbor,
     };
     use imagod_control::ServiceLogStream;
     use serde_json::Value;
@@ -1300,18 +1333,75 @@ mod tests {
     }
 
     #[test]
-    fn log_chunk_budget_is_bounded_by_target_size() {
-        let budget = log_chunk_budget(
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            0,
-            "svc-a",
-            LogStreamKind::Composite,
-            1200,
+    fn fixed_log_chunk_size_is_bounded_by_target_and_datagram_size() {
+        let request_id = Uuid::new_v4();
+        let correlation_id = Uuid::new_v4();
+        let max_datagram_size = 1413usize;
+        let chunk_size = fixed_log_chunk_size(
+            request_id,
+            correlation_id,
+            max_datagram_size,
+            &["svc-a".to_string()],
         )
-        .expect("budget should be computed");
-        assert!(budget <= 1024);
-        assert!(budget > 0);
+        .expect("chunk size should be computed");
+        assert!(chunk_size <= 1024);
+        assert!(chunk_size > 0);
+
+        let probe = ProtocolEnvelope::new(
+            MessageType::LogsChunk,
+            request_id,
+            correlation_id,
+            LogChunk {
+                request_id,
+                seq: u64::MAX,
+                process_id: "svc-a".to_string(),
+                stream_kind: LogStreamKind::Composite,
+                bytes: vec![0xAB; chunk_size],
+                is_last: false,
+            },
+        );
+        let encoded = to_cbor(&probe).expect("encoding must succeed");
+        assert!(encoded.len() <= max_datagram_size);
+    }
+
+    #[test]
+    fn fixed_log_chunk_size_handles_long_process_id() {
+        let request_id = Uuid::new_v4();
+        let correlation_id = Uuid::new_v4();
+        let process_id = "service-with-very-long-name-".repeat(12);
+        let max_datagram_size = 1413usize;
+        let chunk_size = fixed_log_chunk_size(
+            request_id,
+            correlation_id,
+            max_datagram_size,
+            std::slice::from_ref(&process_id),
+        )
+        .expect("chunk size should be computed");
+        assert!(chunk_size > 0);
+
+        let probe = ProtocolEnvelope::new(
+            MessageType::LogsChunk,
+            request_id,
+            correlation_id,
+            LogChunk {
+                request_id,
+                seq: u64::MAX,
+                process_id,
+                stream_kind: LogStreamKind::Composite,
+                bytes: vec![0xCD; chunk_size],
+                is_last: false,
+            },
+        );
+        let encoded = to_cbor(&probe).expect("encoding must succeed");
+        assert!(encoded.len() <= max_datagram_size);
+    }
+
+    #[test]
+    fn fixed_log_chunk_size_rejects_too_small_datagram() {
+        let err = fixed_log_chunk_size(Uuid::new_v4(), Uuid::new_v4(), 8, &["svc-a".to_string()])
+            .expect_err("small datagram should be rejected");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert_eq!(err.stage, "logs.datagram");
     }
 
     #[test]

@@ -1,9 +1,11 @@
 use std::{path::Path, time::Duration};
 
 use anyhow::{Context, anyhow};
-use imago_protocol::{LogChunk, LogEnd, LogRequest, LogStreamKind, MessageType, from_cbor};
+use imago_protocol::{
+    LogChunk, LogEnd, LogRequest, LogStreamKind, MessageType, ProtocolEnvelope, StructuredError,
+    from_cbor,
+};
 use serde::Deserialize;
-use serde_json::Value;
 use tokio::time;
 use uuid::Uuid;
 use web_transport_quinn::Session;
@@ -21,6 +23,21 @@ struct LogsRequestAck {
     process_ids: Vec<String>,
     #[allow(dead_code)]
     follow: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogsDatagramHeader {
+    #[serde(rename = "type")]
+    message_type: MessageType,
+    request_id: Uuid,
+    #[serde(default)]
+    error: Option<StructuredError>,
+}
+
+#[derive(Debug)]
+enum LogsDatagram {
+    Chunk(LogChunk),
+    End(LogEnd),
 }
 
 pub fn run(args: LogsArgs) -> CommandResult {
@@ -110,21 +127,12 @@ async fn receive_logs_datagrams(
         let Some(datagram) = datagram else {
             break;
         };
-        let envelope: deploy::Envelope =
-            from_cbor(&datagram).context("failed to decode log datagram envelope")?;
-        if let Some(err) = envelope.error {
-            return Err(anyhow!(
-                "server error: {} ({:?}) at {}",
-                err.message,
-                err.code,
-                err.stage
-            ));
-        }
 
-        match envelope.message_type {
-            MessageType::LogsChunk => {
-                let chunk: LogChunk =
-                    decode_payload(envelope.payload).context("failed to decode logs.chunk")?;
+        let Some(message) = decode_logs_datagram(&datagram, request_id)? else {
+            continue;
+        };
+        match message {
+            LogsDatagram::Chunk(chunk) => {
                 if request_id != chunk.request_id {
                     continue;
                 }
@@ -137,9 +145,7 @@ async fn receive_logs_datagrams(
                     break;
                 }
             }
-            MessageType::LogsEnd => {
-                let end: LogEnd =
-                    decode_payload(envelope.payload).context("failed to decode logs.end")?;
+            LogsDatagram::End(end) => {
                 if request_id != end.request_id {
                     continue;
                 }
@@ -155,15 +161,46 @@ async fn receive_logs_datagrams(
                 }
                 break;
             }
-            _ => {}
         }
     }
 
     Ok(())
 }
 
-fn decode_payload<T: serde::de::DeserializeOwned>(value: Value) -> anyhow::Result<T> {
-    serde_json::from_value(value).context("payload decode failed")
+fn decode_logs_datagram(datagram: &[u8], request_id: Uuid) -> anyhow::Result<Option<LogsDatagram>> {
+    let header: LogsDatagramHeader =
+        from_cbor(datagram).context("failed to decode log datagram header")?;
+    if let Some(err) = header.error {
+        return Err(anyhow!(
+            "server error: {} ({:?}) at {}",
+            err.message,
+            err.code,
+            err.stage
+        ));
+    }
+    if header.request_id != request_id {
+        return Ok(None);
+    }
+
+    match header.message_type {
+        MessageType::LogsChunk => {
+            let envelope: ProtocolEnvelope<LogChunk> =
+                from_cbor(datagram).context("failed to decode logs.chunk datagram")?;
+            if envelope.payload.request_id != request_id {
+                return Ok(None);
+            }
+            Ok(Some(LogsDatagram::Chunk(envelope.payload)))
+        }
+        MessageType::LogsEnd => {
+            let envelope: ProtocolEnvelope<LogEnd> =
+                from_cbor(datagram).context("failed to decode logs.end datagram")?;
+            if envelope.payload.request_id != request_id {
+                return Ok(None);
+            }
+            Ok(Some(LogsDatagram::End(envelope.payload)))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn detect_seq_gap(expected_seq: &mut Option<u64>, actual: u64) -> bool {
@@ -215,6 +252,7 @@ fn stream_kind_label(stream_kind: LogStreamKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use imago_protocol::to_cbor;
 
     #[test]
     fn detect_seq_gap_reports_mismatch() {
@@ -229,5 +267,33 @@ mod tests {
     fn format_prefixed_lines_adds_prefix_for_each_line() {
         let rendered = format_prefixed_lines("svc-a", LogStreamKind::Stdout, b"a\nb");
         assert_eq!(rendered, "[svc-a][stdout] a\n[svc-a][stdout] b\n");
+    }
+
+    #[test]
+    fn decode_logs_datagram_decodes_typed_chunk_payload() {
+        let request_id = Uuid::new_v4();
+        let envelope = ProtocolEnvelope::new(
+            MessageType::LogsChunk,
+            request_id,
+            Uuid::new_v4(),
+            LogChunk {
+                request_id,
+                seq: 3,
+                process_id: "svc-a".to_string(),
+                stream_kind: LogStreamKind::Stdout,
+                bytes: b"hello".to_vec(),
+                is_last: false,
+            },
+        );
+        let datagram = to_cbor(&envelope).expect("encoding should succeed");
+
+        let decoded = decode_logs_datagram(&datagram, request_id).expect("decode should succeed");
+        match decoded {
+            Some(LogsDatagram::Chunk(chunk)) => {
+                assert_eq!(chunk.seq, 3);
+                assert_eq!(chunk.bytes, b"hello".to_vec());
+            }
+            _ => panic!("expected chunk datagram"),
+        }
     }
 }
