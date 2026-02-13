@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, anyhow};
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
-    Issuer, KeyPair, KeyUsagePurpose, PKCS_ED25519,
+    Issuer, KeyPair, KeyUsagePurpose, PKCS_ED25519, SanType,
 };
 use time::{Duration, OffsetDateTime};
 
@@ -105,9 +105,7 @@ fn run_generate_inner(args: CertsGenerateArgs) -> anyhow::Result<OutputPaths> {
     let server_key =
         KeyPair::generate_for(&PKCS_ED25519).context("failed to generate server keypair")?;
     let server_key_pem = server_key.serialize_pem();
-    let mut server_params =
-        CertificateParams::new(vec![args.server_name.clone(), server_ip.to_string()])
-            .context("failed to build server certificate params")?;
+    let mut server_params = build_server_certificate_params(&args.server_name, server_ip)?;
     server_params.not_before = not_before;
     server_params.not_after = not_after;
     server_params.use_authority_key_identifier_extension = true;
@@ -152,6 +150,16 @@ fn run_generate_inner(args: CertsGenerateArgs) -> anyhow::Result<OutputPaths> {
     write_text(&paths.gitignore, GITIGNORE_CONTENT)?;
 
     Ok(paths)
+}
+
+fn build_server_certificate_params(
+    server_name: &str,
+    server_ip: IpAddr,
+) -> anyhow::Result<CertificateParams> {
+    let mut params = CertificateParams::new(vec![server_name.to_string()])
+        .context("failed to build server certificate params")?;
+    params.subject_alt_names.push(SanType::IpAddress(server_ip));
+    Ok(params)
 }
 
 fn ensure_writable_targets(paths: &OutputPaths, force: bool) -> anyhow::Result<()> {
@@ -364,5 +372,26 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "mode for {} should be 0600", path.display());
+    }
+
+    #[test]
+    fn server_cert_params_include_dns_and_ip_san() {
+        let server_ip: IpAddr = "127.0.0.1".parse().expect("ip should parse");
+        let params = build_server_certificate_params("localhost", server_ip)
+            .expect("server params should be created");
+        assert!(
+            params
+                .subject_alt_names
+                .iter()
+                .any(|san| matches!(san, SanType::DnsName(_))),
+            "dns san should exist"
+        );
+        assert!(
+            params
+                .subject_alt_names
+                .iter()
+                .any(|san| matches!(san, SanType::IpAddress(ip) if *ip == server_ip)),
+            "ip san should exist"
+        );
     }
 }

@@ -20,22 +20,24 @@
 
 | キー | 型 | 制約 | 説明 |
 |---|---|---|---|
-| `name` | string | 1-63 文字、空文字不可 | サービス識別名 |
+| `name` | string | 1-63 文字、空文字不可、`/` `\` `..` 禁止 | サービス識別名 |
 | `main` | string | 相対パス、空文字不可 | 実行対象の Wasm パス |
 | `type` | string | `cli` / `http` / `socket` のいずれか | 実行モデル |
 | `target` | table | 必須 | デプロイ先設定 |
 
-`name` の推奨文字集合は英数字、`-`、`_`。実装は不正文字を明確なエラーで拒否する。
+`name` の許可文字は ASCII 英数字、`.`、`-`、`_`。`/`、`\`、`..` は path 文字として拒否する。
 
 ## 推奨キー
 
 - `args`
+- `build`
 - `capabilities`
 - `limits`
 - `runtime`
 - `vars`
 - `assets`
 - `dependencies`
+- `bindings`
 
 <a id="env-override"></a>
 ## `--env` 上書き規則
@@ -43,8 +45,28 @@
 1. `--env` 未指定時は base 設定のみを使う。
 2. `--env <name>` 指定時は `[env.<name>]` を base 設定にマージする。
 3. `--env <name>` 指定時に読み込む環境変数ファイルは `.env.<name>` のみ。
-4. マージ範囲は設定全体。競合時は env 側を優先する。
+4. マージ範囲はトップレベルキー単位。`[env.<name>]` で指定したキーは base 側の同名キーを丸ごと置換する。
 5. 指定された env 名が存在しない場合はエラー。
+
+`<name>` の許可文字は ASCII 英数字、`.`、`-`、`_`。`/`、`\`、`..` は禁止する。
+
+## build コマンド設定
+
+- `imago build` は `imago.toml` の `[build].command` を参照する。
+- `build.command` は次のいずれかを受け付ける。
+  - string: `sh -c "<command>"` として実行
+  - array: `["cmd", "arg1", ...]` として直接実行
+- `build.command` 未指定時はビルドコマンドを実行せず、`main` の存在検証のみ行う。
+- `--env <name>` 指定時は `.env.<name>` の値を build サブプロセス環境へ注入する。
+
+## `[[bindings]]`（service 間呼び出し許可）
+
+- `[[bindings]]` は service 間関数呼び出しの許可ルールを定義する。
+- 各要素は以下を必須とする。
+  - `target`: 呼び出し先 service 名（`name` と同じ文字制約）
+  - `wit`: interface 識別子文字列
+- `imago build` はこの設定を `manifest.bindings[]` に正規化して出力する。
+- 未指定時は `manifest.bindings=[]` として扱い、runtime は deny-by-default で拒否する。
 
 <a id="capability-model"></a>
 ## 権限モデル
@@ -83,6 +105,7 @@
 ## 異常系
 
 - 存在しない env 指定。
+- 不正な env 名（`/`、`\`、`..` を含む、または許可文字外を含む）。
 - `.env.<name>` の読み込み失敗。
 - 型不正（例: `shutdown_timeout = "abc"`）。
 - 不正な `type`。
@@ -91,6 +114,18 @@
 
 - 設定ロードは CLI 側で厳格検証し、正規化結果を [`manifest.md`](./manifest.md) の形式で出力する。
 - runtime 側は manifest を信頼入力として扱い、再解釈を最小化する。
+
+## 実装反映ノート
+
+- `[env.<name>]` の反映はトップレベルキー単位の置換で実装する。
+- `build.command` は string / array の両形式を受理する。
+- `build.command` は必須キー (`name`/`main`/`type`/`target`) と `vars`/`dependencies` の検証完了後に実行する。不正設定時は実行しない。
+- `imago build --env <name>` は `build/manifest.<name>.json` を生成し、`build/manifest.json` は更新しない。
+- `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
+- `[[bindings]]` は `manifest.bindings[]` へ正規化し、runtime の呼び出し認可入力として扱う。
+- CLI の `name` 検証は `imagod` と同等に `..` を拒否し、path 文字を明示的に弾く。
+- `--env <name>` は manifest 出力先と `.env.<name>` 解決の双方で同一バリデーションを適用し、path traversal を拒否する。
+- `target.<name>.ca_cert` / `client_cert` / `client_key` は path traversal と不正区切りを拒否し、相対指定を `project_root` 基準の絶対パスへ解決する。
 
 ## `target.<name>` の接続キー（deploy 通信）
 
@@ -102,6 +137,11 @@
 - `ca_cert`: サーバ証明書検証用 CA PEM
 - `client_cert`: mTLS クライアント証明書 PEM
 - `client_key`: mTLS クライアント秘密鍵 PEM
+  - 上記 3 つは絶対パスまたは `project_root` 相対パスを受理する。
+  - 相対パスは `project_root` 基準で解決する。
+  - `..`、`\`、Windows ドライブプレフィックス（`C:` など）を含む値は拒否する。
+
+`imago build` が生成する `manifest.target` には、上記のうち `remote` と `server_name` のみを含める。
 
 ローカル検証用の証明書一式は `imago certs generate` で生成できる。
 生成先ディレクトリには `.gitignore`（`*` / `!.gitignore`）も作成される。
@@ -119,6 +159,19 @@
 - `tls.client_ca_cert`
 - `runtime.chunk_size`
 - `runtime.max_inflight_chunks`
+- `runtime.max_artifact_size_bytes`（既定 `67108864` = 64 MiB）
 - `runtime.upload_session_ttl_secs`
 - `runtime.stop_grace_timeout_secs`（既定 `30`）
+- `runtime.runner_ready_timeout_secs`（既定 `3`）
+- `runtime.runner_log_buffer_bytes`（既定 `262144`）
 - `runtime.epoch_tick_interval_ms`（既定 `50`）
+
+`imagod` の runtime 検証制約:
+
+- `runtime.chunk_size`: `1..=8388608`（1 byte 以上 8 MiB 以下）
+- `runtime.max_inflight_chunks`: `1` 以上
+- `runtime.max_artifact_size_bytes`: `1` 以上
+- `runtime.stop_grace_timeout_secs`: `1` 以上
+- `runtime.runner_ready_timeout_secs`: `1` 以上
+- `runtime.runner_log_buffer_bytes`: `1` 以上
+- `runtime.epoch_tick_interval_ms`: `1` 以上

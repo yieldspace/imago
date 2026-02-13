@@ -17,6 +17,7 @@
 - Auth: mTLS
 - Payload format: CBOR
 - Rust 実装: `quinn` + `web-transport-quinn`
+- `imago deploy` は接続確立フェーズで証明書認証失敗を `E_UNAUTHORIZED` として報告する（stage: `transport.connect`）。
 
 ### 2.1 ストリーム上のフレーミング
 
@@ -65,6 +66,11 @@ wire 上の共通形:
 6. `command.event*`
 7. terminal event 受信後に stream close
 
+補足:
+
+- server は request stream の read を 30 秒で timeout 監視し、無期限待機を避ける。
+- timeout 時は `E_OPERATION_TIMEOUT` を返し stream を閉じる。
+
 ### 4.2 Run / Stop（artifact なし）
 
 1. `hello.negotiate`
@@ -89,7 +95,15 @@ response:
 - `features`
 - `limits`
 
+`limits` に含まれる主要キー:
+
+- `chunk_size`
+- `max_inflight_chunks`
+- `max_artifact_size_bytes`
+- `upload_session_ttl`
+
 `compatibility_date` は `protocol_draft` に戻さない。
+`hello.negotiate` request は unknown field を受理しない（legacy `protocol_draft` を含め拒否）。
 
 ### 5.2 `deploy.prepare`
 
@@ -112,6 +126,15 @@ response:
 - `upload_token`
 - `session_expires_at`
 
+クライアント挙動:
+
+- `artifact_status=complete`: upload なし
+- `artifact_status=missing`: 全体 upload
+- `artifact_status=partial`: `missing_ranges` のみ upload（全量再送しない）
+- `missing_ranges` は partial 時に「先頭1件」ではなく「全欠損レンジ集合」を返す
+- `idempotency_key` は `name/type/target/policy/artifact_*/manifest_digest` の canonical 表現を `sha256` した安定キー（`deploy:<hex64>`）を使う。
+- upload フェーズ（`hello.negotiate` / `deploy.prepare` / `artifact.push` / `artifact.commit`）は固定回数の自動再試行を行い、再接続後は同一 `idempotency_key` と `missing_ranges` に基づいて再開転送する。
+
 ### 5.3 `artifact.push`
 
 request payload:
@@ -122,6 +145,13 @@ request payload:
 - `chunk_sha256`
 - `upload_token`
 - `chunk_b64`
+
+制約:
+
+- `length <= hello.limits.chunk_size`
+- 同一 deploy session の同時 push は `hello.limits.max_inflight_chunks` を上限として `E_BUSY` で制御する。
+- `imago-cli` は `hello.limits` の `chunk_size` / `max_inflight_chunks` を実際の upload 送信パラメータに適用する。
+- server は decode 前に `chunk_b64` encoded 長を `header.length` 由来の上限で検証し、過大入力を `E_RANGE_INVALID` で拒否する。
 
 response payload (`artifact.push` ack):
 
@@ -143,6 +173,11 @@ response:
 - `artifact_id`
 - `verified`
 
+制約:
+
+- `deploy.prepare.artifact_size <= hello.limits.max_artifact_size_bytes`
+- 上限超過時は `E_STORAGE_QUOTA`
+
 ### 5.5 `command.start`
 
 request:
@@ -160,6 +195,13 @@ request:
 - `deploy`: `deploy_id`, `expected_current_release`, `restart_policy`, `auto_rollback`
 - `run`: `name`
 - `stop`: `name`, `force`
+
+`deploy` payload の実行条件:
+
+- `expected_current_release = "any"` の場合は比較をスキップする。
+- `expected_current_release != "any"` の場合は server 側 `active_release` と完全一致必須。
+- 不一致時は `E_PRECONDITION_FAILED` を返す。
+- `restart_policy` は現行実装では `never` のみ受理し、それ以外は `E_BAD_REQUEST`。
 
 response:
 
@@ -194,6 +236,7 @@ payload:
 - `state.response.state` は `accepted` / `running` のみ。
 - terminal state を返してはならない。
 - 対象が非実行中なら `E_NOT_FOUND`。
+- `state.request` のエラー応答 envelope `type` も `state.response` を使う。
 
 ### 5.8 `command.cancel`
 
@@ -208,7 +251,7 @@ response:
 
 現行挙動:
 
-- 起動前（spawn 前）のみ `cancellable=true`。
+- 起動前（spawn 直前の原子的遷移より前）のみ `cancellable=true`。
 - 起動後（spawn 後、operation が残っている間）は `cancellable=false`。
 - 終端後（operation 削除後）は `E_NOT_FOUND`。
 
@@ -249,3 +292,27 @@ response:
 - `chunk_size = 1MiB`
 - `max_inflight_chunks = 16`
 - `upload_session_ttl = 15m`
+- `max_artifact_size_bytes = 64MiB`
+
+## 実装反映ノート（Issue #64 / 2026-02-11）
+
+- `imago-cli` の `deploy` 接続フェーズで、証明書認証失敗（Unknown CA / 不正証明書 / 証明書必須違反など）を `E_UNAUTHORIZED` に正規化する。
+- 将来の CONNECT 拒否との整合のため、HTTP status `401` / `403` も `E_UNAUTHORIZED` として扱う。
+- 対象は CLI のエラー正規化のみで、mTLS 検証位置（TLS handshake）および protocol wire 契約は変更しない。
+
+## 実装反映ノート（Issue #71 / 2026-02-11）
+
+- `imago-cli deploy` の `idempotency_key` を `name/type/target/policy/artifact_digest/artifact_size/manifest_digest` 由来の安定ハッシュへ変更した。
+- upload フェーズに自動 retry/resume を導入した（最大 4 試行、待機 250ms -> 500ms -> 1s 上限）。
+- 非再試行エラー（`E_UNAUTHORIZED`, `E_BAD_REQUEST`, `E_BAD_MANIFEST`, `E_IDEMPOTENCY_CONFLICT`, `E_RANGE_INVALID`, `E_CHUNK_HASH_MISMATCH`, `E_STORAGE_QUOTA`, `E_PRECONDITION_FAILED`）は即時失敗とする。
+
+## 実装反映ノート（Multi-process Runner / 2026-02-11）
+
+- `imagod` の実行アーキテクチャは manager/runner のマルチプロセス構成へ変更した。
+- ただし deploy protocol の wire 契約（`MessageType`, payload schema, state/cancel semantics）は変更しない。
+- manager-runner / runner-runner 間の IPC は内部実装であり、本仕様の外部互換性に影響しない。
+
+## 実装反映ノート（Crate Split 6+1 / 2026-02-11）
+
+- `imagod` 実装を複数 crate へ分割したが、本仕様の wire 契約は変更しない。
+- 変更は `imagod` 内部モジュール境界の再編のみであり、`MessageType` と payload schema は不変。

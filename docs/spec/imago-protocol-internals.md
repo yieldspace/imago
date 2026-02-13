@@ -112,6 +112,7 @@
 - `compatibility_date: String`
 - `client_version: String`
 - `required_features: Vec<String>`
+- `#[serde(deny_unknown_fields)]` を付与し、unknown field（例: `protocol_draft`）を decode 拒否する
 
 `Validate`:
 
@@ -240,7 +241,8 @@
 - `name`
 - `force`
 
-全 payload に `#[serde(deny_unknown_fields)]` を付与し、未知キーを拒否する。
+`DeployCommandPayload` / `RunCommandPayload` / `StopCommandPayload` は
+`#[serde(deny_unknown_fields)]` を付与し、未知キーを拒否する。
 
 ### 6.5 command event / state / cancel
 

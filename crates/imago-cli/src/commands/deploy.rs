@@ -2,58 +2,108 @@ use std::{
     collections::BTreeMap,
     io::{BufReader, Read},
     net::{IpAddr, SocketAddr},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, anyhow};
 use base64::Engine;
 use imago_protocol::{
-    ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushChunkHeader, ArtifactStatus,
-    CommandEvent, CommandEventType, CommandPayload, CommandStartRequest, CommandStartResponse,
-    CommandType, DeployCommandPayload, DeployPrepareRequest, DeployPrepareResponse,
-    HelloNegotiateRequest, HelloNegotiateResponse, MessageType, ProtocolEnvelope, from_cbor,
-    to_cbor,
+    ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushChunkHeader, ArtifactPushRequest,
+    ArtifactStatus, ByteRange, CommandEvent, CommandEventType, CommandPayload, CommandStartRequest,
+    CommandStartResponse, CommandType, DeployCommandPayload, DeployPrepareRequest,
+    DeployPrepareResponse, ErrorCode, HelloNegotiateRequest, HelloNegotiateResponse, MessageType,
+    ProtocolEnvelope, StructuredError, from_cbor, to_cbor,
 };
-use openssh::{KnownHosts, SessionBuilder, Stdio};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tokio::net::lookup_host;
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt},
+    net::lookup_host,
+    task::JoinSet,
+};
 use url::Url;
 use uuid::Uuid;
 use web_transport_quinn::{Session, proto::ConnectRequest};
 
-use crate::{cli::DeployArgs, commands::CommandResult};
+use crate::{
+    cli::DeployArgs,
+    commands::{CommandResult, build},
+};
 
-const CHUNK_SIZE: usize = 1024 * 1024;
 const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
 const COMPATIBILITY_DATE: &str = "2026-02-10";
+const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
+const DEFAULT_MAX_INFLIGHT_CHUNKS: usize = 16;
+const TRANSPORT_CONNECT_STAGE: &str = "transport.connect";
+const UPLOAD_MAX_ATTEMPTS: usize = 4;
+const UPLOAD_RETRY_BASE_BACKOFF_MS: u64 = 250;
+const UPLOAD_RETRY_MAX_BACKOFF_MS: u64 = 1000;
 
 type Envelope = ProtocolEnvelope<Value>;
 
-#[derive(Debug, Deserialize)]
-struct ImagoToml {
-    #[serde(default)]
-    target: BTreeMap<String, TargetConfig>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UploadLimits {
+    chunk_size: usize,
+    max_inflight_chunks: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct TargetConfig {
-    remote: String,
-    server_name: Option<String>,
-    ca_cert: PathBuf,
-    client_cert: PathBuf,
-    client_key: PathBuf,
-    server_cert: Option<PathBuf>,
-    server_key: Option<PathBuf>,
-    ssh_host: Option<String>,
-    ssh_port: Option<u16>,
-    ssh_user: Option<String>,
-    ssh_key: Option<PathBuf>,
-    daemon_path: Option<PathBuf>,
+#[derive(Clone, Copy)]
+struct UploadRequestContext<'a> {
+    session: &'a web_transport_quinn::Session,
+    correlation_id: Uuid,
+    deploy_id: &'a str,
+    upload_token: &'a str,
 }
+
+struct UploadPhaseInputs<'a> {
+    target: &'a build::DeployTargetConfig,
+    target_for_protocol: &'a BTreeMap<String, String>,
+    policy: &'a BTreeMap<String, String>,
+    manifest: &'a Manifest,
+    artifact_path: &'a Path,
+    artifact_digest: &'a str,
+    artifact_size: u64,
+    manifest_digest: &'a str,
+    idempotency_key: &'a str,
+    correlation_id: Uuid,
+}
+
+struct UploadPhaseResult {
+    session: Session,
+    deploy_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct ServerResponseError {
+    error: StructuredError,
+}
+
+impl std::fmt::Display for ServerResponseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "server error: {} ({:?}) at {}",
+            self.error.message, self.error.code, self.error.stage
+        )
+    }
+}
+
+impl std::error::Error for ServerResponseError {}
+
+#[derive(Debug)]
+struct CommitNotVerifiedError;
+
+impl std::fmt::Display for CommitNotVerifiedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "artifact.commit returned verified=false")
+    }
+}
+
+impl std::error::Error for CommitNotVerifiedError {}
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
@@ -68,13 +118,6 @@ struct Manifest {
 #[derive(Debug, Deserialize)]
 struct ManifestAsset {
     path: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ArtifactPushRequest {
-    #[serde(flatten)]
-    header: ArtifactPushChunkHeader,
-    chunk_b64: String,
 }
 
 #[derive(Debug)]
@@ -99,7 +142,11 @@ impl Drop for TempArtifactBundle {
 }
 
 pub fn run(args: DeployArgs) -> CommandResult {
-    match run_inner(args) {
+    run_with_project_root(args, Path::new("."))
+}
+
+pub(crate) fn run_with_project_root(args: DeployArgs, project_root: &Path) -> CommandResult {
+    match run_inner(args, project_root) {
         Ok(()) => CommandResult {
             exit_code: 0,
             stderr: None,
@@ -111,125 +158,61 @@ pub fn run(args: DeployArgs) -> CommandResult {
     }
 }
 
-fn run_inner(args: DeployArgs) -> anyhow::Result<()> {
+fn run_inner(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("failed to create tokio runtime")?;
-    runtime.block_on(run_async(args))
+    runtime.block_on(run_async(args, project_root))
 }
 
-async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
-    let imago_toml = load_imago_toml(Path::new("imago.toml"))?;
-    let target_name = args.target.unwrap_or_else(|| "default".to_string());
-    let target = imago_toml
+async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> {
+    let target_name = args
         .target
-        .get(&target_name)
-        .ok_or_else(|| anyhow!("target '{}' is not defined in imago.toml", target_name))?
-        .clone();
+        .clone()
+        .unwrap_or_else(|| build::default_target_name().to_string());
+    let build_output = build::build_project(args.env.as_deref(), &target_name, project_root)
+        .context("failed to run build before deploy")?;
 
-    if args.only_daemon {
-        deploy_daemon_via_ssh(&target).await?;
-        tracing::info!("daemon deployment completed successfully");
-        return Ok(());
-    }
-
-    let manifest_path = resolve_manifest_path(args.env.as_deref());
-    let manifest_bytes = std::fs::read(&manifest_path)
-        .with_context(|| format!("failed to read manifest: {}", manifest_path.display()))?;
+    let manifest_path = build_output.manifest_path;
+    let manifest_bytes = build_output.manifest_bytes;
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).context("failed to parse manifest json")?;
 
-    let artifact = build_artifact_bundle_file(&manifest, &manifest_path, Path::new("."))?;
+    let target = build_output
+        .target
+        .require_deploy_credentials()
+        .context("target settings are invalid for deploy")?;
+
+    let artifact = build_artifact_bundle_file(&manifest, &manifest_path, project_root)?;
     let (artifact_digest, artifact_size) = compute_file_sha256_and_size(artifact.path())?;
     let manifest_digest = hex::encode(Sha256::digest(&manifest_bytes));
-
-    let session = match connect_target(&target).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to connect to daemon, attempting SSH deployment");
-
-            deploy_daemon_via_ssh(&target).await?;
-
-            tracing::info!("waiting for daemon to become ready");
-            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-
-            tracing::info!("retrying connection to daemon");
-            connect_target(&target)
-                .await
-                .context("failed to connect to daemon after SSH deployment")?
-        }
-    };
-
     let correlation_id = Uuid::new_v4();
+    let target_for_protocol = normalize_target_for_protocol(&target);
+    let policy = BTreeMap::new();
+    let idempotency_key = build_idempotency_key(
+        &manifest.name,
+        &manifest.app_type,
+        &target_for_protocol,
+        &policy,
+        &artifact_digest,
+        artifact_size,
+        &manifest_digest,
+    );
 
-    let hello = request_envelope(
-        MessageType::HelloNegotiate,
-        Uuid::new_v4(),
+    let upload_result = run_upload_phase_with_resume(UploadPhaseInputs {
+        target: &target,
+        target_for_protocol: &target_for_protocol,
+        policy: &policy,
+        manifest: &manifest,
+        artifact_path: artifact.path(),
+        artifact_digest: &artifact_digest,
+        artifact_size,
+        manifest_digest: &manifest_digest,
+        idempotency_key: &idempotency_key,
         correlation_id,
-        &HelloNegotiateRequest {
-            compatibility_date: COMPATIBILITY_DATE.to_string(),
-            client_version: env!("CARGO_PKG_VERSION").to_string(),
-            required_features: vec![
-                "deploy.prepare".to_string(),
-                "artifact.push".to_string(),
-                "artifact.commit".to_string(),
-                "command.start".to_string(),
-                "command.event".to_string(),
-            ],
-        },
-    )?;
-    let hello_response: HelloNegotiateResponse =
-        response_payload(request_response(&session, &hello).await?)?;
-    if !hello_response.accepted {
-        return Err(anyhow!("hello.negotiate was rejected by server"));
-    }
-
-    let prepare = request_envelope(
-        MessageType::DeployPrepare,
-        Uuid::new_v4(),
-        correlation_id,
-        &DeployPrepareRequest {
-            name: manifest.name.clone(),
-            app_type: manifest.app_type.clone(),
-            target: normalize_target_for_protocol(&target),
-            artifact_digest: artifact_digest.clone(),
-            artifact_size,
-            manifest_digest: manifest_digest.clone(),
-            idempotency_key: format!("{}:{}:{}", manifest.name, artifact_digest, manifest_digest),
-            policy: BTreeMap::new(),
-        },
-    )?;
-    let prepare_response: DeployPrepareResponse =
-        response_payload(request_response(&session, &prepare).await?)?;
-
-    if prepare_response.artifact_status != ArtifactStatus::Complete {
-        push_artifact_chunks(
-            &session,
-            correlation_id,
-            &prepare_response.deploy_id,
-            &prepare_response.upload_token,
-            artifact.path(),
-        )
-        .await?;
-    }
-
-    let commit = request_envelope(
-        MessageType::ArtifactCommit,
-        Uuid::new_v4(),
-        correlation_id,
-        &ArtifactCommitRequest {
-            deploy_id: prepare_response.deploy_id.clone(),
-            artifact_digest: artifact_digest.clone(),
-            artifact_size,
-            manifest_digest: manifest_digest.clone(),
-        },
-    )?;
-    let commit_response: ArtifactCommitResponse =
-        response_payload(request_response(&session, &commit).await?)?;
-    if !commit_response.verified {
-        return Err(anyhow!("artifact.commit returned verified=false"));
-    }
+    })
+    .await?;
 
     let command_request_id = Uuid::new_v4();
     let command = build_command_start_envelope(
@@ -237,14 +220,14 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
         command_request_id,
         CommandType::Deploy,
         CommandPayload::Deploy(DeployCommandPayload {
-            deploy_id: prepare_response.deploy_id.clone(),
+            deploy_id: upload_result.deploy_id.clone(),
             expected_current_release: "any".to_string(),
             restart_policy: "never".to_string(),
             auto_rollback: true,
         }),
     )?;
 
-    let responses = request_events(&session, &command).await?;
+    let responses = request_events(&upload_result.session, &command).await?;
     if responses.is_empty() {
         return Err(anyhow!("command.start returned empty response stream"));
     }
@@ -293,7 +276,228 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
     }
 }
 
-async fn connect_target(target: &TargetConfig) -> anyhow::Result<Session> {
+async fn run_upload_phase_with_resume(
+    inputs: UploadPhaseInputs<'_>,
+) -> anyhow::Result<UploadPhaseResult> {
+    for attempt in 1..=UPLOAD_MAX_ATTEMPTS {
+        match run_upload_phase_once(&inputs).await {
+            Ok(result) => return Ok(result),
+            Err(err) => {
+                if attempt >= UPLOAD_MAX_ATTEMPTS || !should_retry_upload_error(&err) {
+                    return Err(err.context(format!(
+                        "upload phase failed on attempt {attempt}/{UPLOAD_MAX_ATTEMPTS}"
+                    )));
+                }
+
+                let backoff = retry_backoff_duration(attempt);
+                eprintln!(
+                    "{}",
+                    format_retry_log_message(
+                        attempt,
+                        UPLOAD_MAX_ATTEMPTS,
+                        backoff,
+                        &summarize_retry_error(&err),
+                    )
+                );
+                tokio::time::sleep(backoff).await;
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "upload retry loop exhausted unexpectedly without a terminal result"
+    ))
+}
+
+async fn run_upload_phase_once(
+    inputs: &UploadPhaseInputs<'_>,
+) -> anyhow::Result<UploadPhaseResult> {
+    let session = connect_target(inputs.target).await?;
+
+    let hello = request_envelope(
+        MessageType::HelloNegotiate,
+        Uuid::new_v4(),
+        inputs.correlation_id,
+        &HelloNegotiateRequest {
+            compatibility_date: COMPATIBILITY_DATE.to_string(),
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            required_features: vec![
+                "deploy.prepare".to_string(),
+                "artifact.push".to_string(),
+                "artifact.commit".to_string(),
+                "command.start".to_string(),
+                "command.event".to_string(),
+            ],
+        },
+    )?;
+    let hello_response: HelloNegotiateResponse =
+        response_payload(request_response(&session, &hello).await?)?;
+    if !hello_response.accepted {
+        return Err(anyhow!("hello.negotiate was rejected by server"));
+    }
+    let upload_limits = parse_upload_limits(&hello_response)?;
+
+    let prepare = request_envelope(
+        MessageType::DeployPrepare,
+        Uuid::new_v4(),
+        inputs.correlation_id,
+        &DeployPrepareRequest {
+            name: inputs.manifest.name.clone(),
+            app_type: inputs.manifest.app_type.clone(),
+            target: inputs.target_for_protocol.clone(),
+            artifact_digest: inputs.artifact_digest.to_string(),
+            artifact_size: inputs.artifact_size,
+            manifest_digest: inputs.manifest_digest.to_string(),
+            idempotency_key: inputs.idempotency_key.to_string(),
+            policy: inputs.policy.clone(),
+        },
+    )?;
+    let prepare_response: DeployPrepareResponse =
+        response_payload(request_response(&session, &prepare).await?)?;
+
+    let upload_ranges = upload_ranges_for_prepare(
+        prepare_response.artifact_status,
+        &prepare_response.missing_ranges,
+        inputs.artifact_size,
+    )?;
+    if !upload_ranges.is_empty() {
+        let upload_context = UploadRequestContext {
+            session: &session,
+            correlation_id: inputs.correlation_id,
+            deploy_id: &prepare_response.deploy_id,
+            upload_token: &prepare_response.upload_token,
+        };
+        push_artifact_ranges(
+            upload_context,
+            inputs.artifact_path,
+            inputs.artifact_size,
+            &upload_ranges,
+            upload_limits,
+        )
+        .await?;
+    }
+
+    let commit = request_envelope(
+        MessageType::ArtifactCommit,
+        Uuid::new_v4(),
+        inputs.correlation_id,
+        &ArtifactCommitRequest {
+            deploy_id: prepare_response.deploy_id.clone(),
+            artifact_digest: inputs.artifact_digest.to_string(),
+            artifact_size: inputs.artifact_size,
+            manifest_digest: inputs.manifest_digest.to_string(),
+        },
+    )?;
+    let commit_response: ArtifactCommitResponse =
+        response_payload(request_response(&session, &commit).await?)?;
+    if !commit_response.verified {
+        return Err(CommitNotVerifiedError.into());
+    }
+
+    Ok(UploadPhaseResult {
+        session,
+        deploy_id: prepare_response.deploy_id,
+    })
+}
+
+fn should_retry_upload_error(err: &anyhow::Error) -> bool {
+    if contains_commit_not_verified_error(err) {
+        return false;
+    }
+
+    match find_server_response_error(err) {
+        Some(server_error) => {
+            if is_non_retryable_error_code(server_error.error.code) {
+                return false;
+            }
+            if server_error.error.code == ErrorCode::Busy {
+                return true;
+            }
+            server_error.error.retryable
+        }
+        None => !contains_unauthorized_marker(err),
+    }
+}
+
+fn retry_backoff_duration(retry_index: usize) -> Duration {
+    let shift = retry_index.saturating_sub(1).min(8) as u32;
+    let factor = 1u64 << shift;
+    let millis = UPLOAD_RETRY_BASE_BACKOFF_MS
+        .saturating_mul(factor)
+        .min(UPLOAD_RETRY_MAX_BACKOFF_MS);
+    Duration::from_millis(millis)
+}
+
+fn summarize_retry_error(err: &anyhow::Error) -> String {
+    if let Some(server_error) = find_server_response_error(err) {
+        return format!(
+            "{:?} at {}",
+            server_error.error.code, server_error.error.stage
+        );
+    }
+    truncate_log_message(&err.to_string(), 160)
+}
+
+fn format_retry_log_message(
+    attempt: usize,
+    total_attempts: usize,
+    backoff: Duration,
+    reason: &str,
+) -> String {
+    format!(
+        "upload attempt {attempt}/{total_attempts} failed, retrying in {}ms (reason={reason})",
+        backoff.as_millis()
+    )
+}
+
+fn truncate_log_message(message: &str, max_chars: usize) -> String {
+    let len = message.chars().count();
+    if len <= max_chars {
+        return message.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    let head = message
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    format!("{head}...")
+}
+
+fn find_server_response_error(err: &anyhow::Error) -> Option<&ServerResponseError> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<ServerResponseError>())
+}
+
+fn contains_commit_not_verified_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<CommitNotVerifiedError>().is_some())
+}
+
+fn is_non_retryable_error_code(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::Unauthorized
+            | ErrorCode::BadRequest
+            | ErrorCode::BadManifest
+            | ErrorCode::IdempotencyConflict
+            | ErrorCode::RangeInvalid
+            | ErrorCode::ChunkHashMismatch
+            | ErrorCode::StorageQuota
+            | ErrorCode::PreconditionFailed
+    )
+}
+
+fn contains_unauthorized_marker(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.to_string().contains("E_UNAUTHORIZED"))
+}
+
+async fn connect_target(target: &build::DeployTargetConfig) -> anyhow::Result<Session> {
     let ca_chain = load_certs(&target.ca_cert)?;
     let client_chain = load_certs(&target.client_cert)?;
     let client_key = load_private_key(&target.client_key)?;
@@ -315,14 +519,15 @@ async fn connect_target(target: &TargetConfig) -> anyhow::Result<Session> {
 
     let quic_tls = quinn::crypto::rustls::QuicClientConfig::try_from(tls)?;
     let quic_config = quinn::ClientConfig::new(Arc::new(quic_tls));
-    let endpoint = quinn::Endpoint::client("[::]:0".parse::<SocketAddr>()?)?;
+    let endpoint = create_client_endpoint()?;
 
     let endpoint_info = parse_remote_endpoint(&target.remote).await?;
     let configured_host = target.server_name.as_deref().unwrap_or(&endpoint_info.host);
     let sni = configured_host.to_string();
-    let connection = endpoint
-        .connect_with(quic_config, endpoint_info.remote_addr, &sni)?
-        .await?;
+    let connecting = endpoint
+        .connect_with(quic_config, endpoint_info.remote_addr, &sni)
+        .map_err(|e| anyhow!("failed to start quic connection: {e}"))?;
+    let connection = connecting.await.map_err(map_connect_connection_error)?;
 
     let request_host = format_host_for_url(configured_host);
     let request_url = Url::parse(&format!("https://{}:{}/", request_host, endpoint_info.port))
@@ -330,271 +535,158 @@ async fn connect_target(target: &TargetConfig) -> anyhow::Result<Session> {
     let request = ConnectRequest::new(request_url);
     Session::connect(connection, request)
         .await
-        .map_err(Into::into)
+        .map_err(map_webtransport_client_error)
 }
 
-async fn deploy_daemon_via_ssh(target: &TargetConfig) -> anyhow::Result<()> {
-    let ssh_host = if let Some(host) = &target.ssh_host {
-        host.clone()
-    } else {
-        let url = normalize_remote_to_url(&target.remote)?;
-        url.host_str()
-            .ok_or_else(|| anyhow!("could not extract host from remote URL"))?
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .to_string()
-    };
-    let ssh_port = target.ssh_port.unwrap_or(22);
-    let ssh_user = target
-        .ssh_user
-        .as_ref()
-        .ok_or_else(|| anyhow!("ssh_user is required for daemon deployment"))?;
+fn is_certificate_alert_transport_code(code: quinn::TransportErrorCode) -> bool {
+    let raw_code = u64::from(code);
+    if !(0x100..0x200).contains(&raw_code) {
+        return false;
+    }
+    let alert_code = (raw_code & 0xff) as u8;
+    is_certificate_alert_code(alert_code)
+}
 
-    tracing::info!(user = %ssh_user, host = %ssh_host, port = ssh_port, "deploying daemon via SSH");
+fn is_certificate_alert_code(alert_code: u8) -> bool {
+    matches!(
+        alert_code,
+        code if code == u8::from(rustls::AlertDescription::NoCertificate)
+            || code == u8::from(rustls::AlertDescription::BadCertificate)
+            || code == u8::from(rustls::AlertDescription::UnsupportedCertificate)
+            || code == u8::from(rustls::AlertDescription::CertificateRevoked)
+            || code == u8::from(rustls::AlertDescription::CertificateExpired)
+            || code == u8::from(rustls::AlertDescription::CertificateUnknown)
+            || code == u8::from(rustls::AlertDescription::UnknownCA)
+            || code == u8::from(rustls::AlertDescription::AccessDenied)
+            || code == u8::from(rustls::AlertDescription::BadCertificateStatusResponse)
+            || code == u8::from(rustls::AlertDescription::BadCertificateHashValue)
+            || code == u8::from(rustls::AlertDescription::CertificateRequired)
+    )
+}
 
-    let daemon_binary_path = if let Some(path) = &target.daemon_path {
-        path.clone()
-    } else {
-        let default_path = PathBuf::from("target/release/imagod");
-        if !default_path.exists() {
-            let debug_path = PathBuf::from("target/debug/imagod");
-            if !debug_path.exists() {
-                return Err(anyhow!(
-                    "imagod binary not found at {} or {}. Please build the daemon first.",
-                    default_path.display(),
-                    debug_path.display()
-                ));
-            }
-            debug_path
-        } else {
-            default_path
+fn is_certificate_auth_connection_error(err: &quinn::ConnectionError) -> bool {
+    match err {
+        quinn::ConnectionError::TransportError(transport_error) => {
+            is_certificate_alert_transport_code(transport_error.code)
         }
-    };
-
-    if !daemon_binary_path.exists() {
-        return Err(anyhow!(
-            "daemon binary not found at {}",
-            daemon_binary_path.display()
-        ));
+        quinn::ConnectionError::ConnectionClosed(close) => {
+            is_certificate_alert_transport_code(close.error_code)
+        }
+        _ => false,
     }
+}
 
-    tracing::debug!(path = %daemon_binary_path.display(), "using daemon binary");
+fn unauthorized_connect_error(source: impl std::fmt::Display) -> anyhow::Error {
+    anyhow!(
+        "server error: certificate authentication failed (E_UNAUTHORIZED) at {TRANSPORT_CONNECT_STAGE}: {source}"
+    )
+}
 
-    let mut session_builder = SessionBuilder::default();
-    session_builder.known_hosts_check(KnownHosts::Accept);
-    session_builder.port(ssh_port);
-    session_builder.user(ssh_user.clone());
-
-    if let Some(ssh_key) = &target.ssh_key {
-        session_builder.keyfile(ssh_key);
+fn map_connect_rejection_status(
+    status: web_transport_quinn::http::StatusCode,
+    source: impl std::fmt::Display,
+) -> Option<anyhow::Error> {
+    if status == web_transport_quinn::http::StatusCode::UNAUTHORIZED
+        || status == web_transport_quinn::http::StatusCode::FORBIDDEN
+    {
+        return Some(unauthorized_connect_error(source));
     }
+    None
+}
 
-    let session = session_builder
-        .connect(ssh_host)
-        .await
-        .context("failed to establish SSH connection")?;
+fn parse_connect_error_status(message: &str) -> Option<web_transport_quinn::http::StatusCode> {
+    let (_, status_with_reason) = message.rsplit_once("http error status: ")?;
+    let status_token = status_with_reason.split_ascii_whitespace().next()?;
+    let code = status_token.parse::<u16>().ok()?;
+    web_transport_quinn::http::StatusCode::from_u16(code).ok()
+}
 
-    tracing::debug!("SSH connection established");
+fn map_connect_connection_error(err: quinn::ConnectionError) -> anyhow::Error {
+    if is_certificate_auth_connection_error(&err) {
+        return unauthorized_connect_error(err);
+    }
+    anyhow!("failed to establish quic connection: {err}")
+}
 
-    let remote_dir = "/tmp/imago";
-    let remote_daemon_path = format!("{}/imagod", remote_dir);
-    let remote_certs_dir = format!("{}/certs", remote_dir);
-    let config_path = format!("{}/imagod.toml", remote_dir);
+fn map_webtransport_client_error(err: web_transport_quinn::ClientError) -> anyhow::Error {
+    match err {
+        web_transport_quinn::ClientError::Connection(connection_err) => {
+            map_connect_connection_error(connection_err)
+        }
+        web_transport_quinn::ClientError::HttpError(connect_err) => {
+            let rendered = connect_err.to_string();
+            if let Some(status) = parse_connect_error_status(&rendered)
+                && let Some(mapped) = map_connect_rejection_status(status, &rendered)
+            {
+                return mapped;
+            }
+            anyhow!("failed to establish webtransport session: {connect_err}")
+        }
+        other => anyhow!("failed to establish webtransport session: {other}"),
+    }
+}
 
-    let server_cert = target.server_cert.clone().unwrap_or_else(|| {
-        target
-            .ca_cert
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("server.crt")
-    });
-    let server_key = target.server_key.clone().unwrap_or_else(|| {
-        target
-            .ca_cert
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("server.key")
-    });
-
-    let config_content = format!(
-        r#"listen_addr = "[::]:4443"
-storage_root = "{remote_dir}/data"
-server_version = "imagod/0.1.0"
-compatibility_date = "{COMPATIBILITY_DATE}"
-
-[tls]
-server_cert = "{remote_certs_dir}/server.crt"
-server_key = "{remote_certs_dir}/server.key"
-client_ca_cert = "{remote_certs_dir}/ca.crt"
-
-[runtime]
-chunk_size = 1048576
-max_inflight_chunks = 16
-upload_session_ttl_secs = 900
-stop_grace_timeout_secs = 30
-epoch_tick_interval_ms = 50
-"#,
-    );
-
-    tracing::debug!("building deploy bundle");
-    let bundle_path = build_daemon_bundle(
-        &daemon_binary_path,
-        &target.ca_cert,
-        &server_cert,
-        &server_key,
-        config_content.as_bytes(),
+fn parse_upload_limits(response: &HelloNegotiateResponse) -> anyhow::Result<UploadLimits> {
+    let chunk_size = parse_positive_limit(
+        &response.limits,
+        "chunk_size",
+        DEFAULT_CHUNK_SIZE,
+        "hello.negotiate response chunk_size",
+    )?;
+    let max_inflight_chunks = parse_positive_limit(
+        &response.limits,
+        "max_inflight_chunks",
+        DEFAULT_MAX_INFLIGHT_CHUNKS,
+        "hello.negotiate response max_inflight_chunks",
     )?;
 
-    tracing::info!(remote_dir, "uploading and extracting bundle");
-    ssh_run(&session, &["mkdir", "-p", remote_dir])
-        .await
-        .context("failed to create remote directory")?;
-
-    let bundle_file = std::fs::File::open(&bundle_path).context("failed to open bundle")?;
-
-    let output = session
-        .command("tar")
-        .arg("xf")
-        .arg("-")
-        .arg("-C")
-        .arg(remote_dir)
-        .stdin(Stdio::from(bundle_file))
-        .output()
-        .await
-        .context("failed to extract bundle on remote")?;
-
-    let _ = std::fs::remove_file(&bundle_path);
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("failed to extract bundle: {}", stderr));
-    }
-
-    ssh_run(&session, &["chmod", "+x", &remote_daemon_path])
-        .await
-        .context("failed to set execute permission")?;
-
-    ssh_run(&session, &["mkdir", "-p", &format!("{}/data", remote_dir)])
-        .await
-        .context("failed to create storage directory")?;
-
-    tracing::info!("upload complete");
-
-    tracing::debug!("stopping existing daemon (if running)");
-    let _ = session
-        .command("pkill")
-        .arg("-f")
-        .arg(&remote_daemon_path)
-        .status()
-        .await;
-
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-    tracing::info!("starting daemon");
-    let start_output = session
-        .command("sh")
-        .arg("-c")
-        .arg(format!(
-            "nohup {} --config {} > {}/imagod.log 2>&1 & echo $!",
-            remote_daemon_path, config_path, remote_dir
-        ))
-        .output()
-        .await
-        .context("failed to start daemon")?;
-
-    if !start_output.status.success() {
-        let stderr = String::from_utf8_lossy(&start_output.stderr);
-        return Err(anyhow!("failed to start daemon: {}", stderr));
-    }
-
-    let pid = String::from_utf8_lossy(&start_output.stdout)
-        .trim()
-        .to_string();
-    tracing::info!(pid, "daemon started");
-
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-    let check = session
-        .command("kill")
-        .arg("-0")
-        .arg(&pid)
-        .status()
-        .await
-        .context("failed to check daemon process")?;
-
-    if !check.success() {
-        let log = session
-            .command("tail")
-            .arg("-20")
-            .arg(format!("{}/imagod.log", remote_dir))
-            .output()
-            .await
-            .ok();
-        let log_text = log
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            .unwrap_or_default();
-        return Err(anyhow!(
-            "daemon exited shortly after start. Log:\n{}",
-            log_text
-        ));
-    }
-
-    session
-        .close()
-        .await
-        .context("failed to close SSH session")?;
-    tracing::debug!("SSH connection closed");
-
-    Ok(())
+    Ok(UploadLimits {
+        chunk_size,
+        max_inflight_chunks,
+    })
 }
 
-fn build_daemon_bundle(
-    daemon_binary: &Path,
-    ca_cert: &Path,
-    server_cert: &Path,
-    server_key: &Path,
-    config_content: &[u8],
-) -> anyhow::Result<PathBuf> {
-    let bundle_path = std::env::temp_dir().join(format!("imago-bundle-{}.tar", Uuid::new_v4()));
-    let bundle_file =
-        std::fs::File::create(&bundle_path).context("failed to create bundle file")?;
-
-    let mut builder = tar::Builder::new(bundle_file);
-
-    add_file_to_tar(&mut builder, daemon_binary.to_path_buf(), "imagod")?;
-    add_file_to_tar(&mut builder, ca_cert.to_path_buf(), "certs/ca.crt")?;
-    add_file_to_tar(&mut builder, server_cert.to_path_buf(), "certs/server.crt")?;
-    add_file_to_tar(&mut builder, server_key.to_path_buf(), "certs/server.key")?;
-
-    let mut header = tar::Header::new_gnu();
-    header.set_size(config_content.len() as u64);
-    header.set_mode(0o644);
-    header.set_cksum();
-    builder
-        .append_data(&mut header, "imagod.toml", config_content)
-        .context("failed to add imagod.toml to bundle")?;
-
-    builder.finish()?;
-    Ok(bundle_path)
-}
-
-async fn ssh_run(session: &openssh::Session, args: &[&str]) -> anyhow::Result<()> {
-    let output = if args.len() == 1 {
-        session.command(args[0]).output().await
-    } else {
-        let mut cmd = session.command(args[0]);
-        for arg in &args[1..] {
-            cmd.arg(*arg);
+fn parse_positive_limit(
+    limits: &BTreeMap<String, String>,
+    key: &str,
+    default: usize,
+    label: &str,
+) -> anyhow::Result<usize> {
+    match limits.get(key) {
+        Some(raw) => {
+            let parsed = raw
+                .parse::<usize>()
+                .with_context(|| format!("failed to parse {label} as integer: {raw}"))?;
+            if parsed == 0 {
+                return Err(anyhow!("{label} must be greater than 0"));
+            }
+            Ok(parsed)
         }
-        cmd.output().await
+        None => Ok(default),
     }
-    .context("ssh command execution failed")?;
+}
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("{}", stderr.trim_end()));
+fn client_bind_candidates() -> [SocketAddr; 2] {
+    [
+        "[::]:0".parse().expect("valid ipv6 wildcard address"),
+        "0.0.0.0:0".parse().expect("valid ipv4 wildcard address"),
+    ]
+}
+
+fn create_client_endpoint() -> anyhow::Result<quinn::Endpoint> {
+    let mut last_error: Option<anyhow::Error> = None;
+    for bind_addr in client_bind_candidates() {
+        match quinn::Endpoint::client(bind_addr) {
+            Ok(endpoint) => return Ok(endpoint),
+            Err(err) => {
+                last_error = Some(anyhow!(
+                    "failed to bind client endpoint on {bind_addr}: {err}"
+                ));
+            }
+        }
     }
-    Ok(())
+
+    Err(last_error.unwrap_or_else(|| anyhow!("failed to bind client endpoint")))
 }
 
 struct RemoteEndpoint {
@@ -718,13 +810,77 @@ async fn request_events(
     Ok(envelopes)
 }
 
-async fn push_artifact_chunks(
-    session: &web_transport_quinn::Session,
-    correlation_id: Uuid,
-    deploy_id: &str,
-    upload_token: &str,
+fn upload_ranges_for_prepare(
+    status: ArtifactStatus,
+    missing_ranges: &[ByteRange],
+    artifact_size: u64,
+) -> anyhow::Result<Vec<ByteRange>> {
+    match status {
+        ArtifactStatus::Complete => Ok(Vec::new()),
+        ArtifactStatus::Missing => Ok(vec![ByteRange {
+            offset: 0,
+            length: artifact_size,
+        }]),
+        ArtifactStatus::Partial => {
+            if missing_ranges.is_empty() {
+                return Err(anyhow!(
+                    "server reported artifact_status=partial but missing_ranges is empty"
+                ));
+            }
+            Ok(missing_ranges.to_vec())
+        }
+    }
+}
+
+fn build_upload_chunk_plan(
+    ranges: &[ByteRange],
+    artifact_size: u64,
+    chunk_size: usize,
+) -> anyhow::Result<Vec<(u64, usize)>> {
+    if chunk_size == 0 {
+        return Err(anyhow!("chunk_size must be greater than 0"));
+    }
+
+    let chunk_size_u64 = u64::try_from(chunk_size).context("chunk_size conversion failed")?;
+    let mut chunks = Vec::new();
+    for range in ranges {
+        if range.length == 0 {
+            return Err(anyhow!("missing range length must be greater than 0"));
+        }
+        let range_end = range
+            .offset
+            .checked_add(range.length)
+            .ok_or_else(|| anyhow!("missing range overflow: offset+length"))?;
+        if range_end > artifact_size {
+            return Err(anyhow!(
+                "missing range is outside artifact size: end={} artifact_size={}",
+                range_end,
+                artifact_size
+            ));
+        }
+
+        let mut cursor = range.offset;
+        while cursor < range_end {
+            let remaining = range_end - cursor;
+            let chunk_len_u64 = remaining.min(chunk_size_u64);
+            let chunk_len =
+                usize::try_from(chunk_len_u64).context("chunk length conversion failed")?;
+            chunks.push((cursor, chunk_len));
+            cursor = cursor.saturating_add(chunk_len_u64);
+        }
+    }
+    Ok(chunks)
+}
+
+async fn push_artifact_ranges(
+    context: UploadRequestContext<'_>,
     artifact_path: &Path,
+    artifact_size: u64,
+    ranges: &[ByteRange],
+    limits: UploadLimits,
 ) -> anyhow::Result<()> {
+    let chunk_plan = build_upload_chunk_plan(ranges, artifact_size, limits.chunk_size)?;
+
     let mut file = tokio::fs::File::open(artifact_path)
         .await
         .with_context(|| {
@@ -734,78 +890,137 @@ async fn push_artifact_chunks(
             )
         })?;
 
-    let mut offset = 0u64;
-    let mut buffer = vec![0u8; CHUNK_SIZE];
-    loop {
-        let n = tokio::io::AsyncReadExt::read(&mut file, &mut buffer)
+    let mut uploads = JoinSet::new();
+    let deploy_id = Arc::<str>::from(context.deploy_id.to_string());
+    let upload_token = Arc::<str>::from(context.upload_token.to_string());
+
+    for (offset, chunk_len) in chunk_plan {
+        while uploads.len() >= limits.max_inflight_chunks {
+            let completed = uploads
+                .join_next()
+                .await
+                .ok_or_else(|| anyhow!("upload task set was unexpectedly empty"))?;
+            completed.map_err(|err| anyhow!("upload task join failed: {err}"))??;
+        }
+
+        let mut chunk = vec![0u8; chunk_len];
+        file.seek(std::io::SeekFrom::Start(offset))
             .await
             .with_context(|| {
                 format!(
-                    "failed to read artifact bundle: {}",
+                    "failed to seek artifact bundle: {}",
                     artifact_path.display()
                 )
             })?;
-        if n == 0 {
-            break;
-        }
-
-        let chunk = &buffer[..n];
-        let chunk_hash = hex::encode(Sha256::digest(chunk));
-        let chunk_b64 = base64::engine::general_purpose::STANDARD.encode(chunk);
-
-        let request = request_envelope(
-            MessageType::ArtifactPush,
-            Uuid::new_v4(),
-            correlation_id,
-            &ArtifactPushRequest {
-                header: ArtifactPushChunkHeader {
-                    deploy_id: deploy_id.to_string(),
-                    offset,
-                    length: n as u64,
-                    chunk_sha256: chunk_hash,
-                    upload_token: upload_token.to_string(),
-                },
-                chunk_b64,
-            },
-        )?;
-
-        let _ack: imago_protocol::ArtifactPushAck =
-            response_payload(request_response(session, &request).await?)?;
-        offset = offset.saturating_add(n as u64);
+        file.read_exact(&mut chunk).await.with_context(|| {
+            format!(
+                "failed to read artifact bundle chunk: {}",
+                artifact_path.display()
+            )
+        })?;
+        let task_session = context.session.clone();
+        let task_deploy_id = deploy_id.clone();
+        let task_upload_token = upload_token.clone();
+        uploads.spawn(async move {
+            push_single_artifact_chunk(
+                task_session,
+                context.correlation_id,
+                task_deploy_id,
+                task_upload_token,
+                offset,
+                chunk,
+            )
+            .await
+        });
     }
+
+    while let Some(completed) = uploads.join_next().await {
+        completed.map_err(|err| anyhow!("upload task join failed: {err}"))??;
+    }
+
+    Ok(())
+}
+
+async fn push_single_artifact_chunk(
+    session: Session,
+    correlation_id: Uuid,
+    deploy_id: Arc<str>,
+    upload_token: Arc<str>,
+    offset: u64,
+    chunk: Vec<u8>,
+) -> anyhow::Result<()> {
+    let chunk_hash = hex::encode(Sha256::digest(&chunk));
+    let chunk_b64 = base64::engine::general_purpose::STANDARD.encode(&chunk);
+    let length = u64::try_from(chunk.len()).context("chunk length conversion failed")?;
+
+    let request = request_envelope(
+        MessageType::ArtifactPush,
+        Uuid::new_v4(),
+        correlation_id,
+        &ArtifactPushRequest {
+            header: ArtifactPushChunkHeader {
+                deploy_id: deploy_id.as_ref().to_string(),
+                offset,
+                length,
+                chunk_sha256: chunk_hash,
+                upload_token: upload_token.as_ref().to_string(),
+            },
+            chunk_b64,
+        },
+    )?;
+
+    let _ack: imago_protocol::ArtifactPushAck =
+        response_payload(request_response(&session, &request).await?)?;
     Ok(())
 }
 
 fn response_payload<T: serde::de::DeserializeOwned>(response: Envelope) -> anyhow::Result<T> {
     if let Some(error) = response.error {
-        return Err(anyhow!(
-            "server error: {} ({:?}) at {}",
-            error.message,
-            error.code,
-            error.stage
-        ));
+        return Err(ServerResponseError { error }.into());
     }
     serde_json::from_value(response.payload)
         .map_err(|e| anyhow!("response payload decode failed: {e}"))
 }
 
-fn resolve_manifest_path(env: Option<&str>) -> PathBuf {
-    if let Some(env_name) = env {
-        let env_path = PathBuf::from(format!("build/manifest.{env_name}.json"));
-        if env_path.exists() {
-            return env_path;
-        }
+fn build_idempotency_key(
+    name: &str,
+    app_type: &str,
+    target: &BTreeMap<String, String>,
+    policy: &BTreeMap<String, String>,
+    artifact_digest: &str,
+    artifact_size: u64,
+    manifest_digest: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    update_canonical_field(&mut hasher, "name", name);
+    update_canonical_field(&mut hasher, "app_type", app_type);
+    update_canonical_field(&mut hasher, "artifact_digest", artifact_digest);
+    update_canonical_field(&mut hasher, "artifact_size", &artifact_size.to_string());
+    update_canonical_field(&mut hasher, "manifest_digest", manifest_digest);
+    update_canonical_map(&mut hasher, "target", target);
+    update_canonical_map(&mut hasher, "policy", policy);
+    format!("deploy:{}", hex::encode(hasher.finalize()))
+}
+
+fn update_canonical_field(hasher: &mut Sha256, key: &str, value: &str) {
+    hasher.update(key.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(value.len().to_string().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(value.as_bytes());
+    hasher.update(b"\0");
+}
+
+fn update_canonical_map(hasher: &mut Sha256, key: &str, map: &BTreeMap<String, String>) {
+    hasher.update(key.as_bytes());
+    hasher.update(b"\0");
+    for (entry_key, entry_value) in map {
+        update_canonical_field(hasher, entry_key, entry_value);
     }
-    PathBuf::from("build/manifest.json")
+    hasher.update(b"\0");
 }
 
-fn load_imago_toml(path: &Path) -> anyhow::Result<ImagoToml> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-    toml::from_str(&raw).context("failed to parse imago.toml")
-}
-
-fn normalize_target_for_protocol(target: &TargetConfig) -> BTreeMap<String, String> {
+fn normalize_target_for_protocol(target: &build::DeployTargetConfig) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     map.insert("remote".to_string(), target.remote.clone());
     if let Some(name) = &target.server_name {
@@ -833,17 +1048,78 @@ fn build_artifact_bundle_file(
         project_root.join(manifest_source),
         "manifest.json",
     )?;
+    let manifest_base_dir = manifest_source.parent().unwrap_or_else(|| Path::new(""));
+    let normalized_main = normalize_bundle_entry_path(&manifest.main, "manifest.main")?;
+    let main_entry = normalized_tar_entry_name(&normalized_main);
     add_file_to_tar(
         &mut builder,
-        project_root.join(&manifest.main),
-        &manifest.main,
+        project_root.join(manifest_base_dir).join(&normalized_main),
+        &main_entry,
     )?;
     for asset in &manifest.assets {
-        add_file_to_tar(&mut builder, project_root.join(&asset.path), &asset.path)?;
+        let normalized_asset = normalize_bundle_entry_path(&asset.path, "assets[].path")?;
+        let asset_entry = normalized_tar_entry_name(&normalized_asset);
+        add_file_to_tar(
+            &mut builder,
+            project_root.join(&normalized_asset),
+            &asset_entry,
+        )?;
     }
     builder.finish()?;
 
     Ok(TempArtifactBundle::new(bundle_path))
+}
+
+fn normalize_bundle_entry_path(raw: &str, field_name: &str) -> anyhow::Result<PathBuf> {
+    if raw.is_empty() {
+        return Err(anyhow!("{field_name} must not be empty"));
+    }
+
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        return Err(anyhow!("{field_name} must be a relative path: {raw}"));
+    }
+    if raw.contains('\\') {
+        return Err(anyhow!(
+            "{field_name} must not contain backslash separators: {raw}"
+        ));
+    }
+
+    let raw_os = path.as_os_str().to_string_lossy();
+    if raw_os.len() >= 2 && raw_os.as_bytes()[1] == b':' {
+        return Err(anyhow!("{field_name} must not be windows-prefixed: {raw}"));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => normalized.push(segment),
+            Component::ParentDir | Component::RootDir => {
+                return Err(anyhow!(
+                    "{field_name} must not contain path traversal: {raw}"
+                ));
+            }
+            _ => {
+                return Err(anyhow!(
+                    "{field_name} contains unsupported path component: {raw}"
+                ));
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(anyhow!("{field_name} is invalid: {raw}"));
+    }
+
+    Ok(normalized)
+}
+
+fn normalized_tar_entry_name(path: &Path) -> String {
+    path.iter()
+        .map(|segment| segment.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn compute_file_sha256_and_size(path: &Path) -> anyhow::Result<(String, u64)> {
@@ -941,26 +1217,120 @@ fn decode_frames(value: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
-    fn returns_non_zero_when_manifest_missing() {
-        let result = run(DeployArgs {
-            env: None,
-            target: None,
-            only_daemon: false,
+    fn maps_unknown_ca_transport_error_to_e_unauthorized() {
+        let unknown_ca_code =
+            quinn::TransportErrorCode::crypto(u8::from(rustls::AlertDescription::UnknownCA));
+        assert!(is_certificate_alert_transport_code(unknown_ca_code));
+
+        let err = quinn::ConnectionError::ConnectionClosed(quinn::ConnectionClose {
+            error_code: unknown_ca_code,
+            frame_type: None,
+            reason: "unknown ca".into(),
         });
-        assert_eq!(result.exit_code, 2);
-        assert!(result.stderr.is_some());
+
+        let mapped = map_connect_connection_error(err);
+        let message = mapped.to_string();
+        assert!(message.contains("E_UNAUTHORIZED"));
+        assert!(message.contains("transport.connect"));
     }
 
     #[test]
-    fn resolves_env_manifest_when_exists() {
-        let path = resolve_manifest_path(Some("prod"));
-        if Path::new("build/manifest.prod.json").exists() {
-            assert_eq!(path, PathBuf::from("build/manifest.prod.json"));
-        } else {
-            assert_eq!(path, PathBuf::from("build/manifest.json"));
-        }
+    fn maps_certificate_required_connection_closed_to_e_unauthorized() {
+        let err = quinn::ConnectionError::ConnectionClosed(quinn::ConnectionClose {
+            error_code: quinn::TransportErrorCode::crypto(u8::from(
+                rustls::AlertDescription::CertificateRequired,
+            )),
+            frame_type: None,
+            reason: "certificate required".into(),
+        });
+
+        let mapped = map_connect_connection_error(err);
+        let message = mapped.to_string();
+        assert!(message.contains("E_UNAUTHORIZED"));
+        assert!(message.contains("transport.connect"));
+    }
+
+    #[test]
+    fn does_not_map_non_certificate_tls_alert_to_e_unauthorized() {
+        let no_alpn_code = quinn::TransportErrorCode::crypto(u8::from(
+            rustls::AlertDescription::NoApplicationProtocol,
+        ));
+        assert!(!is_certificate_alert_transport_code(no_alpn_code));
+
+        let err = quinn::ConnectionError::ConnectionClosed(quinn::ConnectionClose {
+            error_code: no_alpn_code,
+            frame_type: None,
+            reason: "no application protocol".into(),
+        });
+
+        let mapped = map_connect_connection_error(err);
+        let message = mapped.to_string();
+        assert!(!message.contains("E_UNAUTHORIZED"));
+        assert!(message.contains("failed to establish quic connection"));
+    }
+
+    #[test]
+    fn maps_http_401_to_e_unauthorized() {
+        let mapped = map_connect_rejection_status(
+            web_transport_quinn::http::StatusCode::UNAUTHORIZED,
+            "http error status: 401 Unauthorized",
+        )
+        .expect("http 401 should map to unauthorized");
+
+        let message = mapped.to_string();
+        assert!(message.contains("E_UNAUTHORIZED"));
+        assert!(message.contains("transport.connect"));
+    }
+
+    #[test]
+    fn parse_connect_error_status_ignores_unrelated_numbers_before_status() {
+        let status = parse_connect_error_status(
+            "connection to 127.0.0.1:443 failed: http error status: 401 Unauthorized",
+        );
+        assert_eq!(
+            status,
+            Some(web_transport_quinn::http::StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn parse_connect_error_status_parses_403_from_http_error_prefix() {
+        let status = parse_connect_error_status("http error status: 403 Forbidden");
+        assert_eq!(
+            status,
+            Some(web_transport_quinn::http::StatusCode::FORBIDDEN)
+        );
+    }
+
+    #[test]
+    fn parse_connect_error_status_returns_none_without_http_error_prefix() {
+        let status = parse_connect_error_status("connection to 127.0.0.1:443 failed");
+        assert_eq!(status, None);
+    }
+
+    #[test]
+    fn returns_non_zero_when_build_step_fails() {
+        let root =
+            std::env::temp_dir().join(format!("imago-cli-deploy-run-fail-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("temp dir should be created");
+
+        let result = run_with_project_root(
+            DeployArgs {
+                env: None,
+                target: None,
+                only_daemon: false,
+            },
+            &root,
+        );
+
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.expect("stderr should be present");
+        assert!(stderr.contains("failed to run build before deploy"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -1004,5 +1374,356 @@ mod tests {
         let payload: CommandStartRequest =
             serde_json::from_value(envelope.payload).expect("payload should deserialize");
         assert_eq!(payload.request_id, request_id);
+    }
+
+    #[test]
+    fn parse_upload_limits_uses_hello_limits_values() {
+        let response = HelloNegotiateResponse {
+            accepted: true,
+            server_version: "imagod-test".to_string(),
+            features: vec![],
+            limits: BTreeMap::from([
+                ("chunk_size".to_string(), "2048".to_string()),
+                ("max_inflight_chunks".to_string(), "4".to_string()),
+            ]),
+        };
+
+        let limits = parse_upload_limits(&response).expect("limits should parse");
+        assert_eq!(
+            limits,
+            UploadLimits {
+                chunk_size: 2048,
+                max_inflight_chunks: 4
+            }
+        );
+    }
+
+    #[test]
+    fn parse_upload_limits_rejects_zero_values() {
+        let response = HelloNegotiateResponse {
+            accepted: true,
+            server_version: "imagod-test".to_string(),
+            features: vec![],
+            limits: BTreeMap::from([("chunk_size".to_string(), "0".to_string())]),
+        };
+
+        let err = parse_upload_limits(&response).expect_err("zero chunk_size must fail");
+        assert!(err.to_string().contains("chunk_size"));
+    }
+
+    fn sample_structured_error(code: ErrorCode, retryable: bool) -> StructuredError {
+        StructuredError {
+            code,
+            message: "error".to_string(),
+            retryable,
+            stage: "upload".to_string(),
+            details: BTreeMap::new(),
+        }
+    }
+
+    fn sample_server_error(code: ErrorCode, retryable: bool) -> anyhow::Error {
+        ServerResponseError {
+            error: sample_structured_error(code, retryable),
+        }
+        .into()
+    }
+
+    #[test]
+    fn client_bind_candidates_include_ipv6_then_ipv4_fallback() {
+        let candidates = client_bind_candidates();
+        assert_eq!(
+            candidates[0],
+            "[::]:0".parse::<SocketAddr>().expect("valid address")
+        );
+        assert_eq!(
+            candidates[1],
+            "0.0.0.0:0".parse::<SocketAddr>().expect("valid address")
+        );
+    }
+
+    #[test]
+    fn upload_ranges_for_partial_requires_missing_ranges() {
+        let err = upload_ranges_for_prepare(ArtifactStatus::Partial, &[], 1024)
+            .expect_err("partial without missing_ranges must fail");
+        assert!(err.to_string().contains("missing_ranges"));
+    }
+
+    #[test]
+    fn build_upload_chunk_plan_uses_requested_ranges_only() {
+        let ranges = vec![
+            ByteRange {
+                offset: 0,
+                length: 4,
+            },
+            ByteRange {
+                offset: 10,
+                length: 3,
+            },
+        ];
+        let plan = build_upload_chunk_plan(&ranges, 32, 2).expect("chunk plan should build");
+        assert_eq!(plan, vec![(0, 2), (2, 2), (10, 2), (12, 1)]);
+    }
+
+    #[test]
+    fn build_upload_chunk_plan_rejects_out_of_bounds_range() {
+        let ranges = vec![ByteRange {
+            offset: 8,
+            length: 4,
+        }];
+        let err = build_upload_chunk_plan(&ranges, 10, 2)
+            .expect_err("range outside artifact size must fail");
+        assert!(err.to_string().contains("outside artifact size"));
+    }
+
+    #[test]
+    fn idempotency_key_is_stable_for_same_payload() {
+        let target = BTreeMap::from([
+            ("remote".to_string(), "127.0.0.1:4443".to_string()),
+            ("server_name".to_string(), "imagod.local".to_string()),
+        ]);
+        let policy = BTreeMap::from([("rollout".to_string(), "safe".to_string())]);
+
+        let first = build_idempotency_key(
+            "svc",
+            "cli",
+            &target,
+            &policy,
+            "digest-a",
+            1024,
+            "manifest-a",
+        );
+        let second = build_idempotency_key(
+            "svc",
+            "cli",
+            &target,
+            &policy,
+            "digest-a",
+            1024,
+            "manifest-a",
+        );
+
+        assert_eq!(first, second);
+        assert!(first.starts_with("deploy:"));
+        assert_eq!(first.len(), "deploy:".len() + 64);
+    }
+
+    #[test]
+    fn idempotency_key_changes_when_target_changes() {
+        let key_a = build_idempotency_key(
+            "svc",
+            "cli",
+            &BTreeMap::from([("remote".to_string(), "127.0.0.1:4443".to_string())]),
+            &BTreeMap::new(),
+            "digest-a",
+            1024,
+            "manifest-a",
+        );
+        let key_b = build_idempotency_key(
+            "svc",
+            "cli",
+            &BTreeMap::from([("remote".to_string(), "127.0.0.1:5555".to_string())]),
+            &BTreeMap::new(),
+            "digest-a",
+            1024,
+            "manifest-a",
+        );
+
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn idempotency_key_changes_when_policy_changes() {
+        let key_a = build_idempotency_key(
+            "svc",
+            "cli",
+            &BTreeMap::new(),
+            &BTreeMap::from([("rollout".to_string(), "safe".to_string())]),
+            "digest-a",
+            1024,
+            "manifest-a",
+        );
+        let key_b = build_idempotency_key(
+            "svc",
+            "cli",
+            &BTreeMap::new(),
+            &BTreeMap::from([("rollout".to_string(), "fast".to_string())]),
+            "digest-a",
+            1024,
+            "manifest-a",
+        );
+
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn retry_classification_retries_busy_or_internal() {
+        assert!(should_retry_upload_error(&sample_server_error(
+            ErrorCode::Busy,
+            false
+        )));
+        assert!(should_retry_upload_error(&sample_server_error(
+            ErrorCode::Busy,
+            true
+        )));
+        assert!(should_retry_upload_error(&sample_server_error(
+            ErrorCode::Internal,
+            true
+        )));
+    }
+
+    #[test]
+    fn retry_classification_does_not_retry_bad_request_or_unauthorized() {
+        assert!(!should_retry_upload_error(&sample_server_error(
+            ErrorCode::BadRequest,
+            true
+        )));
+        assert!(!should_retry_upload_error(&sample_server_error(
+            ErrorCode::Unauthorized,
+            true
+        )));
+    }
+
+    #[test]
+    fn retry_backoff_is_bounded_and_increasing() {
+        assert_eq!(retry_backoff_duration(1), Duration::from_millis(250));
+        assert_eq!(retry_backoff_duration(2), Duration::from_millis(500));
+        assert_eq!(retry_backoff_duration(3), Duration::from_millis(1000));
+        assert_eq!(retry_backoff_duration(4), Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn retry_classification_does_not_retry_when_server_marks_non_retryable() {
+        assert!(!should_retry_upload_error(&sample_server_error(
+            ErrorCode::Internal,
+            false
+        )));
+    }
+
+    #[test]
+    fn retry_classification_retries_busy_even_when_server_marks_non_retryable() {
+        assert!(should_retry_upload_error(&sample_server_error(
+            ErrorCode::Busy,
+            false
+        )));
+    }
+
+    #[test]
+    fn retry_classification_does_not_retry_unstructured_unauthorized_error() {
+        let err = anyhow!(
+            "server error: certificate authentication failed (E_UNAUTHORIZED) at transport.connect"
+        );
+        assert!(!should_retry_upload_error(&err));
+    }
+
+    #[test]
+    fn retry_classification_does_not_retry_commit_not_verified_error() {
+        let err: anyhow::Error = CommitNotVerifiedError.into();
+        assert!(!should_retry_upload_error(&err));
+    }
+
+    #[test]
+    fn truncate_log_message_never_exceeds_max_chars() {
+        assert_eq!(truncate_log_message("abc", 3), "abc");
+        assert_eq!(truncate_log_message("abcdef", 6), "abcdef");
+        assert_eq!(truncate_log_message("abcdef", 5), "ab...");
+        assert_eq!(truncate_log_message("abcdef", 3), "...");
+        assert_eq!(truncate_log_message("abcdef", 2), "..");
+        assert_eq!(truncate_log_message("abcdef", 0), "");
+    }
+
+    #[test]
+    fn format_retry_log_message_reports_failed_attempt() {
+        let message = format_retry_log_message(1, 4, Duration::from_millis(250), "E_BUSY");
+        assert!(message.contains("upload attempt 1/4 failed"));
+        assert!(message.contains("retrying in 250ms"));
+        assert!(message.contains("reason=E_BUSY"));
+    }
+
+    #[test]
+    fn normalize_bundle_entry_path_rejects_unsafe_values() {
+        assert!(normalize_bundle_entry_path("../evil.wasm", "manifest.main").is_err());
+        assert!(normalize_bundle_entry_path("/etc/passwd", "manifest.main").is_err());
+        assert!(normalize_bundle_entry_path("C:\\evil.wasm", "manifest.main").is_err());
+        assert!(normalize_bundle_entry_path("..\\evil.wasm", "manifest.main").is_err());
+        assert!(normalize_bundle_entry_path("", "manifest.main").is_err());
+        assert!(normalize_bundle_entry_path("app/main.wasm", "manifest.main").is_ok());
+    }
+
+    #[test]
+    fn build_artifact_bundle_file_includes_hashed_main_wasm() {
+        let root = std::env::temp_dir().join(format!("imago-cli-bundle-hashed-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("build")).expect("build dir should be created");
+        fs::write(root.join("build/manifest.json"), "{}").expect("manifest source should exist");
+
+        let hashed_main =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef-svc.wasm";
+        fs::write(root.join("build").join(hashed_main), b"wasm").expect("hashed main should exist");
+
+        let manifest = Manifest {
+            name: "svc".to_string(),
+            main: hashed_main.to_string(),
+            app_type: "cli".to_string(),
+            assets: vec![],
+        };
+
+        let bundle = build_artifact_bundle_file(&manifest, Path::new("build/manifest.json"), &root)
+            .expect("bundle should be created");
+
+        let file = std::fs::File::open(bundle.path()).expect("bundle file should open");
+        let mut archive = tar::Archive::new(file);
+        let mut names = Vec::new();
+        for entry in archive.entries().expect("tar entries should be readable") {
+            let entry = entry.expect("tar entry should read");
+            let path = entry.path().expect("entry path should parse");
+            names.push(path.to_string_lossy().to_string());
+        }
+
+        assert!(names.contains(&"manifest.json".to_string()));
+        assert!(names.contains(&hashed_main.to_string()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_artifact_bundle_file_rejects_unsafe_manifest_main() {
+        let root = std::env::temp_dir().join(format!("imago-cli-bundle-main-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("build")).expect("build dir should be created");
+        fs::write(root.join("build/manifest.json"), "{}").expect("manifest source should exist");
+
+        let manifest = Manifest {
+            name: "svc".to_string(),
+            main: "../evil.wasm".to_string(),
+            app_type: "cli".to_string(),
+            assets: vec![],
+        };
+
+        let err = build_artifact_bundle_file(&manifest, Path::new("build/manifest.json"), &root)
+            .expect_err("unsafe manifest.main should be rejected");
+        assert!(err.to_string().contains("manifest.main"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_artifact_bundle_file_rejects_unsafe_asset_path() {
+        let root = std::env::temp_dir().join(format!("imago-cli-bundle-asset-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("build")).expect("build dir should be created");
+        fs::write(root.join("build/manifest.json"), "{}").expect("manifest source should exist");
+        fs::write(root.join("build/main.wasm"), b"00").expect("main wasm should exist");
+
+        let manifest = Manifest {
+            name: "svc".to_string(),
+            main: "main.wasm".to_string(),
+            app_type: "cli".to_string(),
+            assets: vec![ManifestAsset {
+                path: "../secret.txt".to_string(),
+            }],
+        };
+
+        let err = build_artifact_bundle_file(&manifest, Path::new("build/manifest.json"), &root)
+            .expect_err("unsafe asset path should be rejected");
+        assert!(err.to_string().contains("assets[].path"));
+
+        let _ = fs::remove_dir_all(root);
     }
 }

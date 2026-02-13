@@ -9,9 +9,9 @@ pub use envelope::ProtocolEnvelope;
 pub use error::{ErrorCode, StructuredError};
 pub use messages::{
     ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushChunkHeader,
-    ArtifactStatus, ByteRange, CommandCancelRequest, CommandCancelResponse, CommandEvent,
-    CommandEventType, CommandPayload, CommandStartRequest, CommandStartResponse, CommandState,
-    CommandType, DeployCommandPayload, DeployPrepareRequest, DeployPrepareResponse,
+    ArtifactPushRequest, ArtifactStatus, ByteRange, CommandCancelRequest, CommandCancelResponse,
+    CommandEvent, CommandEventType, CommandPayload, CommandStartRequest, CommandStartResponse,
+    CommandState, CommandType, DeployCommandPayload, DeployPrepareRequest, DeployPrepareResponse,
     HelloNegotiateRequest, HelloNegotiateResponse, MessageType, RunCommandPayload, StateRequest,
     StateResponse, StopCommandPayload,
 };

@@ -53,10 +53,10 @@ fn main() {
 ### ビルド
 
 ```bash
-imago dev build
+imago build
 ```
 
-ビルドコマンドは`imago.toml`で変更できます。
+ビルドコマンドは`imago.toml`の`[build].command`で変更できます。
 
 ## デーモンの起動
 
@@ -87,6 +87,8 @@ remote = "192.168.1.100"
 ```bash
 imago deploy
 ```
+
+`imago deploy`は内部で`imago build`相当を毎回実行してから送信します。
 
 デプロイ後のログは`imago logs <process id>`で確認できます。
 

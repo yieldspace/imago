@@ -1,83 +1,231 @@
-mod artifact_store;
-mod config;
-mod error;
-mod operation_state;
-mod orchestrator;
-mod protocol_handler;
-mod runtime_wasmtime;
-mod service_supervisor;
-mod transport;
+//! `imagod` binary entrypoint.
+//!
+//! This binary runs in manager mode by default and switches to runner mode
+//! when `--runner` is passed by the manager supervisor.
 
 use std::{path::PathBuf, sync::Arc};
 
-use artifact_store::ArtifactStore;
-use config::{ImagodConfig, resolve_config_path};
-use operation_state::OperationManager;
-use orchestrator::Orchestrator;
-use protocol_handler::ProtocolHandler;
-use runtime_wasmtime::WasmRuntime;
-use service_supervisor::ServiceSupervisor;
-use transport::build_server;
+use imagod_config::{ImagodConfig, resolve_config_path};
+use imagod_control::{ArtifactStore, OperationManager, Orchestrator, ServiceSupervisor};
+use imagod_runtime::run_runner_from_stdin;
+use imagod_server::{ProtocolHandler, build_server};
 use web_transport_quinn::http::StatusCode;
+
+const MAINTENANCE_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
+const SESSION_TASK_DRAIN_TIMEOUT_SECS: u64 = 15;
 
 #[tokio::main]
 async fn main() {
-    if let Err(err) = run().await {
+    if let Err(err) = dispatch().await {
         eprintln!("{err}");
         std::process::exit(1);
     }
 }
 
-async fn run() -> Result<(), anyhow::Error> {
+async fn dispatch() -> Result<(), anyhow::Error> {
     install_rustls_provider();
-    let config_path = resolve_config_path(parse_config_arg()?);
+    let cli = parse_cli_args()?;
+    match cli.mode {
+        RunMode::Runner => run_runner_from_stdin().await.map_err(anyhow::Error::new),
+        RunMode::Manager => run_manager(cli.config_path).await,
+    }
+}
+
+async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyhow::Error> {
+    let config_path = resolve_config_path(config_path);
     let config = Arc::new(ImagodConfig::load(&config_path).map_err(anyhow::Error::new)?);
 
     let artifact_root = config.storage_root.join("artifacts");
-    let artifacts = ArtifactStore::new(&artifact_root, config.runtime.upload_session_ttl_secs)
-        .await
-        .map_err(anyhow::Error::new)?;
+    let artifacts = ArtifactStore::new(
+        &artifact_root,
+        config.runtime.upload_session_ttl_secs,
+        config.runtime.chunk_size,
+        config.runtime.max_inflight_chunks,
+        config.runtime.max_artifact_size_bytes,
+    )
+    .await
+    .map_err(anyhow::Error::new)?;
     let operations = OperationManager::new();
-    let runtime = WasmRuntime::new().map_err(anyhow::Error::new)?;
-    let supervisor =
-        ServiceSupervisor::new(runtime.clone(), config.runtime.stop_grace_timeout_secs);
+    let supervisor = ServiceSupervisor::new(
+        &config.storage_root,
+        config.runtime.stop_grace_timeout_secs,
+        config.runtime.runner_ready_timeout_secs,
+        config.runtime.runner_log_buffer_bytes,
+        config.runtime.epoch_tick_interval_ms,
+    )
+    .map_err(anyhow::Error::new)?;
     let orchestrator = Orchestrator::new(&config.storage_root, artifacts.clone(), supervisor);
 
     let handler = ProtocolHandler::new(config.clone(), artifacts, operations, orchestrator);
 
     let maintenance_handler = handler.clone();
-    let maintenance_runtime = runtime.clone();
     let active_tick_interval =
         std::time::Duration::from_millis(config.runtime.epoch_tick_interval_ms.max(1));
     let idle_tick_interval = std::time::Duration::from_secs(1);
-    tokio::spawn(async move {
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let maintenance_task = tokio::spawn(async move {
         loop {
-            maintenance_handler.reap_finished_services().await;
-            if maintenance_handler.has_live_services().await {
-                maintenance_runtime.increment_epoch();
-                tokio::time::sleep(active_tick_interval).await;
+            if *shutdown_rx.borrow() {
+                break;
+            }
+            let mut reap_future = std::pin::pin!(maintenance_handler.reap_finished_services());
+            tokio::select! {
+                _ = &mut reap_future => {}
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                    continue;
+                }
+            }
+
+            let mut has_live_services = std::pin::pin!(maintenance_handler.has_live_services());
+            let has_live_services = tokio::select! {
+                live = &mut has_live_services => live,
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                    continue;
+                }
+            };
+
+            let sleep_duration = if has_live_services {
+                active_tick_interval
             } else {
-                tokio::time::sleep(idle_tick_interval).await;
+                idle_tick_interval
+            };
+            tokio::select! {
+                _ = tokio::time::sleep(sleep_duration) => {}
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
             }
         }
     });
 
     let mut server = build_server(&config).map_err(anyhow::Error::new)?;
     eprintln!("imagod listening on {}", config.listen_addr);
+    let mut shutdown_signal = std::pin::pin!(tokio::signal::ctrl_c());
+    let mut session_tasks = tokio::task::JoinSet::new();
+    let mut shutdown_started = false;
 
-    while let Some(request) = server.accept().await {
-        let handler = handler.clone();
-        tokio::spawn(async move {
-            let Ok(session) = request.respond(StatusCode::OK).await else {
-                return;
-            };
-            if let Err(err) = handler.handle_session(session).await {
-                eprintln!("session error: {err}");
+    loop {
+        tokio::select! {
+            _ = &mut shutdown_signal => {
+                eprintln!("shutdown signal received");
+                handler.begin_shutdown();
+                shutdown_started = true;
+                break;
             }
-        });
+            joined = session_tasks.join_next(), if !session_tasks.is_empty() => {
+                if let Some(joined) = joined {
+                    log_session_task_join_result(joined);
+                }
+            }
+            request = server.accept() => {
+                let Some(request): Option<web_transport_quinn::Request> = request else {
+                    break;
+                };
+                let handler = handler.clone();
+                session_tasks.spawn(async move {
+                    let Ok(session) = request.respond(StatusCode::OK).await else {
+                        return;
+                    };
+                    if let Err(err) = handler.handle_session(session).await {
+                        eprintln!("session error: {err}");
+                    }
+                });
+            }
+        }
     }
 
+    if !shutdown_started {
+        handler.begin_shutdown();
+    }
+    drain_session_tasks(
+        &mut session_tasks,
+        std::time::Duration::from_secs(SESSION_TASK_DRAIN_TIMEOUT_SECS),
+    )
+    .await;
+
+    let stop_errors = handler.stop_all_services(false).await;
+    for (service_name, err) in stop_errors {
+        eprintln!(
+            "service shutdown failed name={} code={:?} stage={} message={}",
+            service_name, err.code, err.stage, err.message
+        );
+    }
+    if handler.has_live_services().await {
+        let force_stop_errors = handler.stop_all_services(true).await;
+        for (service_name, err) in force_stop_errors {
+            eprintln!(
+                "service force-shutdown failed name={} code={:?} stage={} message={}",
+                service_name, err.code, err.stage, err.message
+            );
+        }
+    }
+
+    let _ = shutdown_tx.send(true);
+    wait_for_maintenance_shutdown(maintenance_task).await?;
+
     Ok(())
+}
+
+async fn wait_for_maintenance_shutdown(
+    maintenance_task: tokio::task::JoinHandle<()>,
+) -> Result<(), anyhow::Error> {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(MAINTENANCE_SHUTDOWN_TIMEOUT_SECS),
+        maintenance_task,
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(anyhow::anyhow!("maintenance task join failed: {err}")),
+        Err(_) => Err(anyhow::anyhow!(
+            "maintenance task did not shut down within {} seconds",
+            MAINTENANCE_SHUTDOWN_TIMEOUT_SECS
+        )),
+    }
+}
+
+async fn drain_session_tasks(
+    session_tasks: &mut tokio::task::JoinSet<()>,
+    timeout: std::time::Duration,
+) {
+    let drain = async {
+        while let Some(joined) = session_tasks.join_next().await {
+            log_session_task_join_result(joined);
+        }
+    };
+
+    if tokio::time::timeout(timeout, drain).await.is_ok() {
+        return;
+    }
+
+    eprintln!(
+        "session task drain timed out after {} seconds; aborting remaining tasks",
+        timeout.as_secs()
+    );
+    session_tasks.abort_all();
+    while let Some(joined) = session_tasks.join_next().await {
+        log_session_task_join_result(joined);
+    }
+}
+
+fn log_session_task_join_result(joined: Result<(), tokio::task::JoinError>) {
+    match joined {
+        Ok(()) => {}
+        Err(err) if err.is_cancelled() => {
+            eprintln!("session task cancelled during shutdown");
+        }
+        Err(err) => {
+            eprintln!("session task join failed: {err}");
+        }
+    }
 }
 
 fn install_rustls_provider() {
@@ -91,11 +239,28 @@ fn install_rustls_provider() {
     }
 }
 
-fn parse_config_arg() -> Result<Option<PathBuf>, anyhow::Error> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunMode {
+    Manager,
+    Runner,
+}
+
+#[derive(Debug, Clone)]
+struct CliArgs {
+    config_path: Option<PathBuf>,
+    mode: RunMode,
+}
+
+fn parse_cli_args() -> Result<CliArgs, anyhow::Error> {
     let mut args = std::env::args().skip(1);
     let mut config: Option<PathBuf> = None;
+    let mut mode = RunMode::Manager;
 
     while let Some(arg) = args.next() {
+        if arg == "--runner" {
+            mode = RunMode::Runner;
+            continue;
+        }
         if arg == "--config" {
             let path = args
                 .next()
@@ -110,5 +275,50 @@ fn parse_config_arg() -> Result<Option<PathBuf>, anyhow::Error> {
         }
     }
 
-    Ok(config)
+    Ok(CliArgs {
+        config_path: config,
+        mode,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drain_session_tasks;
+    use std::time::Duration;
+    use tokio::task::JoinSet;
+
+    #[tokio::test]
+    async fn drain_session_tasks_completes_finished_tasks() {
+        let mut session_tasks = JoinSet::new();
+        session_tasks.spawn(async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        });
+        session_tasks.spawn(async {});
+
+        drain_session_tasks(&mut session_tasks, Duration::from_secs(1)).await;
+        assert!(
+            session_tasks.is_empty(),
+            "all finished tasks should be drained"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_session_tasks_aborts_stuck_tasks_after_timeout() {
+        let mut session_tasks = JoinSet::new();
+        session_tasks.spawn(async {
+            std::future::pending::<()>().await;
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            drain_session_tasks(&mut session_tasks, Duration::from_millis(20)),
+        )
+        .await
+        .expect("drain should finish by aborting stuck tasks");
+
+        assert!(
+            session_tasks.is_empty(),
+            "stuck tasks should be aborted and drained"
+        );
+    }
 }

@@ -1,6 +1,6 @@
 {
   "name": "syslog-forwarder",
-  "main": "build/app.wasm",
+  "main": "app.wasm",
   "vars": {},
   "secrets": {},
   "assets": [],

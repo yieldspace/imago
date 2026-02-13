@@ -1,6 +1,6 @@
 {
   "name": "syslog-forwarder",
-  "main": "build/app.wasm",
+  "main": "app.wasm",
   "type": "socket",
   "target": {
     "host": "nanokvm-01"
@@ -19,6 +19,12 @@
       "mount": "/etc/imago/certs/ca.pem",
       "sha256": "6a33a9f6c6f48d7f1d7f03545f0f8d8df7ad2501f7f0d5b3c86f31b2c4ecfaaa",
       "size": 2048
+    }
+  ],
+  "bindings": [
+    {
+      "target": "capture-service",
+      "wit": "yieldspace:service/invoke"
     }
   ],
   "dependencies": [

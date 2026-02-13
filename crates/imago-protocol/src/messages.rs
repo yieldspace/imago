@@ -93,6 +93,7 @@ impl Validate for ByteRange {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HelloNegotiateRequest {
     pub compatibility_date: String,
     pub client_version: String,
@@ -189,6 +190,20 @@ impl Validate for ArtifactPushChunkHeader {
         ensure_non_empty(&self.chunk_sha256, "chunk_sha256")?;
         ensure_non_empty(&self.upload_token, "upload_token")?;
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactPushRequest {
+    #[serde(flatten)]
+    pub header: ArtifactPushChunkHeader,
+    pub chunk_b64: String,
+}
+
+impl Validate for ArtifactPushRequest {
+    fn validate(&self) -> Result<(), ValidationError> {
+        self.header.validate()?;
+        ensure_non_empty(&self.chunk_b64, "chunk_b64")
     }
 }
 
@@ -493,6 +508,28 @@ mod tests {
     }
 
     #[derive(Debug, Serialize)]
+    struct HelloNegotiateWithLegacyField<'a> {
+        compatibility_date: &'a str,
+        client_version: &'a str,
+        required_features: Vec<&'a str>,
+        protocol_draft: &'a str,
+    }
+
+    #[test]
+    fn hello_negotiate_rejects_legacy_protocol_draft_field() {
+        let encoded = to_cbor(&HelloNegotiateWithLegacyField {
+            compatibility_date: "2026-02-10",
+            client_version: "0.1.0",
+            required_features: vec![],
+            protocol_draft: "2026-02-10",
+        })
+        .expect("encoding should succeed");
+
+        let decoded = from_cbor::<HelloNegotiateRequest>(&encoded);
+        assert!(decoded.is_err());
+    }
+
+    #[derive(Debug, Serialize)]
     struct DeployPrepareMissingIdempotency<'a> {
         name: &'a str,
         #[serde(rename = "type")]
@@ -548,6 +585,56 @@ mod tests {
             accepted_bytes: 0,
         };
         assert!(ack.validate().is_err());
+    }
+
+    #[test]
+    fn artifact_push_request_round_trip_and_validate() {
+        let request = ArtifactPushRequest {
+            header: ArtifactPushChunkHeader {
+                deploy_id: "dep-1".to_string(),
+                offset: 0,
+                length: 4,
+                chunk_sha256: "abcd".to_string(),
+                upload_token: "token".to_string(),
+            },
+            chunk_b64: "AQIDBA==".to_string(),
+        };
+
+        request.validate().expect("request should be valid");
+        let encoded = to_cbor(&request).expect("encoding should succeed");
+        let decoded: ArtifactPushRequest = from_cbor(&encoded).expect("decoding should succeed");
+        assert_eq!(decoded, request);
+    }
+
+    #[derive(Debug, Serialize)]
+    struct ArtifactPushRequestMissingChunk<'a> {
+        #[serde(flatten)]
+        header: ArtifactPushChunkHeaderBorrowed<'a>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct ArtifactPushChunkHeaderBorrowed<'a> {
+        deploy_id: &'a str,
+        offset: u64,
+        length: u64,
+        chunk_sha256: &'a str,
+        upload_token: &'a str,
+    }
+
+    #[test]
+    fn artifact_push_request_rejects_missing_chunk_b64() {
+        let encoded = to_cbor(&ArtifactPushRequestMissingChunk {
+            header: ArtifactPushChunkHeaderBorrowed {
+                deploy_id: "dep-1",
+                offset: 0,
+                length: 4,
+                chunk_sha256: "abcd",
+                upload_token: "token",
+            },
+        })
+        .expect("encoding should succeed");
+        let decoded = from_cbor::<ArtifactPushRequest>(&encoded);
+        assert!(decoded.is_err());
     }
 
     #[test]
