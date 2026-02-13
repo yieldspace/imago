@@ -2,7 +2,9 @@ mod cli;
 mod commands;
 
 use clap::Parser;
-use cli::{CertsCommands, CertsSubcommandArgs, Cli, Commands};
+use cli::{
+    CertsCommands, CertsSubcommandArgs, Cli, Commands, ServiceCommands, ServiceSubcommandArgs,
+};
 use commands::CommandResult;
 
 fn dispatch(cli: Cli) -> CommandResult {
@@ -11,6 +13,9 @@ fn dispatch(cli: Cli) -> CommandResult {
         Commands::Deploy(args) => commands::deploy::run(args),
         Commands::Certs(CertsSubcommandArgs { command }) => match command {
             CertsCommands::Generate(args) => commands::certs::run_generate(args),
+        },
+        Commands::Service(ServiceSubcommandArgs { command }) => match command {
+            ServiceCommands::Install(args) => commands::service::run(args),
         },
     }
 }
@@ -22,6 +27,11 @@ fn dispatch_with_project_root(cli: Cli, project_root: &std::path::Path) -> Comma
         Commands::Deploy(args) => commands::deploy::run_with_project_root(args, project_root),
         Commands::Certs(CertsSubcommandArgs { command }) => match command {
             CertsCommands::Generate(args) => commands::certs::run_generate(args),
+        },
+        Commands::Service(ServiceSubcommandArgs { command }) => match command {
+            ServiceCommands::Install(args) => {
+                commands::service::run_with_project_root(args, project_root)
+            }
         },
     }
 }
@@ -64,7 +74,7 @@ fn install_rustls_provider() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{BuildArgs, DeployArgs};
+    use crate::cli::{BuildArgs, DeployArgs, ServiceInstallArgs};
     use std::path::PathBuf;
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
@@ -108,7 +118,27 @@ mod tests {
                 command: Commands::Deploy(DeployArgs {
                     env: None,
                     target: None,
-                    only_daemon: false,
+                }),
+            },
+            &root,
+        );
+
+        assert_eq!(result.exit_code, 2);
+        assert!(result.stderr.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dispatches_service_install_and_returns_non_zero_without_imago_toml() {
+        let root = new_temp_dir("dispatch-service-install");
+        let result = dispatch_with_project_root(
+            Cli {
+                command: Commands::Service(ServiceSubcommandArgs {
+                    command: ServiceCommands::Install(ServiceInstallArgs {
+                        env: None,
+                        target: "default".to_string(),
+                        daemon_path: None,
+                    }),
                 }),
             },
             &root,

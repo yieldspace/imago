@@ -14,6 +14,7 @@ pub enum Commands {
     Build(BuildArgs),
     Deploy(DeployArgs),
     Certs(CertsSubcommandArgs),
+    Service(ServiceSubcommandArgs),
 }
 
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
@@ -32,9 +33,6 @@ pub struct DeployArgs {
 
     #[arg(long, value_name = "TARGET_NAME")]
     pub target: Option<String>,
-
-    #[arg(long, help = "Only deploy the daemon to the target server")]
-    pub only_daemon: bool,
 }
 
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
@@ -64,6 +62,29 @@ pub struct CertsGenerateArgs {
 
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct ServiceSubcommandArgs {
+    #[command(subcommand)]
+    pub command: ServiceCommands,
+}
+
+#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
+pub enum ServiceCommands {
+    Install(ServiceInstallArgs),
+}
+
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct ServiceInstallArgs {
+    #[arg(long, value_name = "ENV_NAME")]
+    pub env: Option<String>,
+
+    #[arg(long, value_name = "TARGET_NAME", default_value = "default")]
+    pub target: String,
+
+    #[arg(long, value_name = "PATH")]
+    pub daemon_path: Option<PathBuf>,
 }
 
 #[cfg(test)]
@@ -112,7 +133,6 @@ mod tests {
                 command: Commands::Deploy(DeployArgs {
                     env: None,
                     target: None,
-                    only_daemon: false,
                 }),
             }
         );
@@ -129,7 +149,6 @@ mod tests {
                 command: Commands::Deploy(DeployArgs {
                     env: Some("prod".to_string()),
                     target: None,
-                    only_daemon: false,
                 }),
             }
         );
@@ -146,7 +165,6 @@ mod tests {
                 command: Commands::Deploy(DeployArgs {
                     env: None,
                     target: Some("default".to_string()),
-                    only_daemon: false,
                 }),
             }
         );
@@ -173,6 +191,54 @@ mod tests {
                         server_ip: "127.0.0.1".to_string(),
                         days: 3650,
                         force: false,
+                    }),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_service_install_with_defaults() {
+        let cli =
+            Cli::try_parse_from(["imago", "service", "install"]).expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Commands::Service(ServiceSubcommandArgs {
+                    command: ServiceCommands::Install(ServiceInstallArgs {
+                        env: None,
+                        target: "default".to_string(),
+                        daemon_path: None,
+                    }),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_service_install_with_all_options() {
+        let cli = Cli::try_parse_from([
+            "imago",
+            "service",
+            "install",
+            "--env",
+            "prod",
+            "--target",
+            "edge",
+            "--daemon-path",
+            "/usr/local/bin/imagod",
+        ])
+        .expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Commands::Service(ServiceSubcommandArgs {
+                    command: ServiceCommands::Install(ServiceInstallArgs {
+                        env: Some("prod".to_string()),
+                        target: "edge".to_string(),
+                        daemon_path: Some(PathBuf::from("/usr/local/bin/imagod")),
                     }),
                 }),
             }

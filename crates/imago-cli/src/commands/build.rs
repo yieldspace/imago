@@ -231,7 +231,10 @@ pub fn build_project(
     })
 }
 
-fn load_resolved_toml(project_root: &Path, env: Option<&str>) -> anyhow::Result<toml::Table> {
+pub(crate) fn load_resolved_toml(
+    project_root: &Path,
+    env: Option<&str>,
+) -> anyhow::Result<toml::Table> {
     let path = project_root.join("imago.toml");
     let raw =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
@@ -618,7 +621,7 @@ fn parse_bindings(value: Option<&TomlValue>) -> anyhow::Result<Vec<ManifestBindi
     Ok(bindings)
 }
 
-fn parse_target(
+pub(crate) fn parse_target(
     root: &toml::Table,
     target_name: &str,
     project_root: &Path,
@@ -654,7 +657,7 @@ fn parse_target(
     })
 }
 
-fn optional_string(table: &toml::Table, key: &str) -> anyhow::Result<Option<String>> {
+pub(crate) fn optional_string(table: &toml::Table, key: &str) -> anyhow::Result<Option<String>> {
     let Some(value) = table.get(key) else {
         return Ok(None);
     };
@@ -665,7 +668,7 @@ fn optional_string(table: &toml::Table, key: &str) -> anyhow::Result<Option<Stri
     Ok(Some(text))
 }
 
-fn optional_target_cert_path(
+pub(crate) fn optional_target_cert_path(
     table: &toml::Table,
     key: &str,
     project_root: &Path,

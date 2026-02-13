@@ -1321,7 +1321,6 @@ mod tests {
             DeployArgs {
                 env: None,
                 target: None,
-                only_daemon: false,
             },
             &root,
         );
