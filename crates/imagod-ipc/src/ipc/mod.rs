@@ -58,6 +58,8 @@ pub struct RunnerBootstrap {
     pub release_hash: String,
     /// Runtime execution model selected from manifest `type`.
     pub app_type: RunnerAppType,
+    /// TCP port used by local HTTP ingress when `app_type=http`.
+    pub http_port: Option<u16>,
     /// Absolute path to the component file.
     pub component_path: PathBuf,
     /// CLI arguments passed to WASI command.
@@ -454,6 +456,7 @@ mod tests {
             service_name: "svc-a".to_string(),
             release_hash: "release-a".to_string(),
             app_type: RunnerAppType::Socket,
+            http_port: Some(18080),
             component_path: PathBuf::from("/tmp/component.wasm"),
             args: vec!["--help".to_string()],
             envs: std::collections::BTreeMap::new(),
@@ -468,6 +471,7 @@ mod tests {
         let decoded = imago_protocol::from_cbor::<RunnerBootstrap>(&encoded)
             .expect("bootstrap decoding should work");
         assert_eq!(decoded.app_type, RunnerAppType::Socket);
+        assert_eq!(decoded.http_port, Some(18080));
     }
 
     #[test]

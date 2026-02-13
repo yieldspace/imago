@@ -1,14 +1,17 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "examples/local-imagod"]
+members = ["crates/*", "examples/local-imagod", "examples/local-imagod-http"]
 
 [workspace.dependencies]
 anyhow = "1.0.101"
 base64 = "0.22.1"
+bytes = "1.11.1"
 ciborium = "0.2.2"
 clap = "4.5.58"
 hex = "0.4.3"
 hmac = "0.12.1"
+http-body-util = "0.1.3"
+hyper = "1.8.1"
 quinn = "0.11.9"
 rcgen = "0.14.7"
 rustls = "0.23.36"

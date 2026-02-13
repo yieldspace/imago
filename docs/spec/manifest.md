@@ -28,6 +28,7 @@
 | `secrets` | object | env 反映後の secret 値 |
 | `assets` | array | 同梱アセット一覧 |
 | `bindings` | array | service 間呼び出し許可一覧（省略時は `[]`） |
+| `http` | object | `type=http` 時の HTTP 実行設定（`port` 必須） |
 | `dependencies` | array | 依存解決結果 |
 | `hash` | object | 全体整合性情報 |
 
@@ -64,6 +65,12 @@
 - `wit` は非空文字列。
 - `bindings` 未指定 manifest は `[]` と同等に扱う（後方互換）。
 
+## `http` フィールド
+
+- `http` は `type=http` のときのみ許可する。
+- `http.port` は必須で `1..=65535`。
+- `type!=http` で `http` を含む manifest は不正として拒否する。
+
 ## 正常例と異常例
 
 - 正常例: [`examples/manifest.valid.json`](./examples/manifest.valid.json)
@@ -76,6 +83,8 @@
 
 - 必須フィールド欠落は拒否。
 - `type` が定義外なら拒否。
+- `type=http` かつ `http.port` 欠落は拒否。
+- `type!=http` かつ `http` 指定は拒否。
 - `hash.algorithm != "sha256"` は拒否。
 - `hash.targets` が不足または重複なら拒否。
 - `secrets` は key-value オブジェクトのみ許可。
@@ -94,3 +103,4 @@
 - `build/<sha256>-<name>.wasm` が既に存在する場合でも、内容の sha256 が不一致なら `main` の実体 wasm から上書き再生成する。
 - `hash.value` の wasm 対象は `manifest.main` が指す materialize 後ファイルとする。
 - CLI は `imago.toml` の `[[bindings]]` を `manifest.bindings[]` に正規化して出力する。
+- CLI は `type=http` 時のみ `imago.toml` の `[http].port` を `manifest.http.port` へ正規化して出力する。

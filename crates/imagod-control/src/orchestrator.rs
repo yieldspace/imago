@@ -31,6 +31,8 @@ struct Manifest {
     #[serde(rename = "type")]
     app_type: RunnerAppType,
     #[serde(default)]
+    http: Option<ManifestHttp>,
+    #[serde(default)]
     vars: BTreeMap<String, String>,
     #[serde(default)]
     secrets: BTreeMap<String, String>,
@@ -52,6 +54,12 @@ struct ManifestAsset {
 struct ManifestBinding {
     target: String,
     wit: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+/// Manifest HTTP execution settings.
+struct ManifestHttp {
+    port: u16,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -381,16 +389,42 @@ async fn build_launch_from_release(
     }
 
     let bindings = validate_manifest_bindings(&manifest.bindings)?;
+    let http_port = validate_manifest_http(manifest)?;
 
     Ok(ServiceLaunch {
         name: manifest.name.clone(),
         release_hash: release_hash.to_string(),
         app_type: manifest.app_type,
+        http_port,
         component_path,
         args: Vec::new(),
         envs,
         bindings,
     })
+}
+
+fn validate_manifest_http(manifest: &Manifest) -> Result<Option<u16>, ImagodError> {
+    match manifest.app_type {
+        RunnerAppType::Http => {
+            let http = manifest.http.as_ref().ok_or_else(|| {
+                map_bad_manifest("manifest.http is required when type=\"http\"".to_string())
+            })?;
+            if http.port == 0 {
+                return Err(map_bad_manifest(
+                    "manifest.http.port must be in range 1..=65535".to_string(),
+                ));
+            }
+            Ok(Some(http.port))
+        }
+        RunnerAppType::Cli | RunnerAppType::Socket => {
+            if manifest.http.is_some() {
+                return Err(map_bad_manifest(
+                    "manifest.http is only allowed when type=\"http\"".to_string(),
+                ));
+            }
+            Ok(None)
+        }
+    }
 }
 
 fn validate_manifest_bindings(
@@ -786,8 +820,8 @@ fn map_rollback_error(err: ImagodError) -> ImagodError {
 #[cfg(test)]
 mod tests {
     use super::{
-        HashTarget, Manifest, ManifestAsset, ManifestBinding, ManifestHash, RunnerAppType,
-        build_launch_from_release, extract_tar, normalize_archive_entry_path,
+        HashTarget, Manifest, ManifestAsset, ManifestBinding, ManifestHash, ManifestHttp,
+        RunnerAppType, build_launch_from_release, extract_tar, normalize_archive_entry_path,
         normalize_manifest_main_path, promote_staging_release, release_id_from_artifact_digest,
         validate_deploy_preconditions, validate_service_name,
     };
@@ -809,6 +843,7 @@ mod tests {
             name: "svc-a".to_string(),
             main: "component.wasm".to_string(),
             app_type: RunnerAppType::Cli,
+            http: None,
             vars: BTreeMap::new(),
             secrets: BTreeMap::new(),
             assets: Vec::<ManifestAsset>::new(),
@@ -1013,11 +1048,51 @@ mod tests {
 
         let mut manifest = valid_manifest();
         manifest.app_type = RunnerAppType::Http;
+        manifest.http = Some(ManifestHttp { port: 18080 });
 
         let launch = build_launch_from_release("release-a", &root, &manifest)
             .await
             .expect("launch should be built");
         assert_eq!(launch.app_type, RunnerAppType::Http);
+        assert_eq!(launch.http_port, Some(18080));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_http_type_without_http_section() {
+        let root = temp_dir_path("orchestrator-http-missing");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.app_type = RunnerAppType::Http;
+        manifest.http = None;
+
+        let err = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect_err("type=http without manifest.http must fail");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("manifest.http is required"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_http_section_for_non_http_type() {
+        let root = temp_dir_path("orchestrator-http-extra");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.app_type = RunnerAppType::Cli;
+        manifest.http = Some(ManifestHttp { port: 18080 });
+
+        let err = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect_err("type=cli with manifest.http must fail");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("only allowed when type=\"http\""));
 
         let _ = fs::remove_dir_all(root);
     }

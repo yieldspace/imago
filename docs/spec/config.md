@@ -68,6 +68,13 @@
 - `imago build` はこの設定を `manifest.bindings[]` に正規化して出力する。
 - 未指定時は `manifest.bindings=[]` として扱い、runtime は deny-by-default で拒否する。
 
+## `[http]`（`type=http` 時の ingress 設定）
+
+- `type = "http"` の場合のみ `[http]` セクションを受理する。
+- `http.port` は必須で、`1..=65535` の整数のみ許可する。
+- `type != "http"` で `[http]` を指定した場合は設定不整合として build エラーにする。
+- `imago build` はこの設定を `manifest.http.port` に正規化して出力する。
+
 <a id="capability-model"></a>
 ## 権限モデル
 
@@ -98,6 +105,8 @@
 
 - 必須キー欠落はエラー。
 - `type` 不正値はエラー。
+- `type="http"` かつ `http.port` 欠落はエラー。
+- `type!="http"` かつ `[http]` 指定はエラー。
 - `main` が存在しない場合はビルド時エラー。
 - `shutdown_timeout` が 0 以下はエラー。
 - `privileged = true` かつ `capabilities` 指定ありでもエラーにはしない（`capabilities` を無視）。
@@ -123,6 +132,7 @@
 - `imago build --env <name>` は `build/manifest.<name>.json` を生成し、`build/manifest.json` は更新しない。
 - `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
 - `[[bindings]]` は `manifest.bindings[]` へ正規化し、runtime の呼び出し認可入力として扱う。
+- `type="http"` のときのみ `[http].port` を受理し、`manifest.http.port` へ反映する。
 - CLI の `name` 検証は `imagod` と同等に `..` を拒否し、path 文字を明示的に弾く。
 - `--env <name>` は manifest 出力先と `.env.<name>` 解決の双方で同一バリデーションを適用し、path traversal を拒否する。
 - `target.<name>.ca_cert` / `client_cert` / `client_key` は path traversal と不正区切りを拒否し、相対指定を `project_root` 基準の絶対パスへ解決する。

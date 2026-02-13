@@ -307,12 +307,19 @@ deploy 経路の要点:
 
 - runner は `RunnerBootstrap.app_type` を runtime へ渡し、`type` ごとに実行分岐する。
   - `cli`: `wasmtime_wasi::p2::bindings::Command::instantiate_async` + `call_run(...).await`
-  - `http`: `wasmtime_wasi_http::bindings::Proxy::instantiate_async`（`incoming-handler` instantiate）後、shutdown signal まで待機
+  - `http`: `wasmtime_wasi_http::bindings::Proxy::instantiate_async`（`incoming-handler` instantiate）後、runner の外部 ingress から `call_handle(...)` を都度実行
   - `socket`: 現時点では未実装として `E_INTERNAL` を返す
 - `cli` 分岐では `wasmtime_wasi::p2::add_to_linker_async` を利用する
 - `http` 分岐では `wasmtime_wasi_http::add_only_http_to_linker_async` を併用する
 - `Store::set_epoch_deadline(1)`
 - `Store::epoch_deadline_async_yield_and_update(1)`
+
+HTTP ingress:
+
+- `app_type=http` の runner は `127.0.0.1:http_port`（manifest 明示値）へ TCP bind する。
+- ingress は HTTP/1.1 リクエストを受理し、`RuntimeHttpRequest` へ変換して runtime trait の `handle_http_request` を呼ぶ。
+- runtime は `incoming-handler.handle` を呼び、返却された status/header/body を `RuntimeHttpResponse` に正規化して返す。
+- bind 失敗は `runner_ready` 送信前に start 失敗として扱う。
 
 停止連携:
 
@@ -494,6 +501,9 @@ flowchart TD
   - manager は target runner 秘密鍵で短命 token を発行し、callee runner が検証する。
 - runner bootstrap に `app_type`（`cli` / `http` / `socket`）を追加した。
   - runner process は Wasmtime 直結ではなく runtime trait 経由で実行し、将来の runtime 差し替え可能性を確保する。
+- runner bootstrap に `http_port`（`type=http` 時のみ有効）を追加した。
+  - orchestrator は manifest の `http.port` を `ServiceLaunch` / `RunnerBootstrap` へ伝播する。
+  - runner は `127.0.0.1:http_port` へ ingress bind し、`incoming-handler.handle` を実行する。
 - ログ回収を追加した。
   - runner stdout/stderr を pipe で manager が回収する。
   - service ごとに容量上限付き ring buffer（`runner_log_buffer_bytes`）へ保持する。
