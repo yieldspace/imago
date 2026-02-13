@@ -1,4 +1,9 @@
-use std::{path::Path, time::Duration};
+use std::{
+    borrow::Cow,
+    io::{self, Write},
+    path::Path,
+    time::Duration,
+};
 
 use anyhow::{Context, anyhow};
 use imago_protocol::{
@@ -17,6 +22,50 @@ use crate::{
 
 const NON_FOLLOW_IDLE_TIMEOUT_SECS: u64 = 2;
 const POST_END_DRAIN_TIMEOUT_MS: u64 = 200;
+
+#[derive(Debug, Default)]
+struct PrefixRenderState {
+    streams: Vec<StreamPrefixState>,
+}
+
+#[derive(Debug)]
+struct StreamPrefixState {
+    process_id: String,
+    stream_kind: LogStreamKind,
+    at_line_start: bool,
+}
+
+impl PrefixRenderState {
+    fn at_line_start(&self, process_id: &str, stream_kind: LogStreamKind) -> bool {
+        self.streams
+            .iter()
+            .find(|state| state.process_id == process_id && state.stream_kind == stream_kind)
+            .map(|state| state.at_line_start)
+            .unwrap_or(true)
+    }
+
+    fn set_at_line_start(
+        &mut self,
+        process_id: &str,
+        stream_kind: LogStreamKind,
+        at_line_start: bool,
+    ) {
+        if let Some(state) = self
+            .streams
+            .iter_mut()
+            .find(|state| state.process_id == process_id && state.stream_kind == stream_kind)
+        {
+            state.at_line_start = at_line_start;
+            return;
+        }
+
+        self.streams.push(StreamPrefixState {
+            process_id: process_id.to_string(),
+            stream_kind,
+            at_line_start,
+        });
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct LogsRequestAck {
@@ -106,6 +155,7 @@ async fn receive_logs_datagrams(
 ) -> anyhow::Result<()> {
     let mut expected_seq: Option<u64> = None;
     let mut truncated_warned = false;
+    let mut prefix_state = PrefixRenderState::default();
 
     loop {
         let datagram = if follow {
@@ -138,7 +188,7 @@ async fn receive_logs_datagrams(
                     continue;
                 }
                 warn_if_seq_gap(&mut expected_seq, chunk.seq, &mut truncated_warned);
-                render_chunk(&chunk, all_processes);
+                render_chunk(&chunk, all_processes, &mut prefix_state)?;
             }
             LogsDatagram::End(end) => {
                 if request_id != end.request_id {
@@ -151,8 +201,14 @@ async fn receive_logs_datagrams(
                         error.code
                     ));
                 }
-                let delayed_chunk_seqs =
-                    drain_post_end_chunks(session, request_id, all_processes, end.seq).await?;
+                let delayed_chunk_seqs = drain_post_end_chunks(
+                    session,
+                    request_id,
+                    all_processes,
+                    &mut prefix_state,
+                    end.seq,
+                )
+                .await?;
                 apply_end_seq_after_drain(
                     &mut expected_seq,
                     end.seq,
@@ -171,6 +227,7 @@ async fn drain_post_end_chunks(
     session: &Session,
     request_id: Uuid,
     all_processes: bool,
+    prefix_state: &mut PrefixRenderState,
     end_seq: u64,
 ) -> anyhow::Result<Vec<u64>> {
     let deadline = time::Instant::now() + Duration::from_millis(POST_END_DRAIN_TIMEOUT_MS);
@@ -195,7 +252,7 @@ async fn drain_post_end_chunks(
         if chunk.seq >= end_seq {
             continue;
         }
-        render_chunk(&chunk, all_processes);
+        render_chunk(&chunk, all_processes, prefix_state)?;
         delayed_chunk_seqs.push(chunk.seq);
     }
 
@@ -263,36 +320,91 @@ fn apply_end_seq_after_drain(
     warn_if_seq_gap(expected_seq, end_seq, truncated_warned);
 }
 
-fn render_chunk(chunk: &LogChunk, all_processes: bool) {
+fn render_chunk(
+    chunk: &LogChunk,
+    all_processes: bool,
+    prefix_state: &mut PrefixRenderState,
+) -> anyhow::Result<()> {
     if chunk.bytes.is_empty() {
-        return;
+        return Ok(());
     }
 
-    if all_processes {
-        let rendered = format_prefixed_lines(&chunk.process_id, chunk.stream_kind, &chunk.bytes);
-        print!("{rendered}");
-        return;
+    let rendered = renderable_chunk_bytes(chunk, all_processes, prefix_state);
+    if all_processes
+        || matches!(
+            chunk.stream_kind,
+            LogStreamKind::Stdout | LogStreamKind::Composite
+        )
+    {
+        let mut stdout = io::stdout().lock();
+        stdout
+            .write_all(rendered.as_ref())
+            .context("failed to write log chunk to stdout")?;
+    } else {
+        let mut stderr = io::stderr().lock();
+        stderr
+            .write_all(rendered.as_ref())
+            .context("failed to write log chunk to stderr")?;
     }
 
-    let text = String::from_utf8_lossy(&chunk.bytes);
-    match chunk.stream_kind {
-        LogStreamKind::Stderr => eprint!("{text}"),
-        LogStreamKind::Stdout | LogStreamKind::Composite => print!("{text}"),
-    }
+    Ok(())
 }
 
-fn format_prefixed_lines(process_id: &str, stream_kind: LogStreamKind, bytes: &[u8]) -> String {
+fn renderable_chunk_bytes<'a>(
+    chunk: &'a LogChunk,
+    all_processes: bool,
+    prefix_state: &mut PrefixRenderState,
+) -> Cow<'a, [u8]> {
+    if !all_processes {
+        return Cow::Borrowed(&chunk.bytes);
+    }
+
+    let at_line_start = prefix_state.at_line_start(&chunk.process_id, chunk.stream_kind);
+    let (rendered, next_at_line_start) = format_prefixed_bytes(
+        &chunk.process_id,
+        chunk.stream_kind,
+        &chunk.bytes,
+        at_line_start,
+    );
+    prefix_state.set_at_line_start(&chunk.process_id, chunk.stream_kind, next_at_line_start);
+    Cow::Owned(rendered)
+}
+
+fn format_prefixed_bytes(
+    process_id: &str,
+    stream_kind: LogStreamKind,
+    bytes: &[u8],
+    mut at_line_start: bool,
+) -> (Vec<u8>, bool) {
     let prefix = format!("[{}][{}] ", process_id, stream_kind_label(stream_kind));
-    let text = String::from_utf8_lossy(bytes);
-    let mut out = String::new();
-    for segment in text.split_inclusive('\n') {
-        out.push_str(&prefix);
-        out.push_str(segment);
-        if !segment.ends_with('\n') {
-            out.push('\n');
+    let prefix_bytes = prefix.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len().saturating_add(prefix_bytes.len()));
+
+    let mut segment_start = 0usize;
+    while segment_start < bytes.len() {
+        if at_line_start {
+            out.extend_from_slice(prefix_bytes);
+        }
+
+        match bytes[segment_start..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+        {
+            Some(offset) => {
+                let segment_end = segment_start + offset + 1;
+                out.extend_from_slice(&bytes[segment_start..segment_end]);
+                segment_start = segment_end;
+                at_line_start = true;
+            }
+            None => {
+                out.extend_from_slice(&bytes[segment_start..]);
+                segment_start = bytes.len();
+                at_line_start = false;
+            }
         }
     }
-    out
+
+    (out, at_line_start)
 }
 
 fn stream_kind_label(stream_kind: LogStreamKind) -> &'static str {
@@ -342,9 +454,73 @@ mod tests {
     }
 
     #[test]
-    fn format_prefixed_lines_adds_prefix_for_each_line() {
-        let rendered = format_prefixed_lines("svc-a", LogStreamKind::Stdout, b"a\nb");
-        assert_eq!(rendered, "[svc-a][stdout] a\n[svc-a][stdout] b\n");
+    fn format_prefixed_bytes_adds_prefix_for_each_newline_terminated_line() {
+        let (rendered, at_line_start) =
+            format_prefixed_bytes("svc-a", LogStreamKind::Stdout, b"a\nb\n", true);
+        assert_eq!(rendered, b"[svc-a][stdout] a\n[svc-a][stdout] b\n");
+        assert!(at_line_start);
+    }
+
+    #[test]
+    fn renderable_chunk_bytes_keeps_partial_line_contiguous_across_chunks() {
+        let request_id = Uuid::new_v4();
+        let mut prefix_state = PrefixRenderState::default();
+        let first = LogChunk {
+            request_id,
+            seq: 0,
+            process_id: "svc-a".to_string(),
+            stream_kind: LogStreamKind::Stdout,
+            bytes: b"hel".to_vec(),
+            is_last: false,
+        };
+        let second = LogChunk {
+            request_id,
+            seq: 1,
+            process_id: "svc-a".to_string(),
+            stream_kind: LogStreamKind::Stdout,
+            bytes: b"lo\n".to_vec(),
+            is_last: false,
+        };
+
+        assert_eq!(
+            renderable_chunk_bytes(&first, true, &mut prefix_state).as_ref(),
+            b"[svc-a][stdout] hel"
+        );
+        assert_eq!(
+            renderable_chunk_bytes(&second, true, &mut prefix_state).as_ref(),
+            b"lo\n"
+        );
+    }
+
+    #[test]
+    fn renderable_chunk_bytes_keeps_non_utf8_fragments_unchanged() {
+        let request_id = Uuid::new_v4();
+        let mut prefix_state = PrefixRenderState::default();
+        let first = LogChunk {
+            request_id,
+            seq: 0,
+            process_id: "svc-a".to_string(),
+            stream_kind: LogStreamKind::Stdout,
+            bytes: vec![0xe3, 0x81],
+            is_last: false,
+        };
+        let second = LogChunk {
+            request_id,
+            seq: 1,
+            process_id: "svc-a".to_string(),
+            stream_kind: LogStreamKind::Stdout,
+            bytes: vec![0x82],
+            is_last: false,
+        };
+
+        assert_eq!(
+            renderable_chunk_bytes(&first, false, &mut prefix_state).as_ref(),
+            &[0xe3, 0x81]
+        );
+        assert_eq!(
+            renderable_chunk_bytes(&second, false, &mut prefix_state).as_ref(),
+            &[0x82]
+        );
     }
 
     #[test]
