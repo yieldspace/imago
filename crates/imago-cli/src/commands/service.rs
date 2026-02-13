@@ -534,17 +534,6 @@ mod tests {
         root
     }
 
-    fn write_file(path: &Path, bytes: &[u8]) {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("parent dir should be created");
-        }
-        fs::write(path, bytes).expect("file write should succeed");
-    }
-
-    fn write_imago_toml(root: &Path, body: &str) {
-        write_file(&root.join("imago.toml"), body.as_bytes());
-    }
-
     fn sample_toml_root(body: &str) -> toml::Table {
         let parsed: TomlValue = toml::from_str(body).expect("toml should parse");
         parsed.as_table().cloned().expect("root should be a table")
