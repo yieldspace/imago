@@ -595,72 +595,159 @@ async fn run_logs_forwarder(
             return;
         }
     };
-
-    let stream_result = stream_logs_datagrams(
+    let sender = LogsDatagramSender::new(
         &session,
         request_id,
         correlation_id,
         max_datagram_size,
         chunk_size,
-        subscriptions,
-        &mut seq,
-        &mut last_process_id,
-    )
-    .await;
+    );
+
+    let stream_result = stream_logs_datagrams(&sender, subscriptions, &mut seq, &mut last_process_id).await;
 
     match stream_result {
         Ok(()) => {
             let terminal_process = last_process_id.unwrap_or(fallback_process_id);
-            let _ = send_single_log_chunk(
-                &session,
-                request_id,
-                correlation_id,
-                max_datagram_size,
+            let _ = sender.send_single_log_chunk(
                 &mut seq,
                 &terminal_process,
                 LogStreamKind::Composite,
                 Vec::new(),
                 true,
             );
-            let _ = send_logs_end_datagram(
-                &session,
-                request_id,
-                correlation_id,
-                max_datagram_size,
-                seq,
-                None,
-            );
+            let _ = sender.send_logs_end_datagram(seq, None);
         }
         Err(err) => {
-            let _ = send_logs_end_datagram(
-                &session,
-                request_id,
-                correlation_id,
-                max_datagram_size,
-                seq,
-                Some(log_error_from_imagod_error(&err)),
-            );
+            let _ = sender.send_logs_end_datagram(seq, Some(log_error_from_imagod_error(&err)));
         }
     }
 }
 
-async fn stream_logs_datagrams(
-    session: &Session,
+struct LogsDatagramSender<'a> {
+    session: &'a Session,
     request_id: Uuid,
     correlation_id: Uuid,
     max_datagram_size: usize,
     chunk_size: usize,
-    subscriptions: Vec<ServiceLogSubscription>,
-    seq: &mut u64,
-    last_process_id: &mut Option<String>,
-) -> Result<(), ImagodError> {
-    for subscription in &subscriptions {
-        send_log_data_chunks(
+}
+
+impl<'a> LogsDatagramSender<'a> {
+    fn new(
+        session: &'a Session,
+        request_id: Uuid,
+        correlation_id: Uuid,
+        max_datagram_size: usize,
+        chunk_size: usize,
+    ) -> Self {
+        Self {
             session,
             request_id,
             correlation_id,
             max_datagram_size,
             chunk_size,
+        }
+    }
+
+    fn send_log_data_chunks(
+        &self,
+        seq: &mut u64,
+        process_id: &str,
+        stream_kind: LogStreamKind,
+        bytes: &[u8],
+        last_process_id: &mut Option<String>,
+    ) -> Result<(), ImagodError> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        if self.chunk_size == 0 {
+            return Err(ImagodError::new(
+                imago_protocol::ErrorCode::Internal,
+                "logs.datagram",
+                "computed logs chunk size must be greater than zero",
+            ));
+        }
+
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let end = bytes.len().min(offset.saturating_add(self.chunk_size));
+            self.send_single_log_chunk(
+                seq,
+                process_id,
+                stream_kind,
+                bytes[offset..end].to_vec(),
+                false,
+            )?;
+            *last_process_id = Some(process_id.to_string());
+            offset = end;
+        }
+
+        Ok(())
+    }
+
+    fn send_single_log_chunk(
+        &self,
+        seq: &mut u64,
+        process_id: &str,
+        stream_kind: LogStreamKind,
+        bytes: Vec<u8>,
+        is_last: bool,
+    ) -> Result<(), ImagodError> {
+        let chunk = LogChunk {
+            request_id: self.request_id,
+            seq: *seq,
+            process_id: process_id.to_string(),
+            stream_kind,
+            bytes,
+            is_last,
+        };
+        let envelope = ProtocolEnvelope::new(
+            MessageType::LogsChunk,
+            self.request_id,
+            self.correlation_id,
+            chunk,
+        );
+        send_datagram_envelope(self.session, &envelope, self.max_datagram_size)?;
+        *seq = seq.saturating_add(1);
+        Ok(())
+    }
+
+    fn send_logs_end_datagram(&self, seq: u64, error: Option<LogError>) -> Result<(), ImagodError> {
+        send_logs_end_datagram(
+            self.session,
+            self.request_id,
+            self.correlation_id,
+            self.max_datagram_size,
+            seq,
+            error,
+        )
+    }
+}
+
+fn send_logs_end_datagram(
+    session: &Session,
+    request_id: Uuid,
+    correlation_id: Uuid,
+    max_datagram_size: usize,
+    seq: u64,
+    error: Option<LogError>,
+) -> Result<(), ImagodError> {
+    let end = LogEnd {
+        request_id,
+        seq,
+        error,
+    };
+    let envelope = ProtocolEnvelope::new(MessageType::LogsEnd, request_id, correlation_id, end);
+    send_datagram_envelope(session, &envelope, max_datagram_size)
+}
+
+async fn stream_logs_datagrams(
+    sender: &LogsDatagramSender<'_>,
+    subscriptions: Vec<ServiceLogSubscription>,
+    seq: &mut u64,
+    last_process_id: &mut Option<String>,
+) -> Result<(), ImagodError> {
+    for subscription in &subscriptions {
+        sender.send_log_data_chunks(
             seq,
             &subscription.service_name,
             LogStreamKind::Composite,
@@ -701,12 +788,7 @@ async fn stream_logs_datagrams(
     drop(tx);
 
     while let Some((service_name, event)) = rx.recv().await {
-        send_log_data_chunks(
-            session,
-            request_id,
-            correlation_id,
-            max_datagram_size,
-            chunk_size,
+        sender.send_log_data_chunks(
             seq,
             &service_name,
             service_log_stream_to_protocol(event.stream),
@@ -716,92 +798,6 @@ async fn stream_logs_datagrams(
     }
 
     Ok(())
-}
-
-fn send_log_data_chunks(
-    session: &Session,
-    request_id: Uuid,
-    correlation_id: Uuid,
-    max_datagram_size: usize,
-    chunk_size: usize,
-    seq: &mut u64,
-    process_id: &str,
-    stream_kind: LogStreamKind,
-    bytes: &[u8],
-    last_process_id: &mut Option<String>,
-) -> Result<(), ImagodError> {
-    if bytes.is_empty() {
-        return Ok(());
-    }
-    if chunk_size == 0 {
-        return Err(ImagodError::new(
-            imago_protocol::ErrorCode::Internal,
-            "logs.datagram",
-            "computed logs chunk size must be greater than zero",
-        ));
-    }
-
-    let mut offset = 0usize;
-    while offset < bytes.len() {
-        let end = bytes.len().min(offset.saturating_add(chunk_size));
-        send_single_log_chunk(
-            session,
-            request_id,
-            correlation_id,
-            max_datagram_size,
-            seq,
-            process_id,
-            stream_kind,
-            bytes[offset..end].to_vec(),
-            false,
-        )?;
-        *last_process_id = Some(process_id.to_string());
-        offset = end;
-    }
-
-    Ok(())
-}
-
-fn send_single_log_chunk(
-    session: &Session,
-    request_id: Uuid,
-    correlation_id: Uuid,
-    max_datagram_size: usize,
-    seq: &mut u64,
-    process_id: &str,
-    stream_kind: LogStreamKind,
-    bytes: Vec<u8>,
-    is_last: bool,
-) -> Result<(), ImagodError> {
-    let chunk = LogChunk {
-        request_id,
-        seq: *seq,
-        process_id: process_id.to_string(),
-        stream_kind,
-        bytes,
-        is_last,
-    };
-    let envelope = ProtocolEnvelope::new(MessageType::LogsChunk, request_id, correlation_id, chunk);
-    send_datagram_envelope(session, &envelope, max_datagram_size)?;
-    *seq = seq.saturating_add(1);
-    Ok(())
-}
-
-fn send_logs_end_datagram(
-    session: &Session,
-    request_id: Uuid,
-    correlation_id: Uuid,
-    max_datagram_size: usize,
-    seq: u64,
-    error: Option<LogError>,
-) -> Result<(), ImagodError> {
-    let end = LogEnd {
-        request_id,
-        seq,
-        error,
-    };
-    let envelope = ProtocolEnvelope::new(MessageType::LogsEnd, request_id, correlation_id, end);
-    send_datagram_envelope(session, &envelope, max_datagram_size)
 }
 
 fn send_datagram_envelope<T: Serialize>(
