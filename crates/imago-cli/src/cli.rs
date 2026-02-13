@@ -22,6 +22,9 @@ pub struct DeployArgs {
 
     #[arg(long, value_name = "TARGET_NAME")]
     pub target: Option<String>,
+
+    #[arg(long, help = "Only deploy the daemon to the target server")]
+    pub only_daemon: bool,
 }
 
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
@@ -68,6 +71,7 @@ mod tests {
                 command: Commands::Deploy(DeployArgs {
                     env: None,
                     target: None,
+                    only_daemon: false,
                 }),
             }
         );
@@ -84,6 +88,7 @@ mod tests {
                 command: Commands::Deploy(DeployArgs {
                     env: Some("prod".to_string()),
                     target: None,
+                    only_daemon: false,
                 }),
             }
         );
@@ -100,6 +105,7 @@ mod tests {
                 command: Commands::Deploy(DeployArgs {
                     env: None,
                     target: Some("default".to_string()),
+                    only_daemon: false,
                 }),
             }
         );

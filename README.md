@@ -90,6 +90,55 @@ imago deploy
 
 デプロイ後のログは`imago logs <process id>`で確認できます。
 
+### デーモンの自動デプロイ
+
+デプロイ先のサーバーにデーモンが起動していない場合、SSH経由で自動的にデーモンをインストール・起動できます。
+
+`imago.toml`に`ssh_user`を追加すると、デプロイ時にデーモンへの接続に失敗した場合、自動的にSSH経由でデーモンをデプロイします。
+
+```toml
+[target.default]
+remote = "192.168.1.100:4443"
+ca_cert = "certs/ca.crt"
+client_cert = "certs/client.crt"
+client_key = "certs/client.key"
+
+# SSH接続情報（デーモン自動デプロイ用）
+ssh_user = "deploy"                    # 必須
+ssh_port = 22                          # オプション。デフォルトは22
+ssh_key = "~/.ssh/id_rsa"             # オプション。省略時はSSHデフォルト設定を使用
+server_cert = "certs/server.crt"       # オプション。省略時はca_certと同じディレクトリのserver.crt
+server_key = "certs/server.key"        # オプション。省略時はca_certと同じディレクトリのserver.key
+daemon_path = "target/release/imagod"  # オプション。デフォルトはtarget/release/imagodまたはtarget/debug/imagod
+```
+
+証明書は`imago certs generate`で生成できます。生成されたディレクトリをそのまま使う場合、最小構成は以下のようになります:
+
+```toml
+[target.default]
+remote = "192.168.1.100"
+ca_cert = "certs/ca.crt"
+client_cert = "certs/client.crt"
+client_key = "certs/client.key"
+ssh_user = "deploy"
+```
+
+デーモンのみをデプロイする場合は`--only-daemon`オプションを使用します。
+
+```bash
+imago deploy --only-daemon --target default
+```
+
+このコマンドは以下の処理を実行します:
+
+1. SSH接続を確立
+2. imagodバイナリをリモートサーバーにアップロード（`/tmp/imago/imagod`）
+3. CA証明書・サーバー証明書・サーバー秘密鍵をアップロード
+4. imagod設定ファイル（`/tmp/imago/imagod.toml`）を生成
+5. 既存のimagodプロセスを停止（存在する場合）
+6. 新しいimagodプロセスをバックグラウンドで起動・生存確認
+7. SSH接続を切断
+
 ## WITプラグイン
 
 imagoは依存関係として**WIT**を利用し、プラグインを導入できます。

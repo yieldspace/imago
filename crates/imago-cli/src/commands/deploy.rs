@@ -15,6 +15,7 @@ use imago_protocol::{
     HelloNegotiateRequest, HelloNegotiateResponse, MessageType, ProtocolEnvelope, from_cbor,
     to_cbor,
 };
+use openssh::{KnownHosts, SessionBuilder, Stdio};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -45,6 +46,13 @@ struct TargetConfig {
     ca_cert: PathBuf,
     client_cert: PathBuf,
     client_key: PathBuf,
+    server_cert: Option<PathBuf>,
+    server_key: Option<PathBuf>,
+    ssh_host: Option<String>,
+    ssh_port: Option<u16>,
+    ssh_user: Option<String>,
+    ssh_key: Option<PathBuf>,
+    daemon_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,12 +120,6 @@ fn run_inner(args: DeployArgs) -> anyhow::Result<()> {
 }
 
 async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
-    let manifest_path = resolve_manifest_path(args.env.as_deref());
-    let manifest_bytes = std::fs::read(&manifest_path)
-        .with_context(|| format!("failed to read manifest: {}", manifest_path.display()))?;
-    let manifest: Manifest =
-        serde_json::from_slice(&manifest_bytes).context("failed to parse manifest json")?;
-
     let imago_toml = load_imago_toml(Path::new("imago.toml"))?;
     let target_name = args.target.unwrap_or_else(|| "default".to_string());
     let target = imago_toml
@@ -126,11 +128,39 @@ async fn run_async(args: DeployArgs) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow!("target '{}' is not defined in imago.toml", target_name))?
         .clone();
 
+    if args.only_daemon {
+        deploy_daemon_via_ssh(&target).await?;
+        tracing::info!("daemon deployment completed successfully");
+        return Ok(());
+    }
+
+    let manifest_path = resolve_manifest_path(args.env.as_deref());
+    let manifest_bytes = std::fs::read(&manifest_path)
+        .with_context(|| format!("failed to read manifest: {}", manifest_path.display()))?;
+    let manifest: Manifest =
+        serde_json::from_slice(&manifest_bytes).context("failed to parse manifest json")?;
+
     let artifact = build_artifact_bundle_file(&manifest, &manifest_path, Path::new("."))?;
     let (artifact_digest, artifact_size) = compute_file_sha256_and_size(artifact.path())?;
     let manifest_digest = hex::encode(Sha256::digest(&manifest_bytes));
 
-    let session = connect_target(&target).await?;
+    let session = match connect_target(&target).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to connect to daemon, attempting SSH deployment");
+
+            deploy_daemon_via_ssh(&target).await?;
+
+            tracing::info!("waiting for daemon to become ready");
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+            tracing::info!("retrying connection to daemon");
+            connect_target(&target)
+                .await
+                .context("failed to connect to daemon after SSH deployment")?
+        }
+    };
+
     let correlation_id = Uuid::new_v4();
 
     let hello = request_envelope(
@@ -301,6 +331,270 @@ async fn connect_target(target: &TargetConfig) -> anyhow::Result<Session> {
     Session::connect(connection, request)
         .await
         .map_err(Into::into)
+}
+
+async fn deploy_daemon_via_ssh(target: &TargetConfig) -> anyhow::Result<()> {
+    let ssh_host = if let Some(host) = &target.ssh_host {
+        host.clone()
+    } else {
+        let url = normalize_remote_to_url(&target.remote)?;
+        url.host_str()
+            .ok_or_else(|| anyhow!("could not extract host from remote URL"))?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string()
+    };
+    let ssh_port = target.ssh_port.unwrap_or(22);
+    let ssh_user = target
+        .ssh_user
+        .as_ref()
+        .ok_or_else(|| anyhow!("ssh_user is required for daemon deployment"))?;
+
+    tracing::info!(user = %ssh_user, host = %ssh_host, port = ssh_port, "deploying daemon via SSH");
+
+    let daemon_binary_path = if let Some(path) = &target.daemon_path {
+        path.clone()
+    } else {
+        let default_path = PathBuf::from("target/release/imagod");
+        if !default_path.exists() {
+            let debug_path = PathBuf::from("target/debug/imagod");
+            if !debug_path.exists() {
+                return Err(anyhow!(
+                    "imagod binary not found at {} or {}. Please build the daemon first.",
+                    default_path.display(),
+                    debug_path.display()
+                ));
+            }
+            debug_path
+        } else {
+            default_path
+        }
+    };
+
+    if !daemon_binary_path.exists() {
+        return Err(anyhow!(
+            "daemon binary not found at {}",
+            daemon_binary_path.display()
+        ));
+    }
+
+    tracing::debug!(path = %daemon_binary_path.display(), "using daemon binary");
+
+    let mut session_builder = SessionBuilder::default();
+    session_builder.known_hosts_check(KnownHosts::Accept);
+    session_builder.port(ssh_port);
+    session_builder.user(ssh_user.clone());
+
+    if let Some(ssh_key) = &target.ssh_key {
+        session_builder.keyfile(ssh_key);
+    }
+
+    let session = session_builder
+        .connect(ssh_host)
+        .await
+        .context("failed to establish SSH connection")?;
+
+    tracing::debug!("SSH connection established");
+
+    let remote_dir = "/tmp/imago";
+    let remote_daemon_path = format!("{}/imagod", remote_dir);
+    let remote_certs_dir = format!("{}/certs", remote_dir);
+    let config_path = format!("{}/imagod.toml", remote_dir);
+
+    let server_cert = target.server_cert.clone().unwrap_or_else(|| {
+        target
+            .ca_cert
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("server.crt")
+    });
+    let server_key = target.server_key.clone().unwrap_or_else(|| {
+        target
+            .ca_cert
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("server.key")
+    });
+
+    let config_content = format!(
+        r#"listen_addr = "[::]:4443"
+storage_root = "{remote_dir}/data"
+server_version = "imagod/0.1.0"
+compatibility_date = "{COMPATIBILITY_DATE}"
+
+[tls]
+server_cert = "{remote_certs_dir}/server.crt"
+server_key = "{remote_certs_dir}/server.key"
+client_ca_cert = "{remote_certs_dir}/ca.crt"
+
+[runtime]
+chunk_size = 1048576
+max_inflight_chunks = 16
+upload_session_ttl_secs = 900
+stop_grace_timeout_secs = 30
+epoch_tick_interval_ms = 50
+"#,
+    );
+
+    tracing::debug!("building deploy bundle");
+    let bundle_path = build_daemon_bundle(
+        &daemon_binary_path,
+        &target.ca_cert,
+        &server_cert,
+        &server_key,
+        config_content.as_bytes(),
+    )?;
+
+    tracing::info!(remote_dir, "uploading and extracting bundle");
+    ssh_run(&session, &["mkdir", "-p", remote_dir])
+        .await
+        .context("failed to create remote directory")?;
+
+    let bundle_file = std::fs::File::open(&bundle_path).context("failed to open bundle")?;
+
+    let output = session
+        .command("tar")
+        .arg("xf")
+        .arg("-")
+        .arg("-C")
+        .arg(remote_dir)
+        .stdin(Stdio::from(bundle_file))
+        .output()
+        .await
+        .context("failed to extract bundle on remote")?;
+
+    let _ = std::fs::remove_file(&bundle_path);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("failed to extract bundle: {}", stderr));
+    }
+
+    ssh_run(&session, &["chmod", "+x", &remote_daemon_path])
+        .await
+        .context("failed to set execute permission")?;
+
+    ssh_run(&session, &["mkdir", "-p", &format!("{}/data", remote_dir)])
+        .await
+        .context("failed to create storage directory")?;
+
+    tracing::info!("upload complete");
+
+    tracing::debug!("stopping existing daemon (if running)");
+    let _ = session
+        .command("pkill")
+        .arg("-f")
+        .arg(&remote_daemon_path)
+        .status()
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    tracing::info!("starting daemon");
+    let start_output = session
+        .command("sh")
+        .arg("-c")
+        .arg(format!(
+            "nohup {} --config {} > {}/imagod.log 2>&1 & echo $!",
+            remote_daemon_path, config_path, remote_dir
+        ))
+        .output()
+        .await
+        .context("failed to start daemon")?;
+
+    if !start_output.status.success() {
+        let stderr = String::from_utf8_lossy(&start_output.stderr);
+        return Err(anyhow!("failed to start daemon: {}", stderr));
+    }
+
+    let pid = String::from_utf8_lossy(&start_output.stdout)
+        .trim()
+        .to_string();
+    tracing::info!(pid, "daemon started");
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let check = session
+        .command("kill")
+        .arg("-0")
+        .arg(&pid)
+        .status()
+        .await
+        .context("failed to check daemon process")?;
+
+    if !check.success() {
+        let log = session
+            .command("tail")
+            .arg("-20")
+            .arg(format!("{}/imagod.log", remote_dir))
+            .output()
+            .await
+            .ok();
+        let log_text = log
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        return Err(anyhow!(
+            "daemon exited shortly after start. Log:\n{}",
+            log_text
+        ));
+    }
+
+    session
+        .close()
+        .await
+        .context("failed to close SSH session")?;
+    tracing::debug!("SSH connection closed");
+
+    Ok(())
+}
+
+fn build_daemon_bundle(
+    daemon_binary: &Path,
+    ca_cert: &Path,
+    server_cert: &Path,
+    server_key: &Path,
+    config_content: &[u8],
+) -> anyhow::Result<PathBuf> {
+    let bundle_path = std::env::temp_dir().join(format!("imago-bundle-{}.tar", Uuid::new_v4()));
+    let bundle_file =
+        std::fs::File::create(&bundle_path).context("failed to create bundle file")?;
+
+    let mut builder = tar::Builder::new(bundle_file);
+
+    add_file_to_tar(&mut builder, daemon_binary.to_path_buf(), "imagod")?;
+    add_file_to_tar(&mut builder, ca_cert.to_path_buf(), "certs/ca.crt")?;
+    add_file_to_tar(&mut builder, server_cert.to_path_buf(), "certs/server.crt")?;
+    add_file_to_tar(&mut builder, server_key.to_path_buf(), "certs/server.key")?;
+
+    let mut header = tar::Header::new_gnu();
+    header.set_size(config_content.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, "imagod.toml", config_content)
+        .context("failed to add imagod.toml to bundle")?;
+
+    builder.finish()?;
+    Ok(bundle_path)
+}
+
+async fn ssh_run(session: &openssh::Session, args: &[&str]) -> anyhow::Result<()> {
+    let output = if args.len() == 1 {
+        session.command(args[0]).output().await
+    } else {
+        let mut cmd = session.command(args[0]);
+        for arg in &args[1..] {
+            cmd.arg(*arg);
+        }
+        cmd.output().await
+    }
+    .context("ssh command execution failed")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("{}", stderr.trim_end()));
+    }
+    Ok(())
 }
 
 struct RemoteEndpoint {
@@ -653,6 +947,7 @@ mod tests {
         let result = run(DeployArgs {
             env: None,
             target: None,
+            only_daemon: false,
         });
         assert_eq!(result.exit_code, 2);
         assert!(result.stderr.is_some());

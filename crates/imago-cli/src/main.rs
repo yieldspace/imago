@@ -15,6 +15,16 @@ fn dispatch(cli: Cli) -> CommandResult {
 }
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .without_time()
+        .with_target(false)
+        .init();
+
     install_rustls_provider();
     let cli = Cli::parse();
     let result = dispatch(cli);
@@ -50,6 +60,7 @@ mod tests {
             command: Commands::Deploy(DeployArgs {
                 env: None,
                 target: None,
+                only_daemon: false,
             }),
         });
 
