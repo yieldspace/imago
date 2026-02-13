@@ -171,7 +171,12 @@ async fn receive_logs_datagrams(
             .await
             {
                 Ok(result) => Some(result.context("failed to read log datagram")?),
-                Err(_) => None,
+                Err(_) => {
+                    return Err(anyhow!(
+                        "timed out waiting for logs.end after {}s",
+                        NON_FOLLOW_IDLE_TIMEOUT_SECS
+                    ));
+                }
             }
         };
 
@@ -296,7 +301,10 @@ fn decode_logs_datagram(datagram: &[u8], request_id: Uuid) -> anyhow::Result<Opt
 }
 
 fn detect_seq_gap(expected_seq: &mut Option<u64>, actual: u64) -> bool {
-    let gap = expected_seq.is_some_and(|expected| actual != expected);
+    let gap = match expected_seq {
+        Some(expected) => actual != *expected,
+        None => actual != 0,
+    };
     *expected_seq = Some(actual.saturating_add(1));
     gap
 }
@@ -427,6 +435,14 @@ mod tests {
         assert!(!detect_seq_gap(&mut expected, 1));
         assert!(detect_seq_gap(&mut expected, 3));
         assert!(!detect_seq_gap(&mut expected, 4));
+    }
+
+    #[test]
+    fn detect_seq_gap_flags_nonzero_first_sequence() {
+        let mut expected = None;
+
+        assert!(detect_seq_gap(&mut expected, 2));
+        assert_eq!(expected, Some(3));
     }
 
     #[test]
