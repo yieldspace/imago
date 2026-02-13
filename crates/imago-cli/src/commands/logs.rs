@@ -16,6 +16,7 @@ use crate::{
 };
 
 const NON_FOLLOW_IDLE_TIMEOUT_SECS: u64 = 2;
+const POST_END_DRAIN_TIMEOUT_MS: u64 = 200;
 
 #[derive(Debug, Deserialize)]
 struct LogsRequestAck {
@@ -136,21 +137,12 @@ async fn receive_logs_datagrams(
                 if request_id != chunk.request_id {
                     continue;
                 }
-                if detect_seq_gap(&mut expected_seq, chunk.seq) && !truncated_warned {
-                    eprintln!("<<logs truncated>>");
-                    truncated_warned = true;
-                }
+                warn_if_seq_gap(&mut expected_seq, chunk.seq, &mut truncated_warned);
                 render_chunk(&chunk, all_processes);
-                if !follow && chunk.is_last {
-                    break;
-                }
             }
             LogsDatagram::End(end) => {
                 if request_id != end.request_id {
                     continue;
-                }
-                if detect_seq_gap(&mut expected_seq, end.seq) && !truncated_warned {
-                    eprintln!("<<logs truncated>>");
                 }
                 if let Some(error) = end.error {
                     return Err(anyhow!(
@@ -159,12 +151,55 @@ async fn receive_logs_datagrams(
                         error.code
                     ));
                 }
+                let delayed_chunk_seqs =
+                    drain_post_end_chunks(session, request_id, all_processes, end.seq).await?;
+                apply_end_seq_after_drain(
+                    &mut expected_seq,
+                    end.seq,
+                    &delayed_chunk_seqs,
+                    &mut truncated_warned,
+                );
                 break;
             }
         }
     }
 
     Ok(())
+}
+
+async fn drain_post_end_chunks(
+    session: &Session,
+    request_id: Uuid,
+    all_processes: bool,
+    end_seq: u64,
+) -> anyhow::Result<Vec<u64>> {
+    let deadline = time::Instant::now() + Duration::from_millis(POST_END_DRAIN_TIMEOUT_MS);
+    let mut delayed_chunk_seqs = Vec::new();
+
+    loop {
+        let now = time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let wait_for = deadline.saturating_duration_since(now);
+        let datagram = match time::timeout(wait_for, session.read_datagram()).await {
+            Ok(result) => result.context("failed to read post-end log datagram")?,
+            Err(_) => break,
+        };
+        let Some(message) = decode_logs_datagram(&datagram, request_id)? else {
+            continue;
+        };
+        let LogsDatagram::Chunk(chunk) = message else {
+            continue;
+        };
+        if chunk.seq >= end_seq {
+            continue;
+        }
+        render_chunk(&chunk, all_processes);
+        delayed_chunk_seqs.push(chunk.seq);
+    }
+
+    Ok(delayed_chunk_seqs)
 }
 
 fn decode_logs_datagram(datagram: &[u8], request_id: Uuid) -> anyhow::Result<Option<LogsDatagram>> {
@@ -207,6 +242,25 @@ fn detect_seq_gap(expected_seq: &mut Option<u64>, actual: u64) -> bool {
     let gap = expected_seq.is_some_and(|expected| actual != expected);
     *expected_seq = Some(actual.saturating_add(1));
     gap
+}
+
+fn warn_if_seq_gap(expected_seq: &mut Option<u64>, actual: u64, truncated_warned: &mut bool) {
+    if detect_seq_gap(expected_seq, actual) && !*truncated_warned {
+        eprintln!("<<logs truncated>>");
+        *truncated_warned = true;
+    }
+}
+
+fn apply_end_seq_after_drain(
+    expected_seq: &mut Option<u64>,
+    end_seq: u64,
+    delayed_chunk_seqs: &[u64],
+    truncated_warned: &mut bool,
+) {
+    for seq in delayed_chunk_seqs {
+        warn_if_seq_gap(expected_seq, *seq, truncated_warned);
+    }
+    warn_if_seq_gap(expected_seq, end_seq, truncated_warned);
 }
 
 fn render_chunk(chunk: &LogChunk, all_processes: bool) {
@@ -261,6 +315,30 @@ mod tests {
         assert!(!detect_seq_gap(&mut expected, 1));
         assert!(detect_seq_gap(&mut expected, 3));
         assert!(!detect_seq_gap(&mut expected, 4));
+    }
+
+    #[test]
+    fn apply_end_seq_after_drain_accepts_delayed_chunk_before_end() {
+        let mut expected = None;
+        let mut truncated_warned = false;
+        warn_if_seq_gap(&mut expected, 0, &mut truncated_warned);
+
+        apply_end_seq_after_drain(&mut expected, 2, &[1], &mut truncated_warned);
+
+        assert!(!truncated_warned);
+        assert_eq!(expected, Some(3));
+    }
+
+    #[test]
+    fn apply_end_seq_after_drain_marks_truncation_when_chunk_missing() {
+        let mut expected = None;
+        let mut truncated_warned = false;
+        warn_if_seq_gap(&mut expected, 0, &mut truncated_warned);
+
+        apply_end_seq_after_drain(&mut expected, 2, &[], &mut truncated_warned);
+
+        assert!(truncated_warned);
+        assert_eq!(expected, Some(3));
     }
 
     #[test]

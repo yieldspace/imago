@@ -608,7 +608,7 @@ impl ServiceSupervisor {
         tail_lines: u32,
         follow: bool,
     ) -> Result<ServiceLogSubscription, ImagodError> {
-        let (snapshot_source, sender) = {
+        let (snapshot_source, receiver) = {
             let inner = self.inner.read().await;
             let service = inner.get(service_name).ok_or_else(|| {
                 ImagodError::new(
@@ -624,18 +624,17 @@ impl ServiceSupervisor {
                     format!("service '{service_name}' is not running"),
                 ));
             }
-            (service.composite_log.clone(), service.log_sender.clone())
+            let receiver = if follow {
+                Some(service.log_sender.subscribe())
+            } else {
+                None
+            };
+            (service.composite_log.clone(), receiver)
         };
 
         let snapshot_bytes = {
             let buffer = snapshot_source.lock().await;
             tail_lines_from_bytes(&buffer.snapshot(), tail_lines)
-        };
-
-        let receiver = if follow {
-            Some(sender.subscribe())
-        } else {
-            None
         };
 
         Ok(ServiceLogSubscription {
@@ -1558,6 +1557,57 @@ mod tests {
             .expect("open_logs should succeed");
         assert_eq!(subscription.service_name, service_name);
         assert_eq!(subscription.snapshot_bytes, b"b\nc\n");
+        assert!(subscription.receiver.is_some(), "follow should subscribe");
+
+        stop_running_service_best_effort(&supervisor.inner, service_name).await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn open_logs_subscribes_before_snapshot_read_for_follow() {
+        let root = new_test_root("open-logs-order");
+        let supervisor =
+            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let service_name = "svc-open-logs-order";
+        let runner_endpoint = root
+            .join("runtime")
+            .join("ipc")
+            .join("open-logs-order.sock");
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep process should spawn");
+
+        let service = new_running_service(child, "runner-open-logs-order", runner_endpoint);
+        let composite_log = service.composite_log.clone();
+        let log_sender = service.log_sender.clone();
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(service_name.to_string(), service);
+        }
+
+        let held_snapshot_lock = composite_log.lock().await;
+        let open_task = {
+            let supervisor = supervisor.clone();
+            tokio::spawn(async move { supervisor.open_logs(service_name, 10, true).await })
+        };
+
+        time::timeout(Duration::from_millis(200), async {
+            while log_sender.receiver_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("follow receiver should be registered before snapshot lock is released");
+
+        drop(held_snapshot_lock);
+        let subscription = open_task
+            .await
+            .expect("open_logs task should complete")
+            .expect("open_logs should succeed");
         assert!(subscription.receiver.is_some(), "follow should subscribe");
 
         stop_running_service_best_effort(&supervisor.inner, service_name).await;

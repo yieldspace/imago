@@ -603,7 +603,14 @@ async fn run_logs_forwarder(
         chunk_size,
     );
 
-    let stream_result = stream_logs_datagrams(&sender, subscriptions, &mut seq, &mut last_process_id).await;
+    let stream_result = stream_logs_datagrams(
+        &session,
+        &sender,
+        subscriptions,
+        &mut seq,
+        &mut last_process_id,
+    )
+    .await;
 
     match stream_result {
         Ok(()) => {
@@ -741,6 +748,7 @@ fn send_logs_end_datagram(
 }
 
 async fn stream_logs_datagrams(
+    session: &Session,
     sender: &LogsDatagramSender<'_>,
     subscriptions: Vec<ServiceLogSubscription>,
     seq: &mut u64,
@@ -769,9 +777,10 @@ async fn stream_logs_datagrams(
     }
 
     let (tx, mut rx) = mpsc::channel::<(String, ServiceLogEvent)>(128);
+    let mut forward_tasks = Vec::new();
     for (service_name, mut receiver) in follow_targets.drain(..) {
         let tx = tx.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
                 match receiver.recv().await {
                     Ok(event) => {
@@ -784,17 +793,30 @@ async fn stream_logs_datagrams(
                 }
             }
         });
+        forward_tasks.push(handle);
     }
     drop(tx);
 
-    while let Some((service_name, event)) = rx.recv().await {
-        sender.send_log_data_chunks(
-            seq,
-            &service_name,
-            service_log_stream_to_protocol(event.stream),
-            &event.bytes,
-            last_process_id,
-        )?;
+    loop {
+        tokio::select! {
+            maybe_event = rx.recv() => {
+                let Some((service_name, event)) = maybe_event else {
+                    break;
+                };
+                sender.send_log_data_chunks(
+                    seq,
+                    &service_name,
+                    service_log_stream_to_protocol(event.stream),
+                    &event.bytes,
+                    last_process_id,
+                )?;
+            }
+            _ = session.closed() => break,
+        }
+    }
+
+    for task in forward_tasks {
+        task.abort();
     }
 
     Ok(())
