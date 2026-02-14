@@ -55,6 +55,36 @@ async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyhow::Error> 
     )
     .map_err(anyhow::Error::new)?;
     let orchestrator = Orchestrator::new(&config.storage_root, artifacts.clone(), supervisor);
+    match orchestrator.restore_active_services_on_boot().await {
+        Ok(summary) => {
+            for started in &summary.started {
+                eprintln!(
+                    "boot restore started name={} release={}",
+                    started.service_name, started.release_hash
+                );
+            }
+            for failed in &summary.failed {
+                eprintln!(
+                    "boot restore failed name={} code={:?} stage={} message={}",
+                    failed.service_name,
+                    failed.error.code,
+                    failed.error.stage,
+                    failed.error.message
+                );
+            }
+            eprintln!(
+                "boot restore summary started={} failed={}",
+                summary.started.len(),
+                summary.failed.len()
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "boot restore scan failed code={:?} stage={} message={}",
+                err.code, err.stage, err.message
+            );
+        }
+    }
 
     let handler = ProtocolHandler::new(config.clone(), artifacts, operations, orchestrator);
 

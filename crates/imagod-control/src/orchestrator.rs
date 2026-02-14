@@ -112,6 +112,24 @@ pub struct RunSummary {
     pub release_hash: String,
 }
 
+#[derive(Debug)]
+/// One failed service restore result at manager boot.
+pub struct RestoreFailure {
+    /// Service name that failed to restore.
+    pub service_name: String,
+    /// Failure detail returned by launch/load logic.
+    pub error: ImagodError,
+}
+
+#[derive(Debug)]
+/// Summary of service restore attempts executed at manager boot.
+pub struct RestoreActiveServicesSummary {
+    /// Services restored successfully.
+    pub started: Vec<RunSummary>,
+    /// Services that failed to restore.
+    pub failed: Vec<RestoreFailure>,
+}
+
 #[derive(Debug, Clone)]
 /// Result summary returned after successful stop command.
 pub struct StopSummary {
@@ -197,6 +215,26 @@ impl Orchestrator {
             service_name: payload.name.clone(),
             release_hash: active_release,
         })
+    }
+
+    /// Restores services with an `active_release` marker at manager boot.
+    pub async fn restore_active_services_on_boot(
+        &self,
+    ) -> Result<RestoreActiveServicesSummary, ImagodError> {
+        let (candidates, mut failed) = collect_boot_restore_candidates(&self.storage_root).await?;
+        let mut started = Vec::with_capacity(candidates.len());
+
+        for candidate in candidates {
+            match self.restore_service_from_release(&candidate).await {
+                Ok(summary) => started.push(summary),
+                Err(error) => failed.push(RestoreFailure {
+                    service_name: candidate.service_name,
+                    error,
+                }),
+            }
+        }
+
+        Ok(RestoreActiveServicesSummary { started, failed })
     }
 
     /// Stops a running service.
@@ -364,6 +402,33 @@ impl Orchestrator {
 
         build_launch_from_release(release_hash, &release_dir, &manifest).await
     }
+
+    /// Starts one service from a discovered boot-restore candidate.
+    async fn restore_service_from_release(
+        &self,
+        candidate: &BootRestoreCandidate,
+    ) -> Result<RunSummary, ImagodError> {
+        let launch = self
+            .load_launch_from_release(
+                &candidate.service_name,
+                &candidate.service_root,
+                &candidate.release_hash,
+            )
+            .await?;
+        self.supervisor.start(launch).await?;
+
+        Ok(RunSummary {
+            service_name: candidate.service_name.clone(),
+            release_hash: candidate.release_hash.clone(),
+        })
+    }
+}
+
+/// One boot restore target discovered from `services/<name>/active_release`.
+struct BootRestoreCandidate {
+    service_name: String,
+    service_root: PathBuf,
+    release_hash: String,
 }
 
 /// Builds launch metadata for supervisor from a promoted release directory.
@@ -744,6 +809,79 @@ async fn read_active_release(path: &Path) -> Result<Option<String>, ImagodError>
     }
 }
 
+/// Collects active-release service candidates sorted by service name.
+async fn collect_boot_restore_candidates(
+    storage_root: &Path,
+) -> Result<(Vec<BootRestoreCandidate>, Vec<RestoreFailure>), ImagodError> {
+    let services_root = storage_root.join("services");
+    let mut entries = match fs::read_dir(&services_root).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        Err(e) => {
+            return Err(map_internal(format!(
+                "failed to read services root {}: {e}",
+                services_root.display()
+            )));
+        }
+    };
+
+    let mut service_entries = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| map_internal(format!("failed to iterate services root: {e}")))?
+    {
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|e| map_internal(format!("failed to read service entry type: {e}")))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        service_entries.push((
+            entry.file_name().to_string_lossy().to_string(),
+            entry.path(),
+        ));
+    }
+    service_entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+    let mut candidates = Vec::new();
+    let mut failed = Vec::new();
+    for (service_name, service_root) in service_entries {
+        let active_file = service_root.join("active_release");
+        let active_release = match read_active_release(&active_file).await {
+            Ok(Some(active_release)) => active_release,
+            Ok(None) => continue,
+            Err(error) => {
+                failed.push(RestoreFailure {
+                    service_name: service_name.clone(),
+                    error,
+                });
+                continue;
+            }
+        };
+
+        if active_release.is_empty() {
+            failed.push(RestoreFailure {
+                service_name,
+                error: map_bad_manifest("active_release must not be empty".to_string()),
+            });
+            continue;
+        }
+
+        candidates.push(BootRestoreCandidate {
+            service_name,
+            service_root,
+            release_hash: active_release,
+        });
+    }
+
+    Ok((candidates, failed))
+}
+
 async fn clean_dir(path: &Path) -> Result<(), ImagodError> {
     match fs::remove_dir_all(path).await {
         Ok(_) => Ok(()),
@@ -837,9 +975,9 @@ mod tests {
     use super::{
         DEFAULT_HTTP_MAX_BODY_BYTES, HashTarget, MAX_HTTP_MAX_BODY_BYTES, Manifest, ManifestAsset,
         ManifestBinding, ManifestHash, ManifestHttp, RunnerAppType, build_launch_from_release,
-        extract_tar, normalize_archive_entry_path, normalize_manifest_main_path,
-        promote_staging_release, release_id_from_artifact_digest, validate_deploy_preconditions,
-        validate_service_name,
+        collect_boot_restore_candidates, extract_tar, normalize_archive_entry_path,
+        normalize_manifest_main_path, promote_staging_release, release_id_from_artifact_digest,
+        validate_deploy_preconditions, validate_service_name,
     };
     use imago_protocol::{DeployCommandPayload, ErrorCode};
     use std::{
@@ -1236,6 +1374,76 @@ mod tests {
             .expect_err("invalid binding target should be rejected");
         assert_eq!(err.code, ErrorCode::BadManifest);
         assert!(err.message.contains("bindings[0].target is invalid"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn collect_boot_restore_candidates_returns_empty_when_services_dir_missing() {
+        let root = temp_dir_path("orchestrator-restore-missing-services");
+        fs::create_dir_all(&root).expect("storage root should exist");
+
+        let (candidates, failed) = collect_boot_restore_candidates(&root)
+            .await
+            .expect("missing services dir should not fail");
+        assert!(candidates.is_empty());
+        assert!(failed.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn collect_boot_restore_candidates_sorts_by_service_name() {
+        let root = temp_dir_path("orchestrator-restore-sorted");
+        let services = root.join("services");
+        fs::create_dir_all(&services).expect("services root should exist");
+
+        let svc_b = services.join("svc-b");
+        fs::create_dir_all(&svc_b).expect("svc-b should exist");
+        fs::write(svc_b.join("active_release"), b"release-b\n")
+            .expect("svc-b active_release should exist");
+
+        let svc_a = services.join("svc-a");
+        fs::create_dir_all(&svc_a).expect("svc-a should exist");
+        fs::write(svc_a.join("active_release"), b"release-a")
+            .expect("svc-a active_release should exist");
+
+        let svc_skip = services.join("svc-skip");
+        fs::create_dir_all(&svc_skip).expect("svc-skip should exist");
+
+        let (candidates, failed) = collect_boot_restore_candidates(&root)
+            .await
+            .expect("candidate collection should succeed");
+
+        assert!(
+            failed.is_empty(),
+            "no failure should be reported for valid candidates"
+        );
+        let names = candidates
+            .iter()
+            .map(|candidate| candidate.service_name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["svc-a".to_string(), "svc-b".to_string()]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn collect_boot_restore_candidates_reports_empty_active_release_as_failure() {
+        let root = temp_dir_path("orchestrator-restore-empty-active");
+        let service_dir = root.join("services").join("svc-empty");
+        fs::create_dir_all(&service_dir).expect("service dir should exist");
+        fs::write(service_dir.join("active_release"), b"\n").expect("active_release should exist");
+
+        let (candidates, failed) = collect_boot_restore_candidates(&root)
+            .await
+            .expect("candidate collection should succeed");
+
+        assert!(candidates.is_empty());
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].service_name, "svc-empty");
+        assert_eq!(failed[0].error.code, ErrorCode::BadManifest);
+        assert!(failed[0].error.message.contains("active_release"));
 
         let _ = fs::remove_dir_all(root);
     }

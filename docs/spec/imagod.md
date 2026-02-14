@@ -20,11 +20,11 @@
 - manager/runner のマルチプロセス実行制御（1 service = 1 runner process）
 - manager-runner / runner-runner の IPC（DBus over UDS, trait 抽象）
 - runner stdout/stderr のパイプ回収とメモリ上限付きバッファ保持
+- manager 起動時の active release service 自動復元（best-effort）
 
 `imagod` の非責務（または未実装）:
 
 - イベント永続化・再送
-- 再起動跨ぎの service 状態復元
 - 高度な restart policy
 - blue-green デプロイ
 - runner invoke の実関数実行（現行は配線と認可のみ）
@@ -80,3 +80,9 @@ epoch_tick_interval_ms = 50
 - `imagod` の内部構成を単一 crate から 6+1 構成（`imagod` + `imagod-*`）へ分割した。
 - 外部公開の実行形式は維持し、`imagod` バイナリ名と `imagod --runner` は不変。
 - deploy protocol / manifest の外部 wire 契約は変更せず、内部責務分離のみ実施した。
+
+## 実装反映ノート（Boot Restore / 2026-02-14）
+
+- manager 起動時に `storage_root/services/<service>/active_release` を走査し、service 名昇順で自動起動する。
+- 復元対象は `active_release` が存在し、かつ非空文字列の service のみ。
+- 一部 service の復元失敗はログへ記録して起動を継続する（best-effort）。
