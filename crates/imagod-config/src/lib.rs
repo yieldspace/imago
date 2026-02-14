@@ -232,10 +232,10 @@ fn default_storage_root() -> PathBuf {
 }
 
 fn resolve_default_storage_root(target_os: &str, build_override: Option<&str>) -> PathBuf {
-    if let Some(path) = build_override {
-        if !path.is_empty() {
-            return PathBuf::from(path);
-        }
+    if let Some(path) = build_override
+        && !path.is_empty()
+    {
+        return PathBuf::from(path);
     }
 
     match target_os {
