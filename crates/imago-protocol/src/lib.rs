@@ -12,7 +12,8 @@ pub use messages::{
     ArtifactPushRequest, ArtifactStatus, ByteRange, CommandCancelRequest, CommandCancelResponse,
     CommandEvent, CommandEventType, CommandPayload, CommandStartRequest, CommandStartResponse,
     CommandState, CommandType, DeployCommandPayload, DeployPrepareRequest, DeployPrepareResponse,
-    HelloNegotiateRequest, HelloNegotiateResponse, MessageType, RunCommandPayload, StateRequest,
-    StateResponse, StopCommandPayload,
+    HelloNegotiateRequest, HelloNegotiateResponse, LogChunk, LogEnd, LogError, LogErrorCode,
+    LogRequest, LogStreamKind, MessageType, RunCommandPayload, StateRequest, StateResponse,
+    StopCommandPayload,
 };
 pub use validate::{Validate, ValidationError};

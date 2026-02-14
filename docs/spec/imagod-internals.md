@@ -70,10 +70,10 @@ flowchart TD
 |---|---|---|---|---|
 | `imagod-config (lib.rs)` | `imagod.toml` 読込・検証 | 設定パス | `ImagodConfig` | `imagod-common`, `imago-protocol` |
 | `imagod-server::transport` | mTLS + QUIC/WebTransport endpoint 構築（0-RTT 無効） | TLS 設定, listen_addr | `web_transport_quinn::Server` | `imagod-config`, `imagod-common` |
-| `imagod-server::protocol_handler` | `ProtocolEnvelope<Value>` dispatch | bi-stream bytes | response envelope / command.event | `imagod-control`, `imagod-config` |
+| `imagod-server::protocol_handler` | `ProtocolEnvelope<Value>` dispatch | bi-stream bytes | response envelope / command.event / logs datagram | `imagod-control`, `imagod-config` |
 | `imagod-control::artifact_store` | upload session 管理、chunk commit、GC | prepare/push/commit | prepare/ack/commit response | `imagod-common` |
 | `imagod-control::orchestrator` | deploy/run/stop の実行調停 | command payload | summary / error | `artifact_store`, `service_supervisor` |
-| `imagod-control::service_supervisor` | runner child process 監督、control plane | `ServiceLaunch` | start/stop/replace/reap | `imagod-ipc` |
+| `imagod-control::service_supervisor` | runner child process 監督、control plane | `ServiceLaunch`, logs request | start/stop/replace/reap/open_logs | `imagod-ipc` |
 | `imagod-runtime::runner_process` | runner モード実行（bootstrap, heartbeat, invoke受信） | `RunnerBootstrap` | run result / inbound response | `runtime_wasmtime`, `imagod-ipc` |
 | `imagod-runtime::runtime_wasmtime` | runner 内 Wasmtime component 実行 | release path + env + shutdown | `Result<()>` | `imagod-common` |
 | `imagod-ipc::ipc/*` | manager-runner/runner-runner IPC 抽象 + 実装 | control/invoke message | response/token | `imagod-common` |
@@ -94,6 +94,7 @@ flowchart TD
 - stream 受信バイトは `decode_frames` でフレーム分解し、各 frame を `from_cbor::<ProtocolEnvelope<Value>>` で復号。
 - request envelope は 1 stream につき 1 件のみ許可。複数 request は `E_BAD_REQUEST`。
 - `MessageType::CommandStart` は `handle_command_start` へ分岐し、同一 stream へ `command.start response` + `command.event*` を連続送信。
+- `MessageType::LogsRequest` は stream で ACK を返した後、`Session::send_datagram` で `logs.chunk*` / `logs.end` を送信する。
 - それ以外は `handle_single` で 1 request -> 1 response。
 
 ```mermaid
@@ -108,6 +109,10 @@ sequenceDiagram
     S->>D: handle_command_start
     D-->>C: command.start response
     D-->>C: command.event*
+  else message_type == logs.request
+    S->>D: handle_logs_request
+    D-->>C: logs.request response (stream ACK)
+    D-->>C: logs.chunk* / logs.end (DATAGRAM)
   else other message
     S->>D: handle_single
     D-->>C: single response
@@ -512,3 +517,9 @@ flowchart TD
   - `imagod-server`
 - バイナリ互換は維持し、起動方式（`imagod`, `imagod --runner`）は変更しない。
 - deploy protocol の wire 契約は変更しない（内部実装のみの再編）。
+
+## 実装反映ノート（Issue #31 / 2026-02-13）
+
+- `protocol_handler` に `logs.request` 分岐を追加し、ログ本文を DATAGRAM 専用経路へ移行した。
+- `service_supervisor` に `running_service_names` / `open_logs` を追加し、tail snapshot + follow 受信を提供する。
+- 全サービス購読は `process_id=None` で受理し、リクエスト時点の running サービスのみを対象に固定した。

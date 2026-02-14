@@ -11,6 +11,7 @@ fn dispatch(cli: Cli) -> CommandResult {
     match cli.command {
         Commands::Build(args) => commands::build::run(args),
         Commands::Deploy(args) => commands::deploy::run(args),
+        Commands::Logs(args) => commands::logs::run(args),
         Commands::Certs(CertsSubcommandArgs { command }) => match command {
             CertsCommands::Generate(args) => commands::certs::run_generate(args),
         },
@@ -25,6 +26,7 @@ fn dispatch_with_project_root(cli: Cli, project_root: &std::path::Path) -> Comma
     match cli.command {
         Commands::Build(args) => commands::build::run_with_project_root(args, project_root),
         Commands::Deploy(args) => commands::deploy::run_with_project_root(args, project_root),
+        Commands::Logs(args) => commands::logs::run_with_project_root(args, project_root),
         Commands::Certs(CertsSubcommandArgs { command }) => match command {
             CertsCommands::Generate(args) => commands::certs::run_generate(args),
         },

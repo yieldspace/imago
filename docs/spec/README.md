@@ -28,6 +28,7 @@
 
 - MVP の実装判断をなくすための最小仕様を定義する。
 - 対象は `imago.toml`、`build/manifest.json`、deploy protocol、command stream 観測性、`imagod`/`imago-protocol` の責務と内部構造。
+- `logs` は `logs.request`（stream）+ `logs.chunk`/`logs.end`（DATAGRAM）の混在契約として扱う。
 - 実装コードより仕様を優先する。
 
 ## 共通前提
@@ -38,6 +39,7 @@
 - `ProtocolEnvelope` の `request_id` / `correlation_id` は UUID。
 - `state.request` の応答メッセージ種別は `state.response`。
 - 観測イベントは永続保存せず、再送しない。
+- `logs` 本文の DATAGRAM 配信は欠損許容で、`seq` による検知のみ行う。
 
 ## 実装反映ノート運用
 

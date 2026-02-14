@@ -13,6 +13,7 @@ pub struct Cli {
 pub enum Commands {
     Build(BuildArgs),
     Deploy(DeployArgs),
+    Logs(LogsArgs),
     Certs(CertsSubcommandArgs),
     Service(ServiceSubcommandArgs),
 }
@@ -33,6 +34,18 @@ pub struct DeployArgs {
 
     #[arg(long, value_name = "TARGET_NAME")]
     pub target: Option<String>,
+}
+
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct LogsArgs {
+    #[arg(value_name = "PROCESS_ID")]
+    pub process_id: Option<String>,
+
+    #[arg(long)]
+    pub follow: bool,
+
+    #[arg(long, value_name = "N", default_value_t = 200)]
+    pub tail: u32,
 }
 
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
@@ -165,6 +178,39 @@ mod tests {
                 command: Commands::Deploy(DeployArgs {
                     env: None,
                     target: Some("default".to_string()),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_logs_with_defaults() {
+        let cli = Cli::try_parse_from(["imago", "logs"]).expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Commands::Logs(LogsArgs {
+                    process_id: None,
+                    follow: false,
+                    tail: 200,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_logs_with_process_id_and_flags() {
+        let cli = Cli::try_parse_from(["imago", "logs", "svc-a", "--follow", "--tail", "50"])
+            .expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Commands::Logs(LogsArgs {
+                    process_id: Some("svc-a".to_string()),
+                    follow: true,
+                    tail: 50,
                 }),
             }
         );

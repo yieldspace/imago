@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::{
     artifact_store::ArtifactStore,
-    service_supervisor::{ServiceLaunch, ServiceSupervisor},
+    service_supervisor::{ServiceLaunch, ServiceLogSubscription, ServiceSupervisor},
 };
 
 const STAGE_ORCHESTRATE: &str = "orchestration";
@@ -206,6 +206,23 @@ impl Orchestrator {
     /// Stops all currently running services.
     pub async fn stop_all_services(&self, force: bool) -> Vec<(String, ImagodError)> {
         self.supervisor.stop_all(force).await
+    }
+
+    /// Returns names of currently running services.
+    pub async fn running_service_names(&self) -> Vec<String> {
+        self.supervisor.running_service_names().await
+    }
+
+    /// Opens one service logs snapshot and optional follow stream.
+    pub async fn open_logs(
+        &self,
+        service_name: &str,
+        tail_lines: u32,
+        follow: bool,
+    ) -> Result<ServiceLogSubscription, ImagodError> {
+        self.supervisor
+            .open_logs(service_name, tail_lines, follow)
+            .await
     }
 
     /// Prepares a validated release and launch spec from committed artifact data.
