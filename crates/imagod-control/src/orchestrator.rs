@@ -8,7 +8,7 @@ use std::{
 
 use imago_protocol::{DeployCommandPayload, ErrorCode, RunCommandPayload, StopCommandPayload};
 use imagod_common::ImagodError;
-use imagod_ipc::ServiceBinding;
+use imagod_ipc::{RunnerAppType, ServiceBinding};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::fs;
@@ -22,12 +22,18 @@ use crate::{
 const STAGE_ORCHESTRATE: &str = "orchestration";
 const EXPECTED_CURRENT_RELEASE_ANY: &str = "any";
 const RESTART_POLICY_NEVER: &str = "never";
+const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_HTTP_MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 /// Release manifest loaded from extracted artifact.
 struct Manifest {
     name: String,
     main: String,
+    #[serde(rename = "type")]
+    app_type: RunnerAppType,
+    #[serde(default)]
+    http: Option<ManifestHttp>,
     #[serde(default)]
     vars: BTreeMap<String, String>,
     #[serde(default)]
@@ -50,6 +56,14 @@ struct ManifestAsset {
 struct ManifestBinding {
     target: String,
     wit: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+/// Manifest HTTP execution settings.
+struct ManifestHttp {
+    port: u16,
+    #[serde(default = "default_http_max_body_bytes")]
+    max_body_bytes: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -379,15 +393,53 @@ async fn build_launch_from_release(
     }
 
     let bindings = validate_manifest_bindings(&manifest.bindings)?;
+    let (http_port, http_max_body_bytes) = validate_manifest_http(manifest)?;
 
     Ok(ServiceLaunch {
         name: manifest.name.clone(),
         release_hash: release_hash.to_string(),
+        app_type: manifest.app_type,
+        http_port,
+        http_max_body_bytes,
         component_path,
         args: Vec::new(),
         envs,
         bindings,
     })
+}
+
+fn default_http_max_body_bytes() -> u64 {
+    DEFAULT_HTTP_MAX_BODY_BYTES
+}
+
+fn validate_manifest_http(manifest: &Manifest) -> Result<(Option<u16>, Option<u64>), ImagodError> {
+    match manifest.app_type {
+        RunnerAppType::Http => {
+            let http = manifest.http.as_ref().ok_or_else(|| {
+                map_bad_manifest("manifest.http is required when type=\"http\"".to_string())
+            })?;
+            if http.port == 0 {
+                return Err(map_bad_manifest(
+                    "manifest.http.port must be in range 1..=65535".to_string(),
+                ));
+            }
+            if http.max_body_bytes == 0 || http.max_body_bytes > MAX_HTTP_MAX_BODY_BYTES {
+                return Err(map_bad_manifest(format!(
+                    "manifest.http.max_body_bytes must be in range 1..={} (got {})",
+                    MAX_HTTP_MAX_BODY_BYTES, http.max_body_bytes
+                )));
+            }
+            Ok((Some(http.port), Some(http.max_body_bytes)))
+        }
+        RunnerAppType::Cli | RunnerAppType::Socket => {
+            if manifest.http.is_some() {
+                return Err(map_bad_manifest(
+                    "manifest.http is only allowed when type=\"http\"".to_string(),
+                ));
+            }
+            Ok((None, None))
+        }
+    }
 }
 
 fn validate_manifest_bindings(
@@ -783,10 +835,11 @@ fn map_rollback_error(err: ImagodError) -> ImagodError {
 #[cfg(test)]
 mod tests {
     use super::{
-        HashTarget, Manifest, ManifestAsset, ManifestBinding, ManifestHash,
-        build_launch_from_release, extract_tar, normalize_archive_entry_path,
-        normalize_manifest_main_path, promote_staging_release, release_id_from_artifact_digest,
-        validate_deploy_preconditions, validate_service_name,
+        DEFAULT_HTTP_MAX_BODY_BYTES, HashTarget, MAX_HTTP_MAX_BODY_BYTES, Manifest, ManifestAsset,
+        ManifestBinding, ManifestHash, ManifestHttp, RunnerAppType, build_launch_from_release,
+        extract_tar, normalize_archive_entry_path, normalize_manifest_main_path,
+        promote_staging_release, release_id_from_artifact_digest, validate_deploy_preconditions,
+        validate_service_name,
     };
     use imago_protocol::{DeployCommandPayload, ErrorCode};
     use std::{
@@ -805,6 +858,8 @@ mod tests {
         Manifest {
             name: "svc-a".to_string(),
             main: "component.wasm".to_string(),
+            app_type: RunnerAppType::Cli,
+            http: None,
             vars: BTreeMap::new(),
             secrets: BTreeMap::new(),
             assets: Vec::<ManifestAsset>::new(),
@@ -999,6 +1054,148 @@ mod tests {
         assert!(err.message.contains("bindings[0].target"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_keeps_manifest_app_type() {
+        let root = temp_dir_path("orchestrator-app-type");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.app_type = RunnerAppType::Http;
+        manifest.http = Some(ManifestHttp {
+            port: 18080,
+            max_body_bytes: DEFAULT_HTTP_MAX_BODY_BYTES,
+        });
+
+        let launch = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect("launch should be built");
+        assert_eq!(launch.app_type, RunnerAppType::Http);
+        assert_eq!(launch.http_port, Some(18080));
+        assert_eq!(
+            launch.http_max_body_bytes,
+            Some(DEFAULT_HTTP_MAX_BODY_BYTES)
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_http_type_without_http_section() {
+        let root = temp_dir_path("orchestrator-http-missing");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.app_type = RunnerAppType::Http;
+        manifest.http = None;
+
+        let err = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect_err("type=http without manifest.http must fail");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("manifest.http is required"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_http_section_for_non_http_type() {
+        let root = temp_dir_path("orchestrator-http-extra");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.app_type = RunnerAppType::Cli;
+        manifest.http = Some(ManifestHttp {
+            port: 18080,
+            max_body_bytes: DEFAULT_HTTP_MAX_BODY_BYTES,
+        });
+
+        let err = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect_err("type=cli with manifest.http must fail");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("only allowed when type=\"http\""));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manifest_parse_defaults_http_max_body_bytes_when_missing() {
+        let manifest_json = r#"{
+  "name": "svc-a",
+  "main": "component.wasm",
+  "type": "http",
+  "http": {
+    "port": 18080
+  },
+  "vars": {},
+  "secrets": {},
+  "assets": [],
+  "bindings": [],
+  "hash": {
+    "algorithm": "sha256",
+    "targets": ["wasm", "manifest", "assets"]
+  }
+}"#;
+
+        let manifest = serde_json::from_str::<Manifest>(manifest_json)
+            .expect("http manifest without max_body_bytes should parse");
+        assert_eq!(
+            manifest.http.map(|http| http.max_body_bytes),
+            Some(8 * 1024 * 1024)
+        );
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_http_max_body_bytes_out_of_range() {
+        let root = temp_dir_path("orchestrator-http-max-body-range");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        for invalid in [0, MAX_HTTP_MAX_BODY_BYTES + 1] {
+            let mut manifest = valid_manifest();
+            manifest.app_type = RunnerAppType::Http;
+            manifest.http = Some(ManifestHttp {
+                port: 18080,
+                max_body_bytes: invalid,
+            });
+
+            let err = build_launch_from_release("release-a", &root, &manifest)
+                .await
+                .expect_err("invalid max_body_bytes should fail");
+            assert_eq!(err.code, ErrorCode::BadManifest);
+            assert!(err.message.contains("max_body_bytes"));
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manifest_parse_rejects_unknown_type_variant() {
+        let manifest_json = r#"{
+  "name": "svc-a",
+  "main": "component.wasm",
+  "type": "worker",
+  "vars": {},
+  "secrets": {},
+  "assets": [],
+  "bindings": [],
+  "hash": {
+    "algorithm": "sha256",
+    "targets": ["wasm", "manifest", "assets"]
+  }
+}"#;
+
+        let err = serde_json::from_str::<Manifest>(manifest_json)
+            .expect_err("unknown type should be rejected");
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "unexpected parse error: {err}"
+        );
     }
 
     #[tokio::test]

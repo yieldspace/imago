@@ -42,7 +42,7 @@
 12. `accept` ループで session task を `tokio::spawn`
 13. runner モード:
 14. stdin から `RunnerBootstrap` を読込
-15. `WasmRuntime::new` + component 実行
+15. `create_runtime_backend`（`runtime-wasmtime` 有効時は `WasmRuntime::new`） + component 実行
 
 ```mermaid
 flowchart TD
@@ -59,7 +59,7 @@ flowchart TD
   I --> K["WebTransport server"]
   K --> L["session task"]
   D -->|runner| M["RunnerBootstrap(from stdin)"]
-  M --> N["WasmRuntime::new + run component"]
+  M --> N["create_runtime_backend + run component"]
 ```
 
 ## 3. モジュール責務マップ
@@ -74,8 +74,9 @@ flowchart TD
 | `imagod-control::artifact_store` | upload session 管理、chunk commit、GC | prepare/push/commit | prepare/ack/commit response | `imagod-common` |
 | `imagod-control::orchestrator` | deploy/run/stop の実行調停 | command payload | summary / error | `artifact_store`, `service_supervisor` |
 | `imagod-control::service_supervisor` | runner child process 監督、control plane | `ServiceLaunch`, logs request | start/stop/replace/reap/open_logs | `imagod-ipc` |
-| `imagod-runtime::runner_process` | runner モード実行（bootstrap, heartbeat, invoke受信） | `RunnerBootstrap` | run result / inbound response | `runtime_wasmtime`, `imagod-ipc` |
-| `imagod-runtime::runtime_wasmtime` | runner 内 Wasmtime component 実行 | release path + env + shutdown | `Result<()>` | `imagod-common` |
+| `imagod-runtime::runner_process` | runner モード実行（bootstrap, heartbeat, invoke受信） | `RunnerBootstrap` | run result / inbound response | `imagod-runtime-internal`, `imagod-runtime-wasmtime(feature)`, `imagod-ipc` |
+| `imagod-runtime-internal` | runtime trait/共通 request-response 型 | app_type, path, env/http request | runtime 抽象 API | `imagod-common`, `imagod-ipc` |
+| `imagod-runtime-wasmtime` | Wasmtime backend 実装（component model） | `RuntimeRunRequest`, `RuntimeHttpRequest` | `Result<()>`, `RuntimeHttpResponse` | `imagod-runtime-internal`, `wasmtime*` |
 | `imagod-ipc::ipc/*` | manager-runner/runner-runner IPC 抽象 + 実装 | control/invoke message | response/token | `imagod-common` |
 | `imagod-control::operation_state` | 短命 operation 状態管理 | UUID + state | `StateResponse`, cancel 判定 | `imagod-common` |
 | `imagod-common (lib.rs)` | 内部エラーの構造化 | stage, message, code | `StructuredError` | `imago-protocol` |
@@ -291,11 +292,21 @@ deploy 経路の要点:
 - `start` は spawn 後すぐ成功返却せず、`runner_ready_timeout_secs` 以内の `runner_ready` を待つ
 - timeout / ready 前終了時は起動失敗として child を回収し、deploy 側で rollback 経路へ入れる
 
-## 9. Wasmtime 実行詳細
+## 9. Runtime backend 実行詳細
 
 対象読者: 実装者
 
-実装箇所: `crates/imagod-runtime/src/runtime_wasmtime.rs`
+実装箇所:
+
+- facade: `crates/imagod-runtime/src/runner_process.rs`, `crates/imagod-runtime/src/lib.rs`
+- runtime trait: `crates/imagod-runtime-internal/src/lib.rs`
+- Wasmtime backend: `crates/imagod-runtime-wasmtime/src/lib.rs`
+
+backend 選択:
+
+- `imagod-runtime` は feature `runtime-wasmtime`（default ON）で backend を有効化する。
+- runner は `create_runtime_backend()` で backend を生成する。
+- feature OFF 時は runner 起動時に `E_INTERNAL` / `stage=runner.process` で明示的に失敗する。
 
 設定:
 
@@ -305,16 +316,32 @@ deploy 経路の要点:
 
 実行:
 
-- `wasmtime_wasi::p2::add_to_linker_async`
-- `wasmtime_wasi::p2::bindings::Command::instantiate_async`
-- `call_run(...).await`
+- runner は `RunnerBootstrap.app_type` を runtime へ渡し、`type` ごとに実行分岐する。
+  - `cli`: `wasmtime_wasi::p2::bindings::Command::instantiate_async` + `call_run(...).await`
+  - `http`: `wasmtime_wasi_http::bindings::Proxy::instantiate_async`（`incoming-handler` instantiate）後、runner の外部 ingress から `call_handle(...)` を都度実行
+  - `socket`: 現時点では未実装として `E_INTERNAL` を返す
+- `cli` 分岐では `wasmtime_wasi::p2::add_to_linker_async` を利用する
+- `http` 分岐では `wasmtime_wasi_http::add_only_http_to_linker_async` を併用する
 - `Store::set_epoch_deadline(1)`
 - `Store::epoch_deadline_async_yield_and_update(1)`
+
+HTTP ingress:
+
+- `app_type=http` の runner は `127.0.0.1:http_port`（manifest 明示値）へ TCP bind する。
+- `app_type=http` の ingress は keep-alive を無効化し、1 接続 1 リクエストで接続を閉じる。
+- ingress 接続には idle timeout（既定 30 秒）を設け、無通信接続による handler 枯渇を防ぐ。
+- ingress は `http_max_body_bytes`（未指定時 8MiB）を上限に request body を読み取る。
+- ingress は HTTP/1.1 リクエストを受理し、`RuntimeHttpRequest` へ変換して runtime trait の `handle_http_request` を呼ぶ。
+- runtime は `incoming-handler.handle` を呼び、返却された status/header/body を `RuntimeHttpResponse` に正規化して返す。
+- bind 失敗は `runner_ready` 送信前に start 失敗として扱う。
+- `type=http` の `runner_ready` は runtime 側の HTTP 初期化完了通知と ingress bind 成功の両方を満たした後に送信する。
+- ingress のエラー応答本文は汎用文言（`bad request` / `internal server error`）のみ返し、詳細は runner ログへ出力する。
 
 停止連携:
 
 - `watch::Receiver<bool>` の shutdown signal と run future を `tokio::select!` で競合実行
 - runner 内の epoch tick task が `epoch_tick_interval_ms` 周期で `Engine::increment_epoch()` を呼び、停止時の割り込み余地を維持する
+- HTTP backend は worker task が `Store`/`Proxy` を専有し、`handle_http_request` は channel 経由で処理を委譲する（`Mutex` を `.await` 越しに保持しない）。
 
 ## 10. 状態管理と cancel セマンティクス
 
@@ -468,7 +495,8 @@ flowchart TD
 - service supervisor: `crates/imagod-control/src/service_supervisor.rs`
 - runner process: `crates/imagod-runtime/src/runner_process.rs`
 - ipc transport: `crates/imagod-ipc/src/ipc/*`
-- runtime: `crates/imagod-runtime/src/runtime_wasmtime.rs`
+- runtime trait: `crates/imagod-runtime-internal/src/lib.rs`
+- runtime (wasmtime backend): `crates/imagod-runtime-wasmtime/src/lib.rs`
 - operation state: `crates/imagod-control/src/operation_state.rs`
 - error: `crates/imagod-common/src/lib.rs`
 
@@ -489,6 +517,14 @@ flowchart TD
 - runner 間 direct invoke の基盤を追加した（実関数実行は未実装）。
   - `resolve_invocation_target` は `manifest.bindings` を用いた interface 単位 ACL を適用する。
   - manager は target runner 秘密鍵で短命 token を発行し、callee runner が検証する。
+- runner bootstrap に `app_type`（`cli` / `http` / `socket`）を追加した。
+  - runner process は Wasmtime 直結ではなく runtime trait 経由で実行し、将来の runtime 差し替え可能性を確保する。
+- runner bootstrap に `http_port`（`type=http` 時のみ有効）を追加した。
+  - orchestrator は manifest の `http.port` を `ServiceLaunch` / `RunnerBootstrap` へ伝播する。
+  - runner は `127.0.0.1:http_port` へ ingress bind し、`incoming-handler.handle` を実行する。
+- runner bootstrap に `http_max_body_bytes`（`type=http` 時のみ有効）を追加した。
+  - orchestrator は manifest の `http.max_body_bytes` を `ServiceLaunch` / `RunnerBootstrap` へ伝播する。
+  - runner は未指定時 8MiB を既定値として扱う。
 - ログ回収を追加した。
   - runner stdout/stderr を pipe で manager が回収する。
   - service ごとに容量上限付き ring buffer（`runner_log_buffer_bytes`）へ保持する。
@@ -523,3 +559,11 @@ flowchart TD
 - `protocol_handler` に `logs.request` 分岐を追加し、ログ本文を DATAGRAM 専用経路へ移行した。
 - `service_supervisor` に `running_service_names` / `open_logs` を追加し、tail snapshot + follow 受信を提供する。
 - 全サービス購読は `process_id=None` で受理し、リクエスト時点の running サービスのみを対象に固定した。
+
+## 実装反映ノート（Runtime Backend Split / 2026-02-13）
+
+- Wasmtime backend を `imagod-runtime` から `imagod-runtime-wasmtime` へ分離した。
+- runtime trait/共通型を `imagod-runtime-internal` に集約し、runner は trait 経由で実行する。
+- `imagod-runtime` に feature `runtime-wasmtime` を追加した（default ON）。
+- `runtime-wasmtime` OFF 時は、runner が `E_INTERNAL` / `stage=runner.process` で「runtime backend 未有効」を返す。
+- `imagod-runtime::WasmRuntime` は `runtime-wasmtime` 有効時のみ再exportを維持する。

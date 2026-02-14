@@ -5,26 +5,36 @@ use std::{
     sync::Arc,
 };
 
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Incoming as HyperIncomingBody;
+use hyper::{Request, Response, server::conn::http1, service::service_fn};
+use hyper_util::rt::TokioIo;
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{
-    ControlRequest, ControlResponse, IpcErrorPayload, RunnerBootstrap, RunnerInboundRequest,
-    RunnerInboundResponse, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
-    verify_invocation_token, verify_manager_auth_proof,
+    ControlRequest, ControlResponse, IpcErrorPayload, RunnerAppType, RunnerBootstrap,
+    RunnerInboundRequest, RunnerInboundResponse, compute_manager_auth_proof,
+    dbus_p2p::DbusP2pTransport, verify_invocation_token, verify_manager_auth_proof,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
-    net::{UnixListener, UnixStream},
-    sync::{Semaphore, watch},
+    net::{TcpListener, UnixListener, UnixStream},
+    sync::{Semaphore, oneshot, watch},
     task::JoinHandle,
     time::{self, Duration},
 };
 
-use crate::runtime_wasmtime::WasmRuntime;
+#[cfg(feature = "runtime-wasmtime")]
+use crate::WasmRuntime;
+use crate::runtime::{
+    ComponentRuntime, RuntimeHttpRequest, RuntimeHttpResponse, RuntimeRunRequest,
+};
 
 const STAGE_RUNNER: &str = "runner.process";
 const STAGE_SHUTDOWN: &str = "runner.shutdown";
 const STAGE_INBOUND: &str = "runner.inbound";
+const STAGE_HTTP_INGRESS: &str = "runner.http_ingress";
 const INBOUND_READ_TIMEOUT_SECS: u64 = 3;
 const INBOUND_ACCEPT_RETRY_BACKOFF_MS: u64 = 25;
 const HEARTBEAT_RPC_TIMEOUT_SECS: u64 = 2;
@@ -32,6 +42,12 @@ const MAX_INBOUND_CONNECTION_HANDLERS: usize = 32;
 const MAX_RUNNER_BOOTSTRAP_BYTES: usize = 64 * 1024;
 const MAX_CONSECUTIVE_HEARTBEAT_FAILURES: u32 = 3;
 const STARTUP_CONFIRM_WINDOW: Duration = Duration::from_millis(200);
+#[cfg(not(test))]
+const HTTP_INGRESS_CONNECTION_TIMEOUT_SECS: u64 = 30;
+#[cfg(test)]
+const HTTP_INGRESS_CONNECTION_TIMEOUT_SECS: u64 = 1;
+const DEFAULT_HTTP_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_HTTP_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeartbeatDecision {
@@ -44,6 +60,14 @@ enum StartupRunState {
     /// Workload is still running after startup confirmation window.
     StillRunning,
     /// Workload exited during startup confirmation window.
+    Finished(Result<(), ImagodError>),
+}
+
+/// HTTP runtime initialization observation result.
+enum HttpRuntimeReadyState {
+    /// Runtime initialized HTTP component and is ready to accept requests.
+    Ready,
+    /// Runtime task exited before becoming ready.
     Finished(Result<(), ImagodError>),
 }
 
@@ -93,7 +117,7 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
     })?;
     let _socket_cleanup_guard = SocketCleanupGuard::new(bootstrap.runner_endpoint.clone());
 
-    let runtime = WasmRuntime::new()?;
+    let runtime = create_runtime_backend()?;
     runtime.validate_component(&bootstrap.component_path)?;
 
     register_runner(&bootstrap).await?;
@@ -105,38 +129,130 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
         shutdown_tx.clone(),
         shutdown_rx.clone(),
     ));
+    let (http_ready_tx, http_ready_rx) = if bootstrap.app_type == RunnerAppType::Http {
+        let (tx, rx) = oneshot::channel::<()>();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
 
     let runtime_for_run = runtime.clone();
     let bootstrap_for_run = bootstrap.clone();
     let mut run_task = tokio::spawn(async move {
         runtime_for_run
-            .run_cli_component_async(
-                &bootstrap_for_run.component_path,
-                &bootstrap_for_run.args,
-                &bootstrap_for_run.envs,
-                shutdown_rx,
-                bootstrap_for_run.epoch_tick_interval_ms,
-            )
+            .run_component(RuntimeRunRequest {
+                app_type: bootstrap_for_run.app_type,
+                component_path: bootstrap_for_run.component_path.clone(),
+                args: bootstrap_for_run.args.clone(),
+                envs: bootstrap_for_run.envs.clone(),
+                shutdown: shutdown_rx,
+                epoch_tick_interval_ms: bootstrap_for_run.epoch_tick_interval_ms,
+                http_ready_tx,
+            })
             .await
     });
 
-    match observe_startup_window(&mut run_task, STARTUP_CONFIRM_WINDOW).await? {
-        StartupRunState::Finished(run_result) => {
-            if run_result.is_ok()
-                && let Err(err) = mark_ready(&bootstrap).await
+    let http_ingress_task = match bootstrap.app_type {
+        RunnerAppType::Http => {
+            let ready_rx = http_ready_rx.expect("http ready receiver should exist");
+            match wait_http_runtime_ready_or_exit(&mut run_task, ready_rx).await? {
+                HttpRuntimeReadyState::Finished(run_result) => {
+                    if run_result.is_ok()
+                        && let Err(err) = mark_ready(&bootstrap).await
+                    {
+                        let _ = shutdown_runner_tasks(&shutdown_tx, inbound_task, None, None, None)
+                            .await;
+                        return Err(err);
+                    }
+                    let _ =
+                        shutdown_runner_tasks(&shutdown_tx, inbound_task, None, None, None).await;
+                    return run_result;
+                }
+                HttpRuntimeReadyState::Ready => {}
+            }
+
+            let ingress = match spawn_http_ingress_server(
+                runtime.clone(),
+                bootstrap.clone(),
+                shutdown_tx.clone(),
+                shutdown_tx.subscribe(),
+            )
+            .await
             {
-                shutdown_runner_tasks(&shutdown_tx, inbound_task, None, None).await;
+                Ok(v) => v,
+                Err(err) => {
+                    let _ = shutdown_runner_tasks(
+                        &shutdown_tx,
+                        inbound_task,
+                        None,
+                        None,
+                        Some(run_task),
+                    )
+                    .await;
+                    return Err(err);
+                }
+            };
+
+            if let Err(err) = mark_ready(&bootstrap).await {
+                let _ = shutdown_runner_tasks(
+                    &shutdown_tx,
+                    inbound_task,
+                    Some(ingress),
+                    None,
+                    Some(run_task),
+                )
+                .await;
                 return Err(err);
             }
-            shutdown_runner_tasks(&shutdown_tx, inbound_task, None, None).await;
-            return run_result;
-        }
-        StartupRunState::StillRunning => {}
-    }
 
-    if let Err(err) = mark_ready(&bootstrap).await {
-        shutdown_runner_tasks(&shutdown_tx, inbound_task, None, Some(run_task)).await;
-        return Err(err);
+            Some(ingress)
+        }
+        RunnerAppType::Cli | RunnerAppType::Socket => None,
+    };
+
+    if bootstrap.app_type != RunnerAppType::Http {
+        match observe_startup_window(&mut run_task, STARTUP_CONFIRM_WINDOW).await? {
+            StartupRunState::Finished(run_result) => {
+                if run_result.is_ok()
+                    && let Err(err) = mark_ready(&bootstrap).await
+                {
+                    let _ = shutdown_runner_tasks(
+                        &shutdown_tx,
+                        inbound_task,
+                        http_ingress_task,
+                        None,
+                        None,
+                    )
+                    .await;
+                    return Err(err);
+                }
+                let http_result = shutdown_runner_tasks(
+                    &shutdown_tx,
+                    inbound_task,
+                    http_ingress_task,
+                    None,
+                    None,
+                )
+                .await;
+                if let Some(Err(err)) = http_result {
+                    return Err(err);
+                }
+                return run_result;
+            }
+            StartupRunState::StillRunning => {}
+        }
+
+        if let Err(err) = mark_ready(&bootstrap).await {
+            let _ = shutdown_runner_tasks(
+                &shutdown_tx,
+                inbound_task,
+                http_ingress_task,
+                None,
+                Some(run_task),
+            )
+            .await;
+            return Err(err);
+        }
     }
 
     let heartbeat_task = tokio::spawn(send_heartbeats(
@@ -145,9 +261,35 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
         shutdown_tx.subscribe(),
     ));
     let run_result = join_run_task(run_task).await;
-    shutdown_runner_tasks(&shutdown_tx, inbound_task, Some(heartbeat_task), None).await;
+    let http_result = shutdown_runner_tasks(
+        &shutdown_tx,
+        inbound_task,
+        http_ingress_task,
+        Some(heartbeat_task),
+        None,
+    )
+    .await;
+    if let Some(Err(err)) = http_result {
+        return Err(err);
+    }
 
     run_result
+}
+
+fn create_runtime_backend() -> Result<Arc<dyn ComponentRuntime>, ImagodError> {
+    #[cfg(feature = "runtime-wasmtime")]
+    {
+        return Ok(Arc::new(WasmRuntime::new()?));
+    }
+
+    #[cfg(not(feature = "runtime-wasmtime"))]
+    {
+        Err(ImagodError::new(
+            ErrorCode::Internal,
+            STAGE_RUNNER,
+            "runtime backend is not enabled; enable feature 'runtime-wasmtime'",
+        ))
+    }
 }
 
 /// Observes run task during startup confirmation window.
@@ -164,6 +306,29 @@ async fn observe_startup_window(
     }
 }
 
+/// Waits until HTTP runtime reports readiness or exits early.
+async fn wait_http_runtime_ready_or_exit(
+    run_task: &mut JoinHandle<Result<(), ImagodError>>,
+    http_ready_rx: oneshot::Receiver<()>,
+) -> Result<HttpRuntimeReadyState, ImagodError> {
+    tokio::select! {
+        joined = run_task => {
+            let run_result = joined.map_err(map_run_join_error)?;
+            Ok(HttpRuntimeReadyState::Finished(run_result))
+        }
+        ready = http_ready_rx => {
+            ready.map_err(|_| {
+                ImagodError::new(
+                    ErrorCode::Internal,
+                    STAGE_RUNNER,
+                    "http runtime initialization ended before ready signal",
+                )
+            })?;
+            Ok(HttpRuntimeReadyState::Ready)
+        }
+    }
+}
+
 /// Joins workload run task and maps join errors to internal runner errors.
 async fn join_run_task(run_task: JoinHandle<Result<(), ImagodError>>) -> Result<(), ImagodError> {
     run_task.await.map_err(map_run_join_error)?
@@ -173,9 +338,10 @@ async fn join_run_task(run_task: JoinHandle<Result<(), ImagodError>>) -> Result<
 async fn shutdown_runner_tasks(
     shutdown_tx: &watch::Sender<bool>,
     inbound_task: JoinHandle<()>,
+    http_ingress_task: Option<JoinHandle<Result<(), ImagodError>>>,
     heartbeat_task: Option<JoinHandle<()>>,
     run_task: Option<JoinHandle<Result<(), ImagodError>>>,
-) {
+) -> Option<Result<(), ImagodError>> {
     let _ = shutdown_tx.send(true);
     if let Some(task) = heartbeat_task {
         let _ = task.await;
@@ -183,7 +349,16 @@ async fn shutdown_runner_tasks(
     if let Some(task) = run_task {
         let _ = task.await;
     }
+    let http_result = match http_ingress_task {
+        Some(task) => Some(
+            task.await
+                .map_err(map_http_ingress_join_error)
+                .and_then(|v| v),
+        ),
+        None => None,
+    };
     let _ = inbound_task.await;
+    http_result
 }
 
 /// Converts spawned run task join failures to a unified error.
@@ -193,6 +368,314 @@ fn map_run_join_error(err: tokio::task::JoinError) -> ImagodError {
         STAGE_RUNNER,
         format!("runner run task join failed: {err}"),
     )
+}
+
+fn map_http_ingress_join_error(err: tokio::task::JoinError) -> ImagodError {
+    ImagodError::new(
+        ErrorCode::Internal,
+        STAGE_HTTP_INGRESS,
+        format!("http ingress task join failed: {err}"),
+    )
+}
+
+async fn spawn_http_ingress_server(
+    runtime: Arc<dyn ComponentRuntime>,
+    bootstrap: RunnerBootstrap,
+    shutdown_tx: watch::Sender<bool>,
+    shutdown_rx: watch::Receiver<bool>,
+) -> Result<JoinHandle<Result<(), ImagodError>>, ImagodError> {
+    let port = required_http_port(&bootstrap)?;
+    let max_http_body_bytes = required_http_max_body_bytes(&bootstrap)?;
+    let bind_addr = format!("127.0.0.1:{port}");
+    let listener = TcpListener::bind(&bind_addr).await.map_err(|e| {
+        ImagodError::new(
+            ErrorCode::Internal,
+            STAGE_HTTP_INGRESS,
+            format!("failed to bind http ingress {bind_addr}: {e}"),
+        )
+    })?;
+
+    Ok(tokio::spawn(run_http_ingress_server(
+        listener,
+        runtime,
+        max_http_body_bytes,
+        bootstrap,
+        shutdown_tx,
+        shutdown_rx,
+    )))
+}
+
+fn required_http_port(bootstrap: &RunnerBootstrap) -> Result<u16, ImagodError> {
+    match bootstrap.http_port {
+        Some(port) if port > 0 => Ok(port),
+        _ => Err(ImagodError::new(
+            ErrorCode::Internal,
+            STAGE_HTTP_INGRESS,
+            "type=http requires http_port in runner bootstrap",
+        )),
+    }
+}
+
+fn required_http_max_body_bytes(bootstrap: &RunnerBootstrap) -> Result<usize, ImagodError> {
+    let max_body_bytes = bootstrap
+        .http_max_body_bytes
+        .unwrap_or(DEFAULT_HTTP_MAX_BODY_BYTES as u64);
+    if max_body_bytes == 0 || max_body_bytes > MAX_HTTP_MAX_BODY_BYTES as u64 {
+        return Err(ImagodError::new(
+            ErrorCode::Internal,
+            STAGE_HTTP_INGRESS,
+            format!(
+                "http_max_body_bytes must be in range 1..={} (got {})",
+                MAX_HTTP_MAX_BODY_BYTES, max_body_bytes
+            ),
+        ));
+    }
+    usize::try_from(max_body_bytes).map_err(|_| {
+        ImagodError::new(
+            ErrorCode::Internal,
+            STAGE_HTTP_INGRESS,
+            format!("http_max_body_bytes is too large for this platform: {max_body_bytes}"),
+        )
+    })
+}
+
+async fn run_http_ingress_server(
+    listener: TcpListener,
+    runtime: Arc<dyn ComponentRuntime>,
+    max_http_body_bytes: usize,
+    bootstrap: RunnerBootstrap,
+    shutdown_tx: watch::Sender<bool>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> Result<(), ImagodError> {
+    let concurrency = Arc::new(Semaphore::new(MAX_INBOUND_CONNECTION_HANDLERS));
+    let mut connection_tasks = tokio::task::JoinSet::new();
+
+    loop {
+        let permit = tokio::select! {
+            acquired = concurrency.clone().acquire_owned() => {
+                match acquired {
+                    Ok(permit) => permit,
+                    Err(_) => break,
+                }
+            }
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    break;
+                }
+                continue;
+            }
+        };
+
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            changed = shutdown_rx.changed() => {
+                drop(permit);
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    break;
+                }
+                continue;
+            }
+        };
+
+        let (stream, _) = match accepted {
+            Ok(v) => v,
+            Err(err) => {
+                drop(permit);
+                if should_retry_inbound_accept(&err) {
+                    eprintln!("runner http ingress accept transient error: {err}");
+                    time::sleep(Duration::from_millis(INBOUND_ACCEPT_RETRY_BACKOFF_MS)).await;
+                    continue;
+                }
+                let _ = shutdown_tx.send(true);
+                return Err(ImagodError::new(
+                    ErrorCode::Internal,
+                    STAGE_HTTP_INGRESS,
+                    format!(
+                        "http ingress accept failed for service '{}': {err}",
+                        bootstrap.service_name
+                    ),
+                ));
+            }
+        };
+
+        let runtime = runtime.clone();
+        let service_name = bootstrap.service_name.clone();
+        let connection_timeout = Duration::from_secs(HTTP_INGRESS_CONNECTION_TIMEOUT_SECS);
+        connection_tasks.spawn(async move {
+            let _permit = permit;
+            match time::timeout(
+                connection_timeout,
+                serve_http_connection(stream, runtime, max_http_body_bytes),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    eprintln!(
+                        "runner http ingress connection error service={} error={}",
+                        service_name, err
+                    );
+                }
+                Err(_) => {
+                    eprintln!(
+                        "runner http ingress connection timed out service={} timeout_secs={}",
+                        service_name, HTTP_INGRESS_CONNECTION_TIMEOUT_SECS
+                    );
+                }
+            }
+        });
+    }
+
+    connection_tasks.abort_all();
+    while connection_tasks.join_next().await.is_some() {}
+    Ok(())
+}
+
+async fn serve_http_connection(
+    stream: tokio::net::TcpStream,
+    runtime: Arc<dyn ComponentRuntime>,
+    max_http_body_bytes: usize,
+) -> Result<(), ImagodError> {
+    let service = service_fn(move |request: Request<HyperIncomingBody>| {
+        let runtime = runtime.clone();
+        async move {
+            Ok::<_, std::convert::Infallible>(
+                handle_http_request(runtime, request, max_http_body_bytes).await,
+            )
+        }
+    });
+
+    http1::Builder::new()
+        .keep_alive(false)
+        .serve_connection(TokioIo::new(stream), service)
+        .await
+        .map_err(|e| {
+            ImagodError::new(
+                ErrorCode::Internal,
+                STAGE_HTTP_INGRESS,
+                format!("failed to serve http connection: {e}"),
+            )
+        })
+}
+
+async fn handle_http_request(
+    runtime: Arc<dyn ComponentRuntime>,
+    request: Request<HyperIncomingBody>,
+    max_http_body_bytes: usize,
+) -> Response<Full<Bytes>> {
+    let request = match into_runtime_http_request(request, max_http_body_bytes).await {
+        Ok(v) => v,
+        Err(err) => return runtime_error_response(err),
+    };
+
+    match runtime.handle_http_request(request).await {
+        Ok(response) => runtime_http_response_to_hyper(response),
+        Err(err) => runtime_error_response(err),
+    }
+}
+
+async fn into_runtime_http_request(
+    request: Request<HyperIncomingBody>,
+    max_http_body_bytes: usize,
+) -> Result<RuntimeHttpRequest, ImagodError> {
+    let (parts, mut body) = request.into_parts();
+    if let Some(content_length) = parts.headers.get(hyper::header::CONTENT_LENGTH) {
+        let content_length = content_length.to_str().map_err(|e| {
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                STAGE_HTTP_INGRESS,
+                format!("invalid content-length header: {e}"),
+            )
+        })?;
+        let content_length = content_length.parse::<u64>().map_err(|e| {
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                STAGE_HTTP_INGRESS,
+                format!("invalid content-length value '{content_length}': {e}"),
+            )
+        })?;
+        if content_length > max_http_body_bytes as u64 {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                STAGE_HTTP_INGRESS,
+                format!("http request body exceeds limit of {max_http_body_bytes} bytes"),
+            ));
+        }
+    }
+
+    let mut body_bytes = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|e| {
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                STAGE_HTTP_INGRESS,
+                format!("failed to read request body frame: {e}"),
+            )
+        })?;
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        if body_bytes.len().saturating_add(data.len()) > max_http_body_bytes {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                STAGE_HTTP_INGRESS,
+                format!("http request body exceeds limit of {max_http_body_bytes} bytes"),
+            ));
+        }
+        body_bytes.extend_from_slice(&data);
+    }
+
+    let headers = parts
+        .headers
+        .iter()
+        .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
+        .collect::<Vec<_>>();
+
+    Ok(RuntimeHttpRequest {
+        method: parts.method.as_str().to_string(),
+        uri: parts.uri.to_string(),
+        headers,
+        body: body_bytes,
+    })
+}
+
+fn runtime_http_response_to_hyper(response: RuntimeHttpResponse) -> Response<Full<Bytes>> {
+    let status = hyper::StatusCode::from_u16(response.status)
+        .unwrap_or(hyper::StatusCode::INTERNAL_SERVER_ERROR);
+
+    let mut out = Response::builder()
+        .status(status)
+        .body(Full::new(Bytes::from(response.body)))
+        .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"invalid response"))));
+    for (name, value) in response.headers {
+        let Ok(name) = hyper::header::HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        let Ok(value) = hyper::header::HeaderValue::from_bytes(&value) else {
+            continue;
+        };
+        out.headers_mut().append(name, value);
+    }
+    out
+}
+
+fn runtime_error_response(error: ImagodError) -> Response<Full<Bytes>> {
+    eprintln!(
+        "runner http ingress runtime error: code={:?} stage={} message={}",
+        error.code, error.stage, error.message
+    );
+    let (status, body) = match error.code {
+        ErrorCode::BadRequest => (hyper::StatusCode::BAD_REQUEST, "bad request"),
+        _ => (
+            hyper::StatusCode::INTERNAL_SERVER_ERROR,
+            "internal server error",
+        ),
+    };
+    Response::builder()
+        .status(status)
+        .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(Full::new(Bytes::from(body)))
+        .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"runtime error"))))
 }
 
 async fn read_runner_bootstrap<R>(reader: R) -> Result<RunnerBootstrap, ImagodError>
@@ -616,16 +1099,39 @@ fn prepare_socket_path(path: &Path) -> Result<(), ImagodError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::{
+        RuntimeHttpFuture, RuntimeHttpRequest, RuntimeHttpResponse, RuntimeRunFuture,
+        RuntimeRunRequest,
+    };
     use std::{
         collections::BTreeMap,
         io::Cursor,
         os::unix::net::UnixListener as StdUnixListener,
         path::{Path, PathBuf},
+        sync::Mutex as StdMutex,
+        sync::atomic::{AtomicUsize, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::oneshot;
 
-    use imagod_ipc::{RunnerInboundResponse, random_secret_hex};
+    use imagod_ipc::{RunnerAppType, RunnerInboundResponse, random_secret_hex};
+
+    #[cfg(not(feature = "runtime-wasmtime"))]
+    #[test]
+    fn runtime_backend_disabled_returns_explicit_error() {
+        let err = match create_runtime_backend() {
+            Ok(_) => panic!("backend creation should fail when runtime-wasmtime is disabled"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert_eq!(err.stage, STAGE_RUNNER);
+        assert!(
+            err.message.contains("runtime backend is not enabled"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
 
     fn run_async_test<F>(future: F)
     where
@@ -666,6 +1172,9 @@ mod tests {
             runner_id: runner_id.clone(),
             service_name: "svc-test".to_string(),
             release_hash: "release-test".to_string(),
+            app_type: RunnerAppType::Cli,
+            http_port: None,
+            http_max_body_bytes: None,
             component_path: root.join("component.wasm"),
             args: Vec::new(),
             envs: BTreeMap::new(),
@@ -676,6 +1185,380 @@ mod tests {
             invocation_secret: random_secret_hex(),
             epoch_tick_interval_ms: 50,
         }
+    }
+
+    fn reserve_test_http_port() -> u16 {
+        let listener =
+            std::net::TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
+        let port = listener
+            .local_addr()
+            .expect("local_addr should be available")
+            .port();
+        drop(listener);
+        port
+    }
+
+    #[derive(Default)]
+    struct MockHttpRuntime {
+        calls: AtomicUsize,
+        last_path: StdMutex<Option<String>>,
+    }
+
+    impl ComponentRuntime for MockHttpRuntime {
+        fn validate_component(&self, _component_path: &Path) -> Result<(), ImagodError> {
+            Ok(())
+        }
+
+        fn run_component<'a>(&'a self, _request: RuntimeRunRequest) -> RuntimeRunFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn handle_http_request<'a>(&'a self, request: RuntimeHttpRequest) -> RuntimeHttpFuture<'a> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                *self.last_path.lock().expect("mutex should lock") = Some(request.uri.clone());
+                Ok(RuntimeHttpResponse {
+                    status: 200,
+                    headers: vec![("content-type".to_string(), b"text/plain".to_vec())],
+                    body: b"hello-http".to_vec(),
+                })
+            })
+        }
+    }
+
+    struct MockErrorRuntime;
+
+    impl ComponentRuntime for MockErrorRuntime {
+        fn validate_component(&self, _component_path: &Path) -> Result<(), ImagodError> {
+            Ok(())
+        }
+
+        fn run_component<'a>(&'a self, _request: RuntimeRunRequest) -> RuntimeRunFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn handle_http_request<'a>(
+            &'a self,
+            _request: RuntimeHttpRequest,
+        ) -> RuntimeHttpFuture<'a> {
+            Box::pin(async {
+                Err(ImagodError::new(
+                    ErrorCode::Internal,
+                    "runtime.secret-stage",
+                    "very-secret-internal-detail",
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn http_ingress_requires_http_port_for_http_type() {
+        let root = new_test_root("http-port-required");
+        let mut bootstrap = new_test_bootstrap(&root, "runner.sock");
+        bootstrap.app_type = RunnerAppType::Http;
+        bootstrap.http_port = None;
+
+        let runtime: Arc<dyn ComponentRuntime> = Arc::new(MockHttpRuntime::default());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let err = spawn_http_ingress_server(runtime, bootstrap, shutdown_tx, shutdown_rx)
+            .await
+            .expect_err("http ingress should reject missing http_port");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(err.message.contains("requires http_port"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn http_ingress_uses_default_max_body_bytes_when_missing() {
+        let root = new_test_root("http-max-body-default");
+        let mut bootstrap = new_test_bootstrap(&root, "runner.sock");
+        bootstrap.app_type = RunnerAppType::Http;
+        bootstrap.http_max_body_bytes = None;
+        assert_eq!(
+            required_http_max_body_bytes(&bootstrap).expect("default max body should be accepted"),
+            DEFAULT_HTTP_MAX_BODY_BYTES
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn http_ingress_rejects_invalid_max_body_bytes() {
+        let root = new_test_root("http-max-body-invalid");
+        let mut bootstrap = new_test_bootstrap(&root, "runner.sock");
+        bootstrap.app_type = RunnerAppType::Http;
+        for invalid in [0, (MAX_HTTP_MAX_BODY_BYTES as u64) + 1] {
+            bootstrap.http_max_body_bytes = Some(invalid);
+            let err = required_http_max_body_bytes(&bootstrap)
+                .expect_err("invalid http_max_body_bytes should fail");
+            assert_eq!(err.code, ErrorCode::Internal);
+            assert!(err.message.contains("http_max_body_bytes"));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn http_ingress_handles_request_and_shutdown() {
+        let root = new_test_root("http-ingress-request");
+        let mut bootstrap = new_test_bootstrap(&root, "runner.sock");
+        bootstrap.app_type = RunnerAppType::Http;
+        let port = reserve_test_http_port();
+        bootstrap.http_port = Some(port);
+
+        let runtime = Arc::new(MockHttpRuntime::default());
+        let runtime_trait: Arc<dyn ComponentRuntime> = runtime.clone();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let ingress_task = spawn_http_ingress_server(
+            runtime_trait,
+            bootstrap.clone(),
+            shutdown_tx.clone(),
+            shutdown_rx,
+        )
+        .await
+        .expect("http ingress should start");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("client should connect");
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
+            .await
+            .expect("request write should succeed");
+
+        let mut response_bytes = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            stream.read_to_end(&mut response_bytes),
+        )
+        .await
+        .expect("response read should complete")
+        .expect("response read should succeed");
+        let response_text = String::from_utf8_lossy(&response_bytes);
+        assert!(
+            response_text.starts_with("HTTP/1.1 200"),
+            "unexpected status line: {response_text}"
+        );
+        assert!(response_text.contains("hello-http"));
+        assert!(
+            response_text
+                .to_ascii_lowercase()
+                .contains("connection: close"),
+            "keep-alive should be disabled: {response_text}"
+        );
+
+        assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            runtime
+                .last_path
+                .lock()
+                .expect("mutex should lock")
+                .as_deref(),
+            Some("/health")
+        );
+
+        let _ = shutdown_tx.send(true);
+        let joined = tokio::time::timeout(Duration::from_secs(2), ingress_task)
+            .await
+            .expect("ingress task should stop after shutdown")
+            .expect("ingress task join should succeed");
+        assert!(joined.is_ok(), "ingress should stop cleanly");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn http_ingress_rejects_request_body_over_limit() {
+        let root = new_test_root("http-ingress-body-limit");
+        let mut bootstrap = new_test_bootstrap(&root, "runner.sock");
+        bootstrap.app_type = RunnerAppType::Http;
+        let port = reserve_test_http_port();
+        bootstrap.http_port = Some(port);
+        bootstrap.http_max_body_bytes = Some(16);
+
+        let runtime = Arc::new(MockHttpRuntime::default());
+        let runtime_trait: Arc<dyn ComponentRuntime> = runtime.clone();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let ingress_task = spawn_http_ingress_server(
+            runtime_trait,
+            bootstrap.clone(),
+            shutdown_tx.clone(),
+            shutdown_rx,
+        )
+        .await
+        .expect("http ingress should start");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("client should connect");
+        stream
+            .write_all(
+                b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 17\r\nConnection: close\r\n\r\n0123456789ABCDEFG",
+            )
+            .await
+            .expect("request write should succeed");
+
+        let mut response_bytes = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            stream.read_to_end(&mut response_bytes),
+        )
+        .await
+        .expect("response read should complete")
+        .expect("response read should succeed");
+        let response_text = String::from_utf8_lossy(&response_bytes);
+        assert!(
+            response_text.starts_with("HTTP/1.1 400"),
+            "expected bad request status: {response_text}"
+        );
+        assert_eq!(
+            runtime.calls.load(Ordering::SeqCst),
+            0,
+            "runtime should not be called for oversized request"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let joined = tokio::time::timeout(Duration::from_secs(2), ingress_task)
+            .await
+            .expect("ingress task should stop after shutdown")
+            .expect("ingress task join should succeed");
+        assert!(joined.is_ok(), "ingress should stop cleanly");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn http_ingress_internal_errors_do_not_leak_details_to_client() {
+        let root = new_test_root("http-ingress-error-sanitize");
+        let mut bootstrap = new_test_bootstrap(&root, "runner.sock");
+        bootstrap.app_type = RunnerAppType::Http;
+        let port = reserve_test_http_port();
+        bootstrap.http_port = Some(port);
+
+        let runtime_trait: Arc<dyn ComponentRuntime> = Arc::new(MockErrorRuntime);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let ingress_task = spawn_http_ingress_server(
+            runtime_trait,
+            bootstrap.clone(),
+            shutdown_tx.clone(),
+            shutdown_rx,
+        )
+        .await
+        .expect("http ingress should start");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("client should connect");
+        stream
+            .write_all(b"GET /err HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("request write should succeed");
+
+        let mut response_bytes = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            stream.read_to_end(&mut response_bytes),
+        )
+        .await
+        .expect("response read should complete")
+        .expect("response read should succeed");
+        let response_text = String::from_utf8_lossy(&response_bytes);
+        assert!(
+            response_text.starts_with("HTTP/1.1 500"),
+            "expected internal status: {response_text}"
+        );
+        assert!(
+            response_text.contains("internal server error"),
+            "expected sanitized body: {response_text}"
+        );
+        assert!(
+            !response_text.contains("runtime.secret-stage"),
+            "internal stage must not leak: {response_text}"
+        );
+        assert!(
+            !response_text.contains("very-secret-internal-detail"),
+            "internal detail must not leak: {response_text}"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let joined = tokio::time::timeout(Duration::from_secs(2), ingress_task)
+            .await
+            .expect("ingress task should stop after shutdown")
+            .expect("ingress task join should succeed");
+        assert!(joined.is_ok(), "ingress should stop cleanly");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn http_ingress_releases_permit_after_idle_connection_timeout() {
+        let root = new_test_root("http-ingress-idle-timeout");
+        let mut bootstrap = new_test_bootstrap(&root, "runner.sock");
+        bootstrap.app_type = RunnerAppType::Http;
+        let port = reserve_test_http_port();
+        bootstrap.http_port = Some(port);
+
+        let runtime = Arc::new(MockHttpRuntime::default());
+        let runtime_trait: Arc<dyn ComponentRuntime> = runtime.clone();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let ingress_task = spawn_http_ingress_server(
+            runtime_trait,
+            bootstrap.clone(),
+            shutdown_tx.clone(),
+            shutdown_rx,
+        )
+        .await
+        .expect("http ingress should start");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut idle_streams = Vec::new();
+        for _ in 0..MAX_INBOUND_CONNECTION_HANDLERS {
+            let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("idle client should connect");
+            idle_streams.push(stream);
+        }
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("active client should connect");
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("request write should succeed");
+
+        let mut response_bytes = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(4),
+            stream.read_to_end(&mut response_bytes),
+        )
+        .await
+        .expect("response read should complete after idle timeout")
+        .expect("response read should succeed");
+        let response_text = String::from_utf8_lossy(&response_bytes);
+        assert!(
+            response_text.starts_with("HTTP/1.1 200"),
+            "expected successful status: {response_text}"
+        );
+        assert!(response_text.contains("hello-http"));
+        assert_eq!(
+            runtime.calls.load(Ordering::SeqCst),
+            1,
+            "runtime should eventually serve request after idle timeout"
+        );
+
+        drop(idle_streams);
+        let _ = shutdown_tx.send(true);
+        let joined = tokio::time::timeout(Duration::from_secs(2), ingress_task)
+            .await
+            .expect("ingress task should stop after shutdown")
+            .expect("ingress task join should succeed");
+        assert!(joined.is_ok(), "ingress should stop cleanly");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
@@ -875,6 +1758,52 @@ mod tests {
             join_run_task(run_task)
                 .await
                 .expect("run task should complete successfully");
+        });
+    }
+
+    #[test]
+    fn http_runtime_ready_wait_returns_ready_when_signal_arrives_first() {
+        run_async_test(async {
+            let (ready_tx, ready_rx) = oneshot::channel::<()>();
+            let mut run_task = tokio::spawn(async {
+                time::sleep(Duration::from_millis(80)).await;
+                Ok(())
+            });
+            ready_tx
+                .send(())
+                .expect("ready signal should be delivered to waiter");
+
+            let state = wait_http_runtime_ready_or_exit(&mut run_task, ready_rx)
+                .await
+                .expect("ready observation should succeed");
+            assert!(matches!(state, HttpRuntimeReadyState::Ready));
+            join_run_task(run_task)
+                .await
+                .expect("run task should complete successfully");
+        });
+    }
+
+    #[test]
+    fn http_runtime_ready_wait_returns_finished_when_run_exits_first() {
+        run_async_test(async {
+            let (_ready_tx, ready_rx) = oneshot::channel::<()>();
+            let mut run_task = tokio::spawn(async {
+                Err(ImagodError::new(
+                    ErrorCode::Internal,
+                    STAGE_RUNNER,
+                    "http startup failed",
+                ))
+            });
+
+            let state = wait_http_runtime_ready_or_exit(&mut run_task, ready_rx)
+                .await
+                .expect("ready observation should succeed");
+            match state {
+                HttpRuntimeReadyState::Finished(Err(err)) => {
+                    assert_eq!(err.code, ErrorCode::Internal)
+                }
+                _ => panic!("run task failure should win over ready signal"),
+            }
         });
     }
 

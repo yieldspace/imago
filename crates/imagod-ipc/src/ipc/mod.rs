@@ -36,6 +36,17 @@ pub struct ServiceBinding {
     pub wit: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// Runtime application type carried from manifest into runner bootstrap.
+pub enum RunnerAppType {
+    #[serde(rename = "cli")]
+    Cli,
+    #[serde(rename = "http")]
+    Http,
+    #[serde(rename = "socket")]
+    Socket,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Bootstrap payload sent from manager to runner via child stdin.
 pub struct RunnerBootstrap {
@@ -45,6 +56,12 @@ pub struct RunnerBootstrap {
     pub service_name: String,
     /// Release hash to be executed.
     pub release_hash: String,
+    /// Runtime execution model selected from manifest `type`.
+    pub app_type: RunnerAppType,
+    /// TCP port used by local HTTP ingress when `app_type=http`.
+    pub http_port: Option<u16>,
+    /// Max accepted HTTP request body size in bytes when `app_type=http`.
+    pub http_max_body_bytes: Option<u64>,
     /// Absolute path to the component file.
     pub component_path: PathBuf,
     /// CLI arguments passed to WASI command.
@@ -424,6 +441,42 @@ pub fn map_ipc_error(stage: &str, message: impl Into<String>) -> ImagodError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runner_app_type_round_trip_via_cbor() {
+        let encoded =
+            imago_protocol::to_cbor(&RunnerAppType::Http).expect("app type encoding should work");
+        let decoded = imago_protocol::from_cbor::<RunnerAppType>(&encoded)
+            .expect("app type decoding should work");
+        assert_eq!(decoded, RunnerAppType::Http);
+    }
+
+    #[test]
+    fn runner_bootstrap_includes_app_type_in_cbor_round_trip() {
+        let bootstrap = RunnerBootstrap {
+            runner_id: "runner-a".to_string(),
+            service_name: "svc-a".to_string(),
+            release_hash: "release-a".to_string(),
+            app_type: RunnerAppType::Socket,
+            http_port: Some(18080),
+            http_max_body_bytes: Some(8 * 1024 * 1024),
+            component_path: PathBuf::from("/tmp/component.wasm"),
+            args: vec!["--help".to_string()],
+            envs: std::collections::BTreeMap::new(),
+            bindings: vec![],
+            manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+            runner_endpoint: PathBuf::from("/tmp/runner.sock"),
+            manager_auth_secret: random_secret_hex(),
+            invocation_secret: random_secret_hex(),
+            epoch_tick_interval_ms: 50,
+        };
+        let encoded = imago_protocol::to_cbor(&bootstrap).expect("bootstrap encoding should work");
+        let decoded = imago_protocol::from_cbor::<RunnerBootstrap>(&encoded)
+            .expect("bootstrap decoding should work");
+        assert_eq!(decoded.app_type, RunnerAppType::Socket);
+        assert_eq!(decoded.http_port, Some(18080));
+        assert_eq!(decoded.http_max_body_bytes, Some(8 * 1024 * 1024));
+    }
 
     #[test]
     fn random_secret_hex_has_32_bytes() {

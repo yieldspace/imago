@@ -15,6 +15,8 @@ use toml::Value as TomlValue;
 use crate::{cli::BuildArgs, commands::CommandResult};
 
 const DEFAULT_TARGET_NAME: &str = "default";
+const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_HTTP_MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct TargetConfig {
@@ -87,6 +89,8 @@ struct Manifest {
     assets: Vec<ManifestAsset>,
     #[serde(default)]
     bindings: Vec<ManifestBinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    http: Option<ManifestHttp>,
     dependencies: Vec<JsonValue>,
     hash: ManifestHash,
 }
@@ -102,6 +106,12 @@ struct ManifestAsset {
 struct ManifestBinding {
     target: String,
     wit: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ManifestHttp {
+    port: u16,
+    max_body_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +188,7 @@ pub fn build_project(
 
     let app_type = required_string(&root, "type")?;
     validate_app_type(&app_type)?;
+    let http = parse_http_section(&root, &app_type)?;
 
     let vars = parse_string_table(root.get("vars"), "vars")?;
     let bindings = parse_bindings(root.get("bindings"))?;
@@ -207,6 +218,7 @@ pub fn build_project(
             .map(|entry| entry.manifest_asset.clone())
             .collect(),
         bindings,
+        http,
         dependencies,
         hash: ManifestHash {
             algorithm: "sha256".to_string(),
@@ -478,6 +490,59 @@ fn validate_app_type(app_type: &str) -> anyhow::Result<()> {
             app_type
         )),
     }
+}
+
+fn parse_http_section(root: &toml::Table, app_type: &str) -> anyhow::Result<Option<ManifestHttp>> {
+    let http = root.get("http");
+
+    if app_type != "http" {
+        if http.is_some() {
+            return Err(anyhow!(
+                "http section is only allowed when type is \"http\""
+            ));
+        }
+        return Ok(None);
+    }
+
+    let table = http
+        .and_then(TomlValue::as_table)
+        .ok_or_else(|| anyhow!("type=\"http\" requires [http] table"))?;
+    let raw_port = table
+        .get("port")
+        .and_then(TomlValue::as_integer)
+        .ok_or_else(|| anyhow!("http.port is required when type=\"http\""))?;
+    let port = u16::try_from(raw_port)
+        .map_err(|_| anyhow!("http.port must be in range 1..=65535 (got {raw_port})"))?;
+    if port == 0 {
+        return Err(anyhow!("http.port must be in range 1..=65535 (got 0)"));
+    }
+
+    let max_body_bytes = match table.get("max_body_bytes") {
+        Some(value) => {
+            let raw = value.as_integer().ok_or_else(|| {
+                anyhow!("http.max_body_bytes must be in range 1..={MAX_HTTP_MAX_BODY_BYTES}")
+            })?;
+            let value = u64::try_from(raw).map_err(|_| {
+                anyhow!(
+                    "http.max_body_bytes must be in range 1..={} (got {raw})",
+                    MAX_HTTP_MAX_BODY_BYTES
+                )
+            })?;
+            if value == 0 || value > MAX_HTTP_MAX_BODY_BYTES {
+                return Err(anyhow!(
+                    "http.max_body_bytes must be in range 1..={} (got {value})",
+                    MAX_HTTP_MAX_BODY_BYTES
+                ));
+            }
+            value
+        }
+        None => DEFAULT_HTTP_MAX_BODY_BYTES,
+    };
+
+    Ok(Some(ManifestHttp {
+        port,
+        max_body_bytes,
+    }))
 }
 
 fn normalize_relative_path(raw: &str, field_name: &str) -> anyhow::Result<PathBuf> {
@@ -1045,6 +1110,9 @@ remote = "127.0.0.1:4443"
 
 [env.prod]
 type = "http"
+
+[env.prod.http]
+port = 18080
 "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
@@ -1059,6 +1127,11 @@ type = "http"
 
         let manifest = read_manifest(&root, &output.manifest_path);
         assert_eq!(manifest.app_type, "http");
+        assert_eq!(manifest.http.as_ref().map(|v| v.port), Some(18080));
+        assert_eq!(
+            manifest.http.as_ref().map(|v| v.max_body_bytes),
+            Some(DEFAULT_HTTP_MAX_BODY_BYTES)
+        );
         assert_eq!(
             manifest.secrets.get("SECRET_TOKEN"),
             Some(&"abc".to_string())
@@ -1067,6 +1140,151 @@ type = "http"
         assert!(root.join(&hashed_main).exists());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_succeeds_for_http_type_with_http_port() {
+        let root = new_temp_dir("http-type-valid");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-http"
+main = "build/app.wasm"
+type = "http"
+
+[http]
+port = 18080
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-http");
+
+        let output = build_project(None, "default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        assert_eq!(manifest.app_type, "http");
+        assert_eq!(manifest.http.as_ref().map(|v| v.port), Some(18080));
+        assert_eq!(
+            manifest.http.as_ref().map(|v| v.max_body_bytes),
+            Some(DEFAULT_HTTP_MAX_BODY_BYTES)
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_succeeds_for_http_type_with_explicit_http_max_body_bytes() {
+        let root = new_temp_dir("http-type-max-body-valid");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-http"
+main = "build/app.wasm"
+type = "http"
+
+[http]
+port = 18080
+max_body_bytes = 4096
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-http");
+
+        let output = build_project(None, "default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        assert_eq!(manifest.http.as_ref().map(|v| v.max_body_bytes), Some(4096));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_http_type_without_http_port() {
+        let root = new_temp_dir("http-type-missing-port");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-http"
+main = "build/app.wasm"
+type = "http"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-http");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("build must fail when type=http has no http.port");
+        assert!(err.to_string().contains("requires [http] table"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_http_section_for_non_http_type() {
+        for app_type in ["cli", "socket"] {
+            let root = new_temp_dir(&format!("http-section-non-http-{app_type}"));
+            write_imago_toml(
+                &root,
+                &format!(
+                    r#"
+name = "svc-{app_type}"
+main = "build/app.wasm"
+type = "{app_type}"
+
+[http]
+port = 18080
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+                ),
+            );
+            write_file(&root.join("build/app.wasm"), b"wasm-cli");
+
+            let err = build_project(None, "default", &root)
+                .expect_err("build must fail when non-http type uses [http]");
+            assert!(
+                err.to_string()
+                    .contains("http section is only allowed when type is \"http\"")
+            );
+
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn build_rejects_invalid_http_max_body_bytes() {
+        for (suffix, max_body_bytes) in [("zero", "0"), ("too-large", "67108865")] {
+            let root = new_temp_dir(&format!("http-max-body-{suffix}"));
+            write_imago_toml(
+                &root,
+                &format!(
+                    r#"
+name = "svc-http"
+main = "build/app.wasm"
+type = "http"
+
+[http]
+port = 18080
+max_body_bytes = {max_body_bytes}
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#
+                ),
+            );
+            write_file(&root.join("build/app.wasm"), b"wasm-http");
+
+            let err = build_project(None, "default", &root)
+                .expect_err("invalid max_body_bytes must fail");
+            assert!(err.to_string().contains("http.max_body_bytes"));
+
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]
@@ -1796,6 +2014,9 @@ remote = "127.0.0.1:4443"
 
 [env.prod]
 type = "http"
+
+[env.prod.http]
+port = 18080
 "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
