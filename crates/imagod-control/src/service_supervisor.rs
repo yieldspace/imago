@@ -51,6 +51,8 @@ pub struct ServiceLaunch {
     pub app_type: RunnerAppType,
     /// TCP port for HTTP ingress when `app_type=http`.
     pub http_port: Option<u16>,
+    /// Max accepted HTTP request body size in bytes when `app_type=http`.
+    pub http_max_body_bytes: Option<u64>,
     /// Component file path.
     pub component_path: PathBuf,
     /// WASI CLI arguments.
@@ -275,6 +277,7 @@ impl ServiceSupervisor {
                 release_hash: launch.release_hash.clone(),
                 app_type: launch.app_type,
                 http_port: launch.http_port,
+                http_max_body_bytes: launch.http_max_body_bytes,
                 component_path: launch.component_path.clone(),
                 args: launch.args.clone(),
                 envs: launch.envs.clone(),

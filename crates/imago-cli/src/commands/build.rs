@@ -15,6 +15,8 @@ use toml::Value as TomlValue;
 use crate::{cli::BuildArgs, commands::CommandResult};
 
 const DEFAULT_TARGET_NAME: &str = "default";
+const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_HTTP_MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct TargetConfig {
@@ -109,6 +111,7 @@ struct ManifestBinding {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ManifestHttp {
     port: u16,
+    max_body_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -514,7 +517,32 @@ fn parse_http_section(root: &toml::Table, app_type: &str) -> anyhow::Result<Opti
         return Err(anyhow!("http.port must be in range 1..=65535 (got 0)"));
     }
 
-    Ok(Some(ManifestHttp { port }))
+    let max_body_bytes = match table.get("max_body_bytes") {
+        Some(value) => {
+            let raw = value.as_integer().ok_or_else(|| {
+                anyhow!("http.max_body_bytes must be in range 1..={MAX_HTTP_MAX_BODY_BYTES}")
+            })?;
+            let value = u64::try_from(raw).map_err(|_| {
+                anyhow!(
+                    "http.max_body_bytes must be in range 1..={} (got {raw})",
+                    MAX_HTTP_MAX_BODY_BYTES
+                )
+            })?;
+            if value == 0 || value > MAX_HTTP_MAX_BODY_BYTES {
+                return Err(anyhow!(
+                    "http.max_body_bytes must be in range 1..={} (got {value})",
+                    MAX_HTTP_MAX_BODY_BYTES
+                ));
+            }
+            value
+        }
+        None => DEFAULT_HTTP_MAX_BODY_BYTES,
+    };
+
+    Ok(Some(ManifestHttp {
+        port,
+        max_body_bytes,
+    }))
 }
 
 fn normalize_relative_path(raw: &str, field_name: &str) -> anyhow::Result<PathBuf> {
@@ -1101,6 +1129,10 @@ port = 18080
         assert_eq!(manifest.app_type, "http");
         assert_eq!(manifest.http.as_ref().map(|v| v.port), Some(18080));
         assert_eq!(
+            manifest.http.as_ref().map(|v| v.max_body_bytes),
+            Some(DEFAULT_HTTP_MAX_BODY_BYTES)
+        );
+        assert_eq!(
             manifest.secrets.get("SECRET_TOKEN"),
             Some(&"abc".to_string())
         );
@@ -1133,6 +1165,37 @@ remote = "127.0.0.1:4443"
         let manifest = read_manifest(&root, &output.manifest_path);
         assert_eq!(manifest.app_type, "http");
         assert_eq!(manifest.http.as_ref().map(|v| v.port), Some(18080));
+        assert_eq!(
+            manifest.http.as_ref().map(|v| v.max_body_bytes),
+            Some(DEFAULT_HTTP_MAX_BODY_BYTES)
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_succeeds_for_http_type_with_explicit_http_max_body_bytes() {
+        let root = new_temp_dir("http-type-max-body-valid");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-http"
+main = "build/app.wasm"
+type = "http"
+
+[http]
+port = 18080
+max_body_bytes = 4096
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-http");
+
+        let output = build_project(None, "default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        assert_eq!(manifest.http.as_ref().map(|v| v.max_body_bytes), Some(4096));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1188,6 +1251,37 @@ remote = "127.0.0.1:4443"
                 err.to_string()
                     .contains("http section is only allowed when type is \"http\"")
             );
+
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn build_rejects_invalid_http_max_body_bytes() {
+        for (suffix, max_body_bytes) in [("zero", "0"), ("too-large", "67108865")] {
+            let root = new_temp_dir(&format!("http-max-body-{suffix}"));
+            write_imago_toml(
+                &root,
+                &format!(
+                    r#"
+name = "svc-http"
+main = "build/app.wasm"
+type = "http"
+
+[http]
+port = 18080
+max_body_bytes = {max_body_bytes}
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#
+                ),
+            );
+            write_file(&root.join("build/app.wasm"), b"wasm-http");
+
+            let err = build_project(None, "default", &root)
+                .expect_err("invalid max_body_bytes must fail");
+            assert!(err.to_string().contains("http.max_body_bytes"));
 
             let _ = fs::remove_dir_all(root);
         }

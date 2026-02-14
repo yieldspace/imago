@@ -69,6 +69,8 @@
 
 - `http` は `type=http` のときのみ許可する。
 - `http.port` は必須で `1..=65535`。
+- `http.max_body_bytes` は必須で `1..=67108864`（64MiB）。
+- 旧 manifest 互換のため `http.max_body_bytes` 欠落時は runtime 側で `8388608`（8MiB）として解釈できること。
 - `type!=http` で `http` を含む manifest は不正として拒否する。
 
 ## 正常例と異常例
@@ -84,6 +86,7 @@
 - 必須フィールド欠落は拒否。
 - `type` が定義外なら拒否。
 - `type=http` かつ `http.port` 欠落は拒否。
+- `type=http` かつ `http.max_body_bytes` が範囲外（`1..=67108864`）は拒否。
 - `type!=http` かつ `http` 指定は拒否。
 - `hash.algorithm != "sha256"` は拒否。
 - `hash.targets` が不足または重複なら拒否。
@@ -103,4 +106,4 @@
 - `build/<sha256>-<name>.wasm` が既に存在する場合でも、内容の sha256 が不一致なら `main` の実体 wasm から上書き再生成する。
 - `hash.value` の wasm 対象は `manifest.main` が指す materialize 後ファイルとする。
 - CLI は `imago.toml` の `[[bindings]]` を `manifest.bindings[]` に正規化して出力する。
-- CLI は `type=http` 時のみ `imago.toml` の `[http].port` を `manifest.http.port` へ正規化して出力する。
+- CLI は `type=http` 時のみ `imago.toml` の `[http].port` / `[http].max_body_bytes` を `manifest.http.port` / `manifest.http.max_body_bytes` へ正規化して出力する。

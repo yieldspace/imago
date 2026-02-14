@@ -6,7 +6,10 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use imago_protocol::ErrorCode;
 use imagod_ipc::RunnerAppType;
-use tokio::sync::watch;
+use tokio::{
+    sync::{mpsc, oneshot, watch},
+    task::JoinHandle,
+};
 use wasmtime::{
     Config, Engine, Store,
     component::{Component, Linker, ResourceTable},
@@ -27,6 +30,7 @@ use imagod_runtime_internal::{
 };
 
 const STAGE_RUNTIME: &str = "runtime.start";
+const HTTP_REQUEST_QUEUE_CAPACITY: usize = 32;
 
 /// Internal WASI host state stored in the Wasmtime store.
 struct WasiState {
@@ -63,8 +67,14 @@ pub struct WasmRuntime {
 
 /// Runtime state used while one HTTP component is running.
 struct RunningHttpComponent {
-    store: Store<WasiState>,
-    proxy: Proxy,
+    request_tx: mpsc::Sender<HttpWorkerRequest>,
+    worker_task: JoinHandle<()>,
+}
+
+/// Ingress-to-worker payload for one incoming HTTP request.
+struct HttpWorkerRequest {
+    request: RuntimeHttpRequest,
+    response_tx: oneshot::Sender<Result<RuntimeHttpResponse, ImagodError>>,
 }
 
 impl WasmRuntime {
@@ -128,6 +138,33 @@ impl WasmRuntime {
         Ok(store)
     }
 
+    fn spawn_epoch_tick_task(
+        &self,
+        epoch_tick_interval_ms: u64,
+    ) -> (watch::Sender<bool>, JoinHandle<()>) {
+        let tick_runtime = self.clone();
+        let (tick_stop_tx, mut tick_stop_rx) = watch::channel(false);
+        let tick_interval = Duration::from_millis(epoch_tick_interval_ms.max(1));
+        let tick_task = tokio::spawn(async move {
+            loop {
+                if *tick_stop_rx.borrow() {
+                    break;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(tick_interval) => {
+                        tick_runtime.increment_epoch();
+                    }
+                    changed = tick_stop_rx.changed() => {
+                        if changed.is_err() || *tick_stop_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        (tick_stop_tx, tick_task)
+    }
+
     /// Instantiates and runs a WASI CLI component asynchronously.
     ///
     /// Returns when execution completes or when shutdown is requested.
@@ -171,26 +208,7 @@ impl WasmRuntime {
             })
         };
 
-        let tick_runtime = self.clone();
-        let (tick_stop_tx, mut tick_stop_rx) = watch::channel(false);
-        let tick_interval = Duration::from_millis(epoch_tick_interval_ms.max(1));
-        let tick_task = tokio::spawn(async move {
-            loop {
-                if *tick_stop_rx.borrow() {
-                    break;
-                }
-                tokio::select! {
-                    _ = tokio::time::sleep(tick_interval) => {
-                        tick_runtime.increment_epoch();
-                    }
-                    changed = tick_stop_rx.changed() => {
-                        if changed.is_err() || *tick_stop_rx.borrow() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
+        let (tick_stop_tx, tick_task) = self.spawn_epoch_tick_task(epoch_tick_interval_ms);
 
         let result = tokio::select! {
             _ = wait_for_shutdown(&mut shutdown) => Ok(()),
@@ -208,6 +226,7 @@ impl WasmRuntime {
         args: &[String],
         envs: &BTreeMap<String, String>,
         mut shutdown: watch::Receiver<bool>,
+        epoch_tick_interval_ms: u64,
     ) -> Result<(), ImagodError> {
         let component = Component::from_file(&self.engine, component_path).map_err(|e| {
             map_runtime_error(format!(
@@ -227,21 +246,45 @@ impl WasmRuntime {
             .await
             .map_err(|e| map_runtime_error(format!("http component instantiate failed: {e}")))?;
 
-        {
+        let (request_tx, request_rx) = mpsc::channel(HTTP_REQUEST_QUEUE_CAPACITY);
+        let mut worker_task = Some(tokio::spawn(run_http_worker(store, proxy, request_rx)));
+        let (tick_stop_tx, tick_task) = self.spawn_epoch_tick_task(epoch_tick_interval_ms);
+        let already_running = {
             let mut guard = self.http_instance.lock().await;
             if guard.is_some() {
-                return Err(map_runtime_error(
-                    "http component is already running in this runtime instance".to_string(),
-                ));
+                true
+            } else {
+                *guard = Some(RunningHttpComponent {
+                    request_tx,
+                    worker_task: worker_task
+                        .take()
+                        .expect("worker task should exist before insertion"),
+                });
+                false
             }
-            *guard = Some(RunningHttpComponent { store, proxy });
+        };
+        if already_running {
+            if let Some(worker_task) = worker_task.take() {
+                worker_task.abort();
+            }
+            let _ = tick_stop_tx.send(true);
+            let _ = tick_task.await;
+            return Err(map_runtime_error(
+                "http component is already running in this runtime instance".to_string(),
+            ));
         }
 
         wait_for_shutdown(&mut shutdown).await;
-        {
+        let running = {
             let mut guard = self.http_instance.lock().await;
-            *guard = None;
+            guard.take()
+        };
+        if let Some(running) = running {
+            drop(running.request_tx);
+            let _ = running.worker_task.await;
         }
+        let _ = tick_stop_tx.send(true);
+        let _ = tick_task.await;
         Ok(())
     }
 
@@ -249,47 +292,81 @@ impl WasmRuntime {
         &self,
         request: RuntimeHttpRequest,
     ) -> Result<RuntimeHttpResponse, ImagodError> {
-        let mut guard = self.http_instance.lock().await;
-        let running = guard.as_mut().ok_or_else(|| {
+        let request_tx = {
+            let guard = self.http_instance.lock().await;
+            let running = guard.as_ref().ok_or_else(|| {
+                ImagodError::new(
+                    ErrorCode::Internal,
+                    STAGE_RUNTIME,
+                    "http component is not running",
+                )
+            })?;
+            running.request_tx.clone()
+        };
+        let (response_tx, response_rx) = oneshot::channel();
+        request_tx
+            .send(HttpWorkerRequest {
+                request,
+                response_tx,
+            })
+            .await
+            .map_err(|_| {
+                map_runtime_error("http component worker request channel is closed".to_string())
+            })?;
+        response_rx.await.map_err(|_| {
             ImagodError::new(
                 ErrorCode::Internal,
                 STAGE_RUNTIME,
-                "http component is not running",
+                "http component worker did not return a response",
             )
-        })?;
-
-        let request = runtime_request_to_hyper_request(request)?;
-        let req = running
-            .store
-            .data_mut()
-            .new_incoming_request(Scheme::Http, request)
-            .map_err(|e| map_runtime_error(format!("failed to map incoming HTTP request: {e}")))?;
-
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let out = running
-            .store
-            .data_mut()
-            .new_response_outparam(sender)
-            .map_err(|e| map_runtime_error(format!("failed to allocate response outparam: {e}")))?;
-
-        running
-            .proxy
-            .wasi_http_incoming_handler()
-            .call_handle(&mut running.store, req, out)
-            .await
-            .map_err(|e| map_runtime_error(format!("incoming-handler trap: {e}")))?;
-
-        let response = receiver.await.map_err(|_| {
-            map_runtime_error("incoming-handler did not set response outparam".to_string())
-        })?;
-        let response = response.map_err(|code| {
-            map_runtime_error(format!(
-                "incoming-handler returned wasi:http error: {code:?}"
-            ))
-        })?;
-
-        runtime_response_from_hyper(response).await
+        })?
     }
+}
+
+async fn run_http_worker(
+    mut store: Store<WasiState>,
+    proxy: Proxy,
+    mut request_rx: mpsc::Receiver<HttpWorkerRequest>,
+) {
+    while let Some(request) = request_rx.recv().await {
+        let result = handle_http_request_in_store(&mut store, &proxy, request.request).await;
+        let _ = request.response_tx.send(result);
+    }
+}
+
+async fn handle_http_request_in_store(
+    store: &mut Store<WasiState>,
+    proxy: &Proxy,
+    request: RuntimeHttpRequest,
+) -> Result<RuntimeHttpResponse, ImagodError> {
+    let request = runtime_request_to_hyper_request(request)?;
+    let req = store
+        .data_mut()
+        .new_incoming_request(Scheme::Http, request)
+        .map_err(|e| map_runtime_error(format!("failed to map incoming HTTP request: {e}")))?;
+
+    let (sender, receiver) = oneshot::channel();
+    let out = store
+        .data_mut()
+        .new_response_outparam(sender)
+        .map_err(|e| map_runtime_error(format!("failed to allocate response outparam: {e}")))?;
+
+    proxy
+        .wasi_http_incoming_handler()
+        .call_handle(store, req, out)
+        .await
+        .map_err(|e| map_runtime_error(format!("incoming-handler trap: {e}")))?;
+
+    let response = receiver.await.map_err(|_| {
+        map_runtime_error("incoming-handler did not set response outparam".to_string())
+    })?;
+    let response = response.map_err(|code| {
+        map_runtime_error(format!(
+            "incoming-handler returned wasi:http error: {code:?}"
+        ))
+    })?;
+
+    runtime_response_from_hyper(response).await
 }
 
 impl ComponentRuntime for WasmRuntime {
@@ -320,8 +397,14 @@ impl ComponentRuntime for WasmRuntime {
                     .await
                 }
                 RunnerAppType::Http => {
-                    self.run_http_component_async(&component_path, &args, &envs, shutdown)
-                        .await
+                    self.run_http_component_async(
+                        &component_path,
+                        &args,
+                        &envs,
+                        shutdown,
+                        epoch_tick_interval_ms,
+                    )
+                    .await
                 }
                 RunnerAppType::Socket => Err(ImagodError::new(
                     ErrorCode::Internal,

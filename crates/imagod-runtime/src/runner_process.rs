@@ -42,6 +42,8 @@ const MAX_INBOUND_CONNECTION_HANDLERS: usize = 32;
 const MAX_RUNNER_BOOTSTRAP_BYTES: usize = 64 * 1024;
 const MAX_CONSECUTIVE_HEARTBEAT_FAILURES: u32 = 3;
 const STARTUP_CONFIRM_WINDOW: Duration = Duration::from_millis(200);
+const DEFAULT_HTTP_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_HTTP_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeartbeatDecision {
@@ -288,6 +290,7 @@ async fn spawn_http_ingress_server(
     shutdown_rx: watch::Receiver<bool>,
 ) -> Result<JoinHandle<Result<(), ImagodError>>, ImagodError> {
     let port = required_http_port(&bootstrap)?;
+    let max_http_body_bytes = required_http_max_body_bytes(&bootstrap)?;
     let bind_addr = format!("127.0.0.1:{port}");
     let listener = TcpListener::bind(&bind_addr).await.map_err(|e| {
         ImagodError::new(
@@ -300,6 +303,7 @@ async fn spawn_http_ingress_server(
     Ok(tokio::spawn(run_http_ingress_server(
         listener,
         runtime,
+        max_http_body_bytes,
         bootstrap,
         shutdown_tx,
         shutdown_rx,
@@ -317,9 +321,33 @@ fn required_http_port(bootstrap: &RunnerBootstrap) -> Result<u16, ImagodError> {
     }
 }
 
+fn required_http_max_body_bytes(bootstrap: &RunnerBootstrap) -> Result<usize, ImagodError> {
+    let max_body_bytes = bootstrap
+        .http_max_body_bytes
+        .unwrap_or(DEFAULT_HTTP_MAX_BODY_BYTES as u64);
+    if max_body_bytes == 0 || max_body_bytes > MAX_HTTP_MAX_BODY_BYTES as u64 {
+        return Err(ImagodError::new(
+            ErrorCode::Internal,
+            STAGE_HTTP_INGRESS,
+            format!(
+                "http_max_body_bytes must be in range 1..={} (got {})",
+                MAX_HTTP_MAX_BODY_BYTES, max_body_bytes
+            ),
+        ));
+    }
+    usize::try_from(max_body_bytes).map_err(|_| {
+        ImagodError::new(
+            ErrorCode::Internal,
+            STAGE_HTTP_INGRESS,
+            format!("http_max_body_bytes is too large for this platform: {max_body_bytes}"),
+        )
+    })
+}
+
 async fn run_http_ingress_server(
     listener: TcpListener,
     runtime: Arc<dyn ComponentRuntime>,
+    max_http_body_bytes: usize,
     bootstrap: RunnerBootstrap,
     shutdown_tx: watch::Sender<bool>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -379,7 +407,7 @@ async fn run_http_ingress_server(
         let service_name = bootstrap.service_name.clone();
         connection_tasks.spawn(async move {
             let _permit = permit;
-            if let Err(err) = serve_http_connection(stream, runtime).await {
+            if let Err(err) = serve_http_connection(stream, runtime, max_http_body_bytes).await {
                 eprintln!(
                     "runner http ingress connection error service={} error={}",
                     service_name, err
@@ -396,13 +424,19 @@ async fn run_http_ingress_server(
 async fn serve_http_connection(
     stream: tokio::net::TcpStream,
     runtime: Arc<dyn ComponentRuntime>,
+    max_http_body_bytes: usize,
 ) -> Result<(), ImagodError> {
     let service = service_fn(move |request: Request<HyperIncomingBody>| {
         let runtime = runtime.clone();
-        async move { Ok::<_, std::convert::Infallible>(handle_http_request(runtime, request).await) }
+        async move {
+            Ok::<_, std::convert::Infallible>(
+                handle_http_request(runtime, request, max_http_body_bytes).await,
+            )
+        }
     });
 
     http1::Builder::new()
+        .keep_alive(false)
         .serve_connection(TokioIo::new(stream), service)
         .await
         .map_err(|e| {
@@ -417,8 +451,9 @@ async fn serve_http_connection(
 async fn handle_http_request(
     runtime: Arc<dyn ComponentRuntime>,
     request: Request<HyperIncomingBody>,
+    max_http_body_bytes: usize,
 ) -> Response<Full<Bytes>> {
-    let request = match into_runtime_http_request(request).await {
+    let request = match into_runtime_http_request(request, max_http_body_bytes).await {
         Ok(v) => v,
         Err(err) => return runtime_error_response(err),
     };
@@ -431,15 +466,54 @@ async fn handle_http_request(
 
 async fn into_runtime_http_request(
     request: Request<HyperIncomingBody>,
+    max_http_body_bytes: usize,
 ) -> Result<RuntimeHttpRequest, ImagodError> {
-    let (parts, body) = request.into_parts();
-    let body = BodyExt::collect(body).await.map_err(|e| {
-        ImagodError::new(
-            ErrorCode::BadRequest,
-            STAGE_HTTP_INGRESS,
-            format!("failed to read request body: {e}"),
-        )
-    })?;
+    let (parts, mut body) = request.into_parts();
+    if let Some(content_length) = parts.headers.get(hyper::header::CONTENT_LENGTH) {
+        let content_length = content_length.to_str().map_err(|e| {
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                STAGE_HTTP_INGRESS,
+                format!("invalid content-length header: {e}"),
+            )
+        })?;
+        let content_length = content_length.parse::<u64>().map_err(|e| {
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                STAGE_HTTP_INGRESS,
+                format!("invalid content-length value '{content_length}': {e}"),
+            )
+        })?;
+        if content_length > max_http_body_bytes as u64 {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                STAGE_HTTP_INGRESS,
+                format!("http request body exceeds limit of {max_http_body_bytes} bytes"),
+            ));
+        }
+    }
+
+    let mut body_bytes = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|e| {
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                STAGE_HTTP_INGRESS,
+                format!("failed to read request body frame: {e}"),
+            )
+        })?;
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        if body_bytes.len().saturating_add(data.len()) > max_http_body_bytes {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                STAGE_HTTP_INGRESS,
+                format!("http request body exceeds limit of {max_http_body_bytes} bytes"),
+            ));
+        }
+        body_bytes.extend_from_slice(&data);
+    }
 
     let headers = parts
         .headers
@@ -451,7 +525,7 @@ async fn into_runtime_http_request(
         method: parts.method.as_str().to_string(),
         uri: parts.uri.to_string(),
         headers,
-        body: body.to_bytes().to_vec(),
+        body: body_bytes,
     })
 }
 
@@ -477,8 +551,12 @@ fn runtime_http_response_to_hyper(response: RuntimeHttpResponse) -> Response<Ful
 
 fn runtime_error_response(error: ImagodError) -> Response<Full<Bytes>> {
     let body = format!("runtime error: {} ({})", error.message, error.stage);
+    let status = match error.code {
+        ErrorCode::BadRequest => hyper::StatusCode::BAD_REQUEST,
+        _ => hyper::StatusCode::INTERNAL_SERVER_ERROR,
+    };
     Response::builder()
-        .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+        .status(status)
         .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .body(Full::new(Bytes::from(body)))
         .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"runtime error"))))
@@ -980,6 +1058,7 @@ mod tests {
             release_hash: "release-test".to_string(),
             app_type: RunnerAppType::Cli,
             http_port: None,
+            http_max_body_bytes: None,
             component_path: root.join("component.wasm"),
             args: Vec::new(),
             envs: BTreeMap::new(),
@@ -1049,6 +1128,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn http_ingress_uses_default_max_body_bytes_when_missing() {
+        let root = new_test_root("http-max-body-default");
+        let mut bootstrap = new_test_bootstrap(&root, "runner.sock");
+        bootstrap.app_type = RunnerAppType::Http;
+        bootstrap.http_max_body_bytes = None;
+        assert_eq!(
+            required_http_max_body_bytes(&bootstrap).expect("default max body should be accepted"),
+            DEFAULT_HTTP_MAX_BODY_BYTES
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn http_ingress_rejects_invalid_max_body_bytes() {
+        let root = new_test_root("http-max-body-invalid");
+        let mut bootstrap = new_test_bootstrap(&root, "runner.sock");
+        bootstrap.app_type = RunnerAppType::Http;
+        for invalid in [0, (MAX_HTTP_MAX_BODY_BYTES as u64) + 1] {
+            bootstrap.http_max_body_bytes = Some(invalid);
+            let err = required_http_max_body_bytes(&bootstrap)
+                .expect_err("invalid http_max_body_bytes should fail");
+            assert_eq!(err.code, ErrorCode::Internal);
+            assert!(err.message.contains("http_max_body_bytes"));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn http_ingress_handles_request_and_shutdown() {
         let root = new_test_root("http-ingress-request");
@@ -1075,7 +1182,7 @@ mod tests {
             .await
             .expect("client should connect");
         stream
-            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
             .await
             .expect("request write should succeed");
 
@@ -1093,6 +1200,12 @@ mod tests {
             "unexpected status line: {response_text}"
         );
         assert!(response_text.contains("hello-http"));
+        assert!(
+            response_text
+                .to_ascii_lowercase()
+                .contains("connection: close"),
+            "keep-alive should be disabled: {response_text}"
+        );
 
         assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -1111,6 +1224,67 @@ mod tests {
             .expect("ingress task join should succeed");
         assert!(joined.is_ok(), "ingress should stop cleanly");
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn http_ingress_rejects_request_body_over_limit() {
+        let root = new_test_root("http-ingress-body-limit");
+        let mut bootstrap = new_test_bootstrap(&root, "runner.sock");
+        bootstrap.app_type = RunnerAppType::Http;
+        let port = reserve_test_http_port();
+        bootstrap.http_port = Some(port);
+        bootstrap.http_max_body_bytes = Some(16);
+
+        let runtime = Arc::new(MockHttpRuntime::default());
+        let runtime_trait: Arc<dyn ComponentRuntime> = runtime.clone();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let ingress_task = spawn_http_ingress_server(
+            runtime_trait,
+            bootstrap.clone(),
+            shutdown_tx.clone(),
+            shutdown_rx,
+        )
+        .await
+        .expect("http ingress should start");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("client should connect");
+        stream
+            .write_all(
+                b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 17\r\nConnection: close\r\n\r\n0123456789ABCDEFG",
+            )
+            .await
+            .expect("request write should succeed");
+
+        let mut response_bytes = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            stream.read_to_end(&mut response_bytes),
+        )
+        .await
+        .expect("response read should complete")
+        .expect("response read should succeed");
+        let response_text = String::from_utf8_lossy(&response_bytes);
+        assert!(
+            response_text.starts_with("HTTP/1.1 400"),
+            "expected bad request status: {response_text}"
+        );
+        assert_eq!(
+            runtime.calls.load(Ordering::SeqCst),
+            0,
+            "runtime should not be called for oversized request"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let joined = tokio::time::timeout(Duration::from_secs(2), ingress_task)
+            .await
+            .expect("ingress task should stop after shutdown")
+            .expect("ingress task join should succeed");
+        assert!(joined.is_ok(), "ingress should stop cleanly");
         let _ = std::fs::remove_dir_all(&root);
     }
 

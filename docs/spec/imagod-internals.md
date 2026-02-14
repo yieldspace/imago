@@ -328,6 +328,8 @@ backend 選択:
 HTTP ingress:
 
 - `app_type=http` の runner は `127.0.0.1:http_port`（manifest 明示値）へ TCP bind する。
+- `app_type=http` の ingress は keep-alive を無効化し、1 接続 1 リクエストで接続を閉じる。
+- ingress は `http_max_body_bytes`（未指定時 8MiB）を上限に request body を読み取る。
 - ingress は HTTP/1.1 リクエストを受理し、`RuntimeHttpRequest` へ変換して runtime trait の `handle_http_request` を呼ぶ。
 - runtime は `incoming-handler.handle` を呼び、返却された status/header/body を `RuntimeHttpResponse` に正規化して返す。
 - bind 失敗は `runner_ready` 送信前に start 失敗として扱う。
@@ -336,6 +338,7 @@ HTTP ingress:
 
 - `watch::Receiver<bool>` の shutdown signal と run future を `tokio::select!` で競合実行
 - runner 内の epoch tick task が `epoch_tick_interval_ms` 周期で `Engine::increment_epoch()` を呼び、停止時の割り込み余地を維持する
+- HTTP backend は worker task が `Store`/`Proxy` を専有し、`handle_http_request` は channel 経由で処理を委譲する（`Mutex` を `.await` 越しに保持しない）。
 
 ## 10. 状態管理と cancel セマンティクス
 
@@ -516,6 +519,9 @@ flowchart TD
 - runner bootstrap に `http_port`（`type=http` 時のみ有効）を追加した。
   - orchestrator は manifest の `http.port` を `ServiceLaunch` / `RunnerBootstrap` へ伝播する。
   - runner は `127.0.0.1:http_port` へ ingress bind し、`incoming-handler.handle` を実行する。
+- runner bootstrap に `http_max_body_bytes`（`type=http` 時のみ有効）を追加した。
+  - orchestrator は manifest の `http.max_body_bytes` を `ServiceLaunch` / `RunnerBootstrap` へ伝播する。
+  - runner は未指定時 8MiB を既定値として扱う。
 - ログ回収を追加した。
   - runner stdout/stderr を pipe で manager が回収する。
   - service ごとに容量上限付き ring buffer（`runner_log_buffer_bytes`）へ保持する。

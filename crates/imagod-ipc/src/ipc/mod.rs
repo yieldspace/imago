@@ -60,6 +60,8 @@ pub struct RunnerBootstrap {
     pub app_type: RunnerAppType,
     /// TCP port used by local HTTP ingress when `app_type=http`.
     pub http_port: Option<u16>,
+    /// Max accepted HTTP request body size in bytes when `app_type=http`.
+    pub http_max_body_bytes: Option<u64>,
     /// Absolute path to the component file.
     pub component_path: PathBuf,
     /// CLI arguments passed to WASI command.
@@ -457,6 +459,7 @@ mod tests {
             release_hash: "release-a".to_string(),
             app_type: RunnerAppType::Socket,
             http_port: Some(18080),
+            http_max_body_bytes: Some(8 * 1024 * 1024),
             component_path: PathBuf::from("/tmp/component.wasm"),
             args: vec!["--help".to_string()],
             envs: std::collections::BTreeMap::new(),
@@ -472,6 +475,7 @@ mod tests {
             .expect("bootstrap decoding should work");
         assert_eq!(decoded.app_type, RunnerAppType::Socket);
         assert_eq!(decoded.http_port, Some(18080));
+        assert_eq!(decoded.http_max_body_bytes, Some(8 * 1024 * 1024));
     }
 
     #[test]
