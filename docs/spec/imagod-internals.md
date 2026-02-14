@@ -42,7 +42,7 @@
 12. `accept` ループで session task を `tokio::spawn`
 13. runner モード:
 14. stdin から `RunnerBootstrap` を読込
-15. `WasmRuntime::new` + component 実行
+15. `create_runtime_backend`（`runtime-wasmtime` 有効時は `WasmRuntime::new`） + component 実行
 
 ```mermaid
 flowchart TD
@@ -59,7 +59,7 @@ flowchart TD
   I --> K["WebTransport server"]
   K --> L["session task"]
   D -->|runner| M["RunnerBootstrap(from stdin)"]
-  M --> N["WasmRuntime::new + run component"]
+  M --> N["create_runtime_backend + run component"]
 ```
 
 ## 3. モジュール責務マップ
@@ -74,8 +74,9 @@ flowchart TD
 | `imagod-control::artifact_store` | upload session 管理、chunk commit、GC | prepare/push/commit | prepare/ack/commit response | `imagod-common` |
 | `imagod-control::orchestrator` | deploy/run/stop の実行調停 | command payload | summary / error | `artifact_store`, `service_supervisor` |
 | `imagod-control::service_supervisor` | runner child process 監督、control plane | `ServiceLaunch`, logs request | start/stop/replace/reap/open_logs | `imagod-ipc` |
-| `imagod-runtime::runner_process` | runner モード実行（bootstrap, heartbeat, invoke受信） | `RunnerBootstrap` | run result / inbound response | `runtime_wasmtime`, `imagod-ipc` |
-| `imagod-runtime::runtime_wasmtime` | runner 内 Wasmtime component 実行 | release path + env + shutdown | `Result<()>` | `imagod-common` |
+| `imagod-runtime::runner_process` | runner モード実行（bootstrap, heartbeat, invoke受信） | `RunnerBootstrap` | run result / inbound response | `imagod-runtime-internal`, `imagod-runtime-wasmtime(feature)`, `imagod-ipc` |
+| `imagod-runtime-internal` | runtime trait/共通 request-response 型 | app_type, path, env/http request | runtime 抽象 API | `imagod-common`, `imagod-ipc` |
+| `imagod-runtime-wasmtime` | Wasmtime backend 実装（component model） | `RuntimeRunRequest`, `RuntimeHttpRequest` | `Result<()>`, `RuntimeHttpResponse` | `imagod-runtime-internal`, `wasmtime*` |
 | `imagod-ipc::ipc/*` | manager-runner/runner-runner IPC 抽象 + 実装 | control/invoke message | response/token | `imagod-common` |
 | `imagod-control::operation_state` | 短命 operation 状態管理 | UUID + state | `StateResponse`, cancel 判定 | `imagod-common` |
 | `imagod-common (lib.rs)` | 内部エラーの構造化 | stage, message, code | `StructuredError` | `imago-protocol` |
@@ -291,11 +292,21 @@ deploy 経路の要点:
 - `start` は spawn 後すぐ成功返却せず、`runner_ready_timeout_secs` 以内の `runner_ready` を待つ
 - timeout / ready 前終了時は起動失敗として child を回収し、deploy 側で rollback 経路へ入れる
 
-## 9. Wasmtime 実行詳細
+## 9. Runtime backend 実行詳細
 
 対象読者: 実装者
 
-実装箇所: `crates/imagod-runtime/src/runtime_wasmtime.rs`
+実装箇所:
+
+- facade: `crates/imagod-runtime/src/runner_process.rs`, `crates/imagod-runtime/src/lib.rs`
+- runtime trait: `crates/imagod-runtime-internal/src/lib.rs`
+- Wasmtime backend: `crates/imagod-runtime-wasmtime/src/lib.rs`
+
+backend 選択:
+
+- `imagod-runtime` は feature `runtime-wasmtime`（default ON）で backend を有効化する。
+- runner は `create_runtime_backend()` で backend を生成する。
+- feature OFF 時は runner 起動時に `E_INTERNAL` / `stage=runner.process` で明示的に失敗する。
 
 設定:
 
@@ -478,7 +489,8 @@ flowchart TD
 - service supervisor: `crates/imagod-control/src/service_supervisor.rs`
 - runner process: `crates/imagod-runtime/src/runner_process.rs`
 - ipc transport: `crates/imagod-ipc/src/ipc/*`
-- runtime: `crates/imagod-runtime/src/runtime_wasmtime.rs`
+- runtime trait: `crates/imagod-runtime-internal/src/lib.rs`
+- runtime (wasmtime backend): `crates/imagod-runtime-wasmtime/src/lib.rs`
 - operation state: `crates/imagod-control/src/operation_state.rs`
 - error: `crates/imagod-common/src/lib.rs`
 
@@ -538,3 +550,11 @@ flowchart TD
 - `protocol_handler` に `logs.request` 分岐を追加し、ログ本文を DATAGRAM 専用経路へ移行した。
 - `service_supervisor` に `running_service_names` / `open_logs` を追加し、tail snapshot + follow 受信を提供する。
 - 全サービス購読は `process_id=None` で受理し、リクエスト時点の running サービスのみを対象に固定した。
+
+## 実装反映ノート（Runtime Backend Split / 2026-02-13）
+
+- Wasmtime backend を `imagod-runtime` から `imagod-runtime-wasmtime` へ分離した。
+- runtime trait/共通型を `imagod-runtime-internal` に集約し、runner は trait 経由で実行する。
+- `imagod-runtime` に feature `runtime-wasmtime` を追加した（default ON）。
+- `runtime-wasmtime` OFF 時は、runner が `E_INTERNAL` / `stage=runner.process` で「runtime backend 未有効」を返す。
+- `imagod-runtime::WasmRuntime` は `runtime-wasmtime` 有効時のみ再exportを維持する。

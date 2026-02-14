@@ -9,6 +9,7 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming as HyperIncomingBody;
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
+use hyper_util::rt::TokioIo;
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{
@@ -23,11 +24,11 @@ use tokio::{
     task::JoinHandle,
     time::{self, Duration},
 };
-use wasmtime_wasi_http::io::TokioIo;
 
-use crate::{
-    runtime::{ComponentRuntime, RuntimeHttpRequest, RuntimeHttpResponse, RuntimeRunRequest},
-    runtime_wasmtime::WasmRuntime,
+#[cfg(feature = "runtime-wasmtime")]
+use crate::WasmRuntime;
+use crate::runtime::{
+    ComponentRuntime, RuntimeHttpRequest, RuntimeHttpResponse, RuntimeRunRequest,
 };
 
 const STAGE_RUNNER: &str = "runner.process";
@@ -102,7 +103,7 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
     })?;
     let _socket_cleanup_guard = SocketCleanupGuard::new(bootstrap.runner_endpoint.clone());
 
-    let runtime: Arc<dyn ComponentRuntime> = Arc::new(WasmRuntime::new()?);
+    let runtime = create_runtime_backend()?;
     runtime.validate_component(&bootstrap.component_path)?;
 
     register_runner(&bootstrap).await?;
@@ -199,6 +200,22 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
     }
 
     run_result
+}
+
+fn create_runtime_backend() -> Result<Arc<dyn ComponentRuntime>, ImagodError> {
+    #[cfg(feature = "runtime-wasmtime")]
+    {
+        return Ok(Arc::new(WasmRuntime::new()?));
+    }
+
+    #[cfg(not(feature = "runtime-wasmtime"))]
+    {
+        Err(ImagodError::new(
+            ErrorCode::Internal,
+            STAGE_RUNNER,
+            "runtime backend is not enabled; enable feature 'runtime-wasmtime'",
+        ))
+    }
 }
 
 /// Observes run task during startup confirmation window.
@@ -905,6 +922,22 @@ mod tests {
     use tokio::sync::oneshot;
 
     use imagod_ipc::{RunnerAppType, RunnerInboundResponse, random_secret_hex};
+
+    #[cfg(not(feature = "runtime-wasmtime"))]
+    #[test]
+    fn runtime_backend_disabled_returns_explicit_error() {
+        let err = match create_runtime_backend() {
+            Ok(_) => panic!("backend creation should fail when runtime-wasmtime is disabled"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert_eq!(err.stage, STAGE_RUNNER);
+        assert!(
+            err.message.contains("runtime backend is not enabled"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
 
     fn run_async_test<F>(future: F)
     where

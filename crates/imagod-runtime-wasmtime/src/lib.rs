@@ -21,8 +21,7 @@ use wasmtime_wasi_http::{
 };
 
 use imagod_common::ImagodError;
-
-use crate::runtime::{
+use imagod_runtime_internal::{
     ComponentRuntime, RuntimeHttpFuture, RuntimeHttpRequest, RuntimeHttpResponse, RuntimeRunFuture,
     RuntimeRunRequest,
 };
@@ -435,8 +434,8 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{RuntimeHttpRequest, RuntimeRunRequest};
     use imagod_ipc::RunnerAppType;
+    use imagod_runtime_internal::{RuntimeHttpRequest, RuntimeRunRequest};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 

@@ -3,6 +3,10 @@ name = "imagod"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["runtime-wasmtime"]
+runtime-wasmtime = ["imagod-runtime/runtime-wasmtime"]
+
 [[bin]]
 name = "imagod"
 path = "src/main.rs"
