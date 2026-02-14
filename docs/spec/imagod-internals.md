@@ -329,10 +329,13 @@ HTTP ingress:
 
 - `app_type=http` の runner は `127.0.0.1:http_port`（manifest 明示値）へ TCP bind する。
 - `app_type=http` の ingress は keep-alive を無効化し、1 接続 1 リクエストで接続を閉じる。
+- ingress 接続には idle timeout（既定 30 秒）を設け、無通信接続による handler 枯渇を防ぐ。
 - ingress は `http_max_body_bytes`（未指定時 8MiB）を上限に request body を読み取る。
 - ingress は HTTP/1.1 リクエストを受理し、`RuntimeHttpRequest` へ変換して runtime trait の `handle_http_request` を呼ぶ。
 - runtime は `incoming-handler.handle` を呼び、返却された status/header/body を `RuntimeHttpResponse` に正規化して返す。
 - bind 失敗は `runner_ready` 送信前に start 失敗として扱う。
+- `type=http` の `runner_ready` は runtime 側の HTTP 初期化完了通知と ingress bind 成功の両方を満たした後に送信する。
+- ingress のエラー応答本文は汎用文言（`bad request` / `internal server error`）のみ返し、詳細は runner ログへ出力する。
 
 停止連携:
 

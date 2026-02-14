@@ -9,7 +9,7 @@ use std::{
 
 use imagod_common::ImagodError;
 use imagod_ipc::RunnerAppType;
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 
 /// Owned run request passed from runner process to runtime implementation.
 #[derive(Debug)]
@@ -26,6 +26,8 @@ pub struct RuntimeRunRequest {
     pub shutdown: watch::Receiver<bool>,
     /// Epoch tick interval used for interruption-aware runtimes.
     pub epoch_tick_interval_ms: u64,
+    /// Optional signal sent when HTTP runtime initialization has completed.
+    pub http_ready_tx: Option<oneshot::Sender<()>>,
 }
 
 /// Boxed async result for runtime execution methods.

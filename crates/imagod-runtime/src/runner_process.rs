@@ -20,7 +20,7 @@ use imagod_ipc::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     net::{TcpListener, UnixListener, UnixStream},
-    sync::{Semaphore, watch},
+    sync::{Semaphore, oneshot, watch},
     task::JoinHandle,
     time::{self, Duration},
 };
@@ -42,6 +42,10 @@ const MAX_INBOUND_CONNECTION_HANDLERS: usize = 32;
 const MAX_RUNNER_BOOTSTRAP_BYTES: usize = 64 * 1024;
 const MAX_CONSECUTIVE_HEARTBEAT_FAILURES: u32 = 3;
 const STARTUP_CONFIRM_WINDOW: Duration = Duration::from_millis(200);
+#[cfg(not(test))]
+const HTTP_INGRESS_CONNECTION_TIMEOUT_SECS: u64 = 30;
+#[cfg(test)]
+const HTTP_INGRESS_CONNECTION_TIMEOUT_SECS: u64 = 1;
 const DEFAULT_HTTP_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_HTTP_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
@@ -56,6 +60,14 @@ enum StartupRunState {
     /// Workload is still running after startup confirmation window.
     StillRunning,
     /// Workload exited during startup confirmation window.
+    Finished(Result<(), ImagodError>),
+}
+
+/// HTTP runtime initialization observation result.
+enum HttpRuntimeReadyState {
+    /// Runtime initialized HTTP component and is ready to accept requests.
+    Ready,
+    /// Runtime task exited before becoming ready.
     Finished(Result<(), ImagodError>),
 }
 
@@ -117,17 +129,11 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
         shutdown_tx.clone(),
         shutdown_rx.clone(),
     ));
-    let http_ingress_task = match bootstrap.app_type {
-        RunnerAppType::Http => Some(
-            spawn_http_ingress_server(
-                runtime.clone(),
-                bootstrap.clone(),
-                shutdown_tx.clone(),
-                shutdown_tx.subscribe(),
-            )
-            .await?,
-        ),
-        RunnerAppType::Cli | RunnerAppType::Socket => None,
+    let (http_ready_tx, http_ready_rx) = if bootstrap.app_type == RunnerAppType::Http {
+        let (tx, rx) = oneshot::channel::<()>();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
     };
 
     let runtime_for_run = runtime.clone();
@@ -141,16 +147,86 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
                 envs: bootstrap_for_run.envs.clone(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: bootstrap_for_run.epoch_tick_interval_ms,
+                http_ready_tx,
             })
             .await
     });
 
-    match observe_startup_window(&mut run_task, STARTUP_CONFIRM_WINDOW).await? {
-        StartupRunState::Finished(run_result) => {
-            if run_result.is_ok()
-                && let Err(err) = mark_ready(&bootstrap).await
+    let http_ingress_task = match bootstrap.app_type {
+        RunnerAppType::Http => {
+            let ready_rx = http_ready_rx.expect("http ready receiver should exist");
+            match wait_http_runtime_ready_or_exit(&mut run_task, ready_rx).await? {
+                HttpRuntimeReadyState::Finished(run_result) => {
+                    if run_result.is_ok()
+                        && let Err(err) = mark_ready(&bootstrap).await
+                    {
+                        let _ = shutdown_runner_tasks(&shutdown_tx, inbound_task, None, None, None)
+                            .await;
+                        return Err(err);
+                    }
+                    let _ =
+                        shutdown_runner_tasks(&shutdown_tx, inbound_task, None, None, None).await;
+                    return run_result;
+                }
+                HttpRuntimeReadyState::Ready => {}
+            }
+
+            let ingress = match spawn_http_ingress_server(
+                runtime.clone(),
+                bootstrap.clone(),
+                shutdown_tx.clone(),
+                shutdown_tx.subscribe(),
+            )
+            .await
             {
+                Ok(v) => v,
+                Err(err) => {
+                    let _ = shutdown_runner_tasks(
+                        &shutdown_tx,
+                        inbound_task,
+                        None,
+                        None,
+                        Some(run_task),
+                    )
+                    .await;
+                    return Err(err);
+                }
+            };
+
+            if let Err(err) = mark_ready(&bootstrap).await {
                 let _ = shutdown_runner_tasks(
+                    &shutdown_tx,
+                    inbound_task,
+                    Some(ingress),
+                    None,
+                    Some(run_task),
+                )
+                .await;
+                return Err(err);
+            }
+
+            Some(ingress)
+        }
+        RunnerAppType::Cli | RunnerAppType::Socket => None,
+    };
+
+    if bootstrap.app_type != RunnerAppType::Http {
+        match observe_startup_window(&mut run_task, STARTUP_CONFIRM_WINDOW).await? {
+            StartupRunState::Finished(run_result) => {
+                if run_result.is_ok()
+                    && let Err(err) = mark_ready(&bootstrap).await
+                {
+                    let _ = shutdown_runner_tasks(
+                        &shutdown_tx,
+                        inbound_task,
+                        http_ingress_task,
+                        None,
+                        None,
+                    )
+                    .await;
+                    return Err(err);
+                }
+                let http_result = shutdown_runner_tasks(
                     &shutdown_tx,
                     inbound_task,
                     http_ingress_task,
@@ -158,29 +234,25 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
                     None,
                 )
                 .await;
-                return Err(err);
+                if let Some(Err(err)) = http_result {
+                    return Err(err);
+                }
+                return run_result;
             }
-            let http_result =
-                shutdown_runner_tasks(&shutdown_tx, inbound_task, http_ingress_task, None, None)
-                    .await;
-            if let Some(Err(err)) = http_result {
-                return Err(err);
-            }
-            return run_result;
+            StartupRunState::StillRunning => {}
         }
-        StartupRunState::StillRunning => {}
-    }
 
-    if let Err(err) = mark_ready(&bootstrap).await {
-        let _ = shutdown_runner_tasks(
-            &shutdown_tx,
-            inbound_task,
-            http_ingress_task,
-            None,
-            Some(run_task),
-        )
-        .await;
-        return Err(err);
+        if let Err(err) = mark_ready(&bootstrap).await {
+            let _ = shutdown_runner_tasks(
+                &shutdown_tx,
+                inbound_task,
+                http_ingress_task,
+                None,
+                Some(run_task),
+            )
+            .await;
+            return Err(err);
+        }
     }
 
     let heartbeat_task = tokio::spawn(send_heartbeats(
@@ -231,6 +303,29 @@ async fn observe_startup_window(
             Ok(StartupRunState::Finished(run_result))
         }
         _ = time::sleep(window) => Ok(StartupRunState::StillRunning),
+    }
+}
+
+/// Waits until HTTP runtime reports readiness or exits early.
+async fn wait_http_runtime_ready_or_exit(
+    run_task: &mut JoinHandle<Result<(), ImagodError>>,
+    http_ready_rx: oneshot::Receiver<()>,
+) -> Result<HttpRuntimeReadyState, ImagodError> {
+    tokio::select! {
+        joined = run_task => {
+            let run_result = joined.map_err(map_run_join_error)?;
+            Ok(HttpRuntimeReadyState::Finished(run_result))
+        }
+        ready = http_ready_rx => {
+            ready.map_err(|_| {
+                ImagodError::new(
+                    ErrorCode::Internal,
+                    STAGE_RUNNER,
+                    "http runtime initialization ended before ready signal",
+                )
+            })?;
+            Ok(HttpRuntimeReadyState::Ready)
+        }
     }
 }
 
@@ -405,13 +500,28 @@ async fn run_http_ingress_server(
 
         let runtime = runtime.clone();
         let service_name = bootstrap.service_name.clone();
+        let connection_timeout = Duration::from_secs(HTTP_INGRESS_CONNECTION_TIMEOUT_SECS);
         connection_tasks.spawn(async move {
             let _permit = permit;
-            if let Err(err) = serve_http_connection(stream, runtime, max_http_body_bytes).await {
-                eprintln!(
-                    "runner http ingress connection error service={} error={}",
-                    service_name, err
-                );
+            match time::timeout(
+                connection_timeout,
+                serve_http_connection(stream, runtime, max_http_body_bytes),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    eprintln!(
+                        "runner http ingress connection error service={} error={}",
+                        service_name, err
+                    );
+                }
+                Err(_) => {
+                    eprintln!(
+                        "runner http ingress connection timed out service={} timeout_secs={}",
+                        service_name, HTTP_INGRESS_CONNECTION_TIMEOUT_SECS
+                    );
+                }
             }
         });
     }
@@ -550,10 +660,16 @@ fn runtime_http_response_to_hyper(response: RuntimeHttpResponse) -> Response<Ful
 }
 
 fn runtime_error_response(error: ImagodError) -> Response<Full<Bytes>> {
-    let body = format!("runtime error: {} ({})", error.message, error.stage);
-    let status = match error.code {
-        ErrorCode::BadRequest => hyper::StatusCode::BAD_REQUEST,
-        _ => hyper::StatusCode::INTERNAL_SERVER_ERROR,
+    eprintln!(
+        "runner http ingress runtime error: code={:?} stage={} message={}",
+        error.code, error.stage, error.message
+    );
+    let (status, body) = match error.code {
+        ErrorCode::BadRequest => (hyper::StatusCode::BAD_REQUEST, "bad request"),
+        _ => (
+            hyper::StatusCode::INTERNAL_SERVER_ERROR,
+            "internal server error",
+        ),
     };
     Response::builder()
         .status(status)
@@ -1110,6 +1226,31 @@ mod tests {
         }
     }
 
+    struct MockErrorRuntime;
+
+    impl ComponentRuntime for MockErrorRuntime {
+        fn validate_component(&self, _component_path: &Path) -> Result<(), ImagodError> {
+            Ok(())
+        }
+
+        fn run_component<'a>(&'a self, _request: RuntimeRunRequest) -> RuntimeRunFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn handle_http_request<'a>(
+            &'a self,
+            _request: RuntimeHttpRequest,
+        ) -> RuntimeHttpFuture<'a> {
+            Box::pin(async {
+                Err(ImagodError::new(
+                    ErrorCode::Internal,
+                    "runtime.secret-stage",
+                    "very-secret-internal-detail",
+                ))
+            })
+        }
+    }
+
     #[tokio::test]
     async fn http_ingress_requires_http_port_for_http_type() {
         let root = new_test_root("http-port-required");
@@ -1279,6 +1420,138 @@ mod tests {
             "runtime should not be called for oversized request"
         );
 
+        let _ = shutdown_tx.send(true);
+        let joined = tokio::time::timeout(Duration::from_secs(2), ingress_task)
+            .await
+            .expect("ingress task should stop after shutdown")
+            .expect("ingress task join should succeed");
+        assert!(joined.is_ok(), "ingress should stop cleanly");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn http_ingress_internal_errors_do_not_leak_details_to_client() {
+        let root = new_test_root("http-ingress-error-sanitize");
+        let mut bootstrap = new_test_bootstrap(&root, "runner.sock");
+        bootstrap.app_type = RunnerAppType::Http;
+        let port = reserve_test_http_port();
+        bootstrap.http_port = Some(port);
+
+        let runtime_trait: Arc<dyn ComponentRuntime> = Arc::new(MockErrorRuntime);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let ingress_task = spawn_http_ingress_server(
+            runtime_trait,
+            bootstrap.clone(),
+            shutdown_tx.clone(),
+            shutdown_rx,
+        )
+        .await
+        .expect("http ingress should start");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("client should connect");
+        stream
+            .write_all(b"GET /err HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("request write should succeed");
+
+        let mut response_bytes = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            stream.read_to_end(&mut response_bytes),
+        )
+        .await
+        .expect("response read should complete")
+        .expect("response read should succeed");
+        let response_text = String::from_utf8_lossy(&response_bytes);
+        assert!(
+            response_text.starts_with("HTTP/1.1 500"),
+            "expected internal status: {response_text}"
+        );
+        assert!(
+            response_text.contains("internal server error"),
+            "expected sanitized body: {response_text}"
+        );
+        assert!(
+            !response_text.contains("runtime.secret-stage"),
+            "internal stage must not leak: {response_text}"
+        );
+        assert!(
+            !response_text.contains("very-secret-internal-detail"),
+            "internal detail must not leak: {response_text}"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let joined = tokio::time::timeout(Duration::from_secs(2), ingress_task)
+            .await
+            .expect("ingress task should stop after shutdown")
+            .expect("ingress task join should succeed");
+        assert!(joined.is_ok(), "ingress should stop cleanly");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn http_ingress_releases_permit_after_idle_connection_timeout() {
+        let root = new_test_root("http-ingress-idle-timeout");
+        let mut bootstrap = new_test_bootstrap(&root, "runner.sock");
+        bootstrap.app_type = RunnerAppType::Http;
+        let port = reserve_test_http_port();
+        bootstrap.http_port = Some(port);
+
+        let runtime = Arc::new(MockHttpRuntime::default());
+        let runtime_trait: Arc<dyn ComponentRuntime> = runtime.clone();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let ingress_task = spawn_http_ingress_server(
+            runtime_trait,
+            bootstrap.clone(),
+            shutdown_tx.clone(),
+            shutdown_rx,
+        )
+        .await
+        .expect("http ingress should start");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut idle_streams = Vec::new();
+        for _ in 0..MAX_INBOUND_CONNECTION_HANDLERS {
+            let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("idle client should connect");
+            idle_streams.push(stream);
+        }
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("active client should connect");
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("request write should succeed");
+
+        let mut response_bytes = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(4),
+            stream.read_to_end(&mut response_bytes),
+        )
+        .await
+        .expect("response read should complete after idle timeout")
+        .expect("response read should succeed");
+        let response_text = String::from_utf8_lossy(&response_bytes);
+        assert!(
+            response_text.starts_with("HTTP/1.1 200"),
+            "expected successful status: {response_text}"
+        );
+        assert!(response_text.contains("hello-http"));
+        assert_eq!(
+            runtime.calls.load(Ordering::SeqCst),
+            1,
+            "runtime should eventually serve request after idle timeout"
+        );
+
+        drop(idle_streams);
         let _ = shutdown_tx.send(true);
         let joined = tokio::time::timeout(Duration::from_secs(2), ingress_task)
             .await
@@ -1485,6 +1758,52 @@ mod tests {
             join_run_task(run_task)
                 .await
                 .expect("run task should complete successfully");
+        });
+    }
+
+    #[test]
+    fn http_runtime_ready_wait_returns_ready_when_signal_arrives_first() {
+        run_async_test(async {
+            let (ready_tx, ready_rx) = oneshot::channel::<()>();
+            let mut run_task = tokio::spawn(async {
+                time::sleep(Duration::from_millis(80)).await;
+                Ok(())
+            });
+            ready_tx
+                .send(())
+                .expect("ready signal should be delivered to waiter");
+
+            let state = wait_http_runtime_ready_or_exit(&mut run_task, ready_rx)
+                .await
+                .expect("ready observation should succeed");
+            assert!(matches!(state, HttpRuntimeReadyState::Ready));
+            join_run_task(run_task)
+                .await
+                .expect("run task should complete successfully");
+        });
+    }
+
+    #[test]
+    fn http_runtime_ready_wait_returns_finished_when_run_exits_first() {
+        run_async_test(async {
+            let (_ready_tx, ready_rx) = oneshot::channel::<()>();
+            let mut run_task = tokio::spawn(async {
+                Err(ImagodError::new(
+                    ErrorCode::Internal,
+                    STAGE_RUNNER,
+                    "http startup failed",
+                ))
+            });
+
+            let state = wait_http_runtime_ready_or_exit(&mut run_task, ready_rx)
+                .await
+                .expect("ready observation should succeed");
+            match state {
+                HttpRuntimeReadyState::Finished(Err(err)) => {
+                    assert_eq!(err.code, ErrorCode::Internal)
+                }
+                _ => panic!("run task failure should win over ready signal"),
+            }
         });
     }
 

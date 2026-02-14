@@ -227,6 +227,7 @@ impl WasmRuntime {
         envs: &BTreeMap<String, String>,
         mut shutdown: watch::Receiver<bool>,
         epoch_tick_interval_ms: u64,
+        mut http_ready_tx: Option<oneshot::Sender<()>>,
     ) -> Result<(), ImagodError> {
         let component = Component::from_file(&self.engine, component_path).map_err(|e| {
             map_runtime_error(format!(
@@ -260,6 +261,9 @@ impl WasmRuntime {
                         .take()
                         .expect("worker task should exist before insertion"),
                 });
+                if let Some(ready_tx) = http_ready_tx.take() {
+                    let _ = ready_tx.send(());
+                }
                 false
             }
         };
@@ -383,6 +387,7 @@ impl ComponentRuntime for WasmRuntime {
                 envs,
                 shutdown,
                 epoch_tick_interval_ms,
+                http_ready_tx,
             } = request;
 
             match app_type {
@@ -403,6 +408,7 @@ impl ComponentRuntime for WasmRuntime {
                         &envs,
                         shutdown,
                         epoch_tick_interval_ms,
+                        http_ready_tx,
                     )
                     .await
                 }
@@ -534,6 +540,7 @@ mod tests {
                 envs: BTreeMap::new(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: 50,
+                http_ready_tx: None,
             })
             .await
             .expect_err("socket type should be rejected");
@@ -557,6 +564,7 @@ mod tests {
                 envs: BTreeMap::new(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: 50,
+                http_ready_tx: None,
             })
             .await
             .expect_err("missing component path should fail");
