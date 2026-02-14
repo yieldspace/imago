@@ -139,6 +139,7 @@
 - CLI の `name` 検証は `imagod` と同等に `..` を拒否し、path 文字を明示的に弾く。
 - `--env <name>` は manifest 出力先と `.env.<name>` 解決の双方で同一バリデーションを適用し、path traversal を拒否する。
 - `target.<name>.ca_cert` / `client_cert` / `client_key` は path traversal と不正区切りを拒否し、相対指定を `project_root` 基準の絶対パスへ解決する。
+- `imagod.storage_root` の既定値は OS 別（Linux=`/var/lib/imago`, macOS=`/usr/local/var/imago`, Windows=`C:\ProgramData\imago`, その他=`/var/lib/imago`）にし、ビルド時環境変数 `IMAGOD_STORAGE_ROOT_DEFAULT` で上書きできる。`imagod.toml` の明示値を最優先する。
 
 ## `target.<name>` の接続キー（deploy 通信）
 
@@ -178,6 +179,16 @@
 - `runtime.runner_ready_timeout_secs`（既定 `3`）
 - `runtime.runner_log_buffer_bytes`（既定 `262144`）
 - `runtime.epoch_tick_interval_ms`（既定 `50`）
+
+`storage_root` の既定値決定順序:
+
+1. `imagod.toml` の `storage_root` 明示値
+2. ビルド時環境変数 `IMAGOD_STORAGE_ROOT_DEFAULT`（空文字は無効）
+3. OS 別既定値
+   - Linux: `/var/lib/imago`
+   - macOS: `/usr/local/var/imago`
+   - Windows: `C:\ProgramData\imago`
+   - その他: `/var/lib/imago`
 
 `imagod` の runtime 検証制約:
 

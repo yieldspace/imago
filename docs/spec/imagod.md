@@ -48,7 +48,7 @@
 
 ```toml
 listen_addr = "[::]:4443"
-storage_root = "/etc/imago"
+storage_root = "/var/lib/imago"
 server_version = "imagod/0.1.0"
 compatibility_date = "2026-02-10"
 
@@ -67,6 +67,8 @@ runner_log_buffer_bytes = 262144
 epoch_tick_interval_ms = 50
 ```
 
+`storage_root` の未指定時既定値は OS とビルド時設定で変わる。優先順位と OS 別値は [`config.md`](./config.md) を参照。
+
 詳細は [`config.md`](./config.md) を参照。
 
 ## 6. 実装追従方針
@@ -80,3 +82,9 @@ epoch_tick_interval_ms = 50
 - `imagod` の内部構成を単一 crate から 6+1 構成（`imagod` + `imagod-*`）へ分割した。
 - 外部公開の実行形式は維持し、`imagod` バイナリ名と `imagod --runner` は不変。
 - deploy protocol / manifest の外部 wire 契約は変更せず、内部責務分離のみ実施した。
+
+## 実装反映ノート（Storage Root Default Matrix / 2026-02-14）
+
+- `imagod.toml` の `storage_root` 未指定時既定値を固定 `/etc/imago` から OS 別既定値へ変更した（Linux=`/var/lib/imago`, macOS=`/usr/local/var/imago`, Windows=`C:\ProgramData\imago`, その他=`/var/lib/imago`）。
+- ビルド時環境変数 `IMAGOD_STORAGE_ROOT_DEFAULT` を指定した場合は、その値を `storage_root` 既定値として採用する。
+- `imagod.toml` に `storage_root` を明示した場合は、従来どおり明示値を最優先する。
