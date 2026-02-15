@@ -1,5 +1,6 @@
 pub mod build;
 pub mod certs;
+pub(crate) mod command_common;
 pub mod deploy;
 pub mod logs;
 pub mod run;
