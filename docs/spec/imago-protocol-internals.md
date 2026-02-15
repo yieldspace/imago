@@ -303,13 +303,13 @@
 
 `LogRequest`:
 
-- `process_id: Option<String>`
+- `name: Option<String>`
 - `follow: bool`
 - `tail_lines: u32`
 
 `Validate`:
 
-- `process_id=Some` の場合のみ非空文字列を必須化
+- `name=Some` の場合のみ非空文字列を必須化
 - `tail_lines=0` は許可（snapshot なし）
 
 `LogStreamKind`:
@@ -322,7 +322,7 @@
 
 - `request_id: Uuid`
 - `seq: u64`
-- `process_id: String`
+- `name: String`
 - `stream_kind: LogStreamKind`
 - `bytes: Vec<u8>`
 - `is_last: bool`
@@ -330,7 +330,7 @@
 `Validate`:
 
 - `request_id` nil UUID 禁止
-- `process_id` 非空
+- `name` 非空
 
 `LogErrorCode`:
 
@@ -407,3 +407,8 @@
 - [`deploy-protocol.md`](./deploy-protocol.md)
 - [`observability.md`](./observability.md)
 - crate 内テスト（追加または既存修正）
+
+## 実装反映ノート（Issue #87 / 2026-02-15）
+
+- logs payload の識別子キーを `name` へ統一した。
+- `LogRequest` / `LogChunk` の `Validate` で `name` 非空制約を適用するよう更新した。

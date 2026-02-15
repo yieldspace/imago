@@ -562,7 +562,7 @@ flowchart TD
 
 - `protocol_handler` に `logs.request` 分岐を追加し、ログ本文を DATAGRAM 専用経路へ移行した。
 - `service_supervisor` に `running_service_names` / `open_logs` を追加し、tail snapshot + follow 受信を提供する。
-- 全サービス購読は `process_id=None` で受理し、リクエスト時点の running サービスのみを対象に固定した。
+- 全サービス購読は `name=None` で受理し、リクエスト時点の running サービスのみを対象に固定した。
 
 ## 実装反映ノート（Runtime Backend Split / 2026-02-13）
 
@@ -579,3 +579,8 @@ flowchart TD
 - 復元対象は `storage_root/services/<service>/active_release` が存在し、非空文字列の service のみ。
 - 復元は service 名昇順で逐次実行し、個別失敗は `RestoreFailure` として集計して継続する。
 - manager は復元結果（成功/失敗/集計）をログ出力し、失敗があっても server 起動を継続する。
+
+## 実装反映ノート（Issue #87 / 2026-02-15）
+
+- `logs.request` のフィルタキーを `name` へ統一した。
+- logs ACK の対象一覧キーを `names` へ統一した。

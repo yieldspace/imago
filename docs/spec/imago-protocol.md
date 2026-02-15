@@ -51,7 +51,7 @@
 - `command.start` は `command_type` と `payload` の組み合わせ一致を必須とする。
 - `state.request` の応答メッセージ種別は `state.response`。
 - `state.response.state` は `accepted`/`running` のみ許可し、terminal state を禁止する。
-- `logs.request` は `process_id: Option<String>` を持ち、`None` は「現在稼働中の全サービス」を意味する。
+- `logs.request` は `name: Option<String>` を持ち、`None` は「現在稼働中の全サービス」を意味する。
 - `logs.chunk` は DATAGRAM 用 payload であり、`seq` は欠損検知用（再送制御なし）として扱う。
 - `logs.end` はログ購読の終端メッセージで、配信開始後の異常は `error` に格納する。
 - `StructuredError.details` は `BTreeMap<String, String>`。
@@ -68,3 +68,8 @@
 - `MessageType` に `logs.request` / `logs.chunk` / `logs.end` を追加した。
 - `LogRequest` / `LogChunk` / `LogEnd` / `LogError` / `LogStreamKind` を公開 API として追加した。
 - `logs` 本文転送は DATAGRAM 前提で、順序保証なし・欠損許容（`seq` で検知のみ）を前提とする。
+
+## 実装反映ノート（Issue #87 / 2026-02-15）
+
+- `LogRequest` のフィルタフィールドを `name: Option<String>` に統一した。
+- `LogChunk` の識別フィールドを `name: String` に統一した。
