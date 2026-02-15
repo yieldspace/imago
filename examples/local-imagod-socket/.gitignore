@@ -1,6 +1,6 @@
 /build/*
 !/build/.gitkeep
 /certs/*
-!/certs/.gitkeep
+!/certs/.gitignore
 /.imagod-data/
 /target/

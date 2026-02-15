@@ -8,7 +8,7 @@ use tokio::{
     time::{Duration, sleep},
 };
 
-const DEFAULT_BIND_ADDR: &str = "0.0.0.0:514";
+const DEFAULT_BIND_ADDR: &str = "0.0.0.0:5000";
 const DEFAULT_PACKET_BUFFER_BYTES: usize = 65_507;
 const IDLE_SLEEP_MILLIS: u64 = 5;
 

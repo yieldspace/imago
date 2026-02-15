@@ -13,7 +13,7 @@ nonblocking UDP 受信キューを反復的に drain して、受信した datag
 
 ## ディレクトリ構成
 
-- `imago.toml`: `type=socket` + `[socket]` 設定（`udp` / `both` / `0.0.0.0:514`）
+- `imago.toml`: `type=socket` + `[socket]` 設定（`udp` / `both` / `0.0.0.0:5000`）
 - `imagod.toml`: ローカル `imagod` 設定
 - `Cargo.toml`, `src/main.rs`: tokio current-thread runtime + UDP echo 実装
 - `scripts/generate-certs.sh`: ローカル mTLS 証明書生成
