@@ -30,37 +30,32 @@ struct PrefixRenderState {
 
 #[derive(Debug)]
 struct StreamPrefixState {
-    process_id: String,
+    name: String,
     stream_kind: LogStreamKind,
     at_line_start: bool,
 }
 
 impl PrefixRenderState {
-    fn at_line_start(&self, process_id: &str, stream_kind: LogStreamKind) -> bool {
+    fn at_line_start(&self, name: &str, stream_kind: LogStreamKind) -> bool {
         self.streams
             .iter()
-            .find(|state| state.process_id == process_id && state.stream_kind == stream_kind)
+            .find(|state| state.name == name && state.stream_kind == stream_kind)
             .map(|state| state.at_line_start)
             .unwrap_or(true)
     }
 
-    fn set_at_line_start(
-        &mut self,
-        process_id: &str,
-        stream_kind: LogStreamKind,
-        at_line_start: bool,
-    ) {
+    fn set_at_line_start(&mut self, name: &str, stream_kind: LogStreamKind, at_line_start: bool) {
         if let Some(state) = self
             .streams
             .iter_mut()
-            .find(|state| state.process_id == process_id && state.stream_kind == stream_kind)
+            .find(|state| state.name == name && state.stream_kind == stream_kind)
         {
             state.at_line_start = at_line_start;
             return;
         }
 
         self.streams.push(StreamPrefixState {
-            process_id: process_id.to_string(),
+            name: name.to_string(),
             stream_kind,
             at_line_start,
         });
@@ -70,7 +65,7 @@ impl PrefixRenderState {
 #[derive(Debug, Deserialize)]
 struct LogsRequestAck {
     accepted: bool,
-    process_ids: Vec<String>,
+    names: Vec<String>,
     #[allow(dead_code)]
     follow: bool,
 }
@@ -129,7 +124,7 @@ async fn run_async(args: LogsArgs, project_root: &Path) -> anyhow::Result<()> {
         request_id,
         correlation_id,
         &LogRequest {
-            process_id: args.process_id.clone(),
+            name: args.name.clone(),
             follow: args.follow,
             tail_lines: args.tail,
         },
@@ -139,11 +134,11 @@ async fn run_async(args: LogsArgs, project_root: &Path) -> anyhow::Result<()> {
     if !ack.accepted {
         return Err(anyhow!("logs.request was not accepted"));
     }
-    if ack.process_ids.is_empty() {
-        return Err(anyhow!("logs.request returned no target process"));
+    if ack.names.is_empty() {
+        return Err(anyhow!("logs.request returned no target service"));
     }
 
-    receive_logs_datagrams(&session, request_id, args.follow, args.process_id.is_none()).await?;
+    receive_logs_datagrams(&session, request_id, args.follow, args.name.is_none()).await?;
     Ok(())
 }
 
@@ -367,24 +362,20 @@ fn renderable_chunk_bytes<'a>(
         return Cow::Borrowed(&chunk.bytes);
     }
 
-    let at_line_start = prefix_state.at_line_start(&chunk.process_id, chunk.stream_kind);
-    let (rendered, next_at_line_start) = format_prefixed_bytes(
-        &chunk.process_id,
-        chunk.stream_kind,
-        &chunk.bytes,
-        at_line_start,
-    );
-    prefix_state.set_at_line_start(&chunk.process_id, chunk.stream_kind, next_at_line_start);
+    let at_line_start = prefix_state.at_line_start(&chunk.name, chunk.stream_kind);
+    let (rendered, next_at_line_start) =
+        format_prefixed_bytes(&chunk.name, chunk.stream_kind, &chunk.bytes, at_line_start);
+    prefix_state.set_at_line_start(&chunk.name, chunk.stream_kind, next_at_line_start);
     Cow::Owned(rendered)
 }
 
 fn format_prefixed_bytes(
-    process_id: &str,
+    name: &str,
     stream_kind: LogStreamKind,
     bytes: &[u8],
     mut at_line_start: bool,
 ) -> (Vec<u8>, bool) {
-    let prefix = format!("[{}][{}] ", process_id, stream_kind_label(stream_kind));
+    let prefix = format!("[{}][{}] ", name, stream_kind_label(stream_kind));
     let prefix_bytes = prefix.as_bytes();
     let mut out = Vec::with_capacity(bytes.len().saturating_add(prefix_bytes.len()));
 
@@ -484,7 +475,7 @@ mod tests {
         let first = LogChunk {
             request_id,
             seq: 0,
-            process_id: "svc-a".to_string(),
+            name: "svc-a".to_string(),
             stream_kind: LogStreamKind::Stdout,
             bytes: b"hel".to_vec(),
             is_last: false,
@@ -492,7 +483,7 @@ mod tests {
         let second = LogChunk {
             request_id,
             seq: 1,
-            process_id: "svc-a".to_string(),
+            name: "svc-a".to_string(),
             stream_kind: LogStreamKind::Stdout,
             bytes: b"lo\n".to_vec(),
             is_last: false,
@@ -515,7 +506,7 @@ mod tests {
         let first = LogChunk {
             request_id,
             seq: 0,
-            process_id: "svc-a".to_string(),
+            name: "svc-a".to_string(),
             stream_kind: LogStreamKind::Stdout,
             bytes: vec![0xe3, 0x81],
             is_last: false,
@@ -523,7 +514,7 @@ mod tests {
         let second = LogChunk {
             request_id,
             seq: 1,
-            process_id: "svc-a".to_string(),
+            name: "svc-a".to_string(),
             stream_kind: LogStreamKind::Stdout,
             bytes: vec![0x82],
             is_last: false,
@@ -549,7 +540,7 @@ mod tests {
             LogChunk {
                 request_id,
                 seq: 3,
-                process_id: "svc-a".to_string(),
+                name: "svc-a".to_string(),
                 stream_kind: LogStreamKind::Stdout,
                 bytes: b"hello".to_vec(),
                 is_last: false,

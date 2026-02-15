@@ -337,8 +337,8 @@ impl ProtocolHandler {
             .validate()
             .map_err(|e| bad_request("logs.request", e.to_string()))?;
 
-        let service_names = match payload.process_id {
-            Some(process_id) => vec![process_id],
+        let service_names = match payload.name {
+            Some(name) => vec![name],
             None => {
                 let names = self.orchestrator.running_service_names().await;
                 if names.is_empty() {
@@ -364,7 +364,7 @@ impl ProtocolHandler {
         #[derive(Serialize)]
         struct LogsRequestAck {
             accepted: bool,
-            process_ids: Vec<String>,
+            names: Vec<String>,
             follow: bool,
         }
 
@@ -374,7 +374,7 @@ impl ProtocolHandler {
             request.correlation_id,
             &LogsRequestAck {
                 accepted: true,
-                process_ids: service_names,
+                names: service_names,
                 follow: payload.follow,
             },
         )?;
@@ -569,13 +569,13 @@ async fn run_logs_forwarder(
     }
 
     let max_datagram_size = session.max_datagram_size();
-    let fallback_process_id = subscriptions[0].service_name.clone();
+    let fallback_name = subscriptions[0].service_name.clone();
     let service_names = subscriptions
         .iter()
         .map(|subscription| subscription.service_name.clone())
         .collect::<Vec<_>>();
     let mut seq = 0u64;
-    let mut last_process_id: Option<String> = None;
+    let mut last_name: Option<String> = None;
     let chunk_size = match fixed_log_chunk_size(
         request_id,
         correlation_id,
@@ -603,21 +603,15 @@ async fn run_logs_forwarder(
         chunk_size,
     );
 
-    let stream_result = stream_logs_datagrams(
-        &session,
-        &sender,
-        subscriptions,
-        &mut seq,
-        &mut last_process_id,
-    )
-    .await;
+    let stream_result =
+        stream_logs_datagrams(&session, &sender, subscriptions, &mut seq, &mut last_name).await;
 
     match stream_result {
         Ok(()) => {
-            let terminal_process = last_process_id.unwrap_or(fallback_process_id);
+            let terminal_name = last_name.unwrap_or(fallback_name);
             let _ = sender.send_single_log_chunk(
                 &mut seq,
-                &terminal_process,
+                &terminal_name,
                 LogStreamKind::Composite,
                 Vec::new(),
                 true,
@@ -658,10 +652,10 @@ impl<'a> LogsDatagramSender<'a> {
     fn send_log_data_chunks(
         &self,
         seq: &mut u64,
-        process_id: &str,
+        name: &str,
         stream_kind: LogStreamKind,
         bytes: &[u8],
-        last_process_id: &mut Option<String>,
+        last_name: &mut Option<String>,
     ) -> Result<(), ImagodError> {
         if bytes.is_empty() {
             return Ok(());
@@ -677,14 +671,8 @@ impl<'a> LogsDatagramSender<'a> {
         let mut offset = 0usize;
         while offset < bytes.len() {
             let end = bytes.len().min(offset.saturating_add(self.chunk_size));
-            self.send_single_log_chunk(
-                seq,
-                process_id,
-                stream_kind,
-                bytes[offset..end].to_vec(),
-                false,
-            )?;
-            *last_process_id = Some(process_id.to_string());
+            self.send_single_log_chunk(seq, name, stream_kind, bytes[offset..end].to_vec(), false)?;
+            *last_name = Some(name.to_string());
             offset = end;
         }
 
@@ -694,7 +682,7 @@ impl<'a> LogsDatagramSender<'a> {
     fn send_single_log_chunk(
         &self,
         seq: &mut u64,
-        process_id: &str,
+        name: &str,
         stream_kind: LogStreamKind,
         bytes: Vec<u8>,
         is_last: bool,
@@ -702,7 +690,7 @@ impl<'a> LogsDatagramSender<'a> {
         let chunk = LogChunk {
             request_id: self.request_id,
             seq: *seq,
-            process_id: process_id.to_string(),
+            name: name.to_string(),
             stream_kind,
             bytes,
             is_last,
@@ -752,7 +740,7 @@ async fn stream_logs_datagrams(
     sender: &LogsDatagramSender<'_>,
     subscriptions: Vec<ServiceLogSubscription>,
     seq: &mut u64,
-    last_process_id: &mut Option<String>,
+    last_name: &mut Option<String>,
 ) -> Result<(), ImagodError> {
     for subscription in &subscriptions {
         sender.send_log_data_chunks(
@@ -760,7 +748,7 @@ async fn stream_logs_datagrams(
             &subscription.service_name,
             LogStreamKind::Composite,
             &subscription.snapshot_bytes,
-            last_process_id,
+            last_name,
         )?;
     }
 
@@ -839,11 +827,11 @@ async fn stream_logs_datagrams(
                             &service_name,
                             service_log_stream_to_protocol(event.stream),
                             &event.bytes,
-                            last_process_id,
+                            last_name,
                         )?;
                     }
                     FollowForwardMsg::Lagged { service_name, dropped } => {
-                        *last_process_id = Some(service_name);
+                        *last_name = Some(service_name);
                         advance_seq_for_lagged(seq, dropped);
                     }
                 }
@@ -901,7 +889,7 @@ fn fixed_log_chunk_size(
     max_datagram_size: usize,
     service_names: &[String],
 ) -> Result<usize, ImagodError> {
-    let process_id = service_names
+    let name = service_names
         .iter()
         .max_by_key(|name| name.len())
         .cloned()
@@ -909,7 +897,7 @@ fn fixed_log_chunk_size(
     let probe = LogChunk {
         request_id,
         seq: u64::MAX,
-        process_id,
+        name,
         stream_kind: LogStreamKind::Composite,
         bytes: Vec::new(),
         is_last: false,
@@ -1413,7 +1401,7 @@ mod tests {
             LogChunk {
                 request_id,
                 seq: u64::MAX,
-                process_id: "svc-a".to_string(),
+                name: "svc-a".to_string(),
                 stream_kind: LogStreamKind::Composite,
                 bytes: vec![0xAB; chunk_size],
                 is_last: false,
@@ -1424,16 +1412,16 @@ mod tests {
     }
 
     #[test]
-    fn fixed_log_chunk_size_handles_long_process_id() {
+    fn fixed_log_chunk_size_handles_long_name() {
         let request_id = Uuid::new_v4();
         let correlation_id = Uuid::new_v4();
-        let process_id = "service-with-very-long-name-".repeat(12);
+        let name = "service-with-very-long-name-".repeat(12);
         let max_datagram_size = 1413usize;
         let chunk_size = fixed_log_chunk_size(
             request_id,
             correlation_id,
             max_datagram_size,
-            std::slice::from_ref(&process_id),
+            std::slice::from_ref(&name),
         )
         .expect("chunk size should be computed");
         assert!(chunk_size > 0);
@@ -1445,7 +1433,7 @@ mod tests {
             LogChunk {
                 request_id,
                 seq: u64::MAX,
-                process_id,
+                name,
                 stream_kind: LogStreamKind::Composite,
                 bytes: vec![0xCD; chunk_size],
                 is_last: false,

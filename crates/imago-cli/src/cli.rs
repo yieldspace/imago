@@ -66,8 +66,8 @@ pub struct StopArgs {
 
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct LogsArgs {
-    #[arg(value_name = "PROCESS_ID")]
-    pub process_id: Option<String>,
+    #[arg(value_name = "NAME")]
+    pub name: Option<String>,
 
     #[arg(long)]
     pub follow: bool,
@@ -196,7 +196,7 @@ mod tests {
             cli,
             Cli {
                 command: Commands::Logs(LogsArgs {
-                    process_id: None,
+                    name: None,
                     follow: false,
                     tail: 200,
                 }),
@@ -276,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_logs_with_process_id_and_flags() {
+    fn parses_logs_with_name_and_flags() {
         let cli = Cli::try_parse_from(["imago", "logs", "svc-a", "--follow", "--tail", "50"])
             .expect("parse should succeed");
 
@@ -284,7 +284,7 @@ mod tests {
             cli,
             Cli {
                 command: Commands::Logs(LogsArgs {
-                    process_id: Some("svc-a".to_string()),
+                    name: Some("svc-a".to_string()),
                     follow: true,
                     tail: 50,
                 }),

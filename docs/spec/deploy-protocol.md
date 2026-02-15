@@ -270,13 +270,13 @@ response:
 
 `logs.request` request:
 
-- `process_id: Option<String>`
+- `name: Option<String>`
 - `follow: bool`
 - `tail_lines: u32`
 
 制約:
 
-- `process_id=None` は「リクエスト時点で running の全サービス」を対象とする。
+- `name=None` は「リクエスト時点で running の全サービス」を対象とする。
 - 全サービス購読では `tail_lines` は各サービス単位で適用する。
 - 受理前エラー（対象未存在・未起動など）は stream 応答の `error` で返す。
 
@@ -284,7 +284,7 @@ response:
 
 - `request_id`
 - `seq`
-- `process_id`
+- `name`
 - `stream_kind` (`stdout` / `stderr` / `composite`)
 - `bytes`
 - `is_last`
@@ -368,10 +368,16 @@ response:
 ## 実装反映ノート（Issue #31 / 2026-02-13）
 
 - `imago logs` の本文転送を stream から DATAGRAM へ移し、`logs.request`（stream）+ `logs.chunk`/`logs.end`（DATAGRAM）へ分離した。
-- `process_id=None` を全サービス購読として定義し、対象はリクエスト時点の running サービスに固定した。
+- `name=None` を全サービス購読として定義し、対象はリクエスト時点の running サービスに固定した。
 - `seq` は欠損検知のみとし、再送や順序補正は導入しない。
 
 ## 実装反映ノート（PR #145 follow-up / 2026-02-13）
 
 - follow 配信中に内部 `broadcast` が `Lagged` した場合、欠落を隠蔽しないため `seq` を前進させる挙動を追加した。
 - これによりクライアントは `seq` ギャップから `<<logs truncated>>` 警告を表示できる。
+
+## 実装反映ノート（Issue #87 / 2026-02-15）
+
+- `logs.request` のフィルタキーを `name` へ統一した。
+- `logs.request.name=None` は「リクエスト時点で running の全サービス」を対象とする。
+- `logs.request` ACK の対象一覧キーを `names` へ統一した。

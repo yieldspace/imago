@@ -462,15 +462,15 @@ impl Validate for CommandCancelResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogRequest {
-    pub process_id: Option<String>,
+    pub name: Option<String>,
     pub follow: bool,
     pub tail_lines: u32,
 }
 
 impl Validate for LogRequest {
     fn validate(&self) -> Result<(), ValidationError> {
-        if let Some(process_id) = self.process_id.as_deref() {
-            ensure_non_empty(process_id, "process_id")?;
+        if let Some(name) = self.name.as_deref() {
+            ensure_non_empty(name, "name")?;
         }
         Ok(())
     }
@@ -491,7 +491,7 @@ pub enum LogStreamKind {
 pub struct LogChunk {
     pub request_id: Uuid,
     pub seq: u64,
-    pub process_id: String,
+    pub name: String,
     pub stream_kind: LogStreamKind,
     #[serde(with = "serde_bytes")]
     pub bytes: Vec<u8>,
@@ -501,7 +501,7 @@ pub struct LogChunk {
 impl Validate for LogChunk {
     fn validate(&self) -> Result<(), ValidationError> {
         ensure_uuid_not_nil(&self.request_id, "request_id")?;
-        ensure_non_empty(&self.process_id, "process_id")?;
+        ensure_non_empty(&self.name, "name")?;
         Ok(())
     }
 }
@@ -907,16 +907,16 @@ mod tests {
     }
 
     #[test]
-    fn log_request_accepts_optional_process_id() {
+    fn log_request_accepts_optional_name() {
         let all = LogRequest {
-            process_id: None,
+            name: None,
             follow: false,
             tail_lines: 0,
         };
         assert!(all.validate().is_ok());
 
         let named = LogRequest {
-            process_id: Some("svc-a".to_string()),
+            name: Some("svc-a".to_string()),
             follow: true,
             tail_lines: 200,
         };
@@ -928,11 +928,11 @@ mod tests {
     }
 
     #[test]
-    fn log_chunk_requires_request_id_and_process_id() {
+    fn log_chunk_requires_request_id_and_name() {
         let invalid = LogChunk {
             request_id: Uuid::nil(),
             seq: 1,
-            process_id: "".to_string(),
+            name: "".to_string(),
             stream_kind: LogStreamKind::Stdout,
             bytes: b"abc".to_vec(),
             is_last: false,
@@ -942,7 +942,7 @@ mod tests {
         let valid = LogChunk {
             request_id: sample_request_id(),
             seq: 2,
-            process_id: "svc-a".to_string(),
+            name: "svc-a".to_string(),
             stream_kind: LogStreamKind::Composite,
             bytes: b"line\n".to_vec(),
             is_last: true,
