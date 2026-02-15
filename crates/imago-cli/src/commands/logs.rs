@@ -44,12 +44,7 @@ impl PrefixRenderState {
             .unwrap_or(true)
     }
 
-    fn set_at_line_start(
-        &mut self,
-        name: &str,
-        stream_kind: LogStreamKind,
-        at_line_start: bool,
-    ) {
+    fn set_at_line_start(&mut self, name: &str, stream_kind: LogStreamKind, at_line_start: bool) {
         if let Some(state) = self
             .streams
             .iter_mut()
@@ -368,12 +363,8 @@ fn renderable_chunk_bytes<'a>(
     }
 
     let at_line_start = prefix_state.at_line_start(&chunk.name, chunk.stream_kind);
-    let (rendered, next_at_line_start) = format_prefixed_bytes(
-        &chunk.name,
-        chunk.stream_kind,
-        &chunk.bytes,
-        at_line_start,
-    );
+    let (rendered, next_at_line_start) =
+        format_prefixed_bytes(&chunk.name, chunk.stream_kind, &chunk.bytes, at_line_start);
     prefix_state.set_at_line_start(&chunk.name, chunk.stream_kind, next_at_line_start);
     Cow::Owned(rendered)
 }

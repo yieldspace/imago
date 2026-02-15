@@ -603,14 +603,8 @@ async fn run_logs_forwarder(
         chunk_size,
     );
 
-    let stream_result = stream_logs_datagrams(
-        &session,
-        &sender,
-        subscriptions,
-        &mut seq,
-        &mut last_name,
-    )
-    .await;
+    let stream_result =
+        stream_logs_datagrams(&session, &sender, subscriptions, &mut seq, &mut last_name).await;
 
     match stream_result {
         Ok(()) => {
@@ -677,13 +671,7 @@ impl<'a> LogsDatagramSender<'a> {
         let mut offset = 0usize;
         while offset < bytes.len() {
             let end = bytes.len().min(offset.saturating_add(self.chunk_size));
-            self.send_single_log_chunk(
-                seq,
-                name,
-                stream_kind,
-                bytes[offset..end].to_vec(),
-                false,
-            )?;
+            self.send_single_log_chunk(seq, name, stream_kind, bytes[offset..end].to_vec(), false)?;
             *last_name = Some(name.to_string());
             offset = end;
         }
