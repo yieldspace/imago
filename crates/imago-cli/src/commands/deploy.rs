@@ -35,7 +35,7 @@ use crate::{
 };
 
 const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
-const COMPATIBILITY_DATE: &str = "2026-02-10";
+pub(crate) const COMPATIBILITY_DATE: &str = "2026-02-10";
 const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
 const DEFAULT_MAX_INFLIGHT_CHUNKS: usize = 16;
 const TRANSPORT_CONNECT_STAGE: &str = "transport.connect";
@@ -177,6 +177,7 @@ async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> 
 
     let manifest_path = build_output.manifest_path;
     let manifest_bytes = build_output.manifest_bytes;
+    let restart_policy = build_output.restart_policy;
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).context("failed to parse manifest json")?;
 
@@ -223,7 +224,7 @@ async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> 
         CommandPayload::Deploy(DeployCommandPayload {
             deploy_id: upload_result.deploy_id.clone(),
             expected_current_release: "any".to_string(),
-            restart_policy: "never".to_string(),
+            restart_policy,
             auto_rollback: true,
         }),
     )?;
@@ -766,7 +767,7 @@ pub(crate) fn request_envelope<T: Serialize>(
     })
 }
 
-fn build_command_start_envelope(
+pub(crate) fn build_command_start_envelope(
     correlation_id: Uuid,
     request_id: Uuid,
     command_type: CommandType,
@@ -795,7 +796,7 @@ pub(crate) async fn request_response(
         .ok_or_else(|| anyhow!("empty response stream"))
 }
 
-async fn request_events(
+pub(crate) async fn request_events(
     session: &web_transport_quinn::Session,
     envelope: &Envelope,
 ) -> anyhow::Result<Vec<Envelope>> {
