@@ -828,28 +828,25 @@ async fn collect_boot_restore_candidates(
     };
 
     let mut service_entries = Vec::new();
+    let mut failed = Vec::new();
     while let Some(entry) = entries
         .next_entry()
         .await
         .map_err(|e| map_internal(format!("failed to iterate services root: {e}")))?
     {
-        let file_type = entry
-            .file_type()
-            .await
-            .map_err(|e| map_internal(format!("failed to read service entry type: {e}")))?;
-        if !file_type.is_dir() {
-            continue;
-        }
-
-        service_entries.push((
-            entry.file_name().to_string_lossy().to_string(),
-            entry.path(),
-        ));
+        let service_name = entry.file_name().to_string_lossy().to_string();
+        let service_root = entry.path();
+        classify_boot_restore_entry(
+            service_name,
+            service_root,
+            entry.file_type().await,
+            &mut service_entries,
+            &mut failed,
+        );
     }
     service_entries.sort_by(|(left, _), (right, _)| left.cmp(right));
 
     let mut candidates = Vec::new();
-    let mut failed = Vec::new();
     for (service_name, service_root) in service_entries {
         let active_file = service_root.join("active_release");
         let active_release = match read_active_release(&active_file).await {
@@ -880,6 +877,33 @@ async fn collect_boot_restore_candidates(
     }
 
     Ok((candidates, failed))
+}
+
+/// Classifies one services-root entry and accumulates per-service failures.
+fn classify_boot_restore_entry(
+    service_name: String,
+    service_root: PathBuf,
+    file_type: Result<std::fs::FileType, std::io::Error>,
+    service_entries: &mut Vec<(String, PathBuf)>,
+    failed: &mut Vec<RestoreFailure>,
+) {
+    match file_type {
+        Ok(file_type) => {
+            if file_type.is_dir() {
+                service_entries.push((service_name, service_root));
+            }
+        }
+        Err(err) => {
+            let error = map_internal(format!(
+                "failed to read service entry type for '{}': {err}",
+                service_name
+            ));
+            failed.push(RestoreFailure {
+                service_name,
+                error,
+            });
+        }
+    }
 }
 
 async fn clean_dir(path: &Path) -> Result<(), ImagodError> {
@@ -975,9 +999,9 @@ mod tests {
     use super::{
         DEFAULT_HTTP_MAX_BODY_BYTES, HashTarget, MAX_HTTP_MAX_BODY_BYTES, Manifest, ManifestAsset,
         ManifestBinding, ManifestHash, ManifestHttp, RunnerAppType, build_launch_from_release,
-        collect_boot_restore_candidates, extract_tar, normalize_archive_entry_path,
-        normalize_manifest_main_path, promote_staging_release, release_id_from_artifact_digest,
-        validate_deploy_preconditions, validate_service_name,
+        classify_boot_restore_entry, collect_boot_restore_candidates, extract_tar,
+        normalize_archive_entry_path, normalize_manifest_main_path, promote_staging_release,
+        release_id_from_artifact_digest, validate_deploy_preconditions, validate_service_name,
     };
     use imago_protocol::{DeployCommandPayload, ErrorCode};
     use std::{
@@ -1446,5 +1470,40 @@ mod tests {
         assert!(failed[0].error.message.contains("active_release"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn classify_boot_restore_entry_keeps_processing_after_file_type_error() {
+        let mut service_entries = Vec::new();
+        let mut failed = Vec::new();
+
+        classify_boot_restore_entry(
+            "svc-bad".to_string(),
+            PathBuf::from("/tmp/svc-bad"),
+            Err(std::io::Error::other("raced entry")),
+            &mut service_entries,
+            &mut failed,
+        );
+
+        let good_root = temp_dir_path("orchestrator-restore-classify-good");
+        fs::create_dir_all(&good_root).expect("good service dir should exist");
+        let good_file_type = fs::metadata(&good_root)
+            .expect("metadata should be readable")
+            .file_type();
+        classify_boot_restore_entry(
+            "svc-good".to_string(),
+            good_root.clone(),
+            Ok(good_file_type),
+            &mut service_entries,
+            &mut failed,
+        );
+
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].service_name, "svc-bad");
+        assert!(failed[0].error.message.contains("svc-bad"));
+        assert_eq!(service_entries.len(), 1);
+        assert_eq!(service_entries[0].0, "svc-good");
+
+        let _ = fs::remove_dir_all(good_root);
     }
 }
