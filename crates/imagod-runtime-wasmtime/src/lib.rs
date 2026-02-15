@@ -1,11 +1,17 @@
 //! Wasmtime runtime integration used by runner processes.
 
-use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    net::{IpAddr, SocketAddr},
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use imago_protocol::ErrorCode;
-use imagod_ipc::RunnerAppType;
+use imagod_ipc::{RunnerAppType, RunnerSocketConfig, RunnerSocketDirection};
 use tokio::{
     sync::{mpsc, oneshot, watch},
     task::JoinHandle,
@@ -17,6 +23,7 @@ use wasmtime::{
 use wasmtime_wasi::{
     WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
     p2::{add_to_linker_async, bindings::Command},
+    sockets::SocketAddrUse,
 };
 use wasmtime_wasi_http::{
     WasiHttpCtx, WasiHttpView, add_only_http_to_linker_async, bindings::Proxy,
@@ -113,6 +120,7 @@ impl WasmRuntime {
         &self,
         args: &[String],
         envs: &BTreeMap<String, String>,
+        socket: Option<&RunnerSocketConfig>,
     ) -> Result<Store<WasiState>, ImagodError> {
         let mut builder = WasiCtxBuilder::new();
         builder.inherit_stdio();
@@ -125,6 +133,9 @@ impl WasmRuntime {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect::<Vec<_>>();
             builder.envs(&vars);
+        }
+        if let Some(socket) = socket {
+            configure_socket_policy(&mut builder, socket)?;
         }
 
         let state = WasiState {
@@ -173,6 +184,7 @@ impl WasmRuntime {
         component_path: &Path,
         args: &[String],
         envs: &BTreeMap<String, String>,
+        socket: Option<&RunnerSocketConfig>,
         mut shutdown: watch::Receiver<bool>,
         epoch_tick_interval_ms: u64,
     ) -> Result<(), ImagodError> {
@@ -187,7 +199,7 @@ impl WasmRuntime {
         add_to_linker_async(&mut linker)
             .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
 
-        let mut store = self.build_store(args, envs)?;
+        let mut store = self.build_store(args, envs, socket)?;
 
         let run_future = async {
             let command = Command::instantiate_async(&mut store, &component, &linker)
@@ -242,7 +254,7 @@ impl WasmRuntime {
         add_only_http_to_linker_async(&mut linker)
             .map_err(|e| map_runtime_error(format!("failed to add WASI HTTP linker: {e}")))?;
 
-        let mut store = self.build_store(args, envs)?;
+        let mut store = self.build_store(args, envs, None)?;
         let proxy = Proxy::instantiate_async(&mut store, &component, &linker)
             .await
             .map_err(|e| map_runtime_error(format!("http component instantiate failed: {e}")))?;
@@ -373,6 +385,43 @@ async fn handle_http_request_in_store(
     runtime_response_from_hyper(response).await
 }
 
+fn configure_socket_policy(
+    builder: &mut WasiCtxBuilder,
+    socket: &RunnerSocketConfig,
+) -> Result<(), ImagodError> {
+    let listen_ip = socket.listen_addr.parse::<IpAddr>().map_err(|err| {
+        map_runtime_error(format!(
+            "invalid socket listen_addr '{}': {err}",
+            socket.listen_addr
+        ))
+    })?;
+    let listen_socket = SocketAddr::new(listen_ip, socket.listen_port);
+    builder.allow_udp(socket.protocol.allows_udp());
+    builder.allow_tcp(socket.protocol.allows_tcp());
+    let direction = socket.direction;
+    builder.socket_addr_check(move |address, use_kind| {
+        let allowed = socket_addr_allowed(address, use_kind, listen_socket, direction);
+        Box::pin(async move { allowed })
+    });
+    Ok(())
+}
+
+fn socket_addr_allowed(
+    address: SocketAddr,
+    use_kind: SocketAddrUse,
+    listen_socket: SocketAddr,
+    direction: RunnerSocketDirection,
+) -> bool {
+    match use_kind {
+        SocketAddrUse::TcpBind | SocketAddrUse::UdpBind => {
+            direction.allows_inbound() && address == listen_socket
+        }
+        SocketAddrUse::TcpConnect
+        | SocketAddrUse::UdpConnect
+        | SocketAddrUse::UdpOutgoingDatagram => direction.allows_outbound(),
+    }
+}
+
 impl ComponentRuntime for WasmRuntime {
     fn validate_component(&self, component_path: &Path) -> Result<(), ImagodError> {
         self.validate_component_loadable(component_path)
@@ -385,6 +434,7 @@ impl ComponentRuntime for WasmRuntime {
                 component_path,
                 args,
                 envs,
+                socket,
                 shutdown,
                 epoch_tick_interval_ms,
                 http_ready_tx,
@@ -392,16 +442,27 @@ impl ComponentRuntime for WasmRuntime {
 
             match app_type {
                 RunnerAppType::Cli => {
+                    if socket.is_some() {
+                        return Err(map_runtime_error(
+                            "socket config is only allowed when app_type=socket".to_string(),
+                        ));
+                    }
                     self.run_cli_component_async(
                         &component_path,
                         &args,
                         &envs,
+                        None,
                         shutdown,
                         epoch_tick_interval_ms,
                     )
                     .await
                 }
                 RunnerAppType::Http => {
+                    if socket.is_some() {
+                        return Err(map_runtime_error(
+                            "socket config is only allowed when app_type=socket".to_string(),
+                        ));
+                    }
                     self.run_http_component_async(
                         &component_path,
                         &args,
@@ -412,11 +473,22 @@ impl ComponentRuntime for WasmRuntime {
                     )
                     .await
                 }
-                RunnerAppType::Socket => Err(ImagodError::new(
-                    ErrorCode::Internal,
-                    STAGE_RUNTIME,
-                    "socket runtime type is not implemented yet",
-                )),
+                RunnerAppType::Socket => {
+                    let socket = socket.as_ref().ok_or_else(|| {
+                        map_runtime_error(
+                            "app_type=socket requires socket runtime settings".to_string(),
+                        )
+                    })?;
+                    self.run_cli_component_async(
+                        &component_path,
+                        &args,
+                        &envs,
+                        Some(socket),
+                        shutdown,
+                        epoch_tick_interval_ms,
+                    )
+                    .await
+                }
             }
         })
     }
@@ -523,13 +595,25 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imagod_ipc::RunnerAppType;
+    use imagod_ipc::{
+        RunnerAppType, RunnerSocketConfig, RunnerSocketDirection, RunnerSocketProtocol,
+    };
     use imagod_runtime_internal::{RuntimeHttpRequest, RuntimeRunRequest};
     use std::collections::BTreeMap;
+    use std::net::SocketAddr;
     use std::path::PathBuf;
 
+    fn sample_socket_config() -> RunnerSocketConfig {
+        RunnerSocketConfig {
+            protocol: RunnerSocketProtocol::Udp,
+            direction: RunnerSocketDirection::Inbound,
+            listen_addr: "0.0.0.0".to_string(),
+            listen_port: 514,
+        }
+    }
+
     #[tokio::test]
-    async fn socket_type_returns_not_implemented_error() {
+    async fn socket_type_requires_socket_config() {
         let runtime = WasmRuntime::new().expect("runtime should initialize");
         let (_shutdown_tx, shutdown_rx) = watch::channel(true);
         let err = runtime
@@ -538,15 +622,41 @@ mod tests {
                 component_path: PathBuf::from("/tmp/unused.wasm"),
                 args: Vec::new(),
                 envs: BTreeMap::new(),
+                socket: None,
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: 50,
                 http_ready_tx: None,
             })
             .await
-            .expect_err("socket type should be rejected");
+            .expect_err("socket type should require socket config");
         assert_eq!(err.code, ErrorCode::Internal);
         assert!(
-            err.message.contains("not implemented"),
+            err.message.contains("requires socket runtime settings"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn socket_type_uses_cli_execution_branch_when_socket_config_exists() {
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let (_shutdown_tx, shutdown_rx) = watch::channel(true);
+        let err = runtime
+            .run_component(RuntimeRunRequest {
+                app_type: RunnerAppType::Socket,
+                component_path: PathBuf::from("/tmp/non-existent-socket-component.wasm"),
+                args: Vec::new(),
+                envs: BTreeMap::new(),
+                socket: Some(sample_socket_config()),
+                shutdown: shutdown_rx,
+                epoch_tick_interval_ms: 50,
+                http_ready_tx: None,
+            })
+            .await
+            .expect_err("missing component path should fail");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(
+            err.message.contains("failed to load component"),
             "unexpected message: {}",
             err.message
         );
@@ -562,6 +672,7 @@ mod tests {
                 component_path: PathBuf::from("/tmp/non-existent-http-component.wasm"),
                 args: Vec::new(),
                 envs: BTreeMap::new(),
+                socket: None,
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: 50,
                 http_ready_tx: None,
@@ -590,5 +701,59 @@ mod tests {
             .expect_err("request should fail when no http component is running");
         assert_eq!(err.code, ErrorCode::Internal);
         assert!(err.message.contains("not running"));
+    }
+
+    #[test]
+    fn socket_addr_allowed_restricts_inbound_to_exact_listen_endpoint() {
+        let listen = "0.0.0.0:514"
+            .parse::<SocketAddr>()
+            .expect("listen socket should parse");
+        let allowed = socket_addr_allowed(
+            listen,
+            SocketAddrUse::UdpBind,
+            listen,
+            RunnerSocketDirection::Inbound,
+        );
+        let denied_different_port = socket_addr_allowed(
+            "0.0.0.0:515"
+                .parse::<SocketAddr>()
+                .expect("socket should parse"),
+            SocketAddrUse::UdpBind,
+            listen,
+            RunnerSocketDirection::Inbound,
+        );
+        let denied_outbound_only = socket_addr_allowed(
+            listen,
+            SocketAddrUse::UdpBind,
+            listen,
+            RunnerSocketDirection::Outbound,
+        );
+        assert!(allowed);
+        assert!(!denied_different_port);
+        assert!(!denied_outbound_only);
+    }
+
+    #[test]
+    fn socket_addr_allowed_gates_outbound_by_direction_only() {
+        let listen = "0.0.0.0:514"
+            .parse::<SocketAddr>()
+            .expect("listen socket should parse");
+        let remote = "192.0.2.10:1234"
+            .parse::<SocketAddr>()
+            .expect("remote socket should parse");
+        let outbound_allowed = socket_addr_allowed(
+            remote,
+            SocketAddrUse::UdpOutgoingDatagram,
+            listen,
+            RunnerSocketDirection::Both,
+        );
+        let outbound_denied = socket_addr_allowed(
+            remote,
+            SocketAddrUse::TcpConnect,
+            listen,
+            RunnerSocketDirection::Inbound,
+        );
+        assert!(outbound_allowed);
+        assert!(!outbound_denied);
     }
 }

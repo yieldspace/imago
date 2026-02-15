@@ -15,8 +15,9 @@ use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{
     ControlRequest, ControlResponse, IpcErrorPayload, RunnerAppType, RunnerBootstrap,
-    RunnerInboundRequest, ServiceBinding, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
-    issue_invocation_token, now_unix_secs, random_secret_hex, verify_manager_auth_proof,
+    RunnerInboundRequest, RunnerSocketConfig, ServiceBinding, compute_manager_auth_proof,
+    dbus_p2p::DbusP2pTransport, issue_invocation_token, now_unix_secs, random_secret_hex,
+    verify_manager_auth_proof,
 };
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -53,6 +54,8 @@ pub struct ServiceLaunch {
     pub http_port: Option<u16>,
     /// Max accepted HTTP request body size in bytes when `app_type=http`.
     pub http_max_body_bytes: Option<u64>,
+    /// Socket runtime settings when `app_type=socket`.
+    pub socket: Option<RunnerSocketConfig>,
     /// Component file path.
     pub component_path: PathBuf,
     /// WASI CLI arguments.
@@ -278,6 +281,7 @@ impl ServiceSupervisor {
                 app_type: launch.app_type,
                 http_port: launch.http_port,
                 http_max_body_bytes: launch.http_max_body_bytes,
+                socket: launch.socket.clone(),
                 component_path: launch.component_path.clone(),
                 args: launch.args.clone(),
                 envs: launch.envs.clone(),

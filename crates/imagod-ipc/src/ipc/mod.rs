@@ -47,6 +47,65 @@ pub enum RunnerAppType {
     Socket,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// Socket runtime protocol policy.
+pub enum RunnerSocketProtocol {
+    #[serde(rename = "udp")]
+    Udp,
+    #[serde(rename = "tcp")]
+    Tcp,
+    #[serde(rename = "both")]
+    Both,
+}
+
+impl RunnerSocketProtocol {
+    /// Returns true when UDP is allowed by this protocol policy.
+    pub fn allows_udp(self) -> bool {
+        matches!(self, Self::Udp | Self::Both)
+    }
+
+    /// Returns true when TCP is allowed by this protocol policy.
+    pub fn allows_tcp(self) -> bool {
+        matches!(self, Self::Tcp | Self::Both)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// Socket runtime traffic direction policy.
+pub enum RunnerSocketDirection {
+    #[serde(rename = "inbound")]
+    Inbound,
+    #[serde(rename = "outbound")]
+    Outbound,
+    #[serde(rename = "both")]
+    Both,
+}
+
+impl RunnerSocketDirection {
+    /// Returns true when inbound socket operations are allowed.
+    pub fn allows_inbound(self) -> bool {
+        matches!(self, Self::Inbound | Self::Both)
+    }
+
+    /// Returns true when outbound socket operations are allowed.
+    pub fn allows_outbound(self) -> bool {
+        matches!(self, Self::Outbound | Self::Both)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Socket runtime execution settings used when `app_type=socket`.
+pub struct RunnerSocketConfig {
+    /// Allowed socket protocol set.
+    pub protocol: RunnerSocketProtocol,
+    /// Allowed socket traffic direction.
+    pub direction: RunnerSocketDirection,
+    /// Bind address required for inbound socket operations.
+    pub listen_addr: String,
+    /// Bind port required for inbound socket operations.
+    pub listen_port: u16,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Bootstrap payload sent from manager to runner via child stdin.
 pub struct RunnerBootstrap {
@@ -62,6 +121,8 @@ pub struct RunnerBootstrap {
     pub http_port: Option<u16>,
     /// Max accepted HTTP request body size in bytes when `app_type=http`.
     pub http_max_body_bytes: Option<u64>,
+    /// Socket runtime configuration when `app_type=socket`.
+    pub socket: Option<RunnerSocketConfig>,
     /// Absolute path to the component file.
     pub component_path: PathBuf,
     /// CLI arguments passed to WASI command.
@@ -458,8 +519,14 @@ mod tests {
             service_name: "svc-a".to_string(),
             release_hash: "release-a".to_string(),
             app_type: RunnerAppType::Socket,
-            http_port: Some(18080),
-            http_max_body_bytes: Some(8 * 1024 * 1024),
+            http_port: None,
+            http_max_body_bytes: None,
+            socket: Some(RunnerSocketConfig {
+                protocol: RunnerSocketProtocol::Udp,
+                direction: RunnerSocketDirection::Inbound,
+                listen_addr: "0.0.0.0".to_string(),
+                listen_port: 514,
+            }),
             component_path: PathBuf::from("/tmp/component.wasm"),
             args: vec!["--help".to_string()],
             envs: std::collections::BTreeMap::new(),
@@ -474,8 +541,16 @@ mod tests {
         let decoded = imago_protocol::from_cbor::<RunnerBootstrap>(&encoded)
             .expect("bootstrap decoding should work");
         assert_eq!(decoded.app_type, RunnerAppType::Socket);
-        assert_eq!(decoded.http_port, Some(18080));
-        assert_eq!(decoded.http_max_body_bytes, Some(8 * 1024 * 1024));
+        assert_eq!(decoded.http_port, None);
+        assert_eq!(decoded.http_max_body_bytes, None);
+        assert_eq!(
+            decoded.socket.as_ref().map(|cfg| cfg.listen_port),
+            Some(514)
+        );
+        assert_eq!(
+            decoded.socket.as_ref().map(|cfg| cfg.protocol),
+            Some(RunnerSocketProtocol::Udp)
+        );
     }
 
     #[test]

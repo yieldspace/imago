@@ -8,7 +8,7 @@ use std::{
 };
 
 use imagod_common::ImagodError;
-use imagod_ipc::RunnerAppType;
+use imagod_ipc::{RunnerAppType, RunnerSocketConfig};
 use tokio::sync::{oneshot, watch};
 
 /// Owned run request passed from runner process to runtime implementation.
@@ -22,6 +22,8 @@ pub struct RuntimeRunRequest {
     pub args: Vec<String>,
     /// Runtime environment variables.
     pub envs: BTreeMap<String, String>,
+    /// Socket runtime settings when `app_type=socket`.
+    pub socket: Option<RunnerSocketConfig>,
     /// Shutdown signal observed by runtime implementation.
     pub shutdown: watch::Receiver<bool>,
     /// Epoch tick interval used for interruption-aware runtimes.

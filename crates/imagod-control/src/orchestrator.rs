@@ -3,12 +3,13 @@
 use std::{
     collections::BTreeMap,
     collections::BTreeSet,
+    net::IpAddr,
     path::{Component, Path, PathBuf},
 };
 
 use imago_protocol::{DeployCommandPayload, ErrorCode, RunCommandPayload, StopCommandPayload};
 use imagod_common::ImagodError;
-use imagod_ipc::{RunnerAppType, ServiceBinding};
+use imagod_ipc::{RunnerAppType, RunnerSocketConfig, ServiceBinding};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::fs;
@@ -38,6 +39,8 @@ struct Manifest {
     app_type: RunnerAppType,
     #[serde(default)]
     http: Option<ManifestHttp>,
+    #[serde(default)]
+    socket: Option<RunnerSocketConfig>,
     #[serde(default)]
     vars: BTreeMap<String, String>,
     #[serde(default)]
@@ -476,6 +479,7 @@ async fn build_launch_from_release(
 
     let bindings = validate_manifest_bindings(&manifest.bindings)?;
     let (http_port, http_max_body_bytes) = validate_manifest_http(manifest)?;
+    let socket = validate_manifest_socket(manifest)?;
 
     Ok(ServiceLaunch {
         name: manifest.name.clone(),
@@ -483,6 +487,7 @@ async fn build_launch_from_release(
         app_type: manifest.app_type,
         http_port,
         http_max_body_bytes,
+        socket,
         component_path,
         args: Vec::new(),
         envs,
@@ -520,6 +525,38 @@ fn validate_manifest_http(manifest: &Manifest) -> Result<(Option<u16>, Option<u6
                 ));
             }
             Ok((None, None))
+        }
+    }
+}
+
+fn validate_manifest_socket(
+    manifest: &Manifest,
+) -> Result<Option<RunnerSocketConfig>, ImagodError> {
+    match manifest.app_type {
+        RunnerAppType::Socket => {
+            let socket = manifest.socket.clone().ok_or_else(|| {
+                map_bad_manifest("manifest.socket is required when type=\"socket\"".to_string())
+            })?;
+            if socket.listen_port == 0 {
+                return Err(map_bad_manifest(
+                    "manifest.socket.listen_port must be in range 1..=65535".to_string(),
+                ));
+            }
+            socket.listen_addr.parse::<IpAddr>().map_err(|err| {
+                map_bad_manifest(format!(
+                    "manifest.socket.listen_addr must be a valid IP address (got '{}'): {err}",
+                    socket.listen_addr
+                ))
+            })?;
+            Ok(Some(socket))
+        }
+        RunnerAppType::Cli | RunnerAppType::Http => {
+            if manifest.socket.is_some() {
+                return Err(map_bad_manifest(
+                    "manifest.socket is only allowed when type=\"socket\"".to_string(),
+                ));
+            }
+            Ok(None)
         }
     }
 }
@@ -1103,6 +1140,7 @@ mod tests {
         release_id_from_artifact_digest, validate_deploy_preconditions, validate_service_name,
     };
     use imago_protocol::{DeployCommandPayload, ErrorCode};
+    use imagod_ipc::{RunnerSocketConfig, RunnerSocketDirection, RunnerSocketProtocol};
     use std::{
         collections::BTreeMap,
         fs,
@@ -1121,6 +1159,7 @@ mod tests {
             main: "component.wasm".to_string(),
             app_type: RunnerAppType::Cli,
             http: None,
+            socket: None,
             vars: BTreeMap::new(),
             secrets: BTreeMap::new(),
             assets: Vec::<ManifestAsset>::new(),
@@ -1382,6 +1421,73 @@ mod tests {
             .expect_err("type=cli with manifest.http must fail");
         assert_eq!(err.code, ErrorCode::BadManifest);
         assert!(err.message.contains("only allowed when type=\"http\""));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_socket_type_without_socket_section() {
+        let root = temp_dir_path("orchestrator-socket-missing");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.app_type = RunnerAppType::Socket;
+        manifest.socket = None;
+
+        let err = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect_err("type=socket without manifest.socket must fail");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("manifest.socket is required"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_socket_section_for_non_socket_type() {
+        let root = temp_dir_path("orchestrator-socket-extra");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.app_type = RunnerAppType::Cli;
+        manifest.socket = Some(RunnerSocketConfig {
+            protocol: RunnerSocketProtocol::Udp,
+            direction: RunnerSocketDirection::Inbound,
+            listen_addr: "0.0.0.0".to_string(),
+            listen_port: 514,
+        });
+
+        let err = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect_err("type=cli with manifest.socket must fail");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("only allowed when type=\"socket\""));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_invalid_socket_listen_addr() {
+        let root = temp_dir_path("orchestrator-socket-addr-invalid");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.app_type = RunnerAppType::Socket;
+        manifest.socket = Some(RunnerSocketConfig {
+            protocol: RunnerSocketProtocol::Udp,
+            direction: RunnerSocketDirection::Inbound,
+            listen_addr: "not-an-ip".to_string(),
+            listen_port: 514,
+        });
+
+        let err = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect_err("invalid listen_addr should fail");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("listen_addr"));
 
         let _ = fs::remove_dir_all(root);
     }

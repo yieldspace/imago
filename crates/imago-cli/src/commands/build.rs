@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::Read,
+    net::IpAddr,
     path::{Component, Path, PathBuf},
     process::Command,
 };
@@ -96,6 +97,8 @@ struct Manifest {
     bindings: Vec<ManifestBinding>,
     #[serde(skip_serializing_if = "Option::is_none")]
     http: Option<ManifestHttp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    socket: Option<ManifestSocket>,
     dependencies: Vec<JsonValue>,
     hash: ManifestHash,
 }
@@ -117,6 +120,34 @@ struct ManifestBinding {
 struct ManifestHttp {
     port: u16,
     max_body_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum ManifestSocketProtocol {
+    #[serde(rename = "udp")]
+    Udp,
+    #[serde(rename = "tcp")]
+    Tcp,
+    #[serde(rename = "both")]
+    Both,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum ManifestSocketDirection {
+    #[serde(rename = "inbound")]
+    Inbound,
+    #[serde(rename = "outbound")]
+    Outbound,
+    #[serde(rename = "both")]
+    Both,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ManifestSocket {
+    protocol: ManifestSocketProtocol,
+    direction: ManifestSocketDirection,
+    listen_addr: String,
+    listen_port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +235,7 @@ pub fn build_project(
     let app_type = required_string(&root, "type")?;
     validate_app_type(&app_type)?;
     let http = parse_http_section(&root, &app_type)?;
+    let socket = parse_socket_section(&root, &app_type)?;
     let restart_policy = parse_restart_policy(&root)?;
 
     let vars = parse_string_table(root.get("vars"), "vars")?;
@@ -235,6 +267,7 @@ pub fn build_project(
             .collect(),
         bindings,
         http,
+        socket,
         dependencies,
         hash: ManifestHash {
             algorithm: "sha256".to_string(),
@@ -594,6 +627,90 @@ fn parse_http_section(root: &toml::Table, app_type: &str) -> anyhow::Result<Opti
     Ok(Some(ManifestHttp {
         port,
         max_body_bytes,
+    }))
+}
+
+fn parse_socket_section(
+    root: &toml::Table,
+    app_type: &str,
+) -> anyhow::Result<Option<ManifestSocket>> {
+    let socket = root.get("socket");
+
+    if app_type != "socket" {
+        if socket.is_some() {
+            return Err(anyhow!(
+                "socket section is only allowed when type is \"socket\""
+            ));
+        }
+        return Ok(None);
+    }
+
+    let table = socket
+        .and_then(TomlValue::as_table)
+        .ok_or_else(|| anyhow!("type=\"socket\" requires [socket] table"))?;
+
+    let protocol_raw = table
+        .get("protocol")
+        .and_then(TomlValue::as_str)
+        .ok_or_else(|| anyhow!("socket.protocol is required when type=\"socket\""))?;
+    let protocol = match protocol_raw {
+        "udp" => ManifestSocketProtocol::Udp,
+        "tcp" => ManifestSocketProtocol::Tcp,
+        "both" => ManifestSocketProtocol::Both,
+        _ => {
+            return Err(anyhow!(
+                "socket.protocol must be one of: udp, tcp, both (got: {protocol_raw})"
+            ));
+        }
+    };
+
+    let direction_raw = table
+        .get("direction")
+        .and_then(TomlValue::as_str)
+        .ok_or_else(|| anyhow!("socket.direction is required when type=\"socket\""))?;
+    let direction = match direction_raw {
+        "inbound" => ManifestSocketDirection::Inbound,
+        "outbound" => ManifestSocketDirection::Outbound,
+        "both" => ManifestSocketDirection::Both,
+        _ => {
+            return Err(anyhow!(
+                "socket.direction must be one of: inbound, outbound, both (got: {direction_raw})"
+            ));
+        }
+    };
+
+    let listen_addr = table
+        .get("listen_addr")
+        .and_then(TomlValue::as_str)
+        .ok_or_else(|| anyhow!("socket.listen_addr is required when type=\"socket\""))?
+        .trim()
+        .to_string();
+    if listen_addr.is_empty() {
+        return Err(anyhow!(
+            "socket.listen_addr must be a valid IP address (got empty value)"
+        ));
+    }
+    listen_addr.parse::<IpAddr>().map_err(|err| {
+        anyhow!("socket.listen_addr must be a valid IP address (got '{listen_addr}'): {err}")
+    })?;
+
+    let raw_port = table
+        .get("listen_port")
+        .and_then(TomlValue::as_integer)
+        .ok_or_else(|| anyhow!("socket.listen_port is required when type=\"socket\""))?;
+    let listen_port = u16::try_from(raw_port)
+        .map_err(|_| anyhow!("socket.listen_port must be in range 1..=65535 (got {raw_port})"))?;
+    if listen_port == 0 {
+        return Err(anyhow!(
+            "socket.listen_port must be in range 1..=65535 (got 0)"
+        ));
+    }
+
+    Ok(Some(ManifestSocket {
+        protocol,
+        direction,
+        listen_addr,
+        listen_port,
     }))
 }
 
@@ -1334,6 +1451,198 @@ remote = "127.0.0.1:4443"
             let err = build_project(None, "default", &root)
                 .expect_err("invalid max_body_bytes must fail");
             assert!(err.to_string().contains("http.max_body_bytes"));
+
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn build_succeeds_for_socket_type_with_socket_section() {
+        let root = new_temp_dir("socket-type-valid");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-socket"
+main = "build/app.wasm"
+type = "socket"
+
+[socket]
+protocol = "udp"
+direction = "inbound"
+listen_addr = "0.0.0.0"
+listen_port = 514
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-socket");
+
+        let output = build_project(None, "default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        let socket = manifest
+            .socket
+            .as_ref()
+            .expect("socket section should be emitted");
+        assert!(matches!(socket.protocol, ManifestSocketProtocol::Udp));
+        assert!(matches!(socket.direction, ManifestSocketDirection::Inbound));
+        assert_eq!(socket.listen_addr, "0.0.0.0");
+        assert_eq!(socket.listen_port, 514);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_socket_type_without_socket_section() {
+        let root = new_temp_dir("socket-type-missing-section");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-socket"
+main = "build/app.wasm"
+type = "socket"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-socket");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("type=socket without [socket] must fail");
+        assert!(
+            err.to_string()
+                .contains("type=\"socket\" requires [socket] table")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_socket_section_for_non_socket_type() {
+        for (app_type, app_type_extra) in [("cli", ""), ("http", "[http]\nport = 18080\n")] {
+            let root = new_temp_dir(&format!("socket-section-non-socket-{app_type}"));
+            write_imago_toml(
+                &root,
+                &format!(
+                    r#"
+name = "svc-{app_type}"
+main = "build/app.wasm"
+type = "{app_type}"
+
+{app_type_extra}
+
+[socket]
+protocol = "udp"
+direction = "inbound"
+listen_addr = "0.0.0.0"
+listen_port = 514
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#
+                ),
+            );
+            write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+            let err = build_project(None, "default", &root)
+                .expect_err("build must fail when non-socket type uses [socket]");
+            assert!(
+                err.to_string()
+                    .contains("socket section is only allowed when type is \"socket\"")
+            );
+
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn build_rejects_invalid_socket_section_values() {
+        let invalid_cases = [
+            (
+                "bad-protocol",
+                r#"
+name = "svc"
+main = "build/app.wasm"
+type = "socket"
+
+[socket]
+protocol = "icmp"
+direction = "inbound"
+listen_addr = "0.0.0.0"
+listen_port = 514
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+                "socket.protocol must be one of",
+            ),
+            (
+                "bad-direction",
+                r#"
+name = "svc"
+main = "build/app.wasm"
+type = "socket"
+
+[socket]
+protocol = "udp"
+direction = "sideways"
+listen_addr = "0.0.0.0"
+listen_port = 514
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+                "socket.direction must be one of",
+            ),
+            (
+                "bad-listen-addr",
+                r#"
+name = "svc"
+main = "build/app.wasm"
+type = "socket"
+
+[socket]
+protocol = "udp"
+direction = "inbound"
+listen_addr = "not-an-ip"
+listen_port = 514
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+                "socket.listen_addr must be a valid IP address",
+            ),
+            (
+                "bad-listen-port",
+                r#"
+name = "svc"
+main = "build/app.wasm"
+type = "socket"
+
+[socket]
+protocol = "udp"
+direction = "inbound"
+listen_addr = "0.0.0.0"
+listen_port = 0
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+                "socket.listen_port must be in range",
+            ),
+        ];
+
+        for (suffix, body, expected) in invalid_cases {
+            let root = new_temp_dir(&format!("socket-invalid-{suffix}"));
+            write_imago_toml(&root, body);
+            write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+            let err = build_project(None, "default", &root).expect_err("invalid socket section");
+            assert!(
+                err.to_string().contains(expected),
+                "unexpected error for {suffix}: {err}"
+            );
 
             let _ = fs::remove_dir_all(root);
         }
