@@ -36,7 +36,7 @@
 7. `ServiceSupervisor::new`（manager control socket 起動）
 8. `Orchestrator::new`
 9. `build_server` で WebTransport サーバ構築
-10. `Orchestrator::restore_active_services_on_boot`（`active_release` を持つ service を best-effort で自動復元）
+10. `Orchestrator::restore_active_services_on_boot`（`restart_policy=always` かつ `active_release` を持つ service を best-effort で自動復元）
 11. `ProtocolHandler::new`
 12. maintenance loop 起動
 13. `accept` ループで session task を `tokio::spawn`
@@ -231,7 +231,8 @@ spawn 遷移前 cancel 成立時:
   - release の `manifest.json` 再読込
   - `supervisor.start`
 - `restore_active_services_on_boot()`
-  - `services/<name>/active_release` を走査
+  - `services/<name>/restart_policy` と `services/<name>/active_release` を走査
+  - `restart_policy=always` の service のみ対象
   - service 名昇順で逐次起動
   - service 単位の失敗を集計し、他 service の復元を継続（best-effort）
 - `stop(payload)`
@@ -245,7 +246,9 @@ deploy 経路の要点:
 - `manifest.main` は相対パスのみ許可し、絶対/`..`/Windows prefix を拒否
 - release ID は `sha256(artifact_digest文字列)` の 64 hex を採用（16桁切り詰めはしない）
 - `expected_current_release` は CAS で検証（`any` は比較スキップ、不一致は `E_PRECONDITION_FAILED`）
-- `restart_policy` は `never` のみ受理し、他値は `E_BAD_REQUEST`
+- `restart_policy` は `never` / `on-failure` / `always` / `unless-stopped` を受理し、未知値は `E_BAD_REQUEST`
+- deploy 成功時に `services/<name>/restart_policy` を更新する
+- manager 起動時の復元対象は `restart_policy=always` の service のみ
 - `services/<name>/<release_hash>/` 配置
 - 旧 release cleanup
 - release 配置は `staging -> release` を安全な swap で実施し、失敗時は backup から復元する
@@ -485,7 +488,7 @@ flowchart TD
 
 既知制約:
 
-- service の実行中状態は in-memory（再起動で消える）。ただし `active_release` を持つ service は起動時に自動復元する
+- service の実行中状態は in-memory（再起動で消える）。ただし `restart_policy=always` かつ `active_release` を持つ service は起動時に自動復元する
 - upload session index も in-memory（再起動跨ぎ継続なし）
 - `state.request` は短命 operation のみ
 - event 永続化/再送なし

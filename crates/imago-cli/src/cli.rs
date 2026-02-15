@@ -13,6 +13,8 @@ pub struct Cli {
 pub enum Commands {
     Build(BuildArgs),
     Deploy(DeployArgs),
+    Run(RunArgs),
+    Stop(StopArgs),
     Logs(LogsArgs),
     Certs(CertsSubcommandArgs),
 }
@@ -28,6 +30,33 @@ pub struct BuildArgs {
 
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct DeployArgs {
+    #[arg(long, value_name = "ENV_NAME")]
+    pub env: Option<String>,
+
+    #[arg(long, value_name = "TARGET_NAME")]
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct RunArgs {
+    #[arg(value_name = "SERVICE_NAME")]
+    pub name: Option<String>,
+
+    #[arg(long, value_name = "ENV_NAME")]
+    pub env: Option<String>,
+
+    #[arg(long, value_name = "TARGET_NAME")]
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct StopArgs {
+    #[arg(value_name = "SERVICE_NAME")]
+    pub name: Option<String>,
+
+    #[arg(long)]
+    pub force: bool,
+
     #[arg(long, value_name = "ENV_NAME")]
     pub env: Option<String>,
 
@@ -170,6 +199,77 @@ mod tests {
                     process_id: None,
                     follow: false,
                     tail: 200,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_run_with_defaults() {
+        let cli = Cli::try_parse_from(["imago", "run"]).expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Commands::Run(RunArgs {
+                    name: None,
+                    env: None,
+                    target: None,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_run_with_name_env_target() {
+        let cli =
+            Cli::try_parse_from(["imago", "run", "svc-a", "--env", "prod", "--target", "edge"])
+                .expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Commands::Run(RunArgs {
+                    name: Some("svc-a".to_string()),
+                    env: Some("prod".to_string()),
+                    target: Some("edge".to_string()),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_stop_with_defaults() {
+        let cli = Cli::try_parse_from(["imago", "stop"]).expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Commands::Stop(StopArgs {
+                    name: None,
+                    force: false,
+                    env: None,
+                    target: None,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_stop_with_name_force_env_target() {
+        let cli = Cli::try_parse_from([
+            "imago", "stop", "svc-a", "--force", "--env", "prod", "--target", "edge",
+        ])
+        .expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Commands::Stop(StopArgs {
+                    name: Some("svc-a".to_string()),
+                    force: true,
+                    env: Some("prod".to_string()),
+                    target: Some("edge".to_string()),
                 }),
             }
         );
