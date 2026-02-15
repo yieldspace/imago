@@ -14,7 +14,7 @@ pub use artifact_store::ArtifactStore;
 /// Re-exports for command operation state management.
 pub use operation_state::{OperationManager, SpawnTransition};
 /// Re-export of deployment/run orchestration entry point.
-pub use orchestrator::Orchestrator;
+pub use orchestrator::{Orchestrator, RestoreActiveServicesSummary, RestoreFailure};
 /// Re-exports for service supervision primitives.
 pub use service_supervisor::{
     RunningStatus, ServiceLaunch, ServiceLogEvent, ServiceLogStream, ServiceLogSubscription,

@@ -17,7 +17,6 @@
 対象外:
 
 - restart policy の高度化
-- 再起動跨ぎの service 復元
 - event 永続化/再送
 
 ## 2. プロセス起動とランタイム初期化
@@ -36,13 +35,14 @@
 6. `OperationManager::new`
 7. `ServiceSupervisor::new`（manager control socket 起動）
 8. `Orchestrator::new`
-9. `ProtocolHandler::new`
-10. maintenance loop 起動
-11. `build_server` で WebTransport サーバ構築
-12. `accept` ループで session task を `tokio::spawn`
-13. runner モード:
-14. stdin から `RunnerBootstrap` を読込
-15. `create_runtime_backend`（`runtime-wasmtime` 有効時は `WasmRuntime::new`） + component 実行
+9. `build_server` で WebTransport サーバ構築
+10. `Orchestrator::restore_active_services_on_boot`（`active_release` を持つ service を best-effort で自動復元）
+11. `ProtocolHandler::new`
+12. maintenance loop 起動
+13. `accept` ループで session task を `tokio::spawn`
+14. runner モード:
+15. stdin から `RunnerBootstrap` を読込
+16. `create_runtime_backend`（`runtime-wasmtime` 有効時は `WasmRuntime::new`） + component 実行
 
 ```mermaid
 flowchart TD
@@ -54,12 +54,13 @@ flowchart TD
   E --> G["ServiceSupervisor"]
   F --> H["Orchestrator"]
   G --> H
-  H --> I["ProtocolHandler"]
-  I --> J["maintenance loop"]
-  I --> K["WebTransport server"]
-  K --> L["session task"]
-  D -->|runner| M["RunnerBootstrap(from stdin)"]
-  M --> N["create_runtime_backend + run component"]
+  H --> I["build_server"]
+  I --> J["boot restore(active_release)"]
+  J --> K["ProtocolHandler"]
+  K --> L["maintenance loop"]
+  K --> M["session task"]
+  D -->|runner| O["RunnerBootstrap(from stdin)"]
+  O --> P["create_runtime_backend + run component"]
 ```
 
 ## 3. モジュール責務マップ
@@ -229,6 +230,10 @@ spawn 遷移前 cancel 成立時:
   - `active_release` 読込
   - release の `manifest.json` 再読込
   - `supervisor.start`
+- `restore_active_services_on_boot()`
+  - `services/<name>/active_release` を走査
+  - service 名昇順で逐次起動
+  - service 単位の失敗を集計し、他 service の復元を継続（best-effort）
 - `stop(payload)`
   - `supervisor.stop`
 
@@ -472,14 +477,13 @@ flowchart TD
 
 既知制約:
 
-- service 管理は in-memory（再起動で消える）
+- service の実行中状態は in-memory（再起動で消える）。ただし `active_release` を持つ service は起動時に自動復元する
 - upload session index も in-memory（再起動跨ぎ継続なし）
 - `state.request` は短命 operation のみ
 - event 永続化/再送なし
 
 拡張候補:
 
-- 再起動時 service 自動復元
 - restart policy/backoff 追加
 - artifact index 永続化
 - 長期 service 状態照会 API
@@ -567,3 +571,11 @@ flowchart TD
 - `imagod-runtime` に feature `runtime-wasmtime` を追加した（default ON）。
 - `runtime-wasmtime` OFF 時は、runner が `E_INTERNAL` / `stage=runner.process` で「runtime backend 未有効」を返す。
 - `imagod-runtime::WasmRuntime` は `runtime-wasmtime` 有効時のみ再exportを維持する。
+
+## 実装反映ノート（Boot Restore / 2026-02-14）
+
+- manager 起動時に `Orchestrator::restore_active_services_on_boot` を実行する。
+- `build_server` の初期化成功後に復元を開始し、listen 初期化失敗時の孤児ランナー発生を防ぐ。
+- 復元対象は `storage_root/services/<service>/active_release` が存在し、非空文字列の service のみ。
+- 復元は service 名昇順で逐次実行し、個別失敗は `RestoreFailure` として集計して継続する。
+- manager は復元結果（成功/失敗/集計）をログ出力し、失敗があっても server 起動を継続する。

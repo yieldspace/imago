@@ -55,6 +55,37 @@ async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyhow::Error> 
     )
     .map_err(anyhow::Error::new)?;
     let orchestrator = Orchestrator::new(&config.storage_root, artifacts.clone(), supervisor);
+    let mut server = build_server(&config).map_err(anyhow::Error::new)?;
+    match orchestrator.restore_active_services_on_boot().await {
+        Ok(summary) => {
+            for started in &summary.started {
+                eprintln!(
+                    "boot restore started name={} release={}",
+                    started.service_name, started.release_hash
+                );
+            }
+            for failed in &summary.failed {
+                eprintln!(
+                    "boot restore failed name={} code={:?} stage={} message={}",
+                    failed.service_name,
+                    failed.error.code,
+                    failed.error.stage,
+                    failed.error.message
+                );
+            }
+            eprintln!(
+                "boot restore summary started={} failed={}",
+                summary.started.len(),
+                summary.failed.len()
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "boot restore scan failed code={:?} stage={} message={}",
+                err.code, err.stage, err.message
+            );
+        }
+    }
 
     let handler = ProtocolHandler::new(config.clone(), artifacts, operations, orchestrator);
 
@@ -106,7 +137,6 @@ async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyhow::Error> 
         }
     });
 
-    let mut server = build_server(&config).map_err(anyhow::Error::new)?;
     eprintln!("imagod listening on {}", config.listen_addr);
     let mut shutdown_signal = std::pin::pin!(tokio::signal::ctrl_c());
     let mut session_tasks = tokio::task::JoinSet::new();
