@@ -235,6 +235,13 @@
 - `restart_policy`
 - `auto_rollback`（default `true`）
 
+`restart_policy` の運用値:
+
+- `never`
+- `on-failure`
+- `always`
+- `unless-stopped`
+
 `RunCommandPayload`:
 
 - `name`

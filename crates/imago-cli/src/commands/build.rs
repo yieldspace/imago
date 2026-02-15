@@ -17,6 +17,10 @@ use crate::{cli::BuildArgs, commands::CommandResult};
 const DEFAULT_TARGET_NAME: &str = "default";
 const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_HTTP_MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
+const DEFAULT_RESTART_POLICY: &str = "never";
+const RESTART_POLICY_ON_FAILURE: &str = "on-failure";
+const RESTART_POLICY_ALWAYS: &str = "always";
+const RESTART_POLICY_UNLESS_STOPPED: &str = "unless-stopped";
 
 #[derive(Debug, Clone)]
 pub struct TargetConfig {
@@ -75,6 +79,7 @@ pub struct BuildOutput {
     pub manifest_path: PathBuf,
     pub manifest_bytes: Vec<u8>,
     pub target: TargetConfig,
+    pub restart_policy: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +172,16 @@ pub fn load_target_config(
     parse_target(&root, target_name, project_root)
 }
 
+pub fn load_service_name(env: Option<&str>, project_root: &Path) -> anyhow::Result<String> {
+    if let Some(env_name) = env {
+        validate_env_name(env_name)?;
+    }
+    let root = load_resolved_toml(project_root, env)?;
+    let name = required_string(&root, "name")?;
+    validate_service_name(&name)?;
+    Ok(name)
+}
+
 pub fn build_project(
     env: Option<&str>,
     target_name: &str,
@@ -189,6 +204,7 @@ pub fn build_project(
     let app_type = required_string(&root, "type")?;
     validate_app_type(&app_type)?;
     let http = parse_http_section(&root, &app_type)?;
+    let restart_policy = parse_restart_policy(&root)?;
 
     let vars = parse_string_table(root.get("vars"), "vars")?;
     let bindings = parse_bindings(root.get("bindings"))?;
@@ -252,6 +268,7 @@ pub fn build_project(
         manifest_path,
         manifest_bytes,
         target,
+        restart_policy,
     })
 }
 
@@ -286,7 +303,42 @@ fn load_resolved_toml(project_root: &Path, env: Option<&str>) -> anyhow::Result<
         }
     }
 
+    if let Some(runtime) = root.get("runtime").and_then(TomlValue::as_table)
+        && runtime.get("restart_policy").is_some()
+    {
+        return Err(anyhow!(
+            "runtime.restart_policy is no longer supported; use top-level restart"
+        ));
+    }
+
     Ok(root)
+}
+
+fn parse_restart_policy(root: &toml::Table) -> anyhow::Result<String> {
+    let Some(raw) = root.get("restart") else {
+        return Ok(DEFAULT_RESTART_POLICY.to_string());
+    };
+    let value = raw
+        .as_str()
+        .ok_or_else(|| anyhow!("imago.toml key 'restart' must be a string"))?
+        .trim()
+        .to_string();
+    if !is_supported_restart_policy(&value) {
+        return Err(anyhow!(
+            "imago.toml key 'restart' must be one of: never, on-failure, always, unless-stopped (got: {value})"
+        ));
+    }
+    Ok(value)
+}
+
+fn is_supported_restart_policy(value: &str) -> bool {
+    matches!(
+        value,
+        DEFAULT_RESTART_POLICY
+            | RESTART_POLICY_ON_FAILURE
+            | RESTART_POLICY_ALWAYS
+            | RESTART_POLICY_UNLESS_STOPPED
+    )
 }
 
 fn parse_build_command(root: &toml::Table) -> anyhow::Result<Option<BuildCommand>> {
@@ -441,7 +493,7 @@ fn required_string(root: &toml::Table, key: &str) -> anyhow::Result<String> {
     Ok(text)
 }
 
-fn validate_service_name(name: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_service_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty() {
         return Err(anyhow!("name must not be empty"));
     }
@@ -2028,6 +2080,132 @@ port = 18080
             output.manifest_path,
             PathBuf::from("build/manifest.prod.json")
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_defaults_restart_policy_to_never() {
+        let root = new_temp_dir("restart-default-never");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let output = build_project(None, "default", &root).expect("build should succeed");
+        assert_eq!(output.restart_policy, "never");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_accepts_supported_restart_policies() {
+        for policy in ["never", "on-failure", "always", "unless-stopped"] {
+            let root = new_temp_dir(&format!("restart-policy-{policy}"));
+            write_imago_toml(
+                &root,
+                &format!(
+                    r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+restart = "{policy}"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+                ),
+            );
+            write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+            let output = build_project(None, "default", &root).expect("build should succeed");
+            assert_eq!(output.restart_policy, policy);
+
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn build_rejects_invalid_restart_policy() {
+        let root = new_temp_dir("restart-policy-invalid");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+restart = "sometimes"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err =
+            build_project(None, "default", &root).expect_err("invalid restart policy should fail");
+        assert!(err.to_string().contains("imago.toml key 'restart'"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_legacy_runtime_restart_policy() {
+        let root = new_temp_dir("runtime-restart-policy-legacy");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[runtime]
+restart_policy = "never"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("legacy runtime.restart_policy should fail");
+        assert!(err.to_string().contains("runtime.restart_policy"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_service_name_uses_env_override() {
+        let root = new_temp_dir("load-service-name-env");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-default"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+
+[env.prod]
+name = "svc-prod"
+"#,
+        );
+
+        let default_name = load_service_name(None, &root).expect("default name should load");
+        let env_name = load_service_name(Some("prod"), &root).expect("env name should load");
+
+        assert_eq!(default_name, "svc-default");
+        assert_eq!(env_name, "svc-prod");
 
         let _ = fs::remove_dir_all(root);
     }

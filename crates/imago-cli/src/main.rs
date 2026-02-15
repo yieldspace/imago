@@ -9,6 +9,8 @@ fn dispatch(cli: Cli) -> CommandResult {
     match cli.command {
         Commands::Build(args) => commands::build::run(args),
         Commands::Deploy(args) => commands::deploy::run(args),
+        Commands::Run(args) => commands::run::run(args),
+        Commands::Stop(args) => commands::stop::run(args),
         Commands::Logs(args) => commands::logs::run(args),
         Commands::Certs(CertsSubcommandArgs { command }) => match command {
             CertsCommands::Generate(args) => commands::certs::run_generate(args),
@@ -21,6 +23,8 @@ fn dispatch_with_project_root(cli: Cli, project_root: &std::path::Path) -> Comma
     match cli.command {
         Commands::Build(args) => commands::build::run_with_project_root(args, project_root),
         Commands::Deploy(args) => commands::deploy::run_with_project_root(args, project_root),
+        Commands::Run(args) => commands::run::run_with_project_root(args, project_root),
+        Commands::Stop(args) => commands::stop::run_with_project_root(args, project_root),
         Commands::Logs(args) => commands::logs::run_with_project_root(args, project_root),
         Commands::Certs(CertsSubcommandArgs { command }) => match command {
             CertsCommands::Generate(args) => commands::certs::run_generate(args),
@@ -56,7 +60,7 @@ fn install_rustls_provider() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{BuildArgs, DeployArgs};
+    use crate::cli::{BuildArgs, DeployArgs, RunArgs, StopArgs};
     use std::path::PathBuf;
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
@@ -98,6 +102,45 @@ mod tests {
         let result = dispatch_with_project_root(
             Cli {
                 command: Commands::Deploy(DeployArgs {
+                    env: None,
+                    target: None,
+                }),
+            },
+            &root,
+        );
+
+        assert_eq!(result.exit_code, 2);
+        assert!(result.stderr.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dispatches_run_and_returns_non_zero_without_imago_toml() {
+        let root = new_temp_dir("dispatch-run");
+        let result = dispatch_with_project_root(
+            Cli {
+                command: Commands::Run(RunArgs {
+                    name: None,
+                    env: None,
+                    target: None,
+                }),
+            },
+            &root,
+        );
+
+        assert_eq!(result.exit_code, 2);
+        assert!(result.stderr.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dispatches_stop_and_returns_non_zero_without_imago_toml() {
+        let root = new_temp_dir("dispatch-stop");
+        let result = dispatch_with_project_root(
+            Cli {
+                command: Commands::Stop(StopArgs {
+                    name: None,
+                    force: false,
                     env: None,
                     target: None,
                 }),

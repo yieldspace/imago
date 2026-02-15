@@ -20,7 +20,7 @@
 - manager/runner のマルチプロセス実行制御（1 service = 1 runner process）
 - manager-runner / runner-runner の IPC（DBus over UDS, trait 抽象）
 - runner stdout/stderr のパイプ回収とメモリ上限付きバッファ保持
-- manager 起動時の active release service 自動復元（best-effort）
+- manager 起動時の `restart_policy=always` service 自動復元（best-effort）
 
 `imagod` の非責務（または未実装）:
 
@@ -86,7 +86,8 @@ epoch_tick_interval_ms = 50
 ## 実装反映ノート（Boot Restore / 2026-02-14）
 
 - manager 起動時に `storage_root/services/<service>/active_release` を走査し、service 名昇順で自動起動する。
-- 復元対象は `active_release` が存在し、かつ非空文字列の service のみ。
+- 復元対象は `restart_policy` が `always` で、かつ `active_release` が存在する service のみ。
+- `restart_policy` ファイルが欠落している service は `never` として扱い、起動しない。
 - 一部 service の復元失敗はログへ記録して起動を継続する（best-effort）。
 ## 実装反映ノート（Storage Root Default Matrix / 2026-02-14）
 

@@ -33,7 +33,7 @@
 - `build`
 - `capabilities`
 - `limits`
-- `runtime`
+- `restart`
 - `vars`
 - `assets`
 - `dependencies`
@@ -77,6 +77,15 @@
 - `type != "http"` で `[http]` を指定した場合は設定不整合として build エラーにする。
 - `imago build` はこの設定を `manifest.http.port` / `manifest.http.max_body_bytes` に正規化して出力する。
 
+## `restart`（service 再起動方針）
+
+- `restart` はトップレベルキーとして指定する。
+- 許可値は `never` / `on-failure` / `always` / `unless-stopped`。
+- 未指定時の既定値は `never`。
+- `imagod` 起動時の自動復元対象は `restart="always"` の service のみ。
+- `on-failure` / `unless-stopped` の高度な再起動戦略は現行未実装で、値の受理・保存のみ行う。
+- 旧キー `runtime.restart_policy` は受理しない（設定エラー）。
+
 <a id="capability-model"></a>
 ## 権限モデル
 
@@ -101,7 +110,7 @@
 | キー | 既定値 | 備考 |
 |---|---|---|
 | `limits.shutdown_timeout` | `30s` | graceful 停止待ち時間 |
-| `runtime.restart_policy` | `never` | MVP では詳細パラメータを固定しない |
+| `restart` | `never` | `imago.toml` のトップレベルキー |
 
 ## バリデーション要件
 
@@ -110,6 +119,8 @@
 - `type="http"` かつ `http.port` 欠落はエラー。
 - `type="http"` かつ `http.max_body_bytes` が範囲外（`1..=67108864`）はエラー。
 - `type!="http"` かつ `[http]` 指定はエラー。
+- `restart` が許可値（`never` / `on-failure` / `always` / `unless-stopped`）以外ならエラー。
+- `runtime.restart_policy` を指定した場合はエラー（互換受理なし）。
 - `main` が存在しない場合はビルド時エラー。
 - `shutdown_timeout` が 0 以下はエラー。
 - `privileged = true` かつ `capabilities` 指定ありでもエラーにはしない（`capabilities` を無視）。
@@ -140,10 +151,11 @@
 - `--env <name>` は manifest 出力先と `.env.<name>` 解決の双方で同一バリデーションを適用し、path traversal を拒否する。
 - `target.<name>.ca_cert` / `client_cert` / `client_key` は path traversal と不正区切りを拒否し、相対指定を `project_root` 基準の絶対パスへ解決する。
 - `imagod.storage_root` の既定値は OS 別（Linux=`/var/lib/imago`, macOS=`/usr/local/var/imago`, Windows=`C:\ProgramData\imago`, その他=`/var/lib/imago`）にし、ビルド時環境変数 `IMAGOD_STORAGE_ROOT_DEFAULT` で上書きできる。`imagod.toml` の明示値を最優先する。
+- `restart` はトップレベルキーのみ受理し、`runtime.restart_policy` は移行エラーにする。
 
 ## `target.<name>` の接続キー（deploy 通信）
 
-`imago deploy` は `target.<name>` から下記キーを読む。
+`imago deploy` / `imago run` / `imago stop` / `imago logs` は `target.<name>` から下記キーを読む。
 
 - `remote`: `host` または `host:port`（`https://` 省略可）
   - IPv6 は `::1`, `[::1]`, `[::1]:4443`, `https://[::1]:4443` を許可
