@@ -55,6 +55,7 @@ async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyhow::Error> 
     )
     .map_err(anyhow::Error::new)?;
     let orchestrator = Orchestrator::new(&config.storage_root, artifacts.clone(), supervisor);
+    let mut server = build_server(&config).map_err(anyhow::Error::new)?;
     match orchestrator.restore_active_services_on_boot().await {
         Ok(summary) => {
             for started in &summary.started {
@@ -136,7 +137,6 @@ async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyhow::Error> 
         }
     });
 
-    let mut server = build_server(&config).map_err(anyhow::Error::new)?;
     eprintln!("imagod listening on {}", config.listen_addr);
     let mut shutdown_signal = std::pin::pin!(tokio::signal::ctrl_c());
     let mut session_tasks = tokio::task::JoinSet::new();

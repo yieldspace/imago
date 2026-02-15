@@ -35,10 +35,10 @@
 6. `OperationManager::new`
 7. `ServiceSupervisor::new`（manager control socket 起動）
 8. `Orchestrator::new`
-9. `Orchestrator::restore_active_services_on_boot`（`active_release` を持つ service を best-effort で自動復元）
-10. `ProtocolHandler::new`
-11. maintenance loop 起動
-12. `build_server` で WebTransport サーバ構築
+9. `build_server` で WebTransport サーバ構築
+10. `Orchestrator::restore_active_services_on_boot`（`active_release` を持つ service を best-effort で自動復元）
+11. `ProtocolHandler::new`
+12. maintenance loop 起動
 13. `accept` ループで session task を `tokio::spawn`
 14. runner モード:
 15. stdin から `RunnerBootstrap` を読込
@@ -54,11 +54,11 @@ flowchart TD
   E --> G["ServiceSupervisor"]
   F --> H["Orchestrator"]
   G --> H
-  H --> I["boot restore(active_release)"]
-  I --> J["ProtocolHandler"]
-  J --> K["maintenance loop"]
-  J --> L["WebTransport server"]
-  L --> M["session task"]
+  H --> I["build_server"]
+  I --> J["boot restore(active_release)"]
+  J --> K["ProtocolHandler"]
+  K --> L["maintenance loop"]
+  K --> M["session task"]
   D -->|runner| O["RunnerBootstrap(from stdin)"]
   O --> P["create_runtime_backend + run component"]
 ```
@@ -575,6 +575,7 @@ flowchart TD
 ## 実装反映ノート（Boot Restore / 2026-02-14）
 
 - manager 起動時に `Orchestrator::restore_active_services_on_boot` を実行する。
+- `build_server` の初期化成功後に復元を開始し、listen 初期化失敗時の孤児ランナー発生を防ぐ。
 - 復元対象は `storage_root/services/<service>/active_release` が存在し、非空文字列の service のみ。
 - 復元は service 名昇順で逐次実行し、個別失敗は `RestoreFailure` として集計して継続する。
 - manager は復元結果（成功/失敗/集計）をログ出力し、失敗があっても server 起動を継続する。
