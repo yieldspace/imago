@@ -279,7 +279,7 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
 fn create_runtime_backend() -> Result<Arc<dyn ComponentRuntime>, ImagodError> {
     #[cfg(feature = "runtime-wasmtime")]
     {
-        return Ok(Arc::new(WasmRuntime::new()?));
+        Ok(Arc::new(WasmRuntime::new()?))
     }
 
     #[cfg(not(feature = "runtime-wasmtime"))]
