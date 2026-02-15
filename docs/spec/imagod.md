@@ -48,7 +48,7 @@
 
 ```toml
 listen_addr = "[::]:4443"
-storage_root = "/etc/imago"
+storage_root = "/var/lib/imago"
 server_version = "imagod/0.1.0"
 compatibility_date = "2026-02-10"
 
@@ -66,6 +66,8 @@ runner_ready_timeout_secs = 3
 runner_log_buffer_bytes = 262144
 epoch_tick_interval_ms = 50
 ```
+
+`storage_root` の未指定時既定値は OS とビルド時設定で変わる。優先順位と OS 別値は [`config.md`](./config.md) を参照。
 
 詳細は [`config.md`](./config.md) を参照。
 
@@ -86,3 +88,8 @@ epoch_tick_interval_ms = 50
 - manager 起動時に `storage_root/services/<service>/active_release` を走査し、service 名昇順で自動起動する。
 - 復元対象は `active_release` が存在し、かつ非空文字列の service のみ。
 - 一部 service の復元失敗はログへ記録して起動を継続する（best-effort）。
+## 実装反映ノート（Storage Root Default Matrix / 2026-02-14）
+
+- `imagod.toml` の `storage_root` 未指定時既定値を固定 `/etc/imago` から OS 別既定値へ変更した（Linux=`/var/lib/imago`, macOS=`/usr/local/var/imago`, Windows=`C:\ProgramData\imago`, その他=`/var/lib/imago`）。
+- ビルド時環境変数 `IMAGOD_STORAGE_ROOT_DEFAULT` を指定した場合は、その値を `storage_root` 既定値として採用する。
+- `imagod.toml` に `storage_root` を明示した場合は、従来どおり明示値を最優先する。

@@ -225,7 +225,25 @@ fn default_listen_addr() -> String {
 }
 
 fn default_storage_root() -> PathBuf {
-    PathBuf::from("/etc/imago")
+    resolve_default_storage_root(
+        std::env::consts::OS,
+        option_env!("IMAGOD_STORAGE_ROOT_DEFAULT"),
+    )
+}
+
+fn resolve_default_storage_root(target_os: &str, build_override: Option<&str>) -> PathBuf {
+    if let Some(path) = build_override
+        && !path.is_empty()
+    {
+        return PathBuf::from(path);
+    }
+
+    match target_os {
+        "linux" => PathBuf::from("/var/lib/imago"),
+        "macos" => PathBuf::from("/usr/local/var/imago"),
+        "windows" => PathBuf::from(r"C:\ProgramData\imago"),
+        _ => PathBuf::from("/var/lib/imago"),
+    }
 }
 
 fn default_server_version() -> String {
@@ -310,7 +328,6 @@ mod tests {
             "defaults_compatibility_date_when_missing",
             r#"
 listen_addr = "127.0.0.1:4443"
-storage_root = "/tmp/imago"
 server_version = "imagod/test"
 
 [tls]
@@ -321,12 +338,73 @@ client_ca_cert = "ca.crt"
         );
 
         let config = ImagodConfig::load(&path).expect("config should load");
+        assert_eq!(
+            config.storage_root,
+            resolve_default_storage_root(
+                std::env::consts::OS,
+                option_env!("IMAGOD_STORAGE_ROOT_DEFAULT")
+            )
+        );
         assert_eq!(config.compatibility_date, "2026-02-10");
         assert_eq!(config.runtime.max_artifact_size_bytes, 64 * 1024 * 1024);
         assert_eq!(config.runtime.runner_ready_timeout_secs, 3);
         assert_eq!(config.runtime.runner_log_buffer_bytes, 256 * 1024);
 
         cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn uses_explicit_storage_root_when_present() {
+        let path = write_temp_config(
+            "uses_explicit_storage_root_when_present",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago-explicit"
+server_version = "imagod/test"
+
+[tls]
+server_cert = "server.crt"
+server_key = "server.key"
+client_ca_cert = "ca.crt"
+"#,
+        );
+
+        let config = ImagodConfig::load(&path).expect("config should load");
+        assert_eq!(config.storage_root, PathBuf::from("/tmp/imago-explicit"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn resolve_default_storage_root_prefers_build_override() {
+        let resolved = resolve_default_storage_root("linux", Some("/tmp/imago-build-default"));
+        assert_eq!(resolved, PathBuf::from("/tmp/imago-build-default"));
+    }
+
+    #[test]
+    fn resolve_default_storage_root_ignores_empty_build_override() {
+        let resolved = resolve_default_storage_root("linux", Some(""));
+        assert_eq!(resolved, PathBuf::from("/var/lib/imago"));
+    }
+
+    #[test]
+    fn resolve_default_storage_root_uses_os_matrix() {
+        assert_eq!(
+            resolve_default_storage_root("linux", None),
+            PathBuf::from("/var/lib/imago")
+        );
+        assert_eq!(
+            resolve_default_storage_root("macos", None),
+            PathBuf::from("/usr/local/var/imago")
+        );
+        assert_eq!(
+            resolve_default_storage_root("windows", None),
+            PathBuf::from(r"C:\ProgramData\imago")
+        );
+        assert_eq!(
+            resolve_default_storage_root("freebsd", None),
+            PathBuf::from("/var/lib/imago")
+        );
     }
 
     #[test]
