@@ -1,0 +1,6 @@
+/build/*
+!/build/.gitkeep
+/certs/*
+!/certs/.gitkeep
+/.imagod-data/
+/target/

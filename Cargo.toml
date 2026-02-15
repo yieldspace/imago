@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "examples/local-imagod", "examples/local-imagod-http"]
+members = [
+    "crates/*",
+    "examples/local-imagod",
+    "examples/local-imagod-http",
+    "examples/local-imagod-socket",
+]
 
 [workspace.dependencies]
 anyhow = "1.0.101"

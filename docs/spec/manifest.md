@@ -29,6 +29,7 @@
 | `assets` | array | 同梱アセット一覧 |
 | `bindings` | array | service 間呼び出し許可一覧（省略時は `[]`） |
 | `http` | object | `type=http` 時の HTTP 実行設定（`port` 必須） |
+| `socket` | object | `type=socket` 時の socket 実行設定（必須） |
 | `dependencies` | array | 依存解決結果 |
 | `hash` | object | 全体整合性情報 |
 
@@ -73,6 +74,15 @@
 - 旧 manifest 互換のため `http.max_body_bytes` 欠落時は runtime 側で `8388608`（8MiB）として解釈できること。
 - `type!=http` で `http` を含む manifest は不正として拒否する。
 
+## `socket` フィールド
+
+- `socket` は `type=socket` のとき必須。
+- `socket.protocol` は `udp` / `tcp` / `both`。
+- `socket.direction` は `inbound` / `outbound` / `both`。
+- `socket.listen_addr` は IP アドレス文字列（IPv4/IPv6）。
+- `socket.listen_port` は必須で `1..=65535`。
+- `type!=socket` で `socket` を含む manifest は不正として拒否する。
+
 ## 正常例と異常例
 
 - 正常例: [`examples/manifest.valid.json`](./examples/manifest.valid.json)
@@ -88,6 +98,11 @@
 - `type=http` かつ `http.port` 欠落は拒否。
 - `type=http` かつ `http.max_body_bytes` が範囲外（`1..=67108864`）は拒否。
 - `type!=http` かつ `http` 指定は拒否。
+- `type=socket` かつ `socket` 欠落は拒否。
+- `type=socket` かつ `socket.protocol` / `socket.direction` が定義外値なら拒否。
+- `type=socket` かつ `socket.listen_addr` が IP として不正なら拒否。
+- `type=socket` かつ `socket.listen_port` が範囲外（`1..=65535`）なら拒否。
+- `type!=socket` かつ `socket` 指定は拒否。
 - `hash.algorithm != "sha256"` は拒否。
 - `hash.targets` が不足または重複なら拒否。
 - `secrets` は key-value オブジェクトのみ許可。
@@ -107,3 +122,4 @@
 - `hash.value` の wasm 対象は `manifest.main` が指す materialize 後ファイルとする。
 - CLI は `imago.toml` の `[[bindings]]` を `manifest.bindings[]` に正規化して出力する。
 - CLI は `type=http` 時のみ `imago.toml` の `[http].port` / `[http].max_body_bytes` を `manifest.http.port` / `manifest.http.max_body_bytes` へ正規化して出力する。
+- CLI は `type=socket` 時のみ `imago.toml` の `[socket].protocol` / `[socket].direction` / `[socket].listen_addr` / `[socket].listen_port` を `manifest.socket.*` へ正規化して出力する。

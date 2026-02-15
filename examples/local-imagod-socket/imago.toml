@@ -1,0 +1,19 @@
+name = "local-imagod-socket-app"
+main = "target/wasm32-wasip2/release/local-imagod-socket-app.wasm"
+type = "socket"
+
+[socket]
+protocol = "udp"
+direction = "both"
+listen_addr = "0.0.0.0"
+listen_port = 5000
+
+[build]
+command = "CARGO_TARGET_DIR=target cargo build --target wasm32-wasip2 --release"
+
+[target.default]
+remote = "127.0.0.1:4443"
+server_name = "localhost"
+ca_cert = "certs/ca.crt"
+client_cert = "certs/client.crt"
+client_key = "certs/client.key"
