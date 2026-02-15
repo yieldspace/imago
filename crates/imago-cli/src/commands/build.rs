@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::Read,
+    net::IpAddr,
     path::{Component, Path, PathBuf},
     process::Command,
 };
@@ -17,6 +18,10 @@ use crate::{cli::BuildArgs, commands::CommandResult};
 const DEFAULT_TARGET_NAME: &str = "default";
 const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_HTTP_MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
+const DEFAULT_RESTART_POLICY: &str = "never";
+const RESTART_POLICY_ON_FAILURE: &str = "on-failure";
+const RESTART_POLICY_ALWAYS: &str = "always";
+const RESTART_POLICY_UNLESS_STOPPED: &str = "unless-stopped";
 
 #[derive(Debug, Clone)]
 pub struct TargetConfig {
@@ -75,6 +80,7 @@ pub struct BuildOutput {
     pub manifest_path: PathBuf,
     pub manifest_bytes: Vec<u8>,
     pub target: TargetConfig,
+    pub restart_policy: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +97,8 @@ struct Manifest {
     bindings: Vec<ManifestBinding>,
     #[serde(skip_serializing_if = "Option::is_none")]
     http: Option<ManifestHttp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    socket: Option<ManifestSocket>,
     dependencies: Vec<JsonValue>,
     hash: ManifestHash,
 }
@@ -112,6 +120,34 @@ struct ManifestBinding {
 struct ManifestHttp {
     port: u16,
     max_body_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum ManifestSocketProtocol {
+    #[serde(rename = "udp")]
+    Udp,
+    #[serde(rename = "tcp")]
+    Tcp,
+    #[serde(rename = "both")]
+    Both,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum ManifestSocketDirection {
+    #[serde(rename = "inbound")]
+    Inbound,
+    #[serde(rename = "outbound")]
+    Outbound,
+    #[serde(rename = "both")]
+    Both,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ManifestSocket {
+    protocol: ManifestSocketProtocol,
+    direction: ManifestSocketDirection,
+    listen_addr: String,
+    listen_port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +203,16 @@ pub fn load_target_config(
     parse_target(&root, target_name, project_root)
 }
 
+pub fn load_service_name(env: Option<&str>, project_root: &Path) -> anyhow::Result<String> {
+    if let Some(env_name) = env {
+        validate_env_name(env_name)?;
+    }
+    let root = load_resolved_toml(project_root, env)?;
+    let name = required_string(&root, "name")?;
+    validate_service_name(&name)?;
+    Ok(name)
+}
+
 pub fn build_project(
     env: Option<&str>,
     target_name: &str,
@@ -189,6 +235,8 @@ pub fn build_project(
     let app_type = required_string(&root, "type")?;
     validate_app_type(&app_type)?;
     let http = parse_http_section(&root, &app_type)?;
+    let socket = parse_socket_section(&root, &app_type)?;
+    let restart_policy = parse_restart_policy(&root)?;
 
     let vars = parse_string_table(root.get("vars"), "vars")?;
     let bindings = parse_bindings(root.get("bindings"))?;
@@ -219,6 +267,7 @@ pub fn build_project(
             .collect(),
         bindings,
         http,
+        socket,
         dependencies,
         hash: ManifestHash {
             algorithm: "sha256".to_string(),
@@ -252,6 +301,7 @@ pub fn build_project(
         manifest_path,
         manifest_bytes,
         target,
+        restart_policy,
     })
 }
 
@@ -286,7 +336,42 @@ fn load_resolved_toml(project_root: &Path, env: Option<&str>) -> anyhow::Result<
         }
     }
 
+    if let Some(runtime) = root.get("runtime").and_then(TomlValue::as_table)
+        && runtime.get("restart_policy").is_some()
+    {
+        return Err(anyhow!(
+            "runtime.restart_policy is no longer supported; use top-level restart"
+        ));
+    }
+
     Ok(root)
+}
+
+fn parse_restart_policy(root: &toml::Table) -> anyhow::Result<String> {
+    let Some(raw) = root.get("restart") else {
+        return Ok(DEFAULT_RESTART_POLICY.to_string());
+    };
+    let value = raw
+        .as_str()
+        .ok_or_else(|| anyhow!("imago.toml key 'restart' must be a string"))?
+        .trim()
+        .to_string();
+    if !is_supported_restart_policy(&value) {
+        return Err(anyhow!(
+            "imago.toml key 'restart' must be one of: never, on-failure, always, unless-stopped (got: {value})"
+        ));
+    }
+    Ok(value)
+}
+
+fn is_supported_restart_policy(value: &str) -> bool {
+    matches!(
+        value,
+        DEFAULT_RESTART_POLICY
+            | RESTART_POLICY_ON_FAILURE
+            | RESTART_POLICY_ALWAYS
+            | RESTART_POLICY_UNLESS_STOPPED
+    )
 }
 
 fn parse_build_command(root: &toml::Table) -> anyhow::Result<Option<BuildCommand>> {
@@ -441,7 +526,7 @@ fn required_string(root: &toml::Table, key: &str) -> anyhow::Result<String> {
     Ok(text)
 }
 
-fn validate_service_name(name: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_service_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty() {
         return Err(anyhow!("name must not be empty"));
     }
@@ -542,6 +627,90 @@ fn parse_http_section(root: &toml::Table, app_type: &str) -> anyhow::Result<Opti
     Ok(Some(ManifestHttp {
         port,
         max_body_bytes,
+    }))
+}
+
+fn parse_socket_section(
+    root: &toml::Table,
+    app_type: &str,
+) -> anyhow::Result<Option<ManifestSocket>> {
+    let socket = root.get("socket");
+
+    if app_type != "socket" {
+        if socket.is_some() {
+            return Err(anyhow!(
+                "socket section is only allowed when type is \"socket\""
+            ));
+        }
+        return Ok(None);
+    }
+
+    let table = socket
+        .and_then(TomlValue::as_table)
+        .ok_or_else(|| anyhow!("type=\"socket\" requires [socket] table"))?;
+
+    let protocol_raw = table
+        .get("protocol")
+        .and_then(TomlValue::as_str)
+        .ok_or_else(|| anyhow!("socket.protocol is required when type=\"socket\""))?;
+    let protocol = match protocol_raw {
+        "udp" => ManifestSocketProtocol::Udp,
+        "tcp" => ManifestSocketProtocol::Tcp,
+        "both" => ManifestSocketProtocol::Both,
+        _ => {
+            return Err(anyhow!(
+                "socket.protocol must be one of: udp, tcp, both (got: {protocol_raw})"
+            ));
+        }
+    };
+
+    let direction_raw = table
+        .get("direction")
+        .and_then(TomlValue::as_str)
+        .ok_or_else(|| anyhow!("socket.direction is required when type=\"socket\""))?;
+    let direction = match direction_raw {
+        "inbound" => ManifestSocketDirection::Inbound,
+        "outbound" => ManifestSocketDirection::Outbound,
+        "both" => ManifestSocketDirection::Both,
+        _ => {
+            return Err(anyhow!(
+                "socket.direction must be one of: inbound, outbound, both (got: {direction_raw})"
+            ));
+        }
+    };
+
+    let listen_addr = table
+        .get("listen_addr")
+        .and_then(TomlValue::as_str)
+        .ok_or_else(|| anyhow!("socket.listen_addr is required when type=\"socket\""))?
+        .trim()
+        .to_string();
+    if listen_addr.is_empty() {
+        return Err(anyhow!(
+            "socket.listen_addr must be a valid IP address (got empty value)"
+        ));
+    }
+    listen_addr.parse::<IpAddr>().map_err(|err| {
+        anyhow!("socket.listen_addr must be a valid IP address (got '{listen_addr}'): {err}")
+    })?;
+
+    let raw_port = table
+        .get("listen_port")
+        .and_then(TomlValue::as_integer)
+        .ok_or_else(|| anyhow!("socket.listen_port is required when type=\"socket\""))?;
+    let listen_port = u16::try_from(raw_port)
+        .map_err(|_| anyhow!("socket.listen_port must be in range 1..=65535 (got {raw_port})"))?;
+    if listen_port == 0 {
+        return Err(anyhow!(
+            "socket.listen_port must be in range 1..=65535 (got 0)"
+        ));
+    }
+
+    Ok(Some(ManifestSocket {
+        protocol,
+        direction,
+        listen_addr,
+        listen_port,
     }))
 }
 
@@ -1288,6 +1457,198 @@ remote = "127.0.0.1:4443"
     }
 
     #[test]
+    fn build_succeeds_for_socket_type_with_socket_section() {
+        let root = new_temp_dir("socket-type-valid");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-socket"
+main = "build/app.wasm"
+type = "socket"
+
+[socket]
+protocol = "udp"
+direction = "inbound"
+listen_addr = "0.0.0.0"
+listen_port = 514
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-socket");
+
+        let output = build_project(None, "default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        let socket = manifest
+            .socket
+            .as_ref()
+            .expect("socket section should be emitted");
+        assert!(matches!(socket.protocol, ManifestSocketProtocol::Udp));
+        assert!(matches!(socket.direction, ManifestSocketDirection::Inbound));
+        assert_eq!(socket.listen_addr, "0.0.0.0");
+        assert_eq!(socket.listen_port, 514);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_socket_type_without_socket_section() {
+        let root = new_temp_dir("socket-type-missing-section");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-socket"
+main = "build/app.wasm"
+type = "socket"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-socket");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("type=socket without [socket] must fail");
+        assert!(
+            err.to_string()
+                .contains("type=\"socket\" requires [socket] table")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_socket_section_for_non_socket_type() {
+        for (app_type, app_type_extra) in [("cli", ""), ("http", "[http]\nport = 18080\n")] {
+            let root = new_temp_dir(&format!("socket-section-non-socket-{app_type}"));
+            write_imago_toml(
+                &root,
+                &format!(
+                    r#"
+name = "svc-{app_type}"
+main = "build/app.wasm"
+type = "{app_type}"
+
+{app_type_extra}
+
+[socket]
+protocol = "udp"
+direction = "inbound"
+listen_addr = "0.0.0.0"
+listen_port = 514
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#
+                ),
+            );
+            write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+            let err = build_project(None, "default", &root)
+                .expect_err("build must fail when non-socket type uses [socket]");
+            assert!(
+                err.to_string()
+                    .contains("socket section is only allowed when type is \"socket\"")
+            );
+
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn build_rejects_invalid_socket_section_values() {
+        let invalid_cases = [
+            (
+                "bad-protocol",
+                r#"
+name = "svc"
+main = "build/app.wasm"
+type = "socket"
+
+[socket]
+protocol = "icmp"
+direction = "inbound"
+listen_addr = "0.0.0.0"
+listen_port = 514
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+                "socket.protocol must be one of",
+            ),
+            (
+                "bad-direction",
+                r#"
+name = "svc"
+main = "build/app.wasm"
+type = "socket"
+
+[socket]
+protocol = "udp"
+direction = "sideways"
+listen_addr = "0.0.0.0"
+listen_port = 514
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+                "socket.direction must be one of",
+            ),
+            (
+                "bad-listen-addr",
+                r#"
+name = "svc"
+main = "build/app.wasm"
+type = "socket"
+
+[socket]
+protocol = "udp"
+direction = "inbound"
+listen_addr = "not-an-ip"
+listen_port = 514
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+                "socket.listen_addr must be a valid IP address",
+            ),
+            (
+                "bad-listen-port",
+                r#"
+name = "svc"
+main = "build/app.wasm"
+type = "socket"
+
+[socket]
+protocol = "udp"
+direction = "inbound"
+listen_addr = "0.0.0.0"
+listen_port = 0
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+                "socket.listen_port must be in range",
+            ),
+        ];
+
+        for (suffix, body, expected) in invalid_cases {
+            let root = new_temp_dir(&format!("socket-invalid-{suffix}"));
+            write_imago_toml(&root, body);
+            write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+            let err = build_project(None, "default", &root).expect_err("invalid socket section");
+            assert!(
+                err.to_string().contains(expected),
+                "unexpected error for {suffix}: {err}"
+            );
+
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
     fn build_fails_when_env_file_is_missing() {
         let root = new_temp_dir("env-missing");
         write_imago_toml(
@@ -2028,6 +2389,132 @@ port = 18080
             output.manifest_path,
             PathBuf::from("build/manifest.prod.json")
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_defaults_restart_policy_to_never() {
+        let root = new_temp_dir("restart-default-never");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let output = build_project(None, "default", &root).expect("build should succeed");
+        assert_eq!(output.restart_policy, "never");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_accepts_supported_restart_policies() {
+        for policy in ["never", "on-failure", "always", "unless-stopped"] {
+            let root = new_temp_dir(&format!("restart-policy-{policy}"));
+            write_imago_toml(
+                &root,
+                &format!(
+                    r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+restart = "{policy}"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+                ),
+            );
+            write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+            let output = build_project(None, "default", &root).expect("build should succeed");
+            assert_eq!(output.restart_policy, policy);
+
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn build_rejects_invalid_restart_policy() {
+        let root = new_temp_dir("restart-policy-invalid");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+restart = "sometimes"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err =
+            build_project(None, "default", &root).expect_err("invalid restart policy should fail");
+        assert!(err.to_string().contains("imago.toml key 'restart'"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_legacy_runtime_restart_policy() {
+        let root = new_temp_dir("runtime-restart-policy-legacy");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[runtime]
+restart_policy = "never"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("legacy runtime.restart_policy should fail");
+        assert!(err.to_string().contains("runtime.restart_policy"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_service_name_uses_env_override() {
+        let root = new_temp_dir("load-service-name-env");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-default"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+
+[env.prod]
+name = "svc-prod"
+"#,
+        );
+
+        let default_name = load_service_name(None, &root).expect("default name should load");
+        let env_name = load_service_name(Some("prod"), &root).expect("env name should load");
+
+        assert_eq!(default_name, "svc-default");
+        assert_eq!(env_name, "svc-prod");
 
         let _ = fs::remove_dir_all(root);
     }

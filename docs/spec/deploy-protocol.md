@@ -209,7 +209,10 @@ request:
 - `expected_current_release = "any"` の場合は比較をスキップする。
 - `expected_current_release != "any"` の場合は server 側 `active_release` と完全一致必須。
 - 不一致時は `E_PRECONDITION_FAILED` を返す。
-- `restart_policy` は現行実装では `never` のみ受理し、それ以外は `E_BAD_REQUEST`。
+- `restart_policy` は `never` / `on-failure` / `always` / `unless-stopped` を受理する。
+- 上記以外の値は `E_BAD_REQUEST`。
+- manager 起動時の自動復元対象は `restart_policy="always"` の service のみ（best-effort）。
+- `on-failure` / `unless-stopped` の高度な再起動戦略は現行未実装（値の受理・保存のみ）。
 
 response:
 

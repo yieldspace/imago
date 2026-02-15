@@ -3,12 +3,13 @@
 use std::{
     collections::BTreeMap,
     collections::BTreeSet,
+    net::IpAddr,
     path::{Component, Path, PathBuf},
 };
 
 use imago_protocol::{DeployCommandPayload, ErrorCode, RunCommandPayload, StopCommandPayload};
 use imagod_common::ImagodError;
-use imagod_ipc::{RunnerAppType, ServiceBinding};
+use imagod_ipc::{RunnerAppType, RunnerSocketConfig, ServiceBinding};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::fs;
@@ -22,6 +23,10 @@ use crate::{
 const STAGE_ORCHESTRATE: &str = "orchestration";
 const EXPECTED_CURRENT_RELEASE_ANY: &str = "any";
 const RESTART_POLICY_NEVER: &str = "never";
+const RESTART_POLICY_ON_FAILURE: &str = "on-failure";
+const RESTART_POLICY_ALWAYS: &str = "always";
+const RESTART_POLICY_UNLESS_STOPPED: &str = "unless-stopped";
+const RESTART_POLICY_FILE_NAME: &str = "restart_policy";
 const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_HTTP_MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -34,6 +39,8 @@ struct Manifest {
     app_type: RunnerAppType,
     #[serde(default)]
     http: Option<ManifestHttp>,
+    #[serde(default)]
+    socket: Option<RunnerSocketConfig>,
     #[serde(default)]
     vars: BTreeMap<String, String>,
     #[serde(default)]
@@ -151,7 +158,9 @@ struct PreparedRelease {
     service_root: PathBuf,
     release_hash: String,
     active_file: PathBuf,
+    restart_policy_file: PathBuf,
     previous_release: Option<String>,
+    previous_restart_policy: Option<String>,
     launch: ServiceLaunch,
 }
 
@@ -187,6 +196,7 @@ impl Orchestrator {
         fs::write(&prepared.active_file, prepared.release_hash.as_bytes())
             .await
             .map_err(|e| map_internal(format!("active release update failed: {e}")))?;
+        write_restart_policy(&prepared.restart_policy_file, &payload.restart_policy).await?;
 
         Ok(DeploySummary {
             service_name: prepared.service_name,
@@ -217,7 +227,7 @@ impl Orchestrator {
         })
     }
 
-    /// Restores services with an `active_release` marker at manager boot.
+    /// Restores services marked with `restart_policy=always` at manager boot.
     pub async fn restore_active_services_on_boot(
         &self,
     ) -> Result<RestoreActiveServicesSummary, ImagodError> {
@@ -320,7 +330,9 @@ impl Orchestrator {
         let service_root = self.storage_root.join("services").join(&manifest.name);
         let release_dir = service_root.join(&release_hash);
         let active_file = service_root.join("active_release");
+        let restart_policy_file = service_root.join(RESTART_POLICY_FILE_NAME);
         let previous_release = read_active_release(&active_file).await?;
+        let previous_restart_policy = read_restart_policy(&restart_policy_file).await?;
         validate_deploy_preconditions(payload, previous_release.as_deref())?;
 
         fs::create_dir_all(&service_root)
@@ -337,7 +349,9 @@ impl Orchestrator {
             service_root,
             release_hash,
             active_file,
+            restart_policy_file,
             previous_release,
+            previous_restart_policy,
             launch,
         })
     }
@@ -360,6 +374,12 @@ impl Orchestrator {
                     format!("failed to write rollback release: {e}"),
                 )
             })?;
+        restore_restart_policy(
+            &prepared.restart_policy_file,
+            prepared.previous_restart_policy.as_deref(),
+        )
+        .await
+        .map_err(map_rollback_error)?;
 
         let previous_launch = self
             .load_launch_from_release(
@@ -424,7 +444,7 @@ impl Orchestrator {
     }
 }
 
-/// One boot restore target discovered from `services/<name>/active_release`.
+/// One boot restore target discovered from `services/<name>/active_release` and `restart_policy=always`.
 struct BootRestoreCandidate {
     service_name: String,
     service_root: PathBuf,
@@ -459,6 +479,7 @@ async fn build_launch_from_release(
 
     let bindings = validate_manifest_bindings(&manifest.bindings)?;
     let (http_port, http_max_body_bytes) = validate_manifest_http(manifest)?;
+    let socket = validate_manifest_socket(manifest)?;
 
     Ok(ServiceLaunch {
         name: manifest.name.clone(),
@@ -466,6 +487,7 @@ async fn build_launch_from_release(
         app_type: manifest.app_type,
         http_port,
         http_max_body_bytes,
+        socket,
         component_path,
         args: Vec::new(),
         envs,
@@ -503,6 +525,38 @@ fn validate_manifest_http(manifest: &Manifest) -> Result<(Option<u16>, Option<u6
                 ));
             }
             Ok((None, None))
+        }
+    }
+}
+
+fn validate_manifest_socket(
+    manifest: &Manifest,
+) -> Result<Option<RunnerSocketConfig>, ImagodError> {
+    match manifest.app_type {
+        RunnerAppType::Socket => {
+            let socket = manifest.socket.clone().ok_or_else(|| {
+                map_bad_manifest("manifest.socket is required when type=\"socket\"".to_string())
+            })?;
+            if socket.listen_port == 0 {
+                return Err(map_bad_manifest(
+                    "manifest.socket.listen_port must be in range 1..=65535".to_string(),
+                ));
+            }
+            socket.listen_addr.parse::<IpAddr>().map_err(|err| {
+                map_bad_manifest(format!(
+                    "manifest.socket.listen_addr must be a valid IP address (got '{}'): {err}",
+                    socket.listen_addr
+                ))
+            })?;
+            Ok(Some(socket))
+        }
+        RunnerAppType::Cli | RunnerAppType::Http => {
+            if manifest.socket.is_some() {
+                return Err(map_bad_manifest(
+                    "manifest.socket is only allowed when type=\"socket\"".to_string(),
+                ));
+            }
+            Ok(None)
         }
     }
 }
@@ -727,13 +781,17 @@ fn validate_deploy_preconditions(
     payload: &DeployCommandPayload,
     active_release: Option<&str>,
 ) -> Result<(), ImagodError> {
-    if payload.restart_policy != RESTART_POLICY_NEVER {
+    if !is_supported_restart_policy(&payload.restart_policy) {
         return Err(ImagodError::new(
             ErrorCode::BadRequest,
             STAGE_ORCHESTRATE,
             format!(
-                "unsupported restart_policy '{}': only '{}' is supported",
-                payload.restart_policy, RESTART_POLICY_NEVER
+                "unsupported restart_policy '{}': supported values are '{}', '{}', '{}' and '{}'",
+                payload.restart_policy,
+                RESTART_POLICY_NEVER,
+                RESTART_POLICY_ON_FAILURE,
+                RESTART_POLICY_ALWAYS,
+                RESTART_POLICY_UNLESS_STOPPED
             ),
         ));
     }
@@ -757,6 +815,43 @@ fn validate_deploy_preconditions(
         payload.expected_current_release.clone(),
     )
     .with_detail("actual_current_release", actual.to_string()))
+}
+
+fn is_supported_restart_policy(value: &str) -> bool {
+    matches!(
+        value,
+        RESTART_POLICY_NEVER
+            | RESTART_POLICY_ON_FAILURE
+            | RESTART_POLICY_ALWAYS
+            | RESTART_POLICY_UNLESS_STOPPED
+    )
+}
+
+async fn write_restart_policy(path: &Path, policy: &str) -> Result<(), ImagodError> {
+    if !is_supported_restart_policy(policy) {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            STAGE_ORCHESTRATE,
+            format!("invalid restart_policy: {policy}"),
+        ));
+    }
+    fs::write(path, policy.as_bytes())
+        .await
+        .map_err(|e| map_internal(format!("restart policy update failed: {e}")))
+}
+
+async fn restore_restart_policy(path: &Path, policy: Option<&str>) -> Result<(), ImagodError> {
+    match policy {
+        Some(policy) => write_restart_policy(path, policy).await,
+        None => match fs::remove_file(path).await {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(map_internal(format!(
+                "failed to remove restart policy file {}: {err}",
+                path.display()
+            ))),
+        },
+    }
 }
 
 async fn cleanup_old_releases(
@@ -809,7 +904,33 @@ async fn read_active_release(path: &Path) -> Result<Option<String>, ImagodError>
     }
 }
 
-/// Collects active-release service candidates sorted by service name.
+async fn read_restart_policy(path: &Path) -> Result<Option<String>, ImagodError> {
+    match fs::read_to_string(path).await {
+        Ok(content) => {
+            let policy = content.trim().to_string();
+            if !is_supported_restart_policy(&policy) {
+                return Err(map_internal(format!(
+                    "invalid restart policy persisted in {}: {}",
+                    path.display(),
+                    policy
+                )));
+            }
+            Ok(Some(policy))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(map_internal(format!(
+            "failed to read restart policy: {err}"
+        ))),
+    }
+}
+
+async fn read_restart_policy_or_default(path: &Path) -> Result<String, ImagodError> {
+    Ok(read_restart_policy(path)
+        .await?
+        .unwrap_or_else(|| RESTART_POLICY_NEVER.to_string()))
+}
+
+/// Collects restart-policy-eligible (`always`) active-release candidates sorted by service name.
 async fn collect_boot_restore_candidates(
     storage_root: &Path,
 ) -> Result<(Vec<BootRestoreCandidate>, Vec<RestoreFailure>), ImagodError> {
@@ -848,6 +969,21 @@ async fn collect_boot_restore_candidates(
 
     let mut candidates = Vec::new();
     for (service_name, service_root) in service_entries {
+        let restart_policy_file = service_root.join(RESTART_POLICY_FILE_NAME);
+        let restart_policy = match read_restart_policy_or_default(&restart_policy_file).await {
+            Ok(restart_policy) => restart_policy,
+            Err(error) => {
+                failed.push(RestoreFailure {
+                    service_name: service_name.clone(),
+                    error,
+                });
+                continue;
+            }
+        };
+        if restart_policy != RESTART_POLICY_ALWAYS {
+            continue;
+        }
+
         let active_file = service_root.join("active_release");
         let active_release = match read_active_release(&active_file).await {
             Ok(Some(active_release)) => active_release,
@@ -1004,6 +1140,7 @@ mod tests {
         release_id_from_artifact_digest, validate_deploy_preconditions, validate_service_name,
     };
     use imago_protocol::{DeployCommandPayload, ErrorCode};
+    use imagod_ipc::{RunnerSocketConfig, RunnerSocketDirection, RunnerSocketProtocol};
     use std::{
         collections::BTreeMap,
         fs,
@@ -1022,6 +1159,7 @@ mod tests {
             main: "component.wasm".to_string(),
             app_type: RunnerAppType::Cli,
             http: None,
+            socket: None,
             vars: BTreeMap::new(),
             secrets: BTreeMap::new(),
             assets: Vec::<ManifestAsset>::new(),
@@ -1068,21 +1206,23 @@ mod tests {
 
     #[test]
     fn deploy_precondition_accepts_any_and_matching_release() {
-        let payload_any = DeployCommandPayload {
-            deploy_id: "deploy-1".to_string(),
-            expected_current_release: "any".to_string(),
-            restart_policy: "never".to_string(),
-            auto_rollback: true,
-        };
-        assert!(validate_deploy_preconditions(&payload_any, None).is_ok());
+        for restart_policy in ["never", "on-failure", "always", "unless-stopped"] {
+            let payload_any = DeployCommandPayload {
+                deploy_id: "deploy-1".to_string(),
+                expected_current_release: "any".to_string(),
+                restart_policy: restart_policy.to_string(),
+                auto_rollback: true,
+            };
+            assert!(validate_deploy_preconditions(&payload_any, None).is_ok());
 
-        let payload_match = DeployCommandPayload {
-            deploy_id: "deploy-1".to_string(),
-            expected_current_release: "release-abc".to_string(),
-            restart_policy: "never".to_string(),
-            auto_rollback: true,
-        };
-        assert!(validate_deploy_preconditions(&payload_match, Some("release-abc")).is_ok());
+            let payload_match = DeployCommandPayload {
+                deploy_id: "deploy-1".to_string(),
+                expected_current_release: "release-abc".to_string(),
+                restart_policy: restart_policy.to_string(),
+                auto_rollback: true,
+            };
+            assert!(validate_deploy_preconditions(&payload_match, Some("release-abc")).is_ok());
+        }
     }
 
     #[test]
@@ -1100,7 +1240,7 @@ mod tests {
         let bad_policy_payload = DeployCommandPayload {
             deploy_id: "deploy-1".to_string(),
             expected_current_release: "any".to_string(),
-            restart_policy: "always".to_string(),
+            restart_policy: "sometimes".to_string(),
             auto_rollback: true,
         };
         let bad_policy = validate_deploy_preconditions(&bad_policy_payload, None)
@@ -1285,6 +1425,73 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn build_launch_rejects_socket_type_without_socket_section() {
+        let root = temp_dir_path("orchestrator-socket-missing");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.app_type = RunnerAppType::Socket;
+        manifest.socket = None;
+
+        let err = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect_err("type=socket without manifest.socket must fail");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("manifest.socket is required"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_socket_section_for_non_socket_type() {
+        let root = temp_dir_path("orchestrator-socket-extra");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.app_type = RunnerAppType::Cli;
+        manifest.socket = Some(RunnerSocketConfig {
+            protocol: RunnerSocketProtocol::Udp,
+            direction: RunnerSocketDirection::Inbound,
+            listen_addr: "0.0.0.0".to_string(),
+            listen_port: 514,
+        });
+
+        let err = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect_err("type=cli with manifest.socket must fail");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("only allowed when type=\"socket\""));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_invalid_socket_listen_addr() {
+        let root = temp_dir_path("orchestrator-socket-addr-invalid");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.app_type = RunnerAppType::Socket;
+        manifest.socket = Some(RunnerSocketConfig {
+            protocol: RunnerSocketProtocol::Udp,
+            direction: RunnerSocketDirection::Inbound,
+            listen_addr: "not-an-ip".to_string(),
+            listen_port: 514,
+        });
+
+        let err = build_launch_from_release("release-a", &root, &manifest)
+            .await
+            .expect_err("invalid listen_addr should fail");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("listen_addr"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn manifest_parse_defaults_http_max_body_bytes_when_missing() {
         let manifest_json = r#"{
@@ -1424,11 +1631,15 @@ mod tests {
 
         let svc_b = services.join("svc-b");
         fs::create_dir_all(&svc_b).expect("svc-b should exist");
+        fs::write(svc_b.join("restart_policy"), b"always")
+            .expect("svc-b restart policy should exist");
         fs::write(svc_b.join("active_release"), b"release-b\n")
             .expect("svc-b active_release should exist");
 
         let svc_a = services.join("svc-a");
         fs::create_dir_all(&svc_a).expect("svc-a should exist");
+        fs::write(svc_a.join("restart_policy"), b"always")
+            .expect("svc-a restart policy should exist");
         fs::write(svc_a.join("active_release"), b"release-a")
             .expect("svc-a active_release should exist");
 
@@ -1457,6 +1668,8 @@ mod tests {
         let root = temp_dir_path("orchestrator-restore-empty-active");
         let service_dir = root.join("services").join("svc-empty");
         fs::create_dir_all(&service_dir).expect("service dir should exist");
+        fs::write(service_dir.join("restart_policy"), b"always")
+            .expect("restart policy should exist");
         fs::write(service_dir.join("active_release"), b"\n").expect("active_release should exist");
 
         let (candidates, failed) = collect_boot_restore_candidates(&root)
@@ -1468,6 +1681,49 @@ mod tests {
         assert_eq!(failed[0].service_name, "svc-empty");
         assert_eq!(failed[0].error.code, ErrorCode::BadManifest);
         assert!(failed[0].error.message.contains("active_release"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn collect_boot_restore_candidates_skips_non_always_restart_policy() {
+        let root = temp_dir_path("orchestrator-restore-policy-filter");
+        let service_dir = root.join("services").join("svc-never");
+        fs::create_dir_all(&service_dir).expect("service dir should exist");
+        fs::write(service_dir.join("restart_policy"), b"never")
+            .expect("restart policy should exist");
+        fs::write(service_dir.join("active_release"), b"release-never")
+            .expect("active release should exist");
+
+        let (candidates, failed) = collect_boot_restore_candidates(&root)
+            .await
+            .expect("candidate collection should succeed");
+
+        assert!(failed.is_empty());
+        assert!(candidates.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn collect_boot_restore_candidates_reports_invalid_restart_policy_as_failure() {
+        let root = temp_dir_path("orchestrator-restore-policy-invalid");
+        let service_dir = root.join("services").join("svc-invalid");
+        fs::create_dir_all(&service_dir).expect("service dir should exist");
+        fs::write(service_dir.join("restart_policy"), b"sometimes")
+            .expect("restart policy should exist");
+        fs::write(service_dir.join("active_release"), b"release-invalid")
+            .expect("active release should exist");
+
+        let (candidates, failed) = collect_boot_restore_candidates(&root)
+            .await
+            .expect("candidate collection should succeed");
+
+        assert!(candidates.is_empty());
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].service_name, "svc-invalid");
+        assert_eq!(failed[0].error.code, ErrorCode::Internal);
+        assert!(failed[0].error.message.contains("invalid restart policy"));
 
         let _ = fs::remove_dir_all(root);
     }

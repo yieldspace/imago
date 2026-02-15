@@ -33,7 +33,7 @@
 - `build`
 - `capabilities`
 - `limits`
-- `runtime`
+- `restart`
 - `vars`
 - `assets`
 - `dependencies`
@@ -77,6 +77,25 @@
 - `type != "http"` で `[http]` を指定した場合は設定不整合として build エラーにする。
 - `imago build` はこの設定を `manifest.http.port` / `manifest.http.max_body_bytes` に正規化して出力する。
 
+## `[socket]`（`type=socket` 時の socket 実行設定）
+
+- `type = "socket"` の場合のみ `[socket]` セクションを受理する。
+- `socket.protocol` は必須で `udp` / `tcp` / `both` のいずれか。
+- `socket.direction` は必須で `inbound` / `outbound` / `both` のいずれか。
+- `socket.listen_addr` は必須で IP アドレス文字列（IPv4/IPv6）を受理する。
+- `socket.listen_port` は必須で `1..=65535` の整数のみ許可する。
+- `type != "socket"` で `[socket]` を指定した場合は設定不整合として build エラーにする。
+- `imago build` はこの設定を `manifest.socket.*` に正規化して出力する。
+
+## `restart`（service 再起動方針）
+
+- `restart` はトップレベルキーとして指定する。
+- 許可値は `never` / `on-failure` / `always` / `unless-stopped`。
+- 未指定時の既定値は `never`。
+- `imagod` 起動時の自動復元対象は `restart="always"` の service のみ。
+- `on-failure` / `unless-stopped` の高度な再起動戦略は現行未実装で、値の受理・保存のみ行う。
+- 旧キー `runtime.restart_policy` は受理しない（設定エラー）。
+
 <a id="capability-model"></a>
 ## 権限モデル
 
@@ -101,7 +120,7 @@
 | キー | 既定値 | 備考 |
 |---|---|---|
 | `limits.shutdown_timeout` | `30s` | graceful 停止待ち時間 |
-| `runtime.restart_policy` | `never` | MVP では詳細パラメータを固定しない |
+| `restart` | `never` | `imago.toml` のトップレベルキー |
 
 ## バリデーション要件
 
@@ -110,6 +129,13 @@
 - `type="http"` かつ `http.port` 欠落はエラー。
 - `type="http"` かつ `http.max_body_bytes` が範囲外（`1..=67108864`）はエラー。
 - `type!="http"` かつ `[http]` 指定はエラー。
+- `type="socket"` かつ `[socket]` 欠落はエラー。
+- `type="socket"` かつ `socket.protocol` / `socket.direction` が定義外値ならエラー。
+- `type="socket"` かつ `socket.listen_addr` が IP として不正ならエラー。
+- `type="socket"` かつ `socket.listen_port` が範囲外（`1..=65535`）ならエラー。
+- `type!="socket"` かつ `[socket]` 指定はエラー。
+- `restart` が許可値（`never` / `on-failure` / `always` / `unless-stopped`）以外ならエラー。
+- `runtime.restart_policy` を指定した場合はエラー（互換受理なし）。
 - `main` が存在しない場合はビルド時エラー。
 - `shutdown_timeout` が 0 以下はエラー。
 - `privileged = true` かつ `capabilities` 指定ありでもエラーにはしない（`capabilities` を無視）。
@@ -136,14 +162,16 @@
 - `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
 - `[[bindings]]` は `manifest.bindings[]` へ正規化し、runtime の呼び出し認可入力として扱う。
 - `type="http"` のときのみ `[http].port` / `[http].max_body_bytes` を受理し、`manifest.http.port` / `manifest.http.max_body_bytes` へ反映する。
+- `type="socket"` のときのみ `[socket].protocol` / `[socket].direction` / `[socket].listen_addr` / `[socket].listen_port` を受理し、`manifest.socket.*` へ反映する。
 - CLI の `name` 検証は `imagod` と同等に `..` を拒否し、path 文字を明示的に弾く。
 - `--env <name>` は manifest 出力先と `.env.<name>` 解決の双方で同一バリデーションを適用し、path traversal を拒否する。
 - `target.<name>.ca_cert` / `client_cert` / `client_key` は path traversal と不正区切りを拒否し、相対指定を `project_root` 基準の絶対パスへ解決する。
 - `imagod.storage_root` の既定値は OS 別（Linux=`/var/lib/imago`, macOS=`/usr/local/var/imago`, Windows=`C:\ProgramData\imago`, その他=`/var/lib/imago`）にし、ビルド時環境変数 `IMAGOD_STORAGE_ROOT_DEFAULT` で上書きできる。`imagod.toml` の明示値を最優先する。
+- `restart` はトップレベルキーのみ受理し、`runtime.restart_policy` は移行エラーにする。
 
 ## `target.<name>` の接続キー（deploy 通信）
 
-`imago deploy` は `target.<name>` から下記キーを読む。
+`imago deploy` / `imago run` / `imago stop` / `imago logs` は `target.<name>` から下記キーを読む。
 
 - `remote`: `host` または `host:port`（`https://` 省略可）
   - IPv6 は `::1`, `[::1]`, `[::1]:4443`, `https://[::1]:4443` を許可

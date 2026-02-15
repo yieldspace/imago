@@ -36,7 +36,7 @@
 7. `ServiceSupervisor::new`（manager control socket 起動）
 8. `Orchestrator::new`
 9. `build_server` で WebTransport サーバ構築
-10. `Orchestrator::restore_active_services_on_boot`（`active_release` を持つ service を best-effort で自動復元）
+10. `Orchestrator::restore_active_services_on_boot`（`restart_policy=always` かつ `active_release` を持つ service を best-effort で自動復元）
 11. `ProtocolHandler::new`
 12. maintenance loop 起動
 13. `accept` ループで session task を `tokio::spawn`
@@ -231,7 +231,8 @@ spawn 遷移前 cancel 成立時:
   - release の `manifest.json` 再読込
   - `supervisor.start`
 - `restore_active_services_on_boot()`
-  - `services/<name>/active_release` を走査
+  - `services/<name>/restart_policy` と `services/<name>/active_release` を走査
+  - `restart_policy=always` の service のみ対象
   - service 名昇順で逐次起動
   - service 単位の失敗を集計し、他 service の復元を継続（best-effort）
 - `stop(payload)`
@@ -245,7 +246,9 @@ deploy 経路の要点:
 - `manifest.main` は相対パスのみ許可し、絶対/`..`/Windows prefix を拒否
 - release ID は `sha256(artifact_digest文字列)` の 64 hex を採用（16桁切り詰めはしない）
 - `expected_current_release` は CAS で検証（`any` は比較スキップ、不一致は `E_PRECONDITION_FAILED`）
-- `restart_policy` は `never` のみ受理し、他値は `E_BAD_REQUEST`
+- `restart_policy` は `never` / `on-failure` / `always` / `unless-stopped` を受理し、未知値は `E_BAD_REQUEST`
+- deploy 成功時に `services/<name>/restart_policy` を更新する
+- manager 起動時の復元対象は `restart_policy=always` の service のみ
 - `services/<name>/<release_hash>/` 配置
 - 旧 release cleanup
 - release 配置は `staging -> release` を安全な swap で実施し、失敗時は backup から復元する
@@ -324,11 +327,19 @@ backend 選択:
 - runner は `RunnerBootstrap.app_type` を runtime へ渡し、`type` ごとに実行分岐する。
   - `cli`: `wasmtime_wasi::p2::bindings::Command::instantiate_async` + `call_run(...).await`
   - `http`: `wasmtime_wasi_http::bindings::Proxy::instantiate_async`（`incoming-handler` instantiate）後、runner の外部 ingress から `call_handle(...)` を都度実行
-  - `socket`: 現時点では未実装として `E_INTERNAL` を返す
+  - `socket`: `cli` 分岐と同じ `wasi:cli/run` を実行しつつ、`socket` 設定に基づいて `WasiCtxBuilder` の socket policy を構成する
 - `cli` 分岐では `wasmtime_wasi::p2::add_to_linker_async` を利用する
 - `http` 分岐では `wasmtime_wasi_http::add_only_http_to_linker_async` を併用する
 - `Store::set_epoch_deadline(1)`
 - `Store::epoch_deadline_async_yield_and_update(1)`
+
+socket policy:
+
+- `socket.protocol` に応じて `allow_udp` / `allow_tcp` を切り替える。
+- `socket.direction` と `socket.listen_addr:listen_port` を `socket_addr_check` に適用する。
+  - inbound (`TcpBind` / `UdpBind`) は `listen_addr:listen_port` 完全一致時のみ許可。
+  - outbound (`TcpConnect` / `UdpConnect` / `UdpOutgoingDatagram`) は `direction` が outbound を許可する場合のみ許可。
+- `type=cli` / `type=http` は従来どおりネットワーク deny-by-default（`socket_addr_check=false`）を維持する。
 
 HTTP ingress:
 
@@ -477,7 +488,7 @@ flowchart TD
 
 既知制約:
 
-- service の実行中状態は in-memory（再起動で消える）。ただし `active_release` を持つ service は起動時に自動復元する
+- service の実行中状態は in-memory（再起動で消える）。ただし `restart_policy=always` かつ `active_release` を持つ service は起動時に自動復元する
 - upload session index も in-memory（再起動跨ぎ継続なし）
 - `state.request` は短命 operation のみ
 - event 永続化/再送なし
@@ -571,6 +582,17 @@ flowchart TD
 - `imagod-runtime` に feature `runtime-wasmtime` を追加した（default ON）。
 - `runtime-wasmtime` OFF 時は、runner が `E_INTERNAL` / `stage=runner.process` で「runtime backend 未有効」を返す。
 - `imagod-runtime::WasmRuntime` は `runtime-wasmtime` 有効時のみ再exportを維持する。
+
+## 実装反映ノート（Socket Runtime MVP / 2026-02-15）
+
+- `type=socket` を runner/runtime 実装で有効化した。
+  - `RunnerBootstrap.socket`（`protocol` / `direction` / `listen_addr` / `listen_port`）を追加し、manager から runner へ設定を伝播する。
+  - Wasmtime backend は `app_type=socket` で `wasi:cli/run` 実行を継続しつつ、`WasiCtxBuilder` の socket policy (`allow_udp` / `allow_tcp` / `socket_addr_check`) を適用する。
+- `type=socket` の manifest 検証を強化した。
+  - `manifest.socket` は必須。
+  - `listen_addr` は IP アドレスとして検証し、`listen_port` は `1..=65535` を要求する。
+- `wasi-threads` は今回のスコープ外。
+  - 現行 runtime は component 実行経路（`Component::from_file`）前提であり、`wasmtime-wasi-threads` の core module 実行経路統合は別 issue で扱う。
 
 ## 実装反映ノート（Boot Restore / 2026-02-14）
 
