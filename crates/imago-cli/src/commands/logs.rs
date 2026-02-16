@@ -22,6 +22,7 @@ use crate::{
 
 const NON_FOLLOW_IDLE_TIMEOUT_SECS: u64 = 2;
 const POST_END_DRAIN_TIMEOUT_MS: u64 = 200;
+const JSON_PENDING_MAX_BYTES_PER_STREAM: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogsOutputFormat {
@@ -32,7 +33,6 @@ enum LogsOutputFormat {
 #[derive(Debug, Serialize)]
 struct JsonLogLine<'a> {
     name: &'a str,
-    stream: &'a str,
     timestamp: String,
     log: &'a str,
 }
@@ -52,6 +52,7 @@ struct StreamPrefixState {
 #[derive(Debug, Default)]
 struct JsonLinesRenderState {
     streams: Vec<StreamJsonState>,
+    arrival_order_counter: u64,
 }
 
 #[derive(Debug)]
@@ -59,6 +60,8 @@ struct StreamJsonState {
     name: String,
     stream_kind: LogStreamKind,
     pending: Vec<u8>,
+    scan_start: usize,
+    last_seen_order: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -96,22 +99,30 @@ impl PrefixRenderState {
 }
 
 impl JsonLinesRenderState {
-    fn pending_mut(&mut self, name: &str, stream_kind: LogStreamKind) -> &mut Vec<u8> {
+    fn stream_state_mut(&mut self, name: &str, stream_kind: LogStreamKind) -> &mut StreamJsonState {
         if let Some(index) = self
             .streams
             .iter()
             .position(|state| state.name == name && state.stream_kind == stream_kind)
         {
-            return &mut self.streams[index].pending;
+            return &mut self.streams[index];
         }
 
         self.streams.push(StreamJsonState {
             name: name.to_string(),
             stream_kind,
             pending: Vec::new(),
+            scan_start: 0,
+            last_seen_order: 0,
         });
         let last_index = self.streams.len().saturating_sub(1);
-        &mut self.streams[last_index].pending
+        &mut self.streams[last_index]
+    }
+
+    fn next_arrival_order(&mut self) -> u64 {
+        let order = self.arrival_order_counter;
+        self.arrival_order_counter = self.arrival_order_counter.saturating_add(1);
+        order
     }
 }
 
@@ -219,10 +230,10 @@ async fn receive_logs_datagrams(
     let mut prefix_state = PrefixRenderState::default();
     let mut json_state = JsonLinesRenderState::default();
 
-    loop {
-        let datagram = if follow {
+    let stream_result = 'stream: loop {
+        let datagram_result = if follow {
             tokio::select! {
-                result = session.read_datagram() => Some(result.context("failed to read log datagram")?),
+                result = session.read_datagram() => Some(result.context("failed to read log datagram")),
                 _ = tokio::signal::ctrl_c() => None,
             }
         } else {
@@ -232,9 +243,9 @@ async fn receive_logs_datagrams(
             )
             .await
             {
-                Ok(result) => Some(result.context("failed to read log datagram")?),
+                Ok(result) => Some(result.context("failed to read log datagram")),
                 Err(_) => {
-                    return Err(anyhow!(
+                    break 'stream Err(anyhow!(
                         "timed out waiting for logs.end after {}s",
                         NON_FOLLOW_IDLE_TIMEOUT_SECS
                     ));
@@ -242,12 +253,18 @@ async fn receive_logs_datagrams(
             }
         };
 
-        let Some(datagram) = datagram else {
-            break;
+        let Some(datagram_result) = datagram_result else {
+            break 'stream Ok(());
+        };
+        let datagram = match datagram_result {
+            Ok(datagram) => datagram,
+            Err(err) => break 'stream Err(err),
         };
 
-        let Some(message) = decode_logs_datagram(&datagram, request_id)? else {
-            continue;
+        let message = match decode_logs_datagram(&datagram, request_id) {
+            Ok(Some(message)) => message,
+            Ok(None) => continue,
+            Err(err) => break 'stream Err(err),
         };
         match message {
             LogsDatagram::Chunk(chunk) => {
@@ -255,26 +272,28 @@ async fn receive_logs_datagrams(
                     continue;
                 }
                 warn_if_seq_gap(&mut expected_seq, chunk.seq, &mut truncated_warned);
-                render_chunk(
+                if let Err(err) = render_chunk(
                     &chunk,
                     all_processes,
                     output_format,
                     &mut prefix_state,
                     &mut json_state,
-                )?;
+                ) {
+                    break 'stream Err(err);
+                }
             }
             LogsDatagram::End(end) => {
                 if request_id != end.request_id {
                     continue;
                 }
                 if let Some(error) = end.error {
-                    return Err(anyhow!(
+                    break 'stream Err(anyhow!(
                         "logs stream ended with error: {} ({:?})",
                         error.message,
                         error.code
                     ));
                 }
-                let delayed_chunk_seqs = drain_post_end_chunks(
+                let delayed_chunk_seqs = match drain_post_end_chunks(
                     session,
                     request_id,
                     all_processes,
@@ -283,20 +302,24 @@ async fn receive_logs_datagrams(
                     &mut json_state,
                     end.seq,
                 )
-                .await?;
+                .await
+                {
+                    Ok(seqs) => seqs,
+                    Err(err) => break 'stream Err(err),
+                };
                 apply_end_seq_after_drain(
                     &mut expected_seq,
                     end.seq,
                     &delayed_chunk_seqs,
                     &mut truncated_warned,
                 );
-                break;
+                break 'stream Ok(());
             }
         }
-    }
+    };
 
-    flush_json_tail_if_needed(output_format, &mut json_state)?;
-    Ok(())
+    let flush_result = flush_json_tail_if_needed(output_format, &mut json_state);
+    finalize_stream_result(stream_result, flush_result)
 }
 
 async fn drain_post_end_chunks(
@@ -407,6 +430,21 @@ fn apply_end_seq_after_drain(
     warn_if_seq_gap(expected_seq, end_seq, truncated_warned);
 }
 
+fn finalize_stream_result(
+    stream_result: anyhow::Result<()>,
+    flush_result: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match (stream_result, flush_result) {
+        (Err(stream_err), Err(flush_err)) => {
+            eprintln!("failed to flush buffered json log tails after stream error: {flush_err}");
+            Err(stream_err)
+        }
+        (Err(stream_err), Ok(())) => Err(stream_err),
+        (Ok(()), Err(flush_err)) => Err(flush_err),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
 fn render_chunk(
     chunk: &LogChunk,
     all_processes: bool,
@@ -478,7 +516,6 @@ fn write_json_lines(lines: &[BufferedJsonLogLine]) -> anyhow::Result<()> {
     for line in lines {
         let payload = JsonLogLine {
             name: &line.name,
-            stream: stream_kind_label(line.stream_kind),
             timestamp: current_timestamp_unix_secs(),
             log: &line.log,
         };
@@ -495,15 +532,29 @@ fn collect_json_lines_from_chunk(
     json_state: &mut JsonLinesRenderState,
 ) -> Vec<BufferedJsonLogLine> {
     let mut lines = Vec::new();
-    let pending = json_state.pending_mut(&chunk.name, chunk.stream_kind);
-    pending.extend_from_slice(&chunk.bytes);
-    drain_complete_lines(&chunk.name, chunk.stream_kind, pending, &mut lines);
+    let arrival_order = json_state.next_arrival_order();
+    let stream = json_state.stream_state_mut(&chunk.name, chunk.stream_kind);
+    let name = stream.name.clone();
+    let stream_kind = stream.stream_kind;
+    stream.last_seen_order = arrival_order;
+    stream.pending.extend_from_slice(&chunk.bytes);
+    drain_complete_lines(
+        &name,
+        stream_kind,
+        &mut stream.pending,
+        &mut stream.scan_start,
+        &mut lines,
+    );
     lines
 }
 
 fn flush_json_line_buffers(json_state: &mut JsonLinesRenderState) -> Vec<BufferedJsonLogLine> {
+    let mut stream_indexes = (0..json_state.streams.len()).collect::<Vec<_>>();
+    stream_indexes.sort_by_key(|index| json_state.streams[*index].last_seen_order);
+
     let mut lines = Vec::new();
-    for stream in &mut json_state.streams {
+    for index in stream_indexes {
+        let stream = &mut json_state.streams[index];
         if stream.pending.is_empty() {
             continue;
         }
@@ -520,11 +571,29 @@ fn drain_complete_lines(
     name: &str,
     stream_kind: LogStreamKind,
     pending: &mut Vec<u8>,
+    scan_start: &mut usize,
     out: &mut Vec<BufferedJsonLogLine>,
 ) {
+    let start = (*scan_start).min(pending.len());
     let mut consumed = 0usize;
-    for (idx, byte) in pending.iter().enumerate() {
-        if *byte != b'\n' {
+    let mut idx = start;
+    while idx < pending.len() {
+        if idx.saturating_sub(consumed) >= JSON_PENDING_MAX_BYTES_PER_STREAM {
+            let split_end = consumed + JSON_PENDING_MAX_BYTES_PER_STREAM;
+            out.push(BufferedJsonLogLine {
+                name: name.to_string(),
+                stream_kind,
+                log: normalize_log_line(pending[consumed..split_end].to_vec()),
+            });
+            consumed = split_end;
+            if idx < consumed {
+                idx = consumed;
+            }
+            continue;
+        }
+
+        if pending[idx] != b'\n' {
+            idx += 1;
             continue;
         }
         out.push(BufferedJsonLogLine {
@@ -533,9 +602,24 @@ fn drain_complete_lines(
             log: normalize_log_line(pending[consumed..idx].to_vec()),
         });
         consumed = idx.saturating_add(1);
+        idx = consumed;
     }
+
+    while pending.len().saturating_sub(consumed) > JSON_PENDING_MAX_BYTES_PER_STREAM {
+        let split_end = consumed + JSON_PENDING_MAX_BYTES_PER_STREAM;
+        out.push(BufferedJsonLogLine {
+            name: name.to_string(),
+            stream_kind,
+            log: normalize_log_line(pending[consumed..split_end].to_vec()),
+        });
+        consumed = split_end;
+    }
+
     if consumed > 0 {
         pending.drain(..consumed);
+        *scan_start = (*scan_start).saturating_sub(consumed);
+    } else {
+        *scan_start = pending.len();
     }
 }
 
@@ -858,19 +942,148 @@ mod tests {
     }
 
     #[test]
-    fn json_log_line_serializes_stream_field() {
+    fn json_log_line_serializes_only_name_timestamp_and_log() {
         let line = JsonLogLine {
             name: "svc-a",
-            stream: "stderr",
             timestamp: "123".to_string(),
             log: "oops",
         };
         let value = serde_json::to_value(line).expect("json serialization should succeed");
 
         assert_eq!(value["name"], "svc-a");
-        assert_eq!(value["stream"], "stderr");
         assert_eq!(value["timestamp"], "123");
         assert_eq!(value["log"], "oops");
+        assert!(value.get("stream").is_none());
+    }
+
+    #[test]
+    fn flush_json_line_buffers_sorts_by_last_seen_order() {
+        let request_id = Uuid::new_v4();
+        let mut state = JsonLinesRenderState::default();
+        let svc_a_first = LogChunk {
+            request_id,
+            seq: 0,
+            name: "svc-a".to_string(),
+            stream_kind: LogStreamKind::Stdout,
+            bytes: b"a".to_vec(),
+            is_last: false,
+        };
+        let svc_b = LogChunk {
+            request_id,
+            seq: 1,
+            name: "svc-b".to_string(),
+            stream_kind: LogStreamKind::Stdout,
+            bytes: b"b".to_vec(),
+            is_last: false,
+        };
+        let svc_a_second = LogChunk {
+            request_id,
+            seq: 2,
+            name: "svc-a".to_string(),
+            stream_kind: LogStreamKind::Stdout,
+            bytes: b"c".to_vec(),
+            is_last: false,
+        };
+
+        assert_eq!(
+            collect_json_lines_from_chunk(&svc_a_first, &mut state),
+            vec![]
+        );
+        assert_eq!(collect_json_lines_from_chunk(&svc_b, &mut state), vec![]);
+        assert_eq!(
+            collect_json_lines_from_chunk(&svc_a_second, &mut state),
+            vec![]
+        );
+
+        assert_eq!(
+            flush_json_line_buffers(&mut state),
+            vec![
+                BufferedJsonLogLine {
+                    name: "svc-b".to_string(),
+                    stream_kind: LogStreamKind::Stdout,
+                    log: "b".to_string(),
+                },
+                BufferedJsonLogLine {
+                    name: "svc-a".to_string(),
+                    stream_kind: LogStreamKind::Stdout,
+                    log: "ac".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn json_pending_is_split_when_line_exceeds_cap() {
+        let request_id = Uuid::new_v4();
+        let mut state = JsonLinesRenderState::default();
+        let oversized = LogChunk {
+            request_id,
+            seq: 0,
+            name: "svc-a".to_string(),
+            stream_kind: LogStreamKind::Stdout,
+            bytes: vec![b'x'; JSON_PENDING_MAX_BYTES_PER_STREAM + 3],
+            is_last: false,
+        };
+
+        let lines = collect_json_lines_from_chunk(&oversized, &mut state);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].name, "svc-a");
+        assert_eq!(lines[0].stream_kind, LogStreamKind::Stdout);
+        assert_eq!(lines[0].log.len(), JSON_PENDING_MAX_BYTES_PER_STREAM);
+        assert_eq!(state.streams.len(), 1);
+        assert_eq!(state.streams[0].pending, vec![b'x'; 3]);
+    }
+
+    #[test]
+    fn drain_complete_lines_scans_incrementally_from_previous_offset() {
+        let mut pending = b"abc".to_vec();
+        let mut out = Vec::new();
+        let mut scan_start = 0usize;
+
+        drain_complete_lines(
+            "svc-a",
+            LogStreamKind::Stdout,
+            &mut pending,
+            &mut scan_start,
+            &mut out,
+        );
+        assert_eq!(scan_start, 3);
+        assert_eq!(out, vec![]);
+
+        pending.extend_from_slice(b"def\n");
+        drain_complete_lines(
+            "svc-a",
+            LogStreamKind::Stdout,
+            &mut pending,
+            &mut scan_start,
+            &mut out,
+        );
+
+        assert_eq!(
+            out,
+            vec![BufferedJsonLogLine {
+                name: "svc-a".to_string(),
+                stream_kind: LogStreamKind::Stdout,
+                log: "abcdef".to_string(),
+            }]
+        );
+        assert!(pending.is_empty());
+        assert_eq!(scan_start, 0);
+    }
+
+    #[test]
+    fn finalize_stream_result_prefers_stream_error_over_flush_error() {
+        let result =
+            finalize_stream_result(Err(anyhow!("stream failed")), Err(anyhow!("flush failed")))
+                .expect_err("stream error should win");
+        assert!(result.to_string().contains("stream failed"));
+    }
+
+    #[test]
+    fn finalize_stream_result_returns_flush_error_when_stream_succeeds() {
+        let result =
+            finalize_stream_result(Ok(()), Err(anyhow!("flush failed"))).expect_err("should fail");
+        assert!(result.to_string().contains("flush failed"));
     }
 
     #[test]
