@@ -74,6 +74,9 @@ pub struct LogsArgs {
 
     #[arg(long, value_name = "N", default_value_t = 200)]
     pub tail: u32,
+
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
@@ -199,6 +202,7 @@ mod tests {
                     name: None,
                     follow: false,
                     tail: 200,
+                    json: false,
                 }),
             }
         );
@@ -287,6 +291,25 @@ mod tests {
                     name: Some("svc-a".to_string()),
                     follow: true,
                     tail: 50,
+                    json: false,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_logs_with_json_flag() {
+        let cli = Cli::try_parse_from(["imago", "logs", "svc-a", "--tail", "10", "--json"])
+            .expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Commands::Logs(LogsArgs {
+                    name: Some("svc-a".to_string()),
+                    follow: false,
+                    tail: 10,
+                    json: true,
                 }),
             }
         );
