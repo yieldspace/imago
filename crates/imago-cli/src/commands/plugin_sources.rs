@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::Read,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use anyhow::{Context, anyhow};
@@ -487,12 +487,51 @@ fn parse_warg_spec(spec: &str) -> anyhow::Result<(&str, &str)> {
     let (package, version) = spec
         .rsplit_once('@')
         .ok_or_else(|| anyhow!("warg source must be in form warg://<package>@<version>"))?;
-    if package.trim().is_empty() || version.trim().is_empty() {
+    let package = package.trim();
+    let version = version.trim();
+    if package.is_empty() || version.is_empty() {
         return Err(anyhow!(
             "warg source must include both package and version (warg://<package>@<version>)"
         ));
     }
+    validate_warg_package_for_local_path(package)?;
+    validate_warg_version_for_local_path(version)?;
     Ok((package, version))
+}
+
+fn validate_warg_package_for_local_path(package: &str) -> anyhow::Result<()> {
+    if package.contains('\\')
+        || package
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err(anyhow!(
+            "warg source package contains invalid path components: {package}"
+        ));
+    }
+    for component in Path::new(package).components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err(anyhow!(
+                "warg source package contains invalid path components: {package}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_warg_version_for_local_path(version: &str) -> anyhow::Result<()> {
+    if version.contains('/') || version.contains('\\') {
+        return Err(anyhow!(
+            "warg source version contains invalid path components: {version}"
+        ));
+    }
+    let mut components = Path::new(version).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err(anyhow!(
+            "warg source version contains invalid path components: {version}"
+        ));
+    }
+    Ok(())
 }
 
 fn canonical_warg_source(package: &str, version: &str) -> String {
@@ -968,4 +1007,46 @@ fn copy_dir_contents(source_dir: &Path, destination_dir: &Path) -> anyhow::Resul
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_warg_spec;
+
+    #[test]
+    fn parse_warg_spec_accepts_nested_package_name() {
+        let (package, version) =
+            parse_warg_spec("yieldspace:plugin/example@1.0.0").expect("must parse");
+        assert_eq!(package, "yieldspace:plugin/example");
+        assert_eq!(version, "1.0.0");
+    }
+
+    #[test]
+    fn parse_warg_spec_rejects_traversal_package_name() {
+        let err = parse_warg_spec("../../tmp/evil@1.0.0").expect_err("must reject traversal");
+        assert!(
+            err.to_string()
+                .contains("warg source package contains invalid path components")
+        );
+    }
+
+    #[test]
+    fn parse_warg_spec_rejects_empty_package_segment() {
+        let err = parse_warg_spec("yieldspace:plugin//example@1.0.0")
+            .expect_err("must reject empty segment");
+        assert!(
+            err.to_string()
+                .contains("warg source package contains invalid path components")
+        );
+    }
+
+    #[test]
+    fn parse_warg_spec_rejects_invalid_version_path() {
+        let err = parse_warg_spec("yieldspace:plugin/example@../1.0.0")
+            .expect_err("must reject invalid version path");
+        assert!(
+            err.to_string()
+                .contains("warg source version contains invalid path components")
+        );
+    }
 }
