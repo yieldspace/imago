@@ -8,6 +8,7 @@ use commands::CommandResult;
 fn dispatch(cli: Cli) -> CommandResult {
     match cli.command {
         Commands::Build(args) => commands::build::run(args),
+        Commands::Update(args) => commands::update::run(args),
         Commands::Deploy(args) => commands::deploy::run(args),
         Commands::Run(args) => commands::run::run(args),
         Commands::Stop(args) => commands::stop::run(args),
@@ -22,6 +23,7 @@ fn dispatch(cli: Cli) -> CommandResult {
 fn dispatch_with_project_root(cli: Cli, project_root: &std::path::Path) -> CommandResult {
     match cli.command {
         Commands::Build(args) => commands::build::run_with_project_root(args, project_root),
+        Commands::Update(args) => commands::update::run_with_project_root(args, project_root),
         Commands::Deploy(args) => commands::deploy::run_with_project_root(args, project_root),
         Commands::Run(args) => commands::run::run_with_project_root(args, project_root),
         Commands::Stop(args) => commands::stop::run_with_project_root(args, project_root),

@@ -68,6 +68,30 @@
 - `imago build` はこの設定を `manifest.bindings[]` に正規化して出力する。
 - 未指定時は `manifest.bindings=[]` として扱い、runtime は deny-by-default で拒否する。
 
+## `[[dependencies]]`（プラグイン依存）
+
+- `[[dependencies]]` は plugin 依存を定義する。
+- 各要素は以下を受理する。
+  - `name` (必須): package 名
+  - `version` (必須): version 文字列
+  - `kind` (必須): `native` / `wasm`
+  - `wit` (任意): string または table
+    - string は `file://...` / `warg://...` を受理
+    - table は `wit.source`（必須）+ `wit.registry`（任意）を受理
+    - 未指定時は `wit.source = "warg://{name}@{version}"` / `wit.registry = "wa.dev"`
+  - `requires` (任意): 依存 plugin package 名配列
+  - `component.source` (必須, `kind=wasm` の場合): `file://...` / `warg://...`
+  - `component.registry` (任意, `kind=wasm` の場合): `warg://` の registry（省略時 `wa.dev`）
+  - `component.sha256` (任意, `kind=wasm` の場合): 指定時は `imago update` で照合
+  - `capabilities` (任意): この plugin が caller になる場合の認可ルール
+- `imago update` は依存の WIT を `wit/deps/` に展開し、`imago.lock` に `wit_source` / `wit_registry` / `wit_digest` / `wit_path` / `resolved_at` を固定する。
+- `warg://` の direct dependency で WIT 側に version が書かれている場合は、`warg://...@version` と一致している必要がある。
+- `warg://` の WIT package が transitive import を含む場合、依存パッケージも `wit/deps/<package>/package.wit` に展開する。
+- `warg://` source が plain `.wit` 形式で foreign import を含む場合は `imago update` を失敗させる（WIT package 形式が必要）。
+- `kind=wasm` では `imago.lock` に `component_source` / `component_registry` / `component_sha256` も固定する（component本体はこの時点で保存しない）。
+- `imago build` は `imago.lock` が未生成、または digest 不一致のとき失敗し、`imago update` を要求する。
+- `imago deploy` は `imago.lock` の component 情報を使って必要時に component を取得し、`.imago/components/<sha256>.wasm` を再利用する。
+
 ## `[http]`（`type=http` 時の ingress 設定）
 
 - `type = "http"` の場合のみ `[http]` セクションを受理する。
@@ -105,9 +129,11 @@
 
 ### `capabilities`
 
-- `capabilities.fs`: 許可するファイルシステムアクセス。
-- `capabilities.net`: 許可するネットワークアクセス。
-- `capabilities.dev`: `/dev` 配下の許可デバイス。
+- `capabilities.deps.<package>`: 依存 plugin の呼び出し許可関数。
+  - 許可値は `"*"` または関数名文字列配列。
+- `capabilities.wasi.<interface>`: WASI interface ごとの許可関数。
+  - 許可値は `"*"` または関数名文字列配列。
+- typo キー `capabilirties` は互換受理せずエラーにする。
 
 ### `privileged`
 
@@ -136,6 +162,8 @@
 - `type!="socket"` かつ `[socket]` 指定はエラー。
 - `restart` が許可値（`never` / `on-failure` / `always` / `unless-stopped`）以外ならエラー。
 - `runtime.restart_policy` を指定した場合はエラー（互換受理なし）。
+- `dependencies[].wit` に `https://wa.dev/...` shorthand を指定した場合はエラー（`warg://<package>@<version>` を使用）。
+- `[[dependencies]]` 使用時に `imago.lock` が存在しない、または lock の `wit_*` / `component_*` が設定と一致しない場合はエラー。
 - `main` が存在しない場合はビルド時エラー。
 - `shutdown_timeout` が 0 以下はエラー。
 - `privileged = true` かつ `capabilities` 指定ありでもエラーにはしない（`capabilities` を無視）。
@@ -158,6 +186,10 @@
 - `[env.<name>]` の反映はトップレベルキー単位の置換で実装する。
 - `build.command` は string / array の両形式を受理する。
 - `build.command` は必須キー (`name`/`main`/`type`/`target`) と `vars`/`dependencies` の検証完了後に実行する。不正設定時は実行しない。
+- `imago update` は `warg://` / `file://` を受理し、WIT を `wit/deps/` へ展開する。
+- `warg://` は Rust-native client で解決し、`registry` 未指定時は `wa.dev` を使う。
+- `imago build` は `capabilities` を正規化して manifest に出力し、`capabilirties` キーは設定エラーとして拒否する。
+- `imago build` は `[[dependencies]]` がある場合、`imago.lock` の `wit_*` と `component_*` を検証し、不一致時は `imago update` を要求して失敗する。
 - `imago build --env <name>` は `build/manifest.<name>.json` を生成し、`build/manifest.json` は更新しない。
 - `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
 - `[[bindings]]` は `manifest.bindings[]` へ正規化し、runtime の呼び出し認可入力として扱う。

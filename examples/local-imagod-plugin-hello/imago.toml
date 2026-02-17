@@ -1,0 +1,28 @@
+name = "local-imagod-plugin-hello-app"
+main = "target/wasm32-wasip2/release/local-imagod-plugin-hello-app.wasm"
+type = "cli"
+
+[build]
+command = "CARGO_TARGET_DIR=target cargo build --target wasm32-wasip2 --release"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "wasm"
+wit = "warg://chikoski:hello@0.1.0"
+
+[dependencies.component]
+source = "warg://chikoski:hello-world@0.2.0"
+
+[capabilities]
+privileged = false
+
+[capabilities.deps]
+"chikoski:hello" = ["chikoski:hello/greet.hello"]
+
+[target.default]
+remote = "127.0.0.1:4443"
+server_name = "localhost"
+ca_cert = "certs/ca.crt"
+client_cert = "certs/client.crt"
+client_key = "certs/client.key"

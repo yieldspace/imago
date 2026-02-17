@@ -21,6 +21,8 @@
 - manager-runner / runner-runner の IPC（DBus over UDS, trait 抽象）
 - runner stdout/stderr のパイプ回収とメモリ上限付きバッファ保持
 - manager 起動時の `restart_policy=always` service 自動復元（best-effort）
+- plugin component の SHA-256 検証、cache 再利用、起動時 GC
+- app/plugin capability ルールに基づく plugin import 認可（default deny）
 
 `imagod` の非責務（または未実装）:
 
@@ -89,6 +91,14 @@ epoch_tick_interval_ms = 50
 - 復元対象は `restart_policy` が `always` で、かつ `active_release` が存在する service のみ。
 - `restart_policy` ファイルが欠落している service は `never` として扱い、起動しない。
 - 一部 service の復元失敗はログへ記録して起動を継続する（best-effort）。
+
+## 実装反映ノート（Plugin Runtime MVP-1 / 2026-02-17）
+
+- deploy 時に `manifest.dependencies(kind=wasm)` の `component.sha256` を検証し、`storage_root/plugins/components/<sha256>.wasm` へキャッシュ配置する。
+- 同一 hash の plugin component は再配置せず再利用する。
+- manager 起動時に active release の manifest を走査し、未参照 plugin component を GC する。
+- `RunnerBootstrap` に plugin 依存定義と capability ルールを含め、runner runtime へ伝播する。
+- Wasmtime runtime は dependency import に対して `func_new_async` bridge を構成し、`deps` capability で認可された呼び出しのみ許可する。
 ## 実装反映ノート（Storage Root Default Matrix / 2026-02-14）
 
 - `imagod.toml` の `storage_root` 未指定時既定値を固定 `/etc/imago` から OS 別既定値へ変更した（Linux=`/var/lib/imago`, macOS=`/usr/local/var/imago`, Windows=`C:\ProgramData\imago`, その他=`/var/lib/imago`）。

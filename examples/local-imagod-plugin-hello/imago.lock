@@ -1,0 +1,13 @@
+version = 2
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+wit_source = "warg://chikoski:hello@0.1.0"
+wit_registry = "wa.dev"
+wit_digest = "759224a32555fbe1af92d3c09ff1528db081399cd6041c20ea3f0607a70b4812"
+wit_path = "wit/deps/chikoski_hello"
+component_source = "warg://chikoski:hello-world@0.2.0"
+component_registry = "wa.dev"
+component_sha256 = "5786aec40737e2db4790fc0fa90c1448172aaf892d6134b67061bd2eaedbb5d6"
+resolved_at = "1771318830"

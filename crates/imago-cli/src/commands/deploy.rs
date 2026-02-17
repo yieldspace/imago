@@ -31,7 +31,7 @@ use web_transport_quinn::{Session, proto::ConnectRequest};
 
 use crate::{
     cli::DeployArgs,
-    commands::{CommandResult, build},
+    commands::{CommandResult, build, plugin_sources},
 };
 
 const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
@@ -114,6 +114,8 @@ struct Manifest {
     app_type: String,
     #[serde(default)]
     assets: Vec<ManifestAsset>,
+    #[serde(default)]
+    dependencies: Vec<build::ManifestDependency>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,13 +182,20 @@ async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> 
     let restart_policy = build_output.restart_policy;
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).context("failed to parse manifest json")?;
+    let dependency_component_sources =
+        resolve_dependency_component_sources(project_root, &manifest).await?;
 
     let target = build_output
         .target
         .require_deploy_credentials()
         .context("target settings are invalid for deploy")?;
 
-    let artifact = build_artifact_bundle_file(&manifest, &manifest_path, project_root)?;
+    let artifact = build_artifact_bundle_file(
+        &manifest,
+        &manifest_path,
+        project_root,
+        &dependency_component_sources,
+    )?;
     let (artifact_digest, artifact_size) = compute_file_sha256_and_size(artifact.path())?;
     let manifest_digest = hex::encode(Sha256::digest(&manifest_bytes));
     let correlation_id = Uuid::new_v4();
@@ -1041,6 +1050,7 @@ fn build_artifact_bundle_file(
     manifest: &Manifest,
     manifest_source: &Path,
     project_root: &Path,
+    dependency_component_sources: &BTreeMap<String, PathBuf>,
 ) -> anyhow::Result<TempArtifactBundle> {
     let bundle_path = std::env::temp_dir().join(format!("imago-artifact-{}.tar", Uuid::new_v4()));
     let bundle_file = std::fs::File::create(&bundle_path).with_context(|| {
@@ -1073,9 +1083,103 @@ fn build_artifact_bundle_file(
             &asset_entry,
         )?;
     }
+    for (index, dependency) in manifest.dependencies.iter().enumerate() {
+        if dependency.kind != build::ManifestDependencyKind::Wasm {
+            continue;
+        }
+        let component = dependency.component.as_ref().ok_or_else(|| {
+            anyhow!("dependencies[{index}].component is required when kind=\"wasm\"")
+        })?;
+        let normalized_component = normalize_bundle_entry_path(
+            &component.path,
+            &format!("dependencies[{index}].component.path"),
+        )?;
+        let component_entry = normalized_tar_entry_name(&normalized_component);
+        let source_path = dependency_component_sources
+            .get(&dependency.name)
+            .cloned()
+            .unwrap_or_else(|| project_root.join(&normalized_component));
+        add_file_to_tar(&mut builder, source_path, &component_entry)?;
+    }
     builder.finish()?;
 
     Ok(TempArtifactBundle::new(bundle_path))
+}
+
+async fn resolve_dependency_component_sources(
+    project_root: &Path,
+    manifest: &Manifest,
+) -> anyhow::Result<BTreeMap<String, PathBuf>> {
+    let mut sources = BTreeMap::new();
+    if !manifest
+        .dependencies
+        .iter()
+        .any(|dep| dep.kind == build::ManifestDependencyKind::Wasm)
+    {
+        return Ok(sources);
+    }
+
+    let lock = build::load_imago_lock(project_root)?;
+    let lock_by_name = lock
+        .dependencies
+        .into_iter()
+        .map(|entry| (entry.name.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+
+    for dependency in &manifest.dependencies {
+        if dependency.kind != build::ManifestDependencyKind::Wasm {
+            continue;
+        }
+
+        let component = dependency.component.as_ref().ok_or_else(|| {
+            anyhow!(
+                "manifest dependency '{}' is missing component; run `imago update`",
+                dependency.name
+            )
+        })?;
+        let lock_entry = lock_by_name.get(&dependency.name).ok_or_else(|| {
+            anyhow!(
+                "dependency '{}' is not resolved in imago.lock; run `imago update`",
+                dependency.name
+            )
+        })?;
+        let source = lock_entry.component_source.as_deref().ok_or_else(|| {
+            anyhow!(
+                "dependency '{}' component source is missing in imago.lock; run `imago update`",
+                dependency.name
+            )
+        })?;
+        let sha = lock_entry.component_sha256.as_deref().ok_or_else(|| {
+            anyhow!(
+                "dependency '{}' component sha256 is missing in imago.lock; run `imago update`",
+                dependency.name
+            )
+        })?;
+        if component.sha256 != sha {
+            return Err(anyhow!(
+                "dependency '{}' component hash mismatch (manifest='{}', lock='{}'); run `imago update`",
+                dependency.name,
+                component.sha256,
+                sha
+            ));
+        }
+        let cache_path = plugin_sources::materialize_component_cache_file(
+            project_root,
+            source,
+            lock_entry.component_registry.as_deref(),
+            sha,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to resolve component bytes for dependency '{}'",
+                dependency.name
+            )
+        })?;
+        sources.insert(dependency.name.clone(), cache_path);
+    }
+
+    Ok(sources)
 }
 
 fn normalize_bundle_entry_path(raw: &str, field_name: &str) -> anyhow::Result<PathBuf> {
@@ -1671,10 +1775,16 @@ mod tests {
             main: hashed_main.to_string(),
             app_type: "cli".to_string(),
             assets: vec![],
+            dependencies: vec![],
         };
 
-        let bundle = build_artifact_bundle_file(&manifest, Path::new("build/manifest.json"), &root)
-            .expect("bundle should be created");
+        let bundle = build_artifact_bundle_file(
+            &manifest,
+            Path::new("build/manifest.json"),
+            &root,
+            &BTreeMap::new(),
+        )
+        .expect("bundle should be created");
 
         let file = std::fs::File::open(bundle.path()).expect("bundle file should open");
         let mut archive = tar::Archive::new(file);
@@ -1702,10 +1812,16 @@ mod tests {
             main: "../evil.wasm".to_string(),
             app_type: "cli".to_string(),
             assets: vec![],
+            dependencies: vec![],
         };
 
-        let err = build_artifact_bundle_file(&manifest, Path::new("build/manifest.json"), &root)
-            .expect_err("unsafe manifest.main should be rejected");
+        let err = build_artifact_bundle_file(
+            &manifest,
+            Path::new("build/manifest.json"),
+            &root,
+            &BTreeMap::new(),
+        )
+        .expect_err("unsafe manifest.main should be rejected");
         assert!(err.to_string().contains("manifest.main"));
 
         let _ = fs::remove_dir_all(root);
@@ -1725,10 +1841,16 @@ mod tests {
             assets: vec![ManifestAsset {
                 path: "../secret.txt".to_string(),
             }],
+            dependencies: vec![],
         };
 
-        let err = build_artifact_bundle_file(&manifest, Path::new("build/manifest.json"), &root)
-            .expect_err("unsafe asset path should be rejected");
+        let err = build_artifact_bundle_file(
+            &manifest,
+            Path::new("build/manifest.json"),
+            &root,
+            &BTreeMap::new(),
+        )
+        .expect_err("unsafe asset path should be rejected");
         assert!(err.to_string().contains("assets[].path"));
 
         let _ = fs::remove_dir_all(root);

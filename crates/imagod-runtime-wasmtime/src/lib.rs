@@ -1,7 +1,7 @@
 //! Wasmtime runtime integration used by runner processes.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     net::{IpAddr, SocketAddr},
     path::Path,
     sync::Arc,
@@ -11,14 +11,17 @@ use std::{
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use imago_protocol::ErrorCode;
-use imagod_ipc::{RunnerAppType, RunnerSocketConfig, RunnerSocketDirection};
+use imagod_ipc::{
+    CapabilityPolicy, PluginDependency, PluginKind, RunnerAppType, RunnerSocketConfig,
+    RunnerSocketDirection,
+};
 use tokio::{
     sync::{mpsc, oneshot, watch},
     task::JoinHandle,
 };
 use wasmtime::{
     Config, Engine, Store,
-    component::{Component, Linker, ResourceTable},
+    component::{Component, Func, Linker, ResourceTable, types},
 };
 use wasmtime_wasi::{
     WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
@@ -32,8 +35,8 @@ use wasmtime_wasi_http::{
 
 use imagod_common::ImagodError;
 use imagod_runtime_internal::{
-    ComponentRuntime, RuntimeHttpFuture, RuntimeHttpRequest, RuntimeHttpResponse, RuntimeRunFuture,
-    RuntimeRunRequest,
+    ComponentRuntime, NativePluginRegistry, RuntimeHttpFuture, RuntimeHttpRequest,
+    RuntimeHttpResponse, RuntimeRunFuture, RuntimeRunRequest,
 };
 
 const STAGE_RUNTIME: &str = "runtime.start";
@@ -70,6 +73,7 @@ impl WasiHttpView for WasiState {
 pub struct WasmRuntime {
     engine: Arc<Engine>,
     http_instance: Arc<tokio::sync::Mutex<Option<RunningHttpComponent>>>,
+    native_plugins: NativePluginRegistry,
 }
 
 /// Runtime state used while one HTTP component is running.
@@ -87,6 +91,13 @@ struct HttpWorkerRequest {
 impl WasmRuntime {
     /// Creates a runtime with component model, async support, and epoch interruption enabled.
     pub fn new() -> Result<Self, ImagodError> {
+        Self::new_with_native_plugins(NativePluginRegistry::default())
+    }
+
+    /// Creates a runtime with a native plugin registry injected by manager build.
+    pub fn new_with_native_plugins(
+        native_plugins: NativePluginRegistry,
+    ) -> Result<Self, ImagodError> {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.async_support(true);
@@ -98,6 +109,7 @@ impl WasmRuntime {
         Ok(Self {
             engine: Arc::new(engine),
             http_instance: Arc::new(tokio::sync::Mutex::new(None)),
+            native_plugins,
         })
     }
 
@@ -185,6 +197,8 @@ impl WasmRuntime {
         args: &[String],
         envs: &BTreeMap<String, String>,
         socket: Option<&RunnerSocketConfig>,
+        plugin_dependencies: &[PluginDependency],
+        capabilities: &CapabilityPolicy,
         mut shutdown: watch::Receiver<bool>,
         epoch_tick_interval_ms: u64,
     ) -> Result<(), ImagodError> {
@@ -200,6 +214,18 @@ impl WasmRuntime {
             .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
 
         let mut store = self.build_store(args, envs, socket)?;
+        let available_plugins = self
+            .instantiate_plugin_dependencies(&mut store, plugin_dependencies)
+            .await?;
+        self.register_plugin_import_shims(
+            &mut linker,
+            &mut store,
+            &component,
+            "app",
+            &all_dependency_names(plugin_dependencies),
+            capabilities,
+            &available_plugins,
+        )?;
 
         let run_future = async {
             let command = Command::instantiate_async(&mut store, &component, &linker)
@@ -237,6 +263,8 @@ impl WasmRuntime {
         component_path: &Path,
         args: &[String],
         envs: &BTreeMap<String, String>,
+        plugin_dependencies: &[PluginDependency],
+        capabilities: &CapabilityPolicy,
         mut shutdown: watch::Receiver<bool>,
         epoch_tick_interval_ms: u64,
         mut http_ready_tx: Option<oneshot::Sender<()>>,
@@ -255,6 +283,18 @@ impl WasmRuntime {
             .map_err(|e| map_runtime_error(format!("failed to add WASI HTTP linker: {e}")))?;
 
         let mut store = self.build_store(args, envs, None)?;
+        let available_plugins = self
+            .instantiate_plugin_dependencies(&mut store, plugin_dependencies)
+            .await?;
+        self.register_plugin_import_shims(
+            &mut linker,
+            &mut store,
+            &component,
+            "app",
+            &all_dependency_names(plugin_dependencies),
+            capabilities,
+            &available_plugins,
+        )?;
         let proxy = Proxy::instantiate_async(&mut store, &component, &linker)
             .await
             .map_err(|e| map_runtime_error(format!("http component instantiate failed: {e}")))?;
@@ -337,6 +377,229 @@ impl WasmRuntime {
             )
         })?
     }
+
+    async fn instantiate_plugin_dependencies(
+        &self,
+        store: &mut Store<WasiState>,
+        dependencies: &[PluginDependency],
+    ) -> Result<BTreeMap<String, AvailablePlugin>, ImagodError> {
+        let order = dependency_topological_order(dependencies)?;
+        let mut available = BTreeMap::<String, AvailablePlugin>::new();
+
+        for dep_index in order {
+            let dep = &dependencies[dep_index];
+            match dep.kind {
+                PluginKind::Native => {
+                    available.insert(
+                        dep.name.clone(),
+                        AvailablePlugin {
+                            kind: PluginKind::Native,
+                            instance: None,
+                        },
+                    );
+                }
+                PluginKind::Wasm => {
+                    let component = dep.component.as_ref().ok_or_else(|| {
+                        map_runtime_error(format!(
+                            "plugin dependency '{}' missing component definition",
+                            dep.name
+                        ))
+                    })?;
+                    let component =
+                        Component::from_file(&self.engine, &component.path).map_err(|e| {
+                            map_runtime_error(format!(
+                                "failed to load plugin component '{}' from {}: {e}",
+                                dep.name,
+                                component.path.display()
+                            ))
+                        })?;
+
+                    let mut linker = Linker::new(&self.engine);
+                    add_to_linker_async(&mut linker).map_err(|e| {
+                        map_runtime_error(format!(
+                            "failed to add WASI linker for plugin '{}': {e}",
+                            dep.name
+                        ))
+                    })?;
+                    add_only_http_to_linker_async(&mut linker).map_err(|e| {
+                        map_runtime_error(format!(
+                            "failed to add WASI HTTP linker for plugin '{}': {e}",
+                            dep.name
+                        ))
+                    })?;
+                    let requires = dep.requires.iter().cloned().collect::<BTreeSet<_>>();
+                    self.register_plugin_import_shims(
+                        &mut linker,
+                        store,
+                        &component,
+                        &dep.name,
+                        &requires,
+                        &dep.capabilities,
+                        &available,
+                    )?;
+
+                    let instance = linker
+                        .instantiate_async(&mut *store, &component)
+                        .await
+                        .map_err(|e| {
+                            map_runtime_error(format!(
+                                "failed to instantiate plugin component '{}': {e}",
+                                dep.name
+                            ))
+                        })?;
+                    available.insert(
+                        dep.name.clone(),
+                        AvailablePlugin {
+                            kind: PluginKind::Wasm,
+                            instance: Some(instance),
+                        },
+                    );
+                }
+            }
+        }
+
+        Ok(available)
+    }
+
+    fn register_plugin_import_shims(
+        &self,
+        linker: &mut Linker<WasiState>,
+        store: &mut Store<WasiState>,
+        component: &Component,
+        caller_name: &str,
+        allowed_dependencies: &BTreeSet<String>,
+        capabilities: &CapabilityPolicy,
+        available_plugins: &BTreeMap<String, AvailablePlugin>,
+    ) -> Result<(), ImagodError> {
+        let component_ty = component.component_type();
+
+        for (import_name, import_item) in component_ty.imports(&self.engine) {
+            if import_name.starts_with("wasi:") {
+                continue;
+            }
+
+            let target_dependency = match resolve_target_dependency(import_name, available_plugins)
+            {
+                Some(target) => target,
+                None => continue,
+            };
+            if !allowed_dependencies.contains(target_dependency) {
+                return Err(map_runtime_unauthorized_error(format!(
+                    "caller '{}' is not allowed to use dependency '{}' (import '{}')",
+                    caller_name, target_dependency, import_name
+                )));
+            }
+
+            let types::ComponentItem::ComponentInstance(instance_ty) = import_item else {
+                continue;
+            };
+            let mut import_instance = linker.instance(import_name).map_err(|e| {
+                map_runtime_error(format!(
+                    "failed to define plugin import namespace '{}': {e}",
+                    import_name
+                ))
+            })?;
+
+            for (func_name, item) in instance_ty.exports(&self.engine) {
+                let types::ComponentItem::ComponentFunc(import_ty) = item else {
+                    continue;
+                };
+                if !is_dependency_function_allowed(
+                    capabilities,
+                    target_dependency,
+                    import_name,
+                    func_name,
+                ) {
+                    return Err(map_runtime_unauthorized_error(format!(
+                        "capability denied caller '{}' -> dependency '{}' function '{}.{}'",
+                        caller_name, target_dependency, import_name, func_name
+                    )));
+                }
+
+                let plugin = available_plugins.get(target_dependency).ok_or_else(|| {
+                    map_runtime_error(format!(
+                        "missing target dependency '{}' for plugin import '{}.{}'",
+                        target_dependency, import_name, func_name
+                    ))
+                })?;
+                match plugin.kind {
+                    PluginKind::Native => {
+                        let native_symbol = format!("{import_name}.{func_name}");
+                        if !self
+                            .native_plugins
+                            .has_symbol(target_dependency, &native_symbol)
+                        {
+                            return Err(map_runtime_error(format!(
+                                "native plugin '{}' does not expose symbol '{}'",
+                                target_dependency, native_symbol
+                            )));
+                        }
+                        let target_dependency = target_dependency.to_string();
+                        let interface_name = import_name.to_string();
+                        let function_name = func_name.to_string();
+                        import_instance
+                            .func_new_async(func_name, move |_store, _ty, _params, _results| {
+                                let target_dependency = target_dependency.clone();
+                                let interface_name = interface_name.clone();
+                                let function_name = function_name.clone();
+                                Box::new(async move {
+                                    Err(wasmtime::Error::msg(format!(
+                                        "native plugin call is not implemented yet: {} {}.{}",
+                                        target_dependency, interface_name, function_name
+                                    ))
+                                    .into())
+                                })
+                            })
+                            .map_err(|e| {
+                                map_runtime_error(format!(
+                                    "failed to define native plugin shim '{}.{}': {e}",
+                                    import_name, func_name
+                                ))
+                            })?;
+                    }
+                    PluginKind::Wasm => {
+                        let callee = resolve_wasm_plugin_export(
+                            &mut *store,
+                            plugin,
+                            import_name,
+                            func_name,
+                        )?;
+                        let callee_ty = callee.ty(&*store);
+                        ensure_component_signatures_match(
+                            &import_ty,
+                            &callee_ty,
+                            import_name,
+                            func_name,
+                        )?;
+
+                        import_instance
+                            .func_new_async(func_name, move |mut store, _ty, params, results| {
+                                let callee = callee.clone();
+                                Box::new(async move {
+                                    callee.call_async(&mut store, params, results).await?;
+                                    callee.post_return_async(&mut store).await?;
+                                    Ok(())
+                                })
+                            })
+                            .map_err(|e| {
+                                map_runtime_error(format!(
+                                    "failed to define wasm plugin shim '{}.{}': {e}",
+                                    import_name, func_name
+                                ))
+                            })?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct AvailablePlugin {
+    kind: PluginKind,
+    instance: Option<wasmtime::component::Instance>,
 }
 
 async fn run_http_worker(
@@ -422,6 +685,172 @@ fn socket_addr_allowed(
     }
 }
 
+fn all_dependency_names(dependencies: &[PluginDependency]) -> BTreeSet<String> {
+    dependencies.iter().map(|dep| dep.name.clone()).collect()
+}
+
+fn dependency_topological_order(
+    dependencies: &[PluginDependency],
+) -> Result<Vec<usize>, ImagodError> {
+    let mut by_name = BTreeMap::<String, usize>::new();
+    for (index, dep) in dependencies.iter().enumerate() {
+        if by_name.insert(dep.name.clone(), index).is_some() {
+            return Err(map_runtime_error(format!(
+                "duplicate plugin dependency name '{}'",
+                dep.name
+            )));
+        }
+    }
+
+    let mut indegree = vec![0usize; dependencies.len()];
+    let mut edges = vec![Vec::<usize>::new(); dependencies.len()];
+    for (index, dep) in dependencies.iter().enumerate() {
+        for req in &dep.requires {
+            let req_index = by_name.get(req).ok_or_else(|| {
+                map_runtime_error(format!(
+                    "plugin dependency '{}' requires unknown dependency '{}'",
+                    dep.name, req
+                ))
+            })?;
+            edges[*req_index].push(index);
+            indegree[index] += 1;
+        }
+    }
+
+    let mut ready = dependencies
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, _)| (indegree[idx] == 0).then_some(idx))
+        .collect::<Vec<_>>();
+    ready.sort_unstable_by(|a, b| dependencies[*a].name.cmp(&dependencies[*b].name));
+
+    let mut order = Vec::with_capacity(dependencies.len());
+    while let Some(next) = ready.pop() {
+        order.push(next);
+        for edge in &edges[next] {
+            indegree[*edge] = indegree[*edge].saturating_sub(1);
+            if indegree[*edge] == 0 {
+                ready.push(*edge);
+            }
+        }
+        ready.sort_unstable_by(|a, b| dependencies[*a].name.cmp(&dependencies[*b].name));
+    }
+
+    if order.len() != dependencies.len() {
+        return Err(map_runtime_error(
+            "plugin dependency graph contains a cycle".to_string(),
+        ));
+    }
+    Ok(order)
+}
+
+fn resolve_target_dependency<'a>(
+    import_name: &str,
+    available_plugins: &'a BTreeMap<String, AvailablePlugin>,
+) -> Option<&'a str> {
+    let mut matched = available_plugins
+        .keys()
+        .filter_map(|name| {
+            if import_name == name || import_name.starts_with(&format!("{name}/")) {
+                Some(name.as_str())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    matched.sort_unstable_by_key(|name| std::cmp::Reverse(name.len()));
+    matched.into_iter().next()
+}
+
+fn is_dependency_function_allowed(
+    policy: &CapabilityPolicy,
+    dependency_name: &str,
+    interface_name: &str,
+    function_name: &str,
+) -> bool {
+    if policy.privileged {
+        return true;
+    }
+    let Some(rules) = policy.deps.get(dependency_name) else {
+        return false;
+    };
+    rules.iter().any(|rule| {
+        rule == "*"
+            || rule == function_name
+            || rule == &format!("{interface_name}.{function_name}")
+            || rule == &format!("{interface_name}/{function_name}")
+            || rule == &format!("{interface_name}#{function_name}")
+    })
+}
+
+fn ensure_component_signatures_match(
+    import_ty: &types::ComponentFunc,
+    callee_ty: &types::ComponentFunc,
+    interface_name: &str,
+    function_name: &str,
+) -> Result<(), ImagodError> {
+    let import_params = import_ty.params().map(|(_, ty)| ty).collect::<Vec<_>>();
+    let callee_params = callee_ty.params().map(|(_, ty)| ty).collect::<Vec<_>>();
+    if import_params != callee_params {
+        return Err(map_runtime_error(format!(
+            "plugin import type mismatch for '{}.{}': parameter types differ",
+            interface_name, function_name
+        )));
+    }
+
+    let import_results = import_ty.results().collect::<Vec<_>>();
+    let callee_results = callee_ty.results().collect::<Vec<_>>();
+    if import_results != callee_results {
+        return Err(map_runtime_error(format!(
+            "plugin import type mismatch for '{}.{}': result types differ",
+            interface_name, function_name
+        )));
+    }
+
+    Ok(())
+}
+
+fn resolve_wasm_plugin_export(
+    mut store: impl wasmtime::AsContextMut<Data = WasiState>,
+    plugin: &AvailablePlugin,
+    interface_name: &str,
+    function_name: &str,
+) -> Result<Func, ImagodError> {
+    let instance = plugin.instance.as_ref().ok_or_else(|| {
+        map_runtime_error("internal error: wasm plugin dependency is missing instance".to_string())
+    })?;
+
+    let interface_index = instance
+        .get_export_index(store.as_context_mut(), None, interface_name)
+        .ok_or_else(|| {
+            map_runtime_error(format!(
+                "plugin export interface '{}' was not found",
+                interface_name
+            ))
+        })?;
+    let function_index = instance
+        .get_export_index(
+            store.as_context_mut(),
+            Some(&interface_index),
+            function_name,
+        )
+        .or_else(|| instance.get_export_index(store.as_context_mut(), None, function_name))
+        .ok_or_else(|| {
+            map_runtime_error(format!(
+                "plugin export function '{}.{}' was not found",
+                interface_name, function_name
+            ))
+        })?;
+    instance
+        .get_func(store.as_context_mut(), function_index)
+        .ok_or_else(|| {
+            map_runtime_error(format!(
+                "plugin export '{}.{}' is not a function",
+                interface_name, function_name
+            ))
+        })
+}
+
 impl ComponentRuntime for WasmRuntime {
     fn validate_component(&self, component_path: &Path) -> Result<(), ImagodError> {
         self.validate_component_loadable(component_path)
@@ -435,6 +864,8 @@ impl ComponentRuntime for WasmRuntime {
                 args,
                 envs,
                 socket,
+                plugin_dependencies,
+                capabilities,
                 shutdown,
                 epoch_tick_interval_ms,
                 http_ready_tx,
@@ -452,6 +883,8 @@ impl ComponentRuntime for WasmRuntime {
                         &args,
                         &envs,
                         None,
+                        &plugin_dependencies,
+                        &capabilities,
                         shutdown,
                         epoch_tick_interval_ms,
                     )
@@ -467,6 +900,8 @@ impl ComponentRuntime for WasmRuntime {
                         &component_path,
                         &args,
                         &envs,
+                        &plugin_dependencies,
+                        &capabilities,
                         shutdown,
                         epoch_tick_interval_ms,
                         http_ready_tx,
@@ -484,6 +919,8 @@ impl ComponentRuntime for WasmRuntime {
                         &args,
                         &envs,
                         Some(socket),
+                        &plugin_dependencies,
+                        &capabilities,
                         shutdown,
                         epoch_tick_interval_ms,
                     )
@@ -580,6 +1017,10 @@ fn map_runtime_error(message: String) -> ImagodError {
     ImagodError::new(ErrorCode::Internal, STAGE_RUNTIME, message)
 }
 
+fn map_runtime_unauthorized_error(message: String) -> ImagodError {
+    ImagodError::new(ErrorCode::Unauthorized, STAGE_RUNTIME, message)
+}
+
 /// Waits until shutdown flag is set or sender side is dropped.
 async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
     loop {
@@ -623,6 +1064,8 @@ mod tests {
                 args: Vec::new(),
                 envs: BTreeMap::new(),
                 socket: None,
+                plugin_dependencies: Vec::new(),
+                capabilities: CapabilityPolicy::default(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: 50,
                 http_ready_tx: None,
@@ -648,6 +1091,8 @@ mod tests {
                 args: Vec::new(),
                 envs: BTreeMap::new(),
                 socket: Some(sample_socket_config()),
+                plugin_dependencies: Vec::new(),
+                capabilities: CapabilityPolicy::default(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: 50,
                 http_ready_tx: None,
@@ -673,6 +1118,8 @@ mod tests {
                 args: Vec::new(),
                 envs: BTreeMap::new(),
                 socket: None,
+                plugin_dependencies: Vec::new(),
+                capabilities: CapabilityPolicy::default(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: 50,
                 http_ready_tx: None,

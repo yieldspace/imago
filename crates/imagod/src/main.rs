@@ -56,6 +56,17 @@ async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyhow::Error> 
     .map_err(anyhow::Error::new)?;
     let orchestrator = Orchestrator::new(&config.storage_root, artifacts.clone(), supervisor);
     let mut server = build_server(&config).map_err(anyhow::Error::new)?;
+    match orchestrator.gc_unused_plugin_components_on_boot().await {
+        Ok(()) => {
+            eprintln!("plugin component cache gc completed");
+        }
+        Err(err) => {
+            eprintln!(
+                "plugin component cache gc failed code={:?} stage={} message={}",
+                err.code, err.stage, err.message
+            );
+        }
+    }
     match orchestrator.restore_active_services_on_boot().await {
         Ok(summary) => {
             for started in &summary.started {

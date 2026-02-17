@@ -12,13 +12,16 @@ pub mod runtime_wasmtime {
 
 /// Runtime abstraction types.
 pub use imagod_runtime_internal::{
-    ComponentRuntime, RuntimeHttpRequest, RuntimeHttpResponse, RuntimeRunRequest,
+    ComponentRuntime, NativePluginRegistry, NativePluginRegistryBuilder, RuntimeHttpRequest,
+    RuntimeHttpResponse, RuntimeRunRequest,
 };
 /// Runner runtime wrapper around a shared Wasmtime engine.
 #[cfg(feature = "runtime-wasmtime")]
 pub use imagod_runtime_wasmtime::WasmRuntime;
 /// Runs `imagod` in runner mode using bootstrap data read from stdin.
 pub use runner_process::run_runner_from_stdin;
+/// Runs `imagod` in runner mode with a custom native plugin registry.
+pub use runner_process::run_runner_from_stdin_with_registry;
 
 #[cfg(all(test, feature = "runtime-wasmtime"))]
 mod tests {

@@ -30,7 +30,8 @@
 | `bindings` | array | service 間呼び出し許可一覧（省略時は `[]`） |
 | `http` | object | `type=http` 時の HTTP 実行設定（`port` 必須） |
 | `socket` | object | `type=socket` 時の socket 実行設定（必須） |
-| `dependencies` | array | 依存解決結果 |
+| `dependencies` | array | typed plugin 依存解決結果 |
+| `capabilities` | object | 正規化済み capability ルール（省略時は deny-by-default） |
 | `hash` | object | 全体整合性情報 |
 
 ## `hash` フィールド
@@ -65,6 +66,22 @@
 - `target` は service 名文字制約（`name` と同等）に従う。
 - `wit` は非空文字列。
 - `bindings` 未指定 manifest は `[]` と同等に扱う（後方互換）。
+
+## `dependencies` フィールド
+
+- `dependencies` は typed 構造で出力する。
+  - `name`, `version`, `kind`, `wit`, `requires`, `component`, `capabilities`
+- `kind` は `native` / `wasm`。
+- `kind=wasm` の場合、`component.path` / `component.sha256` を必須とする。
+  - `component.path` は `imago build` が `plugins/components/<sha256>.wasm` へ正規化して出力する。
+  - `component.sha256` は `imago.lock.dependencies[].component_sha256` と一致する。
+- `capabilities` は plugin caller 用のルールで、`privileged` / `deps` / `wasi` を受理する。
+
+## `capabilities` フィールド
+
+- ルート `manifest.capabilities` は app caller 用のルール。
+- `privileged=true` の場合は全許可。
+- それ以外は `deps` / `wasi` で明示許可された関数のみ許可（default deny）。
 
 ## `http` フィールド
 
@@ -107,6 +124,8 @@
 - `hash.targets` が不足または重複なら拒否。
 - `secrets` は key-value オブジェクトのみ許可。
 - `bindings` 指定時は配列のみ許可し、各要素は `target` / `wit` の非空文字列を必須とする。
+- `dependencies` 指定時は typed 構造のみ許可し、`kind=wasm` は `component.path` / `component.sha256` を必須とする。
+- `capabilities` は `privileged` / `deps` / `wasi` 以外のキーを拒否する。
 
 ## 実装ノート
 
@@ -121,5 +140,7 @@
 - `build/<sha256>-<name>.wasm` が既に存在する場合でも、内容の sha256 が不一致なら `main` の実体 wasm から上書き再生成する。
 - `hash.value` の wasm 対象は `manifest.main` が指す materialize 後ファイルとする。
 - CLI は `imago.toml` の `[[bindings]]` を `manifest.bindings[]` に正規化して出力する。
+- CLI は `imago.toml` の `[[dependencies]]` を typed `manifest.dependencies[]` に正規化し、lock 検証済みの WIT/Component 参照情報を保持する。
+- CLI は `imago.toml` の `capabilities` を正規化して `manifest.capabilities` に出力する（`capabilirties` は互換受理しない）。
 - CLI は `type=http` 時のみ `imago.toml` の `[http].port` / `[http].max_body_bytes` を `manifest.http.port` / `manifest.http.max_body_bytes` へ正規化して出力する。
 - CLI は `type=socket` 時のみ `imago.toml` の `[socket].protocol` / `[socket].direction` / `[socket].listen_addr` / `[socket].listen_port` を `manifest.socket.*` へ正規化して出力する。

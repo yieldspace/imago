@@ -14,10 +14,10 @@ use std::{
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{
-    ControlRequest, ControlResponse, IpcErrorPayload, RunnerAppType, RunnerBootstrap,
-    RunnerInboundRequest, RunnerSocketConfig, ServiceBinding, compute_manager_auth_proof,
-    dbus_p2p::DbusP2pTransport, issue_invocation_token, now_unix_secs, random_secret_hex,
-    verify_manager_auth_proof,
+    CapabilityPolicy, ControlRequest, ControlResponse, IpcErrorPayload, PluginDependency,
+    RunnerAppType, RunnerBootstrap, RunnerInboundRequest, RunnerSocketConfig, ServiceBinding,
+    compute_manager_auth_proof, dbus_p2p::DbusP2pTransport, issue_invocation_token, now_unix_secs,
+    random_secret_hex, verify_manager_auth_proof,
 };
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -64,6 +64,10 @@ pub struct ServiceLaunch {
     pub envs: BTreeMap<String, String>,
     /// Allowed invocation bindings for this service.
     pub bindings: Vec<ServiceBinding>,
+    /// Plugin dependencies available to the runtime.
+    pub plugin_dependencies: Vec<PluginDependency>,
+    /// App-level capability policy.
+    pub capabilities: CapabilityPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,6 +290,8 @@ impl ServiceSupervisor {
                 args: launch.args.clone(),
                 envs: launch.envs.clone(),
                 bindings: launch.bindings.clone(),
+                plugin_dependencies: launch.plugin_dependencies.clone(),
+                capabilities: launch.capabilities.clone(),
                 manager_control_endpoint: self.manager_control_endpoint.clone(),
                 runner_endpoint: runner_endpoint.clone(),
                 manager_auth_secret: manager_auth_secret.clone(),
