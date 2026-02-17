@@ -967,8 +967,14 @@ fn compute_sha256_hex(path: &Path) -> anyhow::Result<String> {
 }
 
 fn copy_wit_tree(source: &Path, destination_dir: &Path) -> anyhow::Result<()> {
-    let metadata = fs::metadata(source)
+    let metadata = fs::symlink_metadata(source)
         .with_context(|| format!("failed to inspect wit source: {}", source.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(anyhow!(
+            "wit source must not contain symlinks: {}",
+            source.display()
+        ));
+    }
     if metadata.is_file() {
         let file_name = source
             .file_name()
@@ -1001,10 +1007,16 @@ fn copy_dir_contents(source_dir: &Path, destination_dir: &Path) -> anyhow::Resul
             )
         })?;
         let destination_path = destination_dir.join(relative);
-        let metadata = entry
-            .metadata()
+        let file_type = entry
+            .file_type()
             .with_context(|| format!("failed to inspect source path: {}", source_path.display()))?;
-        if metadata.is_dir() {
+        if file_type.is_symlink() {
+            return Err(anyhow!(
+                "wit source must not contain symlinks: {}",
+                source_path.display()
+            ));
+        }
+        if file_type.is_dir() {
             fs::create_dir_all(&destination_path).with_context(|| {
                 format!(
                     "failed to create destination directory: {}",
@@ -1012,7 +1024,7 @@ fn copy_dir_contents(source_dir: &Path, destination_dir: &Path) -> anyhow::Resul
                 )
             })?;
             copy_dir_contents(&source_path, &destination_path)?;
-        } else if metadata.is_file() {
+        } else if file_type.is_file() {
             if let Some(parent) = destination_path.parent() {
                 fs::create_dir_all(parent).with_context(|| {
                     format!("failed to create destination parent: {}", parent.display())
@@ -1032,7 +1044,35 @@ fn copy_dir_contents(source_dir: &Path, destination_dir: &Path) -> anyhow::Resul
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_warg_spec, sanitize_wit_deps_name, warg_local_package_key};
+    use super::{copy_wit_tree, parse_warg_spec, sanitize_wit_deps_name, warg_local_package_key};
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+
+    fn new_temp_dir(test_name: &str) -> PathBuf {
+        let unique = format!(
+            "imago-cli-plugin-sources-tests-{}-{}-{}",
+            test_name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after UNIX_EPOCH")
+                .as_nanos(),
+        );
+        let root = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&root).expect("temp dir should be created");
+        root
+    }
+
+    fn write(path: &Path, bytes: &[u8]) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("parent should be created");
+        }
+        fs::write(path, bytes).expect("file write should succeed");
+    }
 
     #[test]
     fn parse_warg_spec_accepts_nested_package_name() {
@@ -1085,5 +1125,48 @@ mod tests {
             warg_local_package_key(right),
             "local warg cache key must stay collision-free"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_wit_tree_rejects_symlinked_directory_entries() {
+        let root = new_temp_dir("copy-wit-tree-symlink-entry");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        let outside = root.join("outside");
+
+        write(&source.join("package.wit"), b"package test:source;\n");
+        write(&outside.join("package.wit"), b"package test:outside;\n");
+        symlink(&outside, source.join("linked")).expect("symlink should be created");
+
+        let err = copy_wit_tree(&source, &destination).expect_err("symlinked entry must fail");
+        assert!(
+            err.to_string()
+                .contains("wit source must not contain symlinks"),
+            "unexpected error: {err:#}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_wit_tree_rejects_symlink_root_source() {
+        let root = new_temp_dir("copy-wit-tree-symlink-root");
+        let source_real = root.join("source-real");
+        let source_link = root.join("source-link");
+        let destination = root.join("destination");
+
+        write(&source_real.join("package.wit"), b"package test:source;\n");
+        symlink(&source_real, &source_link).expect("symlink should be created");
+
+        let err = copy_wit_tree(&source_link, &destination).expect_err("symlink root must fail");
+        assert!(
+            err.to_string()
+                .contains("wit source must not contain symlinks"),
+            "unexpected error: {err:#}"
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }

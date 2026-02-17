@@ -203,10 +203,16 @@ pub fn resolve_dependencies(
             ));
         }
 
-        let resolved_wit_path = project_root.join(validate_safe_wit_path(
+        let relative_wit_path = validate_safe_wit_path(
             &entry.wit_path,
             &format!("imago.lock.dependencies['{}'].wit_path", expected.name),
-        )?);
+        )?;
+        ensure_no_symlink_in_relative_path(
+            project_root,
+            &relative_wit_path,
+            &format!("imago.lock.dependencies['{}'].wit_path", expected.name),
+        )?;
+        let resolved_wit_path = project_root.join(relative_wit_path);
         let digest = compute_path_digest_hex(&resolved_wit_path).with_context(|| {
             format!(
                 "failed to compute digest for '{}' from imago.lock",
@@ -425,15 +431,22 @@ fn verify_wit_packages_lock(
                     wit_package.name
                 ),
             )?;
-            let package_wit_file = project_root
-                .join(validate_safe_wit_path(
-                    &version_entry.path,
-                    &format!(
-                        "imago.lock.wit_packages['{}'].versions[].path",
-                        wit_package.name
-                    ),
-                )?)
-                .join("package.wit");
+            let relative_package_path = validate_safe_wit_path(
+                &version_entry.path,
+                &format!(
+                    "imago.lock.wit_packages['{}'].versions[].path",
+                    wit_package.name
+                ),
+            )?;
+            ensure_no_symlink_in_relative_path(
+                project_root,
+                &relative_package_path,
+                &format!(
+                    "imago.lock.wit_packages['{}'].versions[].path",
+                    wit_package.name
+                ),
+            )?;
+            let package_wit_file = project_root.join(relative_package_path).join("package.wit");
             if !package_wit_file.is_file() {
                 return Err(anyhow!(
                     "transitive wit package '{}' is missing package.wit at '{}'; run `imago update`",
@@ -530,14 +543,28 @@ fn validate_safe_wit_path(path: &str, field_name: &str) -> anyhow::Result<PathBu
 }
 
 fn compute_sha256_hex(path: &Path) -> anyhow::Result<String> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect file for sha256: {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(anyhow!(
+            "symlink paths are not allowed while hashing: {}",
+            path.display()
+        ));
+    }
     let mut hasher = Sha256::new();
     hash_file_into(&mut hasher, path, "file for sha256")?;
     Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn compute_path_digest_hex(path: &Path) -> anyhow::Result<String> {
-    let metadata = fs::metadata(path)
+    let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("failed to read path for digest: {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(anyhow!(
+            "symlink paths are not allowed while hashing: {}",
+            path.display()
+        ));
+    }
     if metadata.is_file() {
         return compute_sha256_hex(path);
     }
@@ -558,12 +585,18 @@ fn compute_path_digest_hex(path: &Path) -> anyhow::Result<String> {
                 )
             })?;
             let entry_path = entry.path();
-            let entry_metadata = entry
-                .metadata()
+            let file_type = entry
+                .file_type()
                 .with_context(|| format!("failed to read metadata for {}", entry_path.display()))?;
-            if entry_metadata.is_dir() {
+            if file_type.is_symlink() {
+                return Err(anyhow!(
+                    "symlink paths are not allowed while hashing: {}",
+                    entry_path.display()
+                ));
+            }
+            if file_type.is_dir() {
                 stack.push(entry_path);
-            } else if entry_metadata.is_file() {
+            } else if file_type.is_file() {
                 files.push(entry_path);
             }
         }
@@ -609,9 +642,39 @@ fn hash_file_into(hasher: &mut Sha256, path: &Path, context_label: &str) -> anyh
     Ok(())
 }
 
+fn ensure_no_symlink_in_relative_path(
+    project_root: &Path,
+    relative: &Path,
+    field_name: &str,
+) -> anyhow::Result<()> {
+    let mut current = project_root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return Err(anyhow!(
+                "{field_name} contains invalid path components; run `imago update`"
+            ));
+        };
+        current.push(part);
+        if !current.exists() {
+            break;
+        }
+        let metadata = fs::symlink_metadata(&current)
+            .with_context(|| format!("failed to inspect path {}", current.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(anyhow!(
+                "{field_name} resolves through symlink '{}'; run `imago update`",
+                current.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use std::path::PathBuf;
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
@@ -939,6 +1002,117 @@ mod tests {
         )
         .expect_err("must fail");
         assert!(err.to_string().contains("via contains unknown dependency"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_dependencies_rejects_symlinked_dependency_wit_path() {
+        let root = new_temp_dir("symlinked-direct-wit-path");
+        let outside = root.join("outside");
+        write(&outside.join("package.wit"), b"package outside:dep;\n");
+        fs::create_dir_all(root.join("wit/deps")).expect("wit/deps should be creatable");
+        symlink(&outside, root.join("wit/deps/demo")).expect("symlink should be creatable");
+
+        let lock = ImagoLock {
+            version: IMAGO_LOCK_VERSION,
+            dependencies: vec![ImagoLockDependency {
+                name: "demo:test".to_string(),
+                version: "0.1.0".to_string(),
+                wit_source: "file://registry/demo.wit".to_string(),
+                wit_registry: None,
+                wit_digest: "deadbeef".to_string(),
+                wit_path: "wit/deps/demo".to_string(),
+                component_source: None,
+                component_registry: None,
+                component_sha256: None,
+                resolved_at: "0".to_string(),
+            }],
+            wit_packages: vec![],
+        };
+
+        let err = resolve_dependencies(
+            &root,
+            &lock,
+            &[DependencyExpectation {
+                name: "demo:test".to_string(),
+                version: "0.1.0".to_string(),
+                wit_source: "file://registry/demo.wit".to_string(),
+                wit_registry: None,
+                component: None,
+            }],
+        )
+        .expect_err("symlinked dependency wit path must fail");
+        assert!(
+            err.to_string().contains("resolves through symlink"),
+            "unexpected error: {err:#}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_dependencies_rejects_symlinked_transitive_wit_path() {
+        let root = new_temp_dir("symlinked-transitive-wit-path");
+        write(
+            &root.join("wit/deps/demo/package.wit"),
+            b"package demo:test;\n",
+        );
+        let digest = compute_path_digest_hex(&root.join("wit/deps/demo")).expect("digest");
+
+        let outside = root.join("outside-transitive");
+        write(&outside.join("package.wit"), b"package outside:dep;\n");
+        fs::create_dir_all(root.join("wit/deps")).expect("wit/deps should be creatable");
+        symlink(&outside, root.join("wit/deps/transitive")).expect("symlink should be creatable");
+
+        let lock = ImagoLock {
+            version: IMAGO_LOCK_VERSION,
+            dependencies: vec![ImagoLockDependency {
+                name: "demo:test".to_string(),
+                version: "0.1.0".to_string(),
+                wit_source: "file://registry/demo.wit".to_string(),
+                wit_registry: None,
+                wit_digest: digest,
+                wit_path: "wit/deps/demo".to_string(),
+                component_source: None,
+                component_registry: None,
+                component_sha256: None,
+                resolved_at: "0".to_string(),
+            }],
+            wit_packages: vec![ImagoLockWitPackage {
+                name: "transitive:dep".to_string(),
+                registry: None,
+                versions: vec![ImagoLockWitPackageVersion {
+                    requirement: "*".to_string(),
+                    version: None,
+                    digest:
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                            .to_string(),
+                    source: None,
+                    path: "wit/deps/transitive".to_string(),
+                    via: vec!["demo:test".to_string()],
+                }],
+            }],
+        };
+
+        let err = resolve_dependencies(
+            &root,
+            &lock,
+            &[DependencyExpectation {
+                name: "demo:test".to_string(),
+                version: "0.1.0".to_string(),
+                wit_source: "file://registry/demo.wit".to_string(),
+                wit_registry: None,
+                component: None,
+            }],
+        )
+        .expect_err("symlinked transitive wit path must fail");
+        assert!(
+            err.to_string().contains("resolves through symlink"),
+            "unexpected error: {err:#}"
+        );
+
         let _ = fs::remove_dir_all(root);
     }
 
