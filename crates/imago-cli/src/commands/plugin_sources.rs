@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     io::Read,
     path::{Component, Path, PathBuf},
@@ -68,6 +69,10 @@ enum ParsedComponentSource {
 pub(crate) fn sanitize_wit_deps_name(name: &str) -> String {
     // Keep dependency path naming compatible with wkg.
     name.replace([':', '@'], "-")
+}
+
+pub(crate) fn warg_local_package_key(package: &str) -> String {
+    format!("pkg-{}", hex::encode(package.as_bytes()))
 }
 
 pub(crate) fn path_to_manifest_string(path: &Path) -> String {
@@ -679,11 +684,27 @@ fn materialize_wit_package_resolve(
         .packages
         .iter()
         .filter(|(pkg_id, _)| *pkg_id != top_package)
-        .map(|(pkg_id, pkg)| (sanitize_wit_package_name(&pkg.name), pkg_id))
+        .map(|(pkg_id, pkg)| {
+            let package_name = format!("{}:{}", pkg.name.namespace, pkg.name.name);
+            (sanitize_wit_package_name(&pkg.name), package_name, pkg_id)
+        })
         .collect::<Vec<_>>();
-    transitive.sort_by(|a, b| a.0.cmp(&b.0));
+    transitive.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
-    for (sanitized, pkg_id) in transitive {
+    let mut sanitized_to_package: BTreeMap<String, String> = BTreeMap::new();
+    for (sanitized, package_id, pkg_id) in transitive {
+        if let Some(existing_package) = sanitized_to_package.get(&sanitized)
+            && existing_package != &package_id
+        {
+            return Err(anyhow!(
+                "conflicting transitive package path '{}' for '{}' and '{}'",
+                sanitized,
+                existing_package,
+                package_id
+            ));
+        }
+        sanitized_to_package.insert(sanitized.clone(), package_id);
+
         let package_name = &resolve.packages[pkg_id].name;
         let pkg_text = render_wit_package(resolve, pkg_id)?;
         let global_path = deps_root.join(&sanitized).join("package.wit");
@@ -882,7 +903,7 @@ fn find_local_warg_wit_candidate(
     package: &str,
     version: &str,
 ) -> Option<PathBuf> {
-    let package_dir = sanitize_wit_deps_name(package);
+    let package_dir = warg_local_package_key(package);
     let base = project_root
         .join(".imago")
         .join("warg")
@@ -894,7 +915,7 @@ fn find_local_warg_wit_candidate(
         base.join("wit.wit"),
         project_root.join(".imago").join("warg").join(format!(
             "{}@{}.wit",
-            sanitize_wit_deps_name(package),
+            warg_local_package_key(package),
             version
         )),
     ]
@@ -907,7 +928,7 @@ fn find_local_warg_component_candidate(
     package: &str,
     version: &str,
 ) -> Option<PathBuf> {
-    let package_dir = sanitize_wit_deps_name(package);
+    let package_dir = warg_local_package_key(package);
     let base = project_root
         .join(".imago")
         .join("warg")
@@ -920,7 +941,7 @@ fn find_local_warg_component_candidate(
         base.join("component").join("component.wasm"),
         project_root.join(".imago").join("warg").join(format!(
             "{}@{}.wasm",
-            sanitize_wit_deps_name(package),
+            warg_local_package_key(package),
             version
         )),
     ]
@@ -1011,7 +1032,7 @@ fn copy_dir_contents(source_dir: &Path, destination_dir: &Path) -> anyhow::Resul
 
 #[cfg(test)]
 mod tests {
-    use super::parse_warg_spec;
+    use super::{parse_warg_spec, sanitize_wit_deps_name, warg_local_package_key};
 
     #[test]
     fn parse_warg_spec_accepts_nested_package_name() {
@@ -1047,6 +1068,22 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("warg source version contains invalid path components")
+        );
+    }
+
+    #[test]
+    fn warg_local_package_key_avoids_sanitized_name_collisions() {
+        let left = "foo:bar-baz";
+        let right = "foo-bar:baz";
+        assert_eq!(
+            sanitize_wit_deps_name(left),
+            sanitize_wit_deps_name(right),
+            "precondition: sanitized wit/deps names should collide"
+        );
+        assert_ne!(
+            warg_local_package_key(left),
+            warg_local_package_key(right),
+            "local warg cache key must stay collision-free"
         );
     }
 }

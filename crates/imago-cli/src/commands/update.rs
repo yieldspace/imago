@@ -426,6 +426,17 @@ mod tests {
         fs::write(path, bytes).expect("file write should succeed");
     }
 
+    fn local_warg_package_root(root: &Path, package: &str, version: &str) -> PathBuf {
+        root.join(".imago")
+            .join("warg")
+            .join(plugin_sources::warg_local_package_key(package))
+            .join(version)
+    }
+
+    fn local_warg_file_path(root: &Path, package: &str, version: &str, file_name: &str) -> PathBuf {
+        local_warg_package_root(root, package, version).join(file_name)
+    }
+
     fn sha256_hex(bytes: &[u8]) -> String {
         hex::encode(sha2::Sha256::digest(bytes))
     }
@@ -538,7 +549,7 @@ remote = "127.0.0.1:4443"
 "#,
         );
         write(
-            &root.join(".imago/warg/yieldspace-plugin/example/1.2.3/wit.wit"),
+            &local_warg_file_path(&root, "yieldspace:plugin/example", "1.2.3", "wit.wit"),
             b"package test:example@1.2.3;\n",
         );
 
@@ -679,7 +690,7 @@ world plugin {
         let component_bytes = encode_wit_component(&fixture_wit_root, "plugin");
         let expected_sha = sha256_hex(&component_bytes);
         write(
-            &root.join(".imago/warg/root-component/0.1.0/wit.wasm"),
+            &local_warg_file_path(&root, "root:component", "0.1.0", "wit.wasm"),
             &component_bytes,
         );
 
@@ -754,7 +765,7 @@ interface greet {
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
-            &root.join(".imago/warg/chikoski-hello/0.1.0/wit.wasm"),
+            &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wasm"),
             &wit_package_bytes,
         );
 
@@ -1132,7 +1143,7 @@ interface name-provider {
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
-            &root.join(".imago/warg/chikoski-hello/0.1.0/wit.wasm"),
+            &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wasm"),
             &wit_package_bytes,
         );
 
@@ -1218,7 +1229,7 @@ interface greet {
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
-            &root.join(".imago/warg/chikoski-hello/0.1.0/wit.wasm"),
+            &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wasm"),
             &wit_package_bytes,
         );
 
@@ -1268,7 +1279,7 @@ interface greet {
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
-            &root.join(".imago/warg/chikoski-hello/0.1.0/wit.wasm"),
+            &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wasm"),
             &wit_package_bytes,
         );
 
@@ -1331,7 +1342,7 @@ interface name-provider {
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
-            &root.join(".imago/warg/chikoski-hello/0.1.0/wit.wasm"),
+            &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wasm"),
             &wit_package_bytes,
         );
 
@@ -1544,15 +1555,18 @@ interface greet {
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
-            &root.join(".imago/warg/chikoski-hello/0.1.0/wit.wasm"),
+            &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wasm"),
             &wit_package_bytes,
         );
 
         let first = run_with_project_root(UpdateArgs {}, &root);
         assert_eq!(first.exit_code, 0, "first update should succeed: {first:?}");
 
-        fs::remove_dir_all(root.join(".imago/warg/chikoski-hello"))
-            .expect("local warg fixture should be removable");
+        fs::remove_dir_all(
+            root.join(".imago/warg")
+                .join(plugin_sources::warg_local_package_key("chikoski:hello")),
+        )
+        .expect("local warg fixture should be removable");
         fs::remove_dir_all(root.join("wit/deps")).expect("wit/deps should be removable");
 
         let second = run_with_project_root(UpdateArgs {}, &root);
@@ -1587,7 +1601,7 @@ remote = "127.0.0.1:4443"
 "#,
         );
         write(
-            &root.join(".imago/warg/chikoski-hello/0.1.0/wit.wit"),
+            &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wit"),
             br#"
 package chikoski:hello@0.1.0;
 
