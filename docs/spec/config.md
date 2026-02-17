@@ -85,14 +85,15 @@
   - `component.registry` (任意, `kind=wasm` の場合): `warg://` の registry（省略時 `wa.dev`）
   - `component.sha256` (任意, `kind=wasm` の場合): 指定時は `imago update` で照合
   - `capabilities` (任意): この plugin が caller になる場合の認可ルール
-- `imago update` は依存の WIT を `wit/deps/` に展開し、`imago.lock` に `wit_source` / `wit_registry` / `wit_digest` / `wit_path` / `resolved_at` を固定する。
+- `imago update` は依存の WIT を `wit/deps/` に展開し、`imago.lock (version=1)` に `wit_source` / `wit_registry` / `wit_digest` / `wit_path` / `resolved_at` を固定する。
 - `warg://` の direct dependency で WIT 側に version が書かれている場合は、`warg://...@version` と一致している必要がある。
-- `warg://` の WIT package が transitive import を含む場合、依存パッケージも `wit/deps/<package>/package.wit` に展開する。
+- `warg://` の WIT package が transitive import を含む場合、依存パッケージも `wit/deps/<package>/package.wit` に展開し、`imago.lock.[[wit_packages]]` に `name` / `registry` / `[[versions]]` (`requirement` / `version` / `digest` / `source` / `path` / `via`) を固定する。
 - `warg://` source が plain `.wit` 形式で foreign import を含む場合は `imago update` を失敗させる（WIT package 形式が必要）。
 - `kind=wasm` かつ `component` 未指定で `wit` source が component の場合、`imago update` は component から WIT を抽出し、lock の `component_*` を自動固定する。
 - `kind=wasm` かつ `component` 未指定で `wit` source が component に解釈できない場合、`imago update` は失敗する。
 - `kind=wasm` では `imago.lock` に `component_source` / `component_registry` / `component_sha256` も固定する（component本体はこの時点で保存しない）。
-- `imago build` は `imago.lock` が未生成、または digest 不一致のとき失敗し、`imago update` を要求する。
+- `imago build` は `imago.lock` が未生成、`version != 1`、または lock digest 不一致のとき失敗し、`imago update` を要求する。
+- `.imago_transitive` は使用しない。transitive package 検証は `imago.lock.[[wit_packages]]` の `digest` と `path/package.wit` の照合で行う。
 - `imago deploy` は `imago.lock` の component 情報を使って必要時に component を取得し、`.imago/components/<sha256>.wasm` を再利用する。
 - runtime の transitive plugin import 解決順は `self(component export)` -> `明示 dependency(package名一致)` -> `error`。
 - transitive 解決では `requires` の記述を必須にしない。
@@ -170,7 +171,7 @@
 - `restart` が許可値（`never` / `on-failure` / `always` / `unless-stopped`）以外ならエラー。
 - `runtime.restart_policy` を指定した場合はエラー（互換受理なし）。
 - `dependencies[].wit` に `https://wa.dev/...` shorthand を指定した場合はエラー（`warg://<package>@<version>` を使用）。
-- `[[dependencies]]` 使用時に `imago.lock` が存在しない、または lock の `wit_*` / `component_*` が設定と一致しない場合はエラー。
+- `[[dependencies]]` 使用時に `imago.lock` が存在しない、`version != 1`、または lock の `wit_*` / `component_*` / `wit_packages` が設定・展開結果と一致しない場合はエラー。
 - `main` が存在しない場合はビルド時エラー。
 - `shutdown_timeout` が 0 以下はエラー。
 - `privileged = true` かつ `capabilities` 指定ありでもエラーにはしない（`capabilities` を無視）。
@@ -197,7 +198,7 @@
 - `warg://` は Rust-native client で解決し、`registry` 未指定時は `wa.dev` を使う。
 - `imago update` は `kind=wasm` かつ `component` 未指定で `wit` source が component の場合、component hash/source を lock へ自動固定する。
 - `imago build` は `capabilities` を正規化して manifest に出力し、`capabilirties` キーは設定エラーとして拒否する。
-- `imago build` は `[[dependencies]]` がある場合、`imago.lock` の `wit_*` と `component_*` を検証し、不一致時は `imago update` を要求して失敗する（`kind=wasm` で `component` 未指定の場合は `wit` 由来の期待値と照合する）。
+- `imago build` は `[[dependencies]]` がある場合、`imago.lock(version=1)` の `wit_*` / `component_*` / `wit_packages` を検証し、不一致時は `imago update` を要求して失敗する（`kind=wasm` で `component` 未指定の場合は `wit` 由来の期待値と照合する）。
 - `imago build --env <name>` は `build/manifest.<name>.json` を生成し、`build/manifest.json` は更新しない。
 - `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
 - `[[bindings]]` は `manifest.bindings[]` へ正規化し、runtime の呼び出し認可入力として扱う。
@@ -208,6 +209,7 @@
 - `target.<name>.ca_cert` / `client_cert` / `client_key` は path traversal と不正区切りを拒否し、相対指定を `project_root` 基準の絶対パスへ解決する。
 - `imagod.storage_root` の既定値は OS 別（Linux=`/var/lib/imago`, macOS=`/usr/local/var/imago`, Windows=`C:\ProgramData\imago`, その他=`/var/lib/imago`）にし、ビルド時環境変数 `IMAGOD_STORAGE_ROOT_DEFAULT` で上書きできる。`imagod.toml` の明示値を最優先する。
 - `restart` はトップレベルキーのみ受理し、`runtime.restart_policy` は移行エラーにする。
+- `.imago_transitive` は廃止し、transitive WIT package の検証正本を `imago.lock.[[wit_packages]]` へ移行した。`imago build` / `imago deploy` は lock version 1 のみ受理する。
 
 ## `target.<name>` の接続キー（deploy 通信）
 

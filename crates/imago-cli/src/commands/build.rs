@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
+use imago_lockfile::{ComponentExpectation, DependencyExpectation};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
@@ -186,32 +187,6 @@ pub(crate) struct ProjectDependency {
     pub requires: Vec<String>,
     pub component: Option<ProjectDependencyComponent>,
     pub capabilities: ManifestCapabilityPolicy,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct ImagoLock {
-    #[serde(default = "default_imago_lock_version")]
-    pub version: u32,
-    #[serde(default)]
-    pub dependencies: Vec<ImagoLockDependency>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct ImagoLockDependency {
-    pub name: String,
-    pub version: String,
-    pub wit_source: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wit_registry: Option<String>,
-    pub wit_digest: String,
-    pub wit_path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub component_source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub component_registry: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub component_sha256: Option<String>,
-    pub resolved_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1630,17 +1605,6 @@ pub(crate) fn compute_path_digest_hex(path: &Path) -> anyhow::Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-pub(crate) fn default_imago_lock_version() -> u32 {
-    2
-}
-
-pub(crate) fn load_imago_lock(project_root: &Path) -> anyhow::Result<ImagoLock> {
-    let lock_path = project_root.join("imago.lock");
-    let lock_raw = fs::read_to_string(&lock_path)
-        .with_context(|| "imago.lock is missing; run `imago update`".to_string())?;
-    toml::from_str(&lock_raw).context("failed to parse imago.lock")
-}
-
 fn resolve_manifest_dependencies_from_lock(
     project_root: &Path,
     dependencies: &[ProjectDependency],
@@ -1649,129 +1613,38 @@ fn resolve_manifest_dependencies_from_lock(
         return Ok(Vec::new());
     }
 
-    let lock = load_imago_lock(project_root)?;
-    let mut by_name = BTreeMap::new();
-    for entry in lock.dependencies {
-        by_name.insert(entry.name.clone(), entry);
+    let lock = imago_lockfile::load_from_project_root(project_root)?;
+    let mut expectations = Vec::with_capacity(dependencies.len());
+    for dep in dependencies {
+        expectations.push(DependencyExpectation {
+            name: dep.name.clone(),
+            version: dep.version.clone(),
+            wit_source: dep.wit.source.clone(),
+            wit_registry: dep.wit.registry.clone(),
+            component: expected_component_for_dependency(dep)?,
+        });
     }
+    let resolved_by_name =
+        imago_lockfile::resolve_dependencies(project_root, &lock, &expectations)?;
 
     let mut manifest_dependencies = Vec::with_capacity(dependencies.len());
     for dep in dependencies {
-        let entry = by_name.get(&dep.name).ok_or_else(|| {
+        let entry = resolved_by_name.get(&dep.name).ok_or_else(|| {
             anyhow!(
                 "dependency '{}' is not resolved in imago.lock; run `imago update`",
                 dep.name
             )
         })?;
-        if entry.version != dep.version {
-            return Err(anyhow!(
-                "dependency '{}@{}' does not match lock version '{}'; run `imago update`",
-                dep.name,
-                dep.version,
-                entry.version
-            ));
-        }
-        if entry.wit_source != dep.wit.source {
-            return Err(anyhow!(
-                "dependency '{}' wit source mismatch (lock='{}', config='{}'); run `imago update`",
-                dep.name,
-                entry.wit_source,
-                dep.wit.source
-            ));
-        }
-        if entry.wit_registry != dep.wit.registry {
-            return Err(anyhow!(
-                "dependency '{}' wit registry mismatch (lock='{}', config='{}'); run `imago update`",
-                dep.name,
-                entry.wit_registry.as_deref().unwrap_or(""),
-                dep.wit.registry.as_deref().unwrap_or("")
-            ));
-        }
-
-        let resolved_wit_path = project_root.join(&entry.wit_path);
-        let digest = compute_path_digest_hex(&resolved_wit_path).with_context(|| {
-            format!(
-                "failed to compute digest for '{}' from imago.lock",
-                resolved_wit_path.display()
-            )
-        })?;
-        if digest != entry.wit_digest {
-            return Err(anyhow!(
-                "dependency '{}' lock digest mismatch; run `imago update`",
-                dep.name
-            ));
-        }
-        ensure_transitive_wit_snapshots_in_sync(project_root, &dep.name, &resolved_wit_path)?;
 
         let component = match dep.kind {
             ManifestDependencyKind::Native => None,
             ManifestDependencyKind::Wasm => {
-                let (expected_component_source, expected_component_registry, configured_sha256) =
-                    match dep.component.as_ref() {
-                        Some(dep_component) => (
-                            dep_component.source.clone(),
-                            dep_component.registry.clone(),
-                            dep_component.sha256.clone(),
-                        ),
-                        None => {
-                            let (source, registry) =
-                                plugin_sources::expected_component_identity_from_wit_source(
-                                    &dep.wit.source,
-                                    dep.wit.registry.as_deref(),
-                                )
-                                .with_context(|| {
-                                    format!(
-                                        "dependency '{}' omits component settings but wit source '{}' cannot be mapped to a component source",
-                                        dep.name, dep.wit.source
-                                    )
-                                })?;
-                            (source, registry, None)
-                        }
-                    };
-
-                let lock_component_source = entry.component_source.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "dependency '{}' component source is missing in imago.lock; run `imago update`",
-                        dep.name
-                    )
-                })?;
-                if lock_component_source != &expected_component_source {
-                    return Err(anyhow!(
-                        "dependency '{}' component source mismatch (lock='{}', config='{}'); run `imago update`",
-                        dep.name,
-                        lock_component_source,
-                        expected_component_source
-                    ));
-                }
-                if entry.component_registry != expected_component_registry {
-                    return Err(anyhow!(
-                        "dependency '{}' component registry mismatch (lock='{}', config='{}'); run `imago update`",
-                        dep.name,
-                        entry.component_registry.as_deref().unwrap_or(""),
-                        expected_component_registry.as_deref().unwrap_or("")
-                    ));
-                }
-
                 let lock_component_sha = entry.component_sha256.as_ref().ok_or_else(|| {
                     anyhow!(
                         "dependency '{}' component sha256 is missing in imago.lock; run `imago update`",
                         dep.name
                     )
                 })?;
-                plugin_sources::validate_sha256_hex(
-                    lock_component_sha,
-                    &format!("imago.lock.dependencies[{}].component_sha256", dep.name),
-                )?;
-                if let Some(config_sha) = configured_sha256.as_ref()
-                    && !lock_component_sha.eq_ignore_ascii_case(config_sha)
-                {
-                    return Err(anyhow!(
-                        "dependency '{}' component sha256 mismatch (lock='{}', config='{}'); run `imago update`",
-                        dep.name,
-                        lock_component_sha,
-                        config_sha
-                    ));
-                }
                 Some(ManifestDependencyComponent {
                     path: format!("plugins/components/{lock_component_sha}.wasm"),
                     sha256: lock_component_sha.clone(),
@@ -1792,88 +1665,36 @@ fn resolve_manifest_dependencies_from_lock(
     Ok(manifest_dependencies)
 }
 
-fn ensure_transitive_wit_snapshots_in_sync(
-    project_root: &Path,
-    dependency_name: &str,
-    resolved_wit_path: &Path,
-) -> anyhow::Result<()> {
-    let snapshot_root = resolved_wit_path.join(".imago_transitive");
-    if !snapshot_root.exists() {
-        return Ok(());
-    }
-    let metadata = fs::metadata(&snapshot_root).with_context(|| {
-        format!(
-            "failed to inspect transitive snapshot dir '{}'",
-            snapshot_root.display()
-        )
-    })?;
-    if !metadata.is_dir() {
-        return Err(anyhow!(
-            "dependency '{}' has invalid transitive snapshot '{}'; run `imago update`",
-            dependency_name,
-            snapshot_root.display()
-        ));
-    }
-
-    let mut entries = fs::read_dir(&snapshot_root)
-        .with_context(|| format!("failed to read '{}'", snapshot_root.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .with_context(|| format!("failed to iterate '{}'", snapshot_root.display()))?;
-    entries.sort_by_key(|entry| entry.file_name());
-
-    for entry in entries {
-        let snapshot_dep_dir = entry.path();
-        if !entry
-            .metadata()
-            .with_context(|| format!("failed to inspect '{}'", snapshot_dep_dir.display()))?
-            .is_dir()
-        {
-            continue;
-        }
-        let dep_dir_name = entry.file_name();
-        let snapshot_file = snapshot_dep_dir.join("package.wit");
-        if !snapshot_file.exists() {
-            return Err(anyhow!(
-                "dependency '{}' has incomplete transitive snapshot '{}'; run `imago update`",
-                dependency_name,
-                snapshot_dep_dir.display()
-            ));
-        }
-        let global_file = project_root
-            .join("wit")
-            .join("deps")
-            .join(&dep_dir_name)
-            .join("package.wit");
-        if !global_file.exists() {
-            return Err(anyhow!(
-                "dependency '{}' transitive package '{}' is missing from wit/deps; run `imago update`",
-                dependency_name,
-                dep_dir_name.to_string_lossy()
-            ));
-        }
-
-        let snapshot_hash = compute_sha256_hex(&snapshot_file).with_context(|| {
-            format!(
-                "failed to hash transitive snapshot file '{}'",
-                snapshot_file.display()
+fn expected_component_for_dependency(
+    dependency: &ProjectDependency,
+) -> anyhow::Result<Option<ComponentExpectation>> {
+    match dependency.kind {
+        ManifestDependencyKind::Native => Ok(None),
+        ManifestDependencyKind::Wasm => {
+            if let Some(component) = dependency.component.as_ref() {
+                return Ok(Some(ComponentExpectation {
+                    source: component.source.clone(),
+                    registry: component.registry.clone(),
+                    sha256: component.sha256.clone(),
+                }));
+            }
+            let (source, registry) = plugin_sources::expected_component_identity_from_wit_source(
+                &dependency.wit.source,
+                dependency.wit.registry.as_deref(),
             )
-        })?;
-        let global_hash = compute_sha256_hex(&global_file).with_context(|| {
-            format!(
-                "failed to hash transitive global file '{}'",
-                global_file.display()
-            )
-        })?;
-        if snapshot_hash != global_hash {
-            return Err(anyhow!(
-                "dependency '{}' transitive package '{}' is out of sync; run `imago update`",
-                dependency_name,
-                dep_dir_name.to_string_lossy()
-            ));
+            .with_context(|| {
+                format!(
+                    "dependency '{}' omits component settings but wit source '{}' cannot be mapped to a component source",
+                    dependency.name, dependency.wit.source
+                )
+            })?;
+            Ok(Some(ComponentExpectation {
+                source,
+                registry,
+                sha256: None,
+            }))
         }
     }
-
-    Ok(())
 }
 
 fn hash_file_into(hasher: &mut Sha256, path: &Path, context_label: &str) -> anyhow::Result<()> {
@@ -1972,6 +1793,10 @@ pub fn default_target_name() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use imago_lockfile::{
+        IMAGO_LOCK_VERSION, ImagoLock, ImagoLockDependency, ImagoLockWitPackage,
+        ImagoLockWitPackageVersion,
+    };
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
         let unique = format!(
@@ -2787,6 +2612,145 @@ remote = "127.0.0.1:4443"
     }
 
     #[test]
+    fn build_rejects_imago_lock_version_mismatch() {
+        let root = new_temp_dir("dependencies-lock-version-mismatch");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("registry/example.wit"),
+            b"package test:example;\n",
+        );
+        write_file(
+            &root.join("wit/deps/yieldspace_plugin_example/example.wit"),
+            b"package test:example;\n",
+        );
+        let digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace_plugin_example"))
+            .expect("wit digest should compute");
+        write_imago_lock(
+            &root,
+            &ImagoLock {
+                version: 2,
+                dependencies: vec![ImagoLockDependency {
+                    name: "yieldspace:plugin/example".to_string(),
+                    version: "0.1.0".to_string(),
+                    wit_source: "file://registry/example.wit".to_string(),
+                    wit_registry: None,
+                    wit_digest: digest,
+                    wit_path: "wit/deps/yieldspace_plugin_example".to_string(),
+                    component_source: None,
+                    component_registry: None,
+                    component_sha256: None,
+                    resolved_at: "0".to_string(),
+                }],
+                wit_packages: vec![],
+            },
+        );
+
+        let err = build_project(None, "default", &root)
+            .expect_err("build should reject unsupported lock version");
+        assert!(
+            err.to_string()
+                .contains("imago.lock version '2' is not supported")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_wit_package_with_unknown_via_dependency() {
+        let root = new_temp_dir("dependencies-transitive-via-unknown");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("registry/example.wit"),
+            b"package test:example;\n",
+        );
+        write_file(
+            &root.join("wit/deps/yieldspace_plugin_example/example.wit"),
+            b"package test:example;\n",
+        );
+        write_file(
+            &root.join("wit/deps/test_dep/package.wit"),
+            b"package test:dep; interface dep { pong: func() -> string; }\n",
+        );
+        let digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace_plugin_example"))
+            .expect("wit digest should compute");
+        let transitive_digest = format!(
+            "sha256:{}",
+            compute_sha256_hex(&root.join("wit/deps/test_dep/package.wit"))
+                .expect("transitive digest should compute")
+        );
+        write_imago_lock(
+            &root,
+            &ImagoLock {
+                version: IMAGO_LOCK_VERSION,
+                dependencies: vec![ImagoLockDependency {
+                    name: "yieldspace:plugin/example".to_string(),
+                    version: "0.1.0".to_string(),
+                    wit_source: "file://registry/example.wit".to_string(),
+                    wit_registry: None,
+                    wit_digest: digest,
+                    wit_path: "wit/deps/yieldspace_plugin_example".to_string(),
+                    component_source: None,
+                    component_registry: None,
+                    component_sha256: None,
+                    resolved_at: "0".to_string(),
+                }],
+                wit_packages: vec![ImagoLockWitPackage {
+                    name: "test:dep".to_string(),
+                    registry: None,
+                    versions: vec![ImagoLockWitPackageVersion {
+                        requirement: "*".to_string(),
+                        version: None,
+                        digest: transitive_digest,
+                        source: None,
+                        path: "wit/deps/test_dep".to_string(),
+                        via: vec!["yieldspace:plugin/other".to_string()],
+                    }],
+                }],
+            },
+        );
+
+        let err = build_project(None, "default", &root)
+            .expect_err("build should reject unknown via dependency");
+        assert!(err.to_string().contains("via contains unknown dependency"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn build_rejects_legacy_dependency_component_path_field() {
         let root = new_temp_dir("dependency-component-legacy-path");
         write_imago_toml(
@@ -2867,7 +2831,7 @@ remote = "127.0.0.1:4443"
         write_imago_lock(
             &root,
             &ImagoLock {
-                version: 2,
+                version: IMAGO_LOCK_VERSION,
                 dependencies: vec![ImagoLockDependency {
                     name: "yieldspace:plugin/example".to_string(),
                     version: "0.1.0".to_string(),
@@ -2880,6 +2844,7 @@ remote = "127.0.0.1:4443"
                     component_sha256: None,
                     resolved_at: "0".to_string(),
                 }],
+                wit_packages: vec![],
             },
         );
 
@@ -2904,8 +2869,8 @@ remote = "127.0.0.1:4443"
     }
 
     #[test]
-    fn build_rejects_out_of_sync_transitive_snapshot() {
-        let root = new_temp_dir("dependencies-transitive-snapshot-mismatch");
+    fn build_rejects_transitive_wit_package_digest_mismatch() {
+        let root = new_temp_dir("dependencies-transitive-lock-digest-mismatch");
         write_imago_toml(
             &root,
             r#"
@@ -2933,10 +2898,6 @@ remote = "127.0.0.1:4443"
             b"package test:example;\n",
         );
         write_file(
-            &root.join("wit/deps/yieldspace_plugin_example/.imago_transitive/test_dep/package.wit"),
-            b"package test:dep; interface dep { ping: func() -> string; }\n",
-        );
-        write_file(
             &root.join("wit/deps/test_dep/package.wit"),
             b"package test:dep; interface dep { pong: func() -> string; }\n",
         );
@@ -2946,7 +2907,7 @@ remote = "127.0.0.1:4443"
         write_imago_lock(
             &root,
             &ImagoLock {
-                version: 2,
+                version: IMAGO_LOCK_VERSION,
                 dependencies: vec![ImagoLockDependency {
                     name: "yieldspace:plugin/example".to_string(),
                     version: "0.1.0".to_string(),
@@ -2959,14 +2920,27 @@ remote = "127.0.0.1:4443"
                     component_sha256: None,
                     resolved_at: "0".to_string(),
                 }],
+                wit_packages: vec![ImagoLockWitPackage {
+                    name: "test:dep".to_string(),
+                    registry: None,
+                    versions: vec![ImagoLockWitPackageVersion {
+                        requirement: "*".to_string(),
+                        version: None,
+                        digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                            .to_string(),
+                        source: None,
+                        path: "wit/deps/test_dep".to_string(),
+                        via: vec!["yieldspace:plugin/example".to_string()],
+                    }],
+                }],
             },
         );
 
         let err = build_project(None, "default", &root)
-            .expect_err("build should reject transitive snapshot mismatch");
+            .expect_err("build should reject transitive lock digest mismatch");
         assert!(
             err.to_string()
-                .contains("transitive package 'test_dep' is out of sync"),
+                .contains("lock digest mismatch for transitive wit package 'test:dep'"),
             "unexpected error: {err:#}"
         );
 
@@ -3014,7 +2988,7 @@ remote = "127.0.0.1:4443"
         write_imago_lock(
             &root,
             &ImagoLock {
-                version: 2,
+                version: IMAGO_LOCK_VERSION,
                 dependencies: vec![ImagoLockDependency {
                     name: "yieldspace:plugin/example".to_string(),
                     version: "0.1.0".to_string(),
@@ -3027,6 +3001,7 @@ remote = "127.0.0.1:4443"
                     component_sha256: Some(plugin_sha.clone()),
                     resolved_at: "0".to_string(),
                 }],
+                wit_packages: vec![],
             },
         );
 
@@ -3078,7 +3053,7 @@ remote = "127.0.0.1:4443"
         write_imago_lock(
             &root,
             &ImagoLock {
-                version: 2,
+                version: IMAGO_LOCK_VERSION,
                 dependencies: vec![ImagoLockDependency {
                     name: "chikoski:hello".to_string(),
                     version: "0.1.0".to_string(),
@@ -3091,6 +3066,7 @@ remote = "127.0.0.1:4443"
                     component_sha256: Some(plugin_sha.to_string()),
                     resolved_at: "0".to_string(),
                 }],
+                wit_packages: vec![],
             },
         );
 
@@ -3140,7 +3116,7 @@ remote = "127.0.0.1:4443"
         write_imago_lock(
             &root,
             &ImagoLock {
-                version: 2,
+                version: IMAGO_LOCK_VERSION,
                 dependencies: vec![ImagoLockDependency {
                     name: "chikoski:hello".to_string(),
                     version: "0.1.0".to_string(),
@@ -3156,6 +3132,7 @@ remote = "127.0.0.1:4443"
                     ),
                     resolved_at: "0".to_string(),
                 }],
+                wit_packages: vec![],
             },
         );
 

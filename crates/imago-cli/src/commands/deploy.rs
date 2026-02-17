@@ -1119,7 +1119,7 @@ async fn resolve_dependency_component_sources(
         return Ok(sources);
     }
 
-    let lock = build::load_imago_lock(project_root)?;
+    let lock = imago_lockfile::load_from_project_root(project_root)?;
     let lock_by_name = lock
         .dependencies
         .into_iter()

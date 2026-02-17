@@ -83,9 +83,10 @@ privileged = false
 `warg://sizumita:ferris@0.1.0` は component を返すため、`[dependencies.component]` は不要です。
 `kind="wasm"` かつ `wit` が component ではない場合のみ、`[dependencies.component]` で source を指定します。
 
-`imago update` は WIT を `wit/deps/` へ展開し、source/registry/hash を `imago.lock` へ固定します。  
+`imago update` は WIT を `wit/deps/` へ展開し、`imago.lock (version=1)` に direct 依存の `wit_*` と transitive 依存の `[[wit_packages]]` を固定します。  
 `kind="wasm"` で `dependencies.component` を省略した場合でも、`wit` source が component なら WIT 抽出と `component_*` 固定を自動で行います。  
 `warg://` で取得した WIT package に transitive import がある場合、依存パッケージも `wit/deps/` に同時展開されます。  
+`.imago_transitive` は使用しません。`imago build` は `imago.lock` の `[[wit_packages]]` を使って transitive package の digest を検証します。  
 plain `.wit` 形式で foreign import を含む WIT は解決できないため、`imago update` はエラーになります。  
 `warg://` の direct dependency で WIT 側に version が書かれている場合は、`warg://...@version` と一致している必要があります。  
 `imago deploy` は lock 情報を使って wasm component を遅延取得し、`.imago/components/<sha256>.wasm` を再利用します。

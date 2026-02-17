@@ -28,6 +28,18 @@ pub(crate) struct MaterializedWitComponent {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct MaterializedWitSource {
     pub derived_component: Option<MaterializedWitComponent>,
+    pub transitive_packages: Vec<MaterializedTransitiveWitPackage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MaterializedTransitiveWitPackage {
+    pub name: String,
+    pub registry: Option<String>,
+    pub requirement: String,
+    pub version: Option<String>,
+    pub digest: String,
+    pub source: Option<String>,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,15 +187,19 @@ pub(crate) async fn materialize_wit_source(
             let mut reader = std::io::Cursor::new(bytes.as_slice());
             match wit_component::decode_reader(&mut reader) {
                 Ok(DecodedWasm::WitPackage(resolve, top_package)) => {
-                    materialize_wit_package_resolve(
+                    let transitive_packages = materialize_wit_package_resolve(
                         destination_dir,
                         &resolve,
                         top_package,
                         None,
                         None,
+                        None,
                         &format!("file source '{}'", path.display()),
                     )?;
-                    Ok(MaterializedWitSource::default())
+                    Ok(MaterializedWitSource {
+                        derived_component: None,
+                        transitive_packages,
+                    })
                 }
                 Ok(DecodedWasm::Component(resolve, world)) => {
                     let top_package = component_world_package_id(
@@ -191,10 +207,11 @@ pub(crate) async fn materialize_wit_source(
                         world,
                         &format!("file source '{}'", path.display()),
                     )?;
-                    materialize_wit_package_resolve(
+                    let transitive_packages = materialize_wit_package_resolve(
                         destination_dir,
                         &resolve,
                         top_package,
+                        None,
                         None,
                         None,
                         &format!("file source '{}'", path.display()),
@@ -205,6 +222,7 @@ pub(crate) async fn materialize_wit_source(
                             registry: None,
                             sha256: hex::encode(Sha256::digest(&bytes)),
                         }),
+                        transitive_packages,
                     })
                 }
                 Err(_) => {
@@ -489,25 +507,30 @@ fn materialize_warg_wit_bytes(
     let mut reader = std::io::Cursor::new(bytes);
     match wit_component::decode_reader(&mut reader) {
         Ok(DecodedWasm::WitPackage(resolve, top_package)) => {
-            materialize_wit_package_resolve(
+            let transitive_packages = materialize_wit_package_resolve(
                 destination_dir,
                 &resolve,
                 top_package,
                 Some(package),
                 Some(version),
+                Some(registry),
                 &source_desc,
             )?;
-            Ok(MaterializedWitSource::default())
+            Ok(MaterializedWitSource {
+                derived_component: None,
+                transitive_packages,
+            })
         }
         Ok(DecodedWasm::Component(resolve, world)) => {
             let top_package =
                 select_top_package_for_component(&resolve, world, package, &source_desc)?;
-            materialize_wit_package_resolve(
+            let transitive_packages = materialize_wit_package_resolve(
                 destination_dir,
                 &resolve,
                 top_package,
                 Some(package),
                 Some(version),
+                Some(registry),
                 &source_desc,
             )?;
             Ok(MaterializedWitSource {
@@ -516,6 +539,7 @@ fn materialize_warg_wit_bytes(
                     registry: Some(registry.to_string()),
                     sha256: hex::encode(Sha256::digest(bytes)),
                 }),
+                transitive_packages,
             })
         }
         Err(_) => {
@@ -571,8 +595,9 @@ fn materialize_wit_package_resolve(
     top_package: wit_parser::PackageId,
     expected_package: Option<&str>,
     expected_version: Option<&str>,
+    registry: Option<&str>,
     source_desc: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<MaterializedTransitiveWitPackage>> {
     let deps_root = destination_dir.parent().ok_or_else(|| {
         anyhow!(
             "failed to resolve deps root for destination {}",
@@ -594,14 +619,7 @@ fn materialize_wit_package_resolve(
             destination_dir.display()
         )
     })?;
-
-    let snapshot_root = destination_dir.join(".imago_transitive");
-    fs::create_dir_all(&snapshot_root).with_context(|| {
-        format!(
-            "failed to create transitive snapshot dir {}",
-            snapshot_root.display()
-        )
-    })?;
+    let mut materialized = Vec::new();
 
     let mut transitive = resolve
         .packages
@@ -612,6 +630,7 @@ fn materialize_wit_package_resolve(
     transitive.sort_by(|a, b| a.0.cmp(&b.0));
 
     for (sanitized, pkg_id) in transitive {
+        let package_name = &resolve.packages[pkg_id].name;
         let pkg_text = render_wit_package(resolve, pkg_id)?;
         let global_path = deps_root.join(&sanitized).join("package.wit");
         write_or_verify_identical_wit_file(&global_path, &pkg_text).with_context(|| {
@@ -620,16 +639,41 @@ fn materialize_wit_package_resolve(
                 global_path.display()
             )
         })?;
-        let snapshot_path = snapshot_root.join(&sanitized).join("package.wit");
-        write_or_verify_identical_wit_file(&snapshot_path, &pkg_text).with_context(|| {
-            format!(
-                "failed to materialize transitive snapshot into {}",
-                snapshot_path.display()
-            )
-        })?;
+
+        let version = package_name.version.as_ref().map(ToString::to_string);
+        let requirement = match version.as_deref() {
+            Some(value) => format!("={value}"),
+            None => "*".to_string(),
+        };
+        let source = match (registry, version.as_deref()) {
+            (Some(_), Some(version)) => Some(canonical_warg_source(
+                &format!("{}:{}", package_name.namespace, package_name.name),
+                version,
+            )),
+            _ => None,
+        };
+        let digest = format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(pkg_text.as_bytes()))
+        );
+        let path = path_to_manifest_string(
+            &PathBuf::from("wit")
+                .join("deps")
+                .join(sanitize_wit_package_name(package_name)),
+        );
+
+        materialized.push(MaterializedTransitiveWitPackage {
+            name: format!("{}:{}", package_name.namespace, package_name.name),
+            registry: registry.map(str::to_string),
+            requirement,
+            version,
+            digest,
+            source,
+            path,
+        });
     }
 
-    Ok(())
+    Ok(materialized)
 }
 
 fn validate_top_package_version(

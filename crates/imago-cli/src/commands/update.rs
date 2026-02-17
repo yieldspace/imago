@@ -4,12 +4,16 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
+use imago_lockfile::{
+    IMAGO_LOCK_VERSION, ImagoLock, ImagoLockDependency, TransitivePackageRecord,
+    collect_wit_packages, save_to_project_root,
+};
 
 use crate::{
     cli::UpdateArgs,
     commands::{
         CommandResult,
-        build::{self, ImagoLock, ImagoLockDependency, ManifestDependencyKind},
+        build::{self, ManifestDependencyKind},
         plugin_sources,
     },
 };
@@ -52,6 +56,7 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
 
     let resolved_at = time::OffsetDateTime::now_utc().unix_timestamp().to_string();
     let mut lock_entries = Vec::with_capacity(dependencies.len());
+    let mut transitive_records = Vec::new();
 
     for dependency in dependencies {
         let target_rel = PathBuf::from("wit")
@@ -73,6 +78,18 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
         )
         .await
         .with_context(|| format!("failed to resolve dependency '{}'", dependency.name))?;
+        transitive_records.extend(materialized.transitive_packages.iter().map(|transitive| {
+            TransitivePackageRecord {
+                name: transitive.name.clone(),
+                registry: transitive.registry.clone(),
+                requirement: transitive.requirement.clone(),
+                version: transitive.version.clone(),
+                digest: transitive.digest.clone(),
+                source: transitive.source.clone(),
+                path: transitive.path.clone(),
+                via: dependency.name.clone(),
+            }
+        }));
 
         let digest = build::compute_path_digest_hex(&target_path)?;
         let (component_source, component_registry, component_sha256) = match dependency.kind {
@@ -97,8 +114,12 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
                         component.registry.clone(),
                         Some(digest),
                     )
-                } else if let Some(derived) = materialized.derived_component {
-                    (Some(derived.source), derived.registry, Some(derived.sha256))
+                } else if let Some(derived) = materialized.derived_component.as_ref() {
+                    (
+                        Some(derived.source.clone()),
+                        derived.registry.clone(),
+                        Some(derived.sha256.clone()),
+                    )
                 } else {
                     return Err(anyhow!(
                         "dependencies entry '{}' is kind=\"wasm\" but no component source was provided and wit source '{}' did not decode as a component",
@@ -125,13 +146,11 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
 
     lock_entries.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
     let lock = ImagoLock {
-        version: build::default_imago_lock_version(),
+        version: IMAGO_LOCK_VERSION,
         dependencies: lock_entries,
+        wit_packages: collect_wit_packages(transitive_records),
     };
-    let lock_bytes = toml::to_string_pretty(&lock).context("failed to serialize imago.lock")?;
-    let lock_path = project_root.join("imago.lock");
-    fs::write(&lock_path, lock_bytes)
-        .with_context(|| format!("failed to write {}", lock_path.display()))?;
+    save_to_project_root(project_root, &lock)?;
 
     Ok(())
 }
@@ -233,8 +252,9 @@ remote = "127.0.0.1:4443"
 
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
-        assert_eq!(lock.version, 2);
+        assert_eq!(lock.version, 1);
         assert_eq!(lock.dependencies.len(), 1);
+        assert!(lock.wit_packages.is_empty());
         let entry = &lock.dependencies[0];
         assert_eq!(entry.name, "yieldspace:plugin/example");
         assert_eq!(entry.wit_source, "file://registry/example.wit");
@@ -601,10 +621,30 @@ interface name-provider {
             "transitive package should be materialized"
         );
         assert!(
-            root.join("wit/deps/chikoski_hello/.imago_transitive/chikoski_name/package.wit")
-                .exists(),
-            "dep snapshot should include transitive package"
+            !root
+                .join("wit/deps/chikoski_hello/.imago_transitive")
+                .exists()
         );
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        assert_eq!(lock.version, 1);
+        assert_eq!(lock.wit_packages.len(), 1);
+        assert_eq!(lock.wit_packages[0].name, "chikoski:name");
+        assert_eq!(
+            lock.wit_packages[0].registry.as_deref(),
+            Some(plugin_sources::DEFAULT_WARG_REGISTRY)
+        );
+        assert_eq!(lock.wit_packages[0].versions.len(), 1);
+        let version = &lock.wit_packages[0].versions[0];
+        assert_eq!(version.requirement, "=0.1.0");
+        assert_eq!(version.version.as_deref(), Some("0.1.0"));
+        assert_eq!(
+            version.source.as_deref(),
+            Some("warg://chikoski:name@0.1.0")
+        );
+        assert_eq!(version.path, "wit/deps/chikoski_name");
+        assert_eq!(version.via, vec!["chikoski:hello".to_string()]);
+        assert!(version.digest.starts_with("sha256:"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -768,9 +808,21 @@ interface name-provider {
         );
         assert!(root.join("wit/deps/chikoski_name/package.wit").exists());
         assert!(
-            root.join("wit/deps/chikoski_hello/.imago_transitive/chikoski_name/package.wit")
+            !root
+                .join("wit/deps/chikoski_hello/.imago_transitive")
                 .exists()
         );
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        assert_eq!(lock.wit_packages.len(), 1);
+        assert_eq!(lock.wit_packages[0].name, "chikoski:name");
+        let version = &lock.wit_packages[0].versions[0];
+        assert_eq!(version.requirement, "*");
+        assert!(version.version.is_none());
+        assert!(version.source.is_none());
+        assert_eq!(version.path, "wit/deps/chikoski_name");
+        assert_eq!(version.via, vec!["chikoski:hello".to_string()]);
+        assert!(version.digest.starts_with("sha256:"));
 
         let _ = fs::remove_dir_all(root);
     }

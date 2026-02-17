@@ -50,6 +50,7 @@ web-transport-quinn = "0.11.1"
 syn = "2.0.111"
 
 imago-plugin-imago-admin = { path = "plugins/imago-admin" }
+imago-lockfile = { path = "crates/imago-lockfile" }
 imago-plugin-macros = { path = "crates/imago-plugin-macros" }
 imago-protocol = { path = "crates/imago-protocol" }
 imagod-common = { path = "crates/imagod-common" }

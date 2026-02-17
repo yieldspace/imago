@@ -37,10 +37,11 @@ privileged = false
 "yieldspace:imago-experimental" = ["*"]
 ```
 
-- `imago update` は WIT を `wit/deps/` に展開し、`imago.lock` に `wit_source` / `wit_registry` / `wit_digest` / `wit_path` を固定します。
+- `imago update` は WIT を `wit/deps/` に展開し、`imago.lock (version=1)` に `wit_source` / `wit_registry` / `wit_digest` / `wit_path` を固定します。
 - `kind="wasm"` で `dependencies.component` を省略した場合、`wit` source が component なら `imago update` が WIT 抽出と `component_source` / `component_registry` / `component_sha256` 固定を自動で行います。
 - `warg://` の direct dependency で WIT 側に version が書かれている場合は、`warg://...@version` と一致している必要があります。
-- `warg://` の WIT package が transitive import を持つ場合、依存パッケージも `wit/deps/<package>/package.wit` に展開します。
+- `warg://` の WIT package が transitive import を持つ場合、依存パッケージも `wit/deps/<package>/package.wit` に展開し、`imago.lock` の `[[wit_packages]]` に `requirement` / `version` / `digest` / `source` / `path` / `via` を固定します。
+- `.imago_transitive` は使わず、`imago build` は `[[wit_packages]]` の `digest` (`sha256:<hex>`) と `path/package.wit` を照合します。
 - plain `.wit` 形式で foreign import を含む source は `imago update` でエラーにします（WIT package 形式が必要）。
 - wasm plugin の component 本体は `imago update` では取得せず、`component_sha256` のみ lock に固定します。
 - `imago deploy` は lock の `component_source` / `component_registry` / `component_sha256` を使って component を取得し、`.imago/components/<sha256>.wasm` を再利用します。

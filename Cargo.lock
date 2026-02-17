@@ -2198,6 +2198,7 @@ dependencies = [
  "clap",
  "futures-util",
  "hex",
+ "imago-lockfile",
  "imago-protocol",
  "quinn",
  "rcgen",
@@ -2217,6 +2218,16 @@ dependencies = [
  "web-transport-quinn",
  "wit-component",
  "wit-parser 0.244.0",
+]
+
+[[package]]
+name = "imago-lockfile"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "sha2",
+ "toml 0.8.23",
 ]
 
 [[package]]

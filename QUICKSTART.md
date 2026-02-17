@@ -42,7 +42,8 @@ cargo run --manifest-path ../../Cargo.toml -p imago-cli -- update
 この時点で以下が行われます。
 
 - `wit/deps/` に WIT 展開
-- `imago.lock` に `wit_*` 固定
+- `imago.lock (version=1)` に `wit_*` 固定
+- transitive package は `imago.lock` の `[[wit_packages]]` に固定（`.imago_transitive` は未使用）
 - `wit` が component の場合は `component_*` も自動固定
 
 `examples/local-imagod-plugin-hello/imago.toml` の依存設定は以下です。
