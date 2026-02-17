@@ -16,7 +16,7 @@ use toml::Value as TomlValue;
 
 use crate::{
     cli::BuildArgs,
-    commands::{CommandResult, plugin_sources},
+    commands::{CommandResult, dependency_cache, plugin_sources},
 };
 
 const DEFAULT_TARGET_NAME: &str = "default";
@@ -314,6 +314,10 @@ pub fn build_project(
     let vars = parse_string_table(root.get("vars"), "vars")?;
     let bindings = parse_bindings(root.get("bindings"))?;
     let project_dependencies = parse_project_dependencies(root.get("dependencies"))?;
+    if !project_dependencies.is_empty() {
+        dependency_cache::hydrate_project_wit_deps(project_root, &project_dependencies)
+            .context("failed to hydrate dependency cache")?;
+    }
     let capabilities = parse_root_capabilities(&root)?;
     let dependencies =
         resolve_manifest_dependencies_from_lock(project_root, &project_dependencies)?;
@@ -1798,6 +1802,10 @@ pub fn default_target_name() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        cli::UpdateArgs,
+        commands::{dependency_cache, update},
+    };
     use imago_lockfile::{
         IMAGO_LOCK_VERSION, ImagoLock, ImagoLockDependency, ImagoLockWitPackage,
         ImagoLockWitPackageVersion,
@@ -1837,6 +1845,43 @@ mod tests {
     fn read_manifest(root: &Path, relative_path: &Path) -> Manifest {
         let bytes = fs::read(root.join(relative_path)).expect("manifest should exist");
         serde_json::from_slice(&bytes).expect("manifest json should parse")
+    }
+
+    fn run_update(root: &Path) {
+        let result = update::run_with_project_root(UpdateArgs {}, root);
+        assert_eq!(
+            result.exit_code, 0,
+            "imago update should succeed before build tests: {:?}",
+            result.stderr
+        );
+    }
+
+    fn copy_tree(source: &Path, destination: &Path) {
+        let metadata = fs::metadata(source)
+            .unwrap_or_else(|_| panic!("source must exist: {}", source.display()));
+        if metadata.is_file() {
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent).expect("destination parent should be created");
+            }
+            fs::copy(source, destination).unwrap_or_else(|_| {
+                panic!(
+                    "failed to copy source file {} -> {}",
+                    source.display(),
+                    destination.display()
+                )
+            });
+            return;
+        }
+        if !metadata.is_dir() {
+            panic!("source is not file/dir: {}", source.display());
+        }
+        fs::create_dir_all(destination).expect("destination dir should be created");
+        for entry in fs::read_dir(source).expect("source directory should be readable") {
+            let entry = entry.expect("source directory entry should be readable");
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            copy_tree(&source_path, &destination_path);
+        }
     }
 
     fn assert_hashed_main_path(manifest: &Manifest, service_name: &str) -> PathBuf {
@@ -2608,10 +2653,94 @@ remote = "127.0.0.1:4443"
             &root.join("registry/example.wit"),
             b"package test:example;\n",
         );
+        run_update(&root);
+        fs::remove_file(root.join("imago.lock")).expect("lock should be removable");
 
         let err = build_project(None, "default", &root)
             .expect_err("build should fail when lock is missing");
-        assert!(err.to_string().contains("imago update"));
+        assert!(err.to_string().contains("imago.lock is missing"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rehydrates_wit_deps_from_dependency_cache() {
+        let root = new_temp_dir("dependencies-rehydrate-wit-deps");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("registry/example.wit"),
+            b"package test:example;\n",
+        );
+        run_update(&root);
+        fs::remove_dir_all(root.join("wit/deps")).expect("wit/deps should be removable");
+
+        build_project(None, "default", &root)
+            .expect("build should succeed by hydrating wit/deps from dependency cache");
+        assert!(
+            root.join("wit/deps/yieldspace-plugin/example/example.wit")
+                .exists(),
+            "wit/deps must be rehydrated from dependency cache before lock validation"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_fails_when_dependency_cache_is_missing() {
+        let root = new_temp_dir("dependencies-cache-required");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("registry/example.wit"),
+            b"package test:example;\n",
+        );
+        run_update(&root);
+        fs::remove_dir_all(root.join(".imago/deps")).expect("dependency cache should be removable");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("build should fail when dependency cache is missing");
+        let err_chain = format!("{err:#}");
+        assert!(
+            err_chain.contains(".imago/deps"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            err_chain.contains("run `imago update`"),
+            "unexpected error: {err:#}"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2716,31 +2845,13 @@ remote = "127.0.0.1:4443"
             &root.join("registry/example.wit"),
             b"package test:example;\n",
         );
-        write_file(
-            &root.join("wit/deps/yieldspace-plugin/example/example.wit"),
-            b"package test:example;\n",
-        );
-        let digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace-plugin/example"))
-            .expect("wit digest should compute");
-        write_imago_lock(
-            &root,
-            &ImagoLock {
-                version: 2,
-                dependencies: vec![ImagoLockDependency {
-                    name: "yieldspace:plugin/example".to_string(),
-                    version: "0.1.0".to_string(),
-                    wit_source: "file://registry/example.wit".to_string(),
-                    wit_registry: None,
-                    wit_digest: digest,
-                    wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
-                    component_source: None,
-                    component_registry: None,
-                    component_sha256: None,
-                    resolved_at: "0".to_string(),
-                }],
-                wit_packages: vec![],
-            },
-        );
+        run_update(&root);
+        let mut lock: ImagoLock = toml::from_str(
+            &fs::read_to_string(root.join("imago.lock")).expect("lock should exist"),
+        )
+        .expect("lock should parse");
+        lock.version = 2;
+        write_imago_lock(&root, &lock);
 
         let err = build_project(None, "default", &root)
             .expect_err("build should reject unsupported lock version");
@@ -2801,7 +2912,7 @@ remote = "127.0.0.1:4443"
                     version: "0.1.0".to_string(),
                     wit_source: "file://registry/example.wit".to_string(),
                     wit_registry: None,
-                    wit_digest: digest,
+                    wit_digest: digest.clone(),
                     wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
                     component_source: None,
                     component_registry: None,
@@ -2814,7 +2925,7 @@ remote = "127.0.0.1:4443"
                     versions: vec![ImagoLockWitPackageVersion {
                         requirement: "*".to_string(),
                         version: None,
-                        digest: transitive_digest,
+                        digest: transitive_digest.clone(),
                         source: None,
                         path: "wit/deps/test-dep".to_string(),
                         via: vec!["yieldspace:plugin/other".to_string()],
@@ -2822,6 +2933,40 @@ remote = "127.0.0.1:4443"
                 }],
             },
         );
+        let cache_entry = dependency_cache::DependencyCacheEntry {
+            name: "yieldspace:plugin/example".to_string(),
+            version: "0.1.0".to_string(),
+            kind: "native".to_string(),
+            wit_source: "file://registry/example.wit".to_string(),
+            wit_registry: None,
+            wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
+            wit_digest: digest,
+            wit_source_fingerprint: None,
+            component_source: None,
+            component_registry: None,
+            component_sha256: None,
+            component_source_fingerprint: None,
+            transitive_packages: vec![dependency_cache::DependencyCacheTransitivePackage {
+                name: "test:dep".to_string(),
+                registry: None,
+                requirement: "*".to_string(),
+                version: None,
+                digest: transitive_digest,
+                source: None,
+                path: "wit/deps/test-dep".to_string(),
+            }],
+        };
+        let cache_root = dependency_cache::cache_entry_root(&root, "yieldspace:plugin/example");
+        copy_tree(
+            &root.join("wit/deps/yieldspace-plugin/example"),
+            &cache_root.join("wit/deps/yieldspace-plugin/example"),
+        );
+        copy_tree(
+            &root.join("wit/deps/test-dep"),
+            &cache_root.join("wit/deps/test-dep"),
+        );
+        dependency_cache::save_entry(&root, &cache_entry)
+            .expect("dependency cache should be written");
 
         let err = build_project(None, "default", &root)
             .expect_err("build should reject unknown via dependency");
@@ -2901,32 +3046,7 @@ remote = "127.0.0.1:4443"
             &root.join("registry/example.wit"),
             b"package test:example;\n",
         );
-        write_file(
-            &root.join("wit/deps/yieldspace-plugin/example/example.wit"),
-            b"package test:example;\n",
-        );
-
-        let digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace-plugin/example"))
-            .expect("wit digest should compute");
-        write_imago_lock(
-            &root,
-            &ImagoLock {
-                version: IMAGO_LOCK_VERSION,
-                dependencies: vec![ImagoLockDependency {
-                    name: "yieldspace:plugin/example".to_string(),
-                    version: "0.1.0".to_string(),
-                    wit_source: "file://registry/example.wit".to_string(),
-                    wit_registry: None,
-                    wit_digest: digest,
-                    wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
-                    component_source: None,
-                    component_registry: None,
-                    component_sha256: None,
-                    resolved_at: "0".to_string(),
-                }],
-                wit_packages: vec![],
-            },
-        );
+        run_update(&root);
 
         let output = build_project(None, "default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
@@ -2984,6 +3104,11 @@ remote = "127.0.0.1:4443"
 
         let digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace-plugin/example"))
             .expect("wit digest should compute");
+        let actual_transitive_digest = format!(
+            "sha256:{}",
+            compute_sha256_hex(&root.join("wit/deps/test-dep/package.wit"))
+                .expect("transitive digest should compute")
+        );
         write_imago_lock(
             &root,
             &ImagoLock {
@@ -2993,7 +3118,7 @@ remote = "127.0.0.1:4443"
                     version: "0.1.0".to_string(),
                     wit_source: "file://registry/example.wit".to_string(),
                     wit_registry: None,
-                    wit_digest: digest,
+                    wit_digest: digest.clone(),
                     wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
                     component_source: None,
                     component_registry: None,
@@ -3015,6 +3140,40 @@ remote = "127.0.0.1:4443"
                 }],
             },
         );
+        let cache_entry = dependency_cache::DependencyCacheEntry {
+            name: "yieldspace:plugin/example".to_string(),
+            version: "0.1.0".to_string(),
+            kind: "native".to_string(),
+            wit_source: "file://registry/example.wit".to_string(),
+            wit_registry: None,
+            wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
+            wit_digest: digest,
+            wit_source_fingerprint: None,
+            component_source: None,
+            component_registry: None,
+            component_sha256: None,
+            component_source_fingerprint: None,
+            transitive_packages: vec![dependency_cache::DependencyCacheTransitivePackage {
+                name: "test:dep".to_string(),
+                registry: None,
+                requirement: "*".to_string(),
+                version: None,
+                digest: actual_transitive_digest,
+                source: None,
+                path: "wit/deps/test-dep".to_string(),
+            }],
+        };
+        let cache_root = dependency_cache::cache_entry_root(&root, "yieldspace:plugin/example");
+        copy_tree(
+            &root.join("wit/deps/yieldspace-plugin/example"),
+            &cache_root.join("wit/deps/yieldspace-plugin/example"),
+        );
+        copy_tree(
+            &root.join("wit/deps/test-dep"),
+            &cache_root.join("wit/deps/test-dep"),
+        );
+        dependency_cache::save_entry(&root, &cache_entry)
+            .expect("dependency cache should be written");
 
         let err = build_project(None, "default", &root)
             .expect_err("build should reject transitive lock digest mismatch");
@@ -3057,33 +3216,15 @@ remote = "127.0.0.1:4443"
         );
         let plugin_bytes = b"\0asmplugin";
         write_file(&root.join("registry/example-plugin.wasm"), plugin_bytes);
-
-        write_file(
-            &root.join("wit/deps/yieldspace-plugin/example/example.wit"),
-            b"package test:example;\n",
-        );
-        let wit_digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace-plugin/example"))
-            .expect("wit digest should compute");
-        let plugin_sha = hex::encode(Sha256::digest(plugin_bytes));
-        write_imago_lock(
-            &root,
-            &ImagoLock {
-                version: IMAGO_LOCK_VERSION,
-                dependencies: vec![ImagoLockDependency {
-                    name: "yieldspace:plugin/example".to_string(),
-                    version: "0.1.0".to_string(),
-                    wit_source: "file://registry/example.wit".to_string(),
-                    wit_registry: None,
-                    wit_digest,
-                    wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
-                    component_source: Some("file://registry/example-plugin.wasm".to_string()),
-                    component_registry: None,
-                    component_sha256: Some(plugin_sha.clone()),
-                    resolved_at: "0".to_string(),
-                }],
-                wit_packages: vec![],
-            },
-        );
+        run_update(&root);
+        let lock: ImagoLock = toml::from_str(
+            &fs::read_to_string(root.join("imago.lock")).expect("lock should exist"),
+        )
+        .expect("lock should parse");
+        let plugin_sha = lock.dependencies[0]
+            .component_sha256
+            .clone()
+            .expect("component sha should be resolved");
 
         let output = build_project(None, "default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
@@ -3126,10 +3267,10 @@ remote = "127.0.0.1:4443"
             &root.join("wit/deps/chikoski-hello/package.wit"),
             b"package chikoski:hello@0.1.0;\n",
         );
-
         let wit_digest =
             compute_path_digest_hex(&root.join("wit/deps/chikoski-hello")).expect("wit digest");
-        let plugin_sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let component_bytes = b"\0asmderived-component";
+        let plugin_sha = hex::encode(Sha256::digest(component_bytes));
         write_imago_lock(
             &root,
             &ImagoLock {
@@ -3139,16 +3280,42 @@ remote = "127.0.0.1:4443"
                     version: "0.1.0".to_string(),
                     wit_source: "warg://chikoski:hello@0.1.0".to_string(),
                     wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
-                    wit_digest,
+                    wit_digest: wit_digest.clone(),
                     wit_path: "wit/deps/chikoski-hello".to_string(),
                     component_source: Some("warg://chikoski:hello@0.1.0".to_string()),
                     component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
-                    component_sha256: Some(plugin_sha.to_string()),
+                    component_sha256: Some(plugin_sha.clone()),
                     resolved_at: "0".to_string(),
                 }],
                 wit_packages: vec![],
             },
         );
+        let cache_entry = dependency_cache::DependencyCacheEntry {
+            name: "chikoski:hello".to_string(),
+            version: "0.1.0".to_string(),
+            kind: "wasm".to_string(),
+            wit_source: "warg://chikoski:hello@0.1.0".to_string(),
+            wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
+            wit_path: "wit/deps/chikoski-hello".to_string(),
+            wit_digest,
+            wit_source_fingerprint: None,
+            component_source: Some("warg://chikoski:hello@0.1.0".to_string()),
+            component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
+            component_sha256: Some(plugin_sha.clone()),
+            component_source_fingerprint: None,
+            transitive_packages: vec![],
+        };
+        let cache_root = dependency_cache::cache_entry_root(&root, "chikoski:hello");
+        copy_tree(
+            &root.join("wit/deps/chikoski-hello"),
+            &cache_root.join("wit/deps/chikoski-hello"),
+        );
+        write_file(
+            &dependency_cache::cache_component_path(&root, "chikoski:hello", &plugin_sha),
+            component_bytes,
+        );
+        dependency_cache::save_entry(&root, &cache_entry)
+            .expect("dependency cache should be written");
 
         let output = build_project(None, "default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
@@ -3190,9 +3357,10 @@ remote = "127.0.0.1:4443"
             &root.join("wit/deps/chikoski-hello/package.wit"),
             b"package chikoski:hello@0.1.0;\n",
         );
-
         let wit_digest =
             compute_path_digest_hex(&root.join("wit/deps/chikoski-hello")).expect("wit digest");
+        let component_bytes = b"\0asmderived-component";
+        let plugin_sha = hex::encode(Sha256::digest(component_bytes));
         write_imago_lock(
             &root,
             &ImagoLock {
@@ -3202,19 +3370,42 @@ remote = "127.0.0.1:4443"
                     version: "0.1.0".to_string(),
                     wit_source: "warg://chikoski:hello@0.1.0".to_string(),
                     wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
-                    wit_digest,
+                    wit_digest: wit_digest.clone(),
                     wit_path: "wit/deps/chikoski-hello".to_string(),
                     component_source: Some("warg://chikoski:other@0.1.0".to_string()),
                     component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
-                    component_sha256: Some(
-                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                            .to_string(),
-                    ),
+                    component_sha256: Some(plugin_sha.clone()),
                     resolved_at: "0".to_string(),
                 }],
                 wit_packages: vec![],
             },
         );
+        let cache_entry = dependency_cache::DependencyCacheEntry {
+            name: "chikoski:hello".to_string(),
+            version: "0.1.0".to_string(),
+            kind: "wasm".to_string(),
+            wit_source: "warg://chikoski:hello@0.1.0".to_string(),
+            wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
+            wit_path: "wit/deps/chikoski-hello".to_string(),
+            wit_digest,
+            wit_source_fingerprint: None,
+            component_source: Some("warg://chikoski:hello@0.1.0".to_string()),
+            component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
+            component_sha256: Some(plugin_sha.clone()),
+            component_source_fingerprint: None,
+            transitive_packages: vec![],
+        };
+        let cache_root = dependency_cache::cache_entry_root(&root, "chikoski:hello");
+        copy_tree(
+            &root.join("wit/deps/chikoski-hello"),
+            &cache_root.join("wit/deps/chikoski-hello"),
+        );
+        write_file(
+            &dependency_cache::cache_component_path(&root, "chikoski:hello", &plugin_sha),
+            component_bytes,
+        );
+        dependency_cache::save_entry(&root, &cache_entry)
+            .expect("dependency cache should be written");
 
         let err = build_project(None, "default", &root)
             .expect_err("build should fail when derived component source mismatches lock");

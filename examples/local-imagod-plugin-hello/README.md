@@ -58,7 +58,7 @@ cd examples/local-imagod-plugin-hello
 ./scripts/verify-hello.sh
 ```
 
-成功時は logs に `sizumita:ferris` 呼び出しメッセージが含まれます。plugin component 本体は `imago deploy` 実行時に取得され、同一 hash があれば `.imago/components/` の cache が再利用されます。
+成功時は logs に `sizumita:ferris` 呼び出しメッセージが含まれます。plugin component 本体は `imago update` で `.imago/deps/` に保存され、`imago build` / `imago deploy` はこの依存キャッシュを使って artifact を構築します。
 
 ## 補足
 

@@ -88,7 +88,7 @@
   - `component.registry` (任意, `kind=wasm` の場合): `warg://` の registry（省略時 `wa.dev`）
   - `component.sha256` (任意, `kind=wasm` の場合): 指定時は `imago update` で照合
   - `capabilities` (任意): この plugin が caller になる場合の認可ルール
-- `imago update` は依存の WIT を `wit/deps/` に展開し、`imago.lock (version=1)` に `wit_source` / `wit_registry` / `wit_digest` / `wit_path` / `resolved_at` を固定する。`wit_path` の依存名サニタイズは wkg 準拠で `:` / `@` を `-` に置換する。
+- `imago update` は依存の WIT/Component を `.imago/deps/<sanitized dependency>/` に保存し、そこから `wit/deps/` を再生成する。`imago.lock (version=1)` には `wit_source` / `wit_registry` / `wit_digest` / `wit_path` / `resolved_at` を固定する。`wit_path` の依存名サニタイズは wkg 準拠で `:` / `@` を `-` に置換する。
 - `warg://` の direct dependency で WIT 側に version が書かれている場合は、`warg://...@version` と一致している必要がある。
 - `warg://` の WIT package が transitive import を含む場合、依存パッケージも `wit/deps/<package>/package.wit` に展開し、`imago.lock.[[wit_packages]]` に `name` / `registry` / `[[versions]]` (`requirement` / `version` / `digest` / `source` / `path` / `via`) を固定する。
 - `dependencies[].wit.source` が `file://...` の場合、`wit/deps` 配下を指す source は禁止する（`imago update` が `wit/deps` を再生成するため）。
@@ -96,10 +96,10 @@
 - `warg://` source が plain `.wit` 形式で foreign import を含む場合は `imago update` を失敗させる（WIT package 形式が必要）。
 - `kind=wasm` かつ `component` 未指定で `wit` source が component の場合、`imago update` は component から WIT を抽出し、lock の `component_*` を自動固定する。
 - `kind=wasm` かつ `component` 未指定で `wit` source が component に解釈できない場合、`imago update` は失敗する。
-- `kind=wasm` では `imago.lock` に `component_source` / `component_registry` / `component_sha256` も固定する（component本体はこの時点で保存しない）。
-- `imago build` は `imago.lock` が未生成、`version != 1`、または lock digest 不一致のとき失敗し、`imago update` を要求する。
+- `kind=wasm` では `imago.lock` に `component_source` / `component_registry` / `component_sha256` も固定し、component 本体を `.imago/deps/<dependency>/components/<sha256>.wasm` に保存する。
+- `imago build` は `[[dependencies]]` がある場合、まず `.imago/deps` から `wit/deps` を再生成してから `imago.lock` を検証する。`imago.lock` 未生成、`version != 1`、lock digest 不一致、または必要キャッシュ欠損時は失敗し、`imago update` を要求する。
 - `.imago_transitive` は使用しない。transitive package 検証は `imago.lock.[[wit_packages]]` の `digest` と `path/package.wit` の照合で行う。
-- `imago deploy` は `imago.lock` の component 情報を使って必要時に component を取得し、`.imago/components/<sha256>.wasm` を再利用する。
+- `imago deploy` は `imago.lock` の component 情報と `.imago/deps` の component cache を使って artifact を構築する。必要キャッシュ欠損時は `imago update` を要求して失敗する。
 - runtime の transitive plugin import 解決順は `self(component export)` -> `明示 dependency(package名一致)` -> `error`。
 - transitive 解決では `requires` の記述を必須にしない。
 
@@ -180,6 +180,7 @@
 - 複数 dependency が同一 `wit/deps` 出力パスへ解決される場合はエラー。
 - `dependencies[].name` と `dependencies[].requires[]` に、絶対パス・drive prefix・`./`・`../` を含む path component を指定した場合はエラー。
 - `[[dependencies]]` 使用時に `imago.lock` が存在しない、`version != 1`、または lock の `wit_*` / `component_*` / `wit_packages` が設定・展開結果と一致しない場合はエラー。
+- `[[dependencies]]` 使用時に `.imago/deps` の必要キャッシュ（WIT/Component/metadata）が不足・破損している場合はエラー（`imago update` を要求）。
 - `main` が存在しない場合はビルド時エラー。
 - `shutdown_timeout` が 0 以下はエラー。
 - `privileged = true` かつ `capabilities` 指定ありでもエラーにはしない（`capabilities` を無視）。
@@ -202,14 +203,15 @@
 - `[env.<name>]` の反映はトップレベルキー単位の置換で実装する。
 - `build.command` は string / array の両形式を受理する。
 - `build.command` は必須キー (`name`/`main`/`type`/`target`) と `vars`/`dependencies` の検証完了後に実行する。不正設定時は実行しない。
-- `imago update` は `warg://` / `file://` を受理し、WIT を `wit/deps/` へ展開する。
+- `imago update` は `warg://` / `file://` を受理し、依存WIT/Componentを `.imago/deps/` に保存した上で `wit/deps/` を再生成する。
 - `imago update` の dependency path サニタイズは wkg 準拠 (`:` / `@` を `-`) を使い、`wit/deps` と `.imago/warg` の両方で同じ命名規則を使う。
 - `imago update` は `dependencies[].wit.source=file://...` が `wit/deps` 配下を指す場合と、dependency 同士で `wit/deps` 出力先が衝突する場合に、`wit/deps` を削除する前に失敗させる。
 - dependency package 名の path バリデーションは `/` を許可しつつ、`Path` component が `Normal` 以外（`RootDir`、`Prefix`、`CurDir`、`ParentDir`）を拒否する。
 - `warg://` は Rust-native client で解決し、`registry` 未指定時は `wa.dev` を使う。
 - `imago update` は `kind=wasm` かつ `component` 未指定で `wit` source が component の場合、component hash/source を lock へ自動固定する。
+- `imago update` は `file://` source が存在する場合のみ hash 差分を監視し、差分があればキャッシュを再解決する。source が消えている場合は既存キャッシュを優先する。
 - `imago build` は `capabilities` を正規化して manifest に出力し、`capabilirties` キーは設定エラーとして拒否する。
-- `imago build` は `[[dependencies]]` がある場合、`imago.lock(version=1)` の `wit_*` / `component_*` / `wit_packages` を検証し、不一致時は `imago update` を要求して失敗する（`kind=wasm` で `component` 未指定の場合は `wit` 由来の期待値と照合する）。
+- `imago build` は `[[dependencies]]` がある場合、`.imago/deps` から `wit/deps` を再構築してから `imago.lock(version=1)` の `wit_*` / `component_*` / `wit_packages` を検証し、不一致時は `imago update` を要求して失敗する（`kind=wasm` で `component` 未指定の場合は `wit` 由来の期待値と照合する）。
 - `imago build --env <name>` は `build/manifest.<name>.json` を生成し、`build/manifest.json` は更新しない。
 - `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
 - `[[bindings]]` は `manifest.bindings[]` へ正規化し、runtime の呼び出し認可入力として扱う。

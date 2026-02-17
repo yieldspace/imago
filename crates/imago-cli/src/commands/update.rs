@@ -15,6 +15,7 @@ use crate::{
     commands::{
         CommandResult,
         build::{self, ManifestDependencyKind},
+        dependency_cache::{self, DependencyCacheEntry, DependencyCacheTransitivePackage},
         plugin_sources,
     },
 };
@@ -42,12 +43,6 @@ fn run_inner(project_root: &Path) -> anyhow::Result<()> {
         .build()
         .context("failed to create tokio runtime for update command")?;
     runtime.block_on(run_inner_async(project_root))
-}
-
-fn wit_deps_target_rel(dependency_name: &str) -> PathBuf {
-    PathBuf::from("wit")
-        .join("deps")
-        .join(plugin_sources::sanitize_wit_deps_name(dependency_name))
 }
 
 fn normalize_path_for_compare(path: &Path) -> PathBuf {
@@ -97,7 +92,7 @@ fn validate_wit_output_path_collisions(
 ) -> anyhow::Result<()> {
     let mut path_to_dependency: BTreeMap<PathBuf, &str> = BTreeMap::new();
     for dependency in dependencies {
-        let target_rel = wit_deps_target_rel(&dependency.name);
+        let target_rel = dependency_cache::dependency_wit_target_rel(&dependency.name);
         if let Some(existing_dependency) =
             path_to_dependency.insert(target_rel.clone(), dependency.name.as_str())
         {
@@ -112,59 +107,67 @@ fn validate_wit_output_path_collisions(
     Ok(())
 }
 
-async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
-    let dependencies = build::load_project_dependencies(project_root)?;
-    validate_wit_sources_outside_wit_deps(project_root, &dependencies)?;
-    validate_wit_output_path_collisions(&dependencies)?;
-
-    let wit_root = project_root.join("wit").join("deps");
-    if wit_root.exists() {
-        fs::remove_dir_all(&wit_root)
-            .with_context(|| format!("failed to reset wit root: {}", wit_root.display()))?;
+async fn load_or_refresh_cache_entry(
+    project_root: &Path,
+    dependency: &build::ProjectDependency,
+) -> anyhow::Result<DependencyCacheEntry> {
+    if dependency_cache::is_cache_hit(project_root, dependency)? {
+        return dependency_cache::load_entry(project_root, &dependency.name)
+            .with_context(|| format!("failed to load dependency cache for '{}'", dependency.name));
     }
-    fs::create_dir_all(&wit_root)
-        .with_context(|| format!("failed to create wit root: {}", wit_root.display()))?;
 
-    let resolved_at = time::OffsetDateTime::now_utc().unix_timestamp().to_string();
-    let mut lock_entries = Vec::with_capacity(dependencies.len());
-    let mut transitive_records = Vec::new();
-
-    for dependency in dependencies {
-        let target_rel = wit_deps_target_rel(&dependency.name);
-        let target_path = project_root.join(&target_rel);
-        fs::create_dir_all(&target_path).with_context(|| {
+    let cache_entry_root = dependency_cache::cache_entry_root(project_root, &dependency.name);
+    if cache_entry_root.exists() {
+        fs::remove_dir_all(&cache_entry_root).with_context(|| {
             format!(
-                "failed to create dependency wit output dir: {}",
-                target_path.display()
+                "failed to reset dependency cache dir: {}",
+                cache_entry_root.display()
             )
         })?;
-        let materialized = plugin_sources::materialize_wit_source(
-            project_root,
-            &dependency.wit.source,
-            dependency.wit.registry.as_deref(),
-            &dependency.version,
-            &target_path,
-        )
-        .await
-        .with_context(|| format!("failed to resolve dependency '{}'", dependency.name))?;
-        transitive_records.extend(materialized.transitive_packages.iter().map(|transitive| {
-            TransitivePackageRecord {
-                name: transitive.name.clone(),
-                registry: transitive.registry.clone(),
-                requirement: transitive.requirement.clone(),
-                version: transitive.version.clone(),
-                digest: transitive.digest.clone(),
-                source: transitive.source.clone(),
-                path: transitive.path.clone(),
-                via: dependency.name.clone(),
-            }
-        }));
+    }
 
-        let digest = build::compute_path_digest_hex(&target_path)?;
-        let (component_source, component_registry, component_sha256) = match dependency.kind {
-            ManifestDependencyKind::Native => (None, None, None),
+    let cache_wit_target =
+        cache_entry_root.join(dependency_cache::dependency_wit_path(&dependency.name));
+    fs::create_dir_all(&cache_wit_target).with_context(|| {
+        format!(
+            "failed to create dependency cache wit dir: {}",
+            cache_wit_target.display()
+        )
+    })?;
+
+    let materialized = plugin_sources::materialize_wit_source(
+        project_root,
+        &dependency.wit.source,
+        dependency.wit.registry.as_deref(),
+        &dependency.version,
+        &cache_wit_target,
+    )
+    .await
+    .with_context(|| format!("failed to resolve dependency '{}'", dependency.name))?;
+
+    let cache_wit_digest =
+        build::compute_path_digest_hex(&cache_wit_target).with_context(|| {
+            format!(
+                "failed to compute dependency cache wit digest: {}",
+                cache_wit_target.display()
+            )
+        })?;
+    let wit_source_fingerprint =
+        dependency_cache::wit_source_fingerprint_if_exists(project_root, &dependency.wit.source)
+            .with_context(|| {
+                format!(
+                    "failed to fingerprint wit source for dependency '{}'",
+                    dependency.name
+                )
+            })?;
+
+    let (component_source, component_registry, component_sha256, component_source_fingerprint) =
+        match dependency.kind {
+            ManifestDependencyKind::Native => (None, None, None, None),
             ManifestDependencyKind::Wasm => {
-                if let Some(component) = dependency.component.as_ref() {
+                let (source, registry, sha256) = if let Some(component) =
+                    dependency.component.as_ref()
+                {
                     let digest = plugin_sources::resolve_component_sha256(
                         project_root,
                         &component.source,
@@ -178,16 +181,12 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
                             dependency.name
                         )
                     })?;
-                    (
-                        Some(component.source.clone()),
-                        component.registry.clone(),
-                        Some(digest),
-                    )
+                    (component.source.clone(), component.registry.clone(), digest)
                 } else if let Some(derived) = materialized.derived_component.as_ref() {
                     (
-                        Some(derived.source.clone()),
+                        derived.source.clone(),
                         derived.registry.clone(),
-                        Some(derived.sha256.clone()),
+                        derived.sha256.clone(),
                     )
                 } else {
                     return Err(anyhow!(
@@ -195,22 +194,119 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
                         dependency.name,
                         dependency.wit.source
                     ));
-                }
+                };
+
+                let cache_component_path =
+                    dependency_cache::cache_component_path(project_root, &dependency.name, &sha256);
+                plugin_sources::materialize_component_file(
+                    project_root,
+                    &source,
+                    registry.as_deref(),
+                    &sha256,
+                    &cache_component_path,
+                    "dependency component cache",
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to materialize component cache for dependency '{}'",
+                        dependency.name
+                    )
+                })?;
+                let source_fingerprint =
+                    dependency_cache::component_source_fingerprint_if_exists(project_root, &source)
+                        .with_context(|| {
+                            format!(
+                                "failed to fingerprint component source for dependency '{}'",
+                                dependency.name
+                            )
+                        })?;
+                (Some(source), registry, Some(sha256), source_fingerprint)
             }
         };
 
+    let entry = DependencyCacheEntry {
+        name: dependency.name.clone(),
+        version: dependency.version.clone(),
+        kind: match dependency.kind {
+            ManifestDependencyKind::Native => "native".to_string(),
+            ManifestDependencyKind::Wasm => "wasm".to_string(),
+        },
+        wit_source: dependency.wit.source.clone(),
+        wit_registry: dependency.wit.registry.clone(),
+        wit_path: dependency_cache::dependency_wit_path(&dependency.name),
+        wit_digest: cache_wit_digest,
+        wit_source_fingerprint,
+        component_source,
+        component_registry,
+        component_sha256,
+        component_source_fingerprint,
+        transitive_packages: materialized
+            .transitive_packages
+            .iter()
+            .map(|transitive| DependencyCacheTransitivePackage {
+                name: transitive.name.clone(),
+                registry: transitive.registry.clone(),
+                requirement: transitive.requirement.clone(),
+                version: transitive.version.clone(),
+                digest: transitive.digest.clone(),
+                source: transitive.source.clone(),
+                path: transitive.path.clone(),
+            })
+            .collect(),
+    };
+    dependency_cache::save_entry(project_root, &entry)
+        .with_context(|| format!("failed to save dependency cache for '{}'", dependency.name))?;
+    Ok(entry)
+}
+
+async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
+    let dependencies = build::load_project_dependencies(project_root)?;
+    validate_wit_sources_outside_wit_deps(project_root, &dependencies)?;
+    validate_wit_output_path_collisions(&dependencies)?;
+
+    let resolved_at = time::OffsetDateTime::now_utc().unix_timestamp().to_string();
+    let mut lock_entries = Vec::with_capacity(dependencies.len());
+    let mut transitive_records = Vec::new();
+
+    for dependency in &dependencies {
+        let cache_entry = load_or_refresh_cache_entry(project_root, dependency).await?;
+        transitive_records.extend(cache_entry.transitive_packages.iter().map(|transitive| {
+            TransitivePackageRecord {
+                name: transitive.name.clone(),
+                registry: transitive.registry.clone(),
+                requirement: transitive.requirement.clone(),
+                version: transitive.version.clone(),
+                digest: transitive.digest.clone(),
+                source: transitive.source.clone(),
+                path: transitive.path.clone(),
+                via: dependency.name.clone(),
+            }
+        }));
         lock_entries.push(ImagoLockDependency {
             name: dependency.name.clone(),
             version: dependency.version.clone(),
             wit_source: dependency.wit.source.clone(),
             wit_registry: dependency.wit.registry.clone(),
-            wit_digest: digest,
-            wit_path: plugin_sources::path_to_manifest_string(&target_rel),
-            component_source,
-            component_registry,
-            component_sha256,
+            wit_digest: cache_entry.wit_digest,
+            wit_path: cache_entry.wit_path,
+            component_source: cache_entry.component_source,
+            component_registry: cache_entry.component_registry,
+            component_sha256: cache_entry.component_sha256,
             resolved_at: resolved_at.clone(),
         });
+    }
+
+    dependency_cache::hydrate_project_wit_deps(project_root, &dependencies)?;
+    for entry in &mut lock_entries {
+        let hydrated_path = project_root.join(&entry.wit_path);
+        entry.wit_digest = build::compute_path_digest_hex(&hydrated_path).with_context(|| {
+            format!(
+                "failed to compute hydrated wit digest for dependency '{}' at {}",
+                entry.name,
+                hydrated_path.display()
+            )
+        })?;
     }
 
     lock_entries.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
@@ -396,7 +492,7 @@ remote = "127.0.0.1:4443"
     }
 
     #[test]
-    fn update_records_component_source_and_sha_without_materializing_component_file() {
+    fn update_records_component_source_and_sha_and_materializes_dependency_component_cache() {
         let root = new_temp_dir("component-sha");
         let component_bytes = b"\0asmfake-component";
         let component_sha = sha256_hex(component_bytes);
@@ -450,11 +546,22 @@ remote = "127.0.0.1:4443"
             Some(component_sha.as_str())
         );
         assert!(
+            root.join(".imago/deps/yieldspace-plugin/example/meta.toml")
+                .exists(),
+            "dependency cache metadata must be written"
+        );
+        assert!(
+            root.join(".imago/deps/yieldspace-plugin/example/components")
+                .join(format!("{component_sha}.wasm"))
+                .exists(),
+            "dependency component cache must be materialized"
+        );
+        assert!(
             !root
                 .join(".imago/components")
                 .join(format!("{component_sha}.wasm"))
                 .exists(),
-            "update must not materialize component cache"
+            "update must not materialize deploy-time shared component cache"
         );
 
         let _ = fs::remove_dir_all(root);
@@ -523,6 +630,12 @@ world plugin {
         assert_eq!(
             entry.component_sha256.as_deref(),
             Some(expected_sha.as_str())
+        );
+        assert!(
+            root.join(".imago/deps/root-component/components")
+                .join(format!("{expected_sha}.wasm"))
+                .exists(),
+            "derived component bytes must be stored in dependency cache"
         );
         assert!(root.join("wit/deps/root-component/package.wit").exists());
 
@@ -1065,6 +1178,170 @@ remote = "127.0.0.1:4443"
                 .exists()
         );
         assert!(root.join("imago.lock").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rehydrates_wit_from_cache_when_file_source_disappears() {
+        let root = new_temp_dir("file-source-missing-cache-hit");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("registry/example.wit"),
+            b"package test:example@0.1.0;\n",
+        );
+
+        let first = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(first.exit_code, 0, "first update should succeed: {first:?}");
+
+        fs::remove_file(root.join("registry/example.wit")).expect("source should be removable");
+        fs::remove_dir_all(root.join("wit/deps")).expect("wit/deps should be removable");
+
+        let second = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(
+            second.exit_code, 0,
+            "second update should succeed from cache: {:?}",
+            second.stderr
+        );
+        assert!(
+            root.join("wit/deps/yieldspace-plugin/example/example.wit")
+                .exists(),
+            "wit/deps should be hydrated from dependency cache"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_refreshes_dependency_cache_when_file_source_changes() {
+        let root = new_temp_dir("file-source-refresh");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("registry/example.wit"),
+            b"package test:example@0.1.0;\n",
+        );
+
+        let first = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(first.exit_code, 0, "first update should succeed: {first:?}");
+        let lock_v1: ImagoLock = toml::from_str(
+            &fs::read_to_string(root.join("imago.lock")).expect("lock should exist"),
+        )
+        .expect("lock should parse");
+        let digest_v1 = lock_v1.dependencies[0].wit_digest.clone();
+
+        write(
+            &root.join("registry/example.wit"),
+            b"package test:example@0.2.0;\n",
+        );
+
+        let second = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(
+            second.exit_code, 0,
+            "second update should succeed: {second:?}"
+        );
+        let lock_v2: ImagoLock = toml::from_str(
+            &fs::read_to_string(root.join("imago.lock")).expect("lock should exist"),
+        )
+        .expect("lock should parse");
+        let digest_v2 = lock_v2.dependencies[0].wit_digest.clone();
+        assert_ne!(
+            digest_v1, digest_v2,
+            "wit digest must change after source update"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(
+                ".imago/deps/yieldspace-plugin/example/wit/deps/yieldspace-plugin/example/example.wit"
+            ))
+            .expect("cached wit should exist"),
+            "package test:example@0.2.0;\n"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_uses_dependency_cache_when_local_warg_fixture_is_removed() {
+        let root = new_temp_dir("warg-missing-after-cache");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "native"
+wit = "warg://chikoski:hello@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        let fixture_wit_root = root.join("fixture-wit-warg");
+        write(
+            &fixture_wit_root.join("package.wit"),
+            br#"
+package chikoski:hello@0.1.0;
+
+interface greet {
+  hello: func() -> string;
+}
+"#,
+        );
+        let wit_package_bytes = encode_wit_package(&fixture_wit_root);
+        write(
+            &root.join(".imago/warg/chikoski-hello/0.1.0/wit.wasm"),
+            &wit_package_bytes,
+        );
+
+        let first = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(first.exit_code, 0, "first update should succeed: {first:?}");
+
+        fs::remove_dir_all(root.join(".imago/warg/chikoski-hello"))
+            .expect("local warg fixture should be removable");
+        fs::remove_dir_all(root.join("wit/deps")).expect("wit/deps should be removable");
+
+        let second = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(
+            second.exit_code, 0,
+            "second update should succeed from dependency cache: {:?}",
+            second.stderr
+        );
+        assert!(root.join("wit/deps/chikoski-hello/package.wit").exists());
 
         let _ = fs::remove_dir_all(root);
     }

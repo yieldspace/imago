@@ -41,7 +41,8 @@ cargo run --manifest-path ../../Cargo.toml -p imago-cli -- update
 
 この時点で以下が行われます。
 
-- `wit/deps/` に WIT 展開
+- `.imago/deps/` に依存WIT/Componentを保存
+- `.imago/deps/` から `wit/deps/` を再生成
 - `imago.lock (version=1)` に `wit_*` 固定
 - transitive package は `imago.lock` の `[[wit_packages]]` に固定（`.imago_transitive` は未使用）
 - `wit` が component の場合は `component_*` も自動固定
@@ -73,8 +74,8 @@ wit = "warg://sizumita:ferris@0.1.0"
 ./scripts/deploy.sh
 ```
 
-`imago deploy` は内部で build を実行し、必要な component を lock 情報から遅延取得します。
-同じ hash があれば `.imago/components/` の cache を再利用します。
+`imago build` / `imago deploy` は `.imago/deps/` を依存の正本として使います。
+必要な依存キャッシュが不足している場合は失敗し、`imago update` を要求します。
 
 ## 6. 出力確認
 

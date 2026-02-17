@@ -280,54 +280,25 @@ pub(crate) async fn resolve_component_sha256(
     Ok(digest)
 }
 
-pub(crate) async fn materialize_component_cache_file(
+pub(crate) async fn materialize_component_file(
     project_root: &Path,
     source: &str,
     registry: Option<&str>,
     sha256: &str,
-) -> anyhow::Result<PathBuf> {
+    destination_path: &Path,
+    destination_label: &str,
+) -> anyhow::Result<()> {
     validate_sha256_hex(sha256, "component_sha256")?;
-
-    let cache_root = project_root.join(".imago").join("components");
-    fs::create_dir_all(&cache_root).with_context(|| {
-        format!(
-            "failed to create plugin component cache dir: {}",
-            cache_root.display()
-        )
-    })?;
-    let cache_path = cache_root.join(format!("{sha256}.wasm"));
-
-    if cache_path.exists() {
-        let existing = compute_sha256_hex(&cache_path)?;
-        if existing == sha256 {
-            return Ok(cache_path);
-        }
-        return Err(anyhow!(
-            "cached component hash mismatch for {} (expected {}, actual {})",
-            cache_path.display(),
-            sha256,
-            existing
-        ));
-    }
 
     let parsed = parse_component_source(project_root, source, registry)?;
     match parsed {
         ParsedComponentSource::File(path) => {
-            let digest = compute_sha256_hex(&path)?;
-            if digest != sha256 {
-                return Err(anyhow!(
-                    "component sha256 mismatch: expected {}, actual {}",
-                    sha256,
-                    digest
-                ));
-            }
-            fs::copy(&path, &cache_path).with_context(|| {
-                format!(
-                    "failed to copy component source {} into cache {}",
-                    path.display(),
-                    cache_path.display()
-                )
-            })?;
+            copy_component_source_to_destination(
+                &path,
+                destination_path,
+                sha256,
+                destination_label,
+            )?;
         }
         ParsedComponentSource::Warg {
             package,
@@ -337,21 +308,12 @@ pub(crate) async fn materialize_component_cache_file(
             if let Some(local_path) =
                 find_local_warg_component_candidate(project_root, &package, &version)
             {
-                let digest = compute_sha256_hex(&local_path)?;
-                if digest != sha256 {
-                    return Err(anyhow!(
-                        "component sha256 mismatch: expected {}, actual {}",
-                        sha256,
-                        digest
-                    ));
-                }
-                fs::copy(&local_path, &cache_path).with_context(|| {
-                    format!(
-                        "failed to copy local warg component {} into cache {}",
-                        local_path.display(),
-                        cache_path.display()
-                    )
-                })?;
+                copy_component_source_to_destination(
+                    &local_path,
+                    destination_path,
+                    sha256,
+                    destination_label,
+                )?;
             } else {
                 let bytes = fetch_warg_release_bytes(&package, &version, &registry).await?;
                 let digest = hex::encode(Sha256::digest(&bytes));
@@ -362,17 +324,77 @@ pub(crate) async fn materialize_component_cache_file(
                         digest
                     ));
                 }
-                fs::write(&cache_path, bytes).with_context(|| {
+                if let Some(parent) = destination_path.parent() {
+                    fs::create_dir_all(parent).with_context(|| {
+                        format!(
+                            "failed to create {} destination dir: {}",
+                            destination_label,
+                            parent.display()
+                        )
+                    })?;
+                }
+                fs::write(destination_path, bytes).with_context(|| {
                     format!(
-                        "failed to write component cache file {}",
-                        cache_path.display()
+                        "failed to write {} file {}",
+                        destination_label,
+                        destination_path.display()
                     )
                 })?;
             }
         }
     }
 
-    Ok(cache_path)
+    Ok(())
+}
+
+fn copy_component_source_to_destination(
+    source_path: &Path,
+    destination_path: &Path,
+    expected_sha256: &str,
+    destination_label: &str,
+) -> anyhow::Result<()> {
+    let digest = compute_sha256_hex(source_path)?;
+    if !digest.eq_ignore_ascii_case(expected_sha256) {
+        return Err(anyhow!(
+            "component sha256 mismatch: expected {}, actual {}",
+            expected_sha256,
+            digest
+        ));
+    }
+
+    if destination_path.exists() {
+        let existing_digest = compute_sha256_hex(destination_path)?;
+        if existing_digest.eq_ignore_ascii_case(expected_sha256) {
+            return Ok(());
+        }
+        return Err(anyhow!(
+            "{} hash mismatch for {} (expected {}, actual {})",
+            destination_label,
+            destination_path.display(),
+            expected_sha256,
+            existing_digest
+        ));
+    }
+
+    if let Some(parent) = destination_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create {} destination dir: {}",
+                destination_label,
+                parent.display()
+            )
+        })?;
+    }
+
+    fs::copy(source_path, destination_path).with_context(|| {
+        format!(
+            "failed to copy component source {} into {} {}",
+            source_path.display(),
+            destination_label,
+            destination_path.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn parse_wit_source(
@@ -853,6 +875,8 @@ fn find_local_warg_component_candidate(
         .join(package_dir)
         .join(version);
     [
+        base.join("wit.wasm"),
+        base.join("wit"),
         base.join("component.wasm"),
         base.join("component").join("component.wasm"),
         project_root.join(".imago").join("warg").join(format!(
