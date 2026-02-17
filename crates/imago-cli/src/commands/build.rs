@@ -2637,10 +2637,10 @@ remote = "127.0.0.1:4443"
             b"package test:example;\n",
         );
         write_file(
-            &root.join("wit/deps/yieldspace_plugin_example/example.wit"),
+            &root.join("wit/deps/yieldspace-plugin/example/example.wit"),
             b"package test:example;\n",
         );
-        let digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace_plugin_example"))
+        let digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace-plugin/example"))
             .expect("wit digest should compute");
         write_imago_lock(
             &root,
@@ -2652,7 +2652,7 @@ remote = "127.0.0.1:4443"
                     wit_source: "file://registry/example.wit".to_string(),
                     wit_registry: None,
                     wit_digest: digest,
-                    wit_path: "wit/deps/yieldspace_plugin_example".to_string(),
+                    wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
                     component_source: None,
                     component_registry: None,
                     component_sha256: None,
@@ -2698,18 +2698,18 @@ remote = "127.0.0.1:4443"
             b"package test:example;\n",
         );
         write_file(
-            &root.join("wit/deps/yieldspace_plugin_example/example.wit"),
+            &root.join("wit/deps/yieldspace-plugin/example/example.wit"),
             b"package test:example;\n",
         );
         write_file(
-            &root.join("wit/deps/test_dep/package.wit"),
+            &root.join("wit/deps/test-dep/package.wit"),
             b"package test:dep; interface dep { pong: func() -> string; }\n",
         );
-        let digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace_plugin_example"))
+        let digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace-plugin/example"))
             .expect("wit digest should compute");
         let transitive_digest = format!(
             "sha256:{}",
-            compute_sha256_hex(&root.join("wit/deps/test_dep/package.wit"))
+            compute_sha256_hex(&root.join("wit/deps/test-dep/package.wit"))
                 .expect("transitive digest should compute")
         );
         write_imago_lock(
@@ -2722,7 +2722,7 @@ remote = "127.0.0.1:4443"
                     wit_source: "file://registry/example.wit".to_string(),
                     wit_registry: None,
                     wit_digest: digest,
-                    wit_path: "wit/deps/yieldspace_plugin_example".to_string(),
+                    wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
                     component_source: None,
                     component_registry: None,
                     component_sha256: None,
@@ -2736,7 +2736,7 @@ remote = "127.0.0.1:4443"
                         version: None,
                         digest: transitive_digest,
                         source: None,
-                        path: "wit/deps/test_dep".to_string(),
+                        path: "wit/deps/test-dep".to_string(),
                         via: vec!["yieldspace:plugin/other".to_string()],
                     }],
                 }],
@@ -2822,11 +2822,11 @@ remote = "127.0.0.1:4443"
             b"package test:example;\n",
         );
         write_file(
-            &root.join("wit/deps/yieldspace_plugin_example/example.wit"),
+            &root.join("wit/deps/yieldspace-plugin/example/example.wit"),
             b"package test:example;\n",
         );
 
-        let digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace_plugin_example"))
+        let digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace-plugin/example"))
             .expect("wit digest should compute");
         write_imago_lock(
             &root,
@@ -2838,7 +2838,7 @@ remote = "127.0.0.1:4443"
                     wit_source: "file://registry/example.wit".to_string(),
                     wit_registry: None,
                     wit_digest: digest,
-                    wit_path: "wit/deps/yieldspace_plugin_example".to_string(),
+                    wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
                     component_source: None,
                     component_registry: None,
                     component_sha256: None,
@@ -2894,15 +2894,15 @@ remote = "127.0.0.1:4443"
             b"package test:example;\n",
         );
         write_file(
-            &root.join("wit/deps/yieldspace_plugin_example/example.wit"),
+            &root.join("wit/deps/yieldspace-plugin/example/example.wit"),
             b"package test:example;\n",
         );
         write_file(
-            &root.join("wit/deps/test_dep/package.wit"),
+            &root.join("wit/deps/test-dep/package.wit"),
             b"package test:dep; interface dep { pong: func() -> string; }\n",
         );
 
-        let digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace_plugin_example"))
+        let digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace-plugin/example"))
             .expect("wit digest should compute");
         write_imago_lock(
             &root,
@@ -2914,7 +2914,7 @@ remote = "127.0.0.1:4443"
                     wit_source: "file://registry/example.wit".to_string(),
                     wit_registry: None,
                     wit_digest: digest,
-                    wit_path: "wit/deps/yieldspace_plugin_example".to_string(),
+                    wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
                     component_source: None,
                     component_registry: None,
                     component_sha256: None,
@@ -2929,7 +2929,7 @@ remote = "127.0.0.1:4443"
                         digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
                             .to_string(),
                         source: None,
-                        path: "wit/deps/test_dep".to_string(),
+                        path: "wit/deps/test-dep".to_string(),
                         via: vec!["yieldspace:plugin/example".to_string()],
                     }],
                 }],
@@ -2979,10 +2979,10 @@ remote = "127.0.0.1:4443"
         write_file(&root.join("registry/example-plugin.wasm"), plugin_bytes);
 
         write_file(
-            &root.join("wit/deps/yieldspace_plugin_example/example.wit"),
+            &root.join("wit/deps/yieldspace-plugin/example/example.wit"),
             b"package test:example;\n",
         );
-        let wit_digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace_plugin_example"))
+        let wit_digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace-plugin/example"))
             .expect("wit digest should compute");
         let plugin_sha = hex::encode(Sha256::digest(plugin_bytes));
         write_imago_lock(
@@ -2995,7 +2995,7 @@ remote = "127.0.0.1:4443"
                     wit_source: "file://registry/example.wit".to_string(),
                     wit_registry: None,
                     wit_digest,
-                    wit_path: "wit/deps/yieldspace_plugin_example".to_string(),
+                    wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
                     component_source: Some("file://registry/example-plugin.wasm".to_string()),
                     component_registry: None,
                     component_sha256: Some(plugin_sha.clone()),
@@ -3043,12 +3043,12 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
-            &root.join("wit/deps/chikoski_hello/package.wit"),
+            &root.join("wit/deps/chikoski-hello/package.wit"),
             b"package chikoski:hello@0.1.0;\n",
         );
 
         let wit_digest =
-            compute_path_digest_hex(&root.join("wit/deps/chikoski_hello")).expect("wit digest");
+            compute_path_digest_hex(&root.join("wit/deps/chikoski-hello")).expect("wit digest");
         let plugin_sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         write_imago_lock(
             &root,
@@ -3060,7 +3060,7 @@ remote = "127.0.0.1:4443"
                     wit_source: "warg://chikoski:hello@0.1.0".to_string(),
                     wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
                     wit_digest,
-                    wit_path: "wit/deps/chikoski_hello".to_string(),
+                    wit_path: "wit/deps/chikoski-hello".to_string(),
                     component_source: Some("warg://chikoski:hello@0.1.0".to_string()),
                     component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
                     component_sha256: Some(plugin_sha.to_string()),
@@ -3107,12 +3107,12 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
-            &root.join("wit/deps/chikoski_hello/package.wit"),
+            &root.join("wit/deps/chikoski-hello/package.wit"),
             b"package chikoski:hello@0.1.0;\n",
         );
 
         let wit_digest =
-            compute_path_digest_hex(&root.join("wit/deps/chikoski_hello")).expect("wit digest");
+            compute_path_digest_hex(&root.join("wit/deps/chikoski-hello")).expect("wit digest");
         write_imago_lock(
             &root,
             &ImagoLock {
@@ -3123,7 +3123,7 @@ remote = "127.0.0.1:4443"
                     wit_source: "warg://chikoski:hello@0.1.0".to_string(),
                     wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
                     wit_digest,
-                    wit_path: "wit/deps/chikoski_hello".to_string(),
+                    wit_path: "wit/deps/chikoski-hello".to_string(),
                     component_source: Some("warg://chikoski:other@0.1.0".to_string()),
                     component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
                     component_sha256: Some(

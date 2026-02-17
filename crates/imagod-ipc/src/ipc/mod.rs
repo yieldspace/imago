@@ -637,8 +637,7 @@ mod tests {
             decoded
                 .capabilities
                 .deps
-                .get("yieldspace:plugin/example")
-                .is_some()
+                .contains_key("yieldspace:plugin/example")
         );
     }
 

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -43,8 +44,78 @@ fn run_inner(project_root: &Path) -> anyhow::Result<()> {
     runtime.block_on(run_inner_async(project_root))
 }
 
+fn wit_deps_target_rel(dependency_name: &str) -> PathBuf {
+    PathBuf::from("wit")
+        .join("deps")
+        .join(plugin_sources::sanitize_wit_deps_name(dependency_name))
+}
+
+fn normalize_path_for_compare(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push("..");
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn validate_wit_sources_outside_wit_deps(
+    project_root: &Path,
+    dependencies: &[build::ProjectDependency],
+) -> anyhow::Result<()> {
+    let wit_deps_root = normalize_path_for_compare(&project_root.join("wit").join("deps"));
+    for dependency in dependencies {
+        let Some(raw_path) = dependency.wit.source.strip_prefix("file://") else {
+            continue;
+        };
+        let source_path = if Path::new(raw_path).is_absolute() {
+            PathBuf::from(raw_path)
+        } else {
+            project_root.join(raw_path)
+        };
+        let normalized_source = normalize_path_for_compare(&source_path);
+        if normalized_source.starts_with(&wit_deps_root) {
+            return Err(anyhow!(
+                "dependency '{}' wit source '{}' points under wit/deps, which `imago update` resets; move the source outside wit/deps",
+                dependency.name,
+                dependency.wit.source
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_wit_output_path_collisions(
+    dependencies: &[build::ProjectDependency],
+) -> anyhow::Result<()> {
+    let mut path_to_dependency: BTreeMap<PathBuf, &str> = BTreeMap::new();
+    for dependency in dependencies {
+        let target_rel = wit_deps_target_rel(&dependency.name);
+        if let Some(existing_dependency) =
+            path_to_dependency.insert(target_rel.clone(), dependency.name.as_str())
+        {
+            return Err(anyhow!(
+                "dependencies '{}' and '{}' both resolve to '{}'; dependency WIT output paths must be unique",
+                existing_dependency,
+                dependency.name,
+                plugin_sources::path_to_manifest_string(&target_rel)
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
     let dependencies = build::load_project_dependencies(project_root)?;
+    validate_wit_sources_outside_wit_deps(project_root, &dependencies)?;
+    validate_wit_output_path_collisions(&dependencies)?;
 
     let wit_root = project_root.join("wit").join("deps");
     if wit_root.exists() {
@@ -59,9 +130,7 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
     let mut transitive_records = Vec::new();
 
     for dependency in dependencies {
-        let target_rel = PathBuf::from("wit")
-            .join("deps")
-            .join(plugin_sources::sanitize_dependency_name(&dependency.name));
+        let target_rel = wit_deps_target_rel(&dependency.name);
         let target_path = project_root.join(&target_rel);
         fs::create_dir_all(&target_path).with_context(|| {
             format!(
@@ -259,7 +328,7 @@ remote = "127.0.0.1:4443"
         assert_eq!(entry.name, "yieldspace:plugin/example");
         assert_eq!(entry.wit_source, "file://registry/example.wit");
         assert_eq!(entry.wit_registry, None);
-        assert_eq!(entry.wit_path, "wit/deps/yieldspace_plugin_example");
+        assert_eq!(entry.wit_path, "wit/deps/yieldspace-plugin/example");
         assert!(root.join(&entry.wit_path).exists());
         assert!(entry.component_source.is_none());
         assert!(entry.component_sha256.is_none());
@@ -295,7 +364,7 @@ remote = "127.0.0.1:4443"
 "#,
         );
         write(
-            &root.join(".imago/warg/yieldspace_plugin_example/1.2.3/wit.wit"),
+            &root.join(".imago/warg/yieldspace-plugin/example/1.2.3/wit.wit"),
             b"package test:example@1.2.3;\n",
         );
 
@@ -319,7 +388,7 @@ remote = "127.0.0.1:4443"
         );
         assert_eq!(
             lock.dependencies[0].wit_path,
-            "wit/deps/yieldspace_plugin_example"
+            "wit/deps/yieldspace-plugin/example"
         );
         assert!(root.join(&lock.dependencies[0].wit_path).exists());
 
@@ -425,7 +494,7 @@ world plugin {
         let component_bytes = encode_wit_component(&fixture_wit_root, "plugin");
         let expected_sha = sha256_hex(&component_bytes);
         write(
-            &root.join(".imago/warg/root_component/0.1.0/wit.wasm"),
+            &root.join(".imago/warg/root-component/0.1.0/wit.wasm"),
             &component_bytes,
         );
 
@@ -455,7 +524,7 @@ world plugin {
             entry.component_sha256.as_deref(),
             Some(expected_sha.as_str())
         );
-        assert!(root.join("wit/deps/root_component/package.wit").exists());
+        assert!(root.join("wit/deps/root-component/package.wit").exists());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -494,7 +563,7 @@ interface greet {
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
-            &root.join(".imago/warg/chikoski_hello/0.1.0/wit.wasm"),
+            &root.join(".imago/warg/chikoski-hello/0.1.0/wit.wasm"),
             &wit_package_bytes,
         );
 
@@ -539,6 +608,94 @@ remote = "127.0.0.1:4443"
         assert!(
             stderr.contains("no longer accepts https://wa.dev shorthand"),
             "unexpected stderr: {stderr}"
+        );
+        assert!(!root.join("imago.lock").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rejects_sanitized_wit_output_path_collisions() {
+        let root = new_temp_dir("wit-output-collision");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "foo:bar"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/a.wit"
+
+[[dependencies]]
+name = "foo-bar"
+version = "0.2.0"
+kind = "native"
+wit = "file://registry/b.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("wit/deps/stale/dependency.wit"),
+            b"package stale:dep;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("both resolve to 'wit/deps/foo-bar'"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            root.join("wit/deps/stale/dependency.wit").exists(),
+            "wit/deps must not be reset when collision is detected"
+        );
+        assert!(!root.join("imago.lock").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rejects_file_source_under_wit_deps_before_reset() {
+        let root = new_temp_dir("file-source-under-wit-deps");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://wit/deps/vendor/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("wit/deps/vendor/example.wit"),
+            b"package test:example@0.1.0;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("points under wit/deps"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            root.join("wit/deps/vendor/example.wit").exists(),
+            "source under wit/deps must not be deleted"
         );
         assert!(!root.join("imago.lock").exists());
 
@@ -597,7 +754,7 @@ interface name-provider {
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
-            &root.join(".imago/warg/chikoski_hello/0.1.0/wit.wasm"),
+            &root.join(".imago/warg/chikoski-hello/0.1.0/wit.wasm"),
             &wit_package_bytes,
         );
 
@@ -613,16 +770,16 @@ interface name-provider {
             "wit/deps must be reset before resolving"
         );
         assert!(
-            root.join("wit/deps/chikoski_hello/package.wit").exists(),
+            root.join("wit/deps/chikoski-hello/package.wit").exists(),
             "top-level package should be materialized"
         );
         assert!(
-            root.join("wit/deps/chikoski_name/package.wit").exists(),
+            root.join("wit/deps/chikoski-name/package.wit").exists(),
             "transitive package should be materialized"
         );
         assert!(
             !root
-                .join("wit/deps/chikoski_hello/.imago_transitive")
+                .join("wit/deps/chikoski-hello/.imago_transitive")
                 .exists()
         );
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
@@ -642,7 +799,7 @@ interface name-provider {
             version.source.as_deref(),
             Some("warg://chikoski:name@0.1.0")
         );
-        assert_eq!(version.path, "wit/deps/chikoski_name");
+        assert_eq!(version.path, "wit/deps/chikoski-name");
         assert_eq!(version.via, vec!["chikoski:hello".to_string()]);
         assert!(version.digest.starts_with("sha256:"));
 
@@ -683,7 +840,7 @@ interface greet {
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
-            &root.join(".imago/warg/chikoski_hello/0.1.0/wit.wasm"),
+            &root.join(".imago/warg/chikoski-hello/0.1.0/wit.wasm"),
             &wit_package_bytes,
         );
 
@@ -693,7 +850,7 @@ interface greet {
             "update should succeed: {:?}",
             result.stderr
         );
-        assert!(root.join("wit/deps/chikoski_hello/package.wit").exists());
+        assert!(root.join("wit/deps/chikoski-hello/package.wit").exists());
         assert!(root.join("imago.lock").exists());
 
         let _ = fs::remove_dir_all(root);
@@ -733,7 +890,7 @@ interface greet {
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
-            &root.join(".imago/warg/chikoski_hello/0.1.0/wit.wasm"),
+            &root.join(".imago/warg/chikoski-hello/0.1.0/wit.wasm"),
             &wit_package_bytes,
         );
 
@@ -796,7 +953,7 @@ interface name-provider {
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
-            &root.join(".imago/warg/chikoski_hello/0.1.0/wit.wasm"),
+            &root.join(".imago/warg/chikoski-hello/0.1.0/wit.wasm"),
             &wit_package_bytes,
         );
 
@@ -806,10 +963,10 @@ interface name-provider {
             "update should succeed: {:?}",
             result.stderr
         );
-        assert!(root.join("wit/deps/chikoski_name/package.wit").exists());
+        assert!(root.join("wit/deps/chikoski-name/package.wit").exists());
         assert!(
             !root
-                .join("wit/deps/chikoski_hello/.imago_transitive")
+                .join("wit/deps/chikoski-hello/.imago_transitive")
                 .exists()
         );
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
@@ -820,7 +977,7 @@ interface name-provider {
         assert_eq!(version.requirement, "*");
         assert!(version.version.is_none());
         assert!(version.source.is_none());
-        assert_eq!(version.path, "wit/deps/chikoski_name");
+        assert_eq!(version.path, "wit/deps/chikoski-name");
         assert_eq!(version.via, vec!["chikoski:hello".to_string()]);
         assert!(version.digest.starts_with("sha256:"));
 
@@ -859,7 +1016,7 @@ remote = "127.0.0.1:4443"
             result.stderr
         );
         assert!(
-            root.join("wit/deps/yieldspace_plugin_example/example.wit")
+            root.join("wit/deps/yieldspace-plugin/example/example.wit")
                 .exists()
         );
         assert!(root.join("imago.lock").exists());
@@ -888,7 +1045,7 @@ remote = "127.0.0.1:4443"
 "#,
         );
         write(
-            &root.join(".imago/warg/chikoski_hello/0.1.0/wit.wit"),
+            &root.join(".imago/warg/chikoski-hello/0.1.0/wit.wit"),
             br#"
 package chikoski:hello@0.1.0;
 

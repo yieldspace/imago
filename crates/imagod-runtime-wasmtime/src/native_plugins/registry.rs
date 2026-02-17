@@ -19,7 +19,7 @@ pub trait NativePlugin: Send + Sync + 'static {
     fn add_to_linker(&self, linker: &mut NativePluginLinker) -> NativePluginResult<()>;
 
     fn supports_symbol(&self, symbol: &str) -> bool {
-        self.symbols().iter().any(|candidate| *candidate == symbol)
+        self.symbols().contains(&symbol)
     }
 }
 

@@ -65,16 +65,9 @@ enum ParsedComponentSource {
     },
 }
 
-pub(crate) fn sanitize_dependency_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+pub(crate) fn sanitize_wit_deps_name(name: &str) -> String {
+    // Keep dependency path naming compatible with wkg.
+    name.replace([':', '@'], "-")
 }
 
 pub(crate) fn path_to_manifest_string(path: &Path) -> String {
@@ -751,7 +744,7 @@ fn render_wit_package(
 }
 
 fn sanitize_wit_package_name(name: &wit_parser::PackageName) -> String {
-    sanitize_dependency_name(&format!("{}:{}", name.namespace, name.name))
+    sanitize_wit_deps_name(&format!("{}:{}", name.namespace, name.name))
 }
 
 fn write_or_verify_identical_wit_file(path: &Path, contents: &str) -> anyhow::Result<()> {
@@ -828,7 +821,7 @@ fn find_local_warg_wit_candidate(
     package: &str,
     version: &str,
 ) -> Option<PathBuf> {
-    let package_dir = sanitize_dependency_name(package);
+    let package_dir = sanitize_wit_deps_name(package);
     let base = project_root
         .join(".imago")
         .join("warg")
@@ -840,7 +833,7 @@ fn find_local_warg_wit_candidate(
         base.join("wit.wit"),
         project_root.join(".imago").join("warg").join(format!(
             "{}@{}.wit",
-            sanitize_dependency_name(package),
+            sanitize_wit_deps_name(package),
             version
         )),
     ]
@@ -853,7 +846,7 @@ fn find_local_warg_component_candidate(
     package: &str,
     version: &str,
 ) -> Option<PathBuf> {
-    let package_dir = sanitize_dependency_name(package);
+    let package_dir = sanitize_wit_deps_name(package);
     let base = project_root
         .join(".imago")
         .join("warg")
@@ -864,7 +857,7 @@ fn find_local_warg_component_candidate(
         base.join("component").join("component.wasm"),
         project_root.join(".imago").join("warg").join(format!(
             "{}@{}.wasm",
-            sanitize_dependency_name(package),
+            sanitize_wit_deps_name(package),
             version
         )),
     ]

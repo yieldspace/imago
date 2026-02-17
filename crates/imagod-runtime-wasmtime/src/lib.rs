@@ -252,6 +252,7 @@ impl WasmRuntime {
     /// Instantiates and runs a WASI CLI component asynchronously.
     ///
     /// Returns when execution completes or when shutdown is requested.
+    #[allow(clippy::too_many_arguments)]
     async fn run_cli_component_async(
         &self,
         component_path: &Path,
@@ -322,6 +323,7 @@ impl WasmRuntime {
     }
 
     /// Instantiates a WASI HTTP incoming-handler and waits for shutdown.
+    #[allow(clippy::too_many_arguments)]
     async fn run_http_component_async(
         &self,
         component_path: &Path,
@@ -536,7 +538,7 @@ impl WasmRuntime {
                         })?;
                     {
                         let mut guard = self_instance.lock().await;
-                        *guard = Some(instance.clone());
+                        *guard = Some(instance);
                     }
                     available.insert(
                         dep.name.clone(),
@@ -552,6 +554,7 @@ impl WasmRuntime {
         Ok(available)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn register_plugin_import_shims(
         &self,
         linker: &mut Linker<WasiState>,
@@ -759,7 +762,6 @@ impl WasmRuntime {
                                     .func_new_async(
                                         func_name,
                                         move |mut store, _ty, params, results| {
-                                            let callee = callee.clone();
                                             Box::new(async move {
                                                 callee
                                                     .call_async(&mut store, params, results)
