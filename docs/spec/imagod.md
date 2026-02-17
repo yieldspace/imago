@@ -101,6 +101,20 @@ epoch_tick_interval_ms = 50
 - Wasmtime runtime は dependency import に対して `func_new_async` bridge を構成し、解決順は `self(component export)` -> `明示 dependency(package名一致)` -> `error`。
 - capability は明示 dependency への中継時のみ `deps` で評価し、self 解決は認可不要とする。
 - transitive import 解決では `requires` の記述を必須条件にしない。
+
+## 実装反映ノート（Native Plugin imago:admin / 2026-02-17）
+
+- `imagod` runner は trait/dyn ベースの native plugin registry を持ち、起動時に明示登録された plugin を利用する。
+- native plugin descriptor（package/import/symbol/add_to_linker）は WIT から macro で生成する。
+- `imago:admin` 実装は workspace 直下 `plugins/imago-admin` crate に分離した。
+- `imago:admin/runtime@0.1.0` import は Wasmtime `component::bindgen!` 生成の `add_to_linker` で解決する。
+- native plugin API は read-only 4 関数のみ提供する。
+  - `service-name() -> string`
+  - `release-hash() -> string`
+  - `runner-id() -> string`
+  - `app-type() -> string`（`cli` / `http` / `socket`）
+- `manifest.dependencies(kind=native)` で `name="imago:admin"` を宣言した場合、既存 capability ルール（`capabilities.deps`）をそのまま適用する。
+- `kind=native` dependency が registry 未登録の場合は、component import 解決前に起動時エラーで停止する。
 ## 実装反映ノート（Storage Root Default Matrix / 2026-02-14）
 
 - `imagod.toml` の `storage_root` 未指定時既定値を固定 `/etc/imago` から OS 別既定値へ変更した（Linux=`/var/lib/imago`, macOS=`/usr/local/var/imago`, Windows=`C:\ProgramData\imago`, その他=`/var/lib/imago`）。

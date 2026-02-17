@@ -5,9 +5,12 @@
 
 use std::{path::PathBuf, sync::Arc};
 
+use imago_plugin_imago_admin::ImagoAdminPlugin;
 use imagod_config::{ImagodConfig, resolve_config_path};
 use imagod_control::{ArtifactStore, OperationManager, Orchestrator, ServiceSupervisor};
-use imagod_runtime::run_runner_from_stdin;
+use imagod_runtime::{
+    NativePluginRegistry, NativePluginRegistryBuilder, run_runner_from_stdin_with_registry,
+};
 use imagod_server::{ProtocolHandler, build_server};
 use web_transport_quinn::http::StatusCode;
 
@@ -26,9 +29,19 @@ async fn dispatch() -> Result<(), anyhow::Error> {
     install_rustls_provider();
     let cli = parse_cli_args()?;
     match cli.mode {
-        RunMode::Runner => run_runner_from_stdin().await.map_err(anyhow::Error::new),
+        RunMode::Runner => run_runner_from_stdin_with_registry(builtin_native_plugin_registry()?)
+            .await
+            .map_err(anyhow::Error::new),
         RunMode::Manager => run_manager(cli.config_path).await,
     }
+}
+
+fn builtin_native_plugin_registry() -> Result<NativePluginRegistry, anyhow::Error> {
+    let mut builder = NativePluginRegistryBuilder::new();
+    builder
+        .register_plugin(Arc::new(ImagoAdminPlugin))
+        .map_err(anyhow::Error::new)?;
+    Ok(builder.build())
 }
 
 async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyhow::Error> {

@@ -1,0 +1,5 @@
+package example:local-imagod-plugin-native-admin;
+
+world plugin-imports {
+    import imago:admin/runtime@0.1.0;
+}

@@ -2220,6 +2220,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "imago-plugin-imago-admin"
+version = "0.1.0"
+dependencies = [
+ "imago-plugin-macros",
+ "imagod-runtime-wasmtime",
+ "wasmtime",
+]
+
+[[package]]
+name = "imago-plugin-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+ "wit-parser 0.244.0",
+]
+
+[[package]]
 name = "imago-protocol"
 version = "0.1.0"
 dependencies = [
@@ -2234,6 +2253,7 @@ name = "imagod"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "imago-plugin-imago-admin",
  "imagod-config",
  "imagod-control",
  "imagod-runtime",
@@ -2660,6 +2680,14 @@ dependencies = [
 
 [[package]]
 name = "local-imagod-plugin-hello-app"
+version = "0.1.0"
+dependencies = [
+ "wasi 0.14.7+wasi-0.2.4",
+ "wit-bindgen",
+]
+
+[[package]]
+name = "local-imagod-plugin-native-admin-app"
 version = "0.1.0"
 dependencies = [
  "wasi 0.14.7+wasi-0.2.4",

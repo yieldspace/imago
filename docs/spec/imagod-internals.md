@@ -334,6 +334,15 @@ backend 選択:
   - `socket`: `cli` 分岐と同じ `wasi:cli/run` を実行しつつ、`socket` 設定に基づいて `WasiCtxBuilder` の socket policy を構成する
 - `cli` 分岐では `wasmtime_wasi::p2::add_to_linker_async` を利用する
 - `http` 分岐では `wasmtime_wasi_http::add_only_http_to_linker_async` を併用する
+- native plugin は `NativePlugin` trait と `NativePluginRegistryBuilder` で明示登録する。
+  - descriptor（package/import/symbol/add_to_linker）は `imago-plugin-macros` が WIT から生成する。
+  - plugin 実装本体は workspace 直下 `plugins/*` crate で管理する（初期実装は `plugins/imago-admin`）。
+  - `kind=native` dependency が registry 未登録なら起動時に明示エラーで停止する。
+- native plugin `imago:admin@0.1.0` は `wasmtime::component::bindgen!` 生成の `add_to_linker` で登録する。
+  - import 名は `imago:admin/runtime@0.1.0`。
+  - 提供関数は `service-name` / `release-hash` / `runner-id` / `app-type` の 4 つ。
+  - 値は `RunnerBootstrap`（`service_name` / `release_hash` / `runner_id` / `app_type`）から供給する。
+  - 関数呼び出し前の capability 判定は既存 `capabilities.deps` を利用する。
 - `Store::set_epoch_deadline(1)`
 - `Store::epoch_deadline_async_yield_and_update(1)`
 

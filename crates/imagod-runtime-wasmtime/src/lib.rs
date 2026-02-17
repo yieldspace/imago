@@ -1,5 +1,7 @@
 //! Wasmtime runtime integration used by runner processes.
 
+pub mod native_plugins;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::{IpAddr, SocketAddr},
@@ -35,18 +37,75 @@ use wasmtime_wasi_http::{
 
 use imagod_common::ImagodError;
 use imagod_runtime_internal::{
-    ComponentRuntime, NativePluginRegistry, RuntimeHttpFuture, RuntimeHttpRequest,
-    RuntimeHttpResponse, RuntimeRunFuture, RuntimeRunRequest,
+    ComponentRuntime, RuntimeHttpFuture, RuntimeHttpRequest, RuntimeHttpResponse, RuntimeRunFuture,
+    RuntimeRunRequest,
 };
 
 const STAGE_RUNTIME: &str = "runtime.start";
 const HTTP_REQUEST_QUEUE_CAPACITY: usize = 32;
 
+pub use native_plugins::{NativePlugin, NativePluginRegistry, NativePluginRegistryBuilder};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativePluginContext {
+    service_name: String,
+    release_hash: String,
+    runner_id: String,
+    app_type: String,
+}
+
+impl NativePluginContext {
+    pub fn new(
+        service_name: String,
+        release_hash: String,
+        runner_id: String,
+        app_type: RunnerAppType,
+    ) -> Self {
+        Self {
+            service_name,
+            release_hash,
+            runner_id,
+            app_type: app_type_text(app_type).to_string(),
+        }
+    }
+
+    pub fn service_name(&self) -> &str {
+        &self.service_name
+    }
+
+    pub fn release_hash(&self) -> &str {
+        &self.release_hash
+    }
+
+    pub fn runner_id(&self) -> &str {
+        &self.runner_id
+    }
+
+    pub fn app_type(&self) -> &str {
+        &self.app_type
+    }
+}
+
+pub fn app_type_text(app_type: RunnerAppType) -> &'static str {
+    match app_type {
+        RunnerAppType::Cli => "cli",
+        RunnerAppType::Http => "http",
+        RunnerAppType::Socket => "socket",
+    }
+}
+
 /// Internal WASI host state stored in the Wasmtime store.
-struct WasiState {
+pub struct WasiState {
     table: ResourceTable,
     wasi: WasiCtx,
     http: WasiHttpCtx,
+    native_plugin_context: NativePluginContext,
+}
+
+impl WasiState {
+    pub fn native_plugin_context(&self) -> &NativePluginContext {
+        &self.native_plugin_context
+    }
 }
 
 impl WasiView for WasiState {
@@ -133,6 +192,7 @@ impl WasmRuntime {
         args: &[String],
         envs: &BTreeMap<String, String>,
         socket: Option<&RunnerSocketConfig>,
+        native_plugin_context: NativePluginContext,
     ) -> Result<Store<WasiState>, ImagodError> {
         let mut builder = WasiCtxBuilder::new();
         builder.inherit_stdio();
@@ -154,6 +214,7 @@ impl WasmRuntime {
             table: ResourceTable::new(),
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
+            native_plugin_context,
         };
         let mut store = Store::new(&self.engine, state);
         store.set_epoch_deadline(1);
@@ -197,6 +258,7 @@ impl WasmRuntime {
         args: &[String],
         envs: &BTreeMap<String, String>,
         socket: Option<&RunnerSocketConfig>,
+        native_plugin_context: NativePluginContext,
         plugin_dependencies: &[PluginDependency],
         capabilities: &CapabilityPolicy,
         mut shutdown: watch::Receiver<bool>,
@@ -213,7 +275,7 @@ impl WasmRuntime {
         add_to_linker_async(&mut linker)
             .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
 
-        let mut store = self.build_store(args, envs, socket)?;
+        let mut store = self.build_store(args, envs, socket, native_plugin_context)?;
         let available_plugins = self
             .instantiate_plugin_dependencies(&mut store, plugin_dependencies)
             .await?;
@@ -265,6 +327,7 @@ impl WasmRuntime {
         component_path: &Path,
         args: &[String],
         envs: &BTreeMap<String, String>,
+        native_plugin_context: NativePluginContext,
         plugin_dependencies: &[PluginDependency],
         capabilities: &CapabilityPolicy,
         mut shutdown: watch::Receiver<bool>,
@@ -284,7 +347,7 @@ impl WasmRuntime {
         add_only_http_to_linker_async(&mut linker)
             .map_err(|e| map_runtime_error(format!("failed to add WASI HTTP linker: {e}")))?;
 
-        let mut store = self.build_store(args, envs, None)?;
+        let mut store = self.build_store(args, envs, None, native_plugin_context)?;
         let available_plugins = self
             .instantiate_plugin_dependencies(&mut store, plugin_dependencies)
             .await?;
@@ -415,6 +478,12 @@ impl WasmRuntime {
             let dep = &dependencies[dep_index];
             match dep.kind {
                 PluginKind::Native => {
+                    if !self.native_plugins.has_plugin(&dep.name) {
+                        return Err(map_runtime_error(format!(
+                            "native plugin '{}' is declared in manifest but not registered in runtime",
+                            dep.name
+                        )));
+                    }
                     available.insert(
                         dep.name.clone(),
                         AvailablePlugin {
@@ -498,6 +567,7 @@ impl WasmRuntime {
         let self_export_interfaces =
             collect_component_instance_export_names(component, &self.engine);
         let allow_self_provider = self_instance.is_some();
+        let mut linked_native_imports = BTreeSet::<String>::new();
 
         for (import_name, import_item) in component_ty.imports(&self.engine) {
             let types::ComponentItem::ComponentInstance(instance_ty) = import_item else {
@@ -521,6 +591,60 @@ impl WasmRuntime {
                 available_plugins,
                 allow_self_provider,
             )?;
+
+            let native_dependency = match &provider {
+                ImportProvider::Dependency(target_dependency) => {
+                    available_plugins.get(target_dependency).and_then(|plugin| {
+                        (plugin.kind == PluginKind::Native).then_some(target_dependency.as_str())
+                    })
+                }
+                _ => None,
+            };
+            if let Some(target_dependency) = native_dependency {
+                let native_plugin =
+                    self.native_plugins
+                        .plugin(target_dependency)
+                        .ok_or_else(|| {
+                            map_runtime_error(format!(
+                                "native plugin '{}' is not registered in runtime registry",
+                                target_dependency
+                            ))
+                        })?;
+                if !native_plugin.supports_import(import_name) {
+                    return Err(map_runtime_error(format!(
+                        "native plugin '{}' does not support import '{}'",
+                        target_dependency, import_name
+                    )));
+                }
+                for (func_name, item) in instance_ty.exports(&self.engine) {
+                    let types::ComponentItem::ComponentFunc(_) = item else {
+                        continue;
+                    };
+                    if !is_dependency_function_allowed(
+                        capabilities,
+                        target_dependency,
+                        import_name,
+                        func_name,
+                    ) {
+                        return Err(map_runtime_unauthorized_error(format!(
+                            "capability denied caller '{}' -> dependency '{}' function '{}.{}'",
+                            caller_name, target_dependency, import_name, func_name
+                        )));
+                    }
+                    let native_symbol = format!("{import_name}.{func_name}");
+                    if !native_plugin.supports_symbol(&native_symbol) {
+                        return Err(map_runtime_error(format!(
+                            "native plugin '{}' does not expose symbol '{}'",
+                            target_dependency, native_symbol
+                        )));
+                    }
+                }
+                if linked_native_imports.insert(import_name.to_string()) {
+                    native_plugin.add_to_linker(linker)?;
+                }
+                continue;
+            }
+
             let mut import_instance = linker.instance(import_name).map_err(|e| {
                 map_runtime_error(format!(
                     "failed to define plugin import namespace '{}': {e}",
@@ -611,38 +735,10 @@ impl WasmRuntime {
                         })?;
                         match plugin.kind {
                             PluginKind::Native => {
-                                let native_symbol = format!("{import_name}.{func_name}");
-                                if !self
-                                    .native_plugins
-                                    .has_symbol(target_dependency, &native_symbol)
-                                {
-                                    return Err(map_runtime_error(format!(
-                                        "native plugin '{}' does not expose symbol '{}'",
-                                        target_dependency, native_symbol
-                                    )));
-                                }
-                                let target_dependency = target_dependency.to_string();
-                                let interface_name = import_name.to_string();
-                                let function_name = func_name.to_string();
-                                import_instance
-                                    .func_new_async(func_name, move |_store, _ty, _params, _results| {
-                                        let target_dependency = target_dependency.clone();
-                                        let interface_name = interface_name.clone();
-                                        let function_name = function_name.clone();
-                                        Box::new(async move {
-                                            Err(wasmtime::Error::msg(format!(
-                                                "native plugin call is not implemented yet: {} {}.{}",
-                                                target_dependency, interface_name, function_name
-                                            ))
-                                            .into())
-                                        })
-                                    })
-                                    .map_err(|e| {
-                                        map_runtime_error(format!(
-                                            "failed to define native plugin shim '{}.{}': {e}",
-                                            import_name, func_name
-                                        ))
-                                    })?;
+                                return Err(map_runtime_error(format!(
+                                    "internal error: native plugin dependency '{}' should have been linked before fallback bridge '{}.{}'",
+                                    target_dependency, import_name, func_name
+                                )));
                             }
                             PluginKind::Wasm => {
                                 let callee = resolve_wasm_plugin_export(
@@ -1163,6 +1259,9 @@ impl ComponentRuntime for WasmRuntime {
         Box::pin(async move {
             let RuntimeRunRequest {
                 app_type,
+                runner_id,
+                service_name,
+                release_hash,
                 component_path,
                 args,
                 envs,
@@ -1173,6 +1272,8 @@ impl ComponentRuntime for WasmRuntime {
                 epoch_tick_interval_ms,
                 http_ready_tx,
             } = request;
+            let native_plugin_context =
+                NativePluginContext::new(service_name, release_hash, runner_id, app_type);
 
             match app_type {
                 RunnerAppType::Cli => {
@@ -1186,6 +1287,7 @@ impl ComponentRuntime for WasmRuntime {
                         &args,
                         &envs,
                         None,
+                        native_plugin_context.clone(),
                         &plugin_dependencies,
                         &capabilities,
                         shutdown,
@@ -1203,6 +1305,7 @@ impl ComponentRuntime for WasmRuntime {
                         &component_path,
                         &args,
                         &envs,
+                        native_plugin_context.clone(),
                         &plugin_dependencies,
                         &capabilities,
                         shutdown,
@@ -1222,6 +1325,7 @@ impl ComponentRuntime for WasmRuntime {
                         &args,
                         &envs,
                         Some(socket),
+                        native_plugin_context,
                         &plugin_dependencies,
                         &capabilities,
                         shutdown,
@@ -1490,10 +1594,7 @@ mod tests {
         let policy = CapabilityPolicy {
             privileged: false,
             deps: BTreeMap::new(),
-            wasi: BTreeMap::from([(
-                "wasi:cli/environment".to_string(),
-                vec!["*".to_string()],
-            )]),
+            wasi: BTreeMap::from([("wasi:cli/environment".to_string(), vec!["*".to_string()])]),
         };
         let allowed = is_wasi_function_allowed(&policy, "wasi:cli/environment", "get-environment");
         assert!(allowed, "wildcard rule should allow wasi function");
@@ -1530,6 +1631,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn native_plugin_app_type_text_is_stable() {
+        assert_eq!(app_type_text(RunnerAppType::Cli), "cli");
+        assert_eq!(app_type_text(RunnerAppType::Http), "http");
+        assert_eq!(app_type_text(RunnerAppType::Socket), "socket");
+    }
+
+    #[test]
+    fn native_plugin_context_stores_runner_metadata() {
+        let context = NativePluginContext::new(
+            "svc-test".to_string(),
+            "release-test".to_string(),
+            "runner-test".to_string(),
+            RunnerAppType::Http,
+        );
+        assert_eq!(context.service_name(), "svc-test");
+        assert_eq!(context.release_hash(), "release-test");
+        assert_eq!(context.runner_id(), "runner-test");
+        assert_eq!(context.app_type(), "http");
+    }
+
     #[tokio::test]
     async fn socket_type_requires_socket_config() {
         let runtime = WasmRuntime::new().expect("runtime should initialize");
@@ -1537,6 +1659,9 @@ mod tests {
         let err = runtime
             .run_component(RuntimeRunRequest {
                 app_type: RunnerAppType::Socket,
+                runner_id: "runner-test".to_string(),
+                service_name: "svc-test".to_string(),
+                release_hash: "release-test".to_string(),
                 component_path: PathBuf::from("/tmp/unused.wasm"),
                 args: Vec::new(),
                 envs: BTreeMap::new(),
@@ -1564,6 +1689,9 @@ mod tests {
         let err = runtime
             .run_component(RuntimeRunRequest {
                 app_type: RunnerAppType::Socket,
+                runner_id: "runner-test".to_string(),
+                service_name: "svc-test".to_string(),
+                release_hash: "release-test".to_string(),
                 component_path: PathBuf::from("/tmp/non-existent-socket-component.wasm"),
                 args: Vec::new(),
                 envs: BTreeMap::new(),
@@ -1591,6 +1719,9 @@ mod tests {
         let err = runtime
             .run_component(RuntimeRunRequest {
                 app_type: RunnerAppType::Http,
+                runner_id: "runner-test".to_string(),
+                service_name: "svc-test".to_string(),
+                release_hash: "release-test".to_string(),
                 component_path: PathBuf::from("/tmp/non-existent-http-component.wasm"),
                 args: Vec::new(),
                 envs: BTreeMap::new(),

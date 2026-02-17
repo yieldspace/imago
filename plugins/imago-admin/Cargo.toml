@@ -1,0 +1,9 @@
+[package]
+name = "imago-plugin-imago-admin"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+imago-plugin-macros = { workspace = true }
+imagod-runtime-wasmtime = { workspace = true }
+wasmtime = { workspace = true, features = ["component-model"] }

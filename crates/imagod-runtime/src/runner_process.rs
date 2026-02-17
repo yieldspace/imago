@@ -25,12 +25,12 @@ use tokio::{
     time::{self, Duration},
 };
 
+use crate::NativePluginRegistry;
 #[cfg(feature = "runtime-wasmtime")]
 use crate::WasmRuntime;
 use crate::runtime::{
     ComponentRuntime, RuntimeHttpRequest, RuntimeHttpResponse, RuntimeRunRequest,
 };
-use imagod_runtime_internal::NativePluginRegistry;
 
 const STAGE_RUNNER: &str = "runner.process";
 const STAGE_SHUTDOWN: &str = "runner.shutdown";
@@ -150,6 +150,9 @@ pub async fn run_runner_from_stdin_with_registry(
         runtime_for_run
             .run_component(RuntimeRunRequest {
                 app_type: bootstrap_for_run.app_type,
+                runner_id: bootstrap_for_run.runner_id.clone(),
+                service_name: bootstrap_for_run.service_name.clone(),
+                release_hash: bootstrap_for_run.release_hash.clone(),
                 component_path: bootstrap_for_run.component_path.clone(),
                 args: bootstrap_for_run.args.clone(),
                 envs: bootstrap_for_run.envs.clone(),
