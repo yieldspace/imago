@@ -1102,13 +1102,7 @@ fn parse_project_dependencies(value: Option<&TomlValue>) -> anyhow::Result<Vec<P
                     ));
                 }
             }
-            ManifestDependencyKind::Wasm => {
-                if component.is_none() {
-                    return Err(anyhow!(
-                        "dependencies[{index}].component is required when kind=\"wasm\""
-                    ));
-                }
-            }
+            ManifestDependencyKind::Wasm => {}
         }
 
         dependencies.push(ProjectDependency {
@@ -1712,12 +1706,28 @@ fn resolve_manifest_dependencies_from_lock(
         let component = match dep.kind {
             ManifestDependencyKind::Native => None,
             ManifestDependencyKind::Wasm => {
-                let dep_component = dep.component.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "dependencies entry '{}' is missing component settings; run `imago update`",
-                        dep.name
-                    )
-                })?;
+                let (expected_component_source, expected_component_registry, configured_sha256) =
+                    match dep.component.as_ref() {
+                        Some(dep_component) => (
+                            dep_component.source.clone(),
+                            dep_component.registry.clone(),
+                            dep_component.sha256.clone(),
+                        ),
+                        None => {
+                            let (source, registry) =
+                                plugin_sources::expected_component_identity_from_wit_source(
+                                    &dep.wit.source,
+                                    dep.wit.registry.as_deref(),
+                                )
+                                .with_context(|| {
+                                    format!(
+                                        "dependency '{}' omits component settings but wit source '{}' cannot be mapped to a component source",
+                                        dep.name, dep.wit.source
+                                    )
+                                })?;
+                            (source, registry, None)
+                        }
+                    };
 
                 let lock_component_source = entry.component_source.as_ref().ok_or_else(|| {
                     anyhow!(
@@ -1725,20 +1735,20 @@ fn resolve_manifest_dependencies_from_lock(
                         dep.name
                     )
                 })?;
-                if lock_component_source != &dep_component.source {
+                if lock_component_source != &expected_component_source {
                     return Err(anyhow!(
                         "dependency '{}' component source mismatch (lock='{}', config='{}'); run `imago update`",
                         dep.name,
                         lock_component_source,
-                        dep_component.source
+                        expected_component_source
                     ));
                 }
-                if entry.component_registry != dep_component.registry {
+                if entry.component_registry != expected_component_registry {
                     return Err(anyhow!(
                         "dependency '{}' component registry mismatch (lock='{}', config='{}'); run `imago update`",
                         dep.name,
                         entry.component_registry.as_deref().unwrap_or(""),
-                        dep_component.registry.as_deref().unwrap_or("")
+                        expected_component_registry.as_deref().unwrap_or("")
                     ));
                 }
 
@@ -1752,7 +1762,7 @@ fn resolve_manifest_dependencies_from_lock(
                     lock_component_sha,
                     &format!("imago.lock.dependencies[{}].component_sha256", dep.name),
                 )?;
-                if let Some(config_sha) = dep_component.sha256.as_ref()
+                if let Some(config_sha) = configured_sha256.as_ref()
                     && !lock_component_sha.eq_ignore_ascii_case(config_sha)
                 {
                     return Err(anyhow!(
@@ -3032,6 +3042,126 @@ remote = "127.0.0.1:4443"
             component.path,
             format!("plugins/components/{}.wasm", component.sha256)
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_emits_wasm_component_path_when_component_is_omitted_in_config() {
+        let root = new_temp_dir("dependencies-wasm-component-derived-from-wit");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "wasm"
+wit = "warg://chikoski:hello@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("wit/deps/chikoski_hello/package.wit"),
+            b"package chikoski:hello@0.1.0;\n",
+        );
+
+        let wit_digest =
+            compute_path_digest_hex(&root.join("wit/deps/chikoski_hello")).expect("wit digest");
+        let plugin_sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        write_imago_lock(
+            &root,
+            &ImagoLock {
+                version: 2,
+                dependencies: vec![ImagoLockDependency {
+                    name: "chikoski:hello".to_string(),
+                    version: "0.1.0".to_string(),
+                    wit_source: "warg://chikoski:hello@0.1.0".to_string(),
+                    wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
+                    wit_digest,
+                    wit_path: "wit/deps/chikoski_hello".to_string(),
+                    component_source: Some("warg://chikoski:hello@0.1.0".to_string()),
+                    component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
+                    component_sha256: Some(plugin_sha.to_string()),
+                    resolved_at: "0".to_string(),
+                }],
+            },
+        );
+
+        let output = build_project(None, "default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        let component = manifest.dependencies[0]
+            .component
+            .as_ref()
+            .expect("wasm dependency must include component");
+        assert_eq!(
+            component.path,
+            format!("plugins/components/{}.wasm", component.sha256)
+        );
+        assert_eq!(component.sha256, plugin_sha);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_component_source_mismatch_when_component_is_omitted_in_config() {
+        let root = new_temp_dir("dependencies-wasm-component-mismatch-derived");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "wasm"
+wit = "warg://chikoski:hello@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("wit/deps/chikoski_hello/package.wit"),
+            b"package chikoski:hello@0.1.0;\n",
+        );
+
+        let wit_digest =
+            compute_path_digest_hex(&root.join("wit/deps/chikoski_hello")).expect("wit digest");
+        write_imago_lock(
+            &root,
+            &ImagoLock {
+                version: 2,
+                dependencies: vec![ImagoLockDependency {
+                    name: "chikoski:hello".to_string(),
+                    version: "0.1.0".to_string(),
+                    wit_source: "warg://chikoski:hello@0.1.0".to_string(),
+                    wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
+                    wit_digest,
+                    wit_path: "wit/deps/chikoski_hello".to_string(),
+                    component_source: Some("warg://chikoski:other@0.1.0".to_string()),
+                    component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
+                    component_sha256: Some(
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            .to_string(),
+                    ),
+                    resolved_at: "0".to_string(),
+                }],
+            },
+        );
+
+        let err = build_project(None, "default", &root)
+            .expect_err("build should fail when derived component source mismatches lock");
+        assert!(err.to_string().contains("component source mismatch"));
 
         let _ = fs::remove_dir_all(root);
     }

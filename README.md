@@ -116,19 +116,20 @@ kind = "native" # or "wasm"
 # requires = ["yieldspace:imago-core"]
 
 [dependencies.component]
-# kind = "wasm" のとき必須
+# kind = "wasm" かつ wit が component ではない場合に指定
 source = "warg://yieldspace:imago-experimental-component@0.0.1" # or file://...
 # registry = "wa.dev" # 省略時 wa.dev
 # sha256 = "..." # 省略時は `imago update` が解決して imago.lock に固定
 ```
 
 `imago update` は WIT を `wit/deps/` へ展開し、source/registry/hash を `imago.lock` へ固定します。  
+`kind="wasm"` で `dependencies.component` を省略した場合でも、`wit` source が component なら WIT 抽出と `component_*` 固定を自動で行います。  
 `warg://` で取得した WIT package に transitive import がある場合、依存パッケージも `wit/deps/` に同時展開されます。  
 plain `.wit` 形式で foreign import を含む WIT は解決できないため、`imago update` はエラーになります。  
 `warg://` の direct dependency で WIT 側に version が書かれている場合は、`warg://...@version` と一致している必要があります。  
 `imago deploy` は lock 情報を使って wasm component を遅延取得し、`.imago/components/<sha256>.wasm` を再利用します。
 
-`warg://chikoski:hello-world@0.2.0` を使った wasm plugin 実行例は
+`warg://sizumita:ferris@0.1.0` を使った wasm plugin 実行例は
 `examples/local-imagod-plugin-hello` を参照してください。
 
 ## License

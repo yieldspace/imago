@@ -98,7 +98,9 @@ epoch_tick_interval_ms = 50
 - 同一 hash の plugin component は再配置せず再利用する。
 - manager 起動時に active release の manifest を走査し、未参照 plugin component を GC する。
 - `RunnerBootstrap` に plugin 依存定義と capability ルールを含め、runner runtime へ伝播する。
-- Wasmtime runtime は dependency import に対して `func_new_async` bridge を構成し、`deps` capability で認可された呼び出しのみ許可する。
+- Wasmtime runtime は dependency import に対して `func_new_async` bridge を構成し、解決順は `self(component export)` -> `明示 dependency(package名一致)` -> `error`。
+- capability は明示 dependency への中継時のみ `deps` で評価し、self 解決は認可不要とする。
+- transitive import 解決では `requires` の記述を必須条件にしない。
 ## 実装反映ノート（Storage Root Default Matrix / 2026-02-14）
 
 - `imagod.toml` の `storage_root` 未指定時既定値を固定 `/etc/imago` から OS 別既定値へ変更した（Linux=`/var/lib/imago`, macOS=`/usr/local/var/imago`, Windows=`C:\ProgramData\imago`, その他=`/var/lib/imago`）。

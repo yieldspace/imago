@@ -19,8 +19,23 @@ use wit_parser::UnresolvedPackageGroup;
 pub(crate) const DEFAULT_WARG_REGISTRY: &str = "wa.dev";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MaterializedWitComponent {
+    pub source: String,
+    pub registry: Option<String>,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct MaterializedWitSource {
+    pub derived_component: Option<MaterializedWitComponent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ParsedWitSource {
-    File(PathBuf),
+    File {
+        path: PathBuf,
+        source: String,
+    },
     Warg {
         package: String,
         version: String,
@@ -109,6 +124,28 @@ pub(crate) fn validate_component_source(source: &str, field_name: &str) -> anyho
     ))
 }
 
+pub(crate) fn expected_component_identity_from_wit_source(
+    source: &str,
+    registry: Option<&str>,
+) -> anyhow::Result<(String, Option<String>)> {
+    if source.starts_with("file://") {
+        return Ok((source.to_string(), None));
+    }
+    if let Some(spec) = source.strip_prefix("warg://") {
+        let (package, version) = parse_warg_spec(spec)?;
+        let registry = normalize_registry_name(registry.unwrap_or(DEFAULT_WARG_REGISTRY))?;
+        return Ok((canonical_warg_source(package, version), Some(registry)));
+    }
+    if source.starts_with("https://wa.dev/") {
+        return Err(anyhow!(
+            "wit source no longer accepts https://wa.dev shorthand; use warg://<package>@<version>"
+        ));
+    }
+    Err(anyhow!(
+        "wit source must start with one of: file://, warg://"
+    ))
+}
+
 pub(crate) fn validate_sha256_hex(value: &str, field_name: &str) -> anyhow::Result<()> {
     if value.len() != 64 || !value.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(anyhow!("{field_name} must be a 64-character hex string"));
@@ -122,11 +159,59 @@ pub(crate) async fn materialize_wit_source(
     registry: Option<&str>,
     _dependency_version: &str,
     destination_dir: &Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<MaterializedWitSource> {
     let parsed = parse_wit_source(project_root, source, registry)?;
     match parsed {
-        ParsedWitSource::File(path) => {
-            copy_wit_tree(&path, destination_dir)?;
+        ParsedWitSource::File { path, source } => {
+            let metadata = fs::metadata(&path)
+                .with_context(|| format!("failed to inspect wit source: {}", path.display()))?;
+            if metadata.is_dir() {
+                copy_wit_tree(&path, destination_dir)?;
+                return Ok(MaterializedWitSource::default());
+            }
+
+            let bytes = fs::read(&path)
+                .with_context(|| format!("failed to read wit source file: {}", path.display()))?;
+            let mut reader = std::io::Cursor::new(bytes.as_slice());
+            match wit_component::decode_reader(&mut reader) {
+                Ok(DecodedWasm::WitPackage(resolve, top_package)) => {
+                    materialize_wit_package_resolve(
+                        destination_dir,
+                        &resolve,
+                        top_package,
+                        None,
+                        None,
+                        &format!("file source '{}'", path.display()),
+                    )?;
+                    Ok(MaterializedWitSource::default())
+                }
+                Ok(DecodedWasm::Component(resolve, world)) => {
+                    let top_package = component_world_package_id(
+                        &resolve,
+                        world,
+                        &format!("file source '{}'", path.display()),
+                    )?;
+                    materialize_wit_package_resolve(
+                        destination_dir,
+                        &resolve,
+                        top_package,
+                        None,
+                        None,
+                        &format!("file source '{}'", path.display()),
+                    )?;
+                    Ok(MaterializedWitSource {
+                        derived_component: Some(MaterializedWitComponent {
+                            source,
+                            registry: None,
+                            sha256: hex::encode(Sha256::digest(&bytes)),
+                        }),
+                    })
+                }
+                Err(_) => {
+                    copy_wit_tree(&path, destination_dir)?;
+                    Ok(MaterializedWitSource::default())
+                }
+            }
         }
         ParsedWitSource::Warg {
             package,
@@ -140,10 +225,9 @@ pub(crate) async fn materialize_wit_source(
                 &registry,
             )
             .await?;
-            materialize_warg_wit_bytes(destination_dir, &bytes, &package, &version, &registry)?;
+            materialize_warg_wit_bytes(destination_dir, &bytes, &package, &version, &registry)
         }
     }
-    Ok(())
 }
 
 pub(crate) async fn resolve_component_sha256(
@@ -287,7 +371,10 @@ fn parse_wit_source(
 ) -> anyhow::Result<ParsedWitSource> {
     if let Some(raw_path) = source.strip_prefix("file://") {
         let path = resolve_file_source_path(project_root, raw_path)?;
-        return Ok(ParsedWitSource::File(path));
+        return Ok(ParsedWitSource::File {
+            path,
+            source: source.to_string(),
+        });
     }
 
     if let Some(spec) = source.strip_prefix("warg://") {
@@ -375,6 +462,10 @@ fn parse_warg_spec(spec: &str) -> anyhow::Result<(&str, &str)> {
     Ok((package, version))
 }
 
+fn canonical_warg_source(package: &str, version: &str) -> String {
+    format!("warg://{package}@{version}")
+}
+
 fn normalize_registry_name(raw: &str) -> anyhow::Result<String> {
     let trimmed = raw.trim().trim_end_matches('/');
     let no_scheme = trimmed
@@ -393,20 +484,43 @@ fn materialize_warg_wit_bytes(
     package: &str,
     version: &str,
     registry: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<MaterializedWitSource> {
     let source_desc = format!("warg://{package}@{version} (registry={registry})");
     let mut reader = std::io::Cursor::new(bytes);
     match wit_component::decode_reader(&mut reader) {
-        Ok(DecodedWasm::WitPackage(resolve, top_package)) => materialize_wit_package_resolve(
-            destination_dir,
-            &resolve,
-            top_package,
-            package,
-            version,
-            &source_desc,
-        ),
-        Ok(_) | Err(_) => {
-            materialize_plain_wit_text(destination_dir, bytes, package, version, registry)
+        Ok(DecodedWasm::WitPackage(resolve, top_package)) => {
+            materialize_wit_package_resolve(
+                destination_dir,
+                &resolve,
+                top_package,
+                Some(package),
+                Some(version),
+                &source_desc,
+            )?;
+            Ok(MaterializedWitSource::default())
+        }
+        Ok(DecodedWasm::Component(resolve, world)) => {
+            let top_package =
+                select_top_package_for_component(&resolve, world, package, &source_desc)?;
+            materialize_wit_package_resolve(
+                destination_dir,
+                &resolve,
+                top_package,
+                Some(package),
+                Some(version),
+                &source_desc,
+            )?;
+            Ok(MaterializedWitSource {
+                derived_component: Some(MaterializedWitComponent {
+                    source: canonical_warg_source(package, version),
+                    registry: Some(registry.to_string()),
+                    sha256: hex::encode(Sha256::digest(bytes)),
+                }),
+            })
+        }
+        Err(_) => {
+            materialize_plain_wit_text(destination_dir, bytes, package, version, registry)?;
+            Ok(MaterializedWitSource::default())
         }
     }
 }
@@ -455,8 +569,8 @@ fn materialize_wit_package_resolve(
     destination_dir: &Path,
     resolve: &wit_parser::Resolve,
     top_package: wit_parser::PackageId,
-    expected_package: &str,
-    expected_version: &str,
+    expected_package: Option<&str>,
+    expected_version: Option<&str>,
     source_desc: &str,
 ) -> anyhow::Result<()> {
     let deps_root = destination_dir.parent().ok_or_else(|| {
@@ -521,13 +635,15 @@ fn materialize_wit_package_resolve(
 fn validate_top_package_version(
     resolve: &wit_parser::Resolve,
     top_package: wit_parser::PackageId,
-    expected_package: &str,
-    expected_version: &str,
+    expected_package: Option<&str>,
+    expected_version: Option<&str>,
     source_desc: &str,
 ) -> anyhow::Result<()> {
     let top = &resolve.packages[top_package].name;
     let actual_package = format!("{}:{}", top.namespace, top.name);
-    if actual_package != expected_package {
+    if let Some(expected_package) = expected_package
+        && actual_package != expected_package
+    {
         return Err(anyhow!(
             "top-level WIT package mismatch for {source_desc}: expected package '{}', actual '{}'",
             expected_package,
@@ -535,7 +651,8 @@ fn validate_top_package_version(
         ));
     }
 
-    if let Some(actual_version) = top.version.as_ref() {
+    if let (Some(expected_version), Some(actual_version)) = (expected_version, top.version.as_ref())
+    {
         let actual_version = actual_version.to_string();
         if actual_version != expected_version {
             return Err(anyhow!(
@@ -548,6 +665,34 @@ fn validate_top_package_version(
         }
     }
     Ok(())
+}
+
+fn component_world_package_id(
+    resolve: &wit_parser::Resolve,
+    world: wit_parser::WorldId,
+    source_desc: &str,
+) -> anyhow::Result<wit_parser::PackageId> {
+    resolve.worlds[world].package.ok_or_else(|| {
+        anyhow!("failed to resolve package metadata for component world from {source_desc}")
+    })
+}
+
+fn select_top_package_for_component(
+    resolve: &wit_parser::Resolve,
+    world: wit_parser::WorldId,
+    expected_package: &str,
+    source_desc: &str,
+) -> anyhow::Result<wit_parser::PackageId> {
+    let world_package = component_world_package_id(resolve, world, source_desc)?;
+    let Some((expected_namespace, expected_name)) = expected_package.split_once(':') else {
+        return Ok(world_package);
+    };
+    for (pkg_id, pkg) in resolve.packages.iter() {
+        if pkg.name.namespace == expected_namespace && pkg.name.name == expected_name {
+            return Ok(pkg_id);
+        }
+    }
+    Ok(world_package)
 }
 
 fn render_wit_package(

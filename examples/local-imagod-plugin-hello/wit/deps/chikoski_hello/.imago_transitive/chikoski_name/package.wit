@@ -1,6 +1,0 @@
-package chikoski:name;
-
-interface name-provider {
-  name: func() -> string;
-}
-

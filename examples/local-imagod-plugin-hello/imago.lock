@@ -1,13 +1,13 @@
 version = 2
 
 [[dependencies]]
-name = "chikoski:hello"
+name = "sizumita:ferris"
 version = "0.1.0"
-wit_source = "warg://chikoski:hello@0.1.0"
+wit_source = "warg://sizumita:ferris@0.1.0"
 wit_registry = "wa.dev"
-wit_digest = "759224a32555fbe1af92d3c09ff1528db081399cd6041c20ea3f0607a70b4812"
-wit_path = "wit/deps/chikoski_hello"
-component_source = "warg://chikoski:hello-world@0.2.0"
+wit_digest = "41cb5c74220926b1d6979cb053eb16994f119e629511dfbab506da0b1ff13c73"
+wit_path = "wit/deps/sizumita_ferris"
+component_source = "warg://sizumita:ferris@0.1.0"
 component_registry = "wa.dev"
-component_sha256 = "5786aec40737e2db4790fc0fa90c1448172aaf892d6134b67061bd2eaedbb5d6"
-resolved_at = "1771318830"
+component_sha256 = "040ba9bf6aec60ae0667b34f41890df8c0597a323fe76a8e6588666f2b8c8b41"
+resolved_at = "1771340377"

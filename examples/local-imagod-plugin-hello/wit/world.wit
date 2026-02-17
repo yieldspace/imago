@@ -1,5 +1,5 @@
 package example:local-imagod-plugin-hello;
 
 world plugin-imports {
-    import chikoski:hello/greet;
+    import sizumita:ferris/says@0.1.0;
 }

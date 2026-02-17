@@ -64,7 +64,7 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
                 target_path.display()
             )
         })?;
-        plugin_sources::materialize_wit_source(
+        let materialized = plugin_sources::materialize_wit_source(
             project_root,
             &dependency.wit.source,
             dependency.wit.registry.as_deref(),
@@ -78,30 +78,34 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
         let (component_source, component_registry, component_sha256) = match dependency.kind {
             ManifestDependencyKind::Native => (None, None, None),
             ManifestDependencyKind::Wasm => {
-                let component = dependency.component.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "dependencies entry '{}' is missing component configuration",
-                        dependency.name
+                if let Some(component) = dependency.component.as_ref() {
+                    let digest = plugin_sources::resolve_component_sha256(
+                        project_root,
+                        &component.source,
+                        component.registry.as_deref(),
+                        component.sha256.as_deref(),
                     )
-                })?;
-                let digest = plugin_sources::resolve_component_sha256(
-                    project_root,
-                    &component.source,
-                    component.registry.as_deref(),
-                    component.sha256.as_deref(),
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to resolve component sha256 for dependency '{}'",
-                        dependency.name
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to resolve component sha256 for dependency '{}'",
+                            dependency.name
+                        )
+                    })?;
+                    (
+                        Some(component.source.clone()),
+                        component.registry.clone(),
+                        Some(digest),
                     )
-                })?;
-                (
-                    Some(component.source.clone()),
-                    component.registry.clone(),
-                    Some(digest),
-                )
+                } else if let Some(derived) = materialized.derived_component {
+                    (Some(derived.source), derived.registry, Some(derived.sha256))
+                } else {
+                    return Err(anyhow!(
+                        "dependencies entry '{}' is kind=\"wasm\" but no component source was provided and wit source '{}' did not decode as a component",
+                        dependency.name,
+                        dependency.wit.source
+                    ));
+                }
             }
         };
 
@@ -170,6 +174,29 @@ mod tests {
             .push_dir(root)
             .expect("fixture WIT directory should parse");
         wit_component::encode(&resolve, pkg).expect("fixture WIT package should encode")
+    }
+
+    fn encode_wit_component(root: &Path, world: &str) -> Vec<u8> {
+        let mut resolve = Resolve::default();
+        let (pkg, _) = resolve
+            .push_dir(root)
+            .expect("fixture WIT directory should parse");
+        let world_id = resolve
+            .select_world(&[pkg], Some(world))
+            .expect("fixture world should exist");
+        let mut module = b"\0asm\x01\0\0\0".to_vec();
+        wit_component::embed_component_metadata(
+            &mut module,
+            &resolve,
+            world_id,
+            wit_component::StringEncoding::UTF8,
+        )
+        .expect("component metadata embedding should succeed");
+        wit_component::ComponentEncoder::default()
+            .module(&module)
+            .expect("component encoder should accept module")
+            .encode()
+            .expect("component encoding should succeed")
     }
 
     #[test]
@@ -340,6 +367,128 @@ remote = "127.0.0.1:4443"
                 .exists(),
             "update must not materialize component cache"
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_derives_component_info_from_wit_component_source() {
+        let root = new_temp_dir("wit-component-derived");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "root:component"
+version = "0.1.0"
+kind = "wasm"
+wit = "warg://root:component@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+
+        let fixture_wit_root = root.join("fixture-wit-component");
+        write(
+            &fixture_wit_root.join("package.wit"),
+            br#"
+package root:component@0.1.0;
+
+world plugin {
+}
+"#,
+        );
+        let component_bytes = encode_wit_component(&fixture_wit_root, "plugin");
+        let expected_sha = sha256_hex(&component_bytes);
+        write(
+            &root.join(".imago/warg/root_component/0.1.0/wit.wasm"),
+            &component_bytes,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        let entry = lock
+            .dependencies
+            .iter()
+            .find(|entry| entry.name == "root:component")
+            .expect("dependency lock entry should exist");
+        assert_eq!(
+            entry.component_source.as_deref(),
+            Some("warg://root:component@0.1.0")
+        );
+        assert_eq!(
+            entry.component_registry.as_deref(),
+            Some(plugin_sources::DEFAULT_WARG_REGISTRY)
+        );
+        assert_eq!(
+            entry.component_sha256.as_deref(),
+            Some(expected_sha.as_str())
+        );
+        assert!(root.join("wit/deps/root_component/package.wit").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rejects_wasm_dependency_without_component_when_wit_is_not_component() {
+        let root = new_temp_dir("wit-not-component-for-wasm");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "wasm"
+wit = "warg://chikoski:hello@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+
+        let fixture_wit_root = root.join("fixture-wit-package");
+        write(
+            &fixture_wit_root.join("package.wit"),
+            br#"
+package chikoski:hello@0.1.0;
+
+interface greet {
+  hello: func() -> string;
+}
+"#,
+        );
+        let wit_package_bytes = encode_wit_package(&fixture_wit_root);
+        write(
+            &root.join(".imago/warg/chikoski_hello/0.1.0/wit.wasm"),
+            &wit_package_bytes,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(
+            result.exit_code, 2,
+            "update must fail for non-component WIT"
+        );
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("did not decode as a component"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(!root.join("imago.lock").exists());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -657,7 +806,10 @@ remote = "127.0.0.1:4443"
             "update should succeed: {:?}",
             result.stderr
         );
-        assert!(root.join("wit/deps/yieldspace_plugin_example/example.wit").exists());
+        assert!(
+            root.join("wit/deps/yieldspace_plugin_example/example.wit")
+                .exists()
+        );
         assert!(root.join("imago.lock").exists());
 
         let _ = fs::remove_dir_all(root);

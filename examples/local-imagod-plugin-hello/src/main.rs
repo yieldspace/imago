@@ -1,10 +1,10 @@
 wit_bindgen::generate!({
-        path: "wit",
-        world: "plugin-imports",
-        generate_all
-    });
+    path: "wit",
+    generate_all
+});
 
 fn main() {
-    let message = chikoski::hello::greet::hello();
-    println!("message: {}", message);
+    println!("calling sizumita:ferris/says.say ...");
+    sizumita::ferris::says::say("hello from imago");
+    println!("done: called sizumita:ferris/says.say");
 }
