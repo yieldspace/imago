@@ -712,7 +712,7 @@ async fn prepare_plugin_dependencies(
                 }
 
                 let digest = compute_sha256_hex_async(&release_component_path).await?;
-                if digest != component.sha256 {
+                if !digest.eq_ignore_ascii_case(&component.sha256) {
                     return Err(map_bad_manifest(format!(
                         "plugin component sha256 mismatch for '{}': expected {}, actual {}",
                         dep.name, component.sha256, digest
@@ -729,7 +729,7 @@ async fn prepare_plugin_dependencies(
                             )));
                         }
                         let existing = compute_sha256_hex_async(&cache_path).await?;
-                        existing == component.sha256
+                        existing.eq_ignore_ascii_case(&component.sha256)
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
                     Err(err) => {
@@ -1841,6 +1841,49 @@ mod tests {
             cached,
             root.join("plugins/components")
                 .join(format!("{plugin_sha}.wasm"))
+        );
+        assert!(cached.exists(), "cached component file must exist");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_accepts_uppercase_plugin_component_sha256() {
+        let root = temp_dir_path("orchestrator-plugin-cache-uppercase-sha");
+        fs::create_dir_all(root.join("plugins-src")).expect("plugins source dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("main component should exist");
+        let plugin_bytes = b"plugin-wasm-bytes-uppercase";
+        fs::write(root.join("plugins-src/ffmpeg.wasm"), plugin_bytes)
+            .expect("plugin component should exist");
+        let plugin_sha_upper = hex::encode(Sha256::digest(plugin_bytes)).to_uppercase();
+
+        let mut manifest = valid_manifest();
+        manifest.dependencies = vec![PluginDependency {
+            name: "yieldspace:plugin/ffmpeg".to_string(),
+            version: "1.0.0".to_string(),
+            kind: PluginKind::Wasm,
+            wit: "warg://yieldspace:plugin/ffmpeg@1.0.0".to_string(),
+            requires: vec![],
+            component: Some(PluginComponent {
+                path: PathBuf::from("plugins-src/ffmpeg.wasm"),
+                sha256: plugin_sha_upper.clone(),
+            }),
+            capabilities: CapabilityPolicy::default(),
+        }];
+
+        let launch = build_launch_from_release(&root, "release-a", &root, &manifest)
+            .await
+            .expect("launch should be built");
+        let cached = launch
+            .plugin_dependencies
+            .first()
+            .and_then(|dep| dep.component.as_ref())
+            .map(|component| component.path.clone())
+            .expect("cached plugin component path should exist");
+        assert_eq!(
+            cached,
+            root.join("plugins/components")
+                .join(format!("{plugin_sha_upper}.wasm"))
         );
         assert!(cached.exists(), "cached component file must exist");
 

@@ -500,13 +500,19 @@ impl WasmRuntime {
         let allow_self_provider = self_instance.is_some();
 
         for (import_name, import_item) in component_ty.imports(&self.engine) {
-            if import_name.starts_with("wasi:") {
-                continue;
-            }
-
             let types::ComponentItem::ComponentInstance(instance_ty) = import_item else {
                 continue;
             };
+            if import_name.starts_with("wasi:") {
+                enforce_wasi_import_capabilities(
+                    caller_name,
+                    capabilities,
+                    import_name,
+                    &instance_ty,
+                    &self.engine,
+                )?;
+                continue;
+            }
             let provider = resolve_import_provider(
                 caller_name,
                 import_name,
@@ -977,6 +983,57 @@ fn is_dependency_function_allowed(
     })
 }
 
+fn enforce_wasi_import_capabilities(
+    caller_name: &str,
+    policy: &CapabilityPolicy,
+    interface_name: &str,
+    instance_ty: &types::ComponentInstance,
+    engine: &Engine,
+) -> Result<(), ImagodError> {
+    for (function_name, item) in instance_ty.exports(engine) {
+        let types::ComponentItem::ComponentFunc(_) = item else {
+            continue;
+        };
+        ensure_wasi_function_allowed(caller_name, policy, interface_name, function_name)?;
+    }
+    Ok(())
+}
+
+fn ensure_wasi_function_allowed(
+    caller_name: &str,
+    policy: &CapabilityPolicy,
+    interface_name: &str,
+    function_name: &str,
+) -> Result<(), ImagodError> {
+    if is_wasi_function_allowed(policy, interface_name, function_name) {
+        return Ok(());
+    }
+    Err(map_runtime_unauthorized_error(format!(
+        "capability denied caller '{}' -> wasi '{}' function '{}'",
+        caller_name, interface_name, function_name
+    )))
+}
+
+fn is_wasi_function_allowed(
+    policy: &CapabilityPolicy,
+    interface_name: &str,
+    function_name: &str,
+) -> bool {
+    if policy.privileged {
+        return true;
+    }
+    let Some(rules) = policy.wasi.get(interface_name) else {
+        return false;
+    };
+    rules.iter().any(|rule| {
+        rule == "*"
+            || rule == function_name
+            || rule == &format!("{interface_name}.{function_name}")
+            || rule == &format!("{interface_name}/{function_name}")
+            || rule == &format!("{interface_name}#{function_name}")
+    })
+}
+
 fn ensure_component_signatures_match(
     import_ty: &types::ComponentFunc,
     callee_ty: &types::ComponentFunc,
@@ -1404,6 +1461,72 @@ mod tests {
         assert!(
             indices.is_empty(),
             "self export should suppress implicit edge"
+        );
+    }
+
+    #[test]
+    fn wasi_capability_denies_when_policy_is_empty() {
+        let allowed = is_wasi_function_allowed(
+            &CapabilityPolicy::default(),
+            "wasi:cli/environment",
+            "get-environment",
+        );
+        assert!(!allowed, "empty policy should deny wasi function");
+    }
+
+    #[test]
+    fn wasi_capability_allows_when_privileged() {
+        let policy = CapabilityPolicy {
+            privileged: true,
+            deps: BTreeMap::new(),
+            wasi: BTreeMap::new(),
+        };
+        let allowed = is_wasi_function_allowed(&policy, "wasi:cli/environment", "get-environment");
+        assert!(allowed, "privileged policy should allow all wasi calls");
+    }
+
+    #[test]
+    fn wasi_capability_allows_when_rule_is_wildcard() {
+        let policy = CapabilityPolicy {
+            privileged: false,
+            deps: BTreeMap::new(),
+            wasi: BTreeMap::from([(
+                "wasi:cli/environment".to_string(),
+                vec!["*".to_string()],
+            )]),
+        };
+        let allowed = is_wasi_function_allowed(&policy, "wasi:cli/environment", "get-environment");
+        assert!(allowed, "wildcard rule should allow wasi function");
+    }
+
+    #[test]
+    fn wasi_capability_rejects_unlisted_function() {
+        let policy = CapabilityPolicy {
+            privileged: false,
+            deps: BTreeMap::new(),
+            wasi: BTreeMap::from([(
+                "wasi:cli/environment".to_string(),
+                vec!["get-arguments".to_string()],
+            )]),
+        };
+        let allowed = is_wasi_function_allowed(&policy, "wasi:cli/environment", "get-environment");
+        assert!(!allowed, "unlisted function should be denied");
+    }
+
+    #[test]
+    fn wasi_capability_denial_maps_to_unauthorized() {
+        let err = ensure_wasi_function_allowed(
+            "app",
+            &CapabilityPolicy::default(),
+            "wasi:cli/environment",
+            "get-environment",
+        )
+        .expect_err("empty policy should deny wasi function");
+        assert_eq!(err.code, ErrorCode::Unauthorized);
+        assert!(
+            err.message.contains("capability denied caller 'app'"),
+            "unexpected message: {}",
+            err.message
         );
     }
 
