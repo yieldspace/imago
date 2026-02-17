@@ -703,6 +703,51 @@ remote = "127.0.0.1:4443"
     }
 
     #[test]
+    fn update_rejects_dependency_name_with_absolute_path_before_reset() {
+        let root = new_temp_dir("dependency-name-absolute-path");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "/tmp/pwn"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("wit/deps/stale/dependency.wit"),
+            b"package stale:dep;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("dependencies[0].name is invalid"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("invalid path components"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            root.join("wit/deps/stale/dependency.wit").exists(),
+            "wit/deps must not be reset when dependency name validation fails"
+        );
+        assert!(!root.join("imago.lock").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn update_materializes_warg_transitive_wit_packages() {
         let root = new_temp_dir("warg-transitive");
         write(

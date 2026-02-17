@@ -17,6 +17,15 @@ privileged = false
 [capabilities.deps]
 "sizumita:ferris" = ["sizumita:ferris/says@0.1.0.say"]
 
+[capabilities.wasi]
+"wasi:cli/environment" = ["*"]
+"wasi:cli/exit" = ["*"]
+"wasi:cli/stderr" = ["*"]
+"wasi:cli/stdout" = ["*"]
+"wasi:io/error" = ["*"]
+"wasi:io/streams" = ["*"]
+"wasi:random/insecure-seed" = ["*"]
+
 [target.default]
 remote = "127.0.0.1:4443"
 server_name = "localhost"

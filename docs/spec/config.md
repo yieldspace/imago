@@ -73,6 +73,8 @@
 - `[[dependencies]]` は plugin 依存を定義する。
 - 各要素は以下を受理する。
   - `name` (必須): package 名
+    - 許可文字は ASCII 英数字、`.`、`_`、`-`、`:`, `/`。
+    - `/` は package 階層表現として許可するが、path component は `Normal` のみ許可する（先頭 `/`、drive prefix、`./`、`../` などは拒否）。
   - `version` (必須): version 文字列
   - `kind` (必須): `native` / `wasm`
   - `wit` (任意): string または table
@@ -80,6 +82,7 @@
     - table は `wit.source`（必須）+ `wit.registry`（任意）を受理
     - 未指定時は `wit.source = "warg://{name}@{version}"` / `wit.registry = "wa.dev"`
   - `requires` (任意): 依存 plugin package 名配列（明示依存の宣言）
+    - 各要素のバリデーションは `name` と同一。
   - `component.source` (任意, `kind=wasm` の場合): `file://...` / `warg://...`
     - `wit` source が component ではない場合は指定が必要
   - `component.registry` (任意, `kind=wasm` の場合): `warg://` の registry（省略時 `wa.dev`）
@@ -175,6 +178,7 @@
 - `dependencies[].wit` に `https://wa.dev/...` shorthand を指定した場合はエラー（`warg://<package>@<version>` を使用）。
 - `dependencies[].wit.source` に `file://wit/deps/...`（または同等の `wit/deps` 配下パス）を指定した場合はエラー。
 - 複数 dependency が同一 `wit/deps` 出力パスへ解決される場合はエラー。
+- `dependencies[].name` と `dependencies[].requires[]` に、絶対パス・drive prefix・`./`・`../` を含む path component を指定した場合はエラー。
 - `[[dependencies]]` 使用時に `imago.lock` が存在しない、`version != 1`、または lock の `wit_*` / `component_*` / `wit_packages` が設定・展開結果と一致しない場合はエラー。
 - `main` が存在しない場合はビルド時エラー。
 - `shutdown_timeout` が 0 以下はエラー。
@@ -201,6 +205,7 @@
 - `imago update` は `warg://` / `file://` を受理し、WIT を `wit/deps/` へ展開する。
 - `imago update` の dependency path サニタイズは wkg 準拠 (`:` / `@` を `-`) を使い、`wit/deps` と `.imago/warg` の両方で同じ命名規則を使う。
 - `imago update` は `dependencies[].wit.source=file://...` が `wit/deps` 配下を指す場合と、dependency 同士で `wit/deps` 出力先が衝突する場合に、`wit/deps` を削除する前に失敗させる。
+- dependency package 名の path バリデーションは `/` を許可しつつ、`Path` component が `Normal` 以外（`RootDir`、`Prefix`、`CurDir`、`ParentDir`）を拒否する。
 - `warg://` は Rust-native client で解決し、`registry` 未指定時は `wa.dev` を使う。
 - `imago update` は `kind=wasm` かつ `component` 未指定で `wit` source が component の場合、component hash/source を lock へ自動固定する。
 - `imago build` は `capabilities` を正規化して manifest に出力し、`capabilirties` キーは設定エラーとして拒否する。

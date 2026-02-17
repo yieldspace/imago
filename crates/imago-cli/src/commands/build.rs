@@ -1278,6 +1278,11 @@ fn validate_dependency_package_name(name: &str) -> anyhow::Result<()> {
     {
         return Err(anyhow!("contains unsupported characters: {name}"));
     }
+    for component in Path::new(name).components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err(anyhow!("contains invalid path components: {name}"));
+        }
+    }
     Ok(())
 }
 
@@ -2607,6 +2612,81 @@ remote = "127.0.0.1:4443"
         let err = build_project(None, "default", &root)
             .expect_err("build should fail when lock is missing");
         assert!(err.to_string().contains("imago update"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_dependency_name_with_absolute_path_component() {
+        let root = new_temp_dir("dependency-name-absolute-path");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "/tmp/pwn"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("absolute dependency package name must fail");
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains("dependencies[0].name is invalid"),
+            "unexpected error: {err_text}"
+        );
+        assert!(
+            err_text.contains("invalid path components"),
+            "unexpected error: {err_text}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_dependency_requires_with_absolute_path_component() {
+        let root = new_temp_dir("dependency-requires-absolute-path");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+requires = ["/tmp/pwn"]
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("absolute dependency requirement must fail");
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains("dependencies[0].requires[0] is invalid"),
+            "unexpected error: {err_text}"
+        );
+        assert!(
+            err_text.contains("invalid path components"),
+            "unexpected error: {err_text}"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
