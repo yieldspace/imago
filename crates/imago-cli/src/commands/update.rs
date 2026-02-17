@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -141,19 +140,29 @@ fn validate_wit_sources_outside_wit_deps(
 fn validate_wit_output_path_collisions(
     dependencies: &[build::ProjectDependency],
 ) -> anyhow::Result<()> {
-    let mut path_to_dependency: BTreeMap<PathBuf, &str> = BTreeMap::new();
+    let mut targets: Vec<(PathBuf, &str)> = Vec::with_capacity(dependencies.len());
     for dependency in dependencies {
         let target_rel = dependency_cache::dependency_wit_target_rel(&dependency.name);
-        if let Some(existing_dependency) =
-            path_to_dependency.insert(target_rel.clone(), dependency.name.as_str())
-        {
-            return Err(anyhow!(
-                "dependencies '{}' and '{}' both resolve to '{}'; dependency WIT output paths must be unique",
-                existing_dependency,
-                dependency.name,
-                plugin_sources::path_to_manifest_string(&target_rel)
-            ));
+        for (existing_target, existing_dependency) in &targets {
+            if existing_target == &target_rel {
+                return Err(anyhow!(
+                    "dependencies '{}' and '{}' both resolve to '{}'; dependency WIT output paths must be unique",
+                    existing_dependency,
+                    dependency.name,
+                    plugin_sources::path_to_manifest_string(&target_rel)
+                ));
+            }
+            if target_rel.starts_with(existing_target) || existing_target.starts_with(&target_rel) {
+                return Err(anyhow!(
+                    "dependencies '{}' and '{}' have overlapping WIT output paths ('{}' and '{}'); dependency WIT output paths must be disjoint",
+                    existing_dependency,
+                    dependency.name,
+                    plugin_sources::path_to_manifest_string(existing_target),
+                    plugin_sources::path_to_manifest_string(&target_rel)
+                ));
+            }
         }
+        targets.push((target_rel, dependency.name.as_str()));
     }
     Ok(())
 }
@@ -837,6 +846,53 @@ remote = "127.0.0.1:4443"
         assert!(
             root.join("wit/deps/stale/dependency.wit").exists(),
             "wit/deps must not be reset when collision is detected"
+        );
+        assert!(!root.join("imago.lock").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rejects_overlapping_wit_output_paths_before_reset() {
+        let root = new_temp_dir("wit-output-overlap");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "foo:pkg"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/a.wit"
+
+[[dependencies]]
+name = "foo:pkg/bar"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/b.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("wit/deps/stale/dependency.wit"),
+            b"package stale:dep;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("overlapping WIT output paths"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            root.join("wit/deps/stale/dependency.wit").exists(),
+            "wit/deps must not be reset when overlap is detected"
         );
         assert!(!root.join("imago.lock").exists());
 

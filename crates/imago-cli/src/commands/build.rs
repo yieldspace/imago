@@ -1282,6 +1282,12 @@ fn validate_dependency_package_name(name: &str) -> anyhow::Result<()> {
     {
         return Err(anyhow!("contains unsupported characters: {name}"));
     }
+    if name
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err(anyhow!("contains invalid path components: {name}"));
+    }
     for component in Path::new(name).components() {
         if !matches!(component, Component::Normal(_)) {
             return Err(anyhow!("contains invalid path components: {name}"));
@@ -2769,6 +2775,43 @@ remote = "127.0.0.1:4443"
 
         let err = build_project(None, "default", &root)
             .expect_err("absolute dependency package name must fail");
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains("dependencies[0].name is invalid"),
+            "unexpected error: {err_text}"
+        );
+        assert!(
+            err_text.contains("invalid path components"),
+            "unexpected error: {err_text}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_dependency_name_with_normalized_path_segments() {
+        let root = new_temp_dir("dependency-name-normalized-segments");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/./example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("dependency package with normalized path segment must fail");
         let err_text = err.to_string();
         assert!(
             err_text.contains("dependencies[0].name is invalid"),
