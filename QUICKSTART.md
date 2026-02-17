@@ -1,8 +1,7 @@
 # QUICKSTART
 
-imagoは組込Linux向けの軽量コンテナ代替ツールです。
-Dockerのようにアプリケーションを隔離して実行しますが、コンテナの代わりにWebAssembly（Wasm）をサンドボックスとして使用します。
-これにより、OpenWrtなどのリソースが限られた環境でも効率的にアプリケーションを実行できます。
+この Quickstart は、`warg://sizumita:ferris@0.1.0` を依存として読み込み、
+`sizumita:ferris/says.say` を呼び出す現行仕様の最短フローです。
 
 ## Install CLI
 
@@ -16,64 +15,81 @@ From cargo:
 cargo install imago
 ```
 
-## プロジェクトの作成
+## 事前条件
 
-プロジェクトの雛形をgithubからcloneします。
+- Rust toolchain
+- `wasm32-wasip2` target（未導入なら `rustup target add wasm32-wasip2`）
 
-```bash
-git clone https://github.com/yieldspace/imago_template
-```
-
-## コードを書く
-
-`src/main.rs`を開いて、Hello, Worldプログラムを書きます。
-
-```rust
-fn main() {
-    println!("Hello, World!")
-}
-```
-
-## ビルド
-
-`imago build`でWasmモジュールにコンパイルし、`build/manifest.json`を生成します。ビルドコマンドは`imago.toml`の`[build].command`で変更できます。
+## 1. リポジトリを取得
 
 ```bash
-imago build
+git clone https://github.com/yieldspace/imago
+cd imago/examples/local-imagod-plugin-hello
 ```
 
-## デーモンの起動
-
-imagoを動作させるサーバーでデーモンを起動させます。
-
-1. Install `imago` service.
+## 2. 証明書を生成
 
 ```bash
-imago service install
+./scripts/generate-certs.sh
 ```
 
-2. Start the service.
+## 3. 依存解決（必須）
 
 ```bash
-# Linux
-systemctl start imago
-# or
-/etc/init.d start imago
+cargo run --manifest-path ../../Cargo.toml -p imago-cli -- update
 ```
 
-## デプロイ先の設定
+この時点で以下が行われます。
 
-imagoはdaemonが動作しているサーバーに対しリモートでデプロイが可能です。
+- `wit/deps/` に WIT 展開
+- `imago.lock` に `wit_*` 固定
+- `wit` が component の場合は `component_*` も自動固定
 
-```toml:imago.toml
-[target.default]
-remote = "192.168.1.100"
+`examples/local-imagod-plugin-hello/imago.toml` の依存設定は以下です。
+
+```toml
+[[dependencies]]
+name = "sizumita:ferris"
+version = "0.1.0"
+kind = "wasm"
+wit = "warg://sizumita:ferris@0.1.0"
+
+[capabilities.deps]
+"sizumita:ferris" = ["sizumita:ferris/says@0.1.0.say"]
 ```
+
+`warg://sizumita:ferris@0.1.0` は component のため、`[dependencies.component]` は不要です。
+
+## 4. `imagod` を起動（ターミナル1）
 
 ```bash
-imago deploy
+./scripts/run-imagod.sh
 ```
 
-`imago deploy`は内部で`imago build`相当を毎回実行します。
+## 5. デプロイ（ターミナル2）
 
-デプロイ後のログは`imago logs <process id>`で確認可能です。
+```bash
+./scripts/deploy.sh
+```
+
+`imago deploy` は内部で build を実行し、必要な component を lock 情報から遅延取得します。
+同じ hash があれば `.imago/components/` の cache を再利用します。
+
+## 6. 出力確認
+
+```bash
+./scripts/verify-hello.sh
+```
+
+または直接:
+
+```bash
+cargo run --manifest-path ../../Cargo.toml -p imago-cli -- logs local-imagod-plugin-hello-app --tail 200
+```
+
+`hello from imago` と ferris の出力が見えれば成功です。
+
+注:
+
+- アプリが短時間で終了するため、`imago logs ...` が `NotFound` になる場合があります。
+- その場合は `./scripts/run-imagod.sh` を実行しているターミナルの `service log` 出力を確認してください。
