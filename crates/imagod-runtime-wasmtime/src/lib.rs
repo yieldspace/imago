@@ -1056,7 +1056,7 @@ fn collect_implicit_provider_indices(
 
 fn parse_import_package_name(import_name: &str) -> Option<&str> {
     import_name
-        .split_once('/')
+        .rsplit_once('/')
         .map(|(package_name, _)| package_name)
 }
 
@@ -1568,6 +1568,22 @@ mod tests {
             indices.is_empty(),
             "self export should suppress implicit edge"
         );
+    }
+
+    #[test]
+    fn collect_implicit_provider_indices_supports_nested_dependency_package_name() {
+        let by_name = BTreeMap::from([
+            ("yieldspace:plugin/hello".to_string(), 0usize),
+            ("yieldspace:plugin/example".to_string(), 1usize),
+        ]);
+        let import_names = vec!["yieldspace:plugin/example/admin".to_string()];
+        let indices = collect_implicit_provider_indices(
+            "yieldspace:plugin/hello",
+            &import_names,
+            &BTreeSet::new(),
+            &by_name,
+        );
+        assert_eq!(indices, BTreeSet::from([1usize]));
     }
 
     #[test]

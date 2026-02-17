@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
-    path::Path,
+    path::{Component, Path, PathBuf},
 };
 
 use anyhow::{Context, anyhow};
@@ -203,7 +203,10 @@ pub fn resolve_dependencies(
             ));
         }
 
-        let resolved_wit_path = project_root.join(&entry.wit_path);
+        let resolved_wit_path = project_root.join(validate_safe_wit_path(
+            &entry.wit_path,
+            &format!("imago.lock.dependencies['{}'].wit_path", expected.name),
+        )?);
         let digest = compute_path_digest_hex(&resolved_wit_path).with_context(|| {
             format!(
                 "failed to compute digest for '{}' from imago.lock",
@@ -422,7 +425,15 @@ fn verify_wit_packages_lock(
                     wit_package.name
                 ),
             )?;
-            let package_wit_file = project_root.join(&version_entry.path).join("package.wit");
+            let package_wit_file = project_root
+                .join(validate_safe_wit_path(
+                    &version_entry.path,
+                    &format!(
+                        "imago.lock.wit_packages['{}'].versions[].path",
+                        wit_package.name
+                    ),
+                )?)
+                .join("package.wit");
             if !package_wit_file.is_file() {
                 return Err(anyhow!(
                     "transitive wit package '{}' is missing package.wit at '{}'; run `imago update`",
@@ -477,6 +488,45 @@ fn parse_prefixed_sha256<'a>(value: &'a str, field_name: &str) -> anyhow::Result
     };
     validate_sha256_hex(hex, field_name)?;
     Ok(hex)
+}
+
+fn validate_safe_wit_path(path: &str, field_name: &str) -> anyhow::Result<PathBuf> {
+    if path.trim().is_empty() {
+        return Err(anyhow!(
+            "{field_name} must not be empty; run `imago update`"
+        ));
+    }
+    let raw = Path::new(path);
+    if raw.is_absolute() {
+        return Err(anyhow!(
+            "{field_name} must be a relative path under wit/deps; run `imago update`"
+        ));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in raw.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            _ => {
+                return Err(anyhow!(
+                    "{field_name} contains invalid path components; run `imago update`"
+                ));
+            }
+        }
+    }
+
+    let mut components = normalized.components();
+    let first = components.next();
+    let second = components.next();
+    if !matches!(first, Some(Component::Normal(v)) if v == "wit")
+        || !matches!(second, Some(Component::Normal(v)) if v == "deps")
+    {
+        return Err(anyhow!(
+            "{field_name} must be under wit/deps; run `imago update`"
+        ));
+    }
+
+    Ok(normalized)
 }
 
 fn compute_sha256_hex(path: &Path) -> anyhow::Result<String> {
@@ -640,6 +690,83 @@ mod tests {
     }
 
     #[test]
+    fn resolve_dependencies_rejects_absolute_dependency_wit_path() {
+        let root = new_temp_dir("dep-absolute-wit-path");
+        let lock = ImagoLock {
+            version: IMAGO_LOCK_VERSION,
+            dependencies: vec![ImagoLockDependency {
+                name: "demo:test".to_string(),
+                version: "0.1.0".to_string(),
+                wit_source: "file://registry/demo.wit".to_string(),
+                wit_registry: None,
+                wit_digest: "deadbeef".to_string(),
+                wit_path: "/tmp/evil".to_string(),
+                component_source: None,
+                component_registry: None,
+                component_sha256: None,
+                resolved_at: "0".to_string(),
+            }],
+            wit_packages: vec![],
+        };
+        let err = resolve_dependencies(
+            &root,
+            &lock,
+            &[DependencyExpectation {
+                name: "demo:test".to_string(),
+                version: "0.1.0".to_string(),
+                wit_source: "file://registry/demo.wit".to_string(),
+                wit_registry: None,
+                component: None,
+            }],
+        )
+        .expect_err("absolute wit_path must fail");
+        assert!(
+            err.to_string()
+                .contains("must be a relative path under wit/deps"),
+            "unexpected error: {err:#}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_dependencies_rejects_parent_traversal_dependency_wit_path() {
+        let root = new_temp_dir("dep-parent-wit-path");
+        let lock = ImagoLock {
+            version: IMAGO_LOCK_VERSION,
+            dependencies: vec![ImagoLockDependency {
+                name: "demo:test".to_string(),
+                version: "0.1.0".to_string(),
+                wit_source: "file://registry/demo.wit".to_string(),
+                wit_registry: None,
+                wit_digest: "deadbeef".to_string(),
+                wit_path: "wit/deps/../../evil".to_string(),
+                component_source: None,
+                component_registry: None,
+                component_sha256: None,
+                resolved_at: "0".to_string(),
+            }],
+            wit_packages: vec![],
+        };
+        let err = resolve_dependencies(
+            &root,
+            &lock,
+            &[DependencyExpectation {
+                name: "demo:test".to_string(),
+                version: "0.1.0".to_string(),
+                wit_source: "file://registry/demo.wit".to_string(),
+                wit_registry: None,
+                component: None,
+            }],
+        )
+        .expect_err("parent traversal wit_path must fail");
+        assert!(
+            err.to_string().contains("contains invalid path components"),
+            "unexpected error: {err:#}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn resolve_dependencies_rejects_transitive_digest_mismatch() {
         let root = new_temp_dir("transitive-digest-mismatch");
         write(
@@ -695,6 +822,63 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("lock digest mismatch for transitive wit package")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_dependencies_rejects_absolute_transitive_wit_path() {
+        let root = new_temp_dir("transitive-absolute-path");
+        write(
+            &root.join("wit/deps/demo/package.wit"),
+            b"package demo:test;\n",
+        );
+        let digest = compute_path_digest_hex(&root.join("wit/deps/demo")).expect("digest");
+        let lock = ImagoLock {
+            version: IMAGO_LOCK_VERSION,
+            dependencies: vec![ImagoLockDependency {
+                name: "demo:test".to_string(),
+                version: "0.1.0".to_string(),
+                wit_source: "file://registry/demo.wit".to_string(),
+                wit_registry: None,
+                wit_digest: digest,
+                wit_path: "wit/deps/demo".to_string(),
+                component_source: None,
+                component_registry: None,
+                component_sha256: None,
+                resolved_at: "0".to_string(),
+            }],
+            wit_packages: vec![ImagoLockWitPackage {
+                name: "transitive:dep".to_string(),
+                registry: None,
+                versions: vec![ImagoLockWitPackageVersion {
+                    requirement: "*".to_string(),
+                    version: None,
+                    digest:
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                            .to_string(),
+                    source: None,
+                    path: "/tmp/evil".to_string(),
+                    via: vec!["demo:test".to_string()],
+                }],
+            }],
+        };
+        let err = resolve_dependencies(
+            &root,
+            &lock,
+            &[DependencyExpectation {
+                name: "demo:test".to_string(),
+                version: "0.1.0".to_string(),
+                wit_source: "file://registry/demo.wit".to_string(),
+                wit_registry: None,
+                component: None,
+            }],
+        )
+        .expect_err("absolute transitive wit path must fail");
+        assert!(
+            err.to_string()
+                .contains("must be a relative path under wit/deps"),
+            "unexpected error: {err:#}"
         );
         let _ = fs::remove_dir_all(root);
     }
