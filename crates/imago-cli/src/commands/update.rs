@@ -61,27 +61,78 @@ fn normalize_path_for_compare(path: &Path) -> PathBuf {
     normalized
 }
 
+fn normalize_absolute_path_for_compare(path: &Path) -> anyhow::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("failed to resolve current directory for update path validation")?
+            .join(path)
+    };
+    Ok(normalize_path_for_compare(&absolute))
+}
+
 fn validate_wit_sources_outside_wit_deps(
     project_root: &Path,
     dependencies: &[build::ProjectDependency],
 ) -> anyhow::Result<()> {
-    let wit_deps_root = normalize_path_for_compare(&project_root.join("wit").join("deps"));
-    for dependency in dependencies {
-        let Some(raw_path) = dependency.wit.source.strip_prefix("file://") else {
-            continue;
+    let project_root_abs = normalize_absolute_path_for_compare(project_root)?;
+    let mut wit_deps_roots = vec![normalize_path_for_compare(
+        &project_root_abs.join("wit").join("deps"),
+    )];
+    if let Ok(canonical_project_root) = fs::canonicalize(&project_root_abs) {
+        let canonical_wit_deps_root =
+            normalize_path_for_compare(&canonical_project_root.join("wit").join("deps"));
+        if !wit_deps_roots
+            .iter()
+            .any(|existing| existing == &canonical_wit_deps_root)
+        {
+            wit_deps_roots.push(canonical_wit_deps_root);
+        }
+    }
+
+    let validate_file_source = |dependency_name: &str,
+                                source_label: &str,
+                                source: &str|
+     -> anyhow::Result<()> {
+        let Some(raw_path) = source.strip_prefix("file://") else {
+            return Ok(());
         };
         let source_path = if Path::new(raw_path).is_absolute() {
             PathBuf::from(raw_path)
         } else {
-            project_root.join(raw_path)
+            project_root_abs.join(raw_path)
         };
-        let normalized_source = normalize_path_for_compare(&source_path);
-        if normalized_source.starts_with(&wit_deps_root) {
+        let mut source_candidates = vec![normalize_absolute_path_for_compare(&source_path)?];
+        if let Ok(canonical_source) = fs::canonicalize(&source_path) {
+            let canonical_source = normalize_path_for_compare(&canonical_source);
+            if !source_candidates
+                .iter()
+                .any(|existing| existing == &canonical_source)
+            {
+                source_candidates.push(canonical_source);
+            }
+        }
+
+        if source_candidates.iter().any(|candidate| {
+            wit_deps_roots
+                .iter()
+                .any(|wit_deps_root| candidate.starts_with(wit_deps_root))
+        }) {
             return Err(anyhow!(
-                "dependency '{}' wit source '{}' points under wit/deps, which `imago update` resets; move the source outside wit/deps",
-                dependency.name,
-                dependency.wit.source
+                "dependency '{}' {} '{}' points under wit/deps, which `imago update` resets; move the source outside wit/deps",
+                dependency_name,
+                source_label,
+                source
             ));
+        }
+        Ok(())
+    };
+
+    for dependency in dependencies {
+        validate_file_source(&dependency.name, "wit source", &dependency.wit.source)?;
+        if let Some(component) = dependency.component.as_ref() {
+            validate_file_source(&dependency.name, "component source", &component.source)?;
         }
     }
     Ok(())
@@ -325,6 +376,24 @@ mod tests {
     use super::*;
     use sha2::Digest as _;
     use wit_parser::Resolve;
+
+    struct CwdGuard {
+        previous: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn change_to(path: &Path) -> Self {
+            let previous = std::env::current_dir().expect("current dir should be readable");
+            std::env::set_current_dir(path).expect("current dir should be changeable");
+            Self { previous }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.previous);
+        }
+    }
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
         let unique = format!(
@@ -809,6 +878,101 @@ remote = "127.0.0.1:4443"
         assert!(
             root.join("wit/deps/vendor/example.wit").exists(),
             "source under wit/deps must not be deleted"
+        );
+        assert!(!root.join("imago.lock").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rejects_absolute_file_source_under_wit_deps_when_project_root_is_dot() {
+        let root = new_temp_dir("file-source-under-wit-deps-absolute");
+        let absolute_source = root.join("wit/deps/vendor/example.wit");
+        write(
+            &root.join("imago.toml"),
+            format!(
+                r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://{}"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+                absolute_source.display()
+            )
+            .as_bytes(),
+        );
+        write(&absolute_source, b"package test:example@0.1.0;\n");
+
+        let _cwd_guard = CwdGuard::change_to(&root);
+        let result = run(UpdateArgs {});
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("points under wit/deps"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            absolute_source.exists(),
+            "source under wit/deps must not be deleted"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rejects_component_file_source_under_wit_deps_before_reset() {
+        let root = new_temp_dir("component-file-source-under-wit-deps");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "wasm"
+wit = "file://registry/example.wit"
+
+[dependencies.component]
+source = "file://wit/deps/vendor/example-component.wasm"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("registry/example.wit"),
+            b"package test:example@0.1.0;\n",
+        );
+        write(
+            &root.join("wit/deps/vendor/example-component.wasm"),
+            b"\0asmfake-component",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("component source"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("points under wit/deps"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            root.join("wit/deps/vendor/example-component.wasm").exists(),
+            "component source under wit/deps must not be deleted"
         );
         assert!(!root.join("imago.lock").exists());
 
