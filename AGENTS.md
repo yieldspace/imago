@@ -25,6 +25,7 @@ Use Rust 2024 edition conventions and `rustfmt` defaults (4-space indentation). 
 - `snake_case` for functions, modules, and filenames.
 - `PascalCase` for structs, enums, and traits.
 - `SCREAMING_SNAKE_CASE` for constants.
+- Always prefer simplicity to pathological correctness. YAGNI, KISS, DRY. No backward-compat shims or fallback paths unless they come free without adding cyclomatic complexity.
 
 Keep modules focused and explicit. When behavior changes, update related specs in `docs/spec/` in the same PR so implementation and documentation stay aligned.
 

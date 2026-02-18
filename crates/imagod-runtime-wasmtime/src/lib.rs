@@ -1,7 +1,9 @@
 //! Wasmtime runtime integration used by runner processes.
 
+pub mod native_plugins;
+
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     net::{IpAddr, SocketAddr},
     path::Path,
     sync::Arc,
@@ -11,14 +13,17 @@ use std::{
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use imago_protocol::ErrorCode;
-use imagod_ipc::{RunnerAppType, RunnerSocketConfig, RunnerSocketDirection};
+use imagod_ipc::{
+    CapabilityPolicy, PluginDependency, PluginKind, RunnerAppType, RunnerSocketConfig,
+    RunnerSocketDirection,
+};
 use tokio::{
     sync::{mpsc, oneshot, watch},
     task::JoinHandle,
 };
 use wasmtime::{
     Config, Engine, Store,
-    component::{Component, Linker, ResourceTable},
+    component::{Component, Func, Linker, ResourceTable, types},
 };
 use wasmtime_wasi::{
     WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
@@ -39,11 +44,68 @@ use imagod_runtime_internal::{
 const STAGE_RUNTIME: &str = "runtime.start";
 const HTTP_REQUEST_QUEUE_CAPACITY: usize = 32;
 
+pub use native_plugins::{NativePlugin, NativePluginRegistry, NativePluginRegistryBuilder};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativePluginContext {
+    service_name: String,
+    release_hash: String,
+    runner_id: String,
+    app_type: String,
+}
+
+impl NativePluginContext {
+    pub fn new(
+        service_name: String,
+        release_hash: String,
+        runner_id: String,
+        app_type: RunnerAppType,
+    ) -> Self {
+        Self {
+            service_name,
+            release_hash,
+            runner_id,
+            app_type: app_type_text(app_type).to_string(),
+        }
+    }
+
+    pub fn service_name(&self) -> &str {
+        &self.service_name
+    }
+
+    pub fn release_hash(&self) -> &str {
+        &self.release_hash
+    }
+
+    pub fn runner_id(&self) -> &str {
+        &self.runner_id
+    }
+
+    pub fn app_type(&self) -> &str {
+        &self.app_type
+    }
+}
+
+pub fn app_type_text(app_type: RunnerAppType) -> &'static str {
+    match app_type {
+        RunnerAppType::Cli => "cli",
+        RunnerAppType::Http => "http",
+        RunnerAppType::Socket => "socket",
+    }
+}
+
 /// Internal WASI host state stored in the Wasmtime store.
-struct WasiState {
+pub struct WasiState {
     table: ResourceTable,
     wasi: WasiCtx,
     http: WasiHttpCtx,
+    native_plugin_context: NativePluginContext,
+}
+
+impl WasiState {
+    pub fn native_plugin_context(&self) -> &NativePluginContext {
+        &self.native_plugin_context
+    }
 }
 
 impl WasiView for WasiState {
@@ -70,6 +132,7 @@ impl WasiHttpView for WasiState {
 pub struct WasmRuntime {
     engine: Arc<Engine>,
     http_instance: Arc<tokio::sync::Mutex<Option<RunningHttpComponent>>>,
+    native_plugins: NativePluginRegistry,
 }
 
 /// Runtime state used while one HTTP component is running.
@@ -87,6 +150,13 @@ struct HttpWorkerRequest {
 impl WasmRuntime {
     /// Creates a runtime with component model, async support, and epoch interruption enabled.
     pub fn new() -> Result<Self, ImagodError> {
+        Self::new_with_native_plugins(NativePluginRegistry::default())
+    }
+
+    /// Creates a runtime with a native plugin registry injected by manager build.
+    pub fn new_with_native_plugins(
+        native_plugins: NativePluginRegistry,
+    ) -> Result<Self, ImagodError> {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.async_support(true);
@@ -98,6 +168,7 @@ impl WasmRuntime {
         Ok(Self {
             engine: Arc::new(engine),
             http_instance: Arc::new(tokio::sync::Mutex::new(None)),
+            native_plugins,
         })
     }
 
@@ -121,6 +192,7 @@ impl WasmRuntime {
         args: &[String],
         envs: &BTreeMap<String, String>,
         socket: Option<&RunnerSocketConfig>,
+        native_plugin_context: NativePluginContext,
     ) -> Result<Store<WasiState>, ImagodError> {
         let mut builder = WasiCtxBuilder::new();
         builder.inherit_stdio();
@@ -142,6 +214,7 @@ impl WasmRuntime {
             table: ResourceTable::new(),
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
+            native_plugin_context,
         };
         let mut store = Store::new(&self.engine, state);
         store.set_epoch_deadline(1);
@@ -179,12 +252,16 @@ impl WasmRuntime {
     /// Instantiates and runs a WASI CLI component asynchronously.
     ///
     /// Returns when execution completes or when shutdown is requested.
+    #[allow(clippy::too_many_arguments)]
     async fn run_cli_component_async(
         &self,
         component_path: &Path,
         args: &[String],
         envs: &BTreeMap<String, String>,
         socket: Option<&RunnerSocketConfig>,
+        native_plugin_context: NativePluginContext,
+        plugin_dependencies: &[PluginDependency],
+        capabilities: &CapabilityPolicy,
         mut shutdown: watch::Receiver<bool>,
         epoch_tick_interval_ms: u64,
     ) -> Result<(), ImagodError> {
@@ -199,7 +276,21 @@ impl WasmRuntime {
         add_to_linker_async(&mut linker)
             .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
 
-        let mut store = self.build_store(args, envs, socket)?;
+        let mut store = self.build_store(args, envs, socket, native_plugin_context)?;
+        let available_plugins = self
+            .instantiate_plugin_dependencies(&mut store, plugin_dependencies)
+            .await?;
+        let explicit_dependency_names = all_dependency_names(plugin_dependencies);
+        self.register_plugin_import_shims(
+            &mut linker,
+            &mut store,
+            &component,
+            "app",
+            &explicit_dependency_names,
+            capabilities,
+            &available_plugins,
+            None,
+        )?;
 
         let run_future = async {
             let command = Command::instantiate_async(&mut store, &component, &linker)
@@ -232,11 +323,15 @@ impl WasmRuntime {
     }
 
     /// Instantiates a WASI HTTP incoming-handler and waits for shutdown.
+    #[allow(clippy::too_many_arguments)]
     async fn run_http_component_async(
         &self,
         component_path: &Path,
         args: &[String],
         envs: &BTreeMap<String, String>,
+        native_plugin_context: NativePluginContext,
+        plugin_dependencies: &[PluginDependency],
+        capabilities: &CapabilityPolicy,
         mut shutdown: watch::Receiver<bool>,
         epoch_tick_interval_ms: u64,
         mut http_ready_tx: Option<oneshot::Sender<()>>,
@@ -254,7 +349,21 @@ impl WasmRuntime {
         add_only_http_to_linker_async(&mut linker)
             .map_err(|e| map_runtime_error(format!("failed to add WASI HTTP linker: {e}")))?;
 
-        let mut store = self.build_store(args, envs, None)?;
+        let mut store = self.build_store(args, envs, None, native_plugin_context)?;
+        let available_plugins = self
+            .instantiate_plugin_dependencies(&mut store, plugin_dependencies)
+            .await?;
+        let explicit_dependency_names = all_dependency_names(plugin_dependencies);
+        self.register_plugin_import_shims(
+            &mut linker,
+            &mut store,
+            &component,
+            "app",
+            &explicit_dependency_names,
+            capabilities,
+            &available_plugins,
+            None,
+        )?;
         let proxy = Proxy::instantiate_async(&mut store, &component, &linker)
             .await
             .map_err(|e| map_runtime_error(format!("http component instantiate failed: {e}")))?;
@@ -337,6 +446,358 @@ impl WasmRuntime {
             )
         })?
     }
+
+    async fn instantiate_plugin_dependencies(
+        &self,
+        store: &mut Store<WasiState>,
+        dependencies: &[PluginDependency],
+    ) -> Result<BTreeMap<String, AvailablePlugin>, ImagodError> {
+        let mut loaded_components = BTreeMap::<String, Component>::new();
+        for dep in dependencies {
+            if dep.kind != PluginKind::Wasm {
+                continue;
+            }
+            let component = dep.component.as_ref().ok_or_else(|| {
+                map_runtime_error(format!(
+                    "plugin dependency '{}' missing component definition",
+                    dep.name
+                ))
+            })?;
+            let loaded = Component::from_file(&self.engine, &component.path).map_err(|e| {
+                map_runtime_error(format!(
+                    "failed to load plugin component '{}' from {}: {e}",
+                    dep.name,
+                    component.path.display()
+                ))
+            })?;
+            loaded_components.insert(dep.name.clone(), loaded);
+        }
+        let order = dependency_topological_order(dependencies, &loaded_components, &self.engine)?;
+        let mut available = BTreeMap::<String, AvailablePlugin>::new();
+        let explicit_dependency_names = all_dependency_names(dependencies);
+
+        for dep_index in order {
+            let dep = &dependencies[dep_index];
+            match dep.kind {
+                PluginKind::Native => {
+                    if !self.native_plugins.has_plugin(&dep.name) {
+                        return Err(map_runtime_error(format!(
+                            "native plugin '{}' is declared in manifest but not registered in runtime",
+                            dep.name
+                        )));
+                    }
+                    available.insert(
+                        dep.name.clone(),
+                        AvailablePlugin {
+                            kind: PluginKind::Native,
+                            instance: None,
+                        },
+                    );
+                }
+                PluginKind::Wasm => {
+                    let component = loaded_components.get(&dep.name).ok_or_else(|| {
+                        map_runtime_error(format!(
+                            "internal error: loaded component for dependency '{}' is missing",
+                            dep.name
+                        ))
+                    })?;
+
+                    let mut linker = Linker::new(&self.engine);
+                    add_to_linker_async(&mut linker).map_err(|e| {
+                        map_runtime_error(format!(
+                            "failed to add WASI linker for plugin '{}': {e}",
+                            dep.name
+                        ))
+                    })?;
+                    add_only_http_to_linker_async(&mut linker).map_err(|e| {
+                        map_runtime_error(format!(
+                            "failed to add WASI HTTP linker for plugin '{}': {e}",
+                            dep.name
+                        ))
+                    })?;
+                    let self_instance = Arc::new(tokio::sync::Mutex::new(None));
+                    self.register_plugin_import_shims(
+                        &mut linker,
+                        store,
+                        component,
+                        &dep.name,
+                        &explicit_dependency_names,
+                        &dep.capabilities,
+                        &available,
+                        Some(self_instance.clone()),
+                    )?;
+
+                    let instance = linker
+                        .instantiate_async(&mut *store, component)
+                        .await
+                        .map_err(|e| {
+                            map_runtime_error(format!(
+                                "failed to instantiate plugin component '{}': {e}",
+                                dep.name
+                            ))
+                        })?;
+                    {
+                        let mut guard = self_instance.lock().await;
+                        *guard = Some(instance);
+                    }
+                    available.insert(
+                        dep.name.clone(),
+                        AvailablePlugin {
+                            kind: PluginKind::Wasm,
+                            instance: Some(instance),
+                        },
+                    );
+                }
+            }
+        }
+
+        Ok(available)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn register_plugin_import_shims(
+        &self,
+        linker: &mut Linker<WasiState>,
+        store: &mut Store<WasiState>,
+        component: &Component,
+        caller_name: &str,
+        explicit_dependency_names: &BTreeSet<String>,
+        capabilities: &CapabilityPolicy,
+        available_plugins: &BTreeMap<String, AvailablePlugin>,
+        self_instance: Option<Arc<tokio::sync::Mutex<Option<wasmtime::component::Instance>>>>,
+    ) -> Result<(), ImagodError> {
+        let component_ty = component.component_type();
+        let self_export_interfaces =
+            collect_component_instance_export_names(component, &self.engine);
+        let allow_self_provider = self_instance.is_some();
+        let mut linked_native_imports = BTreeSet::<String>::new();
+
+        for (import_name, import_item) in component_ty.imports(&self.engine) {
+            let types::ComponentItem::ComponentInstance(instance_ty) = import_item else {
+                continue;
+            };
+            if import_name.starts_with("wasi:") {
+                enforce_wasi_import_capabilities(
+                    caller_name,
+                    capabilities,
+                    import_name,
+                    &instance_ty,
+                    &self.engine,
+                )?;
+                continue;
+            }
+            let provider = resolve_import_provider(
+                caller_name,
+                import_name,
+                &self_export_interfaces,
+                explicit_dependency_names,
+                available_plugins,
+                allow_self_provider,
+            )?;
+
+            let native_dependency = match &provider {
+                ImportProvider::Dependency(target_dependency) => {
+                    available_plugins.get(target_dependency).and_then(|plugin| {
+                        (plugin.kind == PluginKind::Native).then_some(target_dependency.as_str())
+                    })
+                }
+                _ => None,
+            };
+            if let Some(target_dependency) = native_dependency {
+                let native_plugin =
+                    self.native_plugins
+                        .plugin(target_dependency)
+                        .ok_or_else(|| {
+                            map_runtime_error(format!(
+                                "native plugin '{}' is not registered in runtime registry",
+                                target_dependency
+                            ))
+                        })?;
+                if !native_plugin.supports_import(import_name) {
+                    return Err(map_runtime_error(format!(
+                        "native plugin '{}' does not support import '{}'",
+                        target_dependency, import_name
+                    )));
+                }
+                for (func_name, item) in instance_ty.exports(&self.engine) {
+                    let types::ComponentItem::ComponentFunc(_) = item else {
+                        continue;
+                    };
+                    if !is_dependency_function_allowed(
+                        capabilities,
+                        target_dependency,
+                        import_name,
+                        func_name,
+                    ) {
+                        return Err(map_runtime_unauthorized_error(format!(
+                            "capability denied caller '{}' -> dependency '{}' function '{}.{}'",
+                            caller_name, target_dependency, import_name, func_name
+                        )));
+                    }
+                    let native_symbol = format!("{import_name}.{func_name}");
+                    if !native_plugin.supports_symbol(&native_symbol) {
+                        return Err(map_runtime_error(format!(
+                            "native plugin '{}' does not expose symbol '{}'",
+                            target_dependency, native_symbol
+                        )));
+                    }
+                }
+                if linked_native_imports.insert(import_name.to_string()) {
+                    native_plugin.add_to_linker(linker)?;
+                }
+                continue;
+            }
+
+            let mut import_instance = linker.instance(import_name).map_err(|e| {
+                map_runtime_error(format!(
+                    "failed to define plugin import namespace '{}': {e}",
+                    import_name
+                ))
+            })?;
+
+            for (func_name, item) in instance_ty.exports(&self.engine) {
+                let types::ComponentItem::ComponentFunc(import_ty) = item else {
+                    continue;
+                };
+                match &provider {
+                    ImportProvider::SelfComponent => {
+                        let self_instance = self_instance.clone().ok_or_else(|| {
+                            map_runtime_error(format!(
+                                "self provider is unavailable for caller='{}', import='{}'",
+                                caller_name, import_name
+                            ))
+                        })?;
+                        let self_export_ty = resolve_component_export_type(
+                            component,
+                            &self.engine,
+                            import_name,
+                            func_name,
+                        )?;
+                        ensure_component_signatures_match(
+                            &import_ty,
+                            &self_export_ty,
+                            import_name,
+                            func_name,
+                        )?;
+
+                        let interface_name = import_name.to_string();
+                        let function_name = func_name.to_string();
+                        import_instance
+                            .func_new_async(func_name, move |mut store, _ty, params, results| {
+                                let self_instance = self_instance.clone();
+                                let interface_name = interface_name.clone();
+                                let function_name = function_name.clone();
+                                Box::new(async move {
+                                    let instance = {
+                                        let guard = self_instance.lock().await;
+                                        guard.as_ref().cloned()
+                                    }
+                                    .ok_or_else(|| {
+                                        wasmtime::Error::msg(format!(
+                                            "self provider instance is not ready for '{}.{}'",
+                                            interface_name, function_name
+                                        ))
+                                    })?;
+                                    let callee = resolve_wasm_export_from_instance(
+                                        &mut store,
+                                        &instance,
+                                        &interface_name,
+                                        &function_name,
+                                    )
+                                    .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+                                    callee.call_async(&mut store, params, results).await?;
+                                    callee.post_return_async(&mut store).await?;
+                                    Ok(())
+                                })
+                            })
+                            .map_err(|e| {
+                                map_runtime_error(format!(
+                                    "failed to define self plugin shim '{}.{}': {e}",
+                                    import_name, func_name
+                                ))
+                            })?;
+                    }
+                    ImportProvider::Dependency(target_dependency) => {
+                        if !is_dependency_function_allowed(
+                            capabilities,
+                            target_dependency,
+                            import_name,
+                            func_name,
+                        ) {
+                            return Err(map_runtime_unauthorized_error(format!(
+                                "capability denied caller '{}' -> dependency '{}' function '{}.{}'",
+                                caller_name, target_dependency, import_name, func_name
+                            )));
+                        }
+
+                        let plugin = available_plugins.get(target_dependency).ok_or_else(|| {
+                            map_runtime_error(format!(
+                                "missing target dependency '{}' for plugin import '{}.{}'",
+                                target_dependency, import_name, func_name
+                            ))
+                        })?;
+                        match plugin.kind {
+                            PluginKind::Native => {
+                                return Err(map_runtime_error(format!(
+                                    "internal error: native plugin dependency '{}' should have been linked before fallback bridge '{}.{}'",
+                                    target_dependency, import_name, func_name
+                                )));
+                            }
+                            PluginKind::Wasm => {
+                                let callee = resolve_wasm_plugin_export(
+                                    &mut *store,
+                                    plugin,
+                                    import_name,
+                                    func_name,
+                                )?;
+                                let callee_ty = callee.ty(&*store);
+                                ensure_component_signatures_match(
+                                    &import_ty,
+                                    &callee_ty,
+                                    import_name,
+                                    func_name,
+                                )?;
+
+                                import_instance
+                                    .func_new_async(
+                                        func_name,
+                                        move |mut store, _ty, params, results| {
+                                            Box::new(async move {
+                                                callee
+                                                    .call_async(&mut store, params, results)
+                                                    .await?;
+                                                callee.post_return_async(&mut store).await?;
+                                                Ok(())
+                                            })
+                                        },
+                                    )
+                                    .map_err(|e| {
+                                        map_runtime_error(format!(
+                                            "failed to define wasm plugin shim '{}.{}': {e}",
+                                            import_name, func_name
+                                        ))
+                                    })?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct AvailablePlugin {
+    kind: PluginKind,
+    instance: Option<wasmtime::component::Instance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImportProvider {
+    SelfComponent,
+    Dependency(String),
 }
 
 async fn run_http_worker(
@@ -422,6 +883,375 @@ fn socket_addr_allowed(
     }
 }
 
+fn all_dependency_names(dependencies: &[PluginDependency]) -> BTreeSet<String> {
+    dependencies.iter().map(|dep| dep.name.clone()).collect()
+}
+
+fn dependency_topological_order(
+    dependencies: &[PluginDependency],
+    loaded_components: &BTreeMap<String, Component>,
+    engine: &Engine,
+) -> Result<Vec<usize>, ImagodError> {
+    let mut by_name = BTreeMap::<String, usize>::new();
+    for (index, dep) in dependencies.iter().enumerate() {
+        if by_name.insert(dep.name.clone(), index).is_some() {
+            return Err(map_runtime_error(format!(
+                "duplicate plugin dependency name '{}'",
+                dep.name
+            )));
+        }
+    }
+
+    let mut indegree = vec![0usize; dependencies.len()];
+    let mut edges = vec![BTreeSet::<usize>::new(); dependencies.len()];
+    for (index, dep) in dependencies.iter().enumerate() {
+        for req in &dep.requires {
+            let req_index = by_name.get(req).ok_or_else(|| {
+                map_runtime_error(format!(
+                    "plugin dependency '{}' requires unknown dependency '{}'",
+                    dep.name, req
+                ))
+            })?;
+            add_dependency_edge(&mut edges, &mut indegree, *req_index, index);
+        }
+
+        let Some(component) = loaded_components.get(&dep.name) else {
+            continue;
+        };
+        let self_export_interfaces = collect_component_instance_export_names(component, engine);
+        let import_names = collect_component_instance_import_names(component, engine);
+        let implicit_provider_indices = collect_implicit_provider_indices(
+            &dep.name,
+            &import_names,
+            &self_export_interfaces,
+            &by_name,
+        );
+        for provider_index in implicit_provider_indices {
+            add_dependency_edge(&mut edges, &mut indegree, provider_index, index);
+        }
+    }
+
+    let mut ready = dependencies
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, _)| (indegree[idx] == 0).then_some(idx))
+        .collect::<Vec<_>>();
+    ready.sort_unstable_by(|a, b| dependencies[*a].name.cmp(&dependencies[*b].name));
+
+    let mut order = Vec::with_capacity(dependencies.len());
+    while let Some(next) = ready.pop() {
+        order.push(next);
+        for edge in &edges[next] {
+            indegree[*edge] = indegree[*edge].saturating_sub(1);
+            if indegree[*edge] == 0 {
+                ready.push(*edge);
+            }
+        }
+        ready.sort_unstable_by(|a, b| dependencies[*a].name.cmp(&dependencies[*b].name));
+    }
+
+    if order.len() != dependencies.len() {
+        return Err(map_runtime_error(
+            "plugin dependency graph contains a cycle".to_string(),
+        ));
+    }
+    Ok(order)
+}
+
+fn add_dependency_edge(
+    edges: &mut [BTreeSet<usize>],
+    indegree: &mut [usize],
+    from: usize,
+    to: usize,
+) {
+    if edges[from].insert(to) {
+        indegree[to] += 1;
+    }
+}
+
+fn resolve_import_provider(
+    caller_name: &str,
+    import_name: &str,
+    self_export_interfaces: &BTreeSet<String>,
+    explicit_dependency_names: &BTreeSet<String>,
+    available_plugins: &BTreeMap<String, AvailablePlugin>,
+    allow_self_provider: bool,
+) -> Result<ImportProvider, ImagodError> {
+    if allow_self_provider && self_export_interfaces.contains(import_name) {
+        return Ok(ImportProvider::SelfComponent);
+    }
+
+    if let Some(explicit_dep) = parse_import_package_name(import_name)
+        .filter(|name| explicit_dependency_names.contains(*name))
+    {
+        if available_plugins.contains_key(explicit_dep) {
+            return Ok(ImportProvider::Dependency(explicit_dep.to_string()));
+        }
+        return Err(map_runtime_error(format!(
+            "failed to resolve plugin import provider for caller='{}', import='{}': checked=self, explicit_dep='{}' exists but is not instantiated yet",
+            caller_name, import_name, explicit_dep
+        )));
+    }
+
+    let explicit_dep_label = parse_import_package_name(import_name).unwrap_or("<none>");
+    Err(map_runtime_error(format!(
+        "failed to resolve plugin import provider for caller='{}', import='{}': checked=self, explicit_dep='{}', result=not-found",
+        caller_name, import_name, explicit_dep_label
+    )))
+}
+
+fn collect_component_instance_export_names(
+    component: &Component,
+    engine: &Engine,
+) -> BTreeSet<String> {
+    component
+        .component_type()
+        .exports(engine)
+        .filter_map(|(name, item)| match item {
+            types::ComponentItem::ComponentInstance(_) => Some(name.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn collect_component_instance_import_names(component: &Component, engine: &Engine) -> Vec<String> {
+    component
+        .component_type()
+        .imports(engine)
+        .filter_map(|(name, item)| {
+            if name.starts_with("wasi:") {
+                return None;
+            }
+            match item {
+                types::ComponentItem::ComponentInstance(_) => Some(name.to_string()),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn collect_implicit_provider_indices(
+    dependency_name: &str,
+    import_names: &[String],
+    self_export_interfaces: &BTreeSet<String>,
+    by_name: &BTreeMap<String, usize>,
+) -> BTreeSet<usize> {
+    let mut providers = BTreeSet::new();
+    for import_name in import_names {
+        if self_export_interfaces.contains(import_name) {
+            continue;
+        }
+        let Some(package_name) = parse_import_package_name(import_name) else {
+            continue;
+        };
+        if package_name == dependency_name {
+            continue;
+        }
+        if let Some(index) = by_name.get(package_name) {
+            providers.insert(*index);
+        }
+    }
+    providers
+}
+
+fn parse_import_package_name(import_name: &str) -> Option<&str> {
+    import_name
+        .rsplit_once('/')
+        .map(|(package_name, _)| package_name)
+}
+
+fn is_dependency_function_allowed(
+    policy: &CapabilityPolicy,
+    dependency_name: &str,
+    interface_name: &str,
+    function_name: &str,
+) -> bool {
+    if policy.privileged {
+        return true;
+    }
+    let Some(rules) = policy.deps.get(dependency_name) else {
+        return false;
+    };
+    rules.iter().any(|rule| {
+        rule == "*"
+            || rule == function_name
+            || rule == &format!("{interface_name}.{function_name}")
+            || rule == &format!("{interface_name}/{function_name}")
+            || rule == &format!("{interface_name}#{function_name}")
+    })
+}
+
+fn enforce_wasi_import_capabilities(
+    caller_name: &str,
+    policy: &CapabilityPolicy,
+    interface_name: &str,
+    instance_ty: &types::ComponentInstance,
+    engine: &Engine,
+) -> Result<(), ImagodError> {
+    for (function_name, item) in instance_ty.exports(engine) {
+        let types::ComponentItem::ComponentFunc(_) = item else {
+            continue;
+        };
+        ensure_wasi_function_allowed(caller_name, policy, interface_name, function_name)?;
+    }
+    Ok(())
+}
+
+fn ensure_wasi_function_allowed(
+    caller_name: &str,
+    policy: &CapabilityPolicy,
+    interface_name: &str,
+    function_name: &str,
+) -> Result<(), ImagodError> {
+    if is_wasi_function_allowed(policy, interface_name, function_name) {
+        return Ok(());
+    }
+    Err(map_runtime_unauthorized_error(format!(
+        "capability denied caller '{}' -> wasi '{}' function '{}'",
+        caller_name, interface_name, function_name
+    )))
+}
+
+fn is_wasi_function_allowed(
+    policy: &CapabilityPolicy,
+    interface_name: &str,
+    function_name: &str,
+) -> bool {
+    if policy.privileged {
+        return true;
+    }
+    let Some(rules) = policy.wasi.get(interface_name) else {
+        return false;
+    };
+    rules.iter().any(|rule| {
+        rule == "*"
+            || rule == function_name
+            || rule == &format!("{interface_name}.{function_name}")
+            || rule == &format!("{interface_name}/{function_name}")
+            || rule == &format!("{interface_name}#{function_name}")
+    })
+}
+
+fn ensure_component_signatures_match(
+    import_ty: &types::ComponentFunc,
+    callee_ty: &types::ComponentFunc,
+    interface_name: &str,
+    function_name: &str,
+) -> Result<(), ImagodError> {
+    let import_params = import_ty.params().map(|(_, ty)| ty).collect::<Vec<_>>();
+    let callee_params = callee_ty.params().map(|(_, ty)| ty).collect::<Vec<_>>();
+    if import_params != callee_params {
+        return Err(map_runtime_error(format!(
+            "plugin import type mismatch for '{}.{}': parameter types differ",
+            interface_name, function_name
+        )));
+    }
+
+    let import_results = import_ty.results().collect::<Vec<_>>();
+    let callee_results = callee_ty.results().collect::<Vec<_>>();
+    if import_results != callee_results {
+        return Err(map_runtime_error(format!(
+            "plugin import type mismatch for '{}.{}': result types differ",
+            interface_name, function_name
+        )));
+    }
+
+    Ok(())
+}
+
+fn resolve_component_export_type(
+    component: &Component,
+    engine: &Engine,
+    interface_name: &str,
+    function_name: &str,
+) -> Result<types::ComponentFunc, ImagodError> {
+    let component_ty = component.component_type();
+    let interface_ty = component_ty
+        .exports(engine)
+        .find_map(|(export_name, export_item)| {
+            if export_name != interface_name {
+                return None;
+            }
+            match export_item {
+                types::ComponentItem::ComponentInstance(instance_ty) => Some(instance_ty),
+                _ => None,
+            }
+        })
+        .ok_or_else(|| {
+            map_runtime_error(format!(
+                "self provider export interface '{}' was not found",
+                interface_name
+            ))
+        })?;
+
+    interface_ty
+        .exports(engine)
+        .find_map(|(export_name, export_item)| {
+            if export_name != function_name {
+                return None;
+            }
+            match export_item {
+                types::ComponentItem::ComponentFunc(func_ty) => Some(func_ty),
+                _ => None,
+            }
+        })
+        .ok_or_else(|| {
+            map_runtime_error(format!(
+                "self provider export function '{}.{}' was not found",
+                interface_name, function_name
+            ))
+        })
+}
+
+fn resolve_wasm_plugin_export(
+    store: impl wasmtime::AsContextMut<Data = WasiState>,
+    plugin: &AvailablePlugin,
+    interface_name: &str,
+    function_name: &str,
+) -> Result<Func, ImagodError> {
+    let instance = plugin.instance.as_ref().ok_or_else(|| {
+        map_runtime_error("internal error: wasm plugin dependency is missing instance".to_string())
+    })?;
+    resolve_wasm_export_from_instance(store, instance, interface_name, function_name)
+}
+
+fn resolve_wasm_export_from_instance(
+    mut store: impl wasmtime::AsContextMut<Data = WasiState>,
+    instance: &wasmtime::component::Instance,
+    interface_name: &str,
+    function_name: &str,
+) -> Result<Func, ImagodError> {
+    let interface_index = instance
+        .get_export_index(store.as_context_mut(), None, interface_name)
+        .ok_or_else(|| {
+            map_runtime_error(format!(
+                "plugin export interface '{}' was not found",
+                interface_name
+            ))
+        })?;
+    let function_index = instance
+        .get_export_index(
+            store.as_context_mut(),
+            Some(&interface_index),
+            function_name,
+        )
+        .or_else(|| instance.get_export_index(store.as_context_mut(), None, function_name))
+        .ok_or_else(|| {
+            map_runtime_error(format!(
+                "plugin export function '{}.{}' was not found",
+                interface_name, function_name
+            ))
+        })?;
+    instance
+        .get_func(store.as_context_mut(), function_index)
+        .ok_or_else(|| {
+            map_runtime_error(format!(
+                "plugin export '{}.{}' is not a function",
+                interface_name, function_name
+            ))
+        })
+}
+
 impl ComponentRuntime for WasmRuntime {
     fn validate_component(&self, component_path: &Path) -> Result<(), ImagodError> {
         self.validate_component_loadable(component_path)
@@ -431,14 +1261,21 @@ impl ComponentRuntime for WasmRuntime {
         Box::pin(async move {
             let RuntimeRunRequest {
                 app_type,
+                runner_id,
+                service_name,
+                release_hash,
                 component_path,
                 args,
                 envs,
                 socket,
+                plugin_dependencies,
+                capabilities,
                 shutdown,
                 epoch_tick_interval_ms,
                 http_ready_tx,
             } = request;
+            let native_plugin_context =
+                NativePluginContext::new(service_name, release_hash, runner_id, app_type);
 
             match app_type {
                 RunnerAppType::Cli => {
@@ -452,6 +1289,9 @@ impl ComponentRuntime for WasmRuntime {
                         &args,
                         &envs,
                         None,
+                        native_plugin_context.clone(),
+                        &plugin_dependencies,
+                        &capabilities,
                         shutdown,
                         epoch_tick_interval_ms,
                     )
@@ -467,6 +1307,9 @@ impl ComponentRuntime for WasmRuntime {
                         &component_path,
                         &args,
                         &envs,
+                        native_plugin_context.clone(),
+                        &plugin_dependencies,
+                        &capabilities,
                         shutdown,
                         epoch_tick_interval_ms,
                         http_ready_tx,
@@ -484,6 +1327,9 @@ impl ComponentRuntime for WasmRuntime {
                         &args,
                         &envs,
                         Some(socket),
+                        native_plugin_context,
+                        &plugin_dependencies,
+                        &capabilities,
                         shutdown,
                         epoch_tick_interval_ms,
                     )
@@ -580,6 +1426,10 @@ fn map_runtime_error(message: String) -> ImagodError {
     ImagodError::new(ErrorCode::Internal, STAGE_RUNTIME, message)
 }
 
+fn map_runtime_unauthorized_error(message: String) -> ImagodError {
+    ImagodError::new(ErrorCode::Unauthorized, STAGE_RUNTIME, message)
+}
+
 /// Waits until shutdown flag is set or sender side is dropped.
 async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
     loop {
@@ -599,7 +1449,7 @@ mod tests {
         RunnerAppType, RunnerSocketConfig, RunnerSocketDirection, RunnerSocketProtocol,
     };
     use imagod_runtime_internal::{RuntimeHttpRequest, RuntimeRunRequest};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::net::SocketAddr;
     use std::path::PathBuf;
 
@@ -612,6 +1462,214 @@ mod tests {
         }
     }
 
+    #[test]
+    fn resolve_import_provider_prefers_self_component() {
+        let self_exports = BTreeSet::from(["chikoski:name/name-provider".to_string()]);
+        let explicit_names = BTreeSet::from(["chikoski:name".to_string()]);
+        let available_plugins = BTreeMap::from([(
+            "chikoski:name".to_string(),
+            AvailablePlugin {
+                kind: PluginKind::Native,
+                instance: None,
+            },
+        )]);
+
+        let provider = resolve_import_provider(
+            "chikoski:hello",
+            "chikoski:name/name-provider",
+            &self_exports,
+            &explicit_names,
+            &available_plugins,
+            true,
+        )
+        .expect("self provider should resolve");
+        assert_eq!(provider, ImportProvider::SelfComponent);
+    }
+
+    #[test]
+    fn resolve_import_provider_falls_back_to_explicit_dependency() {
+        let self_exports = BTreeSet::new();
+        let explicit_names = BTreeSet::from(["chikoski:name".to_string()]);
+        let available_plugins = BTreeMap::from([(
+            "chikoski:name".to_string(),
+            AvailablePlugin {
+                kind: PluginKind::Native,
+                instance: None,
+            },
+        )]);
+
+        let provider = resolve_import_provider(
+            "chikoski:hello",
+            "chikoski:name/name-provider",
+            &self_exports,
+            &explicit_names,
+            &available_plugins,
+            true,
+        )
+        .expect("explicit dependency fallback should resolve");
+        assert_eq!(
+            provider,
+            ImportProvider::Dependency("chikoski:name".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_import_provider_reports_unresolved_import() {
+        let err = resolve_import_provider(
+            "chikoski:hello",
+            "chikoski:name/name-provider",
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+            true,
+        )
+        .expect_err("missing provider should fail");
+        assert!(
+            err.message.contains("caller='chikoski:hello'")
+                && err.message.contains("import='chikoski:name/name-provider'")
+                && err.message.contains("checked=self")
+                && err.message.contains("result=not-found"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn collect_implicit_provider_indices_uses_explicit_dep_when_self_missing() {
+        let by_name = BTreeMap::from([
+            ("chikoski:hello".to_string(), 0usize),
+            ("chikoski:name".to_string(), 1usize),
+        ]);
+        let import_names = vec!["chikoski:name/name-provider".to_string()];
+        let indices = collect_implicit_provider_indices(
+            "chikoski:hello",
+            &import_names,
+            &BTreeSet::new(),
+            &by_name,
+        );
+        assert_eq!(indices, BTreeSet::from([1usize]));
+    }
+
+    #[test]
+    fn collect_implicit_provider_indices_skips_when_self_exports_interface() {
+        let by_name = BTreeMap::from([
+            ("chikoski:hello".to_string(), 0usize),
+            ("chikoski:name".to_string(), 1usize),
+        ]);
+        let import_names = vec!["chikoski:name/name-provider".to_string()];
+        let self_exports = BTreeSet::from(["chikoski:name/name-provider".to_string()]);
+        let indices = collect_implicit_provider_indices(
+            "chikoski:hello",
+            &import_names,
+            &self_exports,
+            &by_name,
+        );
+        assert!(
+            indices.is_empty(),
+            "self export should suppress implicit edge"
+        );
+    }
+
+    #[test]
+    fn collect_implicit_provider_indices_supports_nested_dependency_package_name() {
+        let by_name = BTreeMap::from([
+            ("yieldspace:plugin/hello".to_string(), 0usize),
+            ("yieldspace:plugin/example".to_string(), 1usize),
+        ]);
+        let import_names = vec!["yieldspace:plugin/example/admin".to_string()];
+        let indices = collect_implicit_provider_indices(
+            "yieldspace:plugin/hello",
+            &import_names,
+            &BTreeSet::new(),
+            &by_name,
+        );
+        assert_eq!(indices, BTreeSet::from([1usize]));
+    }
+
+    #[test]
+    fn wasi_capability_denies_when_policy_is_empty() {
+        let allowed = is_wasi_function_allowed(
+            &CapabilityPolicy::default(),
+            "wasi:cli/environment",
+            "get-environment",
+        );
+        assert!(!allowed, "empty policy should deny wasi function");
+    }
+
+    #[test]
+    fn wasi_capability_allows_when_privileged() {
+        let policy = CapabilityPolicy {
+            privileged: true,
+            deps: BTreeMap::new(),
+            wasi: BTreeMap::new(),
+        };
+        let allowed = is_wasi_function_allowed(&policy, "wasi:cli/environment", "get-environment");
+        assert!(allowed, "privileged policy should allow all wasi calls");
+    }
+
+    #[test]
+    fn wasi_capability_allows_when_rule_is_wildcard() {
+        let policy = CapabilityPolicy {
+            privileged: false,
+            deps: BTreeMap::new(),
+            wasi: BTreeMap::from([("wasi:cli/environment".to_string(), vec!["*".to_string()])]),
+        };
+        let allowed = is_wasi_function_allowed(&policy, "wasi:cli/environment", "get-environment");
+        assert!(allowed, "wildcard rule should allow wasi function");
+    }
+
+    #[test]
+    fn wasi_capability_rejects_unlisted_function() {
+        let policy = CapabilityPolicy {
+            privileged: false,
+            deps: BTreeMap::new(),
+            wasi: BTreeMap::from([(
+                "wasi:cli/environment".to_string(),
+                vec!["get-arguments".to_string()],
+            )]),
+        };
+        let allowed = is_wasi_function_allowed(&policy, "wasi:cli/environment", "get-environment");
+        assert!(!allowed, "unlisted function should be denied");
+    }
+
+    #[test]
+    fn wasi_capability_denial_maps_to_unauthorized() {
+        let err = ensure_wasi_function_allowed(
+            "app",
+            &CapabilityPolicy::default(),
+            "wasi:cli/environment",
+            "get-environment",
+        )
+        .expect_err("empty policy should deny wasi function");
+        assert_eq!(err.code, ErrorCode::Unauthorized);
+        assert!(
+            err.message.contains("capability denied caller 'app'"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn native_plugin_app_type_text_is_stable() {
+        assert_eq!(app_type_text(RunnerAppType::Cli), "cli");
+        assert_eq!(app_type_text(RunnerAppType::Http), "http");
+        assert_eq!(app_type_text(RunnerAppType::Socket), "socket");
+    }
+
+    #[test]
+    fn native_plugin_context_stores_runner_metadata() {
+        let context = NativePluginContext::new(
+            "svc-test".to_string(),
+            "release-test".to_string(),
+            "runner-test".to_string(),
+            RunnerAppType::Http,
+        );
+        assert_eq!(context.service_name(), "svc-test");
+        assert_eq!(context.release_hash(), "release-test");
+        assert_eq!(context.runner_id(), "runner-test");
+        assert_eq!(context.app_type(), "http");
+    }
+
     #[tokio::test]
     async fn socket_type_requires_socket_config() {
         let runtime = WasmRuntime::new().expect("runtime should initialize");
@@ -619,10 +1677,15 @@ mod tests {
         let err = runtime
             .run_component(RuntimeRunRequest {
                 app_type: RunnerAppType::Socket,
+                runner_id: "runner-test".to_string(),
+                service_name: "svc-test".to_string(),
+                release_hash: "release-test".to_string(),
                 component_path: PathBuf::from("/tmp/unused.wasm"),
                 args: Vec::new(),
                 envs: BTreeMap::new(),
                 socket: None,
+                plugin_dependencies: Vec::new(),
+                capabilities: CapabilityPolicy::default(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: 50,
                 http_ready_tx: None,
@@ -644,10 +1707,15 @@ mod tests {
         let err = runtime
             .run_component(RuntimeRunRequest {
                 app_type: RunnerAppType::Socket,
+                runner_id: "runner-test".to_string(),
+                service_name: "svc-test".to_string(),
+                release_hash: "release-test".to_string(),
                 component_path: PathBuf::from("/tmp/non-existent-socket-component.wasm"),
                 args: Vec::new(),
                 envs: BTreeMap::new(),
                 socket: Some(sample_socket_config()),
+                plugin_dependencies: Vec::new(),
+                capabilities: CapabilityPolicy::default(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: 50,
                 http_ready_tx: None,
@@ -669,10 +1737,15 @@ mod tests {
         let err = runtime
             .run_component(RuntimeRunRequest {
                 app_type: RunnerAppType::Http,
+                runner_id: "runner-test".to_string(),
+                service_name: "svc-test".to_string(),
+                release_hash: "release-test".to_string(),
                 component_path: PathBuf::from("/tmp/non-existent-http-component.wasm"),
                 args: Vec::new(),
                 envs: BTreeMap::new(),
                 socket: None,
+                plugin_dependencies: Vec::new(),
+                capabilities: CapabilityPolicy::default(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: 50,
                 http_ready_tx: None,

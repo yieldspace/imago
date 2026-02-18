@@ -31,7 +31,7 @@ use web_transport_quinn::{Session, proto::ConnectRequest};
 
 use crate::{
     cli::DeployArgs,
-    commands::{CommandResult, build},
+    commands::{CommandResult, build, dependency_cache},
 };
 
 const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
@@ -114,6 +114,8 @@ struct Manifest {
     app_type: String,
     #[serde(default)]
     assets: Vec<ManifestAsset>,
+    #[serde(default)]
+    dependencies: Vec<build::ManifestDependency>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,13 +182,20 @@ async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> 
     let restart_policy = build_output.restart_policy;
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).context("failed to parse manifest json")?;
+    let dependency_component_sources =
+        resolve_dependency_component_sources(project_root, &manifest).await?;
 
     let target = build_output
         .target
         .require_deploy_credentials()
         .context("target settings are invalid for deploy")?;
 
-    let artifact = build_artifact_bundle_file(&manifest, &manifest_path, project_root)?;
+    let artifact = build_artifact_bundle_file(
+        &manifest,
+        &manifest_path,
+        project_root,
+        &dependency_component_sources,
+    )?;
     let (artifact_digest, artifact_size) = compute_file_sha256_and_size(artifact.path())?;
     let manifest_digest = hex::encode(Sha256::digest(&manifest_bytes));
     let correlation_id = Uuid::new_v4();
@@ -1041,6 +1050,7 @@ fn build_artifact_bundle_file(
     manifest: &Manifest,
     manifest_source: &Path,
     project_root: &Path,
+    dependency_component_sources: &BTreeMap<String, PathBuf>,
 ) -> anyhow::Result<TempArtifactBundle> {
     let bundle_path = std::env::temp_dir().join(format!("imago-artifact-{}.tar", Uuid::new_v4()));
     let bundle_file = std::fs::File::create(&bundle_path).with_context(|| {
@@ -1073,9 +1083,98 @@ fn build_artifact_bundle_file(
             &asset_entry,
         )?;
     }
+    for (index, dependency) in manifest.dependencies.iter().enumerate() {
+        if dependency.kind != build::ManifestDependencyKind::Wasm {
+            continue;
+        }
+        let component = dependency.component.as_ref().ok_or_else(|| {
+            anyhow!("dependencies[{index}].component is required when kind=\"wasm\"")
+        })?;
+        let normalized_component = normalize_bundle_entry_path(
+            &component.path,
+            &format!("dependencies[{index}].component.path"),
+        )?;
+        let component_entry = normalized_tar_entry_name(&normalized_component);
+        let source_path = dependency_component_sources
+            .get(&dependency.name)
+            .cloned()
+            .unwrap_or_else(|| project_root.join(&normalized_component));
+        add_file_to_tar(&mut builder, source_path, &component_entry)?;
+    }
     builder.finish()?;
 
     Ok(TempArtifactBundle::new(bundle_path))
+}
+
+async fn resolve_dependency_component_sources(
+    project_root: &Path,
+    manifest: &Manifest,
+) -> anyhow::Result<BTreeMap<String, PathBuf>> {
+    let mut sources = BTreeMap::new();
+    if !manifest
+        .dependencies
+        .iter()
+        .any(|dep| dep.kind == build::ManifestDependencyKind::Wasm)
+    {
+        return Ok(sources);
+    }
+
+    let lock = imago_lockfile::load_from_project_root(project_root)?;
+    let lock_by_name = lock
+        .dependencies
+        .into_iter()
+        .map(|entry| (entry.name.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+
+    for dependency in &manifest.dependencies {
+        if dependency.kind != build::ManifestDependencyKind::Wasm {
+            continue;
+        }
+
+        let component = dependency.component.as_ref().ok_or_else(|| {
+            anyhow!(
+                "manifest dependency '{}' is missing component; run `imago update`",
+                dependency.name
+            )
+        })?;
+        let lock_entry = lock_by_name.get(&dependency.name).ok_or_else(|| {
+            anyhow!(
+                "dependency '{}' is not resolved in imago.lock; run `imago update`",
+                dependency.name
+            )
+        })?;
+        lock_entry.component_source.as_deref().ok_or_else(|| {
+            anyhow!(
+                "dependency '{}' component source is missing in imago.lock; run `imago update`",
+                dependency.name
+            )
+        })?;
+        let sha = lock_entry.component_sha256.as_deref().ok_or_else(|| {
+            anyhow!(
+                "dependency '{}' component sha256 is missing in imago.lock; run `imago update`",
+                dependency.name
+            )
+        })?;
+        if component.sha256 != sha {
+            return Err(anyhow!(
+                "dependency '{}' component hash mismatch (manifest='{}', lock='{}'); run `imago update`",
+                dependency.name,
+                component.sha256,
+                sha
+            ));
+        }
+        let cache_path =
+            dependency_cache::resolve_cached_component_path(project_root, &dependency.name, sha)
+                .with_context(|| {
+                    format!(
+                        "failed to resolve cached component bytes for dependency '{}'",
+                        dependency.name
+                    )
+                })?;
+        sources.insert(dependency.name.clone(), cache_path);
+    }
+
+    Ok(sources)
 }
 
 fn normalize_bundle_entry_path(raw: &str, field_name: &str) -> anyhow::Result<PathBuf> {
@@ -1225,7 +1324,54 @@ fn decode_frames(value: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use crate::commands::dependency_cache;
+    use imago_lockfile::{IMAGO_LOCK_VERSION, ImagoLock, ImagoLockDependency};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+
+    fn new_temp_dir(test_name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "imago-cli-deploy-tests-{test_name}-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("temp dir should be created");
+        root
+    }
+
+    fn write_file(path: &Path, bytes: &[u8]) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("parent dir should be created");
+        }
+        fs::write(path, bytes).expect("file should be written");
+    }
+
+    fn write_imago_lock(root: &Path, lock: &ImagoLock) {
+        let body = toml::to_string_pretty(lock).expect("lock should serialize");
+        write_file(&root.join("imago.lock"), body.as_bytes());
+    }
+
+    fn sample_manifest_with_wasm_dependency(name: &str, sha256: &str) -> Manifest {
+        Manifest {
+            name: "svc".to_string(),
+            main: "app.wasm".to_string(),
+            app_type: "cli".to_string(),
+            assets: vec![],
+            dependencies: vec![build::ManifestDependency {
+                name: name.to_string(),
+                version: "0.1.0".to_string(),
+                kind: build::ManifestDependencyKind::Wasm,
+                wit: "file://registry/example.wit".to_string(),
+                requires: vec![],
+                component: Some(build::ManifestDependencyComponent {
+                    path: format!("plugins/components/{sha256}.wasm"),
+                    sha256: sha256.to_string(),
+                }),
+                capabilities: build::ManifestCapabilityPolicy::default(),
+            }],
+        }
+    }
 
     #[test]
     fn maps_unknown_ca_transport_error_to_e_unauthorized() {
@@ -1336,6 +1482,122 @@ mod tests {
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.expect("stderr should be present");
         assert!(stderr.contains("failed to run build before deploy"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn resolve_dependency_component_sources_reads_component_from_dependency_cache() {
+        let root = new_temp_dir("dependency-cache-hit");
+        let component_bytes = b"\0asmcached-component";
+        let component_sha = hex::encode(Sha256::digest(component_bytes));
+
+        write_imago_lock(
+            &root,
+            &ImagoLock {
+                version: IMAGO_LOCK_VERSION,
+                dependencies: vec![ImagoLockDependency {
+                    name: "yieldspace:plugin/example".to_string(),
+                    version: "0.1.0".to_string(),
+                    wit_source: "file://registry/example.wit".to_string(),
+                    wit_registry: None,
+                    wit_digest: "deadbeef".to_string(),
+                    wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
+                    component_source: Some("file://registry/example-component.wasm".to_string()),
+                    component_registry: None,
+                    component_sha256: Some(component_sha.clone()),
+                    resolved_at: "0".to_string(),
+                }],
+                wit_packages: vec![],
+            },
+        );
+
+        let cache_entry = dependency_cache::DependencyCacheEntry {
+            name: "yieldspace:plugin/example".to_string(),
+            version: "0.1.0".to_string(),
+            kind: "wasm".to_string(),
+            wit_source: "file://registry/example.wit".to_string(),
+            wit_registry: None,
+            wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
+            wit_digest: "deadbeef".to_string(),
+            wit_source_fingerprint: None,
+            component_source: Some("file://registry/example-component.wasm".to_string()),
+            component_registry: None,
+            component_sha256: Some(component_sha.clone()),
+            component_source_fingerprint: None,
+            transitive_packages: vec![],
+        };
+        dependency_cache::save_entry(&root, &cache_entry)
+            .expect("dependency cache metadata should be written");
+        write_file(
+            &dependency_cache::cache_component_path(
+                &root,
+                "yieldspace:plugin/example",
+                &component_sha,
+            ),
+            component_bytes,
+        );
+
+        let manifest =
+            sample_manifest_with_wasm_dependency("yieldspace:plugin/example", &component_sha);
+        let sources = resolve_dependency_component_sources(&root, &manifest)
+            .await
+            .expect("dependency component should resolve from cache");
+        let resolved = sources
+            .get("yieldspace:plugin/example")
+            .expect("resolved source should exist");
+        assert_eq!(
+            resolved,
+            &dependency_cache::cache_component_path(
+                &root,
+                "yieldspace:plugin/example",
+                &component_sha
+            )
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn resolve_dependency_component_sources_fails_when_dependency_cache_is_missing() {
+        let root = new_temp_dir("dependency-cache-miss");
+        let component_bytes = b"\0asmcached-component";
+        let component_sha = hex::encode(Sha256::digest(component_bytes));
+
+        write_imago_lock(
+            &root,
+            &ImagoLock {
+                version: IMAGO_LOCK_VERSION,
+                dependencies: vec![ImagoLockDependency {
+                    name: "yieldspace:plugin/example".to_string(),
+                    version: "0.1.0".to_string(),
+                    wit_source: "file://registry/example.wit".to_string(),
+                    wit_registry: None,
+                    wit_digest: "deadbeef".to_string(),
+                    wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
+                    component_source: Some("file://registry/example-component.wasm".to_string()),
+                    component_registry: None,
+                    component_sha256: Some(component_sha.clone()),
+                    resolved_at: "0".to_string(),
+                }],
+                wit_packages: vec![],
+            },
+        );
+
+        let manifest =
+            sample_manifest_with_wasm_dependency("yieldspace:plugin/example", &component_sha);
+        let err = resolve_dependency_component_sources(&root, &manifest)
+            .await
+            .expect_err("missing dependency cache must fail");
+        let err_chain = format!("{err:#}");
+        assert!(
+            err_chain.contains(".imago/deps"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            err_chain.contains("imago update"),
+            "unexpected error: {err:#}"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1671,10 +1933,16 @@ mod tests {
             main: hashed_main.to_string(),
             app_type: "cli".to_string(),
             assets: vec![],
+            dependencies: vec![],
         };
 
-        let bundle = build_artifact_bundle_file(&manifest, Path::new("build/manifest.json"), &root)
-            .expect("bundle should be created");
+        let bundle = build_artifact_bundle_file(
+            &manifest,
+            Path::new("build/manifest.json"),
+            &root,
+            &BTreeMap::new(),
+        )
+        .expect("bundle should be created");
 
         let file = std::fs::File::open(bundle.path()).expect("bundle file should open");
         let mut archive = tar::Archive::new(file);
@@ -1702,10 +1970,16 @@ mod tests {
             main: "../evil.wasm".to_string(),
             app_type: "cli".to_string(),
             assets: vec![],
+            dependencies: vec![],
         };
 
-        let err = build_artifact_bundle_file(&manifest, Path::new("build/manifest.json"), &root)
-            .expect_err("unsafe manifest.main should be rejected");
+        let err = build_artifact_bundle_file(
+            &manifest,
+            Path::new("build/manifest.json"),
+            &root,
+            &BTreeMap::new(),
+        )
+        .expect_err("unsafe manifest.main should be rejected");
         assert!(err.to_string().contains("manifest.main"));
 
         let _ = fs::remove_dir_all(root);
@@ -1725,10 +1999,16 @@ mod tests {
             assets: vec![ManifestAsset {
                 path: "../secret.txt".to_string(),
             }],
+            dependencies: vec![],
         };
 
-        let err = build_artifact_bundle_file(&manifest, Path::new("build/manifest.json"), &root)
-            .expect_err("unsafe asset path should be rejected");
+        let err = build_artifact_bundle_file(
+            &manifest,
+            Path::new("build/manifest.json"),
+            &root,
+            &BTreeMap::new(),
+        )
+        .expect_err("unsafe asset path should be rejected");
         assert!(err.to_string().contains("assets[].path"));
 
         let _ = fs::remove_dir_all(root);

@@ -12,6 +12,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Commands {
     Build(BuildArgs),
+    Update(UpdateArgs),
     Deploy(DeployArgs),
     Run(RunArgs),
     Stop(StopArgs),
@@ -27,6 +28,9 @@ pub struct BuildArgs {
     #[arg(long, value_name = "TARGET_NAME", default_value = "default")]
     pub target: String,
 }
+
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct UpdateArgs {}
 
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct DeployArgs {
@@ -140,6 +144,18 @@ mod tests {
                     env: Some("prod".to_string()),
                     target: "edge".to_string(),
                 }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_update_without_options() {
+        let cli = Cli::try_parse_from(["imago", "update"]).expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Commands::Update(UpdateArgs {}),
             }
         );
     }

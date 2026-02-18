@@ -36,13 +36,14 @@
 7. `ServiceSupervisor::new`（manager control socket 起動）
 8. `Orchestrator::new`
 9. `build_server` で WebTransport サーバ構築
-10. `Orchestrator::restore_active_services_on_boot`（`restart_policy=always` かつ `active_release` を持つ service を best-effort で自動復元）
-11. `ProtocolHandler::new`
-12. maintenance loop 起動
-13. `accept` ループで session task を `tokio::spawn`
-14. runner モード:
-15. stdin から `RunnerBootstrap` を読込
-16. `create_runtime_backend`（`runtime-wasmtime` 有効時は `WasmRuntime::new`） + component 実行
+10. `Orchestrator::gc_unused_plugin_components_on_boot`（active release 未参照の plugin component cache を削除）
+11. `Orchestrator::restore_active_services_on_boot`（`restart_policy=always` かつ `active_release` を持つ service を best-effort で自動復元）
+12. `ProtocolHandler::new`
+13. maintenance loop 起動
+14. `accept` ループで session task を `tokio::spawn`
+15. runner モード:
+16. stdin から `RunnerBootstrap` を読込
+17. `create_runtime_backend`（`runtime-wasmtime` 有効時は `WasmRuntime::new_with_native_plugins`） + component 実行
 
 ```mermaid
 flowchart TD
@@ -244,11 +245,13 @@ deploy 経路の要点:
 - manifest/hash 検証
 - `manifest.name` は `[A-Za-z0-9._-]` のみ許可し、path separator/traversal を拒否
 - `manifest.main` は相対パスのみ許可し、絶対/`..`/Windows prefix を拒否
+- `manifest.dependencies(kind=wasm)` は `component.sha256` を検証し、`storage_root/plugins/components/<sha256>.wasm` へ配置（同 hash 再利用）
 - release ID は `sha256(artifact_digest文字列)` の 64 hex を採用（16桁切り詰めはしない）
 - `expected_current_release` は CAS で検証（`any` は比較スキップ、不一致は `E_PRECONDITION_FAILED`）
 - `restart_policy` は `never` / `on-failure` / `always` / `unless-stopped` を受理し、未知値は `E_BAD_REQUEST`
 - deploy 成功時に `services/<name>/restart_policy` を更新する
 - manager 起動時の復元対象は `restart_policy=always` の service のみ
+- manager 起動時に active release 参照集合を元に plugin component cache GC を実行
 - `services/<name>/<release_hash>/` 配置
 - 旧 release cleanup
 - release 配置は `staging -> release` を安全な swap で実施し、失敗時は backup から復元する
@@ -314,6 +317,7 @@ backend 選択:
 
 - `imagod-runtime` は feature `runtime-wasmtime`（default ON）で backend を有効化する。
 - runner は `create_runtime_backend()` で backend を生成する。
+- runner bootstrap には `plugin_dependencies` / `capabilities` が含まれ、runtime bridge の認可入力として利用する。
 - feature OFF 時は runner 起動時に `E_INTERNAL` / `stage=runner.process` で明示的に失敗する。
 
 設定:
@@ -330,6 +334,15 @@ backend 選択:
   - `socket`: `cli` 分岐と同じ `wasi:cli/run` を実行しつつ、`socket` 設定に基づいて `WasiCtxBuilder` の socket policy を構成する
 - `cli` 分岐では `wasmtime_wasi::p2::add_to_linker_async` を利用する
 - `http` 分岐では `wasmtime_wasi_http::add_only_http_to_linker_async` を併用する
+- native plugin は `NativePlugin` trait と `NativePluginRegistryBuilder` で明示登録する。
+  - descriptor（package/import/symbol/add_to_linker）は `imago-plugin-macros` が WIT から生成する。
+  - plugin 実装本体は workspace 直下 `plugins/*` crate で管理する（初期実装は `plugins/imago-admin`）。
+  - `kind=native` dependency が registry 未登録なら起動時に明示エラーで停止する。
+- native plugin `imago:admin@0.1.0` は `wasmtime::component::bindgen!` 生成の `add_to_linker` で登録する。
+  - import 名は `imago:admin/runtime@0.1.0`。
+  - 提供関数は `service-name` / `release-hash` / `runner-id` / `app-type` の 4 つ。
+  - 値は `RunnerBootstrap`（`service_name` / `release_hash` / `runner_id` / `app_type`）から供給する。
+  - 関数呼び出し前の capability 判定は既存 `capabilities.deps` を利用する。
 - `Store::set_epoch_deadline(1)`
 - `Store::epoch_deadline_async_yield_and_update(1)`
 

@@ -25,6 +25,7 @@ use tokio::{
     time::{self, Duration},
 };
 
+use crate::NativePluginRegistry;
 #[cfg(feature = "runtime-wasmtime")]
 use crate::WasmRuntime;
 use crate::runtime::{
@@ -102,6 +103,13 @@ impl Drop for SocketCleanupGuard {
 /// The function registers the runner with manager, serves inbound IPC requests,
 /// emits heartbeat signals, and exits when the component finishes or shutdown is requested.
 pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
+    run_runner_from_stdin_with_registry(NativePluginRegistry::default()).await
+}
+
+/// Starts runner mode with a caller-provided native plugin registry.
+pub async fn run_runner_from_stdin_with_registry(
+    native_plugin_registry: NativePluginRegistry,
+) -> Result<(), ImagodError> {
     let bootstrap = read_runner_bootstrap(tokio::io::stdin()).await?;
 
     prepare_socket_path(&bootstrap.runner_endpoint)?;
@@ -117,7 +125,7 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
     })?;
     let _socket_cleanup_guard = SocketCleanupGuard::new(bootstrap.runner_endpoint.clone());
 
-    let runtime = create_runtime_backend()?;
+    let runtime = create_runtime_backend(&native_plugin_registry)?;
     runtime.validate_component(&bootstrap.component_path)?;
 
     register_runner(&bootstrap).await?;
@@ -142,10 +150,15 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
         runtime_for_run
             .run_component(RuntimeRunRequest {
                 app_type: bootstrap_for_run.app_type,
+                runner_id: bootstrap_for_run.runner_id.clone(),
+                service_name: bootstrap_for_run.service_name.clone(),
+                release_hash: bootstrap_for_run.release_hash.clone(),
                 component_path: bootstrap_for_run.component_path.clone(),
                 args: bootstrap_for_run.args.clone(),
                 envs: bootstrap_for_run.envs.clone(),
                 socket: bootstrap_for_run.socket.clone(),
+                plugin_dependencies: bootstrap_for_run.plugin_dependencies.clone(),
+                capabilities: bootstrap_for_run.capabilities.clone(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: bootstrap_for_run.epoch_tick_interval_ms,
                 http_ready_tx,
@@ -277,10 +290,14 @@ pub async fn run_runner_from_stdin() -> Result<(), ImagodError> {
     run_result
 }
 
-fn create_runtime_backend() -> Result<Arc<dyn ComponentRuntime>, ImagodError> {
+fn create_runtime_backend(
+    native_plugin_registry: &NativePluginRegistry,
+) -> Result<Arc<dyn ComponentRuntime>, ImagodError> {
     #[cfg(feature = "runtime-wasmtime")]
     {
-        Ok(Arc::new(WasmRuntime::new()?))
+        Ok(Arc::new(WasmRuntime::new_with_native_plugins(
+            native_plugin_registry.clone(),
+        )?))
     }
 
     #[cfg(not(feature = "runtime-wasmtime"))]
@@ -1121,7 +1138,7 @@ mod tests {
     #[cfg(not(feature = "runtime-wasmtime"))]
     #[test]
     fn runtime_backend_disabled_returns_explicit_error() {
-        let err = match create_runtime_backend() {
+        let err = match create_runtime_backend(&NativePluginRegistry::default()) {
             Ok(_) => panic!("backend creation should fail when runtime-wasmtime is disabled"),
             Err(err) => err,
         };
@@ -1181,6 +1198,8 @@ mod tests {
             args: Vec::new(),
             envs: BTreeMap::new(),
             bindings: Vec::new(),
+            plugin_dependencies: Vec::new(),
+            capabilities: imagod_ipc::CapabilityPolicy::default(),
             manager_control_endpoint: root.join("manager-control.sock"),
             runner_endpoint: root.join(runner_socket_name),
             manager_auth_secret: random_secret_hex(),

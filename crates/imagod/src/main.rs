@@ -5,9 +5,12 @@
 
 use std::{path::PathBuf, sync::Arc};
 
+use imago_plugin_imago_admin::ImagoAdminPlugin;
 use imagod_config::{ImagodConfig, resolve_config_path};
 use imagod_control::{ArtifactStore, OperationManager, Orchestrator, ServiceSupervisor};
-use imagod_runtime::run_runner_from_stdin;
+use imagod_runtime::{
+    NativePluginRegistry, NativePluginRegistryBuilder, run_runner_from_stdin_with_registry,
+};
 use imagod_server::{ProtocolHandler, build_server};
 use web_transport_quinn::http::StatusCode;
 
@@ -26,9 +29,19 @@ async fn dispatch() -> Result<(), anyhow::Error> {
     install_rustls_provider();
     let cli = parse_cli_args()?;
     match cli.mode {
-        RunMode::Runner => run_runner_from_stdin().await.map_err(anyhow::Error::new),
+        RunMode::Runner => run_runner_from_stdin_with_registry(builtin_native_plugin_registry()?)
+            .await
+            .map_err(anyhow::Error::new),
         RunMode::Manager => run_manager(cli.config_path).await,
     }
+}
+
+fn builtin_native_plugin_registry() -> Result<NativePluginRegistry, anyhow::Error> {
+    let mut builder = NativePluginRegistryBuilder::new();
+    builder
+        .register_plugin(Arc::new(ImagoAdminPlugin))
+        .map_err(anyhow::Error::new)?;
+    Ok(builder.build())
 }
 
 async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyhow::Error> {
@@ -56,6 +69,17 @@ async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyhow::Error> 
     .map_err(anyhow::Error::new)?;
     let orchestrator = Orchestrator::new(&config.storage_root, artifacts.clone(), supervisor);
     let mut server = build_server(&config).map_err(anyhow::Error::new)?;
+    match orchestrator.gc_unused_plugin_components_on_boot().await {
+        Ok(()) => {
+            eprintln!("plugin component cache gc completed");
+        }
+        Err(err) => {
+            eprintln!(
+                "plugin component cache gc failed code={:?} stage={} message={}",
+                err.code, err.stage, err.message
+            );
+        }
+    }
     match orchestrator.restore_active_services_on_boot().await {
         Ok(summary) => {
             for started in &summary.started {

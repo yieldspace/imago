@@ -1,0 +1,25 @@
+name = "local-imagod-plugin-native-admin-app"
+main = "target/wasm32-wasip2/release/local-imagod-plugin-native-admin-app.wasm"
+type = "cli"
+
+[build]
+command = "CARGO_TARGET_DIR=target cargo build --target wasm32-wasip2 --release"
+
+[[dependencies]]
+name = "imago:admin"
+version = "0.1.0"
+kind = "native"
+wit = "file://../../plugins/imago-admin/wit"
+
+[capabilities]
+privileged = true
+
+[capabilities.deps]
+"imago:admin" = ["*"]
+
+[target.default]
+remote = "127.0.0.1:4443"
+server_name = "localhost"
+ca_cert = "certs/ca.crt"
+client_cert = "certs/client.crt"
+client_key = "certs/client.key"

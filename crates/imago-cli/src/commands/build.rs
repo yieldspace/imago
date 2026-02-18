@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
     net::IpAddr,
@@ -8,12 +8,16 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
+use imago_lockfile::{ComponentExpectation, DependencyExpectation};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use toml::Value as TomlValue;
 
-use crate::{cli::BuildArgs, commands::CommandResult};
+use crate::{
+    cli::BuildArgs,
+    commands::{CommandResult, dependency_cache, plugin_sources},
+};
 
 const DEFAULT_TARGET_NAME: &str = "default";
 const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
@@ -99,7 +103,9 @@ struct Manifest {
     http: Option<ManifestHttp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     socket: Option<ManifestSocket>,
-    dependencies: Vec<JsonValue>,
+    dependencies: Vec<ManifestDependency>,
+    #[serde(default, skip_serializing_if = "ManifestCapabilityPolicy::is_empty")]
+    capabilities: ManifestCapabilityPolicy,
     hash: ManifestHash,
 }
 
@@ -114,6 +120,73 @@ struct ManifestAsset {
 struct ManifestBinding {
     target: String,
     wit: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ManifestDependencyKind {
+    Native,
+    Wasm,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ManifestDependencyComponent {
+    pub path: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectDependencySource {
+    pub source: String,
+    pub registry: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectDependencyComponent {
+    pub source: String,
+    pub registry: Option<String>,
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub(crate) struct ManifestCapabilityPolicy {
+    #[serde(default)]
+    pub privileged: bool,
+    #[serde(default)]
+    pub deps: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub wasi: BTreeMap<String, Vec<String>>,
+}
+
+impl ManifestCapabilityPolicy {
+    pub(crate) fn is_empty(&self) -> bool {
+        !self.privileged && self.deps.is_empty() && self.wasi.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ManifestDependency {
+    pub name: String,
+    pub version: String,
+    pub kind: ManifestDependencyKind,
+    pub wit: String,
+    #[serde(default)]
+    pub requires: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component: Option<ManifestDependencyComponent>,
+    #[serde(default, skip_serializing_if = "ManifestCapabilityPolicy::is_empty")]
+    pub capabilities: ManifestCapabilityPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectDependency {
+    pub name: String,
+    pub version: String,
+    pub kind: ManifestDependencyKind,
+    pub wit: ProjectDependencySource,
+    pub requires: Vec<String>,
+    pub component: Option<ProjectDependencyComponent>,
+    pub capabilities: ManifestCapabilityPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,7 +313,14 @@ pub fn build_project(
 
     let vars = parse_string_table(root.get("vars"), "vars")?;
     let bindings = parse_bindings(root.get("bindings"))?;
-    let dependencies = parse_dependencies(root.get("dependencies"))?;
+    let project_dependencies = parse_project_dependencies(root.get("dependencies"))?;
+    if !project_dependencies.is_empty() {
+        dependency_cache::hydrate_project_wit_deps(project_root, &project_dependencies)
+            .context("failed to hydrate dependency cache")?;
+    }
+    let capabilities = parse_root_capabilities(&root)?;
+    let dependencies =
+        resolve_manifest_dependencies_from_lock(project_root, &project_dependencies)?;
     let target = parse_target(&root, target_name, project_root)?;
 
     run_build_command(command.as_ref(), project_root, &secrets)?;
@@ -269,6 +349,7 @@ pub fn build_project(
         http,
         socket,
         dependencies,
+        capabilities,
         hash: ManifestHash {
             algorithm: "sha256".to_string(),
             value: String::new(),
@@ -805,7 +886,14 @@ fn parse_string_table(
     Ok(map)
 }
 
-fn parse_dependencies(value: Option<&TomlValue>) -> anyhow::Result<Vec<JsonValue>> {
+pub(crate) fn load_project_dependencies(
+    project_root: &Path,
+) -> anyhow::Result<Vec<ProjectDependency>> {
+    let root = load_resolved_toml(project_root, None)?;
+    parse_project_dependencies(root.get("dependencies"))
+}
+
+fn parse_project_dependencies(value: Option<&TomlValue>) -> anyhow::Result<Vec<ProjectDependency>> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
@@ -814,10 +902,398 @@ fn parse_dependencies(value: Option<&TomlValue>) -> anyhow::Result<Vec<JsonValue
         .as_array()
         .ok_or_else(|| anyhow!("dependencies must be an array"))?;
     let mut dependencies = Vec::with_capacity(array.len());
-    for item in array {
-        dependencies.push(toml_to_json_normalized(item)?);
+    let mut names = BTreeSet::new();
+
+    for (index, item) in array.iter().enumerate() {
+        let table = item
+            .as_table()
+            .ok_or_else(|| anyhow!("dependencies[{index}] must be a table"))?;
+
+        let name = table
+            .get("name")
+            .and_then(TomlValue::as_str)
+            .ok_or_else(|| anyhow!("dependencies[{index}].name must be a string"))?
+            .trim()
+            .to_string();
+        validate_dependency_package_name(&name)
+            .map_err(|err| anyhow!("dependencies[{index}].name is invalid: {err}"))?;
+        if !names.insert(name.clone()) {
+            return Err(anyhow!(
+                "dependencies contains duplicate dependency name: {name}"
+            ));
+        }
+
+        let version = table
+            .get("version")
+            .and_then(TomlValue::as_str)
+            .ok_or_else(|| anyhow!("dependencies[{index}].version must be a string"))?
+            .trim()
+            .to_string();
+        if version.is_empty() {
+            return Err(anyhow!("dependencies[{index}].version must not be empty"));
+        }
+
+        let kind = match table
+            .get("kind")
+            .and_then(TomlValue::as_str)
+            .ok_or_else(|| anyhow!("dependencies[{index}].kind must be a string"))?
+            .trim()
+        {
+            "native" => ManifestDependencyKind::Native,
+            "wasm" => ManifestDependencyKind::Wasm,
+            other => {
+                return Err(anyhow!(
+                    "dependencies[{index}].kind must be one of: native, wasm (got: {other})"
+                ));
+            }
+        };
+
+        let wit = parse_dependency_wit_source(table.get("wit"), index, &name, &version)
+            .with_context(|| {
+                format!("failed to parse dependencies[{index}].wit source configuration")
+            })?;
+
+        let requires = match table.get("requires") {
+            None => Vec::new(),
+            Some(value) => {
+                let array = value
+                    .as_array()
+                    .ok_or_else(|| anyhow!("dependencies[{index}].requires must be an array"))?;
+                let mut values = Vec::with_capacity(array.len());
+                for (req_index, req) in array.iter().enumerate() {
+                    let req = req
+                        .as_str()
+                        .ok_or_else(|| {
+                            anyhow!("dependencies[{index}].requires[{req_index}] must be a string")
+                        })?
+                        .trim()
+                        .to_string();
+                    if req.is_empty() {
+                        return Err(anyhow!(
+                            "dependencies[{index}].requires[{req_index}] must not be empty"
+                        ));
+                    }
+                    validate_dependency_package_name(&req).map_err(|err| {
+                        anyhow!("dependencies[{index}].requires[{req_index}] is invalid: {err}")
+                    })?;
+                    values.push(req);
+                }
+                normalize_string_list(values)
+            }
+        };
+
+        let capabilities = parse_capability_policy(
+            table.get("capabilities"),
+            &format!("dependencies[{index}].capabilities"),
+        )?;
+
+        let component = match table.get("component") {
+            None => None,
+            Some(value) => {
+                let component_table = value
+                    .as_table()
+                    .ok_or_else(|| anyhow!("dependencies[{index}].component must be a table"))?;
+                if component_table.contains_key("path") {
+                    return Err(anyhow!(
+                        "dependencies[{index}].component.path is no longer supported; use dependencies[{index}].component.source"
+                    ));
+                }
+                for key in component_table.keys() {
+                    if !matches!(key.as_str(), "source" | "registry" | "sha256") {
+                        return Err(anyhow!(
+                            "dependencies[{index}].component.{key} is not supported"
+                        ));
+                    }
+                }
+
+                let source = component_table
+                    .get("source")
+                    .and_then(TomlValue::as_str)
+                    .ok_or_else(|| {
+                        anyhow!("dependencies[{index}].component.source must be a string")
+                    })?
+                    .trim()
+                    .to_string();
+                if source.is_empty() {
+                    return Err(anyhow!(
+                        "dependencies[{index}].component.source must not be empty"
+                    ));
+                }
+                plugin_sources::validate_component_source(
+                    &source,
+                    &format!("dependencies[{index}].component.source"),
+                )?;
+
+                let registry = match component_table.get("registry") {
+                    None => None,
+                    Some(value) => Some(
+                        value
+                            .as_str()
+                            .ok_or_else(|| {
+                                anyhow!("dependencies[{index}].component.registry must be a string")
+                            })?
+                            .trim()
+                            .to_string(),
+                    ),
+                };
+                let registry = plugin_sources::normalize_registry_for_source(
+                    &source,
+                    registry.as_deref(),
+                    &format!("dependencies[{index}].component"),
+                )?;
+
+                let sha256 = match component_table.get("sha256") {
+                    None => None,
+                    Some(value) => {
+                        let sha = value
+                            .as_str()
+                            .ok_or_else(|| {
+                                anyhow!("dependencies[{index}].component.sha256 must be a string")
+                            })?
+                            .trim()
+                            .to_string();
+                        if sha.is_empty() {
+                            return Err(anyhow!(
+                                "dependencies[{index}].component.sha256 must not be empty"
+                            ));
+                        }
+                        plugin_sources::validate_sha256_hex(
+                            &sha,
+                            &format!("dependencies[{index}].component.sha256"),
+                        )?;
+                        Some(sha)
+                    }
+                };
+
+                Some(ProjectDependencyComponent {
+                    source,
+                    registry,
+                    sha256,
+                })
+            }
+        };
+
+        match kind {
+            ManifestDependencyKind::Native => {
+                if component.is_some() {
+                    return Err(anyhow!(
+                        "dependencies[{index}].component is only allowed when kind=\"wasm\""
+                    ));
+                }
+            }
+            ManifestDependencyKind::Wasm => {}
+        }
+
+        dependencies.push(ProjectDependency {
+            name,
+            version,
+            kind,
+            wit,
+            requires,
+            component,
+            capabilities,
+        });
     }
+
     Ok(dependencies)
+}
+
+fn parse_dependency_wit_source(
+    value: Option<&TomlValue>,
+    index: usize,
+    name: &str,
+    version: &str,
+) -> anyhow::Result<ProjectDependencySource> {
+    let default_source = format!("warg://{name}@{version}");
+    let default_registry = Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string());
+
+    let (source, registry) = match value {
+        None => (default_source, default_registry),
+        Some(TomlValue::String(text)) => {
+            let source = text.trim().to_string();
+            if source.is_empty() {
+                return Err(anyhow!("dependencies[{index}].wit must not be empty"));
+            }
+            plugin_sources::validate_wit_source(&source, &format!("dependencies[{index}].wit"))?;
+            let registry = plugin_sources::normalize_registry_for_source(
+                &source,
+                None,
+                &format!("dependencies[{index}].wit"),
+            )?;
+            (source, registry)
+        }
+        Some(TomlValue::Table(table)) => {
+            for key in table.keys() {
+                if !matches!(key.as_str(), "source" | "registry") {
+                    return Err(anyhow!("dependencies[{index}].wit.{key} is not supported"));
+                }
+            }
+
+            let source = table
+                .get("source")
+                .and_then(TomlValue::as_str)
+                .ok_or_else(|| anyhow!("dependencies[{index}].wit.source must be a string"))?
+                .trim()
+                .to_string();
+            if source.is_empty() {
+                return Err(anyhow!(
+                    "dependencies[{index}].wit.source must not be empty"
+                ));
+            }
+            plugin_sources::validate_wit_source(
+                &source,
+                &format!("dependencies[{index}].wit.source"),
+            )?;
+
+            let registry = match table.get("registry") {
+                None => None,
+                Some(value) => Some(
+                    value
+                        .as_str()
+                        .ok_or_else(|| {
+                            anyhow!("dependencies[{index}].wit.registry must be a string")
+                        })?
+                        .trim()
+                        .to_string(),
+                ),
+            };
+            let registry = plugin_sources::normalize_registry_for_source(
+                &source,
+                registry.as_deref(),
+                &format!("dependencies[{index}].wit"),
+            )?;
+            (source, registry)
+        }
+        Some(_) => {
+            return Err(anyhow!(
+                "dependencies[{index}].wit must be a string or a table"
+            ));
+        }
+    };
+
+    Ok(ProjectDependencySource { source, registry })
+}
+
+fn parse_root_capabilities(root: &toml::Table) -> anyhow::Result<ManifestCapabilityPolicy> {
+    if root.contains_key("capabilirties") {
+        return Err(anyhow!("unknown key 'capabilirties'; use 'capabilities'"));
+    }
+    parse_capability_policy(root.get("capabilities"), "capabilities")
+}
+
+fn parse_capability_policy(
+    value: Option<&TomlValue>,
+    field_name: &str,
+) -> anyhow::Result<ManifestCapabilityPolicy> {
+    let Some(value) = value else {
+        return Ok(ManifestCapabilityPolicy::default());
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| anyhow!("{field_name} must be a table"))?;
+
+    for key in table.keys() {
+        if !matches!(key.as_str(), "privileged" | "deps" | "wasi") {
+            return Err(anyhow!("{field_name}.{key} is not supported"));
+        }
+    }
+
+    let privileged = match table.get("privileged") {
+        None => false,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| anyhow!("{field_name}.privileged must be a boolean"))?,
+    };
+
+    let deps = parse_capability_rule_table(table.get("deps"), &format!("{field_name}.deps"))?;
+    let wasi = parse_capability_rule_table(table.get("wasi"), &format!("{field_name}.wasi"))?;
+
+    Ok(ManifestCapabilityPolicy {
+        privileged,
+        deps,
+        wasi,
+    })
+}
+
+fn parse_capability_rule_table(
+    value: Option<&TomlValue>,
+    field_name: &str,
+) -> anyhow::Result<BTreeMap<String, Vec<String>>> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| anyhow!("{field_name} must be a table"))?;
+
+    let mut normalized = BTreeMap::new();
+    for (key, value) in table {
+        if key.trim().is_empty() {
+            return Err(anyhow!("{field_name} contains an empty key"));
+        }
+        let rules = parse_capability_rule_list(value, &format!("{field_name}.{key}"))?;
+        if !rules.is_empty() {
+            normalized.insert(key.clone(), rules);
+        }
+    }
+    Ok(normalized)
+}
+
+fn parse_capability_rule_list(value: &TomlValue, field_name: &str) -> anyhow::Result<Vec<String>> {
+    let array = value
+        .as_array()
+        .ok_or_else(|| anyhow!("{field_name} must be an array of strings"))?;
+    let mut rules = Vec::with_capacity(array.len());
+    for (index, value) in array.iter().enumerate() {
+        let text = value
+            .as_str()
+            .ok_or_else(|| anyhow!("{field_name}[{index}] must be a string"))?
+            .trim()
+            .to_string();
+        if text.is_empty() {
+            return Err(anyhow!("{field_name}[{index}] must not be empty"));
+        }
+        rules.push(text);
+    }
+    Ok(normalize_string_list(rules))
+}
+
+fn normalize_string_list(values: Vec<String>) -> Vec<String> {
+    let mut set = BTreeSet::new();
+    for value in values {
+        let value = value.trim();
+        if !value.is_empty() {
+            set.insert(value.to_string());
+        }
+    }
+    set.into_iter().collect()
+}
+
+fn validate_dependency_package_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() {
+        return Err(anyhow!("must not be empty"));
+    }
+    if name.contains('\\') || name.contains("..") {
+        return Err(anyhow!("contains invalid path characters: {name}"));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/'))
+    {
+        return Err(anyhow!("contains unsupported characters: {name}"));
+    }
+    if name
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err(anyhow!("contains invalid path components: {name}"));
+    }
+    for component in Path::new(name).components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err(anyhow!("contains invalid path components: {name}"));
+        }
+    }
+    Ok(())
 }
 
 fn parse_bindings(value: Option<&TomlValue>) -> anyhow::Result<Vec<ManifestBinding>> {
@@ -1096,6 +1572,146 @@ fn compute_sha256_hex(path: &Path) -> anyhow::Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+pub(crate) fn compute_path_digest_hex(path: &Path) -> anyhow::Result<String> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("failed to read path for digest: {}", path.display()))?;
+    if metadata.is_file() {
+        return compute_sha256_hex(path);
+    }
+    if !metadata.is_dir() {
+        return Err(anyhow!("path is not file or directory: {}", path.display()));
+    }
+
+    let mut stack = vec![path.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)
+            .with_context(|| format!("failed to read directory for digest: {}", dir.display()))?
+        {
+            let entry = entry.with_context(|| {
+                format!(
+                    "failed to read directory entry while hashing {}",
+                    dir.display()
+                )
+            })?;
+            let entry_path = entry.path();
+            let entry_metadata = entry
+                .metadata()
+                .with_context(|| format!("failed to read metadata for {}", entry_path.display()))?;
+            if entry_metadata.is_dir() {
+                stack.push(entry_path);
+            } else if entry_metadata.is_file() {
+                files.push(entry_path);
+            }
+        }
+    }
+    files.sort();
+
+    let mut hasher = Sha256::new();
+    for file in files {
+        let rel = file
+            .strip_prefix(path)
+            .with_context(|| format!("failed to relativize digest path: {}", file.display()))?;
+        hasher.update(normalized_path_to_string(rel).as_bytes());
+        hasher.update([0]);
+        hash_file_into(&mut hasher, &file, "directory digest file")?;
+        hasher.update([0]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn resolve_manifest_dependencies_from_lock(
+    project_root: &Path,
+    dependencies: &[ProjectDependency],
+) -> anyhow::Result<Vec<ManifestDependency>> {
+    if dependencies.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let lock = imago_lockfile::load_from_project_root(project_root)?;
+    let mut expectations = Vec::with_capacity(dependencies.len());
+    for dep in dependencies {
+        expectations.push(DependencyExpectation {
+            name: dep.name.clone(),
+            version: dep.version.clone(),
+            wit_source: dep.wit.source.clone(),
+            wit_registry: dep.wit.registry.clone(),
+            component: expected_component_for_dependency(dep)?,
+        });
+    }
+    let resolved_by_name =
+        imago_lockfile::resolve_dependencies(project_root, &lock, &expectations)?;
+
+    let mut manifest_dependencies = Vec::with_capacity(dependencies.len());
+    for dep in dependencies {
+        let entry = resolved_by_name.get(&dep.name).ok_or_else(|| {
+            anyhow!(
+                "dependency '{}' is not resolved in imago.lock; run `imago update`",
+                dep.name
+            )
+        })?;
+
+        let component = match dep.kind {
+            ManifestDependencyKind::Native => None,
+            ManifestDependencyKind::Wasm => {
+                let lock_component_sha = entry.component_sha256.as_ref().ok_or_else(|| {
+                    anyhow!(
+                        "dependency '{}' component sha256 is missing in imago.lock; run `imago update`",
+                        dep.name
+                    )
+                })?;
+                Some(ManifestDependencyComponent {
+                    path: format!("plugins/components/{lock_component_sha}.wasm"),
+                    sha256: lock_component_sha.clone(),
+                })
+            }
+        };
+
+        manifest_dependencies.push(ManifestDependency {
+            name: dep.name.clone(),
+            version: dep.version.clone(),
+            kind: dep.kind,
+            wit: dep.wit.source.clone(),
+            requires: dep.requires.clone(),
+            component,
+            capabilities: dep.capabilities.clone(),
+        });
+    }
+    Ok(manifest_dependencies)
+}
+
+fn expected_component_for_dependency(
+    dependency: &ProjectDependency,
+) -> anyhow::Result<Option<ComponentExpectation>> {
+    match dependency.kind {
+        ManifestDependencyKind::Native => Ok(None),
+        ManifestDependencyKind::Wasm => {
+            if let Some(component) = dependency.component.as_ref() {
+                return Ok(Some(ComponentExpectation {
+                    source: component.source.clone(),
+                    registry: component.registry.clone(),
+                    sha256: component.sha256.clone(),
+                }));
+            }
+            let (source, registry) = plugin_sources::expected_component_identity_from_wit_source(
+                &dependency.wit.source,
+                dependency.wit.registry.as_deref(),
+            )
+            .with_context(|| {
+                format!(
+                    "dependency '{}' omits component settings but wit source '{}' cannot be mapped to a component source",
+                    dependency.name, dependency.wit.source
+                )
+            })?;
+            Ok(Some(ComponentExpectation {
+                source,
+                registry,
+                sha256: None,
+            }))
+        }
+    }
+}
+
 fn hash_file_into(hasher: &mut Sha256, path: &Path, context_label: &str) -> anyhow::Result<()> {
     let mut file = fs::File::open(path)
         .with_context(|| format!("failed to read {}: {}", context_label, path.display()))?;
@@ -1192,6 +1808,14 @@ pub fn default_target_name() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        cli::UpdateArgs,
+        commands::{dependency_cache, update},
+    };
+    use imago_lockfile::{
+        IMAGO_LOCK_VERSION, ImagoLock, ImagoLockDependency, ImagoLockWitPackage,
+        ImagoLockWitPackageVersion,
+    };
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
         let unique = format!(
@@ -1219,9 +1843,51 @@ mod tests {
         write_file(&root.join("imago.toml"), body.as_bytes());
     }
 
+    fn write_imago_lock(root: &Path, lock: &ImagoLock) {
+        let encoded = toml::to_string_pretty(lock).expect("lock should serialize");
+        write_file(&root.join("imago.lock"), encoded.as_bytes());
+    }
+
     fn read_manifest(root: &Path, relative_path: &Path) -> Manifest {
         let bytes = fs::read(root.join(relative_path)).expect("manifest should exist");
         serde_json::from_slice(&bytes).expect("manifest json should parse")
+    }
+
+    fn run_update(root: &Path) {
+        let result = update::run_with_project_root(UpdateArgs {}, root);
+        assert_eq!(
+            result.exit_code, 0,
+            "imago update should succeed before build tests: {:?}",
+            result.stderr
+        );
+    }
+
+    fn copy_tree(source: &Path, destination: &Path) {
+        let metadata = fs::metadata(source)
+            .unwrap_or_else(|_| panic!("source must exist: {}", source.display()));
+        if metadata.is_file() {
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent).expect("destination parent should be created");
+            }
+            fs::copy(source, destination).unwrap_or_else(|_| {
+                panic!(
+                    "failed to copy source file {} -> {}",
+                    source.display(),
+                    destination.display()
+                )
+            });
+            return;
+        }
+        if !metadata.is_dir() {
+            panic!("source is not file/dir: {}", source.display());
+        }
+        fs::create_dir_all(destination).expect("destination dir should be created");
+        for entry in fs::read_dir(source).expect("source directory should be readable") {
+            let entry = entry.expect("source directory entry should be readable");
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            copy_tree(&source_path, &destination_path);
+        }
     }
 
     fn assert_hashed_main_path(manifest: &Manifest, service_name: &str) -> PathBuf {
@@ -1939,6 +2605,854 @@ remote = "127.0.0.1:4443"
         let err = build_project(None, "default", &root)
             .expect_err("build must fail when bindings.wit is missing");
         assert!(err.to_string().contains("bindings[0].wit"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_capabilirties_typo_key() {
+        let root = new_temp_dir("capability-typo");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[capabilirties]
+privileged = true
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project(None, "default", &root).expect_err("typo key must be rejected");
+        assert!(err.to_string().contains("capabilirties"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_requires_imago_lock_for_dependencies() {
+        let root = new_temp_dir("dependencies-lock-required");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("registry/example.wit"),
+            b"package test:example;\n",
+        );
+        run_update(&root);
+        fs::remove_file(root.join("imago.lock")).expect("lock should be removable");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("build should fail when lock is missing");
+        assert!(err.to_string().contains("imago.lock is missing"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rehydrates_wit_deps_from_dependency_cache() {
+        let root = new_temp_dir("dependencies-rehydrate-wit-deps");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("registry/example.wit"),
+            b"package test:example;\n",
+        );
+        run_update(&root);
+        fs::remove_dir_all(root.join("wit/deps")).expect("wit/deps should be removable");
+
+        build_project(None, "default", &root)
+            .expect("build should succeed by hydrating wit/deps from dependency cache");
+        assert!(
+            root.join("wit/deps/yieldspace-plugin/example/example.wit")
+                .exists(),
+            "wit/deps must be rehydrated from dependency cache before lock validation"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_fails_when_dependency_cache_is_missing() {
+        let root = new_temp_dir("dependencies-cache-required");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("registry/example.wit"),
+            b"package test:example;\n",
+        );
+        run_update(&root);
+        fs::remove_dir_all(root.join(".imago/deps")).expect("dependency cache should be removable");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("build should fail when dependency cache is missing");
+        let err_chain = format!("{err:#}");
+        assert!(
+            err_chain.contains(".imago/deps"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            err_chain.contains("run `imago update`"),
+            "unexpected error: {err:#}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_dependency_name_with_absolute_path_component() {
+        let root = new_temp_dir("dependency-name-absolute-path");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "/tmp/pwn"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("absolute dependency package name must fail");
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains("dependencies[0].name is invalid"),
+            "unexpected error: {err_text}"
+        );
+        assert!(
+            err_text.contains("invalid path components"),
+            "unexpected error: {err_text}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_dependency_name_with_normalized_path_segments() {
+        let root = new_temp_dir("dependency-name-normalized-segments");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/./example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("dependency package with normalized path segment must fail");
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains("dependencies[0].name is invalid"),
+            "unexpected error: {err_text}"
+        );
+        assert!(
+            err_text.contains("invalid path components"),
+            "unexpected error: {err_text}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_dependency_requires_with_absolute_path_component() {
+        let root = new_temp_dir("dependency-requires-absolute-path");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+requires = ["/tmp/pwn"]
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("absolute dependency requirement must fail");
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains("dependencies[0].requires[0] is invalid"),
+            "unexpected error: {err_text}"
+        );
+        assert!(
+            err_text.contains("invalid path components"),
+            "unexpected error: {err_text}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_imago_lock_version_mismatch() {
+        let root = new_temp_dir("dependencies-lock-version-mismatch");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("registry/example.wit"),
+            b"package test:example;\n",
+        );
+        run_update(&root);
+        let mut lock: ImagoLock = toml::from_str(
+            &fs::read_to_string(root.join("imago.lock")).expect("lock should exist"),
+        )
+        .expect("lock should parse");
+        lock.version = 2;
+        write_imago_lock(&root, &lock);
+
+        let err = build_project(None, "default", &root)
+            .expect_err("build should reject unsupported lock version");
+        assert!(
+            err.to_string()
+                .contains("imago.lock version '2' is not supported")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_wit_package_with_unknown_via_dependency() {
+        let root = new_temp_dir("dependencies-transitive-via-unknown");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("registry/example.wit"),
+            b"package test:example;\n",
+        );
+        write_file(
+            &root.join("wit/deps/yieldspace-plugin/example/example.wit"),
+            b"package test:example;\n",
+        );
+        write_file(
+            &root.join("wit/deps/test-dep/package.wit"),
+            b"package test:dep; interface dep { pong: func() -> string; }\n",
+        );
+        let digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace-plugin/example"))
+            .expect("wit digest should compute");
+        let transitive_digest = format!(
+            "sha256:{}",
+            compute_sha256_hex(&root.join("wit/deps/test-dep/package.wit"))
+                .expect("transitive digest should compute")
+        );
+        write_imago_lock(
+            &root,
+            &ImagoLock {
+                version: IMAGO_LOCK_VERSION,
+                dependencies: vec![ImagoLockDependency {
+                    name: "yieldspace:plugin/example".to_string(),
+                    version: "0.1.0".to_string(),
+                    wit_source: "file://registry/example.wit".to_string(),
+                    wit_registry: None,
+                    wit_digest: digest.clone(),
+                    wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
+                    component_source: None,
+                    component_registry: None,
+                    component_sha256: None,
+                    resolved_at: "0".to_string(),
+                }],
+                wit_packages: vec![ImagoLockWitPackage {
+                    name: "test:dep".to_string(),
+                    registry: None,
+                    versions: vec![ImagoLockWitPackageVersion {
+                        requirement: "*".to_string(),
+                        version: None,
+                        digest: transitive_digest.clone(),
+                        source: None,
+                        path: "wit/deps/test-dep".to_string(),
+                        via: vec!["yieldspace:plugin/other".to_string()],
+                    }],
+                }],
+            },
+        );
+        let cache_entry = dependency_cache::DependencyCacheEntry {
+            name: "yieldspace:plugin/example".to_string(),
+            version: "0.1.0".to_string(),
+            kind: "native".to_string(),
+            wit_source: "file://registry/example.wit".to_string(),
+            wit_registry: None,
+            wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
+            wit_digest: digest,
+            wit_source_fingerprint: None,
+            component_source: None,
+            component_registry: None,
+            component_sha256: None,
+            component_source_fingerprint: None,
+            transitive_packages: vec![dependency_cache::DependencyCacheTransitivePackage {
+                name: "test:dep".to_string(),
+                registry: None,
+                requirement: "*".to_string(),
+                version: None,
+                digest: transitive_digest,
+                source: None,
+                path: "wit/deps/test-dep".to_string(),
+            }],
+        };
+        let cache_root = dependency_cache::cache_entry_root(&root, "yieldspace:plugin/example");
+        copy_tree(
+            &root.join("wit/deps/yieldspace-plugin/example"),
+            &cache_root.join("wit/deps/yieldspace-plugin/example"),
+        );
+        copy_tree(
+            &root.join("wit/deps/test-dep"),
+            &cache_root.join("wit/deps/test-dep"),
+        );
+        dependency_cache::save_entry(&root, &cache_entry)
+            .expect("dependency cache should be written");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("build should reject unknown via dependency");
+        assert!(err.to_string().contains("via contains unknown dependency"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_legacy_dependency_component_path_field() {
+        let root = new_temp_dir("dependency-component-legacy-path");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "wasm"
+wit = "file://registry/example.wit"
+
+[dependencies.component]
+path = "plugins/example.wasm"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("registry/example.wit"),
+            b"package test:example;\n",
+        );
+
+        let err = build_project(None, "default", &root)
+            .expect_err("legacy component.path must be rejected");
+        assert!(
+            err.to_string()
+                .contains("component.path is no longer supported")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_emits_typed_dependencies_and_capabilities_when_lock_matches() {
+        let root = new_temp_dir("dependencies-capabilities-typed");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[capabilities]
+privileged = false
+
+[capabilities.deps]
+"yieldspace:plugin/example" = ["*"]
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("registry/example.wit"),
+            b"package test:example;\n",
+        );
+        run_update(&root);
+
+        let output = build_project(None, "default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(manifest.dependencies[0].name, "yieldspace:plugin/example");
+        assert!(matches!(
+            manifest.dependencies[0].kind,
+            ManifestDependencyKind::Native
+        ));
+        assert_eq!(
+            manifest
+                .capabilities
+                .deps
+                .get("yieldspace:plugin/example")
+                .cloned(),
+            Some(vec!["*".to_string()])
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_transitive_wit_package_digest_mismatch() {
+        let root = new_temp_dir("dependencies-transitive-lock-digest-mismatch");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("registry/example.wit"),
+            b"package test:example;\n",
+        );
+        write_file(
+            &root.join("wit/deps/yieldspace-plugin/example/example.wit"),
+            b"package test:example;\n",
+        );
+        write_file(
+            &root.join("wit/deps/test-dep/package.wit"),
+            b"package test:dep; interface dep { pong: func() -> string; }\n",
+        );
+
+        let digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace-plugin/example"))
+            .expect("wit digest should compute");
+        let actual_transitive_digest = format!(
+            "sha256:{}",
+            compute_sha256_hex(&root.join("wit/deps/test-dep/package.wit"))
+                .expect("transitive digest should compute")
+        );
+        write_imago_lock(
+            &root,
+            &ImagoLock {
+                version: IMAGO_LOCK_VERSION,
+                dependencies: vec![ImagoLockDependency {
+                    name: "yieldspace:plugin/example".to_string(),
+                    version: "0.1.0".to_string(),
+                    wit_source: "file://registry/example.wit".to_string(),
+                    wit_registry: None,
+                    wit_digest: digest.clone(),
+                    wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
+                    component_source: None,
+                    component_registry: None,
+                    component_sha256: None,
+                    resolved_at: "0".to_string(),
+                }],
+                wit_packages: vec![ImagoLockWitPackage {
+                    name: "test:dep".to_string(),
+                    registry: None,
+                    versions: vec![ImagoLockWitPackageVersion {
+                        requirement: "*".to_string(),
+                        version: None,
+                        digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                            .to_string(),
+                        source: None,
+                        path: "wit/deps/test-dep".to_string(),
+                        via: vec!["yieldspace:plugin/example".to_string()],
+                    }],
+                }],
+            },
+        );
+        let cache_entry = dependency_cache::DependencyCacheEntry {
+            name: "yieldspace:plugin/example".to_string(),
+            version: "0.1.0".to_string(),
+            kind: "native".to_string(),
+            wit_source: "file://registry/example.wit".to_string(),
+            wit_registry: None,
+            wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
+            wit_digest: digest,
+            wit_source_fingerprint: None,
+            component_source: None,
+            component_registry: None,
+            component_sha256: None,
+            component_source_fingerprint: None,
+            transitive_packages: vec![dependency_cache::DependencyCacheTransitivePackage {
+                name: "test:dep".to_string(),
+                registry: None,
+                requirement: "*".to_string(),
+                version: None,
+                digest: actual_transitive_digest,
+                source: None,
+                path: "wit/deps/test-dep".to_string(),
+            }],
+        };
+        let cache_root = dependency_cache::cache_entry_root(&root, "yieldspace:plugin/example");
+        copy_tree(
+            &root.join("wit/deps/yieldspace-plugin/example"),
+            &cache_root.join("wit/deps/yieldspace-plugin/example"),
+        );
+        copy_tree(
+            &root.join("wit/deps/test-dep"),
+            &cache_root.join("wit/deps/test-dep"),
+        );
+        dependency_cache::save_entry(&root, &cache_entry)
+            .expect("dependency cache should be written");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("build should reject transitive lock digest mismatch");
+        assert!(
+            err.to_string()
+                .contains("lock digest mismatch for transitive wit package 'test:dep'"),
+            "unexpected error: {err:#}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_emits_wasm_component_path_from_lock_hash() {
+        let root = new_temp_dir("dependencies-wasm-component-from-lock");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "wasm"
+wit = "file://registry/example.wit"
+
+[dependencies.component]
+source = "file://registry/example-plugin.wasm"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("registry/example.wit"),
+            b"package test:example;\n",
+        );
+        let plugin_bytes = b"\0asmplugin";
+        write_file(&root.join("registry/example-plugin.wasm"), plugin_bytes);
+        run_update(&root);
+        let lock: ImagoLock = toml::from_str(
+            &fs::read_to_string(root.join("imago.lock")).expect("lock should exist"),
+        )
+        .expect("lock should parse");
+        let plugin_sha = lock.dependencies[0]
+            .component_sha256
+            .clone()
+            .expect("component sha should be resolved");
+
+        let output = build_project(None, "default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        assert_eq!(manifest.dependencies.len(), 1);
+        let component = manifest.dependencies[0]
+            .component
+            .as_ref()
+            .expect("wasm dependency must include component");
+        assert_eq!(component.sha256, plugin_sha);
+        assert_eq!(
+            component.path,
+            format!("plugins/components/{}.wasm", component.sha256)
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_emits_wasm_component_path_when_component_is_omitted_in_config() {
+        let root = new_temp_dir("dependencies-wasm-component-derived-from-wit");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "wasm"
+wit = "warg://chikoski:hello@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("wit/deps/chikoski-hello/package.wit"),
+            b"package chikoski:hello@0.1.0;\n",
+        );
+        let wit_digest =
+            compute_path_digest_hex(&root.join("wit/deps/chikoski-hello")).expect("wit digest");
+        let component_bytes = b"\0asmderived-component";
+        let plugin_sha = hex::encode(Sha256::digest(component_bytes));
+        write_imago_lock(
+            &root,
+            &ImagoLock {
+                version: IMAGO_LOCK_VERSION,
+                dependencies: vec![ImagoLockDependency {
+                    name: "chikoski:hello".to_string(),
+                    version: "0.1.0".to_string(),
+                    wit_source: "warg://chikoski:hello@0.1.0".to_string(),
+                    wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
+                    wit_digest: wit_digest.clone(),
+                    wit_path: "wit/deps/chikoski-hello".to_string(),
+                    component_source: Some("warg://chikoski:hello@0.1.0".to_string()),
+                    component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
+                    component_sha256: Some(plugin_sha.clone()),
+                    resolved_at: "0".to_string(),
+                }],
+                wit_packages: vec![],
+            },
+        );
+        let cache_entry = dependency_cache::DependencyCacheEntry {
+            name: "chikoski:hello".to_string(),
+            version: "0.1.0".to_string(),
+            kind: "wasm".to_string(),
+            wit_source: "warg://chikoski:hello@0.1.0".to_string(),
+            wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
+            wit_path: "wit/deps/chikoski-hello".to_string(),
+            wit_digest,
+            wit_source_fingerprint: None,
+            component_source: Some("warg://chikoski:hello@0.1.0".to_string()),
+            component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
+            component_sha256: Some(plugin_sha.clone()),
+            component_source_fingerprint: None,
+            transitive_packages: vec![],
+        };
+        let cache_root = dependency_cache::cache_entry_root(&root, "chikoski:hello");
+        copy_tree(
+            &root.join("wit/deps/chikoski-hello"),
+            &cache_root.join("wit/deps/chikoski-hello"),
+        );
+        write_file(
+            &dependency_cache::cache_component_path(&root, "chikoski:hello", &plugin_sha),
+            component_bytes,
+        );
+        dependency_cache::save_entry(&root, &cache_entry)
+            .expect("dependency cache should be written");
+
+        let output = build_project(None, "default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        let component = manifest.dependencies[0]
+            .component
+            .as_ref()
+            .expect("wasm dependency must include component");
+        assert_eq!(
+            component.path,
+            format!("plugins/components/{}.wasm", component.sha256)
+        );
+        assert_eq!(component.sha256, plugin_sha);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_component_source_mismatch_when_component_is_omitted_in_config() {
+        let root = new_temp_dir("dependencies-wasm-component-mismatch-derived");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "wasm"
+wit = "warg://chikoski:hello@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("wit/deps/chikoski-hello/package.wit"),
+            b"package chikoski:hello@0.1.0;\n",
+        );
+        let wit_digest =
+            compute_path_digest_hex(&root.join("wit/deps/chikoski-hello")).expect("wit digest");
+        let component_bytes = b"\0asmderived-component";
+        let plugin_sha = hex::encode(Sha256::digest(component_bytes));
+        write_imago_lock(
+            &root,
+            &ImagoLock {
+                version: IMAGO_LOCK_VERSION,
+                dependencies: vec![ImagoLockDependency {
+                    name: "chikoski:hello".to_string(),
+                    version: "0.1.0".to_string(),
+                    wit_source: "warg://chikoski:hello@0.1.0".to_string(),
+                    wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
+                    wit_digest: wit_digest.clone(),
+                    wit_path: "wit/deps/chikoski-hello".to_string(),
+                    component_source: Some("warg://chikoski:other@0.1.0".to_string()),
+                    component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
+                    component_sha256: Some(plugin_sha.clone()),
+                    resolved_at: "0".to_string(),
+                }],
+                wit_packages: vec![],
+            },
+        );
+        let cache_entry = dependency_cache::DependencyCacheEntry {
+            name: "chikoski:hello".to_string(),
+            version: "0.1.0".to_string(),
+            kind: "wasm".to_string(),
+            wit_source: "warg://chikoski:hello@0.1.0".to_string(),
+            wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
+            wit_path: "wit/deps/chikoski-hello".to_string(),
+            wit_digest,
+            wit_source_fingerprint: None,
+            component_source: Some("warg://chikoski:hello@0.1.0".to_string()),
+            component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
+            component_sha256: Some(plugin_sha.clone()),
+            component_source_fingerprint: None,
+            transitive_packages: vec![],
+        };
+        let cache_root = dependency_cache::cache_entry_root(&root, "chikoski:hello");
+        copy_tree(
+            &root.join("wit/deps/chikoski-hello"),
+            &cache_root.join("wit/deps/chikoski-hello"),
+        );
+        write_file(
+            &dependency_cache::cache_component_path(&root, "chikoski:hello", &plugin_sha),
+            component_bytes,
+        );
+        dependency_cache::save_entry(&root, &cache_entry)
+            .expect("dependency cache should be written");
+
+        let err = build_project(None, "default", &root)
+            .expect_err("build should fail when derived component source mismatches lock");
+        assert!(err.to_string().contains("component source mismatch"));
 
         let _ = fs::remove_dir_all(root);
     }

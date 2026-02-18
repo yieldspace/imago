@@ -68,6 +68,41 @@
 - `imago build` はこの設定を `manifest.bindings[]` に正規化して出力する。
 - 未指定時は `manifest.bindings=[]` として扱い、runtime は deny-by-default で拒否する。
 
+## `[[dependencies]]`（プラグイン依存）
+
+- `[[dependencies]]` は plugin 依存を定義する。
+- 各要素は以下を受理する。
+  - `name` (必須): package 名
+    - 許可文字は ASCII 英数字、`.`、`_`、`-`、`:`, `/`。
+    - `/` は package 階層表現として許可するが、path component は `Normal` のみ許可する（先頭 `/`、drive prefix、`./`、`../` などは拒否）。
+  - `version` (必須): version 文字列
+  - `kind` (必須): `native` / `wasm`
+  - `wit` (任意): string または table
+    - string は `file://...` / `warg://...` を受理
+    - table は `wit.source`（必須）+ `wit.registry`（任意）を受理
+    - 未指定時は `wit.source = "warg://{name}@{version}"` / `wit.registry = "wa.dev"`
+  - `requires` (任意): 依存 plugin package 名配列（明示依存の宣言）
+    - 各要素のバリデーションは `name` と同一。
+  - `component.source` (任意, `kind=wasm` の場合): `file://...` / `warg://...`
+    - `wit` source が component ではない場合は指定が必要
+  - `component.registry` (任意, `kind=wasm` の場合): `warg://` の registry（省略時 `wa.dev`）
+  - `component.sha256` (任意, `kind=wasm` の場合): 指定時は `imago update` で照合
+  - `capabilities` (任意): この plugin が caller になる場合の認可ルール
+- `imago update` は依存の WIT/Component を `.imago/deps/<sanitized dependency>/` に保存し、そこから `wit/deps/` を再生成する。`imago.lock (version=1)` には `wit_source` / `wit_registry` / `wit_digest` / `wit_path` / `resolved_at` を固定する。`wit_path` の依存名サニタイズは wkg 準拠で `:` / `@` を `-` に置換する。
+- `warg://` の direct dependency で WIT 側に version が書かれている場合は、`warg://...@version` と一致している必要がある。
+- `warg://` の WIT package が transitive import を含む場合、依存パッケージも `wit/deps/<package>/package.wit` に展開し、`imago.lock.[[wit_packages]]` に `name` / `registry` / `[[versions]]` (`requirement` / `version` / `digest` / `source` / `path` / `via`) を固定する。
+- `dependencies[].wit.source` が `file://...` の場合、`wit/deps` 配下を指す source は禁止する（`imago update` が `wit/deps` を再生成するため）。
+- 複数 dependency が同一 `wit/deps` 出力先へ解決される場合、`imago update` は衝突として失敗する。
+- `warg://` source が plain `.wit` 形式で foreign import を含む場合は `imago update` を失敗させる（WIT package 形式が必要）。
+- `kind=wasm` かつ `component` 未指定で `wit` source が component の場合、`imago update` は component から WIT を抽出し、lock の `component_*` を自動固定する。
+- `kind=wasm` かつ `component` 未指定で `wit` source が component に解釈できない場合、`imago update` は失敗する。
+- `kind=wasm` では `imago.lock` に `component_source` / `component_registry` / `component_sha256` も固定し、component 本体を `.imago/deps/<dependency>/components/<sha256>.wasm` に保存する。
+- `imago build` は `[[dependencies]]` がある場合、まず `.imago/deps` から `wit/deps` を再生成してから `imago.lock` を検証する。`imago.lock` 未生成、`version != 1`、lock digest 不一致、または必要キャッシュ欠損時は失敗し、`imago update` を要求する。
+- `.imago_transitive` は使用しない。transitive package 検証は `imago.lock.[[wit_packages]]` の `digest` と `path/package.wit` の照合で行う。
+- `imago deploy` は `imago.lock` の component 情報と `.imago/deps` の component cache を使って artifact を構築する。必要キャッシュ欠損時は `imago update` を要求して失敗する。
+- runtime の transitive plugin import 解決順は `self(component export)` -> `明示 dependency(package名一致)` -> `error`。
+- transitive 解決では `requires` の記述を必須にしない。
+
 ## `[http]`（`type=http` 時の ingress 設定）
 
 - `type = "http"` の場合のみ `[http]` セクションを受理する。
@@ -105,9 +140,13 @@
 
 ### `capabilities`
 
-- `capabilities.fs`: 許可するファイルシステムアクセス。
-- `capabilities.net`: 許可するネットワークアクセス。
-- `capabilities.dev`: `/dev` 配下の許可デバイス。
+- `capabilities.deps.<package>`: 依存 plugin の呼び出し許可関数。
+  - 許可値は `"*"` または関数名文字列配列。
+  - self 解決（caller 自身の component export）には適用しない。
+  - 明示 dependency への中継時のみ適用する。
+- `capabilities.wasi.<interface>`: WASI interface ごとの許可関数。
+  - 許可値は `"*"` または関数名文字列配列。
+- typo キー `capabilirties` は互換受理せずエラーにする。
 
 ### `privileged`
 
@@ -136,6 +175,12 @@
 - `type!="socket"` かつ `[socket]` 指定はエラー。
 - `restart` が許可値（`never` / `on-failure` / `always` / `unless-stopped`）以外ならエラー。
 - `runtime.restart_policy` を指定した場合はエラー（互換受理なし）。
+- `dependencies[].wit` に `https://wa.dev/...` shorthand を指定した場合はエラー（`warg://<package>@<version>` を使用）。
+- `dependencies[].wit.source` に `file://wit/deps/...`（または同等の `wit/deps` 配下パス）を指定した場合はエラー。
+- 複数 dependency が同一 `wit/deps` 出力パスへ解決される場合はエラー。
+- `dependencies[].name` と `dependencies[].requires[]` に、絶対パス・drive prefix・`./`・`../` を含む path component を指定した場合はエラー。
+- `[[dependencies]]` 使用時に `imago.lock` が存在しない、`version != 1`、または lock の `wit_*` / `component_*` / `wit_packages` が設定・展開結果と一致しない場合はエラー。
+- `[[dependencies]]` 使用時に `.imago/deps` の必要キャッシュ（WIT/Component/metadata）が不足・破損している場合はエラー（`imago update` を要求）。
 - `main` が存在しない場合はビルド時エラー。
 - `shutdown_timeout` が 0 以下はエラー。
 - `privileged = true` かつ `capabilities` 指定ありでもエラーにはしない（`capabilities` を無視）。
@@ -158,6 +203,15 @@
 - `[env.<name>]` の反映はトップレベルキー単位の置換で実装する。
 - `build.command` は string / array の両形式を受理する。
 - `build.command` は必須キー (`name`/`main`/`type`/`target`) と `vars`/`dependencies` の検証完了後に実行する。不正設定時は実行しない。
+- `imago update` は `warg://` / `file://` を受理し、依存WIT/Componentを `.imago/deps/` に保存した上で `wit/deps/` を再生成する。
+- `imago update` の dependency path サニタイズは wkg 準拠 (`:` / `@` を `-`) を使い、`wit/deps` と `.imago/warg` の両方で同じ命名規則を使う。
+- `imago update` は `dependencies[].wit.source=file://...` が `wit/deps` 配下を指す場合と、dependency 同士で `wit/deps` 出力先が衝突する場合に、`wit/deps` を削除する前に失敗させる。
+- dependency package 名の path バリデーションは `/` を許可しつつ、`Path` component が `Normal` 以外（`RootDir`、`Prefix`、`CurDir`、`ParentDir`）を拒否する。
+- `warg://` は Rust-native client で解決し、`registry` 未指定時は `wa.dev` を使う。
+- `imago update` は `kind=wasm` かつ `component` 未指定で `wit` source が component の場合、component hash/source を lock へ自動固定する。
+- `imago update` は `file://` source が存在する場合のみ hash 差分を監視し、差分があればキャッシュを再解決する。source が消えている場合は既存キャッシュを優先する。
+- `imago build` は `capabilities` を正規化して manifest に出力し、`capabilirties` キーは設定エラーとして拒否する。
+- `imago build` は `[[dependencies]]` がある場合、`.imago/deps` から `wit/deps` を再構築してから `imago.lock(version=1)` の `wit_*` / `component_*` / `wit_packages` を検証し、不一致時は `imago update` を要求して失敗する（`kind=wasm` で `component` 未指定の場合は `wit` 由来の期待値と照合する）。
 - `imago build --env <name>` は `build/manifest.<name>.json` を生成し、`build/manifest.json` は更新しない。
 - `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
 - `[[bindings]]` は `manifest.bindings[]` へ正規化し、runtime の呼び出し認可入力として扱う。
@@ -168,6 +222,7 @@
 - `target.<name>.ca_cert` / `client_cert` / `client_key` は path traversal と不正区切りを拒否し、相対指定を `project_root` 基準の絶対パスへ解決する。
 - `imagod.storage_root` の既定値は OS 別（Linux=`/var/lib/imago`, macOS=`/usr/local/var/imago`, Windows=`C:\ProgramData\imago`, その他=`/var/lib/imago`）にし、ビルド時環境変数 `IMAGOD_STORAGE_ROOT_DEFAULT` で上書きできる。`imagod.toml` の明示値を最優先する。
 - `restart` はトップレベルキーのみ受理し、`runtime.restart_policy` は移行エラーにする。
+- `.imago_transitive` は廃止し、transitive WIT package の検証正本を `imago.lock.[[wit_packages]]` へ移行した。`imago build` / `imago deploy` は lock version 1 のみ受理する。
 
 ## `target.<name>` の接続キー（deploy 通信）
 

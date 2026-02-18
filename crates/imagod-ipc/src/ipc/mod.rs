@@ -1,6 +1,7 @@
 //! Transport-agnostic IPC contracts for manager/runner coordination.
 
 use std::{
+    collections::BTreeMap,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -106,6 +107,59 @@ pub struct RunnerSocketConfig {
     pub listen_port: u16,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+/// Plugin delivery kind used by manifest/bootstrap dependency definitions.
+pub enum PluginKind {
+    Native,
+    Wasm,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Wasm plugin component descriptor.
+pub struct PluginComponent {
+    /// Component path. In manifest this is release-relative; in runner bootstrap this is absolute.
+    pub path: PathBuf,
+    /// Hex-encoded SHA-256 digest for component bytes.
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+/// Function-level capability policy used by app/plugin callers.
+pub struct CapabilityPolicy {
+    /// When true, all dependency and WASI calls are allowed.
+    #[serde(default)]
+    pub privileged: bool,
+    /// Dependency plugin function permissions.
+    #[serde(default)]
+    pub deps: BTreeMap<String, Vec<String>>,
+    /// WASI interface function permissions.
+    #[serde(default)]
+    pub wasi: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// One plugin dependency definition passed to runner runtime.
+pub struct PluginDependency {
+    /// Canonical package name.
+    pub name: String,
+    /// Dependency version string.
+    pub version: String,
+    /// Delivery kind.
+    pub kind: PluginKind,
+    /// WIT source identifier.
+    pub wit: String,
+    /// Additional plugin package dependencies required by this plugin.
+    #[serde(default)]
+    pub requires: Vec<String>,
+    /// Wasm component descriptor for `kind=wasm`.
+    #[serde(default)]
+    pub component: Option<PluginComponent>,
+    /// Capability policy used when this plugin is the caller.
+    #[serde(default)]
+    pub capabilities: CapabilityPolicy,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Bootstrap payload sent from manager to runner via child stdin.
 pub struct RunnerBootstrap {
@@ -131,6 +185,12 @@ pub struct RunnerBootstrap {
     pub envs: std::collections::BTreeMap<String, String>,
     /// Allowed outbound bindings for this service.
     pub bindings: Vec<ServiceBinding>,
+    /// Plugin dependencies available for this app/plugin execution context.
+    #[serde(default)]
+    pub plugin_dependencies: Vec<PluginDependency>,
+    /// App-level capability policy.
+    #[serde(default)]
+    pub capabilities: CapabilityPolicy,
     /// Manager control socket endpoint.
     pub manager_control_endpoint: PathBuf,
     /// Runner inbound socket endpoint.
@@ -531,6 +591,23 @@ mod tests {
             args: vec!["--help".to_string()],
             envs: std::collections::BTreeMap::new(),
             bindings: vec![],
+            plugin_dependencies: vec![PluginDependency {
+                name: "yieldspace:plugin/example".to_string(),
+                version: "0.1.0".to_string(),
+                kind: PluginKind::Native,
+                wit: "warg://yieldspace:plugin/example@0.1.0".to_string(),
+                requires: vec![],
+                component: None,
+                capabilities: CapabilityPolicy::default(),
+            }],
+            capabilities: CapabilityPolicy {
+                privileged: false,
+                deps: BTreeMap::from([(
+                    "yieldspace:plugin/example".to_string(),
+                    vec!["*".to_string()],
+                )]),
+                wasi: BTreeMap::new(),
+            },
             manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
             runner_endpoint: PathBuf::from("/tmp/runner.sock"),
             manager_auth_secret: random_secret_hex(),
@@ -550,6 +627,17 @@ mod tests {
         assert_eq!(
             decoded.socket.as_ref().map(|cfg| cfg.protocol),
             Some(RunnerSocketProtocol::Udp)
+        );
+        assert_eq!(decoded.plugin_dependencies.len(), 1);
+        assert_eq!(
+            decoded.plugin_dependencies[0].name,
+            "yieldspace:plugin/example"
+        );
+        assert!(
+            decoded
+                .capabilities
+                .deps
+                .contains_key("yieldspace:plugin/example")
         );
     }
 

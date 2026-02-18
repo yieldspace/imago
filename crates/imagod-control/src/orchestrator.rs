@@ -9,10 +9,14 @@ use std::{
 
 use imago_protocol::{DeployCommandPayload, ErrorCode, RunCommandPayload, StopCommandPayload};
 use imagod_common::ImagodError;
-use imagod_ipc::{RunnerAppType, RunnerSocketConfig, ServiceBinding};
-use serde::Deserialize;
+use imagod_ipc::{
+    CapabilityPolicy, PluginDependency, PluginKind, RunnerAppType, RunnerSocketConfig,
+    ServiceBinding,
+};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::fs;
+use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 
 use crate::{
@@ -30,7 +34,7 @@ const RESTART_POLICY_FILE_NAME: &str = "restart_policy";
 const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_HTTP_MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 /// Release manifest loaded from extracted artifact.
 struct Manifest {
     name: String,
@@ -49,23 +53,27 @@ struct Manifest {
     assets: Vec<ManifestAsset>,
     #[serde(default)]
     bindings: Vec<ManifestBinding>,
+    #[serde(default)]
+    dependencies: Vec<PluginDependency>,
+    #[serde(default)]
+    capabilities: CapabilityPolicy,
     hash: ManifestHash,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// Manifest-declared asset path.
 struct ManifestAsset {
     path: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// Manifest binding authorization entry.
 struct ManifestBinding {
     target: String,
     wit: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// Manifest HTTP execution settings.
 struct ManifestHttp {
     port: u16,
@@ -73,7 +81,7 @@ struct ManifestHttp {
     max_body_bytes: u64,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// Manifest hash metadata describing required verification targets.
 struct ManifestHash {
     algorithm: String,
@@ -90,7 +98,7 @@ impl ManifestHash {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 /// Hash verification targets required by manifest metadata.
 enum HashTarget {
     #[serde(rename = "wasm")]
@@ -247,6 +255,11 @@ impl Orchestrator {
         Ok(RestoreActiveServicesSummary { started, failed })
     }
 
+    /// Removes cached plugin components not referenced by any active release at boot.
+    pub async fn gc_unused_plugin_components_on_boot(&self) -> Result<(), ImagodError> {
+        gc_unused_plugin_components_on_boot(&self.storage_root).await
+    }
+
     /// Stops a running service.
     pub async fn stop(&self, payload: &StopCommandPayload) -> Result<StopSummary, ImagodError> {
         self.supervisor.stop(&payload.name, payload.force).await?;
@@ -342,7 +355,9 @@ impl Orchestrator {
 
         cleanup_old_releases(&service_root, &release_hash, previous_release.as_deref()).await?;
 
-        let launch = build_launch_from_release(&release_hash, &release_dir, &manifest).await?;
+        let launch =
+            build_launch_from_release(&self.storage_root, &release_hash, &release_dir, &manifest)
+                .await?;
 
         Ok(PreparedRelease {
             service_name: manifest.name,
@@ -420,7 +435,7 @@ impl Orchestrator {
             )));
         }
 
-        build_launch_from_release(release_hash, &release_dir, &manifest).await
+        build_launch_from_release(&self.storage_root, release_hash, &release_dir, &manifest).await
     }
 
     /// Starts one service from a discovered boot-restore candidate.
@@ -453,6 +468,7 @@ struct BootRestoreCandidate {
 
 /// Builds launch metadata for supervisor from a promoted release directory.
 async fn build_launch_from_release(
+    storage_root: &Path,
     release_hash: &str,
     release_dir: &Path,
     manifest: &Manifest,
@@ -480,6 +496,8 @@ async fn build_launch_from_release(
     let bindings = validate_manifest_bindings(&manifest.bindings)?;
     let (http_port, http_max_body_bytes) = validate_manifest_http(manifest)?;
     let socket = validate_manifest_socket(manifest)?;
+    let plugin_dependencies =
+        prepare_plugin_dependencies(storage_root, release_dir, &manifest.dependencies).await?;
 
     Ok(ServiceLaunch {
         name: manifest.name.clone(),
@@ -492,6 +510,8 @@ async fn build_launch_from_release(
         args: Vec::new(),
         envs,
         bindings,
+        plugin_dependencies,
+        capabilities: normalize_capability_policy(&manifest.capabilities),
     })
 }
 
@@ -588,6 +608,399 @@ fn validate_manifest_bindings(
         });
     }
     Ok(normalized)
+}
+
+async fn prepare_plugin_dependencies(
+    storage_root: &Path,
+    release_dir: &Path,
+    dependencies: &[PluginDependency],
+) -> Result<Vec<PluginDependency>, ImagodError> {
+    if dependencies.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut known_names = BTreeSet::new();
+    for dep in dependencies {
+        validate_plugin_package_name(&dep.name)?;
+        if dep.version.trim().is_empty() {
+            return Err(map_bad_manifest(format!(
+                "manifest.dependencies[{}].version must not be empty",
+                dep.name
+            )));
+        }
+        if dep.wit.trim().is_empty() {
+            return Err(map_bad_manifest(format!(
+                "manifest.dependencies[{}].wit must not be empty",
+                dep.name
+            )));
+        }
+        if !known_names.insert(dep.name.clone()) {
+            return Err(map_bad_manifest(format!(
+                "manifest.dependencies contains duplicate dependency '{}'",
+                dep.name
+            )));
+        }
+    }
+
+    let mut normalized = Vec::with_capacity(dependencies.len());
+    let components_root = plugin_component_cache_root(storage_root);
+    fs::create_dir_all(&components_root).await.map_err(|e| {
+        map_internal(format!(
+            "failed to create plugin component cache dir {}: {e}",
+            components_root.display()
+        ))
+    })?;
+
+    for dep in dependencies {
+        for required in &dep.requires {
+            validate_plugin_package_name(required)?;
+            if !known_names.contains(required) {
+                return Err(map_bad_manifest(format!(
+                    "manifest.dependencies[{}].requires references unknown dependency '{}'",
+                    dep.name, required
+                )));
+            }
+        }
+
+        let mut dep = dep.clone();
+        dep.capabilities = normalize_capability_policy(&dep.capabilities);
+        dep.requires = normalize_string_set(&dep.requires);
+
+        match dep.kind {
+            PluginKind::Native => {
+                if dep.component.is_some() {
+                    return Err(map_bad_manifest(format!(
+                        "manifest.dependencies[{}].component is only allowed when kind=\"wasm\"",
+                        dep.name
+                    )));
+                }
+            }
+            PluginKind::Wasm => {
+                let component = dep.component.clone().ok_or_else(|| {
+                    map_bad_manifest(format!(
+                        "manifest.dependencies[{}].component is required when kind=\"wasm\"",
+                        dep.name
+                    ))
+                })?;
+                validate_sha256_hex(
+                    &component.sha256,
+                    &format!("manifest.dependencies[{}].component.sha256", dep.name),
+                )?;
+
+                let component_path_str = component.path.to_str().ok_or_else(|| {
+                    map_bad_manifest(format!(
+                        "manifest.dependencies[{}].component.path must be valid UTF-8",
+                        dep.name
+                    ))
+                })?;
+                let normalized_component_path = normalize_manifest_relative_path(
+                    component_path_str,
+                    &format!("manifest.dependencies[{}].component.path", dep.name),
+                )?;
+                let release_component_path = release_dir.join(&normalized_component_path);
+                let metadata = fs::metadata(&release_component_path).await.map_err(|e| {
+                    map_bad_manifest(format!(
+                        "plugin component is not accessible: {} ({e})",
+                        release_component_path.display()
+                    ))
+                })?;
+                if !metadata.is_file() {
+                    return Err(map_bad_manifest(format!(
+                        "plugin component path is not a file: {}",
+                        release_component_path.display()
+                    )));
+                }
+
+                let digest = compute_sha256_hex_async(&release_component_path).await?;
+                if !digest.eq_ignore_ascii_case(&component.sha256) {
+                    return Err(map_bad_manifest(format!(
+                        "plugin component sha256 mismatch for '{}': expected {}, actual {}",
+                        dep.name, component.sha256, digest
+                    )));
+                }
+
+                let cache_path = components_root.join(format!("{}.wasm", component.sha256));
+                let cache_digest_matches = match fs::metadata(&cache_path).await {
+                    Ok(existing_meta) => {
+                        if !existing_meta.is_file() {
+                            return Err(map_internal(format!(
+                                "plugin component cache path is not a file: {}",
+                                cache_path.display()
+                            )));
+                        }
+                        let existing = compute_sha256_hex_async(&cache_path).await?;
+                        existing.eq_ignore_ascii_case(&component.sha256)
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(err) => {
+                        return Err(map_internal(format!(
+                            "failed to inspect plugin component cache {}: {err}",
+                            cache_path.display()
+                        )));
+                    }
+                };
+                if !cache_digest_matches {
+                    fs::copy(&release_component_path, &cache_path)
+                        .await
+                        .map_err(|e| {
+                            map_internal(format!(
+                                "failed to copy plugin component to cache {}: {e}",
+                                cache_path.display()
+                            ))
+                        })?;
+                }
+
+                dep.component = Some(imagod_ipc::PluginComponent {
+                    path: cache_path,
+                    sha256: component.sha256,
+                });
+            }
+        }
+
+        normalized.push(dep);
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_capability_policy(policy: &CapabilityPolicy) -> CapabilityPolicy {
+    CapabilityPolicy {
+        privileged: policy.privileged,
+        deps: normalize_capability_rule_map(&policy.deps),
+        wasi: normalize_capability_rule_map(&policy.wasi),
+    }
+}
+
+fn normalize_capability_rule_map(
+    map: &BTreeMap<String, Vec<String>>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut normalized = BTreeMap::new();
+    for (key, values) in map {
+        if key.trim().is_empty() {
+            continue;
+        }
+        let normalized_values = normalize_string_set(values);
+        if !normalized_values.is_empty() {
+            normalized.insert(key.clone(), normalized_values);
+        }
+    }
+    normalized
+}
+
+fn normalize_string_set(values: &[String]) -> Vec<String> {
+    let mut set = BTreeSet::new();
+    for value in values {
+        let value = value.trim();
+        if !value.is_empty() {
+            set.insert(value.to_string());
+        }
+    }
+    set.into_iter().collect()
+}
+
+fn validate_plugin_package_name(name: &str) -> Result<(), ImagodError> {
+    if name.is_empty() {
+        return Err(map_bad_manifest(
+            "manifest.dependencies[].name must not be empty".to_string(),
+        ));
+    }
+    if name.contains('\\') || name.contains("..") {
+        return Err(map_bad_manifest(format!(
+            "manifest dependency name contains invalid path characters: {name}"
+        )));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/'))
+    {
+        return Err(map_bad_manifest(format!(
+            "manifest dependency name contains unsupported characters: {name}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_sha256_hex(value: &str, field_name: &str) -> Result<(), ImagodError> {
+    if value.len() != 64 || !value.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(map_bad_manifest(format!(
+            "{field_name} must be a 64-character hex string"
+        )));
+    }
+    Ok(())
+}
+
+fn plugin_component_cache_root(storage_root: &Path) -> PathBuf {
+    storage_root.join("plugins").join("components")
+}
+
+async fn compute_sha256_hex_async(path: &Path) -> Result<String, ImagodError> {
+    let mut file = fs::File::open(path).await.map_err(|e| {
+        map_internal(format!(
+            "failed to open file for sha256 {}: {e}",
+            path.display()
+        ))
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buf).await.map_err(|e| {
+            map_internal(format!(
+                "failed to read file for sha256 {}: {e}",
+                path.display()
+            ))
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+async fn gc_unused_plugin_components_on_boot(storage_root: &Path) -> Result<(), ImagodError> {
+    let components_root = plugin_component_cache_root(storage_root);
+    let referenced = collect_referenced_plugin_component_hashes(storage_root).await?;
+
+    let mut entries = match fs::read_dir(&components_root).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(map_internal(format!(
+                "failed to read plugin components dir {}: {err}",
+                components_root.display()
+            )));
+        }
+    };
+
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| map_internal(format!("failed to iterate plugin components dir: {e}")))?
+    {
+        let path = entry.path();
+        let file_type = match entry.file_type().await {
+            Ok(v) => v,
+            Err(err) => {
+                eprintln!(
+                    "plugin component gc skipped unreadable entry {}: {}",
+                    path.display(),
+                    err
+                );
+                continue;
+            }
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("wasm") {
+            continue;
+        }
+
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if referenced.contains(stem) {
+            continue;
+        }
+
+        if let Err(err) = fs::remove_file(&path).await {
+            eprintln!(
+                "plugin component gc failed to remove {}: {}",
+                path.display(),
+                err
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn collect_referenced_plugin_component_hashes(
+    storage_root: &Path,
+) -> Result<BTreeSet<String>, ImagodError> {
+    let services_root = storage_root.join("services");
+    let mut entries = match fs::read_dir(&services_root).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(err) => {
+            return Err(map_internal(format!(
+                "failed to read services root for plugin gc {}: {err}",
+                services_root.display()
+            )));
+        }
+    };
+
+    let mut referenced = BTreeSet::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| map_internal(format!("failed to iterate services root: {e}")))?
+    {
+        let service_root = entry.path();
+        let file_type = match entry.file_type().await {
+            Ok(v) => v,
+            Err(err) => {
+                eprintln!(
+                    "plugin component gc skipped unreadable service entry {}: {}",
+                    service_root.display(),
+                    err
+                );
+                continue;
+            }
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let active = match read_active_release(&service_root.join("active_release")).await {
+            Ok(Some(value)) => value,
+            Ok(None) => continue,
+            Err(err) => {
+                eprintln!(
+                    "plugin component gc skipped service {} due to active_release error: {}",
+                    service_root.display(),
+                    err.message
+                );
+                continue;
+            }
+        };
+        if active.is_empty() {
+            continue;
+        }
+
+        let manifest_path = service_root.join(active).join("manifest.json");
+        let manifest_bytes = match fs::read(&manifest_path).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                eprintln!(
+                    "plugin component gc skipped missing manifest {}: {}",
+                    manifest_path.display(),
+                    err
+                );
+                continue;
+            }
+        };
+        let manifest: Manifest = match serde_json::from_slice(&manifest_bytes) {
+            Ok(manifest) => manifest,
+            Err(err) => {
+                eprintln!(
+                    "plugin component gc skipped unparsable manifest {}: {}",
+                    manifest_path.display(),
+                    err
+                );
+                continue;
+            }
+        };
+        for dependency in manifest.dependencies {
+            if dependency.kind == PluginKind::Wasm
+                && let Some(component) = dependency.component
+            {
+                referenced.insert(component.sha256);
+            }
+        }
+    }
+
+    Ok(referenced)
 }
 
 /// Extracts a tar archive into destination while rejecting unsupported entries.
@@ -707,23 +1120,24 @@ fn normalize_archive_entry_path(path: &Path) -> Result<PathBuf, ImagodError> {
 }
 
 fn normalize_manifest_main_path(main: &str) -> Result<PathBuf, ImagodError> {
-    let path = Path::new(main);
-    if main.is_empty() || path.as_os_str().is_empty() {
-        return Err(map_bad_manifest(
-            "manifest.main must not be empty".to_string(),
-        ));
+    normalize_manifest_relative_path(main, "manifest.main")
+}
+
+fn normalize_manifest_relative_path(raw: &str, field_name: &str) -> Result<PathBuf, ImagodError> {
+    let path = Path::new(raw);
+    if raw.is_empty() || path.as_os_str().is_empty() {
+        return Err(map_bad_manifest(format!("{field_name} must not be empty")));
     }
     if path.is_absolute() {
         return Err(map_bad_manifest(format!(
-            "manifest.main must be a relative path: {}",
-            main
+            "{field_name} must be a relative path: {raw}"
         )));
     }
 
-    let raw = path.as_os_str().to_string_lossy();
-    if raw.len() >= 2 && raw.as_bytes()[1] == b':' {
+    let raw_os = path.as_os_str().to_string_lossy();
+    if raw_os.len() >= 2 && raw_os.as_bytes()[1] == b':' {
         return Err(map_bad_manifest(format!(
-            "manifest.main must not be windows-prefixed: {main}"
+            "{field_name} must not be windows-prefixed: {raw}"
         )));
     }
 
@@ -734,21 +1148,19 @@ fn normalize_manifest_main_path(main: &str) -> Result<PathBuf, ImagodError> {
             Component::Normal(segment) => normalized.push(segment),
             Component::ParentDir | Component::RootDir => {
                 return Err(map_bad_manifest(format!(
-                    "manifest.main contains invalid path traversal: {main}"
+                    "{field_name} contains invalid path traversal: {raw}"
                 )));
             }
             _ => {
                 return Err(map_bad_manifest(format!(
-                    "manifest.main contains invalid path component: {main}"
+                    "{field_name} contains invalid path component: {raw}"
                 )));
             }
         }
     }
 
     if normalized.as_os_str().is_empty() {
-        return Err(map_bad_manifest(format!(
-            "manifest.main is invalid: {main}"
-        )));
+        return Err(map_bad_manifest(format!("{field_name} is invalid: {raw}")));
     }
 
     Ok(normalized)
@@ -1134,13 +1546,19 @@ fn map_rollback_error(err: ImagodError) -> ImagodError {
 mod tests {
     use super::{
         DEFAULT_HTTP_MAX_BODY_BYTES, HashTarget, MAX_HTTP_MAX_BODY_BYTES, Manifest, ManifestAsset,
-        ManifestBinding, ManifestHash, ManifestHttp, RunnerAppType, build_launch_from_release,
+        ManifestBinding, ManifestHash, ManifestHttp, RESTART_POLICY_ALWAYS,
+        RESTART_POLICY_FILE_NAME, RunnerAppType, build_launch_from_release,
         classify_boot_restore_entry, collect_boot_restore_candidates, extract_tar,
-        normalize_archive_entry_path, normalize_manifest_main_path, promote_staging_release,
-        release_id_from_artifact_digest, validate_deploy_preconditions, validate_service_name,
+        gc_unused_plugin_components_on_boot, normalize_archive_entry_path,
+        normalize_manifest_main_path, promote_staging_release, release_id_from_artifact_digest,
+        validate_deploy_preconditions, validate_service_name,
     };
     use imago_protocol::{DeployCommandPayload, ErrorCode};
-    use imagod_ipc::{RunnerSocketConfig, RunnerSocketDirection, RunnerSocketProtocol};
+    use imagod_ipc::{
+        CapabilityPolicy, PluginComponent, PluginDependency, PluginKind, RunnerSocketConfig,
+        RunnerSocketDirection, RunnerSocketProtocol,
+    };
+    use sha2::{Digest, Sha256};
     use std::{
         collections::BTreeMap,
         fs,
@@ -1164,6 +1582,8 @@ mod tests {
             secrets: BTreeMap::new(),
             assets: Vec::<ManifestAsset>::new(),
             bindings: Vec::new(),
+            dependencies: Vec::<PluginDependency>::new(),
+            capabilities: CapabilityPolicy::default(),
             hash: ManifestHash {
                 algorithm: "sha256".to_string(),
                 targets: vec![HashTarget::Wasm, HashTarget::Manifest, HashTarget::Assets],
@@ -1349,7 +1769,7 @@ mod tests {
             wit: "yieldspace:service/invoke".to_string(),
         }];
 
-        let err = build_launch_from_release("release-a", &root, &manifest)
+        let err = build_launch_from_release(&root, "release-a", &root, &manifest)
             .await
             .expect_err("empty binding target should be rejected");
         assert_eq!(err.code, ErrorCode::BadManifest);
@@ -1371,7 +1791,7 @@ mod tests {
             max_body_bytes: DEFAULT_HTTP_MAX_BODY_BYTES,
         });
 
-        let launch = build_launch_from_release("release-a", &root, &manifest)
+        let launch = build_launch_from_release(&root, "release-a", &root, &manifest)
             .await
             .expect("launch should be built");
         assert_eq!(launch.app_type, RunnerAppType::Http);
@@ -1379,6 +1799,154 @@ mod tests {
         assert_eq!(
             launch.http_max_body_bytes,
             Some(DEFAULT_HTTP_MAX_BODY_BYTES)
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_caches_wasm_plugin_component_by_sha256() {
+        let root = temp_dir_path("orchestrator-plugin-cache");
+        fs::create_dir_all(root.join("plugins-src")).expect("plugins source dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("main component should exist");
+        let plugin_bytes = b"plugin-wasm-bytes";
+        fs::write(root.join("plugins-src/ffmpeg.wasm"), plugin_bytes)
+            .expect("plugin component should exist");
+        let plugin_sha = hex::encode(Sha256::digest(plugin_bytes));
+
+        let mut manifest = valid_manifest();
+        manifest.dependencies = vec![PluginDependency {
+            name: "yieldspace:plugin/ffmpeg".to_string(),
+            version: "1.0.0".to_string(),
+            kind: PluginKind::Wasm,
+            wit: "warg://yieldspace:plugin/ffmpeg@1.0.0".to_string(),
+            requires: vec![],
+            component: Some(PluginComponent {
+                path: PathBuf::from("plugins-src/ffmpeg.wasm"),
+                sha256: plugin_sha.clone(),
+            }),
+            capabilities: CapabilityPolicy::default(),
+        }];
+
+        let launch = build_launch_from_release(&root, "release-a", &root, &manifest)
+            .await
+            .expect("launch should be built");
+        let cached = launch
+            .plugin_dependencies
+            .first()
+            .and_then(|dep| dep.component.as_ref())
+            .map(|component| component.path.clone())
+            .expect("cached plugin component path should exist");
+        assert_eq!(
+            cached,
+            root.join("plugins/components")
+                .join(format!("{plugin_sha}.wasm"))
+        );
+        assert!(cached.exists(), "cached component file must exist");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_accepts_uppercase_plugin_component_sha256() {
+        let root = temp_dir_path("orchestrator-plugin-cache-uppercase-sha");
+        fs::create_dir_all(root.join("plugins-src")).expect("plugins source dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("main component should exist");
+        let plugin_bytes = b"plugin-wasm-bytes-uppercase";
+        fs::write(root.join("plugins-src/ffmpeg.wasm"), plugin_bytes)
+            .expect("plugin component should exist");
+        let plugin_sha_upper = hex::encode(Sha256::digest(plugin_bytes)).to_uppercase();
+
+        let mut manifest = valid_manifest();
+        manifest.dependencies = vec![PluginDependency {
+            name: "yieldspace:plugin/ffmpeg".to_string(),
+            version: "1.0.0".to_string(),
+            kind: PluginKind::Wasm,
+            wit: "warg://yieldspace:plugin/ffmpeg@1.0.0".to_string(),
+            requires: vec![],
+            component: Some(PluginComponent {
+                path: PathBuf::from("plugins-src/ffmpeg.wasm"),
+                sha256: plugin_sha_upper.clone(),
+            }),
+            capabilities: CapabilityPolicy::default(),
+        }];
+
+        let launch = build_launch_from_release(&root, "release-a", &root, &manifest)
+            .await
+            .expect("launch should be built");
+        let cached = launch
+            .plugin_dependencies
+            .first()
+            .and_then(|dep| dep.component.as_ref())
+            .map(|component| component.path.clone())
+            .expect("cached plugin component path should exist");
+        assert_eq!(
+            cached,
+            root.join("plugins/components")
+                .join(format!("{plugin_sha_upper}.wasm"))
+        );
+        assert!(cached.exists(), "cached component file must exist");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn gc_unused_plugin_components_removes_unreferenced_files() {
+        let root = temp_dir_path("orchestrator-plugin-gc");
+        let components_root = root.join("plugins/components");
+        fs::create_dir_all(&components_root).expect("components root should exist");
+
+        let keep_bytes = b"plugin-keep";
+        let remove_bytes = b"plugin-remove";
+        let keep_sha = hex::encode(Sha256::digest(keep_bytes));
+        let remove_sha = hex::encode(Sha256::digest(remove_bytes));
+        fs::write(components_root.join(format!("{keep_sha}.wasm")), keep_bytes)
+            .expect("keep file should exist");
+        fs::write(
+            components_root.join(format!("{remove_sha}.wasm")),
+            remove_bytes,
+        )
+        .expect("remove file should exist");
+
+        let service_root = root.join("services").join("svc-a");
+        let release_hash = "release-a";
+        let release_root = service_root.join(release_hash);
+        fs::create_dir_all(&release_root).expect("release root should exist");
+        fs::write(service_root.join("active_release"), release_hash).expect("active release");
+        fs::write(
+            service_root.join(RESTART_POLICY_FILE_NAME),
+            RESTART_POLICY_ALWAYS,
+        )
+        .expect("restart policy should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.dependencies = vec![PluginDependency {
+            name: "yieldspace:plugin/keep".to_string(),
+            version: "1.0.0".to_string(),
+            kind: PluginKind::Wasm,
+            wit: "warg://yieldspace:plugin/keep@1.0.0".to_string(),
+            requires: vec![],
+            component: Some(PluginComponent {
+                path: PathBuf::from("plugins/components/keep.wasm"),
+                sha256: keep_sha.clone(),
+            }),
+            capabilities: CapabilityPolicy::default(),
+        }];
+        let manifest_bytes =
+            serde_json::to_vec(&manifest).expect("manifest should serialize for gc test");
+        fs::write(release_root.join("manifest.json"), manifest_bytes).expect("manifest write");
+
+        gc_unused_plugin_components_on_boot(&root)
+            .await
+            .expect("gc should succeed");
+
+        assert!(
+            components_root.join(format!("{keep_sha}.wasm")).exists(),
+            "referenced component must be preserved"
+        );
+        assert!(
+            !components_root.join(format!("{remove_sha}.wasm")).exists(),
+            "unreferenced component must be removed"
         );
 
         let _ = fs::remove_dir_all(root);
@@ -1394,7 +1962,7 @@ mod tests {
         manifest.app_type = RunnerAppType::Http;
         manifest.http = None;
 
-        let err = build_launch_from_release("release-a", &root, &manifest)
+        let err = build_launch_from_release(&root, "release-a", &root, &manifest)
             .await
             .expect_err("type=http without manifest.http must fail");
         assert_eq!(err.code, ErrorCode::BadManifest);
@@ -1416,7 +1984,7 @@ mod tests {
             max_body_bytes: DEFAULT_HTTP_MAX_BODY_BYTES,
         });
 
-        let err = build_launch_from_release("release-a", &root, &manifest)
+        let err = build_launch_from_release(&root, "release-a", &root, &manifest)
             .await
             .expect_err("type=cli with manifest.http must fail");
         assert_eq!(err.code, ErrorCode::BadManifest);
@@ -1435,7 +2003,7 @@ mod tests {
         manifest.app_type = RunnerAppType::Socket;
         manifest.socket = None;
 
-        let err = build_launch_from_release("release-a", &root, &manifest)
+        let err = build_launch_from_release(&root, "release-a", &root, &manifest)
             .await
             .expect_err("type=socket without manifest.socket must fail");
         assert_eq!(err.code, ErrorCode::BadManifest);
@@ -1459,7 +2027,7 @@ mod tests {
             listen_port: 514,
         });
 
-        let err = build_launch_from_release("release-a", &root, &manifest)
+        let err = build_launch_from_release(&root, "release-a", &root, &manifest)
             .await
             .expect_err("type=cli with manifest.socket must fail");
         assert_eq!(err.code, ErrorCode::BadManifest);
@@ -1483,7 +2051,7 @@ mod tests {
             listen_port: 514,
         });
 
-        let err = build_launch_from_release("release-a", &root, &manifest)
+        let err = build_launch_from_release(&root, "release-a", &root, &manifest)
             .await
             .expect_err("invalid listen_addr should fail");
         assert_eq!(err.code, ErrorCode::BadManifest);
@@ -1533,7 +2101,7 @@ mod tests {
                 max_body_bytes: invalid,
             });
 
-            let err = build_launch_from_release("release-a", &root, &manifest)
+            let err = build_launch_from_release(&root, "release-a", &root, &manifest)
                 .await
                 .expect_err("invalid max_body_bytes should fail");
             assert_eq!(err.code, ErrorCode::BadManifest);
@@ -1579,7 +2147,7 @@ mod tests {
             wit: String::new(),
         }];
 
-        let err = build_launch_from_release("release-a", &root, &manifest)
+        let err = build_launch_from_release(&root, "release-a", &root, &manifest)
             .await
             .expect_err("empty binding wit should be rejected");
         assert_eq!(err.code, ErrorCode::BadManifest);
@@ -1600,7 +2168,7 @@ mod tests {
             wit: "yieldspace:service/invoke".to_string(),
         }];
 
-        let err = build_launch_from_release("release-a", &root, &manifest)
+        let err = build_launch_from_release(&root, "release-a", &root, &manifest)
             .await
             .expect_err("invalid binding target should be rejected");
         assert_eq!(err.code, ErrorCode::BadManifest);

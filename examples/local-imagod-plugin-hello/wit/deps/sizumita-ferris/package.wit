@@ -1,0 +1,6 @@
+package sizumita:ferris@0.1.0;
+
+interface says {
+  say: func(text: string);
+}
+

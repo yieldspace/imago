@@ -1,0 +1,1628 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context, anyhow};
+use imago_lockfile::{
+    IMAGO_LOCK_VERSION, ImagoLock, ImagoLockDependency, TransitivePackageRecord,
+    collect_wit_packages, save_to_project_root,
+};
+
+use crate::{
+    cli::UpdateArgs,
+    commands::{
+        CommandResult,
+        build::{self, ManifestDependencyKind},
+        dependency_cache::{self, DependencyCacheEntry, DependencyCacheTransitivePackage},
+        plugin_sources,
+    },
+};
+
+pub fn run(args: UpdateArgs) -> CommandResult {
+    run_with_project_root(args, Path::new("."))
+}
+
+pub(crate) fn run_with_project_root(_args: UpdateArgs, project_root: &Path) -> CommandResult {
+    match run_inner(project_root) {
+        Ok(()) => CommandResult {
+            exit_code: 0,
+            stderr: None,
+        },
+        Err(err) => CommandResult {
+            exit_code: 2,
+            stderr: Some(format!("{err:#}")),
+        },
+    }
+}
+
+fn run_inner(project_root: &Path) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to create tokio runtime for update command")?;
+    runtime.block_on(run_inner_async(project_root))
+}
+
+fn normalize_path_for_compare(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push("..");
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn normalize_absolute_path_for_compare(path: &Path) -> anyhow::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("failed to resolve current directory for update path validation")?
+            .join(path)
+    };
+    Ok(normalize_path_for_compare(&absolute))
+}
+
+fn validate_wit_sources_outside_wit_deps(
+    project_root: &Path,
+    dependencies: &[build::ProjectDependency],
+) -> anyhow::Result<()> {
+    let project_root_abs = normalize_absolute_path_for_compare(project_root)?;
+    let mut wit_deps_roots = vec![normalize_path_for_compare(
+        &project_root_abs.join("wit").join("deps"),
+    )];
+    if let Ok(canonical_project_root) = fs::canonicalize(&project_root_abs) {
+        let canonical_wit_deps_root =
+            normalize_path_for_compare(&canonical_project_root.join("wit").join("deps"));
+        if !wit_deps_roots
+            .iter()
+            .any(|existing| existing == &canonical_wit_deps_root)
+        {
+            wit_deps_roots.push(canonical_wit_deps_root);
+        }
+    }
+
+    let validate_file_source = |dependency_name: &str,
+                                source_label: &str,
+                                source: &str|
+     -> anyhow::Result<()> {
+        let Some(raw_path) = source.strip_prefix("file://") else {
+            return Ok(());
+        };
+        let source_path = if Path::new(raw_path).is_absolute() {
+            PathBuf::from(raw_path)
+        } else {
+            project_root_abs.join(raw_path)
+        };
+        let mut source_candidates = vec![normalize_absolute_path_for_compare(&source_path)?];
+        if let Ok(canonical_source) = fs::canonicalize(&source_path) {
+            let canonical_source = normalize_path_for_compare(&canonical_source);
+            if !source_candidates
+                .iter()
+                .any(|existing| existing == &canonical_source)
+            {
+                source_candidates.push(canonical_source);
+            }
+        }
+
+        if source_candidates.iter().any(|candidate| {
+            wit_deps_roots
+                .iter()
+                .any(|wit_deps_root| candidate.starts_with(wit_deps_root))
+        }) {
+            return Err(anyhow!(
+                "dependency '{}' {} '{}' points under wit/deps, which `imago update` resets; move the source outside wit/deps",
+                dependency_name,
+                source_label,
+                source
+            ));
+        }
+        Ok(())
+    };
+
+    for dependency in dependencies {
+        validate_file_source(&dependency.name, "wit source", &dependency.wit.source)?;
+        if let Some(component) = dependency.component.as_ref() {
+            validate_file_source(&dependency.name, "component source", &component.source)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_wit_output_path_collisions(
+    dependencies: &[build::ProjectDependency],
+) -> anyhow::Result<()> {
+    let mut targets: Vec<(PathBuf, &str)> = Vec::with_capacity(dependencies.len());
+    for dependency in dependencies {
+        let target_rel = dependency_cache::dependency_wit_target_rel(&dependency.name);
+        for (existing_target, existing_dependency) in &targets {
+            if existing_target == &target_rel {
+                return Err(anyhow!(
+                    "dependencies '{}' and '{}' both resolve to '{}'; dependency WIT output paths must be unique",
+                    existing_dependency,
+                    dependency.name,
+                    plugin_sources::path_to_manifest_string(&target_rel)
+                ));
+            }
+            if target_rel.starts_with(existing_target) || existing_target.starts_with(&target_rel) {
+                return Err(anyhow!(
+                    "dependencies '{}' and '{}' have overlapping WIT output paths ('{}' and '{}'); dependency WIT output paths must be disjoint",
+                    existing_dependency,
+                    dependency.name,
+                    plugin_sources::path_to_manifest_string(existing_target),
+                    plugin_sources::path_to_manifest_string(&target_rel)
+                ));
+            }
+        }
+        targets.push((target_rel, dependency.name.as_str()));
+    }
+    Ok(())
+}
+
+async fn load_or_refresh_cache_entry(
+    project_root: &Path,
+    dependency: &build::ProjectDependency,
+) -> anyhow::Result<DependencyCacheEntry> {
+    if dependency_cache::is_cache_hit(project_root, dependency)? {
+        return dependency_cache::load_entry(project_root, &dependency.name)
+            .with_context(|| format!("failed to load dependency cache for '{}'", dependency.name));
+    }
+
+    let cache_entry_root = dependency_cache::cache_entry_root(project_root, &dependency.name);
+    if cache_entry_root.exists() {
+        fs::remove_dir_all(&cache_entry_root).with_context(|| {
+            format!(
+                "failed to reset dependency cache dir: {}",
+                cache_entry_root.display()
+            )
+        })?;
+    }
+
+    let cache_wit_target =
+        cache_entry_root.join(dependency_cache::dependency_wit_path(&dependency.name));
+    fs::create_dir_all(&cache_wit_target).with_context(|| {
+        format!(
+            "failed to create dependency cache wit dir: {}",
+            cache_wit_target.display()
+        )
+    })?;
+
+    let materialized = plugin_sources::materialize_wit_source(
+        project_root,
+        &dependency.wit.source,
+        dependency.wit.registry.as_deref(),
+        &dependency.version,
+        &cache_wit_target,
+    )
+    .await
+    .with_context(|| format!("failed to resolve dependency '{}'", dependency.name))?;
+
+    let cache_wit_digest =
+        build::compute_path_digest_hex(&cache_wit_target).with_context(|| {
+            format!(
+                "failed to compute dependency cache wit digest: {}",
+                cache_wit_target.display()
+            )
+        })?;
+    let wit_source_fingerprint =
+        dependency_cache::wit_source_fingerprint_if_exists(project_root, &dependency.wit.source)
+            .with_context(|| {
+                format!(
+                    "failed to fingerprint wit source for dependency '{}'",
+                    dependency.name
+                )
+            })?;
+
+    let (component_source, component_registry, component_sha256, component_source_fingerprint) =
+        match dependency.kind {
+            ManifestDependencyKind::Native => (None, None, None, None),
+            ManifestDependencyKind::Wasm => {
+                let (source, registry, sha256) = if let Some(component) =
+                    dependency.component.as_ref()
+                {
+                    let digest = plugin_sources::resolve_component_sha256(
+                        project_root,
+                        &component.source,
+                        component.registry.as_deref(),
+                        component.sha256.as_deref(),
+                    )
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to resolve component sha256 for dependency '{}'",
+                            dependency.name
+                        )
+                    })?;
+                    (component.source.clone(), component.registry.clone(), digest)
+                } else if let Some(derived) = materialized.derived_component.as_ref() {
+                    (
+                        derived.source.clone(),
+                        derived.registry.clone(),
+                        derived.sha256.clone(),
+                    )
+                } else {
+                    return Err(anyhow!(
+                        "dependencies entry '{}' is kind=\"wasm\" but no component source was provided and wit source '{}' did not decode as a component",
+                        dependency.name,
+                        dependency.wit.source
+                    ));
+                };
+
+                let cache_component_path =
+                    dependency_cache::cache_component_path(project_root, &dependency.name, &sha256);
+                plugin_sources::materialize_component_file(
+                    project_root,
+                    &source,
+                    registry.as_deref(),
+                    &sha256,
+                    &cache_component_path,
+                    "dependency component cache",
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to materialize component cache for dependency '{}'",
+                        dependency.name
+                    )
+                })?;
+                let source_fingerprint =
+                    dependency_cache::component_source_fingerprint_if_exists(project_root, &source)
+                        .with_context(|| {
+                            format!(
+                                "failed to fingerprint component source for dependency '{}'",
+                                dependency.name
+                            )
+                        })?;
+                (Some(source), registry, Some(sha256), source_fingerprint)
+            }
+        };
+
+    let entry = DependencyCacheEntry {
+        name: dependency.name.clone(),
+        version: dependency.version.clone(),
+        kind: match dependency.kind {
+            ManifestDependencyKind::Native => "native".to_string(),
+            ManifestDependencyKind::Wasm => "wasm".to_string(),
+        },
+        wit_source: dependency.wit.source.clone(),
+        wit_registry: dependency.wit.registry.clone(),
+        wit_path: dependency_cache::dependency_wit_path(&dependency.name),
+        wit_digest: cache_wit_digest,
+        wit_source_fingerprint,
+        component_source,
+        component_registry,
+        component_sha256,
+        component_source_fingerprint,
+        transitive_packages: materialized
+            .transitive_packages
+            .iter()
+            .map(|transitive| DependencyCacheTransitivePackage {
+                name: transitive.name.clone(),
+                registry: transitive.registry.clone(),
+                requirement: transitive.requirement.clone(),
+                version: transitive.version.clone(),
+                digest: transitive.digest.clone(),
+                source: transitive.source.clone(),
+                path: transitive.path.clone(),
+            })
+            .collect(),
+    };
+    dependency_cache::save_entry(project_root, &entry)
+        .with_context(|| format!("failed to save dependency cache for '{}'", dependency.name))?;
+    Ok(entry)
+}
+
+async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
+    let dependencies = build::load_project_dependencies(project_root)?;
+    validate_wit_sources_outside_wit_deps(project_root, &dependencies)?;
+    validate_wit_output_path_collisions(&dependencies)?;
+
+    let resolved_at = time::OffsetDateTime::now_utc().unix_timestamp().to_string();
+    let mut lock_entries = Vec::with_capacity(dependencies.len());
+    let mut transitive_records = Vec::new();
+
+    for dependency in &dependencies {
+        let cache_entry = load_or_refresh_cache_entry(project_root, dependency).await?;
+        transitive_records.extend(cache_entry.transitive_packages.iter().map(|transitive| {
+            TransitivePackageRecord {
+                name: transitive.name.clone(),
+                registry: transitive.registry.clone(),
+                requirement: transitive.requirement.clone(),
+                version: transitive.version.clone(),
+                digest: transitive.digest.clone(),
+                source: transitive.source.clone(),
+                path: transitive.path.clone(),
+                via: dependency.name.clone(),
+            }
+        }));
+        lock_entries.push(ImagoLockDependency {
+            name: dependency.name.clone(),
+            version: dependency.version.clone(),
+            wit_source: dependency.wit.source.clone(),
+            wit_registry: dependency.wit.registry.clone(),
+            wit_digest: cache_entry.wit_digest,
+            wit_path: cache_entry.wit_path,
+            component_source: cache_entry.component_source,
+            component_registry: cache_entry.component_registry,
+            component_sha256: cache_entry.component_sha256,
+            resolved_at: resolved_at.clone(),
+        });
+    }
+
+    dependency_cache::hydrate_project_wit_deps(project_root, &dependencies)?;
+    for entry in &mut lock_entries {
+        let hydrated_path = project_root.join(&entry.wit_path);
+        entry.wit_digest = build::compute_path_digest_hex(&hydrated_path).with_context(|| {
+            format!(
+                "failed to compute hydrated wit digest for dependency '{}' at {}",
+                entry.name,
+                hydrated_path.display()
+            )
+        })?;
+    }
+
+    lock_entries.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
+    let lock = ImagoLock {
+        version: IMAGO_LOCK_VERSION,
+        dependencies: lock_entries,
+        wit_packages: collect_wit_packages(transitive_records),
+    };
+    save_to_project_root(project_root, &lock)?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::Digest as _;
+    use wit_parser::Resolve;
+
+    struct CwdGuard {
+        previous: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn change_to(path: &Path) -> Self {
+            let previous = std::env::current_dir().expect("current dir should be readable");
+            std::env::set_current_dir(path).expect("current dir should be changeable");
+            Self { previous }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.previous);
+        }
+    }
+
+    fn new_temp_dir(test_name: &str) -> PathBuf {
+        let unique = format!(
+            "imago-cli-update-tests-{}-{}-{}",
+            test_name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after UNIX_EPOCH")
+                .as_nanos(),
+        );
+        let root = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&root).expect("temp dir should be created");
+        root
+    }
+
+    fn write(path: &Path, bytes: &[u8]) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("parent should be created");
+        }
+        fs::write(path, bytes).expect("file write should succeed");
+    }
+
+    fn local_warg_package_root(root: &Path, package: &str, version: &str) -> PathBuf {
+        root.join(".imago")
+            .join("warg")
+            .join(plugin_sources::warg_local_package_key(package))
+            .join(version)
+    }
+
+    fn local_warg_file_path(root: &Path, package: &str, version: &str, file_name: &str) -> PathBuf {
+        local_warg_package_root(root, package, version).join(file_name)
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        hex::encode(sha2::Sha256::digest(bytes))
+    }
+
+    fn encode_wit_package(root: &Path) -> Vec<u8> {
+        let mut resolve = Resolve::default();
+        let (pkg, _) = resolve
+            .push_dir(root)
+            .expect("fixture WIT directory should parse");
+        wit_component::encode(&resolve, pkg).expect("fixture WIT package should encode")
+    }
+
+    fn encode_wit_component(root: &Path, world: &str) -> Vec<u8> {
+        let mut resolve = Resolve::default();
+        let (pkg, _) = resolve
+            .push_dir(root)
+            .expect("fixture WIT directory should parse");
+        let world_id = resolve
+            .select_world(&[pkg], Some(world))
+            .expect("fixture world should exist");
+        let mut module = b"\0asm\x01\0\0\0".to_vec();
+        wit_component::embed_component_metadata(
+            &mut module,
+            &resolve,
+            world_id,
+            wit_component::StringEncoding::UTF8,
+        )
+        .expect("component metadata embedding should succeed");
+        wit_component::ComponentEncoder::default()
+            .module(&module)
+            .expect("component encoder should accept module")
+            .encode()
+            .expect("component encoding should succeed")
+    }
+
+    #[test]
+    fn update_resolves_file_source_into_wit_and_lock() {
+        let root = new_temp_dir("file-source");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("registry/example.wit"),
+            b"package test:example@0.1.0;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        assert_eq!(lock.version, 1);
+        assert_eq!(lock.dependencies.len(), 1);
+        assert!(lock.wit_packages.is_empty());
+        let entry = &lock.dependencies[0];
+        assert_eq!(entry.name, "yieldspace:plugin/example");
+        assert_eq!(entry.wit_source, "file://registry/example.wit");
+        assert_eq!(entry.wit_registry, None);
+        assert_eq!(entry.wit_path, "wit/deps/yieldspace-plugin/example");
+        assert!(root.join(&entry.wit_path).exists());
+        assert!(entry.component_source.is_none());
+        assert!(entry.component_sha256.is_none());
+        assert!(!entry.wit_digest.is_empty());
+
+        let second = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(second.exit_code, 0);
+        let lock_raw_2 =
+            fs::read_to_string(root.join("imago.lock")).expect("lock should exist after rerun");
+        let lock_2: ImagoLock = toml::from_str(&lock_raw_2).expect("lock should parse");
+        assert_eq!(lock_2.dependencies[0].wit_digest, entry.wit_digest);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_uses_default_warg_source_when_wit_is_omitted() {
+        let root = new_temp_dir("warg-default");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "1.2.3"
+kind = "native"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &local_warg_file_path(&root, "yieldspace:plugin/example", "1.2.3", "wit.wit"),
+            b"package test:example@1.2.3;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        assert_eq!(lock.dependencies.len(), 1);
+        assert_eq!(
+            lock.dependencies[0].wit_source,
+            "warg://yieldspace:plugin/example@1.2.3"
+        );
+        assert_eq!(
+            lock.dependencies[0].wit_registry,
+            Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string())
+        );
+        assert_eq!(
+            lock.dependencies[0].wit_path,
+            "wit/deps/yieldspace-plugin/example"
+        );
+        assert!(root.join(&lock.dependencies[0].wit_path).exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_records_component_source_and_sha_and_materializes_dependency_component_cache() {
+        let root = new_temp_dir("component-sha");
+        let component_bytes = b"\0asmfake-component";
+        let component_sha = sha256_hex(component_bytes);
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "1.2.3"
+kind = "wasm"
+wit = "file://registry/example.wit"
+
+[dependencies.component]
+source = "file://registry/example-component.wasm"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("registry/example.wit"),
+            b"package test:example@1.2.3;\n",
+        );
+        write(
+            &root.join("registry/example-component.wasm"),
+            component_bytes,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        assert_eq!(lock.dependencies.len(), 1);
+        let entry = &lock.dependencies[0];
+        assert_eq!(
+            entry.component_source.as_deref(),
+            Some("file://registry/example-component.wasm")
+        );
+        assert_eq!(entry.component_registry, None);
+        assert_eq!(
+            entry.component_sha256.as_deref(),
+            Some(component_sha.as_str())
+        );
+        assert!(
+            root.join(".imago/deps/yieldspace-plugin/example/meta.toml")
+                .exists(),
+            "dependency cache metadata must be written"
+        );
+        assert!(
+            root.join(".imago/deps/yieldspace-plugin/example/components")
+                .join(format!("{component_sha}.wasm"))
+                .exists(),
+            "dependency component cache must be materialized"
+        );
+        assert!(
+            !root
+                .join(".imago/components")
+                .join(format!("{component_sha}.wasm"))
+                .exists(),
+            "update must not materialize deploy-time shared component cache"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_derives_component_info_from_wit_component_source() {
+        let root = new_temp_dir("wit-component-derived");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "root:component"
+version = "0.1.0"
+kind = "wasm"
+wit = "warg://root:component@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+
+        let fixture_wit_root = root.join("fixture-wit-component");
+        write(
+            &fixture_wit_root.join("package.wit"),
+            br#"
+package root:component@0.1.0;
+
+world plugin {
+}
+"#,
+        );
+        let component_bytes = encode_wit_component(&fixture_wit_root, "plugin");
+        let expected_sha = sha256_hex(&component_bytes);
+        write(
+            &local_warg_file_path(&root, "root:component", "0.1.0", "wit.wasm"),
+            &component_bytes,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        let entry = lock
+            .dependencies
+            .iter()
+            .find(|entry| entry.name == "root:component")
+            .expect("dependency lock entry should exist");
+        assert_eq!(
+            entry.component_source.as_deref(),
+            Some("warg://root:component@0.1.0")
+        );
+        assert_eq!(
+            entry.component_registry.as_deref(),
+            Some(plugin_sources::DEFAULT_WARG_REGISTRY)
+        );
+        assert_eq!(
+            entry.component_sha256.as_deref(),
+            Some(expected_sha.as_str())
+        );
+        assert!(
+            root.join(".imago/deps/root-component/components")
+                .join(format!("{expected_sha}.wasm"))
+                .exists(),
+            "derived component bytes must be stored in dependency cache"
+        );
+        assert!(root.join("wit/deps/root-component/package.wit").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rejects_wasm_dependency_without_component_when_wit_is_not_component() {
+        let root = new_temp_dir("wit-not-component-for-wasm");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "wasm"
+wit = "warg://chikoski:hello@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+
+        let fixture_wit_root = root.join("fixture-wit-package");
+        write(
+            &fixture_wit_root.join("package.wit"),
+            br#"
+package chikoski:hello@0.1.0;
+
+interface greet {
+  hello: func() -> string;
+}
+"#,
+        );
+        let wit_package_bytes = encode_wit_package(&fixture_wit_root);
+        write(
+            &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wasm"),
+            &wit_package_bytes,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(
+            result.exit_code, 2,
+            "update must fail for non-component WIT"
+        );
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("did not decode as a component"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(!root.join("imago.lock").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rejects_wa_dev_wit_shorthand() {
+        let root = new_temp_dir("wa-dev-shorthand");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "native"
+wit = "https://wa.dev/chikoski:hello/greet"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("no longer accepts https://wa.dev shorthand"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(!root.join("imago.lock").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rejects_sanitized_wit_output_path_collisions() {
+        let root = new_temp_dir("wit-output-collision");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "foo:bar"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/a.wit"
+
+[[dependencies]]
+name = "foo-bar"
+version = "0.2.0"
+kind = "native"
+wit = "file://registry/b.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("wit/deps/stale/dependency.wit"),
+            b"package stale:dep;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("both resolve to 'wit/deps/foo-bar'"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            root.join("wit/deps/stale/dependency.wit").exists(),
+            "wit/deps must not be reset when collision is detected"
+        );
+        assert!(!root.join("imago.lock").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rejects_overlapping_wit_output_paths_before_reset() {
+        let root = new_temp_dir("wit-output-overlap");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "foo:pkg"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/a.wit"
+
+[[dependencies]]
+name = "foo:pkg/bar"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/b.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("wit/deps/stale/dependency.wit"),
+            b"package stale:dep;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("overlapping WIT output paths"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            root.join("wit/deps/stale/dependency.wit").exists(),
+            "wit/deps must not be reset when overlap is detected"
+        );
+        assert!(!root.join("imago.lock").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rejects_file_source_under_wit_deps_before_reset() {
+        let root = new_temp_dir("file-source-under-wit-deps");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://wit/deps/vendor/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("wit/deps/vendor/example.wit"),
+            b"package test:example@0.1.0;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("points under wit/deps"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            root.join("wit/deps/vendor/example.wit").exists(),
+            "source under wit/deps must not be deleted"
+        );
+        assert!(!root.join("imago.lock").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rejects_absolute_file_source_under_wit_deps_when_project_root_is_dot() {
+        let root = new_temp_dir("file-source-under-wit-deps-absolute");
+        let absolute_source = root.join("wit/deps/vendor/example.wit");
+        write(
+            &root.join("imago.toml"),
+            format!(
+                r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://{}"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+                absolute_source.display()
+            )
+            .as_bytes(),
+        );
+        write(&absolute_source, b"package test:example@0.1.0;\n");
+
+        let _cwd_guard = CwdGuard::change_to(&root);
+        let result = run(UpdateArgs {});
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("points under wit/deps"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            absolute_source.exists(),
+            "source under wit/deps must not be deleted"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rejects_component_file_source_under_wit_deps_before_reset() {
+        let root = new_temp_dir("component-file-source-under-wit-deps");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "wasm"
+wit = "file://registry/example.wit"
+
+[dependencies.component]
+source = "file://wit/deps/vendor/example-component.wasm"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("registry/example.wit"),
+            b"package test:example@0.1.0;\n",
+        );
+        write(
+            &root.join("wit/deps/vendor/example-component.wasm"),
+            b"\0asmfake-component",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("component source"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("points under wit/deps"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            root.join("wit/deps/vendor/example-component.wasm").exists(),
+            "component source under wit/deps must not be deleted"
+        );
+        assert!(!root.join("imago.lock").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rejects_dependency_name_with_absolute_path_before_reset() {
+        let root = new_temp_dir("dependency-name-absolute-path");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "/tmp/pwn"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("wit/deps/stale/dependency.wit"),
+            b"package stale:dep;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("dependencies[0].name is invalid"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("invalid path components"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            root.join("wit/deps/stale/dependency.wit").exists(),
+            "wit/deps must not be reset when dependency name validation fails"
+        );
+        assert!(!root.join("imago.lock").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_materializes_warg_transitive_wit_packages() {
+        let root = new_temp_dir("warg-transitive");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "native"
+wit = "warg://chikoski:hello@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("wit/deps/stale/dependency.wit"),
+            b"package stale:dep;\n",
+        );
+
+        let fixture_wit_root = root.join("fixture-wit");
+        write(
+            &fixture_wit_root.join("greet.wit"),
+            br#"
+package chikoski:hello@0.1.0;
+
+interface greet {
+  hello: func() -> string;
+}
+
+world example {
+  import chikoski:name/name-provider@0.1.0;
+}
+"#,
+        );
+        write(
+            &fixture_wit_root.join("deps/chikoski-name/package.wit"),
+            br#"
+package chikoski:name@0.1.0;
+
+interface name-provider {
+  get-name: func() -> string;
+}
+"#,
+        );
+        let wit_package_bytes = encode_wit_package(&fixture_wit_root);
+        write(
+            &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wasm"),
+            &wit_package_bytes,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+
+        assert!(
+            !root.join("wit/deps/stale").exists(),
+            "wit/deps must be reset before resolving"
+        );
+        assert!(
+            root.join("wit/deps/chikoski-hello/package.wit").exists(),
+            "top-level package should be materialized"
+        );
+        assert!(
+            root.join("wit/deps/chikoski-name/package.wit").exists(),
+            "transitive package should be materialized"
+        );
+        assert!(
+            !root
+                .join("wit/deps/chikoski-hello/.imago_transitive")
+                .exists()
+        );
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        assert_eq!(lock.version, 1);
+        assert_eq!(lock.wit_packages.len(), 1);
+        assert_eq!(lock.wit_packages[0].name, "chikoski:name");
+        assert_eq!(
+            lock.wit_packages[0].registry.as_deref(),
+            Some(plugin_sources::DEFAULT_WARG_REGISTRY)
+        );
+        assert_eq!(lock.wit_packages[0].versions.len(), 1);
+        let version = &lock.wit_packages[0].versions[0];
+        assert_eq!(version.requirement, "=0.1.0");
+        assert_eq!(version.version.as_deref(), Some("0.1.0"));
+        assert_eq!(
+            version.source.as_deref(),
+            Some("warg://chikoski:name@0.1.0")
+        );
+        assert_eq!(version.path, "wit/deps/chikoski-name");
+        assert_eq!(version.via, vec!["chikoski:hello".to_string()]);
+        assert!(version.digest.starts_with("sha256:"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_allows_warg_top_package_without_version() {
+        let root = new_temp_dir("warg-top-without-version");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "native"
+wit = "warg://chikoski:hello@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+
+        let fixture_wit_root = root.join("fixture-wit-top-no-version");
+        write(
+            &fixture_wit_root.join("greet.wit"),
+            br#"
+package chikoski:hello;
+
+interface greet {
+  hello: func() -> string;
+}
+"#,
+        );
+        let wit_package_bytes = encode_wit_package(&fixture_wit_root);
+        write(
+            &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wasm"),
+            &wit_package_bytes,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert!(
+            result.exit_code == 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+        assert!(root.join("wit/deps/chikoski-hello/package.wit").exists());
+        assert!(root.join("imago.lock").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rejects_warg_top_package_version_mismatch() {
+        let root = new_temp_dir("warg-top-version-mismatch");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "native"
+wit = "warg://chikoski:hello@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+
+        let fixture_wit_root = root.join("fixture-wit-top-version-mismatch");
+        write(
+            &fixture_wit_root.join("greet.wit"),
+            br#"
+package chikoski:hello@0.2.0;
+
+interface greet {
+  hello: func() -> string;
+}
+"#,
+        );
+        let wit_package_bytes = encode_wit_package(&fixture_wit_root);
+        write(
+            &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wasm"),
+            &wit_package_bytes,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("top-level WIT package 'chikoski:hello' version mismatch"),
+            "unexpected stderr: {stderr}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_allows_warg_transitive_package_without_version() {
+        let root = new_temp_dir("warg-transitive-without-version");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "native"
+wit = "warg://chikoski:hello@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+
+        let fixture_wit_root = root.join("fixture-wit-transitive-no-version");
+        write(
+            &fixture_wit_root.join("greet.wit"),
+            br#"
+package chikoski:hello@0.1.0;
+
+interface greet {
+  hello: func() -> string;
+}
+
+world example {
+  import chikoski:name/name-provider;
+}
+"#,
+        );
+        write(
+            &fixture_wit_root.join("deps/chikoski-name/package.wit"),
+            br#"
+package chikoski:name;
+
+interface name-provider {
+  name: func() -> string;
+}
+"#,
+        );
+        let wit_package_bytes = encode_wit_package(&fixture_wit_root);
+        write(
+            &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wasm"),
+            &wit_package_bytes,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert!(
+            result.exit_code == 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+        assert!(root.join("wit/deps/chikoski-name/package.wit").exists());
+        assert!(
+            !root
+                .join("wit/deps/chikoski-hello/.imago_transitive")
+                .exists()
+        );
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        assert_eq!(lock.wit_packages.len(), 1);
+        assert_eq!(lock.wit_packages[0].name, "chikoski:name");
+        let version = &lock.wit_packages[0].versions[0];
+        assert_eq!(version.requirement, "*");
+        assert!(version.version.is_none());
+        assert!(version.source.is_none());
+        assert_eq!(version.path, "wit/deps/chikoski-name");
+        assert_eq!(version.via, vec!["chikoski:hello".to_string()]);
+        assert!(version.digest.starts_with("sha256:"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_allows_file_source_package_without_version() {
+        let root = new_temp_dir("file-source-without-version");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("registry/example.wit"),
+            b"package test:example;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert!(
+            result.exit_code == 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+        assert!(
+            root.join("wit/deps/yieldspace-plugin/example/example.wit")
+                .exists()
+        );
+        assert!(root.join("imago.lock").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rehydrates_wit_from_cache_when_file_source_disappears() {
+        let root = new_temp_dir("file-source-missing-cache-hit");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("registry/example.wit"),
+            b"package test:example@0.1.0;\n",
+        );
+
+        let first = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(first.exit_code, 0, "first update should succeed: {first:?}");
+
+        fs::remove_file(root.join("registry/example.wit")).expect("source should be removable");
+        fs::remove_dir_all(root.join("wit/deps")).expect("wit/deps should be removable");
+
+        let second = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(
+            second.exit_code, 0,
+            "second update should succeed from cache: {:?}",
+            second.stderr
+        );
+        assert!(
+            root.join("wit/deps/yieldspace-plugin/example/example.wit")
+                .exists(),
+            "wit/deps should be hydrated from dependency cache"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_refreshes_dependency_cache_when_file_source_changes() {
+        let root = new_temp_dir("file-source-refresh");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("registry/example.wit"),
+            b"package test:example@0.1.0;\n",
+        );
+
+        let first = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(first.exit_code, 0, "first update should succeed: {first:?}");
+        let lock_v1: ImagoLock = toml::from_str(
+            &fs::read_to_string(root.join("imago.lock")).expect("lock should exist"),
+        )
+        .expect("lock should parse");
+        let digest_v1 = lock_v1.dependencies[0].wit_digest.clone();
+
+        write(
+            &root.join("registry/example.wit"),
+            b"package test:example@0.2.0;\n",
+        );
+
+        let second = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(
+            second.exit_code, 0,
+            "second update should succeed: {second:?}"
+        );
+        let lock_v2: ImagoLock = toml::from_str(
+            &fs::read_to_string(root.join("imago.lock")).expect("lock should exist"),
+        )
+        .expect("lock should parse");
+        let digest_v2 = lock_v2.dependencies[0].wit_digest.clone();
+        assert_ne!(
+            digest_v1, digest_v2,
+            "wit digest must change after source update"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(
+                ".imago/deps/yieldspace-plugin/example/wit/deps/yieldspace-plugin/example/example.wit"
+            ))
+            .expect("cached wit should exist"),
+            "package test:example@0.2.0;\n"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_uses_dependency_cache_when_local_warg_fixture_is_removed() {
+        let root = new_temp_dir("warg-missing-after-cache");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "native"
+wit = "warg://chikoski:hello@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        let fixture_wit_root = root.join("fixture-wit-warg");
+        write(
+            &fixture_wit_root.join("package.wit"),
+            br#"
+package chikoski:hello@0.1.0;
+
+interface greet {
+  hello: func() -> string;
+}
+"#,
+        );
+        let wit_package_bytes = encode_wit_package(&fixture_wit_root);
+        write(
+            &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wasm"),
+            &wit_package_bytes,
+        );
+
+        let first = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(first.exit_code, 0, "first update should succeed: {first:?}");
+
+        fs::remove_dir_all(
+            root.join(".imago/warg")
+                .join(plugin_sources::warg_local_package_key("chikoski:hello")),
+        )
+        .expect("local warg fixture should be removable");
+        fs::remove_dir_all(root.join("wit/deps")).expect("wit/deps should be removable");
+
+        let second = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(
+            second.exit_code, 0,
+            "second update should succeed from dependency cache: {:?}",
+            second.stderr
+        );
+        assert!(root.join("wit/deps/chikoski-hello/package.wit").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_rejects_plain_wit_with_foreign_imports_from_warg_source() {
+        let root = new_temp_dir("warg-plain-wit-foreign-import");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "native"
+wit = "warg://chikoski:hello@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wit"),
+            br#"
+package chikoski:hello@0.1.0;
+
+interface greet {
+  hello: func() -> string;
+}
+
+world example {
+  import chikoski:name/name-provider;
+}
+"#,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root);
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("contains foreign imports in plain .wit form"),
+            "unexpected stderr: {stderr}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+}

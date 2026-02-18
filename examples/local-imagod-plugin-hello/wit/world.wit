@@ -1,0 +1,5 @@
+package example:local-imagod-plugin-hello;
+
+world plugin-imports {
+    import sizumita:ferris/says@0.1.0;
+}

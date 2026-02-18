@@ -1,0 +1,12 @@
+[package]
+name = "local-imagod-plugin-hello-app"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "local-imagod-plugin-hello-app"
+path = "src/main.rs"
+
+[dependencies]
+wasi = "0.14.7"
+wit-bindgen = "0.51.0"

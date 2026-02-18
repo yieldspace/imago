@@ -1,0 +1,12 @@
+package imago:admin@0.1.0;
+
+interface runtime {
+    service-name: func() -> string;
+    release-hash: func() -> string;
+    runner-id: func() -> string;
+    app-type: func() -> string;
+}
+
+world host {
+    import runtime;
+}

@@ -1,0 +1,9 @@
+version = 1
+
+[[dependencies]]
+name = "imago:admin"
+version = "0.1.0"
+wit_source = "file://../../plugins/imago-admin/wit"
+wit_digest = "1ae68248c708ee8555e328c2d001058d4eb379e0c5a00be7321ad70f893a5110"
+wit_path = "wit/deps/imago_admin"
+resolved_at = "1771355246"
