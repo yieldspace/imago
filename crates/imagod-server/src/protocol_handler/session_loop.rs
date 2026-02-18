@@ -57,101 +57,161 @@ pub(crate) async fn run_session_loop<S>(
 where
     S: ProtocolSession + 'static,
 {
+    let mut stream_tasks = tokio::task::JoinSet::new();
+    let mut first_error = None;
     loop {
-        let Some((mut send, mut recv)) = session.accept_bi().await else {
-            break;
-        };
-
-        let buf = match read_stream_with_timeout(
-            recv.read_to_end(MAX_STREAM_BYTES),
-            Duration::from_secs(STREAM_READ_TIMEOUT_SECS),
-        )
-        .await
-        {
-            Ok(buf) => buf,
-            Err(err) => {
-                let envelope = error_envelope(
-                    MessageType::CommandEvent,
-                    Uuid::new_v4(),
-                    Uuid::new_v4(),
-                    err.to_structured(),
-                );
-                write_envelope(&mut send, &envelope, handler.frame_codec.as_ref()).await?;
-                finish_stream(&mut send)?;
-                continue;
+        tokio::select! {
+            accepted = session.accept_bi() => {
+                let Some((send, recv)) = accepted else {
+                    break;
+                };
+                let handler = handler.clone();
+                let session = session.clone();
+                stream_tasks.spawn(async move {
+                    run_single_stream(&handler, session, send, recv).await
+                });
             }
-        };
-
-        let envelopes = match parse_stream_envelopes(&buf, handler.frame_codec.as_ref()) {
-            Ok(v) => v,
-            Err(err) => {
-                let envelope = error_envelope(
-                    MessageType::CommandEvent,
-                    Uuid::new_v4(),
-                    Uuid::new_v4(),
-                    err.to_structured(),
-                );
-                write_envelope(&mut send, &envelope, handler.frame_codec.as_ref()).await?;
-                finish_stream(&mut send)?;
-                continue;
+            joined = stream_tasks.join_next(), if !stream_tasks.is_empty() => {
+                collect_stream_task_result(joined, &mut first_error);
             }
-        };
-
-        if envelopes.is_empty() {
-            finish_stream(&mut send)?;
-            continue;
         }
+        if first_error.is_some() {
+            break;
+        }
+    }
 
-        if let Err(err) = ensure_single_request_envelope(&envelopes) {
-            let first = &envelopes[0];
-            let response = error_envelope(
-                response_message_type_for_request(first.message_type),
-                first.request_id,
-                first.correlation_id,
+    if first_error.is_some() {
+        stream_tasks.abort_all();
+    }
+    while let Some(joined) = stream_tasks.join_next().await {
+        collect_stream_task_result(Some(joined), &mut first_error);
+    }
+    if let Some(err) = first_error {
+        return Err(err);
+    }
+    Ok(())
+}
+
+async fn run_single_stream<S>(
+    handler: &ProtocolHandler,
+    session: Arc<S>,
+    mut send: SendStream,
+    mut recv: RecvStream,
+) -> Result<(), ImagodError>
+where
+    S: ProtocolSession + 'static,
+{
+    let buf = match read_stream_with_timeout(
+        recv.read_to_end(MAX_STREAM_BYTES),
+        Duration::from_secs(STREAM_READ_TIMEOUT_SECS),
+    )
+    .await
+    {
+        Ok(buf) => buf,
+        Err(err) => {
+            let envelope = error_envelope(
+                MessageType::CommandEvent,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
                 err.to_structured(),
             );
-            write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
+            write_envelope(&mut send, &envelope, handler.frame_codec.as_ref()).await?;
             finish_stream(&mut send)?;
-            continue;
+            return Ok(());
         }
+    };
 
-        let request = envelopes[0].clone();
-        if request.message_type == MessageType::CommandStart {
-            handler.handle_command_start(request, &mut send).await?;
+    let envelopes = match parse_stream_envelopes(&buf, handler.frame_codec.as_ref()) {
+        Ok(v) => v,
+        Err(err) => {
+            let envelope = error_envelope(
+                MessageType::CommandEvent,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                err.to_structured(),
+            );
+            write_envelope(&mut send, &envelope, handler.frame_codec.as_ref()).await?;
             finish_stream(&mut send)?;
-            continue;
+            return Ok(());
         }
-        if request.message_type == MessageType::LogsRequest {
-            if let Err(err) = handler
-                .handle_logs_request(session.clone(), request.clone(), &mut send)
-                .await
-            {
-                let response = error_envelope(
-                    MessageType::LogsRequest,
-                    request.request_id,
-                    request.correlation_id,
-                    err.to_structured(),
-                );
-                write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
-            }
-            finish_stream(&mut send)?;
-            continue;
-        }
+    };
 
-        let response = match handler.handle_single(request.clone()).await {
-            Ok(resp) => resp,
-            Err(err) => error_envelope(
-                response_message_type_for_request(request.message_type),
+    if envelopes.is_empty() {
+        finish_stream(&mut send)?;
+        return Ok(());
+    }
+
+    if let Err(err) = ensure_single_request_envelope(&envelopes) {
+        let first = &envelopes[0];
+        let response = error_envelope(
+            response_message_type_for_request(first.message_type),
+            first.request_id,
+            first.correlation_id,
+            err.to_structured(),
+        );
+        write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
+        finish_stream(&mut send)?;
+        return Ok(());
+    }
+
+    let request = envelopes[0].clone();
+    if request.message_type == MessageType::CommandStart {
+        handler.handle_command_start(request, &mut send).await?;
+        finish_stream(&mut send)?;
+        return Ok(());
+    }
+    if request.message_type == MessageType::LogsRequest {
+        if let Err(err) = handler
+            .handle_logs_request(session.clone(), request.clone(), &mut send)
+            .await
+        {
+            let response = error_envelope(
+                MessageType::LogsRequest,
                 request.request_id,
                 request.correlation_id,
                 err.to_structured(),
-            ),
-        };
-        write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
+            );
+            write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
+        }
         finish_stream(&mut send)?;
+        return Ok(());
     }
 
+    let response = match handler.handle_single(request.clone()).await {
+        Ok(resp) => resp,
+        Err(err) => error_envelope(
+            response_message_type_for_request(request.message_type),
+            request.request_id,
+            request.correlation_id,
+            err.to_structured(),
+        ),
+    };
+    write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
+    finish_stream(&mut send)?;
     Ok(())
+}
+
+fn collect_stream_task_result(
+    joined: Option<Result<Result<(), ImagodError>, tokio::task::JoinError>>,
+    first_error: &mut Option<ImagodError>,
+) {
+    if first_error.is_some() {
+        return;
+    }
+    let Some(joined) = joined else {
+        return;
+    };
+    match joined {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => *first_error = Some(err),
+        Err(err) => {
+            *first_error = Some(ImagodError::new(
+                ErrorCode::Internal,
+                "session.loop",
+                format!("stream task join failed: {err}"),
+            ))
+        }
+    }
 }
 
 pub(crate) async fn read_stream_with_timeout<F, E>(

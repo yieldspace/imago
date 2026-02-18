@@ -48,6 +48,9 @@ const TRANSPORT_CONNECT_STAGE: &str = "transport.connect";
 const UPLOAD_MAX_ATTEMPTS: usize = 4;
 const UPLOAD_RETRY_BASE_BACKOFF_MS: u64 = 250;
 const UPLOAD_RETRY_MAX_BACKOFF_MS: u64 = 1000;
+const DEFAULT_DEPLOY_STREAM_TIMEOUT_SECS: u64 = 30;
+const DEPLOY_STREAM_RETRY_BACKOFF_MS: [u64; 2] = [100, 250];
+const DEPLOY_STREAM_MAX_ATTEMPTS: usize = DEPLOY_STREAM_RETRY_BACKOFF_MS.len() + 1;
 const DATAGRAM_BUFFER_BYTES: usize = 1024 * 1024;
 
 pub(crate) type Envelope = ProtocolEnvelope<Value>;
@@ -56,6 +59,7 @@ pub(crate) type Envelope = ProtocolEnvelope<Value>;
 struct UploadLimits {
     chunk_size: usize,
     max_inflight_chunks: usize,
+    deploy_stream_timeout: Duration,
 }
 
 #[derive(Clone, Copy)]
@@ -64,6 +68,7 @@ struct UploadRequestContext<'a> {
     correlation_id: Uuid,
     deploy_id: &'a str,
     upload_token: &'a str,
+    stream_timeout: Duration,
 }
 
 struct UploadPhaseInputs<'a> {
@@ -82,6 +87,7 @@ struct UploadPhaseInputs<'a> {
 struct UploadPhaseResult {
     session: Session,
     deploy_id: String,
+    deploy_stream_timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -246,7 +252,12 @@ async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> 
         }),
     )?;
 
-    let responses = request_events(&upload_result.session, &command).await?;
+    let responses = request_events_with_timeout(
+        &upload_result.session,
+        &command,
+        upload_result.deploy_stream_timeout,
+    )
+    .await?;
     if responses.is_empty() {
         return Err(anyhow!("command.start returned empty response stream"));
     }
@@ -373,8 +384,10 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
             policy: inputs.policy.clone(),
         },
     )?;
-    let prepare_response: DeployPrepareResponse =
-        response_payload(request_response(&session, &prepare).await?)?;
+    let prepare_response: DeployPrepareResponse = response_payload(
+        request_response_with_timeout(&session, &prepare, upload_limits.deploy_stream_timeout)
+            .await?,
+    )?;
 
     let upload_ranges = upload_ranges_for_prepare(
         prepare_response.artifact_status,
@@ -387,6 +400,7 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
             correlation_id: inputs.correlation_id,
             deploy_id: &prepare_response.deploy_id,
             upload_token: &prepare_response.upload_token,
+            stream_timeout: upload_limits.deploy_stream_timeout,
         };
         push_artifact_ranges(
             upload_context,
@@ -409,8 +423,10 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
             manifest_digest: inputs.manifest_digest.to_string(),
         },
     )?;
-    let commit_response: ArtifactCommitResponse =
-        response_payload(request_response(&session, &commit).await?)?;
+    let commit_response: ArtifactCommitResponse = response_payload(
+        request_response_with_timeout(&session, &commit, upload_limits.deploy_stream_timeout)
+            .await?,
+    )?;
     if !commit_response.verified {
         return Err(CommitNotVerifiedError.into());
     }
@@ -418,6 +434,7 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
     Ok(UploadPhaseResult {
         session,
         deploy_id: prepare_response.deploy_id,
+        deploy_stream_timeout: upload_limits.deploy_stream_timeout,
     })
 }
 
@@ -664,10 +681,17 @@ fn parse_upload_limits(response: &HelloNegotiateResponse) -> anyhow::Result<Uplo
         DEFAULT_MAX_INFLIGHT_CHUNKS,
         "hello.negotiate response max_inflight_chunks",
     )?;
+    let deploy_stream_timeout_secs = parse_positive_limit_u64(
+        &response.limits,
+        "deploy_stream_timeout_secs",
+        DEFAULT_DEPLOY_STREAM_TIMEOUT_SECS,
+        "hello.negotiate response deploy_stream_timeout_secs",
+    )?;
 
     Ok(UploadLimits {
         chunk_size,
         max_inflight_chunks,
+        deploy_stream_timeout: Duration::from_secs(deploy_stream_timeout_secs),
     })
 }
 
@@ -681,6 +705,26 @@ fn parse_positive_limit(
         Some(raw) => {
             let parsed = raw
                 .parse::<usize>()
+                .with_context(|| format!("failed to parse {label} as integer: {raw}"))?;
+            if parsed == 0 {
+                return Err(anyhow!("{label} must be greater than 0"));
+            }
+            Ok(parsed)
+        }
+        None => Ok(default),
+    }
+}
+
+fn parse_positive_limit_u64(
+    limits: &BTreeMap<String, String>,
+    key: &str,
+    default: u64,
+    label: &str,
+) -> anyhow::Result<u64> {
+    match limits.get(key) {
+        Some(raw) => {
+            let parsed = raw
+                .parse::<u64>()
                 .with_context(|| format!("failed to parse {label} as integer: {raw}"))?;
             if parsed == 0 {
                 return Err(anyhow!("{label} must be greater than 0"));
@@ -808,7 +852,15 @@ pub(crate) async fn request_response(
     session: &web_transport_quinn::Session,
     envelope: &Envelope,
 ) -> anyhow::Result<Envelope> {
-    let responses = request_events(session, envelope).await?;
+    request_response_with_timeout(session, envelope, resolve_deploy_stream_timeout()).await
+}
+
+pub(crate) async fn request_response_with_timeout(
+    session: &web_transport_quinn::Session,
+    envelope: &Envelope,
+    stream_timeout: Duration,
+) -> anyhow::Result<Envelope> {
+    let responses = request_events_with_timeout(session, envelope, stream_timeout).await?;
     responses
         .into_iter()
         .next()
@@ -819,20 +871,91 @@ pub(crate) async fn request_events(
     session: &web_transport_quinn::Session,
     envelope: &Envelope,
 ) -> anyhow::Result<Vec<Envelope>> {
+    request_events_with_timeout(session, envelope, resolve_deploy_stream_timeout()).await
+}
+
+pub(crate) async fn request_events_with_timeout(
+    session: &web_transport_quinn::Session,
+    envelope: &Envelope,
+    stream_timeout: Duration,
+) -> anyhow::Result<Vec<Envelope>> {
     let payload = to_cbor(envelope)?;
     let framed = encode_frame(&payload);
-
-    let (mut send, mut recv) = session.open_bi().await?;
-    send.write_all(&framed).await?;
-    send.finish()?;
-
-    let response_bytes = recv.read_to_end(MAX_STREAM_BYTES).await?;
+    let mut attempt = 1usize;
+    let response_bytes = loop {
+        match request_events_once(session, &framed, stream_timeout).await {
+            Ok(response_bytes) => break response_bytes,
+            Err(err) => {
+                let Some(backoff) = deploy_stream_retry_backoff(attempt) else {
+                    return Err(err);
+                };
+                eprintln!(
+                    "request stream attempt {attempt}/{DEPLOY_STREAM_MAX_ATTEMPTS} failed, retrying in {}ms",
+                    backoff.as_millis()
+                );
+                tokio::time::sleep(backoff).await;
+                attempt = attempt.saturating_add(1);
+            }
+        }
+    };
     let frames = decode_frames(&response_bytes)?;
     let mut envelopes = Vec::with_capacity(frames.len());
     for frame in frames {
         envelopes.push(from_cbor::<Envelope>(&frame)?);
     }
     Ok(envelopes)
+}
+
+async fn request_events_once(
+    session: &web_transport_quinn::Session,
+    framed: &[u8],
+    timeout_duration: Duration,
+) -> anyhow::Result<Vec<u8>> {
+    let (mut send, mut recv) = tokio::time::timeout(timeout_duration, session.open_bi())
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "request stream open timed out after {} ms",
+                timeout_duration.as_millis()
+            )
+        })??;
+    tokio::time::timeout(timeout_duration, send.write_all(framed))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "request stream write timed out after {} ms",
+                timeout_duration.as_millis()
+            )
+        })??;
+    send.finish()?;
+    tokio::time::timeout(timeout_duration, recv.read_to_end(MAX_STREAM_BYTES))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "request stream read timed out after {} ms",
+                timeout_duration.as_millis()
+            )
+        })?
+        .map_err(anyhow::Error::from)
+}
+
+fn deploy_stream_retry_backoff(attempt: usize) -> Option<Duration> {
+    if attempt >= DEPLOY_STREAM_MAX_ATTEMPTS {
+        return None;
+    }
+    DEPLOY_STREAM_RETRY_BACKOFF_MS
+        .get(attempt.saturating_sub(1))
+        .copied()
+        .map(Duration::from_millis)
+}
+
+fn resolve_deploy_stream_timeout() -> Duration {
+    let value = std::env::var("IMAGO_DEPLOY_STREAM_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(DEFAULT_DEPLOY_STREAM_TIMEOUT_SECS);
+    Duration::from_secs(value)
 }
 
 fn upload_ranges_for_prepare(
@@ -946,6 +1069,7 @@ async fn push_artifact_ranges(
         let task_session = context.session.clone();
         let task_deploy_id = deploy_id.clone();
         let task_upload_token = upload_token.clone();
+        let task_stream_timeout = context.stream_timeout;
         uploads.spawn(async move {
             push_single_artifact_chunk(
                 task_session,
@@ -954,6 +1078,7 @@ async fn push_artifact_ranges(
                 task_upload_token,
                 offset,
                 chunk,
+                task_stream_timeout,
             )
             .await
         });
@@ -973,6 +1098,7 @@ async fn push_single_artifact_chunk(
     upload_token: Arc<str>,
     offset: u64,
     chunk: Vec<u8>,
+    stream_timeout: Duration,
 ) -> anyhow::Result<()> {
     let chunk_hash = hex::encode(Sha256::digest(&chunk));
     let chunk_b64 = base64::engine::general_purpose::STANDARD.encode(&chunk);
@@ -995,7 +1121,7 @@ async fn push_single_artifact_chunk(
     )?;
 
     let _ack: imago_protocol::ArtifactPushAck =
-        response_payload(request_response(&session, &request).await?)?;
+        response_payload(request_response_with_timeout(&session, &request, stream_timeout).await?)?;
     Ok(())
 }
 
@@ -1603,6 +1729,7 @@ mod tests {
             limits: BTreeMap::from([
                 ("chunk_size".to_string(), "2048".to_string()),
                 ("max_inflight_chunks".to_string(), "4".to_string()),
+                ("deploy_stream_timeout_secs".to_string(), "12".to_string()),
             ]),
         };
 
@@ -1611,7 +1738,8 @@ mod tests {
             limits,
             UploadLimits {
                 chunk_size: 2048,
-                max_inflight_chunks: 4
+                max_inflight_chunks: 4,
+                deploy_stream_timeout: Duration::from_secs(12),
             }
         );
     }
@@ -1807,6 +1935,19 @@ mod tests {
         assert_eq!(retry_backoff_duration(2), Duration::from_millis(500));
         assert_eq!(retry_backoff_duration(3), Duration::from_millis(1000));
         assert_eq!(retry_backoff_duration(4), Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn deploy_stream_retry_backoff_is_bounded() {
+        assert_eq!(
+            deploy_stream_retry_backoff(1),
+            Some(Duration::from_millis(100))
+        );
+        assert_eq!(
+            deploy_stream_retry_backoff(2),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(deploy_stream_retry_backoff(3), None);
     }
 
     #[test]

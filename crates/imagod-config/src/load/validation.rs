@@ -61,6 +61,46 @@ pub(crate) fn validate(config: &ImagodConfig) -> Result<(), ImagodError> {
         ));
     }
 
+    if !(1..=4).contains(&config.runtime.http_worker_count) {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.load",
+            "runtime.http_worker_count must be between 1 and 4",
+        ));
+    }
+
+    if !(1..=16).contains(&config.runtime.http_worker_queue_capacity) {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.load",
+            "runtime.http_worker_queue_capacity must be between 1 and 16",
+        ));
+    }
+
+    if config.runtime.manager_control_read_timeout_ms == 0 {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.load",
+            "runtime.manager_control_read_timeout_ms must be greater than 0",
+        ));
+    }
+
+    if config.runtime.max_concurrent_sessions == 0 {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.load",
+            "runtime.max_concurrent_sessions must be greater than 0",
+        ));
+    }
+
+    if config.runtime.deploy_stream_timeout_secs == 0 {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.load",
+            "runtime.deploy_stream_timeout_secs must be greater than 0",
+        ));
+    }
+
     if config.runtime.max_artifact_size_bytes == 0 {
         return Err(ImagodError::new(
             ErrorCode::BadRequest,

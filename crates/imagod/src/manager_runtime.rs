@@ -30,6 +30,9 @@ pub(crate) async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyh
         &config.storage_root,
         config.runtime.stop_grace_timeout_secs,
         config.runtime.runner_ready_timeout_secs,
+        config.runtime.manager_control_read_timeout_ms,
+        config.runtime.http_worker_count,
+        config.runtime.http_worker_queue_capacity,
         config.runtime.runner_log_buffer_bytes,
         config.runtime.epoch_tick_interval_ms,
     )
@@ -133,6 +136,9 @@ pub(crate) async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyh
     eprintln!("imagod listening on {}", config.listen_addr);
     let mut shutdown_signal = std::pin::pin!(tokio::signal::ctrl_c());
     let mut session_tasks = tokio::task::JoinSet::new();
+    let session_concurrency = Arc::new(tokio::sync::Semaphore::new(
+        config.runtime.max_concurrent_sessions as usize,
+    ));
     let mut shutdown_started = false;
 
     loop {
@@ -152,8 +158,16 @@ pub(crate) async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyh
                 let Some(request): Option<web_transport_quinn::Request> = request else {
                     break;
                 };
+                let permit = match session_concurrency.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let _ = request.respond(StatusCode::TOO_MANY_REQUESTS).await;
+                        continue;
+                    }
+                };
                 let handler = handler.clone();
                 session_tasks.spawn(async move {
+                    let _permit = permit;
                     let Ok(session) = request.respond(StatusCode::OK).await else {
                         return;
                     };

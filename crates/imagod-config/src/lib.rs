@@ -70,6 +70,21 @@ pub struct RuntimeConfig {
     #[serde(default = "default_epoch_tick_interval_ms")]
     /// Runner epoch-tick interval in milliseconds.
     pub epoch_tick_interval_ms: u64,
+    #[serde(default = "default_http_worker_count")]
+    /// Number of HTTP worker tasks used by runtime ingress.
+    pub http_worker_count: u32,
+    #[serde(default = "default_http_worker_queue_capacity")]
+    /// Per-worker request queue capacity for runtime ingress.
+    pub http_worker_queue_capacity: u32,
+    #[serde(default = "default_manager_control_read_timeout_ms")]
+    /// Read timeout for manager control channel operations in milliseconds.
+    pub manager_control_read_timeout_ms: u64,
+    #[serde(default = "default_max_concurrent_sessions")]
+    /// Upper bound of concurrently active sessions managed by imagod.
+    pub max_concurrent_sessions: u32,
+    #[serde(default = "default_deploy_stream_timeout_secs")]
+    /// Timeout for deployment stream operations in seconds.
+    pub deploy_stream_timeout_secs: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -83,6 +98,11 @@ impl Default for RuntimeConfig {
             runner_ready_timeout_secs: default_runner_ready_timeout_secs(),
             runner_log_buffer_bytes: default_runner_log_buffer_bytes(),
             epoch_tick_interval_ms: default_epoch_tick_interval_ms(),
+            http_worker_count: default_http_worker_count(),
+            http_worker_queue_capacity: default_http_worker_queue_capacity(),
+            manager_control_read_timeout_ms: default_manager_control_read_timeout_ms(),
+            max_concurrent_sessions: default_max_concurrent_sessions(),
+            deploy_stream_timeout_secs: default_deploy_stream_timeout_secs(),
         }
     }
 }
@@ -180,6 +200,26 @@ fn default_epoch_tick_interval_ms() -> u64 {
     50
 }
 
+fn default_http_worker_count() -> u32 {
+    2
+}
+
+fn default_http_worker_queue_capacity() -> u32 {
+    4
+}
+
+fn default_manager_control_read_timeout_ms() -> u64 {
+    500
+}
+
+fn default_max_concurrent_sessions() -> u32 {
+    256
+}
+
+fn default_deploy_stream_timeout_secs() -> u64 {
+    15
+}
+
 fn is_valid_compatibility_date(value: &str) -> bool {
     if value.len() != 10 {
         return false;
@@ -243,6 +283,11 @@ client_ca_cert = "ca.crt"
         assert_eq!(config.runtime.max_artifact_size_bytes, 64 * 1024 * 1024);
         assert_eq!(config.runtime.runner_ready_timeout_secs, 3);
         assert_eq!(config.runtime.runner_log_buffer_bytes, 256 * 1024);
+        assert_eq!(config.runtime.http_worker_count, 2);
+        assert_eq!(config.runtime.http_worker_queue_capacity, 4);
+        assert_eq!(config.runtime.manager_control_read_timeout_ms, 500);
+        assert_eq!(config.runtime.max_concurrent_sessions, 256);
+        assert_eq!(config.runtime.deploy_stream_timeout_secs, 15);
 
         cleanup_temp_path(path);
     }
@@ -436,6 +481,150 @@ runner_log_buffer_bytes = 0
         let err = ImagodConfig::load(&path)
             .expect_err("config should reject zero runner_log_buffer_bytes");
         assert!(err.to_string().contains("runtime.runner_log_buffer_bytes"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_http_worker_count_out_of_range() {
+        let path = write_temp_config(
+            "rejects_http_worker_count_out_of_range",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_cert = "server.crt"
+server_key = "server.key"
+client_ca_cert = "ca.crt"
+
+[runtime]
+http_worker_count = 5
+"#,
+        );
+
+        let err =
+            ImagodConfig::load(&path).expect_err("config should reject out-of-range worker count");
+        assert!(err.to_string().contains("runtime.http_worker_count"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_http_worker_queue_capacity_out_of_range() {
+        let path = write_temp_config(
+            "rejects_http_worker_queue_capacity_out_of_range",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_cert = "server.crt"
+server_key = "server.key"
+client_ca_cert = "ca.crt"
+
+[runtime]
+http_worker_queue_capacity = 17
+"#,
+        );
+
+        let err = ImagodConfig::load(&path)
+            .expect_err("config should reject out-of-range queue capacity");
+        assert!(
+            err.to_string()
+                .contains("runtime.http_worker_queue_capacity")
+        );
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_zero_manager_control_read_timeout_ms() {
+        let path = write_temp_config(
+            "rejects_zero_manager_control_read_timeout_ms",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_cert = "server.crt"
+server_key = "server.key"
+client_ca_cert = "ca.crt"
+
+[runtime]
+manager_control_read_timeout_ms = 0
+"#,
+        );
+
+        let err = ImagodConfig::load(&path)
+            .expect_err("config should reject zero manager control read timeout");
+        assert!(
+            err.to_string()
+                .contains("runtime.manager_control_read_timeout_ms")
+        );
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_zero_max_concurrent_sessions() {
+        let path = write_temp_config(
+            "rejects_zero_max_concurrent_sessions",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_cert = "server.crt"
+server_key = "server.key"
+client_ca_cert = "ca.crt"
+
+[runtime]
+max_concurrent_sessions = 0
+"#,
+        );
+
+        let err = ImagodConfig::load(&path)
+            .expect_err("config should reject zero max_concurrent_sessions");
+        assert!(err.to_string().contains("runtime.max_concurrent_sessions"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_zero_deploy_stream_timeout_secs() {
+        let path = write_temp_config(
+            "rejects_zero_deploy_stream_timeout_secs",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_cert = "server.crt"
+server_key = "server.key"
+client_ca_cert = "ca.crt"
+
+[runtime]
+deploy_stream_timeout_secs = 0
+"#,
+        );
+
+        let err = ImagodConfig::load(&path)
+            .expect_err("config should reject zero deploy_stream_timeout_secs");
+        assert!(
+            err.to_string()
+                .contains("runtime.deploy_stream_timeout_secs")
+        );
 
         cleanup_temp_path(path);
     }

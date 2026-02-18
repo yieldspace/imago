@@ -146,6 +146,8 @@ pub async fn run_runner_from_stdin_with_registry(
                 capabilities: bootstrap_for_run.capabilities.clone(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: bootstrap_for_run.epoch_tick_interval_ms,
+                http_worker_count: bootstrap_for_run.http_worker_count,
+                http_worker_queue_capacity: bootstrap_for_run.http_worker_queue_capacity,
                 http_ready_tx,
             })
             .await

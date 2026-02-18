@@ -3,9 +3,7 @@ use std::{collections::BTreeMap, path::Path};
 use imagod_common::ImagodError;
 
 use super::{
-    Manifest, ServiceLaunch,
-    manifest::ManifestValidator,
-    plugin_cache::FilesystemPluginCache,
+    Manifest, ServiceLaunch, manifest::ManifestValidator, plugin_cache::FilesystemPluginCache,
 };
 
 pub(super) async fn build_launch_from_release(

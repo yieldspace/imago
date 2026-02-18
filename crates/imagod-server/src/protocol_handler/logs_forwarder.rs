@@ -6,10 +6,11 @@ use imago_protocol::{
 };
 use imagod_common::ImagodError;
 use imagod_control::{ServiceLogEvent, ServiceLogStream, ServiceLogSubscription};
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::Duration};
 use uuid::Uuid;
 
 use super::{LOG_DATAGRAM_TARGET_BYTES, session_loop::ProtocolSession};
+const DATAGRAM_SEND_RETRY_DELAYS_MS: [u64; 3] = [10, 50, 100];
 
 #[async_trait]
 pub(crate) trait LogsForwarder: Send + Sync {
@@ -75,7 +76,8 @@ pub(crate) async fn run_logs_forwarder<S>(
                 max_datagram_size,
                 seq,
                 Some(log_error_from_imagod_error(&err)),
-            );
+            )
+            .await;
             return;
         }
     };
@@ -99,17 +101,21 @@ pub(crate) async fn run_logs_forwarder<S>(
     match stream_result {
         Ok(()) => {
             let terminal_name = last_name.unwrap_or(fallback_name);
-            let _ = sender.send_single_log_chunk(
-                &mut seq,
-                &terminal_name,
-                LogStreamKind::Composite,
-                Vec::new(),
-                true,
-            );
-            let _ = sender.send_logs_end_datagram(seq, None);
+            let _ = sender
+                .send_single_log_chunk(
+                    &mut seq,
+                    &terminal_name,
+                    LogStreamKind::Composite,
+                    Vec::new(),
+                    true,
+                )
+                .await;
+            let _ = sender.send_logs_end_datagram(seq, None).await;
         }
         Err(err) => {
-            let _ = sender.send_logs_end_datagram(seq, Some(log_error_from_imagod_error(&err)));
+            let _ = sender
+                .send_logs_end_datagram(seq, Some(log_error_from_imagod_error(&err)))
+                .await;
         }
     }
 }
@@ -145,7 +151,7 @@ where
         }
     }
 
-    fn send_log_data_chunks(
+    async fn send_log_data_chunks(
         &self,
         seq: &mut u64,
         name: &str,
@@ -167,7 +173,8 @@ where
         let mut offset = 0usize;
         while offset < bytes.len() {
             let end = bytes.len().min(offset.saturating_add(self.chunk_size));
-            self.send_single_log_chunk(seq, name, stream_kind, bytes[offset..end].to_vec(), false)?;
+            self.send_single_log_chunk(seq, name, stream_kind, bytes[offset..end].to_vec(), false)
+                .await?;
             *last_name = Some(name.to_string());
             offset = end;
         }
@@ -175,7 +182,7 @@ where
         Ok(())
     }
 
-    fn send_single_log_chunk(
+    async fn send_single_log_chunk(
         &self,
         seq: &mut u64,
         name: &str,
@@ -197,12 +204,16 @@ where
             self.correlation_id,
             chunk,
         );
-        send_datagram_envelope(self.session, &envelope, self.max_datagram_size)?;
+        send_datagram_envelope(self.session, &envelope, self.max_datagram_size).await?;
         *seq = seq.saturating_add(1);
         Ok(())
     }
 
-    fn send_logs_end_datagram(&self, seq: u64, error: Option<LogError>) -> Result<(), ImagodError> {
+    async fn send_logs_end_datagram(
+        &self,
+        seq: u64,
+        error: Option<LogError>,
+    ) -> Result<(), ImagodError> {
         send_logs_end_datagram(
             self.session,
             self.request_id,
@@ -211,10 +222,11 @@ where
             seq,
             error,
         )
+        .await
     }
 }
 
-fn send_logs_end_datagram<S>(
+async fn send_logs_end_datagram<S>(
     session: &S,
     request_id: Uuid,
     correlation_id: Uuid,
@@ -231,7 +243,7 @@ where
         error,
     };
     let envelope = ProtocolEnvelope::new(MessageType::LogsEnd, request_id, correlation_id, end);
-    send_datagram_envelope(session, &envelope, max_datagram_size)
+    send_datagram_envelope(session, &envelope, max_datagram_size).await
 }
 
 async fn stream_logs_datagrams<S>(
@@ -245,13 +257,15 @@ where
     S: ProtocolSession,
 {
     for subscription in &subscriptions {
-        sender.send_log_data_chunks(
-            seq,
-            &subscription.service_name,
-            LogStreamKind::Composite,
-            &subscription.snapshot_bytes,
-            last_name,
-        )?;
+        sender
+            .send_log_data_chunks(
+                seq,
+                &subscription.service_name,
+                LogStreamKind::Composite,
+                &subscription.snapshot_bytes,
+                last_name,
+            )
+            .await?;
     }
 
     let mut follow_targets = subscriptions
@@ -324,13 +338,15 @@ where
                 };
                 match message {
                     FollowForwardMsg::Event { service_name, event } => {
-                        sender.send_log_data_chunks(
-                            seq,
-                            &service_name,
-                            service_log_stream_to_protocol(event.stream),
-                            &event.bytes,
-                            last_name,
-                        )?;
+                        sender
+                            .send_log_data_chunks(
+                                seq,
+                                &service_name,
+                                service_log_stream_to_protocol(event.stream),
+                                &event.bytes,
+                                last_name,
+                            )
+                            .await?;
                     }
                     FollowForwardMsg::Lagged { service_name, dropped } => {
                         *last_name = Some(service_name);
@@ -353,7 +369,7 @@ pub(crate) fn advance_seq_for_lagged(seq: &mut u64, dropped: u64) {
     *seq = seq.saturating_add(dropped);
 }
 
-fn send_datagram_envelope<S, T>(
+async fn send_datagram_envelope<S, T>(
     session: &S,
     envelope: &ProtocolEnvelope<T>,
     max_datagram_size: usize,
@@ -380,7 +396,29 @@ where
             ),
         ));
     }
-    session.send_datagram(bytes)
+    send_datagram_with_retry(session, bytes).await
+}
+
+async fn send_datagram_with_retry<S>(session: &S, bytes: Vec<u8>) -> Result<(), ImagodError>
+where
+    S: ProtocolSession,
+{
+    match session.send_datagram(bytes.clone()) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let mut last_err = err;
+            for delay_ms in DATAGRAM_SEND_RETRY_DELAYS_MS {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                match session.send_datagram(bytes.clone()) {
+                    Ok(()) => return Ok(()),
+                    Err(err) => {
+                        last_err = err;
+                    }
+                }
+            }
+            Err(last_err)
+        }
+    }
 }
 
 pub(crate) fn fixed_log_chunk_size(

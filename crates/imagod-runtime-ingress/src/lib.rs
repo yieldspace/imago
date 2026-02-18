@@ -14,7 +14,7 @@ pub use imagod_runtime_internal::{ComponentRuntime, RuntimeHttpRequest, RuntimeH
 use tokio::{
     net::TcpListener,
     sync::{Semaphore, watch},
-    task::JoinHandle,
+    task::{JoinError, JoinHandle},
     time::{self, Duration},
 };
 
@@ -105,9 +105,18 @@ where
 {
     let concurrency = Arc::new(Semaphore::new(MAX_INBOUND_CONNECTION_HANDLERS));
     let mut connection_tasks = tokio::task::JoinSet::new();
+    let service_name = bootstrap.service_name.clone();
 
-    loop {
+    'accept: loop {
+        reap_completed_connection_tasks(&mut connection_tasks, &service_name);
+
         let permit = tokio::select! {
+            joined = connection_tasks.join_next(), if !connection_tasks.is_empty() => {
+                if let Some(joined) = joined {
+                    report_connection_task_completion(&service_name, joined);
+                }
+                continue 'accept;
+            }
             acquired = concurrency.clone().acquire_owned() => {
                 match acquired {
                     Ok(permit) => permit,
@@ -122,37 +131,46 @@ where
             }
         };
 
-        let accepted = tokio::select! {
-            accepted = listener.accept() => accepted,
-            changed = shutdown_rx.changed() => {
-                drop(permit);
-                if changed.is_err() || *shutdown_rx.borrow() {
-                    break;
-                }
-                continue;
-            }
-        };
-
-        let (stream, _) = match accepted {
-            Ok(v) => v,
-            Err(err) => {
-                drop(permit);
-                if should_retry_accept(&err) {
-                    eprintln!("runner http ingress accept transient error: {err}");
-                    time::sleep(Duration::from_millis(INBOUND_ACCEPT_RETRY_BACKOFF_MS)).await;
+        let accepted = loop {
+            let accepted = tokio::select! {
+                joined = connection_tasks.join_next(), if !connection_tasks.is_empty() => {
+                    if let Some(joined) = joined {
+                        report_connection_task_completion(&service_name, joined);
+                    }
                     continue;
                 }
-                let _ = shutdown_tx.send(true);
-                return Err(ImagodError::new(
-                    ErrorCode::Internal,
-                    STAGE_HTTP_INGRESS,
-                    format!(
-                        "http ingress accept failed for service '{}': {err}",
-                        bootstrap.service_name
-                    ),
-                ));
+                accepted = listener.accept() => accepted,
+                changed = shutdown_rx.changed() => {
+                    drop(permit);
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break 'accept;
+                    }
+                    continue 'accept;
+                }
+            };
+
+            match accepted {
+                Ok(v) => break v,
+                Err(err) => {
+                    drop(permit);
+                    if should_retry_accept(&err) {
+                        eprintln!("runner http ingress accept transient error: {err}");
+                        time::sleep(Duration::from_millis(INBOUND_ACCEPT_RETRY_BACKOFF_MS)).await;
+                        continue 'accept;
+                    }
+                    let _ = shutdown_tx.send(true);
+                    return Err(ImagodError::new(
+                        ErrorCode::Internal,
+                        STAGE_HTTP_INGRESS,
+                        format!(
+                            "http ingress accept failed for service '{}': {err}",
+                            bootstrap.service_name
+                        ),
+                    ));
+                }
             }
         };
+        let (stream, _) = accepted;
 
         let runtime = runtime.clone();
         let service_name = bootstrap.service_name.clone();
@@ -328,6 +346,10 @@ pub fn runtime_error_response(error: ImagodError) -> Response<Full<Bytes>> {
     );
     let (status, body) = match error.code {
         ErrorCode::BadRequest => (hyper::StatusCode::BAD_REQUEST, "bad request"),
+        ErrorCode::Busy => (
+            hyper::StatusCode::SERVICE_UNAVAILABLE,
+            "service unavailable",
+        ),
         _ => (
             hyper::StatusCode::INTERNAL_SERVER_ERROR,
             "internal server error",
@@ -338,6 +360,24 @@ pub fn runtime_error_response(error: ImagodError) -> Response<Full<Bytes>> {
         .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .body(Full::new(Bytes::from(body)))
         .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"runtime error"))))
+}
+
+fn reap_completed_connection_tasks(
+    connection_tasks: &mut tokio::task::JoinSet<()>,
+    service_name: &str,
+) {
+    while let Some(joined) = connection_tasks.try_join_next() {
+        report_connection_task_completion(service_name, joined);
+    }
+}
+
+fn report_connection_task_completion(service_name: &str, joined: Result<(), JoinError>) {
+    if let Err(err) = joined {
+        eprintln!(
+            "runner http ingress connection task join error service={} error={}",
+            service_name, err
+        );
+    }
 }
 
 fn should_retry_accept(err: &std::io::Error) -> bool {
@@ -382,6 +422,8 @@ mod tests {
             app_type: RunnerAppType::Cli,
             http_port: None,
             http_max_body_bytes: None,
+            http_worker_count: 2,
+            http_worker_queue_capacity: 4,
             socket: None,
             component_path: root.join("component.wasm"),
             args: Vec::new(),
@@ -648,14 +690,10 @@ mod tests {
 
         let runtime = Arc::new(MockErrorRuntime);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let ingress_task = spawn_http_ingress_server(
-            runtime,
-            bootstrap.clone(),
-            shutdown_tx.clone(),
-            shutdown_rx,
-        )
-        .await
-        .expect("http ingress should start");
+        let ingress_task =
+            spawn_http_ingress_server(runtime, bootstrap.clone(), shutdown_tx.clone(), shutdown_rx)
+                .await
+                .expect("http ingress should start");
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -767,5 +805,31 @@ mod tests {
             .expect("ingress task join should succeed");
         assert!(joined.is_ok(), "ingress should stop cleanly");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn runtime_error_response_maps_busy_to_service_unavailable() {
+        let response = runtime_error_response(ImagodError::new(
+            ErrorCode::Busy,
+            "runtime.http",
+            "queue full",
+        ));
+        assert_eq!(response.status(), hyper::StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn ingress_reaps_completed_connection_tasks_while_running() {
+        let mut connection_tasks = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            connection_tasks.spawn(async {});
+        }
+        tokio::task::yield_now().await;
+
+        reap_completed_connection_tasks(&mut connection_tasks, "svc-test");
+        assert_eq!(
+            connection_tasks.len(),
+            0,
+            "completed tasks should be collected from join set"
+        );
     }
 }

@@ -1,5 +1,5 @@
-use bytes::Bytes;
 use async_trait::async_trait;
+use bytes::Bytes;
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
@@ -14,7 +14,7 @@ use crate::{STAGE_RUNTIME, WasiState, map_runtime_error};
 
 #[derive(Default)]
 pub(crate) struct DefaultHttpComponentSupervisor {
-    request_tx: tokio::sync::Mutex<Option<mpsc::Sender<RuntimeHttpWorkItem>>>,
+    request_tx: std::sync::RwLock<Option<mpsc::Sender<RuntimeHttpWorkItem>>>,
 }
 
 impl DefaultHttpComponentSupervisor {
@@ -30,7 +30,9 @@ impl HttpComponentSupervisor for DefaultHttpComponentSupervisor {
         request_tx: mpsc::Sender<RuntimeHttpWorkItem>,
         mut http_ready_tx: Option<oneshot::Sender<()>>,
     ) -> Result<(), ImagodError> {
-        let mut guard = self.request_tx.lock().await;
+        let mut guard = self.request_tx.write().map_err(|_| {
+            map_runtime_error("http component supervisor state is poisoned".to_string())
+        })?;
         if guard.is_some() {
             return Err(map_runtime_error(
                 "http component is already running in this runtime instance".to_string(),
@@ -44,7 +46,9 @@ impl HttpComponentSupervisor for DefaultHttpComponentSupervisor {
     }
 
     async fn request_sender(&self) -> Result<mpsc::Sender<RuntimeHttpWorkItem>, ImagodError> {
-        let guard = self.request_tx.lock().await;
+        let guard = self.request_tx.read().map_err(|_| {
+            map_runtime_error("http component supervisor state is poisoned".to_string())
+        })?;
         guard.as_ref().cloned().ok_or_else(|| {
             ImagodError::new(
                 ErrorCode::Internal,
@@ -55,7 +59,10 @@ impl HttpComponentSupervisor for DefaultHttpComponentSupervisor {
     }
 
     async fn unregister_http_component(&self) -> Option<mpsc::Sender<RuntimeHttpWorkItem>> {
-        let mut guard = self.request_tx.lock().await;
+        let mut guard = match self.request_tx.write() {
+            Ok(guard) => guard,
+            Err(_) => return None,
+        };
         guard.take()
     }
 }

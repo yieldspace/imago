@@ -4,8 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use async_trait::async_trait;
 use anyhow::{Context, anyhow};
+use async_trait::async_trait;
 use imago_lockfile::{ComponentExpectation, DependencyExpectation};
 
 use crate::commands::{

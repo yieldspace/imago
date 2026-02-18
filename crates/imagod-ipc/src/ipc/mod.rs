@@ -285,6 +285,10 @@ pub struct RunnerBootstrap {
     pub http_port: Option<u16>,
     /// Max accepted HTTP request body size in bytes when `app_type=http`.
     pub http_max_body_bytes: Option<u64>,
+    /// Number of HTTP workers available to runtime ingress.
+    pub http_worker_count: u32,
+    /// Queue capacity for each HTTP worker.
+    pub http_worker_queue_capacity: u32,
     /// Socket runtime configuration when `app_type=socket`.
     pub socket: Option<RunnerSocketConfig>,
     /// Absolute path to the component file.
@@ -326,6 +330,18 @@ impl Validate for RunnerBootstrap {
         validate_non_empty_path(&self.manager_control_endpoint, "manager_control_endpoint")?;
         validate_non_empty_path(&self.runner_endpoint, "runner_endpoint")?;
         validate_positive_u64(self.epoch_tick_interval_ms, "epoch_tick_interval_ms")?;
+        if !(1..=4).contains(&self.http_worker_count) {
+            return Err(ValidationError::invalid(
+                "http_worker_count",
+                "must be between 1 and 4",
+            ));
+        }
+        if !(1..=16).contains(&self.http_worker_queue_capacity) {
+            return Err(ValidationError::invalid(
+                "http_worker_queue_capacity",
+                "must be between 1 and 16",
+            ));
+        }
 
         match self.app_type {
             RunnerAppType::Http => {
@@ -843,6 +859,31 @@ pub fn map_ipc_error(stage: &str, message: impl Into<String>) -> ImagodError {
 mod tests {
     use super::*;
 
+    fn valid_http_bootstrap() -> RunnerBootstrap {
+        RunnerBootstrap {
+            runner_id: "runner-a".to_string(),
+            service_name: "svc-a".to_string(),
+            release_hash: "release-a".to_string(),
+            app_type: RunnerAppType::Http,
+            http_port: Some(8080),
+            http_max_body_bytes: Some(1024),
+            http_worker_count: 2,
+            http_worker_queue_capacity: 4,
+            socket: None,
+            component_path: PathBuf::from("/tmp/component.wasm"),
+            args: vec![],
+            envs: BTreeMap::new(),
+            bindings: vec![],
+            plugin_dependencies: vec![],
+            capabilities: CapabilityPolicy::default(),
+            manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+            runner_endpoint: PathBuf::from("/tmp/runner.sock"),
+            manager_auth_secret: random_secret_hex(),
+            invocation_secret: random_secret_hex(),
+            epoch_tick_interval_ms: 50,
+        }
+    }
+
     #[test]
     fn runner_app_type_round_trip_via_cbor() {
         let encoded =
@@ -861,6 +902,8 @@ mod tests {
             app_type: RunnerAppType::Socket,
             http_port: None,
             http_max_body_bytes: None,
+            http_worker_count: 2,
+            http_worker_queue_capacity: 4,
             socket: Some(RunnerSocketConfig {
                 protocol: RunnerSocketProtocol::Udp,
                 direction: RunnerSocketDirection::Inbound,
@@ -919,6 +962,30 @@ mod tests {
                 .deps
                 .contains_key("yieldspace:plugin/example")
         );
+        assert_eq!(decoded.http_worker_count, 2);
+        assert_eq!(decoded.http_worker_queue_capacity, 4);
+    }
+
+    #[test]
+    fn runner_bootstrap_validate_rejects_http_worker_count_out_of_range() {
+        let mut bootstrap = valid_http_bootstrap();
+        bootstrap.http_worker_count = 5;
+
+        let err = bootstrap
+            .validate()
+            .expect_err("bootstrap should reject out-of-range http_worker_count");
+        assert!(err.to_string().contains("http_worker_count"));
+    }
+
+    #[test]
+    fn runner_bootstrap_validate_rejects_http_worker_queue_capacity_out_of_range() {
+        let mut bootstrap = valid_http_bootstrap();
+        bootstrap.http_worker_queue_capacity = 17;
+
+        let err = bootstrap
+            .validate()
+            .expect_err("bootstrap should reject out-of-range http_worker_queue_capacity");
+        assert!(err.to_string().contains("http_worker_queue_capacity"));
     }
 
     #[test]

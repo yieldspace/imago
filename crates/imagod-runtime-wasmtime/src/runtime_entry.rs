@@ -274,6 +274,8 @@ impl WasmRuntime {
         capabilities: &CapabilityPolicy,
         mut shutdown: watch::Receiver<bool>,
         epoch_tick_interval_ms: u64,
+        http_worker_count: u32,
+        http_worker_queue_capacity: u32,
         http_ready_tx: Option<oneshot::Sender<()>>,
     ) -> Result<(), ImagodError> {
         let component = Component::from_file(&self.engine, component_path).map_err(|e| {
@@ -321,7 +323,9 @@ impl WasmRuntime {
             .await
             .map_err(|e| map_runtime_error(format!("http component instantiate failed: {e}")))?;
 
-        let (request_tx, request_rx) = mpsc::channel(HTTP_REQUEST_QUEUE_CAPACITY);
+        let request_queue_capacity =
+            http_request_queue_capacity(http_worker_count, http_worker_queue_capacity);
+        let (request_tx, request_rx) = mpsc::channel(request_queue_capacity);
         let worker_task = tokio::spawn(run_http_worker(store, proxy, request_rx));
         let (tick_stop_tx, tick_task) = self.spawn_epoch_tick_task(epoch_tick_interval_ms);
 
@@ -350,16 +354,7 @@ impl WasmRuntime {
         request: RuntimeHttpRequest,
     ) -> Result<RuntimeHttpResponse, ImagodError> {
         let request_tx = self.http_supervisor.request_sender().await?;
-        let (response_tx, response_rx) = oneshot::channel();
-        request_tx
-            .send(RuntimeHttpWorkItem {
-                request,
-                response_tx,
-            })
-            .await
-            .map_err(|_| {
-                map_runtime_error("http component worker request channel is closed".to_string())
-            })?;
+        let response_rx = dispatch_http_work_item(&request_tx, request)?;
         response_rx.await.map_err(|_| {
             ImagodError::new(
                 ErrorCode::Internal,
@@ -368,6 +363,39 @@ impl WasmRuntime {
             )
         })?
     }
+}
+
+fn dispatch_http_work_item(
+    request_tx: &mpsc::Sender<RuntimeHttpWorkItem>,
+    request: RuntimeHttpRequest,
+) -> Result<oneshot::Receiver<Result<RuntimeHttpResponse, ImagodError>>, ImagodError> {
+    let (response_tx, response_rx) = oneshot::channel();
+    match request_tx.try_send(RuntimeHttpWorkItem {
+        request,
+        response_tx,
+    }) {
+        Ok(()) => Ok(response_rx),
+        Err(mpsc::error::TrySendError::Full(_)) => Err(ImagodError::new(
+            ErrorCode::Busy,
+            STAGE_RUNTIME,
+            "http component worker queue is full",
+        )),
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(map_runtime_error(
+            "http component worker request channel is closed".to_string(),
+        )),
+    }
+}
+
+fn http_request_queue_capacity(http_worker_count: u32, http_worker_queue_capacity: u32) -> usize {
+    let worker_count = usize::try_from(http_worker_count)
+        .ok()
+        .filter(|v| *v > 0)
+        .unwrap_or(1);
+    let queue_capacity = usize::try_from(http_worker_queue_capacity)
+        .ok()
+        .filter(|v| *v > 0)
+        .unwrap_or(HTTP_REQUEST_QUEUE_CAPACITY);
+    worker_count.saturating_mul(queue_capacity).max(1)
 }
 
 #[async_trait]
@@ -390,6 +418,8 @@ impl ComponentRuntime for WasmRuntime {
             capabilities,
             shutdown,
             epoch_tick_interval_ms,
+            http_worker_count,
+            http_worker_queue_capacity,
             http_ready_tx,
         } = request;
         let native_plugin_context =
@@ -430,13 +460,17 @@ impl ComponentRuntime for WasmRuntime {
                     &capabilities,
                     shutdown,
                     epoch_tick_interval_ms,
+                    http_worker_count,
+                    http_worker_queue_capacity,
                     http_ready_tx,
                 )
                 .await
             }
             RunnerAppType::Socket => {
                 let socket = socket.as_ref().ok_or_else(|| {
-                    map_runtime_error("app_type=socket requires socket runtime settings".to_string())
+                    map_runtime_error(
+                        "app_type=socket requires socket runtime settings".to_string(),
+                    )
                 })?;
                 self.run_cli_component_async(
                     &component_path,
@@ -526,6 +560,33 @@ mod tests {
         }
     }
 
+    fn sample_http_request() -> RuntimeHttpRequest {
+        RuntimeHttpRequest {
+            method: "GET".to_string(),
+            uri: "/".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn queue_full_dispatch_returns_busy_without_awaiting() {
+        let (request_tx, mut request_rx) = mpsc::channel::<RuntimeHttpWorkItem>(1);
+        request_tx
+            .try_send(RuntimeHttpWorkItem {
+                request: sample_http_request(),
+                response_tx: oneshot::channel().0,
+            })
+            .expect("first enqueue should fill queue");
+
+        let err = dispatch_http_work_item(&request_tx, sample_http_request())
+            .expect_err("second enqueue should fail with busy");
+        assert_eq!(err.code, ErrorCode::Busy);
+        assert!(err.message.contains("queue is full"));
+
+        let _ = request_rx.recv().await;
+    }
+
     #[tokio::test]
     async fn socket_type_requires_socket_config() {
         let runtime = WasmRuntime::new().expect("runtime should initialize");
@@ -544,6 +605,8 @@ mod tests {
                 capabilities: CapabilityPolicy::default(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: 50,
+                http_worker_count: 2,
+                http_worker_queue_capacity: 4,
                 http_ready_tx: None,
             })
             .await
@@ -574,6 +637,8 @@ mod tests {
                 capabilities: CapabilityPolicy::default(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: 50,
+                http_worker_count: 2,
+                http_worker_queue_capacity: 4,
                 http_ready_tx: None,
             })
             .await
@@ -604,6 +669,8 @@ mod tests {
                 capabilities: CapabilityPolicy::default(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: 50,
+                http_worker_count: 2,
+                http_worker_queue_capacity: 4,
                 http_ready_tx: None,
             })
             .await

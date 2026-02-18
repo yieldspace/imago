@@ -106,10 +106,7 @@ impl RunnerManagerClient for DbusRunnerManagerClient {
     }
 }
 
-pub async fn register<M>(
-    bootstrap: &RunnerBootstrap,
-    manager_client: &M,
-) -> Result<(), ImagodError>
+pub async fn register<M>(bootstrap: &RunnerBootstrap, manager_client: &M) -> Result<(), ImagodError>
 where
     M: RunnerManagerClient,
 {
@@ -481,6 +478,8 @@ mod tests {
             runner_endpoint: root.join(runner_socket_name),
             manager_auth_secret: random_secret_hex(),
             invocation_secret: random_secret_hex(),
+            http_worker_count: 2,
+            http_worker_queue_capacity: 4,
             epoch_tick_interval_ms: 50,
         }
     }

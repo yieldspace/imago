@@ -92,7 +92,7 @@ flowchart TD
 
 処理モデル:
 
-- session ごとに `accept_bi` ループ。
+- session ごとに `accept_bi` ループを回し、受理した stream は session 内で task 並列処理する。
 - stream 受信は `read_to_end` を 30 秒 timeout 付きで実行し、timeout 時は `E_OPERATION_TIMEOUT` で stream を閉じる。
 - stream 受信バイトは `decode_frames` でフレーム分解し、各 frame を `from_cbor::<ProtocolEnvelope<Value>>` で復号。
 - request envelope は 1 stream につき 1 件のみ許可。複数 request は `E_BAD_REQUEST`。
@@ -619,3 +619,11 @@ flowchart TD
 
 - `logs.request` のフィルタキーを `name` へ統一した。
 - logs ACK の対象一覧キーを `names` へ統一した。
+
+## 実装反映ノート（Manager/Session/Logs 改修 / 2026-02-18）
+
+- `ServiceSupervisor::wait_for_runner_ready` は `tokio::select!` 中心の待機へ変更した。`runner_ready`、runner 早期終了、ready timeout を同時待ちする。
+- manager control の request read timeout は runner ready timeout と分離し、`runtime.manager_control_read_timeout_ms`（既定 500ms）で設定する。
+- manager control server は `accept` 後に handler permit を取得する順序へ変更し、permit の占有時間を短縮した。
+- protocol session は 1 session 内の複数 bi-stream を並列処理する。
+- logs datagram 送信は一時失敗時に 10ms / 50ms / 100ms の bounded retry を実施する。

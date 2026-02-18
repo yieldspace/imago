@@ -66,6 +66,10 @@ impl ProtocolHandler {
             "upload_session_ttl".to_string(),
             format!("{}s", self.config.runtime.upload_session_ttl_secs),
         );
+        limits.insert(
+            "deploy_stream_timeout_secs".to_string(),
+            self.config.runtime.deploy_stream_timeout_secs.to_string(),
+        );
 
         response_envelope(
             MessageType::HelloNegotiate,

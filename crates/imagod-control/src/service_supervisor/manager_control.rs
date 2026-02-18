@@ -30,9 +30,16 @@ impl DefaultManagerControlHandler {
         stream: UnixStream,
         inner: Arc<RwLock<BTreeMap<String, super::RunningService>>>,
         pending_ready: Arc<Mutex<super::PendingReadyMap>>,
-        read_timeout: Duration,
+        manager_control_read_timeout: Duration,
     ) {
-        handle_control_connection_impl(stream, inner, pending_ready, read_timeout, self).await;
+        handle_control_connection_impl(
+            stream,
+            inner,
+            pending_ready,
+            manager_control_read_timeout,
+            self,
+        )
+        .await;
     }
 }
 
@@ -189,11 +196,11 @@ pub(super) async fn handle_control_connection_impl(
     mut stream: UnixStream,
     inner: Arc<RwLock<BTreeMap<String, super::RunningService>>>,
     pending_ready: Arc<Mutex<super::PendingReadyMap>>,
-    read_timeout: Duration,
+    manager_control_read_timeout: Duration,
     handler: &DefaultManagerControlHandler,
 ) {
     let request = match time::timeout(
-        read_timeout,
+        manager_control_read_timeout,
         DbusP2pTransport::read_message::<ControlRequest>(&mut stream),
     )
     .await
@@ -213,7 +220,7 @@ pub(super) async fn handle_control_connection_impl(
                 stage: super::STAGE_CONTROL.to_string(),
                 message: format!(
                     "manager control request read timed out after {} ms",
-                    read_timeout.as_millis()
+                    manager_control_read_timeout.as_millis()
                 ),
             };
             if let Err(err) =
