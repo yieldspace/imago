@@ -20,6 +20,8 @@ use crate::{
     commands::{CommandResult, build, deploy},
 };
 
+mod render;
+
 const NON_FOLLOW_IDLE_TIMEOUT_SECS: u64 = 2;
 const POST_END_DRAIN_TIMEOUT_MS: u64 = 200;
 const JSON_PENDING_MAX_BYTES_PER_STREAM: usize = 64 * 1024;
@@ -225,6 +227,7 @@ async fn receive_logs_datagrams(
     all_processes: bool,
     output_format: LogsOutputFormat,
 ) -> anyhow::Result<()> {
+    let renderer = render::DefaultLogRenderer;
     let mut expected_seq: Option<u64> = None;
     let mut truncated_warned = false;
     let mut prefix_state = PrefixRenderState::default();
@@ -272,7 +275,8 @@ async fn receive_logs_datagrams(
                     continue;
                 }
                 warn_if_seq_gap(&mut expected_seq, chunk.seq, &mut truncated_warned);
-                if let Err(err) = render_chunk(
+                if let Err(err) = render::LogRenderer::render_chunk(
+                    &renderer,
                     &chunk,
                     all_processes,
                     output_format,
@@ -318,7 +322,7 @@ async fn receive_logs_datagrams(
         }
     };
 
-    let flush_result = flush_json_tail_if_needed(output_format, &mut json_state);
+    let flush_result = render::LogRenderer::flush_tail(&renderer, output_format, &mut json_state);
     finalize_stream_result(stream_result, flush_result)
 }
 

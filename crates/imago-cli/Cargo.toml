@@ -8,6 +8,7 @@ name = "imago"
 path = "src/main.rs"
 
 [dependencies]
+async-trait = { workspace = true }
 anyhow = { workspace = true }
 base64 = { workspace = true }
 clap = { workspace = true, features = ["derive"] }

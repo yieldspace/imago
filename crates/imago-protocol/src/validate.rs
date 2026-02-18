@@ -46,6 +46,16 @@ pub(crate) fn ensure_non_empty(value: &str, field: &'static str) -> Result<(), V
     Ok(())
 }
 
+pub(crate) fn ensure_required_strings(
+    fields: &[(&str, &'static str)],
+) -> Result<(), ValidationError> {
+    for &(value, field) in fields {
+        ensure_non_empty(value, field)?;
+    }
+
+    Ok(())
+}
+
 pub(crate) fn ensure_uuid_not_nil(
     value: &Uuid,
     field: &'static str,

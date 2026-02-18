@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::validate::{Validate, ValidationError, ensure_non_empty};
+use crate::validate::{Validate, ValidationError, ensure_required_strings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorCode {
@@ -47,9 +47,7 @@ pub struct StructuredError {
 
 impl Validate for StructuredError {
     fn validate(&self) -> Result<(), ValidationError> {
-        ensure_non_empty(&self.message, "message")?;
-        ensure_non_empty(&self.stage, "stage")?;
-        Ok(())
+        ensure_required_strings(&[(&self.message, "message"), (&self.stage, "stage")])
     }
 }
 

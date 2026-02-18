@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use imago_protocol::{ErrorCode, StructuredError};
 use thiserror::Error;
 
+mod builders;
+
 #[derive(Debug, Error)]
 #[error("{code:?} at {stage}: {message}")]
 /// Rich internal error type carried across `imagod` components.
@@ -24,13 +26,7 @@ pub struct ImagodError {
 impl ImagodError {
     /// Creates a new error with default retryable=false and no details.
     pub fn new(code: ErrorCode, stage: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            stage: stage.into(),
-            message: message.into(),
-            retryable: false,
-            details: BTreeMap::new(),
-        }
+        builders::new_error(code, stage, message)
     }
 
     /// Sets the retryable flag.
@@ -41,7 +37,7 @@ impl ImagodError {
 
     /// Appends one key/value detail entry.
     pub fn with_detail(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.details.insert(key.into(), value.into());
+        builders::insert_detail(&mut self.details, key, value);
         self
     }
 

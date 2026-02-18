@@ -31,8 +31,14 @@ use web_transport_quinn::{Session, proto::ConnectRequest};
 
 use crate::{
     cli::DeployArgs,
-    commands::{CommandResult, build, dependency_cache},
+    commands::{
+        CommandResult, build,
+        shared::dependency::{DependencyResolver, StandardDependencyResolver},
+    },
 };
+
+mod artifact;
+mod network;
 
 const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const COMPATIBILITY_DATE: &str = "2026-02-10";
@@ -170,6 +176,10 @@ fn run_inner(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> {
 }
 
 async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> {
+    let dependency_resolver = StandardDependencyResolver;
+    let target_connector = network::QuinnTargetConnector;
+    let artifact_bundler = artifact::TarArtifactBundler;
+
     let target_name = args
         .target
         .clone()
@@ -182,19 +192,22 @@ async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> 
     let restart_policy = build_output.restart_policy;
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).context("failed to parse manifest json")?;
-    let dependency_component_sources =
-        resolve_dependency_component_sources(project_root, &manifest).await?;
+    let dependency_component_sources = dependency_resolver
+        .resolve_dependency_component_sources(project_root, &manifest.dependencies)?;
 
     let target = build_output
         .target
         .require_deploy_credentials()
         .context("target settings are invalid for deploy")?;
 
-    let artifact = build_artifact_bundle_file(
-        &manifest,
-        &manifest_path,
-        project_root,
-        &dependency_component_sources,
+    let artifact = artifact::ArtifactBundler::bundle(
+        &artifact_bundler,
+        artifact::ArtifactBundleRequest {
+            manifest: &manifest,
+            manifest_path: &manifest_path,
+            project_root,
+            dependency_component_sources: &dependency_component_sources,
+        },
     )?;
     let (artifact_digest, artifact_size) = compute_file_sha256_and_size(artifact.path())?;
     let manifest_digest = hex::encode(Sha256::digest(&manifest_bytes));
@@ -211,18 +224,21 @@ async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> 
         &manifest_digest,
     );
 
-    let upload_result = run_upload_phase_with_resume(UploadPhaseInputs {
-        target: &target,
-        target_for_protocol: &target_for_protocol,
-        policy: &policy,
-        manifest: &manifest,
-        artifact_path: artifact.path(),
-        artifact_digest: &artifact_digest,
-        artifact_size,
-        manifest_digest: &manifest_digest,
-        idempotency_key: &idempotency_key,
-        correlation_id,
-    })
+    let upload_result = run_upload_phase_with_resume(
+        &target_connector,
+        UploadPhaseInputs {
+            target: &target,
+            target_for_protocol: &target_for_protocol,
+            policy: &policy,
+            manifest: &manifest,
+            artifact_path: artifact.path(),
+            artifact_digest: &artifact_digest,
+            artifact_size,
+            manifest_digest: &manifest_digest,
+            idempotency_key: &idempotency_key,
+            correlation_id,
+        },
+    )
     .await?;
 
     let command_request_id = Uuid::new_v4();
@@ -287,11 +303,12 @@ async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> 
     }
 }
 
-async fn run_upload_phase_with_resume(
+async fn run_upload_phase_with_resume<C: network::TargetConnector>(
+    target_connector: &C,
     inputs: UploadPhaseInputs<'_>,
 ) -> anyhow::Result<UploadPhaseResult> {
     for attempt in 1..=UPLOAD_MAX_ATTEMPTS {
-        match run_upload_phase_once(&inputs).await {
+        match run_upload_phase_once(target_connector, &inputs).await {
             Ok(result) => return Ok(result),
             Err(err) => {
                 if attempt >= UPLOAD_MAX_ATTEMPTS || !should_retry_upload_error(&err) {
@@ -320,10 +337,11 @@ async fn run_upload_phase_with_resume(
     ))
 }
 
-async fn run_upload_phase_once(
+async fn run_upload_phase_once<C: network::TargetConnector>(
+    target_connector: &C,
     inputs: &UploadPhaseInputs<'_>,
 ) -> anyhow::Result<UploadPhaseResult> {
-    let session = connect_target(inputs.target).await?;
+    let session = target_connector.connect(inputs.target).await?;
 
     let hello = request_envelope(
         MessageType::HelloNegotiate,
@@ -1106,75 +1124,13 @@ fn build_artifact_bundle_file(
     Ok(TempArtifactBundle::new(bundle_path))
 }
 
+#[cfg(test)]
 async fn resolve_dependency_component_sources(
     project_root: &Path,
     manifest: &Manifest,
 ) -> anyhow::Result<BTreeMap<String, PathBuf>> {
-    let mut sources = BTreeMap::new();
-    if !manifest
-        .dependencies
-        .iter()
-        .any(|dep| dep.kind == build::ManifestDependencyKind::Wasm)
-    {
-        return Ok(sources);
-    }
-
-    let lock = imago_lockfile::load_from_project_root(project_root)?;
-    let lock_by_name = lock
-        .dependencies
-        .into_iter()
-        .map(|entry| (entry.name.clone(), entry))
-        .collect::<BTreeMap<_, _>>();
-
-    for dependency in &manifest.dependencies {
-        if dependency.kind != build::ManifestDependencyKind::Wasm {
-            continue;
-        }
-
-        let component = dependency.component.as_ref().ok_or_else(|| {
-            anyhow!(
-                "manifest dependency '{}' is missing component; run `imago update`",
-                dependency.name
-            )
-        })?;
-        let lock_entry = lock_by_name.get(&dependency.name).ok_or_else(|| {
-            anyhow!(
-                "dependency '{}' is not resolved in imago.lock; run `imago update`",
-                dependency.name
-            )
-        })?;
-        lock_entry.component_source.as_deref().ok_or_else(|| {
-            anyhow!(
-                "dependency '{}' component source is missing in imago.lock; run `imago update`",
-                dependency.name
-            )
-        })?;
-        let sha = lock_entry.component_sha256.as_deref().ok_or_else(|| {
-            anyhow!(
-                "dependency '{}' component sha256 is missing in imago.lock; run `imago update`",
-                dependency.name
-            )
-        })?;
-        if component.sha256 != sha {
-            return Err(anyhow!(
-                "dependency '{}' component hash mismatch (manifest='{}', lock='{}'); run `imago update`",
-                dependency.name,
-                component.sha256,
-                sha
-            ));
-        }
-        let cache_path =
-            dependency_cache::resolve_cached_component_path(project_root, &dependency.name, sha)
-                .with_context(|| {
-                    format!(
-                        "failed to resolve cached component bytes for dependency '{}'",
-                        dependency.name
-                    )
-                })?;
-        sources.insert(dependency.name.clone(), cache_path);
-    }
-
-    Ok(sources)
+    let dependency_resolver = StandardDependencyResolver;
+    dependency_resolver.resolve_dependency_component_sources(project_root, &manifest.dependencies)
 }
 
 fn normalize_bundle_entry_path(raw: &str, field_name: &str) -> anyhow::Result<PathBuf> {

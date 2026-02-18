@@ -1,9 +1,11 @@
 //! Service process supervisor and manager-side control-plane server.
 
+#[cfg(test)]
+use std::process::Stdio;
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    process::{ExitStatus, Stdio},
+    process::ExitStatus,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -14,20 +16,30 @@ use std::{
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{
-    CapabilityPolicy, ControlRequest, ControlResponse, IpcErrorPayload, PluginDependency,
-    RunnerAppType, RunnerBootstrap, RunnerInboundRequest, RunnerSocketConfig, ServiceBinding,
-    compute_manager_auth_proof, dbus_p2p::DbusP2pTransport, issue_invocation_token, now_unix_secs,
-    random_secret_hex, verify_manager_auth_proof,
+    CapabilityPolicy, PluginDependency, RunnerAppType, RunnerBootstrap, RunnerInboundRequest,
+    RunnerSocketConfig, ServiceBinding, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
+    now_unix_secs, random_secret_hex,
 };
-use sha2::{Digest, Sha256};
+#[cfg(test)]
+use imagod_ipc::{ControlRequest, ControlResponse};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
-    net::{UnixListener, UnixStream},
-    process::{Child, Command},
+    io::{AsyncRead, AsyncWriteExt},
+    net::UnixListener,
+    process::Child,
     sync::{Mutex, RwLock, Semaphore, broadcast, oneshot, oneshot::error::TryRecvError, watch},
     task::{JoinHandle, JoinSet},
     time,
 };
+
+use self::{
+    log_buffer::BoundedLogBuffer,
+    manager_control::DefaultManagerControlHandler,
+    runner_spawn::DefaultRunnerSpawner,
+};
+
+mod log_buffer;
+mod manager_control;
+mod runner_spawn;
 
 const STAGE_START: &str = "service.start";
 const STAGE_STOP: &str = "service.stop";
@@ -122,43 +134,6 @@ struct RunningService {
 }
 
 #[derive(Debug)]
-/// Bounded byte ring used for per-stream runner log capture.
-struct BoundedLogBuffer {
-    max_bytes: usize,
-    bytes: VecDeque<u8>,
-}
-
-impl BoundedLogBuffer {
-    /// Creates a new bounded log buffer.
-    fn new(max_bytes: usize) -> Self {
-        Self {
-            max_bytes: max_bytes.max(1),
-            bytes: VecDeque::new(),
-        }
-    }
-
-    /// Appends bytes and evicts oldest data when capacity is exceeded.
-    fn push(&mut self, chunk: &[u8]) {
-        if chunk.is_empty() {
-            return;
-        }
-        self.bytes.extend(chunk.iter().copied());
-        while self.bytes.len() > self.max_bytes {
-            let _ = self.bytes.pop_front();
-        }
-    }
-
-    fn snapshot(&self) -> Vec<u8> {
-        self.bytes.iter().copied().collect()
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.bytes.len()
-    }
-}
-
-#[derive(Debug)]
 struct ManagerControlServer {
     endpoint: PathBuf,
     shutdown_tx: watch::Sender<bool>,
@@ -186,6 +161,8 @@ pub struct ServiceSupervisor {
     pending_ready: Arc<Mutex<PendingReadyMap>>,
     starting_services: Arc<Mutex<BTreeSet<String>>>,
     stopping_count: Arc<AtomicUsize>,
+    _manager_control_handler: Arc<DefaultManagerControlHandler>,
+    runner_spawner: DefaultRunnerSpawner,
     _manager_control_server: Arc<ManagerControlServer>,
 }
 
@@ -243,12 +220,15 @@ impl ServiceSupervisor {
         let pending_ready = Arc::new(Mutex::new(BTreeMap::new()));
         let starting_services = Arc::new(Mutex::new(BTreeSet::new()));
         let stopping_count = Arc::new(AtomicUsize::new(0));
+        let manager_control_handler = Arc::new(DefaultManagerControlHandler);
+        let runner_spawner = DefaultRunnerSpawner;
         let manager_control_server = Arc::new(Self::spawn_manager_control_server(
             listener,
             manager_control_endpoint.clone(),
             inner.clone(),
             pending_ready.clone(),
             runner_ready_timeout,
+            manager_control_handler.clone(),
         ));
 
         let supervisor = Self {
@@ -262,6 +242,8 @@ impl ServiceSupervisor {
             pending_ready,
             starting_services,
             stopping_count,
+            _manager_control_handler: manager_control_handler,
+            runner_spawner,
             _manager_control_server: manager_control_server,
         };
         Ok(supervisor)
@@ -670,6 +652,7 @@ impl ServiceSupervisor {
         inner: Arc<RwLock<BTreeMap<String, RunningService>>>,
         pending_ready: Arc<Mutex<PendingReadyMap>>,
         read_timeout: Duration,
+        manager_control_handler: Arc<DefaultManagerControlHandler>,
     ) -> ManagerControlServer {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let concurrency = Arc::new(Semaphore::new(MAX_MANAGER_CONTROL_CONNECTION_HANDLERS));
@@ -712,9 +695,12 @@ impl ServiceSupervisor {
 
                 let inner = inner.clone();
                 let pending_ready = pending_ready.clone();
+                let manager_control_handler = manager_control_handler.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    handle_control_connection(stream, inner, pending_ready, read_timeout).await;
+                    manager_control_handler
+                        .handle_control_connection(stream, inner, pending_ready, read_timeout)
+                        .await;
                 });
             }
         });
@@ -727,26 +713,8 @@ impl ServiceSupervisor {
     }
 
     /// Spawns the `imagod --runner` child process with piped stdio.
-    fn spawn_runner_child(&self, _bootstrap: &RunnerBootstrap) -> Result<Child, ImagodError> {
-        let exe = std::env::current_exe().map_err(|e| {
-            ImagodError::new(
-                ErrorCode::Internal,
-                STAGE_START,
-                format!("failed to resolve current executable: {e}"),
-            )
-        })?;
-        let mut cmd = Command::new(exe);
-        cmd.arg("--runner");
-        cmd.stdin(Stdio::piped());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-        cmd.spawn().map_err(|e| {
-            ImagodError::new(
-                ErrorCode::Internal,
-                STAGE_START,
-                format!("failed to spawn runner process: {e}"),
-            )
-        })
+    fn spawn_runner_child(&self, bootstrap: &RunnerBootstrap) -> Result<Child, ImagodError> {
+        self.runner_spawner.spawn_runner_child(bootstrap)
     }
 
     fn runner_endpoint_for(&self, service_name: &str, runner_id: &str) -> PathBuf {
@@ -1006,267 +974,40 @@ impl ServiceSupervisor {
 }
 
 fn build_runner_endpoint(storage_root: &Path, service_name: &str, runner_id: &str) -> PathBuf {
-    let mut hasher = Sha256::new();
-    hasher.update(service_name.as_bytes());
-    hasher.update(b":");
-    hasher.update(runner_id.as_bytes());
-    let digest = hasher.finalize();
-    let endpoint_hash = hex::encode(&digest[..RUNNER_ENDPOINT_HASH_BYTES]);
-
-    storage_root
-        .join("runtime")
-        .join("ipc")
-        .join("runners")
-        .join(format!("runner-{endpoint_hash}.sock"))
+    runner_spawn::build_runner_endpoint(storage_root, service_name, runner_id)
 }
 
 fn validate_unix_socket_path_len(path: &Path, socket_name: &str) -> Result<(), ImagodError> {
-    let path_len = path.to_string_lossy().len();
-    if path_len <= MAX_UNIX_SOCKET_PATH_BYTES {
-        return Ok(());
-    }
-
-    Err(ImagodError::new(
-        ErrorCode::Internal,
-        STAGE_CONTROL,
-        format!(
-            "{socket_name} path is too long for AF_UNIX: actual length {path_len}, max {MAX_UNIX_SOCKET_PATH_BYTES}, path={}",
-            path.display()
-        ),
-    ))
+    runner_spawn::validate_unix_socket_path_len(path, socket_name)
 }
 
 /// Handles one control request received on manager control socket.
+#[cfg(test)]
 async fn handle_control_request(
     inner: &Arc<RwLock<BTreeMap<String, RunningService>>>,
     pending_ready: &Arc<Mutex<PendingReadyMap>>,
     request: ControlRequest,
 ) -> ControlResponse {
-    match request {
-        ControlRequest::RegisterRunner {
-            runner_id,
-            service_name,
-            release_hash,
-            runner_endpoint,
-            manager_auth_proof,
-        } => {
-            let mut guard = inner.write().await;
-            let Some((actual_service_name, service)) = guard
-                .iter_mut()
-                .find(|(_, service)| service.runner_id == runner_id)
-            else {
-                return control_error(ErrorCode::NotFound, "runner is not registered for startup");
-            };
-
-            if let Err(err) = validate_manager_auth(
-                &service.manager_auth_secret,
-                &runner_id,
-                &manager_auth_proof,
-            ) {
-                return ControlResponse::Error(IpcErrorPayload::from_error(&err));
-            }
-
-            if actual_service_name != &service_name || service.release_hash != release_hash {
-                return control_error(ErrorCode::BadRequest, "register_runner metadata mismatch");
-            }
-
-            if service.runner_endpoint != runner_endpoint {
-                return control_error(ErrorCode::BadRequest, "register_runner endpoint mismatch");
-            }
-            service.last_heartbeat_at = now_unix_secs().to_string();
-            ControlResponse::Ack
-        }
-        ControlRequest::RunnerReady {
-            runner_id,
-            manager_auth_proof,
-        } => {
-            {
-                let mut guard = inner.write().await;
-                let Some((_, service)) = guard
-                    .iter_mut()
-                    .find(|(_, service)| service.runner_id == runner_id)
-                else {
-                    return control_error(ErrorCode::NotFound, "runner is not registered");
-                };
-
-                if let Err(err) = validate_manager_auth(
-                    &service.manager_auth_secret,
-                    &runner_id,
-                    &manager_auth_proof,
-                ) {
-                    return ControlResponse::Error(IpcErrorPayload::from_error(&err));
-                }
-
-                service.is_ready = true;
-                service.last_heartbeat_at = now_unix_secs().to_string();
-            }
-
-            if let Some(sender) = pending_ready.lock().await.remove(&runner_id) {
-                let _ = sender.send(Ok(()));
-            }
-            ControlResponse::Ack
-        }
-        ControlRequest::Heartbeat {
-            runner_id,
-            manager_auth_proof,
-        } => {
-            let mut guard = inner.write().await;
-            let Some((_, service)) = guard
-                .iter_mut()
-                .find(|(_, service)| service.runner_id == runner_id)
-            else {
-                return control_error(ErrorCode::NotFound, "runner is not registered");
-            };
-
-            if let Err(err) = validate_manager_auth(
-                &service.manager_auth_secret,
-                &runner_id,
-                &manager_auth_proof,
-            ) {
-                return ControlResponse::Error(IpcErrorPayload::from_error(&err));
-            }
-
-            service.last_heartbeat_at = now_unix_secs().to_string();
-            ControlResponse::Ack
-        }
-        ControlRequest::ResolveInvocationTarget {
-            runner_id,
-            manager_auth_proof,
-            target_service,
-            wit,
-        } => {
-            let guard = inner.read().await;
-
-            let Some((source_service_name, source_service)) = guard
-                .iter()
-                .find(|(_, service)| service.runner_id == runner_id)
-            else {
-                return control_error(ErrorCode::NotFound, "source runner is not registered");
-            };
-
-            if let Err(err) = validate_manager_auth(
-                &source_service.manager_auth_secret,
-                &runner_id,
-                &manager_auth_proof,
-            ) {
-                return ControlResponse::Error(IpcErrorPayload::from_error(&err));
-            }
-
-            if !is_binding_allowed(&source_service.bindings, &target_service, &wit) {
-                return control_error(
-                    ErrorCode::Unauthorized,
-                    "binding does not allow target service/interface",
-                );
-            }
-
-            let Some(target_runner) = guard.get(&target_service) else {
-                return control_error(ErrorCode::NotFound, "target service is not running");
-            };
-            if !target_runner.is_ready {
-                return control_error(ErrorCode::NotFound, "target service is not running");
-            }
-
-            let claims = imagod_ipc::InvocationTokenClaims {
-                source_service: source_service_name.clone(),
-                target_service: target_service.clone(),
-                wit: wit.clone(),
-                exp: now_unix_secs() + INVOCATION_TOKEN_TTL_SECS,
-                nonce: uuid::Uuid::new_v4().to_string(),
-            };
-            let token = match issue_invocation_token(&target_runner.invocation_secret, claims) {
-                Ok(token) => token,
-                Err(err) => return ControlResponse::Error(IpcErrorPayload::from_error(&err)),
-            };
-
-            ControlResponse::ResolvedInvocationTarget {
-                endpoint: target_runner.runner_endpoint.clone(),
-                token,
-            }
-        }
-    }
-}
-
-async fn handle_control_connection(
-    mut stream: UnixStream,
-    inner: Arc<RwLock<BTreeMap<String, RunningService>>>,
-    pending_ready: Arc<Mutex<PendingReadyMap>>,
-    read_timeout: Duration,
-) {
-    let request = match time::timeout(
-        read_timeout,
-        DbusP2pTransport::read_message::<ControlRequest>(&mut stream),
-    )
-    .await
-    {
-        Ok(Ok(v)) => v,
-        Ok(Err(err)) => {
-            let _ = DbusP2pTransport::write_message(
-                &mut stream,
-                &ControlResponse::Error(IpcErrorPayload::from_error(&err)),
-            )
-            .await;
-            return;
-        }
-        Err(_) => {
-            let timeout_error = IpcErrorPayload {
-                code: ErrorCode::OperationTimeout,
-                stage: STAGE_CONTROL.to_string(),
-                message: format!(
-                    "manager control request read timed out after {} ms",
-                    read_timeout.as_millis()
-                ),
-            };
-            if let Err(err) =
-                DbusP2pTransport::write_message(&mut stream, &ControlResponse::Error(timeout_error))
-                    .await
-            {
-                eprintln!("manager control timeout response write failed: {err}");
-            }
-            return;
-        }
-    };
-
-    let response = handle_control_request(&inner, &pending_ready, request).await;
-    let _ = DbusP2pTransport::write_message(&mut stream, &response).await;
+    manager_control::handle_control_request_impl(inner, pending_ready, request).await
 }
 
 /// Validates manager proof generated from shared secret and runner id.
+#[cfg(test)]
 fn validate_manager_auth(secret: &str, runner_id: &str, proof: &str) -> Result<(), ImagodError> {
-    match verify_manager_auth_proof(secret, runner_id, proof) {
-        Ok(()) => Ok(()),
-        Err(err) if err.code == ErrorCode::Unauthorized => Err(ImagodError::new(
-            ErrorCode::Unauthorized,
-            STAGE_CONTROL,
-            "manager auth proof mismatch",
-        )),
-        Err(err) => Err(ImagodError::new(
-            err.code,
-            STAGE_CONTROL,
-            format!("manager auth proof verification failed: {}", err.message),
-        )),
-    }
-}
-
-fn control_error(code: ErrorCode, message: impl Into<String>) -> ControlResponse {
-    ControlResponse::Error(IpcErrorPayload {
-        code,
-        stage: STAGE_CONTROL.to_string(),
-        message: message.into(),
-    })
+    manager_control::validate_manager_auth(secret, runner_id, proof)
 }
 
 /// Returns whether a binding list allows the target service/interface pair.
+#[cfg(test)]
 fn is_binding_allowed(bindings: &[ServiceBinding], target_service: &str, wit: &str) -> bool {
-    bindings
-        .iter()
-        .any(|binding| binding.target == target_service && binding.wit == wit)
+    manager_control::is_binding_allowed(bindings, target_service, wit)
 }
 
 /// Drains one child output stream into bounded in-memory log buffer.
 ///
 /// Concurrency: runs as a detached task per stream.
 fn spawn_log_drain<R>(
-    mut reader: R,
+    reader: R,
     buffer: Arc<Mutex<BoundedLogBuffer>>,
     composite_buffer: Arc<Mutex<BoundedLogBuffer>>,
     sender: broadcast::Sender<ServiceLogEvent>,
@@ -1276,66 +1017,19 @@ fn spawn_log_drain<R>(
 ) where
     R: AsyncRead + Unpin + Send + 'static,
 {
-    tokio::spawn(async move {
-        let mut chunk = vec![0u8; 8192];
-        loop {
-            let read = match reader.read(&mut chunk).await {
-                Ok(v) => v,
-                Err(err) => {
-                    eprintln!(
-                        "service log read error name={} stream={} error={}",
-                        service_name, stream_name, err
-                    );
-                    break;
-                }
-            };
-            if read == 0 {
-                break;
-            }
-            {
-                let mut guard = buffer.lock().await;
-                guard.push(&chunk[..read]);
-            }
-            {
-                let mut guard = composite_buffer.lock().await;
-                guard.push(&chunk[..read]);
-            }
-            let _ = sender.send(ServiceLogEvent {
-                stream,
-                bytes: chunk[..read].to_vec(),
-            });
-
-            let text = String::from_utf8_lossy(&chunk[..read]);
-            for line in text.lines() {
-                if line.is_empty() {
-                    continue;
-                }
-                eprintln!(
-                    "service log name={} stream={} msg={}",
-                    service_name, stream_name, line
-                );
-            }
-        }
-    });
+    log_buffer::spawn_log_drain(
+        reader,
+        buffer,
+        composite_buffer,
+        sender,
+        service_name,
+        stream_name,
+        stream,
+    );
 }
 
 fn tail_lines_from_bytes(bytes: &[u8], tail_lines: u32) -> Vec<u8> {
-    if tail_lines == 0 || bytes.is_empty() {
-        return Vec::new();
-    }
-
-    let mut line_starts = vec![0usize];
-    for (idx, byte) in bytes.iter().enumerate() {
-        if *byte == b'\n' && idx + 1 < bytes.len() {
-            line_starts.push(idx + 1);
-        }
-    }
-
-    if tail_lines as usize >= line_starts.len() {
-        return bytes.to_vec();
-    }
-    let start = line_starts[line_starts.len() - tail_lines as usize];
-    bytes[start..].to_vec()
+    log_buffer::tail_lines_from_bytes(bytes, tail_lines)
 }
 
 /// Sends kill signal to child and waits for termination.

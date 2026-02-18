@@ -10,6 +10,22 @@ pub mod runtime_wasmtime {
     pub use imagod_runtime_wasmtime::*;
 }
 
+/// Runner bootstrap helpers extracted from runner process orchestration.
+pub use imagod_runtime_bootstrap::{
+    MAX_RUNNER_BOOTSTRAP_BYTES, STAGE_RUNNER, STAGE_RUNNER_BOOTSTRAP, SocketCleanupGuard,
+    decode_runner_bootstrap, prepare_socket_path, read_runner_bootstrap,
+    validate_runner_bootstrap_size,
+};
+/// Runner control-plane helpers and manager-client abstraction.
+pub use imagod_runtime_control::{
+    DbusRunnerManagerClient, RunnerManagerClient, mark_ready, register, run_inbound_server,
+    send_heartbeats,
+};
+/// Runner HTTP ingress server helpers.
+pub use imagod_runtime_ingress::{
+    DEFAULT_HTTP_MAX_BODY_BYTES, MAX_HTTP_MAX_BODY_BYTES, STAGE_HTTP_INGRESS,
+    required_http_max_body_bytes, required_http_port, spawn_http_ingress_server,
+};
 /// Runtime abstraction types.
 pub use imagod_runtime_internal::{
     ComponentRuntime, RuntimeHttpRequest, RuntimeHttpResponse, RuntimeRunRequest,

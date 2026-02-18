@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
+
+mod load;
 
 const MAX_CHUNK_SIZE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -92,118 +93,11 @@ impl ImagodConfig {
     /// Returns `ImagodError` with `ErrorCode::BadRequest` when decode or
     /// validation fails.
     pub fn load(path: &Path) -> Result<Self, ImagodError> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            ImagodError::new(
-                ErrorCode::BadRequest,
-                "config.load",
-                format!("config read failed: {e}"),
-            )
-            .with_detail("path", path.to_string_lossy())
-        })?;
-        let raw: toml::Value = toml::from_str(&content).map_err(|e| {
-            ImagodError::new(
-                ErrorCode::BadRequest,
-                "config.load",
-                format!("config parse failed: {e}"),
-            )
-            .with_detail("path", path.to_string_lossy())
-        })?;
-
-        if raw.get("protocol_draft").is_some() {
-            return Err(ImagodError::new(
-                ErrorCode::BadRequest,
-                "config.load",
-                "protocol_draft is no longer supported; use compatibility_date (YYYY-MM-DD)",
-            )
-            .with_detail("path", path.to_string_lossy())
-            .with_detail("legacy_key", "protocol_draft"));
-        }
-
-        let config: Self = raw.clone().try_into().map_err(|e| {
-            ImagodError::new(
-                ErrorCode::BadRequest,
-                "config.load",
-                format!("config decode failed: {e}"),
-            )
-            .with_detail("path", path.to_string_lossy())
-        })?;
-
-        if !is_valid_compatibility_date(&config.compatibility_date) {
-            return Err(ImagodError::new(
-                ErrorCode::BadRequest,
-                "config.load",
-                "compatibility_date must be in YYYY-MM-DD format",
-            )
-            .with_detail("compatibility_date", config.compatibility_date.clone()));
-        }
-
-        if config.runtime.stop_grace_timeout_secs == 0 {
-            return Err(ImagodError::new(
-                ErrorCode::BadRequest,
-                "config.load",
-                "runtime.stop_grace_timeout_secs must be greater than 0",
-            ));
-        }
-
-        if config.runtime.epoch_tick_interval_ms == 0 {
-            return Err(ImagodError::new(
-                ErrorCode::BadRequest,
-                "config.load",
-                "runtime.epoch_tick_interval_ms must be greater than 0",
-            ));
-        }
-
-        if config.runtime.runner_ready_timeout_secs == 0 {
-            return Err(ImagodError::new(
-                ErrorCode::BadRequest,
-                "config.load",
-                "runtime.runner_ready_timeout_secs must be greater than 0",
-            ));
-        }
-
-        if config.runtime.runner_log_buffer_bytes == 0 {
-            return Err(ImagodError::new(
-                ErrorCode::BadRequest,
-                "config.load",
-                "runtime.runner_log_buffer_bytes must be greater than 0",
-            ));
-        }
-
-        if config.runtime.max_artifact_size_bytes == 0 {
-            return Err(ImagodError::new(
-                ErrorCode::BadRequest,
-                "config.load",
-                "runtime.max_artifact_size_bytes must be greater than 0",
-            ));
-        }
-
-        if config.runtime.chunk_size == 0 {
-            return Err(ImagodError::new(
-                ErrorCode::BadRequest,
-                "config.load",
-                "runtime.chunk_size must be greater than 0",
-            ));
-        }
-
-        if config.runtime.chunk_size > MAX_CHUNK_SIZE_BYTES {
-            return Err(ImagodError::new(
-                ErrorCode::BadRequest,
-                "config.load",
-                format!(
-                    "runtime.chunk_size must be less than or equal to {}",
-                    MAX_CHUNK_SIZE_BYTES
-                ),
-            ));
-        }
-
-        if config.runtime.max_inflight_chunks == 0 {
-            return Err(ImagodError::new(
-                ErrorCode::BadRequest,
-                "config.load",
-                "runtime.max_inflight_chunks must be greater than 0",
-            ));
-        }
-
+        let content = load::io::read_to_string(path)?;
+        let raw = load::parsing::parse(path, &content)?;
+        load::validation::reject_legacy_keys(path, &raw)?;
+        let config = load::parsing::decode(path, raw)?;
+        load::validation::validate(&config)?;
         Ok(config)
     }
 }
