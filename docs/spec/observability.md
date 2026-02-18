@@ -148,3 +148,9 @@ operation が存在しない場合の扱い:
 
 - `logs.request` の識別子キーを `name` に統一した。
 - `name=None` の意味は従来どおり「現在 running の全サービス」とする。
+
+## 実装反映ノート（Session 並列化と logs retry / 2026-02-18）
+
+- protocol session は 1 session 内で複数 stream を並列処理する。`command.start` / `logs.request` / 単発 request は stream 単位で独立して処理される。
+- logs datagram 配信は send 失敗時に 10ms / 50ms / 100ms の bounded retry を行い、瞬断時の即終了を緩和する。
+- retry 後も送信不能な場合は従来どおり `logs.end.error` で終端を通知する。

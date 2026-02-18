@@ -9,19 +9,24 @@ use std::{
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+#[cfg(test)]
+use imago_protocol::ArtifactStatus;
 use imago_protocol::{
-    ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushRequest,
-    ArtifactStatus, ByteRange, DeployPrepareRequest, DeployPrepareResponse, ErrorCode,
+    ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushRequest, ByteRange,
+    DeployPrepareRequest, DeployPrepareResponse, ErrorCode,
 };
 use sha2::{Digest, Sha256};
-use tokio::{
-    fs::{self, OpenOptions},
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    sync::Mutex,
-};
+use tokio::{fs, sync::Mutex};
 use uuid::Uuid;
 
 use imagod_common::ImagodError;
+use session_index::InMemoryUploadSessionStore;
+
+use self::chunk_pipeline::FileChunkSink;
+
+mod chunk_pipeline;
+mod commit;
+mod session_index;
 
 const STAGE_PREPARE: &str = "deploy.prepare";
 const STAGE_PUSH: &str = "artifact.push";
@@ -85,6 +90,8 @@ impl CleanupPlan {
 pub struct ArtifactStore {
     root: Arc<PathBuf>,
     state: Arc<Mutex<StoreState>>,
+    session_store: InMemoryUploadSessionStore,
+    chunk_sink: FileChunkSink,
     upload_session_ttl_secs: u64,
     max_chunk_size: usize,
     max_inflight_chunks: usize,
@@ -108,6 +115,8 @@ impl ArtifactStore {
         Ok(Self {
             root: Arc::new(root),
             state: Arc::new(Mutex::new(StoreState::default())),
+            session_store: InMemoryUploadSessionStore,
+            chunk_sink: FileChunkSink,
             upload_session_ttl_secs: upload_session_ttl_secs.max(1),
             max_chunk_size: max_chunk_size.max(1),
             max_inflight_chunks: max_inflight_chunks.max(1),
@@ -151,12 +160,12 @@ impl ArtifactStore {
 
         let decision: Result<PrepareDecision, ImagodError> = {
             let mut state = self.state.lock().await;
-            cleanup_plan.merge(collect_expired_sessions_locked(
+            cleanup_plan.merge(self.session_store.collect_expired_sessions(
                 &mut state,
                 now,
                 self.upload_session_ttl_secs,
             ));
-            cleanup_orphan_idempotency_locked(&mut state);
+            self.session_store.cleanup_orphan_idempotency(&mut state);
 
             if let Some(existing_id) = state.idempotency.get(&request.idempotency_key).cloned()
                 && let Some(existing) = state.sessions.get_mut(&existing_id)
@@ -169,11 +178,13 @@ impl ArtifactStore {
                     ))
                 } else {
                     existing.updated_at_epoch_secs = now;
-                    Ok(PrepareDecision::Existing(build_prepare_response(
-                        existing,
-                        self.upload_session_ttl_secs,
-                        now,
-                    )))
+                    Ok(PrepareDecision::Existing(
+                        self.session_store.build_prepare_response(
+                            existing,
+                            self.upload_session_ttl_secs,
+                            now,
+                        ),
+                    ))
                 }
             } else {
                 let deploy_id = Uuid::new_v4().to_string();
@@ -214,11 +225,13 @@ impl ArtifactStore {
         let result = match decision {
             PrepareDecision::Existing(response) => Ok(response),
             PrepareDecision::Create(session_candidate) => {
-                if let Err(err) = create_preallocated_file(
-                    &session_candidate.file_path,
-                    session_candidate.artifact_size,
-                )
-                .await
+                if let Err(err) = self
+                    .chunk_sink
+                    .create_preallocated_file(
+                        &session_candidate.file_path,
+                        session_candidate.artifact_size,
+                    )
+                    .await
                 {
                     apply_cleanup_plan(cleanup_plan).await;
                     return Err(err);
@@ -229,12 +242,12 @@ impl ArtifactStore {
                 let mut session_candidate = session_candidate;
                 let result = {
                     let mut state = self.state.lock().await;
-                    cleanup_plan.merge(collect_expired_sessions_locked(
+                    cleanup_plan.merge(self.session_store.collect_expired_sessions(
                         &mut state,
                         now_after_io,
                         self.upload_session_ttl_secs,
                     ));
-                    cleanup_orphan_idempotency_locked(&mut state);
+                    self.session_store.cleanup_orphan_idempotency(&mut state);
 
                     if let Some(existing_id) = state
                         .idempotency
@@ -251,7 +264,7 @@ impl ArtifactStore {
                             ))
                         } else {
                             existing.updated_at_epoch_secs = now_after_io;
-                            Ok(build_prepare_response(
+                            Ok(self.session_store.build_prepare_response(
                                 existing,
                                 self.upload_session_ttl_secs,
                                 now_after_io,
@@ -261,7 +274,7 @@ impl ArtifactStore {
                         session_candidate.updated_at_epoch_secs = now_after_io;
                         let deploy_id = session_candidate.deploy_id.clone();
                         let idempotency_key = session_candidate.idempotency_key.clone();
-                        let response = build_prepare_response(
+                        let response = self.session_store.build_prepare_response(
                             &session_candidate,
                             self.upload_session_ttl_secs,
                             now_after_io,
@@ -343,12 +356,12 @@ impl ArtifactStore {
         let mut cleanup_plan = CleanupPlan::default();
         let prepare_write = {
             let mut state = self.state.lock().await;
-            cleanup_plan.merge(collect_expired_sessions_locked(
+            cleanup_plan.merge(self.session_store.collect_expired_sessions(
                 &mut state,
                 now,
                 self.upload_session_ttl_secs,
             ));
-            cleanup_orphan_idempotency_locked(&mut state);
+            self.session_store.cleanup_orphan_idempotency(&mut state);
 
             let session = state.sessions.get_mut(&header.deploy_id).ok_or_else(|| {
                 ImagodError::new(ErrorCode::NotFound, STAGE_PUSH, "deploy_id is not found")
@@ -407,7 +420,10 @@ impl ArtifactStore {
             }
         };
 
-        let write_result = write_chunk_to_file(&file_path, header.offset, &chunk).await;
+        let write_result = self
+            .chunk_sink
+            .write_chunk_to_file(&file_path, header.offset, &chunk)
+            .await;
 
         let result = {
             let mut state = self.state.lock().await;
@@ -423,12 +439,13 @@ impl ArtifactStore {
             }
 
             write_result?;
-            merge_range(
+            commit::merge_range(
                 &mut session.received_ranges,
-                range_from_start_end(header.offset, chunk_end),
+                commit::range_from_start_end(header.offset, chunk_end),
             );
             session.updated_at_epoch_secs = now;
-            let next_missing = next_missing_range(&session.received_ranges, session.artifact_size);
+            let next_missing =
+                commit::next_missing_range(&session.received_ranges, session.artifact_size);
             Ok(ArtifactPushAck {
                 received_ranges: session.received_ranges.clone(),
                 next_missing_range: next_missing,
@@ -450,12 +467,12 @@ impl ArtifactStore {
 
         let prepare_commit = {
             let mut state = self.state.lock().await;
-            cleanup_plan.merge(collect_expired_sessions_locked(
+            cleanup_plan.merge(self.session_store.collect_expired_sessions(
                 &mut state,
                 now,
                 self.upload_session_ttl_secs,
             ));
-            cleanup_orphan_idempotency_locked(&mut state);
+            self.session_store.cleanup_orphan_idempotency(&mut state);
 
             let session = state.sessions.get_mut(&request.deploy_id).ok_or_else(|| {
                 ImagodError::new(ErrorCode::NotFound, STAGE_COMMIT, "deploy_id is not found")
@@ -488,7 +505,7 @@ impl ArtifactStore {
                 ));
             }
 
-            if !is_complete(&session.received_ranges, session.artifact_size) {
+            if !commit::is_complete(&session.received_ranges, session.artifact_size) {
                 return Err(ImagodError::new(
                     ErrorCode::ArtifactIncomplete,
                     STAGE_COMMIT,
@@ -509,7 +526,7 @@ impl ArtifactStore {
             }
         };
 
-        let digest_result = digest_file(&file_path).await;
+        let digest_result = commit::digest_file(&file_path).await;
 
         let result = {
             let mut state = self.state.lock().await;
@@ -537,7 +554,7 @@ impl ArtifactStore {
             let current_deploy_id = session.deploy_id.clone();
             let artifact_id = session.artifact_digest.clone();
 
-            cleanup_plan.merge(collect_old_committed_sessions_locked(
+            cleanup_plan.merge(self.session_store.collect_old_committed_sessions(
                 &mut state,
                 &service_name,
                 &current_deploy_id,
@@ -563,12 +580,12 @@ impl ArtifactStore {
 
         let result = {
             let mut state = self.state.lock().await;
-            cleanup_plan.merge(collect_expired_sessions_locked(
+            cleanup_plan.merge(self.session_store.collect_expired_sessions(
                 &mut state,
                 now,
                 self.upload_session_ttl_secs,
             ));
-            cleanup_orphan_idempotency_locked(&mut state);
+            self.session_store.cleanup_orphan_idempotency(&mut state);
 
             let session = state.sessions.get_mut(deploy_id).ok_or_else(|| {
                 ImagodError::new(
@@ -601,126 +618,17 @@ impl ArtifactStore {
 }
 
 /// Builds a prepare response from session progress and configured expiry.
+#[cfg(test)]
 fn build_prepare_response(
     session: &UploadSession,
     upload_session_ttl_secs: u64,
     now_epoch_secs: u64,
 ) -> DeployPrepareResponse {
-    let artifact_status =
-        if session.committed || is_complete(&session.received_ranges, session.artifact_size) {
-            ArtifactStatus::Complete
-        } else if session.received_ranges.is_empty() {
-            ArtifactStatus::Missing
-        } else {
-            ArtifactStatus::Partial
-        };
-
-    let missing_ranges = match artifact_status {
-        ArtifactStatus::Complete => Vec::new(),
-        _ => all_missing_ranges(&session.received_ranges, session.artifact_size),
-    };
-
-    DeployPrepareResponse {
-        deploy_id: session.deploy_id.clone(),
-        artifact_status,
-        missing_ranges,
-        upload_token: session.upload_token.clone(),
-        session_expires_at: now_epoch_secs
-            .saturating_add(upload_session_ttl_secs)
-            .to_string(),
-    }
-}
-
-/// Collects expired sessions and removes their indexes while lock is held.
-fn collect_expired_sessions_locked(
-    state: &mut StoreState,
-    now_epoch_secs: u64,
-    upload_session_ttl_secs: u64,
-) -> CleanupPlan {
-    let expired_ids = state
-        .sessions
-        .iter()
-        .filter_map(|(deploy_id, session)| {
-            if session.committed || session.inflight_writes > 0 || session.commit_in_progress {
-                return None;
-            }
-
-            let age = now_epoch_secs.saturating_sub(session.updated_at_epoch_secs);
-            if age >= upload_session_ttl_secs {
-                Some(deploy_id.clone())
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-
-    collect_sessions_for_removal_locked(state, expired_ids)
-}
-
-/// Collects old committed sessions for one service except the deploy id to keep.
-fn collect_old_committed_sessions_locked(
-    state: &mut StoreState,
-    service_name: &str,
-    keep_deploy_id: &str,
-) -> CleanupPlan {
-    let old_ids = state
-        .sessions
-        .iter()
-        .filter_map(|(deploy_id, session)| {
-            if session.committed
-                && session.service_name == service_name
-                && deploy_id.as_str() != keep_deploy_id
-            {
-                Some(deploy_id.clone())
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-
-    collect_sessions_for_removal_locked(state, old_ids)
-}
-
-/// Removes selected sessions from indexes and returns files to delete.
-fn collect_sessions_for_removal_locked(
-    state: &mut StoreState,
-    deploy_ids: Vec<String>,
-) -> CleanupPlan {
-    let mut plan = CleanupPlan::default();
-
-    for deploy_id in deploy_ids {
-        if let Some(session) = state.sessions.remove(&deploy_id) {
-            if state
-                .idempotency
-                .get(&session.idempotency_key)
-                .is_some_and(|mapped| mapped == &deploy_id)
-            {
-                state.idempotency.remove(&session.idempotency_key);
-            }
-            plan.files.push(session.file_path);
-        }
-    }
-
-    plan
-}
-
-/// Removes stale idempotency entries that no longer have backing sessions.
-fn cleanup_orphan_idempotency_locked(state: &mut StoreState) {
-    let orphan_keys = state
-        .idempotency
-        .iter()
-        .filter_map(|(key, deploy_id)| {
-            if state.sessions.contains_key(deploy_id) {
-                None
-            } else {
-                Some(key.clone())
-            }
-        })
-        .collect::<Vec<_>>();
-
-    for key in orphan_keys {
-        state.idempotency.remove(&key);
-    }
+    InMemoryUploadSessionStore.build_prepare_response(
+        session,
+        upload_session_ttl_secs,
+        now_epoch_secs,
+    )
 }
 
 /// Executes filesystem cleanup outside lock scope.
@@ -738,41 +646,6 @@ async fn apply_cleanup_plan(plan: CleanupPlan) {
             }
         }
     }
-}
-
-async fn create_preallocated_file(path: &Path, artifact_size: u64) -> Result<(), ImagodError> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .read(true)
-        .open(path)
-        .await
-        .map_err(|e| map_internal(STAGE_PREPARE, e.to_string()))?;
-    file.set_len(artifact_size)
-        .await
-        .map_err(|e| map_internal(STAGE_PREPARE, e.to_string()))?;
-    file.flush()
-        .await
-        .map_err(|e| map_internal(STAGE_PREPARE, e.to_string()))
-}
-
-async fn write_chunk_to_file(path: &Path, offset: u64, chunk: &[u8]) -> Result<(), ImagodError> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .await
-        .map_err(|e| map_internal(STAGE_PUSH, e.to_string()))?;
-    file.seek(std::io::SeekFrom::Start(offset))
-        .await
-        .map_err(|e| map_internal(STAGE_PUSH, e.to_string()))?;
-    file.write_all(chunk)
-        .await
-        .map_err(|e| map_internal(STAGE_PUSH, e.to_string()))?;
-    file.flush()
-        .await
-        .map_err(|e| map_internal(STAGE_PUSH, e.to_string()))
 }
 
 fn fingerprint(request: &DeployPrepareRequest) -> String {
@@ -808,120 +681,6 @@ fn max_base64_len_for_decoded_len(decoded_len: u64) -> Option<usize> {
     let groups = decoded_len.checked_add(2)?.checked_div(3)?;
     let encoded_len = groups.checked_mul(4)?;
     usize::try_from(encoded_len).ok()
-}
-
-async fn digest_file(path: &Path) -> Result<String, ImagodError> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(path)
-        .await
-        .map_err(|e| map_internal(STAGE_COMMIT, e.to_string()))?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 64];
-    loop {
-        let n = file
-            .read(&mut buf)
-            .await
-            .map_err(|e| map_internal(STAGE_COMMIT, e.to_string()))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hex::encode(hasher.finalize()))
-}
-
-fn is_complete(ranges: &[ByteRange], total: u64) -> bool {
-    if ranges.len() != 1 {
-        return false;
-    }
-    let first = &ranges[0];
-    first.offset == 0 && first.length == total
-}
-
-/// Computes the next missing byte range for a partially uploaded artifact.
-fn next_missing_range(ranges: &[ByteRange], total: u64) -> Option<ByteRange> {
-    if total == 0 {
-        return None;
-    }
-    if ranges.is_empty() {
-        return Some(ByteRange {
-            offset: 0,
-            length: total,
-        });
-    }
-
-    let mut cursor = 0u64;
-    for range in ranges {
-        let start = range.offset;
-        let end = range.offset.saturating_add(range.length);
-        if cursor < start {
-            return Some(range_from_start_end(cursor, start));
-        }
-        cursor = end;
-    }
-    if cursor < total {
-        return Some(range_from_start_end(cursor, total));
-    }
-    None
-}
-
-/// Computes all missing byte ranges for a partially uploaded artifact.
-fn all_missing_ranges(ranges: &[ByteRange], total: u64) -> Vec<ByteRange> {
-    if total == 0 {
-        return Vec::new();
-    }
-    if ranges.is_empty() {
-        return vec![ByteRange {
-            offset: 0,
-            length: total,
-        }];
-    }
-
-    let mut missing = Vec::new();
-    let mut cursor = 0u64;
-    for range in ranges {
-        let start = range.offset;
-        let end = range.offset.saturating_add(range.length);
-        if cursor < start {
-            missing.push(range_from_start_end(cursor, start));
-        }
-        cursor = cursor.max(end);
-        if cursor >= total {
-            break;
-        }
-    }
-    if cursor < total {
-        missing.push(range_from_start_end(cursor, total));
-    }
-    missing
-}
-
-/// Merges an incoming range into sorted, non-overlapping range list.
-fn merge_range(ranges: &mut Vec<ByteRange>, incoming: ByteRange) {
-    ranges.push(incoming);
-    ranges.sort_by_key(|r| r.offset);
-
-    let mut merged: Vec<ByteRange> = Vec::with_capacity(ranges.len());
-    for range in ranges.drain(..) {
-        match merged.last_mut() {
-            Some(last) if range.offset <= last.offset.saturating_add(last.length) => {
-                let current_end = range.offset.saturating_add(range.length);
-                let merged_end = last.offset.saturating_add(last.length).max(current_end);
-                last.length = merged_end.saturating_sub(last.offset);
-            }
-            _ => merged.push(range),
-        }
-    }
-
-    *ranges = merged;
-}
-
-fn range_from_start_end(start: u64, end: u64) -> ByteRange {
-    ByteRange {
-        offset: start,
-        length: end.saturating_sub(start),
-    }
 }
 
 fn now_epoch_secs() -> u64 {

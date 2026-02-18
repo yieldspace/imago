@@ -8,7 +8,6 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
-use imago_lockfile::{ComponentExpectation, DependencyExpectation};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
@@ -16,8 +15,13 @@ use toml::Value as TomlValue;
 
 use crate::{
     cli::BuildArgs,
-    commands::{CommandResult, dependency_cache, plugin_sources},
+    commands::{
+        CommandResult, dependency_cache, plugin_sources,
+        shared::dependency::{DependencyResolver, StandardDependencyResolver},
+    },
 };
+
+mod validation;
 
 const DEFAULT_TARGET_NAME: &str = "default";
 const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
@@ -319,8 +323,9 @@ pub fn build_project(
             .context("failed to hydrate dependency cache")?;
     }
     let capabilities = parse_root_capabilities(&root)?;
-    let dependencies =
-        resolve_manifest_dependencies_from_lock(project_root, &project_dependencies)?;
+    let dependency_resolver = StandardDependencyResolver;
+    let dependencies = dependency_resolver
+        .resolve_manifest_dependencies_from_lock(project_root, &project_dependencies)?;
     let target = parse_target(&root, target_name, project_root)?;
 
     run_build_command(command.as_ref(), project_root, &secrets)?;
@@ -608,54 +613,15 @@ fn required_string(root: &toml::Table, key: &str) -> anyhow::Result<String> {
 }
 
 pub(crate) fn validate_service_name(name: &str) -> anyhow::Result<()> {
-    if name.is_empty() {
-        return Err(anyhow!("name must not be empty"));
-    }
-    if name.len() > 63 {
-        return Err(anyhow!("name must be 63 characters or fewer"));
-    }
-    if name.contains('/') || name.contains('\\') || name.contains("..") {
-        return Err(anyhow!("name contains invalid path characters: {}", name));
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-    {
-        return Err(anyhow!("name contains unsupported characters: {}", name));
-    }
-    Ok(())
+    validation::validate_service_name(name)
 }
 
 fn validate_env_name(env_name: &str) -> anyhow::Result<()> {
-    if env_name.is_empty() {
-        return Err(anyhow!("env name must not be empty"));
-    }
-    if env_name.contains('/') || env_name.contains('\\') || env_name.contains("..") {
-        return Err(anyhow!(
-            "env name contains invalid path characters: {}",
-            env_name
-        ));
-    }
-    if !env_name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-    {
-        return Err(anyhow!(
-            "env name contains unsupported characters: {}",
-            env_name
-        ));
-    }
-    Ok(())
+    validation::validate_env_name(env_name)
 }
 
 fn validate_app_type(app_type: &str) -> anyhow::Result<()> {
-    match app_type {
-        "cli" | "http" | "socket" => Ok(()),
-        _ => Err(anyhow!(
-            "type must be one of: cli, http, socket (got: {})",
-            app_type
-        )),
-    }
+    validation::validate_app_type(app_type)
 }
 
 fn parse_http_section(root: &toml::Table, app_type: &str) -> anyhow::Result<Option<ManifestHttp>> {
@@ -1270,30 +1236,7 @@ fn normalize_string_list(values: Vec<String>) -> Vec<String> {
 }
 
 fn validate_dependency_package_name(name: &str) -> anyhow::Result<()> {
-    if name.is_empty() {
-        return Err(anyhow!("must not be empty"));
-    }
-    if name.contains('\\') || name.contains("..") {
-        return Err(anyhow!("contains invalid path characters: {name}"));
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/'))
-    {
-        return Err(anyhow!("contains unsupported characters: {name}"));
-    }
-    if name
-        .split('/')
-        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
-    {
-        return Err(anyhow!("contains invalid path components: {name}"));
-    }
-    for component in Path::new(name).components() {
-        if !matches!(component, Component::Normal(_)) {
-            return Err(anyhow!("contains invalid path components: {name}"));
-        }
-    }
-    Ok(())
+    validation::validate_dependency_package_name(name)
 }
 
 fn parse_bindings(value: Option<&TomlValue>) -> anyhow::Result<Vec<ManifestBinding>> {
@@ -1620,98 +1563,6 @@ pub(crate) fn compute_path_digest_hex(path: &Path) -> anyhow::Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn resolve_manifest_dependencies_from_lock(
-    project_root: &Path,
-    dependencies: &[ProjectDependency],
-) -> anyhow::Result<Vec<ManifestDependency>> {
-    if dependencies.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let lock = imago_lockfile::load_from_project_root(project_root)?;
-    let mut expectations = Vec::with_capacity(dependencies.len());
-    for dep in dependencies {
-        expectations.push(DependencyExpectation {
-            name: dep.name.clone(),
-            version: dep.version.clone(),
-            wit_source: dep.wit.source.clone(),
-            wit_registry: dep.wit.registry.clone(),
-            component: expected_component_for_dependency(dep)?,
-        });
-    }
-    let resolved_by_name =
-        imago_lockfile::resolve_dependencies(project_root, &lock, &expectations)?;
-
-    let mut manifest_dependencies = Vec::with_capacity(dependencies.len());
-    for dep in dependencies {
-        let entry = resolved_by_name.get(&dep.name).ok_or_else(|| {
-            anyhow!(
-                "dependency '{}' is not resolved in imago.lock; run `imago update`",
-                dep.name
-            )
-        })?;
-
-        let component = match dep.kind {
-            ManifestDependencyKind::Native => None,
-            ManifestDependencyKind::Wasm => {
-                let lock_component_sha = entry.component_sha256.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "dependency '{}' component sha256 is missing in imago.lock; run `imago update`",
-                        dep.name
-                    )
-                })?;
-                Some(ManifestDependencyComponent {
-                    path: format!("plugins/components/{lock_component_sha}.wasm"),
-                    sha256: lock_component_sha.clone(),
-                })
-            }
-        };
-
-        manifest_dependencies.push(ManifestDependency {
-            name: dep.name.clone(),
-            version: dep.version.clone(),
-            kind: dep.kind,
-            wit: dep.wit.source.clone(),
-            requires: dep.requires.clone(),
-            component,
-            capabilities: dep.capabilities.clone(),
-        });
-    }
-    Ok(manifest_dependencies)
-}
-
-fn expected_component_for_dependency(
-    dependency: &ProjectDependency,
-) -> anyhow::Result<Option<ComponentExpectation>> {
-    match dependency.kind {
-        ManifestDependencyKind::Native => Ok(None),
-        ManifestDependencyKind::Wasm => {
-            if let Some(component) = dependency.component.as_ref() {
-                return Ok(Some(ComponentExpectation {
-                    source: component.source.clone(),
-                    registry: component.registry.clone(),
-                    sha256: component.sha256.clone(),
-                }));
-            }
-            let (source, registry) = plugin_sources::expected_component_identity_from_wit_source(
-                &dependency.wit.source,
-                dependency.wit.registry.as_deref(),
-            )
-            .with_context(|| {
-                format!(
-                    "dependency '{}' omits component settings but wit source '{}' cannot be mapped to a component source",
-                    dependency.name, dependency.wit.source
-                )
-            })?;
-            Ok(Some(ComponentExpectation {
-                source,
-                registry,
-                sha256: None,
-            }))
-        }
-    }
-}
-
 fn hash_file_into(hasher: &mut Sha256, path: &Path, context_label: &str) -> anyhow::Result<()> {
     let mut file = fs::File::open(path)
         .with_context(|| format!("failed to read {}: {}", context_label, path.display()))?;
@@ -1854,7 +1705,11 @@ mod tests {
     }
 
     fn run_update(root: &Path) {
-        let result = update::run_with_project_root(UpdateArgs {}, root);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime for update helper should be created");
+        let result = runtime.block_on(update::run_with_project_root(UpdateArgs {}, root));
         assert_eq!(
             result.exit_code, 0,
             "imago update should succeed before build tests: {:?}",

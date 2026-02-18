@@ -1,9 +1,11 @@
 //! Service process supervisor and manager-side control-plane server.
 
+#[cfg(test)]
+use std::process::Stdio;
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    process::{ExitStatus, Stdio},
+    process::ExitStatus,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -14,26 +16,35 @@ use std::{
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{
-    CapabilityPolicy, ControlRequest, ControlResponse, IpcErrorPayload, PluginDependency,
-    RunnerAppType, RunnerBootstrap, RunnerInboundRequest, RunnerSocketConfig, ServiceBinding,
-    compute_manager_auth_proof, dbus_p2p::DbusP2pTransport, issue_invocation_token, now_unix_secs,
-    random_secret_hex, verify_manager_auth_proof,
+    CapabilityPolicy, PluginDependency, RunnerAppType, RunnerBootstrap, RunnerInboundRequest,
+    RunnerSocketConfig, ServiceBinding, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
+    now_unix_secs, random_secret_hex,
 };
-use sha2::{Digest, Sha256};
+#[cfg(test)]
+use imagod_ipc::{ControlRequest, ControlResponse};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
-    net::{UnixListener, UnixStream},
-    process::{Child, Command},
+    io::{AsyncRead, AsyncWriteExt},
+    net::UnixListener,
+    process::Child,
     sync::{Mutex, RwLock, Semaphore, broadcast, oneshot, oneshot::error::TryRecvError, watch},
     task::{JoinHandle, JoinSet},
     time,
 };
 
+use self::{
+    log_buffer::BoundedLogBuffer, manager_control::DefaultManagerControlHandler,
+    runner_spawn::DefaultRunnerSpawner,
+};
+
+mod log_buffer;
+mod manager_control;
+mod runner_spawn;
+
 const STAGE_START: &str = "service.start";
 const STAGE_STOP: &str = "service.stop";
 const STAGE_CONTROL: &str = "service.control";
 const STAGE_LOGS: &str = "service.logs";
-const STARTUP_PROBE_POLL_INTERVAL_MS: u64 = 25;
+const STARTUP_EXIT_CHECK_INTERVAL_MS: u64 = 25;
 const INVOCATION_TOKEN_TTL_SECS: u64 = 30;
 const RUNNER_ENDPOINT_HASH_BYTES: usize = 16;
 const MAX_MANAGER_CONTROL_CONNECTION_HANDLERS: usize = 32;
@@ -122,43 +133,6 @@ struct RunningService {
 }
 
 #[derive(Debug)]
-/// Bounded byte ring used for per-stream runner log capture.
-struct BoundedLogBuffer {
-    max_bytes: usize,
-    bytes: VecDeque<u8>,
-}
-
-impl BoundedLogBuffer {
-    /// Creates a new bounded log buffer.
-    fn new(max_bytes: usize) -> Self {
-        Self {
-            max_bytes: max_bytes.max(1),
-            bytes: VecDeque::new(),
-        }
-    }
-
-    /// Appends bytes and evicts oldest data when capacity is exceeded.
-    fn push(&mut self, chunk: &[u8]) {
-        if chunk.is_empty() {
-            return;
-        }
-        self.bytes.extend(chunk.iter().copied());
-        while self.bytes.len() > self.max_bytes {
-            let _ = self.bytes.pop_front();
-        }
-    }
-
-    fn snapshot(&self) -> Vec<u8> {
-        self.bytes.iter().copied().collect()
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.bytes.len()
-    }
-}
-
-#[derive(Debug)]
 struct ManagerControlServer {
     endpoint: PathBuf,
     shutdown_tx: watch::Sender<bool>,
@@ -179,6 +153,8 @@ pub struct ServiceSupervisor {
     storage_root: PathBuf,
     stop_grace_timeout: Duration,
     runner_ready_timeout: Duration,
+    http_worker_count: u32,
+    http_worker_queue_capacity: u32,
     runner_log_buffer_bytes: usize,
     epoch_tick_interval_ms: u64,
     manager_control_endpoint: PathBuf,
@@ -186,15 +162,21 @@ pub struct ServiceSupervisor {
     pending_ready: Arc<Mutex<PendingReadyMap>>,
     starting_services: Arc<Mutex<BTreeSet<String>>>,
     stopping_count: Arc<AtomicUsize>,
+    _manager_control_handler: Arc<DefaultManagerControlHandler>,
+    runner_spawner: DefaultRunnerSpawner,
     _manager_control_server: Arc<ManagerControlServer>,
 }
 
 impl ServiceSupervisor {
     /// Creates a service supervisor and starts manager control socket server.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         storage_root: impl AsRef<Path>,
         stop_grace_timeout_secs: u64,
         runner_ready_timeout_secs: u64,
+        manager_control_read_timeout_ms: u64,
+        http_worker_count: u32,
+        http_worker_queue_capacity: u32,
         runner_log_buffer_bytes: usize,
         epoch_tick_interval_ms: u64,
     ) -> Result<Self, ImagodError> {
@@ -202,6 +184,8 @@ impl ServiceSupervisor {
         let runtime_root = storage_root.join("runtime").join("ipc");
         let stop_grace_timeout = Duration::from_secs(stop_grace_timeout_secs.max(1));
         let runner_ready_timeout = Duration::from_secs(runner_ready_timeout_secs.max(1));
+        let manager_control_read_timeout =
+            Duration::from_millis(manager_control_read_timeout_ms.max(1));
 
         std::fs::create_dir_all(&runtime_root).map_err(|e| {
             ImagodError::new(
@@ -243,18 +227,23 @@ impl ServiceSupervisor {
         let pending_ready = Arc::new(Mutex::new(BTreeMap::new()));
         let starting_services = Arc::new(Mutex::new(BTreeSet::new()));
         let stopping_count = Arc::new(AtomicUsize::new(0));
+        let manager_control_handler = Arc::new(DefaultManagerControlHandler);
+        let runner_spawner = DefaultRunnerSpawner;
         let manager_control_server = Arc::new(Self::spawn_manager_control_server(
             listener,
             manager_control_endpoint.clone(),
             inner.clone(),
             pending_ready.clone(),
-            runner_ready_timeout,
+            manager_control_read_timeout,
+            manager_control_handler.clone(),
         ));
 
         let supervisor = Self {
             storage_root,
             stop_grace_timeout,
             runner_ready_timeout,
+            http_worker_count,
+            http_worker_queue_capacity,
             runner_log_buffer_bytes: runner_log_buffer_bytes.max(1024),
             epoch_tick_interval_ms: epoch_tick_interval_ms.max(1),
             manager_control_endpoint,
@@ -262,6 +251,8 @@ impl ServiceSupervisor {
             pending_ready,
             starting_services,
             stopping_count,
+            _manager_control_handler: manager_control_handler,
+            runner_spawner,
             _manager_control_server: manager_control_server,
         };
         Ok(supervisor)
@@ -285,6 +276,8 @@ impl ServiceSupervisor {
                 app_type: launch.app_type,
                 http_port: launch.http_port,
                 http_max_body_bytes: launch.http_max_body_bytes,
+                http_worker_count: self.http_worker_count,
+                http_worker_queue_capacity: self.http_worker_queue_capacity,
                 socket: launch.socket.clone(),
                 component_path: launch.component_path.clone(),
                 args: launch.args.clone(),
@@ -669,12 +662,31 @@ impl ServiceSupervisor {
         endpoint: PathBuf,
         inner: Arc<RwLock<BTreeMap<String, RunningService>>>,
         pending_ready: Arc<Mutex<PendingReadyMap>>,
-        read_timeout: Duration,
+        manager_control_read_timeout: Duration,
+        manager_control_handler: Arc<DefaultManagerControlHandler>,
     ) -> ManagerControlServer {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let concurrency = Arc::new(Semaphore::new(MAX_MANAGER_CONTROL_CONNECTION_HANDLERS));
         let task = tokio::spawn(async move {
             loop {
+                let accepted = tokio::select! {
+                    accepted = listener.accept() => accepted,
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+
+                let (stream, _) = match accepted {
+                    Ok(v) => v,
+                    Err(err) => {
+                        eprintln!("manager control accept failed: {err}");
+                        continue;
+                    }
+                };
+
                 let permit = tokio::select! {
                     acquired = concurrency.clone().acquire_owned() => {
                         match acquired {
@@ -690,31 +702,19 @@ impl ServiceSupervisor {
                     }
                 };
 
-                let accepted = tokio::select! {
-                    accepted = listener.accept() => accepted,
-                    changed = shutdown_rx.changed() => {
-                        drop(permit);
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            break;
-                        }
-                        continue;
-                    }
-                };
-
-                let (stream, _) = match accepted {
-                    Ok(v) => v,
-                    Err(err) => {
-                        drop(permit);
-                        eprintln!("manager control accept failed: {err}");
-                        continue;
-                    }
-                };
-
                 let inner = inner.clone();
                 let pending_ready = pending_ready.clone();
+                let manager_control_handler = manager_control_handler.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    handle_control_connection(stream, inner, pending_ready, read_timeout).await;
+                    manager_control_handler
+                        .handle_control_connection(
+                            stream,
+                            inner,
+                            pending_ready,
+                            manager_control_read_timeout,
+                        )
+                        .await;
                 });
             }
         });
@@ -727,26 +727,8 @@ impl ServiceSupervisor {
     }
 
     /// Spawns the `imagod --runner` child process with piped stdio.
-    fn spawn_runner_child(&self, _bootstrap: &RunnerBootstrap) -> Result<Child, ImagodError> {
-        let exe = std::env::current_exe().map_err(|e| {
-            ImagodError::new(
-                ErrorCode::Internal,
-                STAGE_START,
-                format!("failed to resolve current executable: {e}"),
-            )
-        })?;
-        let mut cmd = Command::new(exe);
-        cmd.arg("--runner");
-        cmd.stdin(Stdio::piped());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-        cmd.spawn().map_err(|e| {
-            ImagodError::new(
-                ErrorCode::Internal,
-                STAGE_START,
-                format!("failed to spawn runner process: {e}"),
-            )
-        })
+    fn spawn_runner_child(&self, bootstrap: &RunnerBootstrap) -> Result<Child, ImagodError> {
+        self.runner_spawner.spawn_runner_child(bootstrap)
     }
 
     fn runner_endpoint_for(&self, service_name: &str, runner_id: &str) -> PathBuf {
@@ -760,21 +742,39 @@ impl ServiceSupervisor {
         runner_id: &str,
         ready_rx: &mut oneshot::Receiver<Result<(), ImagodError>>,
     ) -> Result<(), ImagodError> {
-        let deadline = time::Instant::now() + self.runner_ready_timeout;
-        loop {
-            match ready_rx.try_recv() {
-                Ok(Ok(())) => return Ok(()),
-                Ok(Err(err)) => return Err(err),
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Closed) => {
-                    return Err(ImagodError::new(
-                        ErrorCode::Internal,
+        let mut ready_timeout = std::pin::pin!(time::sleep(self.runner_ready_timeout));
+        let mut runner_exit_wait = std::pin::pin!(self.wait_for_runner_exit(service_name));
+        tokio::select! {
+            ready = &mut *ready_rx => match ready {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(err)) => Err(err),
+                Err(_) => Err(self.runner_ready_channel_closed_error(runner_id)),
+            },
+            _ = &mut runner_exit_wait => Err(ImagodError::new(
+                ErrorCode::Internal,
+                STAGE_START,
+                format!("service '{service_name}' exited before ready"),
+            )),
+            _ = &mut ready_timeout => {
+                match ready_rx.try_recv() {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(err)) => Err(err),
+                    Err(TryRecvError::Closed) => Err(self.runner_ready_channel_closed_error(runner_id)),
+                    Err(TryRecvError::Empty) => Err(ImagodError::new(
+                        ErrorCode::OperationTimeout,
                         STAGE_START,
-                        format!("runner '{runner_id}' readiness channel closed unexpectedly"),
-                    ));
+                        format!("service '{service_name}' did not send runner_ready in time"),
+                    )),
                 }
             }
+        }
+    }
 
+    async fn wait_for_runner_exit(&self, service_name: &str) {
+        let mut interval = time::interval(Duration::from_millis(STARTUP_EXIT_CHECK_INTERVAL_MS));
+        interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
             let exited = {
                 let mut inner = self.inner.write().await;
                 match inner.get_mut(service_name) {
@@ -783,38 +783,17 @@ impl ServiceSupervisor {
                 }
             };
             if exited {
-                return Err(ImagodError::new(
-                    ErrorCode::Internal,
-                    STAGE_START,
-                    format!("service '{service_name}' exited before ready"),
-                ));
+                return;
             }
-
-            let now = time::Instant::now();
-            if now >= deadline {
-                match ready_rx.try_recv() {
-                    Ok(Ok(())) => return Ok(()),
-                    Ok(Err(err)) => return Err(err),
-                    Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Closed) => {
-                        return Err(ImagodError::new(
-                            ErrorCode::Internal,
-                            STAGE_START,
-                            format!("runner '{runner_id}' readiness channel closed unexpectedly"),
-                        ));
-                    }
-                }
-                return Err(ImagodError::new(
-                    ErrorCode::OperationTimeout,
-                    STAGE_START,
-                    format!("service '{service_name}' did not send runner_ready in time"),
-                ));
-            }
-            let sleep_for = deadline
-                .saturating_duration_since(now)
-                .min(Duration::from_millis(STARTUP_PROBE_POLL_INTERVAL_MS));
-            time::sleep(sleep_for).await;
         }
+    }
+
+    fn runner_ready_channel_closed_error(&self, runner_id: &str) -> ImagodError {
+        ImagodError::new(
+            ErrorCode::Internal,
+            STAGE_START,
+            format!("runner '{runner_id}' readiness channel closed unexpectedly"),
+        )
     }
 
     async fn reserve_start(&self, service_name: &str) -> Result<(), ImagodError> {
@@ -1006,267 +985,40 @@ impl ServiceSupervisor {
 }
 
 fn build_runner_endpoint(storage_root: &Path, service_name: &str, runner_id: &str) -> PathBuf {
-    let mut hasher = Sha256::new();
-    hasher.update(service_name.as_bytes());
-    hasher.update(b":");
-    hasher.update(runner_id.as_bytes());
-    let digest = hasher.finalize();
-    let endpoint_hash = hex::encode(&digest[..RUNNER_ENDPOINT_HASH_BYTES]);
-
-    storage_root
-        .join("runtime")
-        .join("ipc")
-        .join("runners")
-        .join(format!("runner-{endpoint_hash}.sock"))
+    runner_spawn::build_runner_endpoint(storage_root, service_name, runner_id)
 }
 
 fn validate_unix_socket_path_len(path: &Path, socket_name: &str) -> Result<(), ImagodError> {
-    let path_len = path.to_string_lossy().len();
-    if path_len <= MAX_UNIX_SOCKET_PATH_BYTES {
-        return Ok(());
-    }
-
-    Err(ImagodError::new(
-        ErrorCode::Internal,
-        STAGE_CONTROL,
-        format!(
-            "{socket_name} path is too long for AF_UNIX: actual length {path_len}, max {MAX_UNIX_SOCKET_PATH_BYTES}, path={}",
-            path.display()
-        ),
-    ))
+    runner_spawn::validate_unix_socket_path_len(path, socket_name)
 }
 
 /// Handles one control request received on manager control socket.
+#[cfg(test)]
 async fn handle_control_request(
     inner: &Arc<RwLock<BTreeMap<String, RunningService>>>,
     pending_ready: &Arc<Mutex<PendingReadyMap>>,
     request: ControlRequest,
 ) -> ControlResponse {
-    match request {
-        ControlRequest::RegisterRunner {
-            runner_id,
-            service_name,
-            release_hash,
-            runner_endpoint,
-            manager_auth_proof,
-        } => {
-            let mut guard = inner.write().await;
-            let Some((actual_service_name, service)) = guard
-                .iter_mut()
-                .find(|(_, service)| service.runner_id == runner_id)
-            else {
-                return control_error(ErrorCode::NotFound, "runner is not registered for startup");
-            };
-
-            if let Err(err) = validate_manager_auth(
-                &service.manager_auth_secret,
-                &runner_id,
-                &manager_auth_proof,
-            ) {
-                return ControlResponse::Error(IpcErrorPayload::from_error(&err));
-            }
-
-            if actual_service_name != &service_name || service.release_hash != release_hash {
-                return control_error(ErrorCode::BadRequest, "register_runner metadata mismatch");
-            }
-
-            if service.runner_endpoint != runner_endpoint {
-                return control_error(ErrorCode::BadRequest, "register_runner endpoint mismatch");
-            }
-            service.last_heartbeat_at = now_unix_secs().to_string();
-            ControlResponse::Ack
-        }
-        ControlRequest::RunnerReady {
-            runner_id,
-            manager_auth_proof,
-        } => {
-            {
-                let mut guard = inner.write().await;
-                let Some((_, service)) = guard
-                    .iter_mut()
-                    .find(|(_, service)| service.runner_id == runner_id)
-                else {
-                    return control_error(ErrorCode::NotFound, "runner is not registered");
-                };
-
-                if let Err(err) = validate_manager_auth(
-                    &service.manager_auth_secret,
-                    &runner_id,
-                    &manager_auth_proof,
-                ) {
-                    return ControlResponse::Error(IpcErrorPayload::from_error(&err));
-                }
-
-                service.is_ready = true;
-                service.last_heartbeat_at = now_unix_secs().to_string();
-            }
-
-            if let Some(sender) = pending_ready.lock().await.remove(&runner_id) {
-                let _ = sender.send(Ok(()));
-            }
-            ControlResponse::Ack
-        }
-        ControlRequest::Heartbeat {
-            runner_id,
-            manager_auth_proof,
-        } => {
-            let mut guard = inner.write().await;
-            let Some((_, service)) = guard
-                .iter_mut()
-                .find(|(_, service)| service.runner_id == runner_id)
-            else {
-                return control_error(ErrorCode::NotFound, "runner is not registered");
-            };
-
-            if let Err(err) = validate_manager_auth(
-                &service.manager_auth_secret,
-                &runner_id,
-                &manager_auth_proof,
-            ) {
-                return ControlResponse::Error(IpcErrorPayload::from_error(&err));
-            }
-
-            service.last_heartbeat_at = now_unix_secs().to_string();
-            ControlResponse::Ack
-        }
-        ControlRequest::ResolveInvocationTarget {
-            runner_id,
-            manager_auth_proof,
-            target_service,
-            wit,
-        } => {
-            let guard = inner.read().await;
-
-            let Some((source_service_name, source_service)) = guard
-                .iter()
-                .find(|(_, service)| service.runner_id == runner_id)
-            else {
-                return control_error(ErrorCode::NotFound, "source runner is not registered");
-            };
-
-            if let Err(err) = validate_manager_auth(
-                &source_service.manager_auth_secret,
-                &runner_id,
-                &manager_auth_proof,
-            ) {
-                return ControlResponse::Error(IpcErrorPayload::from_error(&err));
-            }
-
-            if !is_binding_allowed(&source_service.bindings, &target_service, &wit) {
-                return control_error(
-                    ErrorCode::Unauthorized,
-                    "binding does not allow target service/interface",
-                );
-            }
-
-            let Some(target_runner) = guard.get(&target_service) else {
-                return control_error(ErrorCode::NotFound, "target service is not running");
-            };
-            if !target_runner.is_ready {
-                return control_error(ErrorCode::NotFound, "target service is not running");
-            }
-
-            let claims = imagod_ipc::InvocationTokenClaims {
-                source_service: source_service_name.clone(),
-                target_service: target_service.clone(),
-                wit: wit.clone(),
-                exp: now_unix_secs() + INVOCATION_TOKEN_TTL_SECS,
-                nonce: uuid::Uuid::new_v4().to_string(),
-            };
-            let token = match issue_invocation_token(&target_runner.invocation_secret, claims) {
-                Ok(token) => token,
-                Err(err) => return ControlResponse::Error(IpcErrorPayload::from_error(&err)),
-            };
-
-            ControlResponse::ResolvedInvocationTarget {
-                endpoint: target_runner.runner_endpoint.clone(),
-                token,
-            }
-        }
-    }
-}
-
-async fn handle_control_connection(
-    mut stream: UnixStream,
-    inner: Arc<RwLock<BTreeMap<String, RunningService>>>,
-    pending_ready: Arc<Mutex<PendingReadyMap>>,
-    read_timeout: Duration,
-) {
-    let request = match time::timeout(
-        read_timeout,
-        DbusP2pTransport::read_message::<ControlRequest>(&mut stream),
-    )
-    .await
-    {
-        Ok(Ok(v)) => v,
-        Ok(Err(err)) => {
-            let _ = DbusP2pTransport::write_message(
-                &mut stream,
-                &ControlResponse::Error(IpcErrorPayload::from_error(&err)),
-            )
-            .await;
-            return;
-        }
-        Err(_) => {
-            let timeout_error = IpcErrorPayload {
-                code: ErrorCode::OperationTimeout,
-                stage: STAGE_CONTROL.to_string(),
-                message: format!(
-                    "manager control request read timed out after {} ms",
-                    read_timeout.as_millis()
-                ),
-            };
-            if let Err(err) =
-                DbusP2pTransport::write_message(&mut stream, &ControlResponse::Error(timeout_error))
-                    .await
-            {
-                eprintln!("manager control timeout response write failed: {err}");
-            }
-            return;
-        }
-    };
-
-    let response = handle_control_request(&inner, &pending_ready, request).await;
-    let _ = DbusP2pTransport::write_message(&mut stream, &response).await;
+    manager_control::handle_control_request_impl(inner, pending_ready, request).await
 }
 
 /// Validates manager proof generated from shared secret and runner id.
+#[cfg(test)]
 fn validate_manager_auth(secret: &str, runner_id: &str, proof: &str) -> Result<(), ImagodError> {
-    match verify_manager_auth_proof(secret, runner_id, proof) {
-        Ok(()) => Ok(()),
-        Err(err) if err.code == ErrorCode::Unauthorized => Err(ImagodError::new(
-            ErrorCode::Unauthorized,
-            STAGE_CONTROL,
-            "manager auth proof mismatch",
-        )),
-        Err(err) => Err(ImagodError::new(
-            err.code,
-            STAGE_CONTROL,
-            format!("manager auth proof verification failed: {}", err.message),
-        )),
-    }
-}
-
-fn control_error(code: ErrorCode, message: impl Into<String>) -> ControlResponse {
-    ControlResponse::Error(IpcErrorPayload {
-        code,
-        stage: STAGE_CONTROL.to_string(),
-        message: message.into(),
-    })
+    manager_control::validate_manager_auth(secret, runner_id, proof)
 }
 
 /// Returns whether a binding list allows the target service/interface pair.
+#[cfg(test)]
 fn is_binding_allowed(bindings: &[ServiceBinding], target_service: &str, wit: &str) -> bool {
-    bindings
-        .iter()
-        .any(|binding| binding.target == target_service && binding.wit == wit)
+    manager_control::is_binding_allowed(bindings, target_service, wit)
 }
 
 /// Drains one child output stream into bounded in-memory log buffer.
 ///
 /// Concurrency: runs as a detached task per stream.
 fn spawn_log_drain<R>(
-    mut reader: R,
+    reader: R,
     buffer: Arc<Mutex<BoundedLogBuffer>>,
     composite_buffer: Arc<Mutex<BoundedLogBuffer>>,
     sender: broadcast::Sender<ServiceLogEvent>,
@@ -1276,66 +1028,19 @@ fn spawn_log_drain<R>(
 ) where
     R: AsyncRead + Unpin + Send + 'static,
 {
-    tokio::spawn(async move {
-        let mut chunk = vec![0u8; 8192];
-        loop {
-            let read = match reader.read(&mut chunk).await {
-                Ok(v) => v,
-                Err(err) => {
-                    eprintln!(
-                        "service log read error name={} stream={} error={}",
-                        service_name, stream_name, err
-                    );
-                    break;
-                }
-            };
-            if read == 0 {
-                break;
-            }
-            {
-                let mut guard = buffer.lock().await;
-                guard.push(&chunk[..read]);
-            }
-            {
-                let mut guard = composite_buffer.lock().await;
-                guard.push(&chunk[..read]);
-            }
-            let _ = sender.send(ServiceLogEvent {
-                stream,
-                bytes: chunk[..read].to_vec(),
-            });
-
-            let text = String::from_utf8_lossy(&chunk[..read]);
-            for line in text.lines() {
-                if line.is_empty() {
-                    continue;
-                }
-                eprintln!(
-                    "service log name={} stream={} msg={}",
-                    service_name, stream_name, line
-                );
-            }
-        }
-    });
+    log_buffer::spawn_log_drain(
+        reader,
+        buffer,
+        composite_buffer,
+        sender,
+        service_name,
+        stream_name,
+        stream,
+    );
 }
 
 fn tail_lines_from_bytes(bytes: &[u8], tail_lines: u32) -> Vec<u8> {
-    if tail_lines == 0 || bytes.is_empty() {
-        return Vec::new();
-    }
-
-    let mut line_starts = vec![0usize];
-    for (idx, byte) in bytes.iter().enumerate() {
-        if *byte == b'\n' && idx + 1 < bytes.len() {
-            line_starts.push(idx + 1);
-        }
-    }
-
-    if tail_lines as usize >= line_starts.len() {
-        return bytes.to_vec();
-    }
-    let start = line_starts[line_starts.len() - tail_lines as usize];
-    bytes[start..].to_vec()
+    log_buffer::tail_lines_from_bytes(bytes, tail_lines)
 }
 
 /// Sends kill signal to child and waits for termination.
@@ -1523,8 +1228,8 @@ mod tests {
     #[tokio::test]
     async fn runner_endpoint_for_uses_fixed_length_hash_name() {
         let root = new_test_root("endpoint-hash");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
 
         let long_service_name = "svc-".to_string() + &"x".repeat(200);
         let endpoint = supervisor.runner_endpoint_for(&long_service_name, "runner-1");
@@ -1547,8 +1252,8 @@ mod tests {
     #[tokio::test]
     async fn open_logs_returns_tail_snapshot_and_follow_receiver() {
         let root = new_test_root("open-logs");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
         let service_name = "svc-open-logs";
         let runner_endpoint = root.join("runtime").join("ipc").join("open-logs.sock");
         let child = Command::new("sleep")
@@ -1585,8 +1290,8 @@ mod tests {
     #[tokio::test]
     async fn open_logs_subscribes_before_snapshot_read_for_follow() {
         let root = new_test_root("open-logs-order");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
         let service_name = "svc-open-logs-order";
         let runner_endpoint = root
             .join("runtime")
@@ -1636,8 +1341,8 @@ mod tests {
     #[tokio::test]
     async fn running_service_names_returns_running_only() {
         let root = new_test_root("running-names");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
 
         let endpoint_a = root.join("runtime").join("ipc").join("running-a.sock");
         let endpoint_b = root.join("runtime").join("ipc").join("running-b.sock");
@@ -1691,7 +1396,7 @@ mod tests {
         let root = PathBuf::from(format!("/tmp/iss-control-too-long-{}", "x".repeat(90)));
         let _ = std::fs::remove_dir_all(&root);
 
-        let err = match ServiceSupervisor::new(&root, 1, 1, 4096, 50) {
+        let err = match ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50) {
             Ok(_) => panic!("too long manager control endpoint should be rejected"),
             Err(err) => err,
         };
@@ -1709,8 +1414,8 @@ mod tests {
     #[tokio::test]
     async fn reserve_start_rejects_duplicate_service_name() {
         let root = new_test_root("start-reserve");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
 
         supervisor
             .reserve_start("svc-reserve")
@@ -1945,8 +1650,8 @@ mod tests {
     #[tokio::test]
     async fn stop_returns_when_shutdown_ipc_hangs() {
         let root = new_test_root("stop-timeout");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
 
         let runner_endpoint = root.join("runtime").join("ipc").join("hung-runner.sock");
         if let Some(parent) = runner_endpoint.parent() {
@@ -1995,8 +1700,8 @@ mod tests {
     #[tokio::test]
     async fn stop_force_removes_runner_endpoint() {
         let root = new_test_root("stop-force-cleanup");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
 
         let runner_endpoint = root
             .join("runtime")
@@ -2038,8 +1743,8 @@ mod tests {
     #[tokio::test]
     async fn stop_failure_reinserts_service_into_supervisor_state() {
         let root = new_test_root("stop-reinsert");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
 
         let runner_endpoint = root
             .join("runtime")
@@ -2101,8 +1806,8 @@ mod tests {
     #[tokio::test]
     async fn stop_recovery_terminates_displaced_child_when_service_name_is_taken() {
         let root = new_test_root("stop-recovery-displaced");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
         let displaced_endpoint = root
             .join("runtime")
             .join("ipc")
@@ -2186,8 +1891,8 @@ mod tests {
     #[tokio::test]
     async fn stop_all_stops_multiple_services_in_parallel() {
         let root = new_test_root("stop-all");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
 
         let endpoint_a = root
             .join("runtime")
@@ -2245,8 +1950,8 @@ mod tests {
     #[tokio::test]
     async fn stop_all_ignores_not_found_errors() {
         let root = new_test_root("stop-all-not-found");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
 
         let endpoint_done = root
             .join("runtime")
@@ -2307,8 +2012,8 @@ mod tests {
     #[tokio::test]
     async fn wait_for_runner_ready_times_out_without_ready_signal() {
         let root = new_test_root("ready-timeout");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
         let service_name = "svc-ready-timeout";
         let runner_id = "runner-ready-timeout";
         let runner_endpoint = root.join("runtime").join("ipc").join("ready-timeout.sock");
@@ -2348,8 +2053,8 @@ mod tests {
     #[tokio::test]
     async fn wait_for_runner_ready_fails_when_child_exits_early() {
         let root = new_test_root("ready-exit");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
         let service_name = "svc-ready-exit";
         let runner_id = "runner-ready-exit";
         let runner_endpoint = root.join("runtime").join("ipc").join("ready-exit.sock");
@@ -2391,8 +2096,8 @@ mod tests {
     #[tokio::test]
     async fn wait_for_runner_ready_accepts_ready_arriving_at_timeout_boundary() {
         let root = new_test_root("ready-boundary");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
         let service_name = "svc-ready-boundary".to_string();
         let runner_id = "runner-ready-boundary".to_string();
         let runner_endpoint = root.join("runtime").join("ipc").join("ready-boundary.sock");
@@ -2444,8 +2149,8 @@ mod tests {
     #[tokio::test]
     async fn reap_finished_removes_runner_endpoint() {
         let root = new_test_root("reap-cleanup");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
         let service_name = "svc-reap-cleanup";
         let runner_endpoint = root
             .join("runtime")
@@ -2494,8 +2199,8 @@ mod tests {
     #[tokio::test]
     async fn manager_control_idle_connection_does_not_block_next_request() {
         let root = new_test_root("control-parallel");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
 
         let idle = tokio::net::UnixStream::connect(&supervisor.manager_control_endpoint)
             .await
@@ -2528,8 +2233,8 @@ mod tests {
     #[tokio::test]
     async fn manager_control_server_limits_concurrent_handlers() {
         let root = new_test_root("control-limit");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 5, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 5, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
         let mut idle_connections = Vec::new();
 
         for _ in 0..MAX_MANAGER_CONTROL_CONNECTION_HANDLERS {
@@ -2576,8 +2281,8 @@ mod tests {
     #[tokio::test]
     async fn dropping_supervisor_removes_manager_control_endpoint() {
         let root = new_test_root("control-cleanup");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
         let endpoint = supervisor.manager_control_endpoint.clone();
         assert!(
             endpoint.exists(),
@@ -2597,8 +2302,8 @@ mod tests {
     #[tokio::test]
     async fn manager_control_server_stops_accepting_after_drop() {
         let root = new_test_root("control-shutdown");
-        let supervisor =
-            ServiceSupervisor::new(&root, 1, 1, 4096, 50).expect("supervisor should initialize");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
         let endpoint = supervisor.manager_control_endpoint.clone();
 
         let initial = tokio::net::UnixStream::connect(&endpoint)

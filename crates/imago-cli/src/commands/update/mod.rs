@@ -13,18 +13,21 @@ use crate::{
     cli::UpdateArgs,
     commands::{
         CommandResult,
-        build::{self, ManifestDependencyKind},
-        dependency_cache::{self, DependencyCacheEntry, DependencyCacheTransitivePackage},
+        build::{self},
+        dependency_cache::{self},
         plugin_sources,
+        shared::dependency::StandardDependencyResolver,
     },
 };
 
-pub fn run(args: UpdateArgs) -> CommandResult {
-    run_with_project_root(args, Path::new("."))
+mod cache;
+
+pub async fn run(args: UpdateArgs) -> CommandResult {
+    run_with_project_root(args, Path::new(".")).await
 }
 
-pub(crate) fn run_with_project_root(_args: UpdateArgs, project_root: &Path) -> CommandResult {
-    match run_inner(project_root) {
+pub(crate) async fn run_with_project_root(_args: UpdateArgs, project_root: &Path) -> CommandResult {
+    match run_inner_async(project_root).await {
         Ok(()) => CommandResult {
             exit_code: 0,
             stderr: None,
@@ -34,14 +37,6 @@ pub(crate) fn run_with_project_root(_args: UpdateArgs, project_root: &Path) -> C
             stderr: Some(format!("{err:#}")),
         },
     }
-}
-
-fn run_inner(project_root: &Path) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create tokio runtime for update command")?;
-    runtime.block_on(run_inner_async(project_root))
 }
 
 fn normalize_path_for_compare(path: &Path) -> PathBuf {
@@ -167,160 +162,8 @@ fn validate_wit_output_path_collisions(
     Ok(())
 }
 
-async fn load_or_refresh_cache_entry(
-    project_root: &Path,
-    dependency: &build::ProjectDependency,
-) -> anyhow::Result<DependencyCacheEntry> {
-    if dependency_cache::is_cache_hit(project_root, dependency)? {
-        return dependency_cache::load_entry(project_root, &dependency.name)
-            .with_context(|| format!("failed to load dependency cache for '{}'", dependency.name));
-    }
-
-    let cache_entry_root = dependency_cache::cache_entry_root(project_root, &dependency.name);
-    if cache_entry_root.exists() {
-        fs::remove_dir_all(&cache_entry_root).with_context(|| {
-            format!(
-                "failed to reset dependency cache dir: {}",
-                cache_entry_root.display()
-            )
-        })?;
-    }
-
-    let cache_wit_target =
-        cache_entry_root.join(dependency_cache::dependency_wit_path(&dependency.name));
-    fs::create_dir_all(&cache_wit_target).with_context(|| {
-        format!(
-            "failed to create dependency cache wit dir: {}",
-            cache_wit_target.display()
-        )
-    })?;
-
-    let materialized = plugin_sources::materialize_wit_source(
-        project_root,
-        &dependency.wit.source,
-        dependency.wit.registry.as_deref(),
-        &dependency.version,
-        &cache_wit_target,
-    )
-    .await
-    .with_context(|| format!("failed to resolve dependency '{}'", dependency.name))?;
-
-    let cache_wit_digest =
-        build::compute_path_digest_hex(&cache_wit_target).with_context(|| {
-            format!(
-                "failed to compute dependency cache wit digest: {}",
-                cache_wit_target.display()
-            )
-        })?;
-    let wit_source_fingerprint =
-        dependency_cache::wit_source_fingerprint_if_exists(project_root, &dependency.wit.source)
-            .with_context(|| {
-                format!(
-                    "failed to fingerprint wit source for dependency '{}'",
-                    dependency.name
-                )
-            })?;
-
-    let (component_source, component_registry, component_sha256, component_source_fingerprint) =
-        match dependency.kind {
-            ManifestDependencyKind::Native => (None, None, None, None),
-            ManifestDependencyKind::Wasm => {
-                let (source, registry, sha256) = if let Some(component) =
-                    dependency.component.as_ref()
-                {
-                    let digest = plugin_sources::resolve_component_sha256(
-                        project_root,
-                        &component.source,
-                        component.registry.as_deref(),
-                        component.sha256.as_deref(),
-                    )
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to resolve component sha256 for dependency '{}'",
-                            dependency.name
-                        )
-                    })?;
-                    (component.source.clone(), component.registry.clone(), digest)
-                } else if let Some(derived) = materialized.derived_component.as_ref() {
-                    (
-                        derived.source.clone(),
-                        derived.registry.clone(),
-                        derived.sha256.clone(),
-                    )
-                } else {
-                    return Err(anyhow!(
-                        "dependencies entry '{}' is kind=\"wasm\" but no component source was provided and wit source '{}' did not decode as a component",
-                        dependency.name,
-                        dependency.wit.source
-                    ));
-                };
-
-                let cache_component_path =
-                    dependency_cache::cache_component_path(project_root, &dependency.name, &sha256);
-                plugin_sources::materialize_component_file(
-                    project_root,
-                    &source,
-                    registry.as_deref(),
-                    &sha256,
-                    &cache_component_path,
-                    "dependency component cache",
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to materialize component cache for dependency '{}'",
-                        dependency.name
-                    )
-                })?;
-                let source_fingerprint =
-                    dependency_cache::component_source_fingerprint_if_exists(project_root, &source)
-                        .with_context(|| {
-                            format!(
-                                "failed to fingerprint component source for dependency '{}'",
-                                dependency.name
-                            )
-                        })?;
-                (Some(source), registry, Some(sha256), source_fingerprint)
-            }
-        };
-
-    let entry = DependencyCacheEntry {
-        name: dependency.name.clone(),
-        version: dependency.version.clone(),
-        kind: match dependency.kind {
-            ManifestDependencyKind::Native => "native".to_string(),
-            ManifestDependencyKind::Wasm => "wasm".to_string(),
-        },
-        wit_source: dependency.wit.source.clone(),
-        wit_registry: dependency.wit.registry.clone(),
-        wit_path: dependency_cache::dependency_wit_path(&dependency.name),
-        wit_digest: cache_wit_digest,
-        wit_source_fingerprint,
-        component_source,
-        component_registry,
-        component_sha256,
-        component_source_fingerprint,
-        transitive_packages: materialized
-            .transitive_packages
-            .iter()
-            .map(|transitive| DependencyCacheTransitivePackage {
-                name: transitive.name.clone(),
-                registry: transitive.registry.clone(),
-                requirement: transitive.requirement.clone(),
-                version: transitive.version.clone(),
-                digest: transitive.digest.clone(),
-                source: transitive.source.clone(),
-                path: transitive.path.clone(),
-            })
-            .collect(),
-    };
-    dependency_cache::save_entry(project_root, &entry)
-        .with_context(|| format!("failed to save dependency cache for '{}'", dependency.name))?;
-    Ok(entry)
-}
-
 async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
+    let dependency_resolver = StandardDependencyResolver;
     let dependencies = build::load_project_dependencies(project_root)?;
     validate_wit_sources_outside_wit_deps(project_root, &dependencies)?;
     validate_wit_output_path_collisions(&dependencies)?;
@@ -330,7 +173,9 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
     let mut transitive_records = Vec::new();
 
     for dependency in &dependencies {
-        let cache_entry = load_or_refresh_cache_entry(project_root, dependency).await?;
+        let cache_entry =
+            cache::load_or_refresh_cache_entry(&dependency_resolver, project_root, dependency)
+                .await?;
         transitive_records.extend(cache_entry.transitive_packages.iter().map(|transitive| {
             TransitivePackageRecord {
                 name: transitive.name.clone(),
@@ -472,8 +317,8 @@ mod tests {
             .expect("component encoding should succeed")
     }
 
-    #[test]
-    fn update_resolves_file_source_into_wit_and_lock() {
+    #[tokio::test]
+    async fn update_resolves_file_source_into_wit_and_lock() {
         let root = new_temp_dir("file-source");
         write(
             &root.join("imago.toml"),
@@ -497,7 +342,7 @@ remote = "127.0.0.1:4443"
             b"package test:example@0.1.0;\n",
         );
 
-        let result = run_with_project_root(UpdateArgs {}, &root);
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(
             result.exit_code, 0,
             "update should succeed: {:?}",
@@ -519,7 +364,7 @@ remote = "127.0.0.1:4443"
         assert!(entry.component_sha256.is_none());
         assert!(!entry.wit_digest.is_empty());
 
-        let second = run_with_project_root(UpdateArgs {}, &root);
+        let second = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(second.exit_code, 0);
         let lock_raw_2 =
             fs::read_to_string(root.join("imago.lock")).expect("lock should exist after rerun");
@@ -529,8 +374,8 @@ remote = "127.0.0.1:4443"
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_uses_default_warg_source_when_wit_is_omitted() {
+    #[tokio::test]
+    async fn update_uses_default_warg_source_when_wit_is_omitted() {
         let root = new_temp_dir("warg-default");
         write(
             &root.join("imago.toml"),
@@ -553,7 +398,7 @@ remote = "127.0.0.1:4443"
             b"package test:example@1.2.3;\n",
         );
 
-        let result = run_with_project_root(UpdateArgs {}, &root);
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(
             result.exit_code, 0,
             "update should succeed: {:?}",
@@ -580,8 +425,8 @@ remote = "127.0.0.1:4443"
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_records_component_source_and_sha_and_materializes_dependency_component_cache() {
+    #[tokio::test]
+    async fn update_records_component_source_and_sha_and_materializes_dependency_component_cache() {
         let root = new_temp_dir("component-sha");
         let component_bytes = b"\0asmfake-component";
         let component_sha = sha256_hex(component_bytes);
@@ -614,7 +459,7 @@ remote = "127.0.0.1:4443"
             component_bytes,
         );
 
-        let result = run_with_project_root(UpdateArgs {}, &root);
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(
             result.exit_code, 0,
             "update should succeed: {:?}",
@@ -656,8 +501,8 @@ remote = "127.0.0.1:4443"
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_derives_component_info_from_wit_component_source() {
+    #[tokio::test]
+    async fn update_derives_component_info_from_wit_component_source() {
         let root = new_temp_dir("wit-component-derived");
         write(
             &root.join("imago.toml"),
@@ -694,7 +539,7 @@ world plugin {
             &component_bytes,
         );
 
-        let result = run_with_project_root(UpdateArgs {}, &root);
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(
             result.exit_code, 0,
             "update should succeed: {:?}",
@@ -731,8 +576,8 @@ world plugin {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_rejects_wasm_dependency_without_component_when_wit_is_not_component() {
+    #[tokio::test]
+    async fn update_rejects_wasm_dependency_without_component_when_wit_is_not_component() {
         let root = new_temp_dir("wit-not-component-for-wasm");
         write(
             &root.join("imago.toml"),
@@ -769,7 +614,7 @@ interface greet {
             &wit_package_bytes,
         );
 
-        let result = run_with_project_root(UpdateArgs {}, &root);
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(
             result.exit_code, 2,
             "update must fail for non-component WIT"
@@ -784,8 +629,8 @@ interface greet {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_rejects_wa_dev_wit_shorthand() {
+    #[tokio::test]
+    async fn update_rejects_wa_dev_wit_shorthand() {
         let root = new_temp_dir("wa-dev-shorthand");
         write(
             &root.join("imago.toml"),
@@ -804,7 +649,7 @@ wit = "https://wa.dev/chikoski:hello/greet"
 remote = "127.0.0.1:4443"
 "#,
         );
-        let result = run_with_project_root(UpdateArgs {}, &root);
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.unwrap_or_default();
         assert!(
@@ -816,8 +661,8 @@ remote = "127.0.0.1:4443"
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_rejects_sanitized_wit_output_path_collisions() {
+    #[tokio::test]
+    async fn update_rejects_sanitized_wit_output_path_collisions() {
         let root = new_temp_dir("wit-output-collision");
         write(
             &root.join("imago.toml"),
@@ -847,7 +692,7 @@ remote = "127.0.0.1:4443"
             b"package stale:dep;\n",
         );
 
-        let result = run_with_project_root(UpdateArgs {}, &root);
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.unwrap_or_default();
         assert!(
@@ -863,8 +708,8 @@ remote = "127.0.0.1:4443"
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_rejects_overlapping_wit_output_paths_before_reset() {
+    #[tokio::test]
+    async fn update_rejects_overlapping_wit_output_paths_before_reset() {
         let root = new_temp_dir("wit-output-overlap");
         write(
             &root.join("imago.toml"),
@@ -894,7 +739,7 @@ remote = "127.0.0.1:4443"
             b"package stale:dep;\n",
         );
 
-        let result = run_with_project_root(UpdateArgs {}, &root);
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.unwrap_or_default();
         assert!(
@@ -910,8 +755,8 @@ remote = "127.0.0.1:4443"
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_rejects_file_source_under_wit_deps_before_reset() {
+    #[tokio::test]
+    async fn update_rejects_file_source_under_wit_deps_before_reset() {
         let root = new_temp_dir("file-source-under-wit-deps");
         write(
             &root.join("imago.toml"),
@@ -935,7 +780,7 @@ remote = "127.0.0.1:4443"
             b"package test:example@0.1.0;\n",
         );
 
-        let result = run_with_project_root(UpdateArgs {}, &root);
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.unwrap_or_default();
         assert!(
@@ -951,8 +796,8 @@ remote = "127.0.0.1:4443"
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_rejects_absolute_file_source_under_wit_deps_when_project_root_is_dot() {
+    #[tokio::test]
+    async fn update_rejects_absolute_file_source_under_wit_deps_when_project_root_is_dot() {
         let root = new_temp_dir("file-source-under-wit-deps-absolute");
         let absolute_source = root.join("wit/deps/vendor/example.wit");
         write(
@@ -979,7 +824,7 @@ remote = "127.0.0.1:4443"
         write(&absolute_source, b"package test:example@0.1.0;\n");
 
         let _cwd_guard = CwdGuard::change_to(&root);
-        let result = run(UpdateArgs {});
+        let result = run(UpdateArgs {}).await;
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.unwrap_or_default();
         assert!(
@@ -994,8 +839,8 @@ remote = "127.0.0.1:4443"
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_rejects_component_file_source_under_wit_deps_before_reset() {
+    #[tokio::test]
+    async fn update_rejects_component_file_source_under_wit_deps_before_reset() {
         let root = new_temp_dir("component-file-source-under-wit-deps");
         write(
             &root.join("imago.toml"),
@@ -1026,7 +871,7 @@ remote = "127.0.0.1:4443"
             b"\0asmfake-component",
         );
 
-        let result = run_with_project_root(UpdateArgs {}, &root);
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.unwrap_or_default();
         assert!(
@@ -1046,8 +891,8 @@ remote = "127.0.0.1:4443"
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_rejects_dependency_name_with_absolute_path_before_reset() {
+    #[tokio::test]
+    async fn update_rejects_dependency_name_with_absolute_path_before_reset() {
         let root = new_temp_dir("dependency-name-absolute-path");
         write(
             &root.join("imago.toml"),
@@ -1071,7 +916,7 @@ remote = "127.0.0.1:4443"
             b"package stale:dep;\n",
         );
 
-        let result = run_with_project_root(UpdateArgs {}, &root);
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.unwrap_or_default();
         assert!(
@@ -1091,8 +936,8 @@ remote = "127.0.0.1:4443"
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_materializes_warg_transitive_wit_packages() {
+    #[tokio::test]
+    async fn update_materializes_warg_transitive_wit_packages() {
         let root = new_temp_dir("warg-transitive");
         write(
             &root.join("imago.toml"),
@@ -1147,7 +992,7 @@ interface name-provider {
             &wit_package_bytes,
         );
 
-        let result = run_with_project_root(UpdateArgs {}, &root);
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(
             result.exit_code, 0,
             "update should succeed: {:?}",
@@ -1195,8 +1040,8 @@ interface name-provider {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_allows_warg_top_package_without_version() {
+    #[tokio::test]
+    async fn update_allows_warg_top_package_without_version() {
         let root = new_temp_dir("warg-top-without-version");
         write(
             &root.join("imago.toml"),
@@ -1233,7 +1078,7 @@ interface greet {
             &wit_package_bytes,
         );
 
-        let result = run_with_project_root(UpdateArgs {}, &root);
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert!(
             result.exit_code == 0,
             "update should succeed: {:?}",
@@ -1245,8 +1090,8 @@ interface greet {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_rejects_warg_top_package_version_mismatch() {
+    #[tokio::test]
+    async fn update_rejects_warg_top_package_version_mismatch() {
         let root = new_temp_dir("warg-top-version-mismatch");
         write(
             &root.join("imago.toml"),
@@ -1283,7 +1128,7 @@ interface greet {
             &wit_package_bytes,
         );
 
-        let result = run_with_project_root(UpdateArgs {}, &root);
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.unwrap_or_default();
         assert!(
@@ -1294,8 +1139,8 @@ interface greet {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_allows_warg_transitive_package_without_version() {
+    #[tokio::test]
+    async fn update_allows_warg_transitive_package_without_version() {
         let root = new_temp_dir("warg-transitive-without-version");
         write(
             &root.join("imago.toml"),
@@ -1346,7 +1191,7 @@ interface name-provider {
             &wit_package_bytes,
         );
 
-        let result = run_with_project_root(UpdateArgs {}, &root);
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert!(
             result.exit_code == 0,
             "update should succeed: {:?}",
@@ -1373,8 +1218,8 @@ interface name-provider {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_allows_file_source_package_without_version() {
+    #[tokio::test]
+    async fn update_allows_file_source_package_without_version() {
         let root = new_temp_dir("file-source-without-version");
         write(
             &root.join("imago.toml"),
@@ -1398,7 +1243,7 @@ remote = "127.0.0.1:4443"
             b"package test:example;\n",
         );
 
-        let result = run_with_project_root(UpdateArgs {}, &root);
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert!(
             result.exit_code == 0,
             "update should succeed: {:?}",
@@ -1413,8 +1258,8 @@ remote = "127.0.0.1:4443"
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_rehydrates_wit_from_cache_when_file_source_disappears() {
+    #[tokio::test]
+    async fn update_rehydrates_wit_from_cache_when_file_source_disappears() {
         let root = new_temp_dir("file-source-missing-cache-hit");
         write(
             &root.join("imago.toml"),
@@ -1438,13 +1283,13 @@ remote = "127.0.0.1:4443"
             b"package test:example@0.1.0;\n",
         );
 
-        let first = run_with_project_root(UpdateArgs {}, &root);
+        let first = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(first.exit_code, 0, "first update should succeed: {first:?}");
 
         fs::remove_file(root.join("registry/example.wit")).expect("source should be removable");
         fs::remove_dir_all(root.join("wit/deps")).expect("wit/deps should be removable");
 
-        let second = run_with_project_root(UpdateArgs {}, &root);
+        let second = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(
             second.exit_code, 0,
             "second update should succeed from cache: {:?}",
@@ -1459,8 +1304,8 @@ remote = "127.0.0.1:4443"
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_refreshes_dependency_cache_when_file_source_changes() {
+    #[tokio::test]
+    async fn update_refreshes_dependency_cache_when_file_source_changes() {
         let root = new_temp_dir("file-source-refresh");
         write(
             &root.join("imago.toml"),
@@ -1484,7 +1329,7 @@ remote = "127.0.0.1:4443"
             b"package test:example@0.1.0;\n",
         );
 
-        let first = run_with_project_root(UpdateArgs {}, &root);
+        let first = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(first.exit_code, 0, "first update should succeed: {first:?}");
         let lock_v1: ImagoLock = toml::from_str(
             &fs::read_to_string(root.join("imago.lock")).expect("lock should exist"),
@@ -1497,7 +1342,7 @@ remote = "127.0.0.1:4443"
             b"package test:example@0.2.0;\n",
         );
 
-        let second = run_with_project_root(UpdateArgs {}, &root);
+        let second = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(
             second.exit_code, 0,
             "second update should succeed: {second:?}"
@@ -1522,8 +1367,8 @@ remote = "127.0.0.1:4443"
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_uses_dependency_cache_when_local_warg_fixture_is_removed() {
+    #[tokio::test]
+    async fn update_uses_dependency_cache_when_local_warg_fixture_is_removed() {
         let root = new_temp_dir("warg-missing-after-cache");
         write(
             &root.join("imago.toml"),
@@ -1559,7 +1404,7 @@ interface greet {
             &wit_package_bytes,
         );
 
-        let first = run_with_project_root(UpdateArgs {}, &root);
+        let first = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(first.exit_code, 0, "first update should succeed: {first:?}");
 
         fs::remove_dir_all(
@@ -1569,7 +1414,7 @@ interface greet {
         .expect("local warg fixture should be removable");
         fs::remove_dir_all(root.join("wit/deps")).expect("wit/deps should be removable");
 
-        let second = run_with_project_root(UpdateArgs {}, &root);
+        let second = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(
             second.exit_code, 0,
             "second update should succeed from dependency cache: {:?}",
@@ -1580,8 +1425,8 @@ interface greet {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn update_rejects_plain_wit_with_foreign_imports_from_warg_source() {
+    #[tokio::test]
+    async fn update_rejects_plain_wit_with_foreign_imports_from_warg_source() {
         let root = new_temp_dir("warg-plain-wit-foreign-import");
         write(
             &root.join("imago.toml"),
@@ -1615,7 +1460,7 @@ world example {
 "#,
         );
 
-        let result = run_with_project_root(UpdateArgs {}, &root);
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.unwrap_or_default();
         assert!(

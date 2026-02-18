@@ -8,11 +8,15 @@ default = ["runtime-wasmtime"]
 runtime-wasmtime = ["dep:imagod-runtime-wasmtime"]
 
 [dependencies]
+async-trait = { workspace = true }
 bytes = { workspace = true }
 http-body-util = { workspace = true }
 imago-protocol = { workspace = true }
 imagod-common = { workspace = true }
 imagod-ipc = { workspace = true }
+imagod-runtime-bootstrap = { workspace = true }
+imagod-runtime-control = { workspace = true }
+imagod-runtime-ingress = { workspace = true }
 imagod-runtime-internal = { workspace = true }
 imagod-runtime-wasmtime = { workspace = true, optional = true }
 hyper = { workspace = true, features = ["http1", "server"] }

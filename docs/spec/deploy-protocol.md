@@ -381,3 +381,10 @@ response:
 - `logs.request` のフィルタキーを `name` へ統一した。
 - `logs.request.name=None` は「リクエスト時点で running の全サービス」を対象とする。
 - `logs.request` ACK の対象一覧キーを `names` へ統一した。
+
+## 実装反映ノート（CLI request stream timeout/retry / 2026-02-18）
+
+- `imago-cli` の `request_events` / `request_response` は request stream を timeout 付きで実行する。
+- timeout 対象は `open_bi` / stream write / stream read で、既定値は 30 秒。
+- deploy 実行時は `hello.negotiate` の `limits.deploy_stream_timeout_secs` を timeout 値に適用する（server 既定は `runtime.deploy_stream_timeout_secs`）。
+- request stream 失敗時は固定回数で再試行する（待機 100ms -> 250ms、最大 3 試行）。

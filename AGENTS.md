@@ -26,6 +26,7 @@ Use Rust 2024 edition conventions and `rustfmt` defaults (4-space indentation). 
 - `PascalCase` for structs, enums, and traits.
 - `SCREAMING_SNAKE_CASE` for constants.
 - Always prefer simplicity to pathological correctness. YAGNI, KISS, DRY. No backward-compat shims or fallback paths unless they come free without adding cyclomatic complexity.
+- 特に指定がない場合、サブエージェントを利用してください。分割可能なタスクは分割しサブエージェントに振り分けてください。
 
 Keep modules focused and explicit. When behavior changes, update related specs in `docs/spec/` in the same PR so implementation and documentation stay aligned.
 

@@ -31,8 +31,14 @@ use web_transport_quinn::{Session, proto::ConnectRequest};
 
 use crate::{
     cli::DeployArgs,
-    commands::{CommandResult, build, dependency_cache},
+    commands::{
+        CommandResult, build,
+        shared::dependency::{DependencyResolver, StandardDependencyResolver},
+    },
 };
+
+mod artifact;
+mod network;
 
 const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const COMPATIBILITY_DATE: &str = "2026-02-10";
@@ -42,6 +48,9 @@ const TRANSPORT_CONNECT_STAGE: &str = "transport.connect";
 const UPLOAD_MAX_ATTEMPTS: usize = 4;
 const UPLOAD_RETRY_BASE_BACKOFF_MS: u64 = 250;
 const UPLOAD_RETRY_MAX_BACKOFF_MS: u64 = 1000;
+const DEFAULT_DEPLOY_STREAM_TIMEOUT_SECS: u64 = 30;
+const DEPLOY_STREAM_RETRY_BACKOFF_MS: [u64; 2] = [100, 250];
+const DEPLOY_STREAM_MAX_ATTEMPTS: usize = DEPLOY_STREAM_RETRY_BACKOFF_MS.len() + 1;
 const DATAGRAM_BUFFER_BYTES: usize = 1024 * 1024;
 
 pub(crate) type Envelope = ProtocolEnvelope<Value>;
@@ -50,6 +59,7 @@ pub(crate) type Envelope = ProtocolEnvelope<Value>;
 struct UploadLimits {
     chunk_size: usize,
     max_inflight_chunks: usize,
+    deploy_stream_timeout: Duration,
 }
 
 #[derive(Clone, Copy)]
@@ -58,6 +68,7 @@ struct UploadRequestContext<'a> {
     correlation_id: Uuid,
     deploy_id: &'a str,
     upload_token: &'a str,
+    stream_timeout: Duration,
 }
 
 struct UploadPhaseInputs<'a> {
@@ -76,6 +87,7 @@ struct UploadPhaseInputs<'a> {
 struct UploadPhaseResult {
     session: Session,
     deploy_id: String,
+    deploy_stream_timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -144,12 +156,12 @@ impl Drop for TempArtifactBundle {
     }
 }
 
-pub fn run(args: DeployArgs) -> CommandResult {
-    run_with_project_root(args, Path::new("."))
+pub async fn run(args: DeployArgs) -> CommandResult {
+    run_with_project_root(args, Path::new(".")).await
 }
 
-pub(crate) fn run_with_project_root(args: DeployArgs, project_root: &Path) -> CommandResult {
-    match run_inner(args, project_root) {
+pub(crate) async fn run_with_project_root(args: DeployArgs, project_root: &Path) -> CommandResult {
+    match run_async(args, project_root).await {
         Ok(()) => CommandResult {
             exit_code: 0,
             stderr: None,
@@ -161,15 +173,11 @@ pub(crate) fn run_with_project_root(args: DeployArgs, project_root: &Path) -> Co
     }
 }
 
-fn run_inner(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("failed to create tokio runtime")?;
-    runtime.block_on(run_async(args, project_root))
-}
-
 async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> {
+    let dependency_resolver = StandardDependencyResolver;
+    let target_connector = network::QuinnTargetConnector;
+    let artifact_bundler = artifact::TarArtifactBundler;
+
     let target_name = args
         .target
         .clone()
@@ -182,19 +190,22 @@ async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> 
     let restart_policy = build_output.restart_policy;
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).context("failed to parse manifest json")?;
-    let dependency_component_sources =
-        resolve_dependency_component_sources(project_root, &manifest).await?;
+    let dependency_component_sources = dependency_resolver
+        .resolve_dependency_component_sources(project_root, &manifest.dependencies)?;
 
     let target = build_output
         .target
         .require_deploy_credentials()
         .context("target settings are invalid for deploy")?;
 
-    let artifact = build_artifact_bundle_file(
-        &manifest,
-        &manifest_path,
-        project_root,
-        &dependency_component_sources,
+    let artifact = artifact::ArtifactBundler::bundle(
+        &artifact_bundler,
+        artifact::ArtifactBundleRequest {
+            manifest: &manifest,
+            manifest_path: &manifest_path,
+            project_root,
+            dependency_component_sources: &dependency_component_sources,
+        },
     )?;
     let (artifact_digest, artifact_size) = compute_file_sha256_and_size(artifact.path())?;
     let manifest_digest = hex::encode(Sha256::digest(&manifest_bytes));
@@ -211,18 +222,21 @@ async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> 
         &manifest_digest,
     );
 
-    let upload_result = run_upload_phase_with_resume(UploadPhaseInputs {
-        target: &target,
-        target_for_protocol: &target_for_protocol,
-        policy: &policy,
-        manifest: &manifest,
-        artifact_path: artifact.path(),
-        artifact_digest: &artifact_digest,
-        artifact_size,
-        manifest_digest: &manifest_digest,
-        idempotency_key: &idempotency_key,
-        correlation_id,
-    })
+    let upload_result = run_upload_phase_with_resume(
+        &target_connector,
+        UploadPhaseInputs {
+            target: &target,
+            target_for_protocol: &target_for_protocol,
+            policy: &policy,
+            manifest: &manifest,
+            artifact_path: artifact.path(),
+            artifact_digest: &artifact_digest,
+            artifact_size,
+            manifest_digest: &manifest_digest,
+            idempotency_key: &idempotency_key,
+            correlation_id,
+        },
+    )
     .await?;
 
     let command_request_id = Uuid::new_v4();
@@ -238,7 +252,12 @@ async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> 
         }),
     )?;
 
-    let responses = request_events(&upload_result.session, &command).await?;
+    let responses = request_events_with_timeout(
+        &upload_result.session,
+        &command,
+        upload_result.deploy_stream_timeout,
+    )
+    .await?;
     if responses.is_empty() {
         return Err(anyhow!("command.start returned empty response stream"));
     }
@@ -287,11 +306,12 @@ async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> 
     }
 }
 
-async fn run_upload_phase_with_resume(
+async fn run_upload_phase_with_resume<C: network::TargetConnector>(
+    target_connector: &C,
     inputs: UploadPhaseInputs<'_>,
 ) -> anyhow::Result<UploadPhaseResult> {
     for attempt in 1..=UPLOAD_MAX_ATTEMPTS {
-        match run_upload_phase_once(&inputs).await {
+        match run_upload_phase_once(target_connector, &inputs).await {
             Ok(result) => return Ok(result),
             Err(err) => {
                 if attempt >= UPLOAD_MAX_ATTEMPTS || !should_retry_upload_error(&err) {
@@ -320,10 +340,11 @@ async fn run_upload_phase_with_resume(
     ))
 }
 
-async fn run_upload_phase_once(
+async fn run_upload_phase_once<C: network::TargetConnector>(
+    target_connector: &C,
     inputs: &UploadPhaseInputs<'_>,
 ) -> anyhow::Result<UploadPhaseResult> {
-    let session = connect_target(inputs.target).await?;
+    let session = target_connector.connect(inputs.target).await?;
 
     let hello = request_envelope(
         MessageType::HelloNegotiate,
@@ -363,8 +384,10 @@ async fn run_upload_phase_once(
             policy: inputs.policy.clone(),
         },
     )?;
-    let prepare_response: DeployPrepareResponse =
-        response_payload(request_response(&session, &prepare).await?)?;
+    let prepare_response: DeployPrepareResponse = response_payload(
+        request_response_with_timeout(&session, &prepare, upload_limits.deploy_stream_timeout)
+            .await?,
+    )?;
 
     let upload_ranges = upload_ranges_for_prepare(
         prepare_response.artifact_status,
@@ -377,6 +400,7 @@ async fn run_upload_phase_once(
             correlation_id: inputs.correlation_id,
             deploy_id: &prepare_response.deploy_id,
             upload_token: &prepare_response.upload_token,
+            stream_timeout: upload_limits.deploy_stream_timeout,
         };
         push_artifact_ranges(
             upload_context,
@@ -399,8 +423,10 @@ async fn run_upload_phase_once(
             manifest_digest: inputs.manifest_digest.to_string(),
         },
     )?;
-    let commit_response: ArtifactCommitResponse =
-        response_payload(request_response(&session, &commit).await?)?;
+    let commit_response: ArtifactCommitResponse = response_payload(
+        request_response_with_timeout(&session, &commit, upload_limits.deploy_stream_timeout)
+            .await?,
+    )?;
     if !commit_response.verified {
         return Err(CommitNotVerifiedError.into());
     }
@@ -408,6 +434,7 @@ async fn run_upload_phase_once(
     Ok(UploadPhaseResult {
         session,
         deploy_id: prepare_response.deploy_id,
+        deploy_stream_timeout: upload_limits.deploy_stream_timeout,
     })
 }
 
@@ -654,10 +681,17 @@ fn parse_upload_limits(response: &HelloNegotiateResponse) -> anyhow::Result<Uplo
         DEFAULT_MAX_INFLIGHT_CHUNKS,
         "hello.negotiate response max_inflight_chunks",
     )?;
+    let deploy_stream_timeout_secs = parse_positive_limit_u64(
+        &response.limits,
+        "deploy_stream_timeout_secs",
+        DEFAULT_DEPLOY_STREAM_TIMEOUT_SECS,
+        "hello.negotiate response deploy_stream_timeout_secs",
+    )?;
 
     Ok(UploadLimits {
         chunk_size,
         max_inflight_chunks,
+        deploy_stream_timeout: Duration::from_secs(deploy_stream_timeout_secs),
     })
 }
 
@@ -671,6 +705,26 @@ fn parse_positive_limit(
         Some(raw) => {
             let parsed = raw
                 .parse::<usize>()
+                .with_context(|| format!("failed to parse {label} as integer: {raw}"))?;
+            if parsed == 0 {
+                return Err(anyhow!("{label} must be greater than 0"));
+            }
+            Ok(parsed)
+        }
+        None => Ok(default),
+    }
+}
+
+fn parse_positive_limit_u64(
+    limits: &BTreeMap<String, String>,
+    key: &str,
+    default: u64,
+    label: &str,
+) -> anyhow::Result<u64> {
+    match limits.get(key) {
+        Some(raw) => {
+            let parsed = raw
+                .parse::<u64>()
                 .with_context(|| format!("failed to parse {label} as integer: {raw}"))?;
             if parsed == 0 {
                 return Err(anyhow!("{label} must be greater than 0"));
@@ -798,7 +852,15 @@ pub(crate) async fn request_response(
     session: &web_transport_quinn::Session,
     envelope: &Envelope,
 ) -> anyhow::Result<Envelope> {
-    let responses = request_events(session, envelope).await?;
+    request_response_with_timeout(session, envelope, resolve_deploy_stream_timeout()).await
+}
+
+pub(crate) async fn request_response_with_timeout(
+    session: &web_transport_quinn::Session,
+    envelope: &Envelope,
+    stream_timeout: Duration,
+) -> anyhow::Result<Envelope> {
+    let responses = request_events_with_timeout(session, envelope, stream_timeout).await?;
     responses
         .into_iter()
         .next()
@@ -809,20 +871,91 @@ pub(crate) async fn request_events(
     session: &web_transport_quinn::Session,
     envelope: &Envelope,
 ) -> anyhow::Result<Vec<Envelope>> {
+    request_events_with_timeout(session, envelope, resolve_deploy_stream_timeout()).await
+}
+
+pub(crate) async fn request_events_with_timeout(
+    session: &web_transport_quinn::Session,
+    envelope: &Envelope,
+    stream_timeout: Duration,
+) -> anyhow::Result<Vec<Envelope>> {
     let payload = to_cbor(envelope)?;
     let framed = encode_frame(&payload);
-
-    let (mut send, mut recv) = session.open_bi().await?;
-    send.write_all(&framed).await?;
-    send.finish()?;
-
-    let response_bytes = recv.read_to_end(MAX_STREAM_BYTES).await?;
+    let mut attempt = 1usize;
+    let response_bytes = loop {
+        match request_events_once(session, &framed, stream_timeout).await {
+            Ok(response_bytes) => break response_bytes,
+            Err(err) => {
+                let Some(backoff) = deploy_stream_retry_backoff(attempt) else {
+                    return Err(err);
+                };
+                eprintln!(
+                    "request stream attempt {attempt}/{DEPLOY_STREAM_MAX_ATTEMPTS} failed, retrying in {}ms",
+                    backoff.as_millis()
+                );
+                tokio::time::sleep(backoff).await;
+                attempt = attempt.saturating_add(1);
+            }
+        }
+    };
     let frames = decode_frames(&response_bytes)?;
     let mut envelopes = Vec::with_capacity(frames.len());
     for frame in frames {
         envelopes.push(from_cbor::<Envelope>(&frame)?);
     }
     Ok(envelopes)
+}
+
+async fn request_events_once(
+    session: &web_transport_quinn::Session,
+    framed: &[u8],
+    timeout_duration: Duration,
+) -> anyhow::Result<Vec<u8>> {
+    let (mut send, mut recv) = tokio::time::timeout(timeout_duration, session.open_bi())
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "request stream open timed out after {} ms",
+                timeout_duration.as_millis()
+            )
+        })??;
+    tokio::time::timeout(timeout_duration, send.write_all(framed))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "request stream write timed out after {} ms",
+                timeout_duration.as_millis()
+            )
+        })??;
+    send.finish()?;
+    tokio::time::timeout(timeout_duration, recv.read_to_end(MAX_STREAM_BYTES))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "request stream read timed out after {} ms",
+                timeout_duration.as_millis()
+            )
+        })?
+        .map_err(anyhow::Error::from)
+}
+
+fn deploy_stream_retry_backoff(attempt: usize) -> Option<Duration> {
+    if attempt >= DEPLOY_STREAM_MAX_ATTEMPTS {
+        return None;
+    }
+    DEPLOY_STREAM_RETRY_BACKOFF_MS
+        .get(attempt.saturating_sub(1))
+        .copied()
+        .map(Duration::from_millis)
+}
+
+fn resolve_deploy_stream_timeout() -> Duration {
+    let value = std::env::var("IMAGO_DEPLOY_STREAM_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(DEFAULT_DEPLOY_STREAM_TIMEOUT_SECS);
+    Duration::from_secs(value)
 }
 
 fn upload_ranges_for_prepare(
@@ -936,6 +1069,7 @@ async fn push_artifact_ranges(
         let task_session = context.session.clone();
         let task_deploy_id = deploy_id.clone();
         let task_upload_token = upload_token.clone();
+        let task_stream_timeout = context.stream_timeout;
         uploads.spawn(async move {
             push_single_artifact_chunk(
                 task_session,
@@ -944,6 +1078,7 @@ async fn push_artifact_ranges(
                 task_upload_token,
                 offset,
                 chunk,
+                task_stream_timeout,
             )
             .await
         });
@@ -963,6 +1098,7 @@ async fn push_single_artifact_chunk(
     upload_token: Arc<str>,
     offset: u64,
     chunk: Vec<u8>,
+    stream_timeout: Duration,
 ) -> anyhow::Result<()> {
     let chunk_hash = hex::encode(Sha256::digest(&chunk));
     let chunk_b64 = base64::engine::general_purpose::STANDARD.encode(&chunk);
@@ -985,7 +1121,7 @@ async fn push_single_artifact_chunk(
     )?;
 
     let _ack: imago_protocol::ArtifactPushAck =
-        response_payload(request_response(&session, &request).await?)?;
+        response_payload(request_response_with_timeout(&session, &request, stream_timeout).await?)?;
     Ok(())
 }
 
@@ -1106,75 +1242,13 @@ fn build_artifact_bundle_file(
     Ok(TempArtifactBundle::new(bundle_path))
 }
 
+#[cfg(test)]
 async fn resolve_dependency_component_sources(
     project_root: &Path,
     manifest: &Manifest,
 ) -> anyhow::Result<BTreeMap<String, PathBuf>> {
-    let mut sources = BTreeMap::new();
-    if !manifest
-        .dependencies
-        .iter()
-        .any(|dep| dep.kind == build::ManifestDependencyKind::Wasm)
-    {
-        return Ok(sources);
-    }
-
-    let lock = imago_lockfile::load_from_project_root(project_root)?;
-    let lock_by_name = lock
-        .dependencies
-        .into_iter()
-        .map(|entry| (entry.name.clone(), entry))
-        .collect::<BTreeMap<_, _>>();
-
-    for dependency in &manifest.dependencies {
-        if dependency.kind != build::ManifestDependencyKind::Wasm {
-            continue;
-        }
-
-        let component = dependency.component.as_ref().ok_or_else(|| {
-            anyhow!(
-                "manifest dependency '{}' is missing component; run `imago update`",
-                dependency.name
-            )
-        })?;
-        let lock_entry = lock_by_name.get(&dependency.name).ok_or_else(|| {
-            anyhow!(
-                "dependency '{}' is not resolved in imago.lock; run `imago update`",
-                dependency.name
-            )
-        })?;
-        lock_entry.component_source.as_deref().ok_or_else(|| {
-            anyhow!(
-                "dependency '{}' component source is missing in imago.lock; run `imago update`",
-                dependency.name
-            )
-        })?;
-        let sha = lock_entry.component_sha256.as_deref().ok_or_else(|| {
-            anyhow!(
-                "dependency '{}' component sha256 is missing in imago.lock; run `imago update`",
-                dependency.name
-            )
-        })?;
-        if component.sha256 != sha {
-            return Err(anyhow!(
-                "dependency '{}' component hash mismatch (manifest='{}', lock='{}'); run `imago update`",
-                dependency.name,
-                component.sha256,
-                sha
-            ));
-        }
-        let cache_path =
-            dependency_cache::resolve_cached_component_path(project_root, &dependency.name, sha)
-                .with_context(|| {
-                    format!(
-                        "failed to resolve cached component bytes for dependency '{}'",
-                        dependency.name
-                    )
-                })?;
-        sources.insert(dependency.name.clone(), cache_path);
-    }
-
-    Ok(sources)
+    let dependency_resolver = StandardDependencyResolver;
+    dependency_resolver.resolve_dependency_component_sources(project_root, &manifest.dependencies)
 }
 
 fn normalize_bundle_entry_path(raw: &str, field_name: &str) -> anyhow::Result<PathBuf> {
@@ -1465,8 +1539,8 @@ mod tests {
         assert_eq!(status, None);
     }
 
-    #[test]
-    fn returns_non_zero_when_build_step_fails() {
+    #[tokio::test]
+    async fn returns_non_zero_when_build_step_fails() {
         let root =
             std::env::temp_dir().join(format!("imago-cli-deploy-run-fail-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).expect("temp dir should be created");
@@ -1477,7 +1551,8 @@ mod tests {
                 target: None,
             },
             &root,
-        );
+        )
+        .await;
 
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.expect("stderr should be present");
@@ -1654,6 +1729,7 @@ mod tests {
             limits: BTreeMap::from([
                 ("chunk_size".to_string(), "2048".to_string()),
                 ("max_inflight_chunks".to_string(), "4".to_string()),
+                ("deploy_stream_timeout_secs".to_string(), "12".to_string()),
             ]),
         };
 
@@ -1662,7 +1738,8 @@ mod tests {
             limits,
             UploadLimits {
                 chunk_size: 2048,
-                max_inflight_chunks: 4
+                max_inflight_chunks: 4,
+                deploy_stream_timeout: Duration::from_secs(12),
             }
         );
     }
@@ -1858,6 +1935,19 @@ mod tests {
         assert_eq!(retry_backoff_duration(2), Duration::from_millis(500));
         assert_eq!(retry_backoff_duration(3), Duration::from_millis(1000));
         assert_eq!(retry_backoff_duration(4), Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn deploy_stream_retry_backoff_is_bounded() {
+        assert_eq!(
+            deploy_stream_retry_backoff(1),
+            Some(Duration::from_millis(100))
+        );
+        assert_eq!(
+            deploy_stream_retry_backoff(2),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(deploy_stream_retry_backoff(3), None);
     }
 
     #[test]

@@ -11,6 +11,7 @@ members = [
 ]
 
 [workspace.dependencies]
+async-trait = "0.1.89"
 anyhow = "1.0.101"
 base64 = "0.22.1"
 bytes = "1.11.1"
@@ -58,6 +59,9 @@ imagod-config = { path = "crates/imagod-config" }
 imagod-control = { path = "crates/imagod-control" }
 imagod-ipc = { path = "crates/imagod-ipc" }
 imagod-runtime = { path = "crates/imagod-runtime", default-features = false }
+imagod-runtime-bootstrap = { path = "crates/imagod-runtime-bootstrap" }
+imagod-runtime-control = { path = "crates/imagod-runtime-control" }
+imagod-runtime-ingress = { path = "crates/imagod-runtime-ingress" }
 imagod-runtime-internal = { path = "crates/imagod-runtime-internal" }
 imagod-runtime-wasmtime = { path = "crates/imagod-runtime-wasmtime" }
 imagod-server = { path = "crates/imagod-server" }

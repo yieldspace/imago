@@ -20,6 +20,8 @@ use crate::{
     commands::{CommandResult, build, deploy},
 };
 
+mod render;
+
 const NON_FOLLOW_IDLE_TIMEOUT_SECS: u64 = 2;
 const POST_END_DRAIN_TIMEOUT_MS: u64 = 200;
 const JSON_PENDING_MAX_BYTES_PER_STREAM: usize = 64 * 1024;
@@ -149,12 +151,12 @@ enum LogsDatagram {
     End(LogEnd),
 }
 
-pub fn run(args: LogsArgs) -> CommandResult {
-    run_with_project_root(args, Path::new("."))
+pub async fn run(args: LogsArgs) -> CommandResult {
+    run_with_project_root(args, Path::new(".")).await
 }
 
-pub(crate) fn run_with_project_root(args: LogsArgs, project_root: &Path) -> CommandResult {
-    match run_inner(args, project_root) {
+pub(crate) async fn run_with_project_root(args: LogsArgs, project_root: &Path) -> CommandResult {
+    match run_async(args, project_root).await {
         Ok(()) => CommandResult {
             exit_code: 0,
             stderr: None,
@@ -164,14 +166,6 @@ pub(crate) fn run_with_project_root(args: LogsArgs, project_root: &Path) -> Comm
             stderr: Some(err.to_string()),
         },
     }
-}
-
-fn run_inner(args: LogsArgs, project_root: &Path) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("failed to create tokio runtime")?;
-    runtime.block_on(run_async(args, project_root))
 }
 
 async fn run_async(args: LogsArgs, project_root: &Path) -> anyhow::Result<()> {
@@ -225,6 +219,7 @@ async fn receive_logs_datagrams(
     all_processes: bool,
     output_format: LogsOutputFormat,
 ) -> anyhow::Result<()> {
+    let renderer = render::DefaultLogRenderer;
     let mut expected_seq: Option<u64> = None;
     let mut truncated_warned = false;
     let mut prefix_state = PrefixRenderState::default();
@@ -272,7 +267,8 @@ async fn receive_logs_datagrams(
                     continue;
                 }
                 warn_if_seq_gap(&mut expected_seq, chunk.seq, &mut truncated_warned);
-                if let Err(err) = render_chunk(
+                if let Err(err) = render::LogRenderer::render_chunk(
+                    &renderer,
                     &chunk,
                     all_processes,
                     output_format,
@@ -318,7 +314,7 @@ async fn receive_logs_datagrams(
         }
     };
 
-    let flush_result = flush_json_tail_if_needed(output_format, &mut json_state);
+    let flush_result = render::LogRenderer::flush_tail(&renderer, output_format, &mut json_state);
     finalize_stream_result(stream_result, flush_result)
 }
 

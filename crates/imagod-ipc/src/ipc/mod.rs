@@ -10,7 +10,7 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
-use imago_protocol::ErrorCode;
+use imago_protocol::{ErrorCode, Validate, ValidationError};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
@@ -24,6 +24,42 @@ const STAGE_TOKEN: &str = "ipc.token";
 const MAX_INVOCATION_TOKEN_CHARS: usize = 4096;
 type HmacSha256 = Hmac<Sha256>;
 
+fn validate_non_empty(value: &str, field: &'static str) -> Result<(), ValidationError> {
+    if value.trim().is_empty() {
+        return Err(ValidationError::empty(field));
+    }
+
+    Ok(())
+}
+
+fn validate_non_empty_fields(fields: &[(&str, &'static str)]) -> Result<(), ValidationError> {
+    for &(value, field) in fields {
+        validate_non_empty(value, field)?;
+    }
+
+    Ok(())
+}
+
+fn validate_non_empty_path(path: &Path, field: &'static str) -> Result<(), ValidationError> {
+    if path.as_os_str().is_empty() {
+        return Err(ValidationError::empty(field));
+    }
+
+    Ok(())
+}
+
+fn validate_positive_u64(value: u64, field: &'static str) -> Result<(), ValidationError> {
+    if value == 0 {
+        return Err(ValidationError::invalid(field, "must be greater than zero"));
+    }
+
+    Ok(())
+}
+
+fn validation_error(code: ErrorCode, stage: &str, error: ValidationError) -> ImagodError {
+    ImagodError::new(code, stage, error.to_string())
+}
+
 #[allow(dead_code)]
 /// Boxed future used by transport traits to avoid exposing concrete future types.
 pub type BoxFutureResult<'a, T> = Pin<Box<dyn Future<Output = Result<T, ImagodError>> + Send + 'a>>;
@@ -35,6 +71,12 @@ pub struct ServiceBinding {
     pub target: String,
     /// WIT interface identifier that is allowed for the target.
     pub wit: String,
+}
+
+impl Validate for ServiceBinding {
+    fn validate(&self) -> Result<(), ValidationError> {
+        validate_non_empty_fields(&[(&self.target, "target"), (&self.wit, "wit")])
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,6 +149,21 @@ pub struct RunnerSocketConfig {
     pub listen_port: u16,
 }
 
+impl Validate for RunnerSocketConfig {
+    fn validate(&self) -> Result<(), ValidationError> {
+        validate_non_empty(&self.listen_addr, "listen_addr")?;
+
+        if self.direction.allows_inbound() && self.listen_port == 0 {
+            return Err(ValidationError::invalid(
+                "listen_port",
+                "must be greater than zero",
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 /// Plugin delivery kind used by manifest/bootstrap dependency definitions.
@@ -124,6 +181,13 @@ pub struct PluginComponent {
     pub sha256: String,
 }
 
+impl Validate for PluginComponent {
+    fn validate(&self) -> Result<(), ValidationError> {
+        validate_non_empty_path(&self.path, "path")?;
+        validate_non_empty(&self.sha256, "sha256")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 /// Function-level capability policy used by app/plugin callers.
 pub struct CapabilityPolicy {
@@ -136,6 +200,26 @@ pub struct CapabilityPolicy {
     /// WASI interface function permissions.
     #[serde(default)]
     pub wasi: BTreeMap<String, Vec<String>>,
+}
+
+impl Validate for CapabilityPolicy {
+    fn validate(&self) -> Result<(), ValidationError> {
+        for (dependency, functions) in &self.deps {
+            validate_non_empty(dependency, "deps.key")?;
+            for function in functions {
+                validate_non_empty(function, "deps.function")?;
+            }
+        }
+
+        for (interface, functions) in &self.wasi {
+            validate_non_empty(interface, "wasi.key")?;
+            for function in functions {
+                validate_non_empty(function, "wasi.function")?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -160,6 +244,32 @@ pub struct PluginDependency {
     pub capabilities: CapabilityPolicy,
 }
 
+impl Validate for PluginDependency {
+    fn validate(&self) -> Result<(), ValidationError> {
+        validate_non_empty_fields(&[
+            (&self.name, "name"),
+            (&self.version, "version"),
+            (&self.wit, "wit"),
+        ])?;
+        for requirement in &self.requires {
+            validate_non_empty(requirement, "requires")?;
+        }
+        self.capabilities.validate()?;
+
+        if matches!(self.kind, PluginKind::Wasm) {
+            let component = self
+                .component
+                .as_ref()
+                .ok_or(ValidationError::missing("component"))?;
+            component.validate()?;
+        } else if let Some(component) = &self.component {
+            component.validate()?;
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Bootstrap payload sent from manager to runner via child stdin.
 pub struct RunnerBootstrap {
@@ -175,6 +285,10 @@ pub struct RunnerBootstrap {
     pub http_port: Option<u16>,
     /// Max accepted HTTP request body size in bytes when `app_type=http`.
     pub http_max_body_bytes: Option<u64>,
+    /// Number of HTTP workers available to runtime ingress.
+    pub http_worker_count: u32,
+    /// Queue capacity for each HTTP worker.
+    pub http_worker_queue_capacity: u32,
     /// Socket runtime configuration when `app_type=socket`.
     pub socket: Option<RunnerSocketConfig>,
     /// Absolute path to the component file.
@@ -201,6 +315,70 @@ pub struct RunnerBootstrap {
     pub invocation_secret: String,
     /// Epoch tick interval used by the runner runtime loop.
     pub epoch_tick_interval_ms: u64,
+}
+
+impl Validate for RunnerBootstrap {
+    fn validate(&self) -> Result<(), ValidationError> {
+        validate_non_empty_fields(&[
+            (&self.runner_id, "runner_id"),
+            (&self.service_name, "service_name"),
+            (&self.release_hash, "release_hash"),
+            (&self.manager_auth_secret, "manager_auth_secret"),
+            (&self.invocation_secret, "invocation_secret"),
+        ])?;
+        validate_non_empty_path(&self.component_path, "component_path")?;
+        validate_non_empty_path(&self.manager_control_endpoint, "manager_control_endpoint")?;
+        validate_non_empty_path(&self.runner_endpoint, "runner_endpoint")?;
+        validate_positive_u64(self.epoch_tick_interval_ms, "epoch_tick_interval_ms")?;
+        if !(1..=4).contains(&self.http_worker_count) {
+            return Err(ValidationError::invalid(
+                "http_worker_count",
+                "must be between 1 and 4",
+            ));
+        }
+        if !(1..=16).contains(&self.http_worker_queue_capacity) {
+            return Err(ValidationError::invalid(
+                "http_worker_queue_capacity",
+                "must be between 1 and 16",
+            ));
+        }
+
+        match self.app_type {
+            RunnerAppType::Http => {
+                let port = self
+                    .http_port
+                    .ok_or(ValidationError::missing("http_port"))?;
+                if port == 0 {
+                    return Err(ValidationError::invalid(
+                        "http_port",
+                        "must be greater than zero",
+                    ));
+                }
+
+                if let Some(max_body_bytes) = self.http_max_body_bytes {
+                    validate_positive_u64(max_body_bytes, "http_max_body_bytes")?;
+                }
+            }
+            RunnerAppType::Socket => {
+                let socket = self
+                    .socket
+                    .as_ref()
+                    .ok_or(ValidationError::missing("socket"))?;
+                socket.validate()?;
+            }
+            RunnerAppType::Cli => {}
+        }
+
+        for binding in &self.bindings {
+            binding.validate()?;
+        }
+        for dependency in &self.plugin_dependencies {
+            dependency.validate()?;
+        }
+        self.capabilities.validate()?;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,6 +424,50 @@ pub enum ControlRequest {
     },
 }
 
+impl Validate for ControlRequest {
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::RegisterRunner {
+                runner_id,
+                service_name,
+                release_hash,
+                runner_endpoint,
+                manager_auth_proof,
+            } => {
+                validate_non_empty_fields(&[
+                    (runner_id, "runner_id"),
+                    (service_name, "service_name"),
+                    (release_hash, "release_hash"),
+                    (manager_auth_proof, "manager_auth_proof"),
+                ])?;
+                validate_non_empty_path(runner_endpoint, "runner_endpoint")
+            }
+            Self::RunnerReady {
+                runner_id,
+                manager_auth_proof,
+            }
+            | Self::Heartbeat {
+                runner_id,
+                manager_auth_proof,
+            } => validate_non_empty_fields(&[
+                (runner_id, "runner_id"),
+                (manager_auth_proof, "manager_auth_proof"),
+            ]),
+            Self::ResolveInvocationTarget {
+                runner_id,
+                manager_auth_proof,
+                target_service,
+                wit,
+            } => validate_non_empty_fields(&[
+                (runner_id, "runner_id"),
+                (manager_auth_proof, "manager_auth_proof"),
+                (target_service, "target_service"),
+                (wit, "wit"),
+            ]),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Control-plane response returned by manager.
 pub enum ControlResponse {
@@ -260,6 +482,19 @@ pub enum ControlResponse {
     },
     /// Structured control-plane failure.
     Error(IpcErrorPayload),
+}
+
+impl Validate for ControlResponse {
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::Ack => Ok(()),
+            Self::ResolvedInvocationTarget { endpoint, token } => {
+                validate_non_empty_path(endpoint, "endpoint")?;
+                validate_non_empty(token, "token")
+            }
+            Self::Error(error) => error.validate(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +518,26 @@ pub enum RunnerInboundRequest {
     },
 }
 
+impl Validate for RunnerInboundRequest {
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::ShutdownRunner { manager_auth_proof } => {
+                validate_non_empty(manager_auth_proof, "manager_auth_proof")
+            }
+            Self::Invoke {
+                interface_id,
+                function,
+                token,
+                ..
+            } => validate_non_empty_fields(&[
+                (interface_id, "interface_id"),
+                (function, "function"),
+                (token, "token"),
+            ]),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Runner inbound response.
 pub enum RunnerInboundResponse {
@@ -297,6 +552,16 @@ pub enum RunnerInboundResponse {
     Error(IpcErrorPayload),
 }
 
+impl Validate for RunnerInboundResponse {
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::Ack => Ok(()),
+            Self::InvokeResult { .. } => Ok(()),
+            Self::Error(error) => error.validate(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Wire-safe error payload for IPC responses.
 pub struct IpcErrorPayload {
@@ -306,6 +571,12 @@ pub struct IpcErrorPayload {
     pub stage: String,
     /// Human-readable message.
     pub message: String,
+}
+
+impl Validate for IpcErrorPayload {
+    fn validate(&self) -> Result<(), ValidationError> {
+        validate_non_empty_fields(&[(&self.stage, "stage"), (&self.message, "message")])
+    }
 }
 
 impl IpcErrorPayload {
@@ -339,11 +610,30 @@ pub struct InvocationTokenClaims {
     pub nonce: String,
 }
 
+impl Validate for InvocationTokenClaims {
+    fn validate(&self) -> Result<(), ValidationError> {
+        validate_non_empty_fields(&[
+            (&self.source_service, "source_service"),
+            (&self.target_service, "target_service"),
+            (&self.wit, "wit"),
+            (&self.nonce, "nonce"),
+        ])?;
+        validate_positive_u64(self.exp, "exp")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Internal signed token envelope serialized into URL-safe base64.
 struct SignedInvocationToken {
     claims: InvocationTokenClaims,
     signature: String,
+}
+
+impl Validate for SignedInvocationToken {
+    fn validate(&self) -> Result<(), ValidationError> {
+        self.claims.validate()?;
+        validate_non_empty(&self.signature, "signature")
+    }
 }
 
 #[allow(dead_code)]
@@ -399,6 +689,9 @@ pub fn issue_invocation_token(
     secret_hex: &str,
     claims: InvocationTokenClaims,
 ) -> Result<String, ImagodError> {
+    claims
+        .validate()
+        .map_err(|e| validation_error(ErrorCode::Internal, STAGE_TOKEN, e))?;
     let secret = decode_secret_hex(secret_hex)?;
     let signature = compute_token_signature(&secret, &claims)?;
     let envelope = SignedInvocationToken { claims, signature };
@@ -443,6 +736,9 @@ pub fn verify_invocation_token(
             format!("token parse failed: {e}"),
         )
     })?;
+    envelope
+        .validate()
+        .map_err(|e| validation_error(ErrorCode::Unauthorized, STAGE_TOKEN, e))?;
 
     let claims_bytes = imago_protocol::to_cbor(&envelope.claims).map_err(|e| {
         ImagodError::new(
@@ -563,6 +859,31 @@ pub fn map_ipc_error(stage: &str, message: impl Into<String>) -> ImagodError {
 mod tests {
     use super::*;
 
+    fn valid_http_bootstrap() -> RunnerBootstrap {
+        RunnerBootstrap {
+            runner_id: "runner-a".to_string(),
+            service_name: "svc-a".to_string(),
+            release_hash: "release-a".to_string(),
+            app_type: RunnerAppType::Http,
+            http_port: Some(8080),
+            http_max_body_bytes: Some(1024),
+            http_worker_count: 2,
+            http_worker_queue_capacity: 4,
+            socket: None,
+            component_path: PathBuf::from("/tmp/component.wasm"),
+            args: vec![],
+            envs: BTreeMap::new(),
+            bindings: vec![],
+            plugin_dependencies: vec![],
+            capabilities: CapabilityPolicy::default(),
+            manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+            runner_endpoint: PathBuf::from("/tmp/runner.sock"),
+            manager_auth_secret: random_secret_hex(),
+            invocation_secret: random_secret_hex(),
+            epoch_tick_interval_ms: 50,
+        }
+    }
+
     #[test]
     fn runner_app_type_round_trip_via_cbor() {
         let encoded =
@@ -581,6 +902,8 @@ mod tests {
             app_type: RunnerAppType::Socket,
             http_port: None,
             http_max_body_bytes: None,
+            http_worker_count: 2,
+            http_worker_queue_capacity: 4,
             socket: Some(RunnerSocketConfig {
                 protocol: RunnerSocketProtocol::Udp,
                 direction: RunnerSocketDirection::Inbound,
@@ -639,6 +962,30 @@ mod tests {
                 .deps
                 .contains_key("yieldspace:plugin/example")
         );
+        assert_eq!(decoded.http_worker_count, 2);
+        assert_eq!(decoded.http_worker_queue_capacity, 4);
+    }
+
+    #[test]
+    fn runner_bootstrap_validate_rejects_http_worker_count_out_of_range() {
+        let mut bootstrap = valid_http_bootstrap();
+        bootstrap.http_worker_count = 5;
+
+        let err = bootstrap
+            .validate()
+            .expect_err("bootstrap should reject out-of-range http_worker_count");
+        assert!(err.to_string().contains("http_worker_count"));
+    }
+
+    #[test]
+    fn runner_bootstrap_validate_rejects_http_worker_queue_capacity_out_of_range() {
+        let mut bootstrap = valid_http_bootstrap();
+        bootstrap.http_worker_queue_capacity = 17;
+
+        let err = bootstrap
+            .validate()
+            .expect_err("bootstrap should reject out-of-range http_worker_queue_capacity");
+        assert!(err.to_string().contains("http_worker_queue_capacity"));
     }
 
     #[test]

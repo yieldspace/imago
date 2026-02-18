@@ -2194,6 +2194,7 @@ name = "imago-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "clap",
  "futures-util",
@@ -2328,6 +2329,48 @@ dependencies = [
 name = "imagod-runtime"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "imago-protocol",
+ "imagod-common",
+ "imagod-ipc",
+ "imagod-runtime-bootstrap",
+ "imagod-runtime-control",
+ "imagod-runtime-ingress",
+ "imagod-runtime-internal",
+ "imagod-runtime-wasmtime",
+ "tokio",
+]
+
+[[package]]
+name = "imagod-runtime-bootstrap"
+version = "0.1.0"
+dependencies = [
+ "imago-protocol",
+ "imagod-common",
+ "imagod-ipc",
+ "tokio",
+]
+
+[[package]]
+name = "imagod-runtime-control"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "imago-protocol",
+ "imagod-common",
+ "imagod-ipc",
+ "tokio",
+]
+
+[[package]]
+name = "imagod-runtime-ingress"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
  "bytes",
  "http-body-util",
  "hyper",
@@ -2336,7 +2379,6 @@ dependencies = [
  "imagod-common",
  "imagod-ipc",
  "imagod-runtime-internal",
- "imagod-runtime-wasmtime",
  "tokio",
 ]
 
@@ -2344,6 +2386,7 @@ dependencies = [
 name = "imagod-runtime-internal"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "imagod-common",
  "imagod-ipc",
  "tokio",
@@ -2353,6 +2396,7 @@ dependencies = [
 name = "imagod-runtime-wasmtime"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bytes",
  "http-body-util",
  "hyper",
@@ -2370,6 +2414,7 @@ dependencies = [
 name = "imagod-server"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "imago-protocol",
  "imagod-common",
  "imagod-config",

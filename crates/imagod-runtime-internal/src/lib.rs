@@ -2,14 +2,13 @@
 
 use std::{
     collections::BTreeMap,
-    future::Future,
     path::{Path, PathBuf},
-    pin::Pin,
 };
 
+use async_trait::async_trait;
 use imagod_common::ImagodError;
 use imagod_ipc::{CapabilityPolicy, PluginDependency, RunnerAppType, RunnerSocketConfig};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 /// Owned run request passed from runner process to runtime implementation.
 #[derive(Debug)]
@@ -38,12 +37,13 @@ pub struct RuntimeRunRequest {
     pub shutdown: watch::Receiver<bool>,
     /// Epoch tick interval used for interruption-aware runtimes.
     pub epoch_tick_interval_ms: u64,
+    /// Number of HTTP workers available to runtime ingress.
+    pub http_worker_count: u32,
+    /// Queue capacity for each HTTP worker.
+    pub http_worker_queue_capacity: u32,
     /// Optional signal sent when HTTP runtime initialization has completed.
     pub http_ready_tx: Option<oneshot::Sender<()>>,
 }
-
-/// Boxed async result for runtime execution methods.
-pub type RuntimeRunFuture<'a> = Pin<Box<dyn Future<Output = Result<(), ImagodError>> + Send + 'a>>;
 
 /// Runtime-agnostic HTTP request model passed from ingress to wasm runtime.
 #[derive(Debug, Clone)]
@@ -69,18 +69,128 @@ pub struct RuntimeHttpResponse {
     pub body: Vec<u8>,
 }
 
-/// Boxed async result for runtime HTTP handling.
-pub type RuntimeHttpFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<RuntimeHttpResponse, ImagodError>> + Send + 'a>>;
-
 /// Runtime abstraction so runner can swap out concrete wasm engines.
+#[async_trait]
 pub trait ComponentRuntime: Send + Sync {
     /// Validates that the component can be loaded by this runtime.
     fn validate_component(&self, component_path: &Path) -> Result<(), ImagodError>;
 
     /// Executes one component until completion or shutdown.
-    fn run_component<'a>(&'a self, request: RuntimeRunRequest) -> RuntimeRunFuture<'a>;
+    async fn run_component(&self, request: RuntimeRunRequest) -> Result<(), ImagodError>;
 
     /// Handles one HTTP request using the already-running HTTP component.
-    fn handle_http_request<'a>(&'a self, request: RuntimeHttpRequest) -> RuntimeHttpFuture<'a>;
+    async fn handle_http_request(
+        &self,
+        request: RuntimeHttpRequest,
+    ) -> Result<RuntimeHttpResponse, ImagodError>;
+}
+
+/// Runtime-facing item sent to HTTP worker tasks.
+#[derive(Debug)]
+pub struct RuntimeHttpWorkItem {
+    /// Incoming HTTP request forwarded from ingress.
+    pub request: RuntimeHttpRequest,
+    /// One-shot sender used by runtime worker to complete the response.
+    pub response_tx: oneshot::Sender<Result<RuntimeHttpResponse, ImagodError>>,
+}
+
+/// Supervises lifecycle of an HTTP component request channel.
+#[async_trait]
+pub trait HttpComponentSupervisor: Send + Sync {
+    /// Registers the active HTTP worker sender.
+    async fn register_http_component(
+        &self,
+        request_tx: mpsc::Sender<RuntimeHttpWorkItem>,
+        http_ready_tx: Option<oneshot::Sender<()>>,
+    ) -> Result<(), ImagodError>;
+
+    /// Returns the active HTTP worker sender.
+    async fn request_sender(&self) -> Result<mpsc::Sender<RuntimeHttpWorkItem>, ImagodError>;
+
+    /// Unregisters and returns the active HTTP worker sender.
+    async fn unregister_http_component(&self) -> Option<mpsc::Sender<RuntimeHttpWorkItem>>;
+}
+
+/// Resolved provider for one plugin import namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginImportProvider {
+    /// Import is satisfied by the current component instance exports.
+    SelfComponent,
+    /// Import is satisfied by another dependency package.
+    Dependency(String),
+}
+
+/// String-based component interface metadata used for dependency planning.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PluginComponentInterfaces {
+    /// Non-WASI instance import names.
+    pub imports: Vec<String>,
+    /// Exported instance interface names.
+    pub exports: std::collections::BTreeSet<String>,
+}
+
+/// Resolves dependency order and import providers for plugin wiring.
+pub trait PluginResolver: Send + Sync {
+    /// Returns the explicit dependency package names.
+    fn all_dependency_names(
+        &self,
+        dependencies: &[PluginDependency],
+    ) -> std::collections::BTreeSet<String>;
+
+    /// Calculates dependency instantiation order.
+    fn dependency_topological_order(
+        &self,
+        dependencies: &[PluginDependency],
+        component_interfaces_by_dependency: &BTreeMap<String, PluginComponentInterfaces>,
+    ) -> Result<Vec<usize>, ImagodError>;
+
+    /// Resolves provider for one import namespace.
+    fn resolve_import_provider(
+        &self,
+        caller_name: &str,
+        import_name: &str,
+        self_export_interfaces: &std::collections::BTreeSet<String>,
+        explicit_dependency_names: &std::collections::BTreeSet<String>,
+        available_dependency_names: &std::collections::BTreeSet<String>,
+        allow_self_provider: bool,
+    ) -> Result<PluginImportProvider, ImagodError>;
+}
+
+/// Capability policy checks used by runtime plugin and WASI bridges.
+pub trait CapabilityChecker: Send + Sync {
+    /// Returns whether one dependency function call is allowed.
+    fn is_dependency_function_allowed(
+        &self,
+        policy: &CapabilityPolicy,
+        dependency_name: &str,
+        interface_name: &str,
+        function_name: &str,
+    ) -> bool;
+
+    /// Ensures one dependency function call is allowed.
+    fn ensure_dependency_function_allowed(
+        &self,
+        caller_name: &str,
+        policy: &CapabilityPolicy,
+        dependency_name: &str,
+        interface_name: &str,
+        function_name: &str,
+    ) -> Result<(), ImagodError>;
+
+    /// Returns whether one WASI function call is allowed.
+    fn is_wasi_function_allowed(
+        &self,
+        policy: &CapabilityPolicy,
+        interface_name: &str,
+        function_name: &str,
+    ) -> bool;
+
+    /// Ensures one WASI function call is allowed.
+    fn ensure_wasi_function_allowed(
+        &self,
+        caller_name: &str,
+        policy: &CapabilityPolicy,
+        interface_name: &str,
+        function_name: &str,
+    ) -> Result<(), ImagodError>;
 }

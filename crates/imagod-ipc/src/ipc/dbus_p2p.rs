@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use imago_protocol::ErrorCode;
+use imago_protocol::{ErrorCode, Validate};
 use imagod_common::ImagodError;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
@@ -28,6 +28,7 @@ impl DbusP2pTransport {
         endpoint: &Path,
         request: &ControlRequest,
     ) -> Result<ControlResponse, ImagodError> {
+        validate_message(request)?;
         call(endpoint, request).await
     }
 
@@ -36,6 +37,7 @@ impl DbusP2pTransport {
         endpoint: &Path,
         request: &RunnerInboundRequest,
     ) -> Result<RunnerInboundResponse, ImagodError> {
+        validate_message(request)?;
         call(endpoint, request).await
     }
 
@@ -45,13 +47,15 @@ impl DbusP2pTransport {
         T: DeserializeOwned,
     {
         let bytes = read_frame(stream).await?;
-        imago_protocol::from_cbor::<T>(&bytes).map_err(|e| {
+        let message = imago_protocol::from_cbor::<T>(&bytes).map_err(|e| {
             ImagodError::new(
                 ErrorCode::BadRequest,
                 STAGE,
                 format!("ipc message decode failed: {e}"),
             )
-        })
+        })?;
+        validate_received_message::<T>(&bytes)?;
+        Ok(message)
     }
 
     /// Encodes and writes one length-prefixed CBOR message to a stream.
@@ -106,6 +110,61 @@ where
         )
     })?;
     DbusP2pTransport::read_message::<Resp>(&mut stream).await
+}
+
+fn validate_message<T>(message: &T) -> Result<(), ImagodError>
+where
+    T: Validate,
+{
+    message.validate().map_err(|e| {
+        ImagodError::new(
+            ErrorCode::BadRequest,
+            STAGE,
+            format!("ipc message validation failed: {e}"),
+        )
+    })
+}
+
+fn validate_received_message<T>(bytes: &[u8]) -> Result<(), ImagodError>
+where
+    T: DeserializeOwned,
+{
+    let message_type = std::any::type_name::<T>();
+
+    if message_type == std::any::type_name::<ControlRequest>() {
+        let message = decode_for_validation::<ControlRequest>(bytes)?;
+        return validate_message(&message);
+    }
+
+    if message_type == std::any::type_name::<ControlResponse>() {
+        let message = decode_for_validation::<ControlResponse>(bytes)?;
+        return validate_message(&message);
+    }
+
+    if message_type == std::any::type_name::<RunnerInboundRequest>() {
+        let message = decode_for_validation::<RunnerInboundRequest>(bytes)?;
+        return validate_message(&message);
+    }
+
+    if message_type == std::any::type_name::<RunnerInboundResponse>() {
+        let message = decode_for_validation::<RunnerInboundResponse>(bytes)?;
+        return validate_message(&message);
+    }
+
+    Ok(())
+}
+
+fn decode_for_validation<T>(bytes: &[u8]) -> Result<T, ImagodError>
+where
+    T: DeserializeOwned,
+{
+    imago_protocol::from_cbor(bytes).map_err(|e| {
+        ImagodError::new(
+            ErrorCode::BadRequest,
+            STAGE,
+            format!("ipc message decode failed: {e}"),
+        )
+    })
 }
 
 /// Writes one big-endian length-prefixed frame.
