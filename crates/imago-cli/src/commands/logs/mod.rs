@@ -151,12 +151,12 @@ enum LogsDatagram {
     End(LogEnd),
 }
 
-pub fn run(args: LogsArgs) -> CommandResult {
-    run_with_project_root(args, Path::new("."))
+pub async fn run(args: LogsArgs) -> CommandResult {
+    run_with_project_root(args, Path::new(".")).await
 }
 
-pub(crate) fn run_with_project_root(args: LogsArgs, project_root: &Path) -> CommandResult {
-    match run_inner(args, project_root) {
+pub(crate) async fn run_with_project_root(args: LogsArgs, project_root: &Path) -> CommandResult {
+    match run_async(args, project_root).await {
         Ok(()) => CommandResult {
             exit_code: 0,
             stderr: None,
@@ -166,14 +166,6 @@ pub(crate) fn run_with_project_root(args: LogsArgs, project_root: &Path) -> Comm
             stderr: Some(err.to_string()),
         },
     }
-}
-
-fn run_inner(args: LogsArgs, project_root: &Path) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("failed to create tokio runtime")?;
-    runtime.block_on(run_async(args, project_root))
 }
 
 async fn run_async(args: LogsArgs, project_root: &Path) -> anyhow::Result<()> {

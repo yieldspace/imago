@@ -400,111 +400,90 @@ mod tests {
         );
     }
 
-    fn run_async_test<F>(future: F)
-    where
-        F: std::future::Future<Output = ()>,
-    {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime should build")
-            .block_on(future);
+    #[tokio::test]
+    async fn startup_window_detects_early_error_exit() {
+        let mut run_task = tokio::spawn(async {
+            Err(ImagodError::new(
+                ErrorCode::Internal,
+                STAGE_RUNNER,
+                "early startup failure",
+            ))
+        });
+        let state = observe_startup_window(&mut run_task, STARTUP_CONFIRM_WINDOW)
+            .await
+            .expect("startup observation should succeed");
+        match state {
+            StartupRunState::Finished(Err(err)) => assert_eq!(err.code, ErrorCode::Internal),
+            _ => panic!("startup should classify early error as finished failure"),
+        }
     }
 
-    #[test]
-    fn startup_window_detects_early_error_exit() {
-        run_async_test(async {
-            let mut run_task = tokio::spawn(async {
-                Err(ImagodError::new(
-                    ErrorCode::Internal,
-                    STAGE_RUNNER,
-                    "early startup failure",
-                ))
-            });
-            let state = observe_startup_window(&mut run_task, STARTUP_CONFIRM_WINDOW)
-                .await
-                .expect("startup observation should succeed");
-            match state {
-                StartupRunState::Finished(Err(err)) => assert_eq!(err.code, ErrorCode::Internal),
-                _ => panic!("startup should classify early error as finished failure"),
+    #[tokio::test]
+    async fn startup_window_keeps_early_ok_exit_compatible() {
+        let mut run_task = tokio::spawn(async { Ok(()) });
+        let state = observe_startup_window(&mut run_task, STARTUP_CONFIRM_WINDOW)
+            .await
+            .expect("startup observation should succeed");
+        match state {
+            StartupRunState::Finished(Ok(())) => {}
+            _ => panic!("startup should classify early ok as finished success"),
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_window_recognizes_running_task_after_window() {
+        let mut run_task = tokio::spawn(async {
+            time::sleep(Duration::from_millis(80)).await;
+            Ok(())
+        });
+        let state = observe_startup_window(&mut run_task, Duration::from_millis(10))
+            .await
+            .expect("startup observation should succeed");
+        assert!(matches!(state, StartupRunState::StillRunning));
+        join_run_task(run_task)
+            .await
+            .expect("run task should complete successfully");
+    }
+
+    #[tokio::test]
+    async fn http_runtime_ready_wait_returns_ready_when_signal_arrives_first() {
+        let (ready_tx, ready_rx) = oneshot::channel::<()>();
+        let mut run_task = tokio::spawn(async {
+            time::sleep(Duration::from_millis(80)).await;
+            Ok(())
+        });
+        ready_tx
+            .send(())
+            .expect("ready signal should be delivered to waiter");
+
+        let state = wait_http_runtime_ready_or_exit(&mut run_task, ready_rx)
+            .await
+            .expect("ready observation should succeed");
+        assert!(matches!(state, HttpRuntimeReadyState::Ready));
+        join_run_task(run_task)
+            .await
+            .expect("run task should complete successfully");
+    }
+
+    #[tokio::test]
+    async fn http_runtime_ready_wait_returns_finished_when_run_exits_first() {
+        let (_ready_tx, ready_rx) = oneshot::channel::<()>();
+        let mut run_task = tokio::spawn(async {
+            Err(ImagodError::new(
+                ErrorCode::Internal,
+                STAGE_RUNNER,
+                "http startup failed",
+            ))
+        });
+
+        let state = wait_http_runtime_ready_or_exit(&mut run_task, ready_rx)
+            .await
+            .expect("ready observation should succeed");
+        match state {
+            HttpRuntimeReadyState::Finished(Err(err)) => {
+                assert_eq!(err.code, ErrorCode::Internal)
             }
-        });
-    }
-
-    #[test]
-    fn startup_window_keeps_early_ok_exit_compatible() {
-        run_async_test(async {
-            let mut run_task = tokio::spawn(async { Ok(()) });
-            let state = observe_startup_window(&mut run_task, STARTUP_CONFIRM_WINDOW)
-                .await
-                .expect("startup observation should succeed");
-            match state {
-                StartupRunState::Finished(Ok(())) => {}
-                _ => panic!("startup should classify early ok as finished success"),
-            }
-        });
-    }
-
-    #[test]
-    fn startup_window_recognizes_running_task_after_window() {
-        run_async_test(async {
-            let mut run_task = tokio::spawn(async {
-                time::sleep(Duration::from_millis(80)).await;
-                Ok(())
-            });
-            let state = observe_startup_window(&mut run_task, Duration::from_millis(10))
-                .await
-                .expect("startup observation should succeed");
-            assert!(matches!(state, StartupRunState::StillRunning));
-            join_run_task(run_task)
-                .await
-                .expect("run task should complete successfully");
-        });
-    }
-
-    #[test]
-    fn http_runtime_ready_wait_returns_ready_when_signal_arrives_first() {
-        run_async_test(async {
-            let (ready_tx, ready_rx) = oneshot::channel::<()>();
-            let mut run_task = tokio::spawn(async {
-                time::sleep(Duration::from_millis(80)).await;
-                Ok(())
-            });
-            ready_tx
-                .send(())
-                .expect("ready signal should be delivered to waiter");
-
-            let state = wait_http_runtime_ready_or_exit(&mut run_task, ready_rx)
-                .await
-                .expect("ready observation should succeed");
-            assert!(matches!(state, HttpRuntimeReadyState::Ready));
-            join_run_task(run_task)
-                .await
-                .expect("run task should complete successfully");
-        });
-    }
-
-    #[test]
-    fn http_runtime_ready_wait_returns_finished_when_run_exits_first() {
-        run_async_test(async {
-            let (_ready_tx, ready_rx) = oneshot::channel::<()>();
-            let mut run_task = tokio::spawn(async {
-                Err(ImagodError::new(
-                    ErrorCode::Internal,
-                    STAGE_RUNNER,
-                    "http startup failed",
-                ))
-            });
-
-            let state = wait_http_runtime_ready_or_exit(&mut run_task, ready_rx)
-                .await
-                .expect("ready observation should succeed");
-            match state {
-                HttpRuntimeReadyState::Finished(Err(err)) => {
-                    assert_eq!(err.code, ErrorCode::Internal)
-                }
-                _ => panic!("run task failure should win over ready signal"),
-            }
-        });
+            _ => panic!("run task failure should win over ready signal"),
+        }
     }
 }

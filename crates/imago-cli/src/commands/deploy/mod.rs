@@ -150,12 +150,12 @@ impl Drop for TempArtifactBundle {
     }
 }
 
-pub fn run(args: DeployArgs) -> CommandResult {
-    run_with_project_root(args, Path::new("."))
+pub async fn run(args: DeployArgs) -> CommandResult {
+    run_with_project_root(args, Path::new(".")).await
 }
 
-pub(crate) fn run_with_project_root(args: DeployArgs, project_root: &Path) -> CommandResult {
-    match run_inner(args, project_root) {
+pub(crate) async fn run_with_project_root(args: DeployArgs, project_root: &Path) -> CommandResult {
+    match run_async(args, project_root).await {
         Ok(()) => CommandResult {
             exit_code: 0,
             stderr: None,
@@ -165,14 +165,6 @@ pub(crate) fn run_with_project_root(args: DeployArgs, project_root: &Path) -> Co
             stderr: Some(err.to_string()),
         },
     }
-}
-
-fn run_inner(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("failed to create tokio runtime")?;
-    runtime.block_on(run_async(args, project_root))
 }
 
 async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> {
@@ -1421,8 +1413,8 @@ mod tests {
         assert_eq!(status, None);
     }
 
-    #[test]
-    fn returns_non_zero_when_build_step_fails() {
+    #[tokio::test]
+    async fn returns_non_zero_when_build_step_fails() {
         let root =
             std::env::temp_dir().join(format!("imago-cli-deploy-run-fail-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).expect("temp dir should be created");
@@ -1433,7 +1425,8 @@ mod tests {
                 target: None,
             },
             &root,
-        );
+        )
+        .await;
 
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.expect("stderr should be present");

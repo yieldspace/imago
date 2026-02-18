@@ -126,17 +126,6 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    fn run_async_test<F>(future: F)
-    where
-        F: std::future::Future<Output = ()>,
-    {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime should build")
-            .block_on(future);
-    }
-
     fn new_test_socket_path(prefix: &str) -> PathBuf {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -164,16 +153,14 @@ mod tests {
         assert!(err.message.contains("too large"));
     }
 
-    #[test]
-    fn read_runner_bootstrap_rejects_oversized_input_before_decode() {
-        run_async_test(async {
-            let oversized = vec![0_u8; MAX_RUNNER_BOOTSTRAP_BYTES + 1];
-            let err = read_runner_bootstrap(Cursor::new(oversized))
-                .await
-                .expect_err("oversized bootstrap should fail before decode");
-            assert_eq!(err.code, ErrorCode::BadRequest);
-            assert!(err.message.contains("too large"));
-        });
+    #[tokio::test]
+    async fn read_runner_bootstrap_rejects_oversized_input_before_decode() {
+        let oversized = vec![0_u8; MAX_RUNNER_BOOTSTRAP_BYTES + 1];
+        let err = read_runner_bootstrap(Cursor::new(oversized))
+            .await
+            .expect_err("oversized bootstrap should fail before decode");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert!(err.message.contains("too large"));
     }
 
     #[test]
