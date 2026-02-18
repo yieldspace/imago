@@ -4,9 +4,8 @@ server_version = "imagod/local-plugin-native-admin-example"
 compatibility_date = "2026-02-10"
 
 [tls]
-server_cert = "certs/server.crt"
 server_key = "certs/server.key"
-client_ca_cert = "certs/ca.crt"
+client_public_keys = ["cd89018994ede35b4c80b21d7958a4a6fc2684637846f6938175b0a87ccc9ff3"]
 
 [runtime]
 chunk_size = 1048576

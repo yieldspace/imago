@@ -1,14 +1,7 @@
-use std::{
-    net::IpAddr,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
-use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
-    Issuer, KeyPair, KeyUsagePurpose, PKCS_ED25519, SanType,
-};
-use time::{Duration, OffsetDateTime};
+use rcgen::{KeyPair, PKCS_ED25519};
 
 use crate::cli::CertsGenerateArgs;
 
@@ -18,25 +11,21 @@ const GITIGNORE_CONTENT: &str = "*\n!.gitignore\n";
 
 #[derive(Debug)]
 struct OutputPaths {
-    ca_crt: PathBuf,
-    ca_key: PathBuf,
-    server_crt: PathBuf,
     server_key: PathBuf,
-    client_crt: PathBuf,
     client_key: PathBuf,
+    server_pub_hex: PathBuf,
+    client_pub_hex: PathBuf,
     gitignore: PathBuf,
 }
 
 pub fn run_generate(args: CertsGenerateArgs) -> CommandResult {
     match run_generate_inner(args) {
         Ok(paths) => {
-            println!("generated certificates:");
-            println!("  {}", paths.ca_crt.display());
-            println!("  {}", paths.ca_key.display());
-            println!("  {}", paths.server_crt.display());
+            println!("generated key material:");
             println!("  {}", paths.server_key.display());
-            println!("  {}", paths.client_crt.display());
             println!("  {}", paths.client_key.display());
+            println!("  {}", paths.server_pub_hex.display());
+            println!("  {}", paths.client_pub_hex.display());
             println!("  {}", paths.gitignore.display());
             println!("private keys are sensitive. do not commit or share them.");
 
@@ -54,122 +43,45 @@ pub fn run_generate(args: CertsGenerateArgs) -> CommandResult {
 
 fn run_generate_inner(args: CertsGenerateArgs) -> anyhow::Result<OutputPaths> {
     let out_dir = args.out_dir;
-    let server_ip: IpAddr = args
-        .server_ip
-        .parse()
-        .with_context(|| format!("invalid --server-ip: {}", args.server_ip))?;
-
     std::fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create out dir: {}", out_dir.display()))?;
 
     let paths = OutputPaths {
-        ca_crt: out_dir.join("ca.crt"),
-        ca_key: out_dir.join("ca.key"),
-        server_crt: out_dir.join("server.crt"),
         server_key: out_dir.join("server.key"),
-        client_crt: out_dir.join("client.crt"),
         client_key: out_dir.join("client.key"),
+        server_pub_hex: out_dir.join("server.pub.hex"),
+        client_pub_hex: out_dir.join("client.pub.hex"),
         gitignore: out_dir.join(".gitignore"),
     };
 
     ensure_writable_targets(&paths, args.force)?;
 
-    let now = OffsetDateTime::now_utc();
-    let not_before = now - Duration::days(1);
-    let not_after = now + Duration::days(i64::from(args.days));
-
-    let ca_key = KeyPair::generate_for(&PKCS_ED25519).context("failed to generate CA keypair")?;
-    let ca_key_pem = ca_key.serialize_pem();
-
-    let mut ca_params = CertificateParams::new(Vec::<String>::new())
-        .context("failed to build CA certificate params")?;
-    ca_params.not_before = not_before;
-    ca_params.not_after = not_after;
-    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca_params.distinguished_name = DistinguishedName::new();
-    ca_params
-        .distinguished_name
-        .push(DnType::CommonName, "imago local ca");
-    ca_params.key_usages = vec![
-        KeyUsagePurpose::DigitalSignature,
-        KeyUsagePurpose::KeyCertSign,
-        KeyUsagePurpose::CrlSign,
-    ];
-
-    let ca_cert = ca_params
-        .self_signed(&ca_key)
-        .context("failed to generate CA certificate")?;
-    let ca_cert_pem = ca_cert.pem();
-    let ca_issuer = Issuer::new(ca_params, ca_key);
-
     let server_key =
         KeyPair::generate_for(&PKCS_ED25519).context("failed to generate server keypair")?;
-    let server_key_pem = server_key.serialize_pem();
-    let mut server_params = build_server_certificate_params(&args.server_name, server_ip)?;
-    server_params.not_before = not_before;
-    server_params.not_after = not_after;
-    server_params.use_authority_key_identifier_extension = true;
-    server_params.distinguished_name = DistinguishedName::new();
-    server_params
-        .distinguished_name
-        .push(DnType::CommonName, args.server_name.clone());
-    server_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-    server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-
-    let server_cert = server_params
-        .signed_by(&server_key, &ca_issuer)
-        .context("failed to generate server certificate")?;
-    let server_cert_pem = server_cert.pem();
-
     let client_key =
         KeyPair::generate_for(&PKCS_ED25519).context("failed to generate client keypair")?;
-    let client_key_pem = client_key.serialize_pem();
-    let mut client_params = CertificateParams::new(Vec::<String>::new())
-        .context("failed to build client certificate params")?;
-    client_params.not_before = not_before;
-    client_params.not_after = not_after;
-    client_params.use_authority_key_identifier_extension = true;
-    client_params.distinguished_name = DistinguishedName::new();
-    client_params
-        .distinguished_name
-        .push(DnType::CommonName, "imago local client");
-    client_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-    client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
 
-    let client_cert = client_params
-        .signed_by(&client_key, &ca_issuer)
-        .context("failed to generate client certificate")?;
-    let client_cert_pem = client_cert.pem();
-
-    write_text(&paths.ca_crt, &ca_cert_pem)?;
-    write_private_key(&paths.ca_key, &ca_key_pem)?;
-    write_text(&paths.server_crt, &server_cert_pem)?;
-    write_private_key(&paths.server_key, &server_key_pem)?;
-    write_text(&paths.client_crt, &client_cert_pem)?;
-    write_private_key(&paths.client_key, &client_key_pem)?;
+    write_private_key(&paths.server_key, &server_key.serialize_pem())?;
+    write_private_key(&paths.client_key, &client_key.serialize_pem())?;
+    write_text(
+        &paths.server_pub_hex,
+        &format!("{}\n", hex::encode(server_key.public_key_raw())),
+    )?;
+    write_text(
+        &paths.client_pub_hex,
+        &format!("{}\n", hex::encode(client_key.public_key_raw())),
+    )?;
     write_text(&paths.gitignore, GITIGNORE_CONTENT)?;
 
     Ok(paths)
 }
 
-fn build_server_certificate_params(
-    server_name: &str,
-    server_ip: IpAddr,
-) -> anyhow::Result<CertificateParams> {
-    let mut params = CertificateParams::new(vec![server_name.to_string()])
-        .context("failed to build server certificate params")?;
-    params.subject_alt_names.push(SanType::IpAddress(server_ip));
-    Ok(params)
-}
-
 fn ensure_writable_targets(paths: &OutputPaths, force: bool) -> anyhow::Result<()> {
     let all_paths = [
-        &paths.ca_crt,
-        &paths.ca_key,
-        &paths.server_crt,
         &paths.server_key,
-        &paths.client_crt,
         &paths.client_key,
+        &paths.server_pub_hex,
+        &paths.client_pub_hex,
         &paths.gitignore,
     ];
 
@@ -221,14 +133,13 @@ fn write_private_key(path: &Path, contents: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::BufReader;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn generates_all_files_and_valid_pem() {
-        let dir = temp_dir("generates_all_files_and_valid_pem");
+    fn generates_all_files_and_valid_payloads() {
+        let dir = temp_dir("generates_all_files_and_valid_payloads");
         let args = CertsGenerateArgs {
             out_dir: dir.clone(),
             server_name: "localhost".to_string(),
@@ -237,25 +148,24 @@ mod tests {
             force: false,
         };
 
-        let paths = run_generate_inner(args).expect("certificate generation should succeed");
+        let paths = run_generate_inner(args).expect("key generation should succeed");
 
-        assert!(paths.ca_crt.exists());
-        assert!(paths.ca_key.exists());
-        assert!(paths.server_crt.exists());
         assert!(paths.server_key.exists());
-        assert!(paths.client_crt.exists());
         assert!(paths.client_key.exists());
+        assert!(paths.server_pub_hex.exists());
+        assert!(paths.client_pub_hex.exists());
         assert!(paths.gitignore.exists());
 
         let gitignore = std::fs::read_to_string(&paths.gitignore).expect("read .gitignore");
         assert_eq!(gitignore, GITIGNORE_CONTENT);
 
-        assert_has_certificate(&paths.ca_crt);
-        assert_has_certificate(&paths.server_crt);
-        assert_has_certificate(&paths.client_crt);
-        assert_has_private_key(&paths.ca_key);
         assert_has_private_key(&paths.server_key);
         assert_has_private_key(&paths.client_key);
+        assert_public_key_hex(&paths.server_pub_hex);
+        assert_public_key_hex(&paths.client_pub_hex);
+
+        assert_public_key_matches_private(&paths.server_key, &paths.server_pub_hex);
+        assert_public_key_matches_private(&paths.client_key, &paths.client_pub_hex);
 
         cleanup(&dir);
     }
@@ -263,7 +173,7 @@ mod tests {
     #[test]
     fn fails_without_force_when_file_exists() {
         let dir = temp_dir("fails_without_force_when_file_exists");
-        let existing = dir.join("ca.crt");
+        let existing = dir.join("server.key");
         std::fs::write(&existing, "dummy").expect("create existing file");
 
         let args = CertsGenerateArgs {
@@ -277,7 +187,7 @@ mod tests {
         let err = run_generate_inner(args).expect_err("generation should fail");
         let message = err.to_string();
         assert!(message.contains("--force"));
-        assert!(message.contains("ca.crt"));
+        assert!(message.contains("server.key"));
 
         cleanup(&dir);
     }
@@ -285,7 +195,7 @@ mod tests {
     #[test]
     fn force_overwrites_existing_outputs() {
         let dir = temp_dir("force_overwrites_existing_outputs");
-        let existing = dir.join("ca.crt");
+        let existing = dir.join("server.key");
         std::fs::write(&existing, "old").expect("create existing file");
 
         let args = CertsGenerateArgs {
@@ -297,8 +207,8 @@ mod tests {
         };
 
         let paths = run_generate_inner(args).expect("generation with --force should succeed");
-        let ca_crt = std::fs::read_to_string(paths.ca_crt).expect("read ca certificate");
-        assert!(ca_crt.contains("BEGIN CERTIFICATE"));
+        let server_key = std::fs::read_to_string(paths.server_key).expect("read server key");
+        assert!(server_key.contains("BEGIN PRIVATE KEY"));
 
         cleanup(&dir);
     }
@@ -315,30 +225,36 @@ mod tests {
             force: false,
         };
 
-        let paths = run_generate_inner(args).expect("certificate generation should succeed");
-        assert_mode_0600(&paths.ca_key);
+        let paths = run_generate_inner(args).expect("key generation should succeed");
         assert_mode_0600(&paths.server_key);
         assert_mode_0600(&paths.client_key);
 
         cleanup(&dir);
     }
 
-    fn assert_has_certificate(path: &Path) {
-        let file = std::fs::File::open(path).expect("open cert");
-        let mut reader = BufReader::new(file);
-        let certs = rustls_pemfile::certs(&mut reader)
-            .collect::<Result<Vec<_>, _>>()
-            .expect("parse cert PEM");
-        assert!(
-            !certs.is_empty(),
-            "cert should not be empty: {}",
-            path.display()
-        );
+    fn assert_public_key_hex(path: &Path) {
+        let value = std::fs::read_to_string(path).expect("public key file should be readable");
+        let trimmed = value.trim();
+        let decoded = hex::decode(trimmed).expect("public key must be hex");
+        assert_eq!(decoded.len(), 32, "ed25519 public key must be 32 bytes");
+    }
+
+    fn assert_public_key_matches_private(private_key_path: &Path, public_key_hex_path: &Path) {
+        let private_key_pem =
+            std::fs::read_to_string(private_key_path).expect("private key should be readable");
+        let key_pair = KeyPair::from_pem(&private_key_pem).expect("private key should parse");
+        let expected = hex::encode(key_pair.public_key_raw());
+
+        let actual = std::fs::read_to_string(public_key_hex_path)
+            .expect("public key should be readable")
+            .trim()
+            .to_string();
+        assert_eq!(actual, expected);
     }
 
     fn assert_has_private_key(path: &Path) {
         let file = std::fs::File::open(path).expect("open key");
-        let mut reader = BufReader::new(file);
+        let mut reader = std::io::BufReader::new(file);
         let key = rustls_pemfile::private_key(&mut reader)
             .expect("parse key PEM")
             .expect("key should exist");
@@ -372,26 +288,5 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "mode for {} should be 0600", path.display());
-    }
-
-    #[test]
-    fn server_cert_params_include_dns_and_ip_san() {
-        let server_ip: IpAddr = "127.0.0.1".parse().expect("ip should parse");
-        let params = build_server_certificate_params("localhost", server_ip)
-            .expect("server params should be created");
-        assert!(
-            params
-                .subject_alt_names
-                .iter()
-                .any(|san| matches!(san, SanType::DnsName(_))),
-            "dns san should exist"
-        );
-        assert!(
-            params
-                .subject_alt_names
-                .iter()
-                .any(|san| matches!(san, SanType::IpAddress(ip) if *ip == server_ip)),
-            "ip san should exist"
-        );
     }
 }

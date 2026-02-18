@@ -35,8 +35,6 @@ const RESTART_POLICY_UNLESS_STOPPED: &str = "unless-stopped";
 pub struct TargetConfig {
     pub remote: String,
     pub server_name: Option<String>,
-    pub ca_cert: Option<PathBuf>,
-    pub client_cert: Option<PathBuf>,
     pub client_key: Option<PathBuf>,
 }
 
@@ -44,8 +42,6 @@ pub struct TargetConfig {
 pub struct DeployTargetConfig {
     pub remote: String,
     pub server_name: Option<String>,
-    pub ca_cert: PathBuf,
-    pub client_cert: PathBuf,
     pub client_key: PathBuf,
 }
 
@@ -60,14 +56,6 @@ impl TargetConfig {
     }
 
     pub fn require_deploy_credentials(&self) -> anyhow::Result<DeployTargetConfig> {
-        let ca_cert = self
-            .ca_cert
-            .clone()
-            .ok_or_else(|| anyhow!("target is missing required key: ca_cert"))?;
-        let client_cert = self
-            .client_cert
-            .clone()
-            .ok_or_else(|| anyhow!("target is missing required key: client_cert"))?;
         let client_key = self
             .client_key
             .clone()
@@ -76,8 +64,6 @@ impl TargetConfig {
         Ok(DeployTargetConfig {
             remote: self.remote.clone(),
             server_name: self.server_name.clone(),
-            ca_cert,
-            client_cert,
             client_key,
         })
     }
@@ -1306,15 +1292,26 @@ fn parse_target(
         .to_string();
 
     let server_name = optional_string(target_table, "server_name")?;
-    let ca_cert = optional_target_cert_path(target_table, "ca_cert", project_root)?;
-    let client_cert = optional_target_cert_path(target_table, "client_cert", project_root)?;
-    let client_key = optional_target_cert_path(target_table, "client_key", project_root)?;
+    if target_table.contains_key("ca_cert") {
+        return Err(anyhow!(
+            "target key 'ca_cert' is no longer supported; use target.<name>.client_key with RPK+TOFU"
+        ));
+    }
+    if target_table.contains_key("client_cert") {
+        return Err(anyhow!(
+            "target key 'client_cert' is no longer supported; use target.<name>.client_key with RPK+TOFU"
+        ));
+    }
+    if target_table.contains_key("known_hosts") {
+        return Err(anyhow!(
+            "target key 'known_hosts' is no longer supported; CLI always uses ~/.imago/known_hosts"
+        ));
+    }
+    let client_key = optional_target_credential_path(target_table, "client_key", project_root)?;
 
     Ok(TargetConfig {
         remote,
         server_name,
-        ca_cert,
-        client_cert,
         client_key,
     })
 }
@@ -1330,7 +1327,7 @@ fn optional_string(table: &toml::Table, key: &str) -> anyhow::Result<Option<Stri
     Ok(Some(text))
 }
 
-fn optional_target_cert_path(
+fn optional_target_credential_path(
     table: &toml::Table,
     key: &str,
     project_root: &Path,
@@ -1341,7 +1338,7 @@ fn optional_target_cert_path(
     let text = value
         .as_str()
         .ok_or_else(|| anyhow!("target key '{}' must be a string", key))?;
-    let normalized = normalize_target_cert_path(text, key)?;
+    let normalized = normalize_target_credential_path(text, key)?;
     if normalized.is_absolute() {
         Ok(Some(normalized))
     } else {
@@ -1349,7 +1346,7 @@ fn optional_target_cert_path(
     }
 }
 
-fn normalize_target_cert_path(raw: &str, key: &str) -> anyhow::Result<PathBuf> {
+fn normalize_target_credential_path(raw: &str, key: &str) -> anyhow::Result<PathBuf> {
     if raw.is_empty() {
         return Err(anyhow!("target key '{}' must not be empty", key));
     }
@@ -2386,8 +2383,6 @@ type = "cli"
 [target.default]
 remote = "127.0.0.1:4443"
 server_name = "localhost"
-ca_cert = "certs/ca.crt"
-client_cert = "certs/client.crt"
 client_key = "certs/client.key"
 "#,
         );
@@ -3313,8 +3308,8 @@ remote = "127.0.0.1:4443"
     }
 
     #[test]
-    fn target_cert_paths_are_resolved_relative_to_project_root() {
-        let root = new_temp_dir("target-cert-relative");
+    fn target_client_key_path_is_resolved_relative_to_project_root() {
+        let root = new_temp_dir("target-client-key-relative");
         write_imago_toml(
             &root,
             r#"
@@ -3324,19 +3319,12 @@ type = "cli"
 
 [target.default]
 remote = "127.0.0.1:4443"
-ca_cert = "certs/ca.crt"
-client_cert = "certs/client.crt"
 client_key = "certs/client.key"
 "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
         let output = build_project(None, "default", &root).expect("build should succeed");
-        assert_eq!(output.target.ca_cert, Some(root.join("certs/ca.crt")));
-        assert_eq!(
-            output.target.client_cert,
-            Some(root.join("certs/client.crt"))
-        );
         assert_eq!(
             output.target.client_key,
             Some(root.join("certs/client.key"))
@@ -3346,10 +3334,8 @@ client_key = "certs/client.key"
     }
 
     #[test]
-    fn target_cert_paths_allow_absolute_values() {
-        let root = new_temp_dir("target-cert-absolute");
-        let abs_ca = root.join("abs-ca.crt");
-        let abs_client_cert = root.join("abs-client.crt");
+    fn target_client_key_path_allows_absolute_values() {
+        let root = new_temp_dir("target-client-key-absolute");
         let abs_client_key = root.join("abs-client.key");
         write_imago_toml(
             &root,
@@ -3361,28 +3347,22 @@ type = "cli"
 
 [target.default]
 remote = "127.0.0.1:4443"
-ca_cert = "{}"
-client_cert = "{}"
 client_key = "{}"
 "#,
-                abs_ca.display(),
-                abs_client_cert.display(),
                 abs_client_key.display()
             ),
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
         let output = build_project(None, "default", &root).expect("build should succeed");
-        assert_eq!(output.target.ca_cert, Some(abs_ca));
-        assert_eq!(output.target.client_cert, Some(abs_client_cert));
         assert_eq!(output.target.client_key, Some(abs_client_key));
 
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn target_cert_path_rejects_parent_traversal() {
-        let root = new_temp_dir("target-cert-dotdot");
+    fn target_client_key_path_rejects_parent_traversal() {
+        let root = new_temp_dir("target-client-key-dotdot");
         write_imago_toml(
             &root,
             r#"
@@ -3392,7 +3372,7 @@ type = "cli"
 
 [target.default]
 remote = "127.0.0.1:4443"
-ca_cert = "../secrets/ca.crt"
+client_key = "../secrets/client.key"
 "#,
         );
 
@@ -3400,15 +3380,15 @@ ca_cert = "../secrets/ca.crt"
             .expect_err("target cert path with parent traversal must fail");
         assert!(
             err.to_string()
-                .contains("target key 'ca_cert' must not contain path traversal")
+                .contains("target key 'client_key' must not contain path traversal")
         );
 
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn target_cert_path_rejects_backslashes() {
-        let root = new_temp_dir("target-cert-backslash");
+    fn target_client_key_path_rejects_backslashes() {
+        let root = new_temp_dir("target-client-key-backslash");
         write_imago_toml(
             &root,
             r#"
@@ -3418,7 +3398,7 @@ type = "cli"
 
 [target.default]
 remote = "127.0.0.1:4443"
-ca_cert = "certs\\ca.crt"
+client_key = "certs\\client.key"
 "#,
         );
 
@@ -3426,15 +3406,15 @@ ca_cert = "certs\\ca.crt"
             build_project(None, "default", &root).expect_err("backslash path must be rejected");
         assert!(
             err.to_string()
-                .contains("target key 'ca_cert' must not contain backslashes")
+                .contains("target key 'client_key' must not contain backslashes")
         );
 
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn target_cert_path_rejects_windows_prefix() {
-        let root = new_temp_dir("target-cert-windows-prefix");
+    fn target_client_key_path_rejects_windows_prefix() {
+        let root = new_temp_dir("target-client-key-windows-prefix");
         write_imago_toml(
             &root,
             r#"
@@ -3444,7 +3424,7 @@ type = "cli"
 
 [target.default]
 remote = "127.0.0.1:4443"
-ca_cert = "C:/certs/ca.crt"
+client_key = "C:/certs/client.key"
 "#,
         );
 
@@ -3452,8 +3432,79 @@ ca_cert = "C:/certs/ca.crt"
             .expect_err("windows-prefixed cert path must be rejected");
         assert!(
             err.to_string()
-                .contains("target key 'ca_cert' must not be windows-prefixed")
+                .contains("target key 'client_key' must not be windows-prefixed")
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn target_rejects_deprecated_ca_cert_key() {
+        let root = new_temp_dir("target-rejects-ca-cert");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+ca_cert = "certs/ca.crt"
+"#,
+        );
+
+        let err = build_project(None, "default", &root).expect_err("ca_cert should be rejected");
+        assert!(err.to_string().contains("ca_cert"));
+        assert!(err.to_string().contains("no longer supported"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn target_rejects_deprecated_client_cert_key() {
+        let root = new_temp_dir("target-rejects-client-cert");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+client_cert = "certs/client.crt"
+"#,
+        );
+
+        let err =
+            build_project(None, "default", &root).expect_err("client_cert should be rejected");
+        assert!(err.to_string().contains("client_cert"));
+        assert!(err.to_string().contains("no longer supported"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn target_rejects_deprecated_known_hosts_key() {
+        let root = new_temp_dir("target-rejects-known-hosts");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+known_hosts = "certs/known_hosts"
+"#,
+        );
+
+        let err =
+            build_project(None, "default", &root).expect_err("known_hosts should be rejected");
+        assert!(err.to_string().contains("known_hosts"));
+        assert!(err.to_string().contains("no longer supported"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3642,15 +3693,13 @@ remote = "127.0.0.1:4443"
         let target = TargetConfig {
             remote: "127.0.0.1:4443".to_string(),
             server_name: Some("localhost".to_string()),
-            ca_cert: None,
-            client_cert: Some(PathBuf::from("certs/client.crt")),
-            client_key: Some(PathBuf::from("certs/client.key")),
+            client_key: None,
         };
 
         let err = target
             .require_deploy_credentials()
             .expect_err("missing cert should fail");
-        assert!(err.to_string().contains("ca_cert"));
+        assert!(err.to_string().contains("client_key"));
     }
 
     #[test]

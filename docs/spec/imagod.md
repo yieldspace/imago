@@ -12,7 +12,7 @@
 
 - QUIC + WebTransport セッション受理
 - `ProtocolEnvelope` (`MessageType`) の decode/dispatch
-- mTLS 認証（クライアント証明書必須）
+- RPK 認証（クライアント公開鍵 allowlist 必須）
 - `deploy.prepare` / `artifact.push` / `artifact.commit`
 - `command.start` (`deploy` / `run` / `stop`) と `command.event` 配信
 - `state.request -> state.response` の実行中状態照会
@@ -55,9 +55,10 @@ server_version = "imagod/0.1.0"
 compatibility_date = "2026-02-10"
 
 [tls]
-server_cert = "/etc/imago/certs/server.crt"
 server_key = "/etc/imago/certs/server.key"
-client_ca_cert = "/etc/imago/certs/ca.crt"
+client_public_keys = [
+  "/etc/imago/certs/client-a.pub",
+]
 
 [runtime]
 chunk_size = 1048576
@@ -120,3 +121,9 @@ epoch_tick_interval_ms = 50
 - `imagod.toml` の `storage_root` 未指定時既定値を固定 `/etc/imago` から OS 別既定値へ変更した（Linux=`/var/lib/imago`, macOS=`/usr/local/var/imago`, Windows=`C:\ProgramData\imago`, その他=`/var/lib/imago`）。
 - ビルド時環境変数 `IMAGOD_STORAGE_ROOT_DEFAULT` を指定した場合は、その値を `storage_root` 既定値として採用する。
 - `imagod.toml` に `storage_root` を明示した場合は、従来どおり明示値を最優先する。
+
+## 実装反映ノート（RPK + TOFU / 2026-02-18）
+
+- [BREAKING] `imagod.toml` の `tls.server_cert` / `tls.client_ca_cert` を廃止し、`tls.server_key` / `tls.client_public_keys` へ移行した。
+- `imagod` はサーバ証明書チェーンを持たず、`server_key` から提示する RPK で識別される。
+- クライアント側は `known_hosts` でサーバ鍵 pin を行い、初回接続時のみ TOFU 登録する。

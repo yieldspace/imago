@@ -7,7 +7,7 @@ runner の管理メタデータ（service/release/runner/app-type）を取得す
 
 - Rust toolchain（`rustc 1.90` 以上）
 - `wasm32-wasip2` target（未導入なら `rustup target add wasm32-wasip2`）
-- `cargo run -p imago-cli -- certs generate ...` が実行できること
+- （任意）鍵を再生成する場合は `cargo run -p imago-cli -- certs generate ...` が実行できること
 
 ## ディレクトリ構成
 
@@ -16,19 +16,26 @@ runner の管理メタデータ（service/release/runner/app-type）を取得す
 - `Cargo.toml`, `src/main.rs`: `wasi:cli/run` 実装 + `wit-bindgen` で `imago:admin/runtime` 呼び出し
 - `wit/world.wit`: app world（`imago:admin/runtime@0.1.0` import）
 - `../../plugins/imago-admin/wit/package.wit`: `imago:admin` native plugin 契約（runtime 実装は `plugins/imago-admin` crate）
-- `scripts/generate-certs.sh`: ローカル mTLS 証明書生成
+- `scripts/generate-certs.sh`: ローカル RPK 鍵生成 + `client.pub.hex` 生成
 - `scripts/run-imagod.sh`: ローカル `imagod` 起動
 - `scripts/deploy.sh`: deploy 実行（内部で build も実行）
 - `scripts/verify-admin.sh`: `imago logs` で管理情報出力を検証
 
+## 注意（破壊的変更）
+
+- 旧 mTLS/X.509 設定（`ca_cert` / `client_cert` / `tls.server_cert` / `tls.client_ca_cert`）はこの example では利用しません。
+- `imago.toml` は `target.default.client_key` のみを使い、サーバ鍵検証は TOFU + `~/.imago/known_hosts`（CLI 既定パス）で行います。
+
 ## 手順
 
-1. 証明書を生成
+1. RPK 鍵を生成
 
 ```bash
 cd examples/local-imagod-plugin-native-admin
 ./scripts/generate-certs.sh
 ```
+
+このスクリプトは `certs/server.key`・`certs/client.key`・`certs/server.pub.hex`・`certs/client.pub.hex` を再生成し、`imagod.toml` の `tls.client_public_keys` を `client.pub.hex` に同期します。`known_hosts` は example 配下には作成せず、CLI 既定の `~/.imago/known_hosts` に初回接続時 TOFU でサーバ公開鍵が記録され、以後は不一致鍵を拒否します。
 
 2. `imago update` で依存 WIT を `wit/deps/` に展開して `imago.lock` へ固定
 

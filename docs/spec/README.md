@@ -34,7 +34,7 @@
 ## 共通前提
 
 - 通信方式は QUIC + WebTransport + CBOR。
-- 認証は mTLS。
+- 認証は RPK + TOFU（初回接続で `~/.imago/known_hosts` へ鍵 pin）。
 - `hello.negotiate` の互換キーは `compatibility_date`。
 - `ProtocolEnvelope` の `request_id` / `correlation_id` は UUID。
 - `state.request` の応答メッセージ種別は `state.response`。
@@ -52,3 +52,9 @@
 - 差分配信
 - 監視ダッシュボード UI
 - メトリクスの詳細仕様
+
+## 実装反映ノート（RPK + TOFU / 2026-02-18）
+
+- [BREAKING] deploy 通信の認証前提を mTLS/X.509 から RPK + TOFU へ更新した。
+- `target.<name>` は `client_key` を使い、`known_hosts` は CLI 既定 `~/.imago/known_hosts` 固定運用にした（`ca_cert` / `client_cert` / `known_hosts` は廃止）。
+- `imagod.toml` の TLS 設定は `server_key` と `client_public_keys`（ed25519 公開鍵 raw 32byte hex allowlist）を正本にする。

@@ -14,10 +14,10 @@
 ## 2. トランスポート層
 
 - Transport: QUIC + WebTransport
-- Auth: mTLS
+- Auth: RPK（client key 認証 + server key pin/TOFU）
 - Payload format: CBOR
 - Rust 実装: `quinn` + `web-transport-quinn`
-- `imago deploy` は接続確立フェーズで証明書認証失敗を `E_UNAUTHORIZED` として報告する（stage: `transport.connect`）。
+- `imago deploy` は接続確立フェーズで鍵認証失敗（クライアント鍵拒否、known_hosts 不一致など）を `E_UNAUTHORIZED` として報告する（stage: `transport.connect`）。
 
 ### 2.1 ストリーム上のフレーミング
 
@@ -344,9 +344,9 @@ response:
 
 ## 実装反映ノート（Issue #64 / 2026-02-11）
 
-- `imago-cli` の `deploy` 接続フェーズで、証明書認証失敗（Unknown CA / 不正証明書 / 証明書必須違反など）を `E_UNAUTHORIZED` に正規化する。
+- `imago-cli` の `deploy` 接続フェーズで、トランスポート認証失敗を `E_UNAUTHORIZED` に正規化する。
 - 将来の CONNECT 拒否との整合のため、HTTP status `401` / `403` も `E_UNAUTHORIZED` として扱う。
-- 対象は CLI のエラー正規化のみで、mTLS 検証位置（TLS handshake）および protocol wire 契約は変更しない。
+- 対象は CLI のエラー正規化のみで、認証検証位置（transport handshake）および protocol wire 契約は変更しない。
 
 ## 実装反映ノート（Issue #71 / 2026-02-11）
 
@@ -388,3 +388,9 @@ response:
 - timeout 対象は `open_bi` / stream write / stream read で、既定値は 30 秒。
 - deploy 実行時は `hello.negotiate` の `limits.deploy_stream_timeout_secs` を timeout 値に適用する（server 既定は `runtime.deploy_stream_timeout_secs`）。
 - request stream 失敗時は固定回数で再試行する（待機 100ms -> 250ms、最大 3 試行）。
+
+## 実装反映ノート（RPK + TOFU / 2026-02-18）
+
+- [BREAKING] 認証方式を mTLS/X.509 から RPK + TOFU へ移行した。
+- [BREAKING] 接続時のサーバ検証は CA チェーンではなく `known_hosts` の鍵 pin を正本にする。
+- `known_hosts` 未登録ホストへの初回接続のみ TOFU で登録し、登録済みホストの鍵不一致は `E_UNAUTHORIZED` を返す。

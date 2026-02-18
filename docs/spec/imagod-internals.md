@@ -71,7 +71,7 @@ flowchart TD
 | モジュール | 主責務 | 主な入力 | 主な出力 | 依存方向 |
 |---|---|---|---|---|
 | `imagod-config (lib.rs)` | `imagod.toml` 読込・検証 | 設定パス | `ImagodConfig` | `imagod-common`, `imago-protocol` |
-| `imagod-server::transport` | mTLS + QUIC/WebTransport endpoint 構築（0-RTT 無効） | TLS 設定, listen_addr | `web_transport_quinn::Server` | `imagod-config`, `imagod-common` |
+| `imagod-server::transport` | RPK + QUIC/WebTransport endpoint 構築（0-RTT 無効） | TLS 設定, listen_addr | `web_transport_quinn::Server` | `imagod-config`, `imagod-common` |
 | `imagod-server::protocol_handler` | `ProtocolEnvelope<Value>` dispatch | bi-stream bytes | response envelope / command.event / logs datagram | `imagod-control`, `imagod-config` |
 | `imagod-control::artifact_store` | upload session 管理、chunk commit、GC | prepare/push/commit | prepare/ack/commit response | `imagod-common` |
 | `imagod-control::orchestrator` | deploy/run/stop の実行調停 | command payload | summary / error | `artifact_store`, `service_supervisor` |
@@ -490,7 +490,7 @@ flowchart TD
 
 典型トラブル起点:
 
-- 接続不可: TLS/mTLS パス不整合
+- 接続不可: server/client 鍵設定や `known_hosts` 不整合
 - deploy 失敗: digest/manifest 不一致
 - `E_NOT_FOUND`: 終端後照会の可能性
 - `E_BUSY`: 同名 service 競合
@@ -511,6 +511,12 @@ flowchart TD
 - restart policy/backoff 追加
 - artifact index 永続化
 - 長期 service 状態照会 API
+
+## 実装反映ノート（RPK + TOFU / 2026-02-18）
+
+- [BREAKING] transport 初期化は `tls.server_cert` / `tls.client_ca_cert` 読み込みをやめ、`tls.server_key` と `tls.client_public_keys` を正本にする。
+- server 側のクライアント認可は `client_public_keys` の静的 allowlist で判定する。
+- client 側のサーバ認証は `known_hosts` による pin を前提とし、初回接続時のみ TOFU 登録を許可する。
 
 ## 実装参照インデックス
 

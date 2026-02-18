@@ -4,9 +4,8 @@ server_version = "imagod/local-socket-example"
 compatibility_date = "2026-02-10"
 
 [tls]
-server_cert = "certs/server.crt"
 server_key = "certs/server.key"
-client_ca_cert = "certs/ca.crt"
+client_public_keys = ["2875c88fb3ed5f79eb4772d81f52dbd4ecda02cef08d5d64a8a8d31199b0c442"]
 
 [runtime]
 chunk_size = 1048576

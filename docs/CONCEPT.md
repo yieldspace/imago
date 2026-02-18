@@ -28,7 +28,7 @@ imago は「組込み開発の敷居を下げる」ことを目的に、Wasm Com
 ### 通信モデル
 
 - CLI と daemon は QUIC + WebTransport + CBOR で通信する。
-- mTLS で相互認証する。
+- RPK + TOFU で相互認証する（初回接続で known_hosts へ pin）。
 - deploy/run/stop は command stream を開いて実行する。
 
 詳細: [`docs/spec/deploy-protocol.md`](./spec/deploy-protocol.md)
@@ -48,3 +48,9 @@ imago は「組込み開発の敷居を下げる」ことを目的に、Wasm Com
 - NanoKVM キャプチャ取得と Discord 送信を成立させる。
 
 計画全体: [`docs/MVP_PLAN.md`](./MVP_PLAN.md)
+
+## 実装反映ノート（RPK + TOFU / 2026-02-18）
+
+- [BREAKING] 通信認証モデルを mTLS/X.509 から RPK + TOFU へ置換した。
+- サーバ認証は CA チェーンではなく `known_hosts` への鍵 pin を正本とする。
+- クライアント認証は `client_key` とサーバ側 `client_public_keys` allowlist で行う。

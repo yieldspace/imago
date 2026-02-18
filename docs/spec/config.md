@@ -219,7 +219,8 @@
 - `type="socket"` のときのみ `[socket].protocol` / `[socket].direction` / `[socket].listen_addr` / `[socket].listen_port` を受理し、`manifest.socket.*` へ反映する。
 - CLI の `name` 検証は `imagod` と同等に `..` を拒否し、path 文字を明示的に弾く。
 - `--env <name>` は manifest 出力先と `.env.<name>` 解決の双方で同一バリデーションを適用し、path traversal を拒否する。
-- `target.<name>.ca_cert` / `client_cert` / `client_key` は path traversal と不正区切りを拒否し、相対指定を `project_root` 基準の絶対パスへ解決する。
+- `target.<name>.client_key` は path traversal と不正区切りを拒否し、相対指定を `project_root` 基準の絶対パスへ解決する。
+- `known_hosts` は設定キーとして受理せず、CLI 既定パス `~/.imago/known_hosts` を常に使用する。
 - `imagod.storage_root` の既定値は OS 別（Linux=`/var/lib/imago`, macOS=`/usr/local/var/imago`, Windows=`C:\ProgramData\imago`, その他=`/var/lib/imago`）にし、ビルド時環境変数 `IMAGOD_STORAGE_ROOT_DEFAULT` で上書きできる。`imagod.toml` の明示値を最優先する。
 - `imagod.runtime` に `http_worker_count` / `http_worker_queue_capacity` / `manager_control_read_timeout_ms` / `max_concurrent_sessions` / `deploy_stream_timeout_secs` を追加し、load 時に範囲・正数検証を行う。`RunnerBootstrap` へは `http_worker_count` と `http_worker_queue_capacity` を必須値として伝播する。
 - `restart` はトップレベルキーのみ受理し、`runtime.restart_policy` は移行エラーにする。
@@ -231,18 +232,20 @@
 
 - `remote`: `host` または `host:port`（`https://` 省略可）
   - IPv6 は `::1`, `[::1]`, `[::1]:4443`, `https://[::1]:4443` を許可
-- `server_name`: TLS SNI で利用するサーバ名（省略時は `remote` 側の host）
-- `ca_cert`: サーバ証明書検証用 CA PEM
-- `client_cert`: mTLS クライアント証明書 PEM
-- `client_key`: mTLS クライアント秘密鍵 PEM
-  - 上記 3 つは絶対パスまたは `project_root` 相対パスを受理する。
+- `server_name`: known_hosts で使うサーバ識別名（省略時は `remote` 側の host）
+- `client_key`: クライアント秘密鍵（PEM）
+  - 絶対パスまたは `project_root` 相対パスを受理する。
   - 相対パスは `project_root` 基準で解決する。
   - `..`、`\`、Windows ドライブプレフィックス（`C:` など）を含む値は拒否する。
+- `known_hosts` は設定で上書きできず、CLI 既定パス `~/.imago/known_hosts` を固定使用する。
+
+初回接続時に `~/.imago/known_hosts` へ対象ホストの公開鍵が未登録の場合、CLI は TOFU で鍵を登録する。
+2 回目以降は `~/.imago/known_hosts` と一致しないサーバ鍵を拒否する。
 
 `imago build` が生成する `manifest.target` には、上記のうち `remote` と `server_name` のみを含める。
 
-ローカル検証用の証明書一式は `imago certs generate` で生成できる。
-生成先ディレクトリには `.gitignore`（`*` / `!.gitignore`）も作成される。
+ローカル検証用の RPK 鍵（server/client keypair）は `openssl` 等で生成する。
+`~/.imago/known_hosts` は初回接続（TOFU）で作成・更新される。
 
 ## imagod 設定ファイル
 
@@ -252,9 +255,8 @@
 - `storage_root`
 - `server_version`
 - `compatibility_date`（`YYYY-MM-DD`、既定値 `2026-02-10`）
-- `tls.server_cert`
 - `tls.server_key`
-- `tls.client_ca_cert`
+- `tls.client_public_keys`（ed25519 公開鍵 raw 32byte hex を 1 要素以上）
 - `runtime.chunk_size`
 - `runtime.max_inflight_chunks`
 - `runtime.max_artifact_size_bytes`（既定 `67108864` = 64 MiB）
@@ -293,3 +295,9 @@
 - `runtime.manager_control_read_timeout_ms`: `1` 以上
 - `runtime.max_concurrent_sessions`: `1` 以上
 - `runtime.deploy_stream_timeout_secs`: `1` 以上
+
+## 実装反映ノート（RPK + TOFU / 2026-02-18）
+
+- [BREAKING] `target.<name>.ca_cert` / `target.<name>.client_cert` / `target.<name>.known_hosts` を廃止し、`target.<name>.client_key` + CLI 既定 `~/.imago/known_hosts` へ移行した。
+- [BREAKING] `imagod.tls.server_cert` / `imagod.tls.client_ca_cert` を廃止し、`imagod.tls.server_key` + `imagod.tls.client_public_keys` へ移行した。
+- サーバ認証は X.509 チェーン検証ではなく、RPK pin（`known_hosts`）+ TOFU で扱う。

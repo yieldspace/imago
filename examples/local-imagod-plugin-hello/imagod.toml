@@ -4,9 +4,8 @@ server_version = "imagod/local-plugin-hello-example"
 compatibility_date = "2026-02-10"
 
 [tls]
-server_cert = "certs/server.crt"
 server_key = "certs/server.key"
-client_ca_cert = "certs/ca.crt"
+client_public_keys = ["ab5bd390075f66f09862e65a75bb5ebe8a60c7bc138dd0dd21891d91996079e8"]
 
 [runtime]
 chunk_size = 1048576
