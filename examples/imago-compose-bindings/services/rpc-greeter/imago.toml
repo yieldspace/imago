@@ -1,5 +1,5 @@
 name = "rpc-greeter"
-main = "target/wasm32-wasip2/release/rpc-greeter.wasm"
+main = "target/wasm32-wasip2/release/rpc_greeter.wasm"
 type = "rpc"
 
 [build]

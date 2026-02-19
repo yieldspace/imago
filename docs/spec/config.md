@@ -301,6 +301,7 @@
 - [BREAKING] `imago build/deploy/run/stop` の `--env` は廃止した。`[env.*]` と `.env.<name>` の解決も行わない。
 - [BREAKING] `[[bindings]]` は `name` + `wit` のみ受理し、`target` は設定エラーとして拒否する。
 - `type = "rpc"` を追加し、`imago build` / manifest 正規化で受理する。
+- `type = "rpc"` は `main` を必須キーとして維持しつつ、runner 起動時に `main` を自動実行しない（実行契機は `rpc.invoke` のみ）。
 - `imago bindings cert upload` / `imago bindings cert deploy` サブコマンドを追加した。
 - `imago compose update` / `imago compose build` / `imago compose logs` を追加した。
 - `imago-compose.toml` は `[target.<name>]` を受理し、`compose build/deploy/logs` は service `imago.toml` の `target` ではなく compose 側 target を優先して解決する。

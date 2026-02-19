@@ -321,6 +321,7 @@ response:
 
 - `result_cbor` と `error` は同時に存在してはならない。
 - `tls.client_public_keys` で認証された接続は `rpc.invoke` を許可し、それ以外の管理メッセージは拒否する。
+- `type="rpc"` service の runner は起動時に `manifest.main` を自動実行せず、`rpc.invoke` 到着時のみ対象関数を実行する。
 - 例: `examples/rpc.invoke.request.json` / `examples/rpc.invoke.response.success.json` / `examples/rpc.invoke.response.error.json`
 
 ## 6. 状態遷移
@@ -421,3 +422,8 @@ response:
 - `rpc.invoke` request は `interface_id` / `function` / `args_cbor` / `target_service.name` を持つ。
 - `rpc.invoke` response は `result_cbor` または構造化 `error` の排他的表現を返す。
 - クライアント鍵ロールを分離し、`tls.client_public_keys` は `hello.negotiate` と `rpc.invoke` のみ許可する。
+
+## 実装反映ノート（RPC resident runner startup / 2026-02-19）
+
+- `type="rpc"` の runner は起動時に `manifest.main` を自動実行しない。
+- `rpc.invoke` が到着するまで runner は常駐待機し、関数実行は `rpc.invoke` でのみ開始する。

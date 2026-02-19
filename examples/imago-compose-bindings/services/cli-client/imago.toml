@@ -16,7 +16,7 @@ name = "acme:clock"
 version = "0.1.0"
 kind = "wasm"
 wit = "file://../rpc-greeter/wit/world.wit"
-component = { source = "file://../rpc-greeter/target/wasm32-wasip2/release/rpc-greeter.wasm" }
+component = { source = "file://../rpc-greeter/target/wasm32-wasip2/release/rpc_greeter.wasm" }
 
 [dependencies.capabilities]
 privileged = false

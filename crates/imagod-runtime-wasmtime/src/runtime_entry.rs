@@ -371,6 +371,14 @@ impl WasmRuntime {
         })?
     }
 
+    async fn run_rpc_component_async(
+        &self,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> Result<(), ImagodError> {
+        wait_for_shutdown(&mut shutdown).await;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn invoke_rpc_component_async(
         &self,
@@ -650,7 +658,7 @@ impl ComponentRuntime for WasmRuntime {
         );
 
         match app_type {
-            RunnerAppType::Cli | RunnerAppType::Rpc => {
+            RunnerAppType::Cli => {
                 if socket.is_some() {
                     return Err(map_runtime_error(
                         "socket config is only allowed when app_type=socket".to_string(),
@@ -669,6 +677,14 @@ impl ComponentRuntime for WasmRuntime {
                     epoch_tick_interval_ms,
                 )
                 .await
+            }
+            RunnerAppType::Rpc => {
+                if socket.is_some() {
+                    return Err(map_runtime_error(
+                        "socket config is only allowed when app_type=socket".to_string(),
+                    ));
+                }
+                self.run_rpc_component_async(shutdown).await
             }
             RunnerAppType::Http => {
                 if socket.is_some() {
@@ -930,10 +946,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rpc_type_uses_cli_execution_branch() {
+    async fn rpc_type_returns_without_loading_component_when_shutdown_already_signaled() {
         let runtime = WasmRuntime::new().expect("runtime should initialize");
         let (_shutdown_tx, shutdown_rx) = watch::channel(true);
-        let err = runtime
+        runtime
             .run_component(RuntimeRunRequest {
                 app_type: RunnerAppType::Rpc,
                 runner_id: "runner-test".to_string(),
@@ -955,13 +971,50 @@ mod tests {
                 http_ready_tx: None,
             })
             .await
-            .expect_err("missing component path should fail");
-        assert_eq!(err.code, ErrorCode::Internal);
+            .expect("rpc run should exit cleanly when shutdown is already signaled");
+    }
+
+    #[tokio::test]
+    async fn rpc_type_waits_for_shutdown_signal() {
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let run_future = runtime.run_component(RuntimeRunRequest {
+            app_type: RunnerAppType::Rpc,
+            runner_id: "runner-test".to_string(),
+            service_name: "svc-test".to_string(),
+            release_hash: "release-test".to_string(),
+            component_path: PathBuf::from("/tmp/non-existent-rpc-component.wasm"),
+            args: Vec::new(),
+            envs: BTreeMap::new(),
+            socket: None,
+            plugin_dependencies: Vec::new(),
+            capabilities: CapabilityPolicy::default(),
+            bindings: Vec::new(),
+            manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+            manager_auth_secret: "secret".to_string(),
+            shutdown: shutdown_rx,
+            epoch_tick_interval_ms: 50,
+            http_worker_count: 2,
+            http_worker_queue_capacity: 4,
+            http_ready_tx: None,
+        });
+        tokio::pin!(run_future);
+
         assert!(
-            err.message.contains("failed to load component"),
-            "unexpected message: {}",
-            err.message
+            tokio::time::timeout(Duration::from_millis(100), &mut run_future)
+                .await
+                .is_err(),
+            "rpc runner should stay alive until shutdown is signaled"
         );
+
+        shutdown_tx
+            .send(true)
+            .expect("shutdown sender should still be connected");
+        let result = tokio::time::timeout(Duration::from_secs(1), &mut run_future)
+            .await
+            .expect("rpc runner should stop promptly after shutdown")
+            .expect("rpc run should stop without error");
+        assert_eq!(result, ());
     }
 
     #[tokio::test]

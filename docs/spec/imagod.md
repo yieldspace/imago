@@ -15,6 +15,7 @@
 - RPK 認証（クライアント公開鍵 allowlist 必須）
 - `deploy.prepare` / `artifact.push` / `artifact.commit`
 - `command.start` (`deploy` / `run` / `stop`) と `command.event` 配信
+- `type=rpc` runner の常駐管理（起動時は `main` 非実行、`rpc.invoke` で関数実行）
 - `state.request -> state.response` の実行中状態照会
 - `command.cancel` の起動前 cancel 判定
 - manager/runner のマルチプロセス実行制御（1 service = 1 runner process）
@@ -29,7 +30,7 @@
 - イベント永続化・再送
 - 高度な restart policy
 - blue-green デプロイ
-- runner invoke の実関数実行（現行は配線と認可のみ）
+- RPC 呼び出し結果の永続化・再送
 
 ## 3. 外部仕様との対応
 
@@ -113,7 +114,7 @@ epoch_tick_interval_ms = 50
   - `service-name() -> string`
   - `release-hash() -> string`
   - `runner-id() -> string`
-  - `app-type() -> string`（`cli` / `http` / `socket`）
+  - `app-type() -> string`（`cli` / `rpc` / `http` / `socket`）
 - `manifest.dependencies(kind=native)` で `name="imago:admin"` を宣言した場合、既存 capability ルール（`capabilities.deps`）をそのまま適用する。
 - `kind=native` dependency が registry 未登録の場合は、component import 解決前に起動時エラーで停止する。
 ## 実装反映ノート（Storage Root Default Matrix / 2026-02-14）
@@ -133,3 +134,8 @@ epoch_tick_interval_ms = 50
 - `tls.admin_public_keys` を追加し、管理操作（deploy/run/stop/logs/state/cert）を許可する鍵を分離した。
 - `tls.client_public_keys` は RPC クライアント鍵として扱い、`hello.negotiate` と `rpc.invoke` のみ許可する。
 - `tls.known_public_keys` は `authority -> public key` table へ変更した。
+
+## 実装反映ノート（RPC resident runner startup / 2026-02-19）
+
+- `type=rpc` は runner 起動時に `main` を自動実行せず、shutdown まで常駐待機する。
+- `rpc.invoke` が到着したタイミングでのみ、`manifest.main` が指す component の関数を実行する。
