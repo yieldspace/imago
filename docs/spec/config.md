@@ -32,6 +32,7 @@
 - `args`
 - `build`
 - `capabilities`
+- `wasi`
 - `limits`
 - `restart`
 - `vars`
@@ -121,6 +122,21 @@
 - `type != "socket"` で `[socket]` を指定した場合は設定不整合として build エラーにする。
 - `imago build` はこの設定を `manifest.socket.*` に正規化して出力する。
 
+## `[wasi]`（WASI 実行設定）
+
+- `[wasi]` は任意指定とし、`imago build` は `manifest.wasi` に正規化して出力する。
+- `wasi.args` は string 配列を受理する。
+- `wasi.env` は `key -> value` がともに string の table を受理する。
+- `[[wasi.mounts]]` は read/write mount を定義する。
+- `[[wasi.read_only_mounts]]` は read-only mount を定義する。
+- `wasi.mounts[]` / `wasi.read_only_mounts[]` の各要素は `asset_dir` と `guest_path` を必須とする。
+  - `asset_dir` は `assets` 由来ディレクトリのみ受理する（mount 単位はディレクトリのみで、ファイル単位は不可）。
+  - `guest_path` は guest 側の絶対パスのみ受理する。
+- `wasi.mounts[]` と `wasi.read_only_mounts[]` では、同一 `guest_path` または同一 `asset_dir` の重複指定（同一配列内および配列跨ぎ）を禁止する。
+- runtime 権限マッピングは次を適用する。
+  - `wasi.mounts[]`: `DirPerms::all` / `FilePerms::all`
+  - `wasi.read_only_mounts[]`: `DirPerms::READ` / `FilePerms::READ`
+
 ## `restart`（service 再起動方針）
 
 - `restart` はトップレベルキーとして指定する。
@@ -143,8 +159,12 @@
   - 許可値は `"*"` または関数名文字列配列。
   - self 解決（caller 自身の component export）には適用しない。
   - 明示 dependency への中継時のみ適用する。
-- `capabilities.wasi.<interface>`: WASI interface ごとの許可関数。
-  - 許可値は `"*"` または関数名文字列配列。
+- `capabilities.wasi`: WASI 呼び出し許可ルール。
+  - 許可値は `true` / `false` または table。
+  - `true` は全 WASI を許可する。
+  - `false` は空ルールとして扱い、WASI を許可しない。
+  - table 指定時は `capabilities.wasi.<interface>` ごとに許可関数を定義する。
+  - `capabilities.wasi.<interface>` の許可値は `"*"` または関数名文字列配列。
 - typo キー `capabilirties` は互換受理せずエラーにする。
 
 ### `privileged`
@@ -172,6 +192,12 @@
 - `type="socket"` かつ `socket.listen_addr` が IP として不正ならエラー。
 - `type="socket"` かつ `socket.listen_port` が範囲外（`1..=65535`）ならエラー。
 - `type!="socket"` かつ `[socket]` 指定はエラー。
+- `wasi.args` が string 配列以外ならエラー。
+- `wasi.env` が string 値の table 以外ならエラー。
+- `wasi.mounts[]` / `wasi.read_only_mounts[]` の要素に `asset_dir` または `guest_path` 欠落がある場合はエラー。
+- `wasi.mounts[]` / `wasi.read_only_mounts[]` の `asset_dir` が `assets` 由来ディレクトリ以外、またはファイル単位の場合はエラー。
+- `wasi.mounts[]` / `wasi.read_only_mounts[]` の `guest_path` が絶対パスでない場合はエラー。
+- `wasi.mounts[]` / `wasi.read_only_mounts[]` で同一 `guest_path` または同一 `asset_dir` が重複（同一配列内・配列跨ぎ）した場合はエラー。
 - `restart` が許可値（`never` / `on-failure` / `always` / `unless-stopped`）以外ならエラー。
 - `runtime.restart_policy` を指定した場合はエラー（互換受理なし）。
 - `dependencies[].wit` に `https://wa.dev/...` shorthand を指定した場合はエラー（`warg://<package>@<version>` を使用）。
@@ -208,12 +234,15 @@
 - `imago update` は `kind=wasm` かつ `component` 未指定で `wit` source が component の場合、component hash/source を lock へ自動固定する。
 - `imago update` は `file://` source が存在する場合のみ hash 差分を監視し、差分があればキャッシュを再解決する。source が消えている場合は既存キャッシュを優先する。
 - `imago build` は `capabilities` を正規化して manifest に出力し、`capabilirties` キーは設定エラーとして拒否する。
+- `imago build` は `capabilities.wasi` に `bool` / table の両形式を受理し、`true` は全許可、`false` は空ルールとして正規化する。
 - `imago build` は `[[dependencies]]` がある場合、`.imago/deps` から `wit/deps` を再構築してから `imago.lock(version=1)` の `wit_*` / `component_*` / `wit_packages` を検証し、不一致時は `imago update` を要求して失敗する（`kind=wasm` で `component` 未指定の場合は `wit` 由来の期待値と照合する）。
 - `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
 - `imago update` は `[[bindings]].wit` から WIT package を解決し、package 内の全 interface を `manifest.bindings[]` の `<package>/<interface>` へ展開する。
 - `imago build` は展開済み `manifest.bindings[]` を出力し、runtime の呼び出し認可入力として扱う。
 - `type="http"` のときのみ `[http].port` / `[http].max_body_bytes` を受理し、`manifest.http.port` / `manifest.http.max_body_bytes` へ反映する。
 - `type="socket"` のときのみ `[socket].protocol` / `[socket].direction` / `[socket].listen_addr` / `[socket].listen_port` を受理し、`manifest.socket.*` へ反映する。
+- `imago build` は `[wasi]` を `manifest.wasi` へ反映し、`wasi.mounts[]` / `wasi.read_only_mounts[]` の `asset_dir` / `guest_path` 制約と重複禁止（同一・跨ぎ）を検証する。
+- runtime の mount 権限は `wasi.mounts[]` を `DirPerms::all` / `FilePerms::all`、`wasi.read_only_mounts[]` を `DirPerms::READ` / `FilePerms::READ` へ対応付ける。
 - CLI の `name` 検証は `imagod` と同等に `..` を拒否し、path 文字を明示的に弾く。
 - `target.<name>.client_key` は path traversal と不正区切りを拒否し、相対指定を `project_root` 基準の絶対パスへ解決する。
 - `known_hosts` は設定キーとして受理せず、CLI 既定パス `~/.imago/known_hosts` を常に使用する。

@@ -12,7 +12,7 @@
 ## ディレクトリ構成
 
 - `imago.toml`: plugin 依存（`[[dependencies]]`）と capability、build/deploy 設定（`wit = "warg://sizumita:ferris@0.1.0"`、`component` 指定なし）
-  - `privileged = false` を維持したまま `capabilities.wasi` で必要な WASI interface を明示許可しています。
+  - `privileged = false` を維持したまま `capabilities.wasi = true` で WASI を許可しています。
 - `imagod.toml`: ローカル `imagod` 設定
 - `Cargo.toml`, `src/main.rs`: `wasi:cli/run` 実装 + `wit-bindgen` で plugin import 呼び出し
 - `wit/world.wit`: app world（`sizumita:ferris/says` import）
@@ -71,5 +71,5 @@ cd examples/local-imagod-plugin-hello
 
 - plugin component / WIT の出所は `sizumita:ferris@0.1.0` です。
 - capability ルールは version 付き interface 名（`sizumita:ferris/says@0.1.0.say`）を許可しています。
-- runtime は WASI import も deny-by-default なので、`println!` を使うこの example では `capabilities.wasi` の許可が必須です。
+- runtime は WASI import も deny-by-default なので、`println!` を使うこの example では `capabilities.wasi = true` が必須です。
 - `kind="wasm"` でも `component` を省略できます（`wit` source が component の場合のみ）。`imago update` が lock に `component_*` を自動固定します。

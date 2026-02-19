@@ -3,7 +3,7 @@
 use std::{
     collections::BTreeMap,
     future::Future,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     pin::Pin,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -167,6 +167,58 @@ impl Validate for RunnerSocketConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// WASI preopened directory configuration passed from manager to runner.
+pub struct RunnerWasiMount {
+    /// Absolute host path to the mounted directory.
+    pub host_path: PathBuf,
+    /// Absolute guest path exposed to component.
+    pub guest_path: String,
+    /// Whether this mount is read-only.
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+impl Validate for RunnerWasiMount {
+    fn validate(&self) -> Result<(), ValidationError> {
+        validate_non_empty_path(&self.host_path, "host_path")?;
+        validate_non_empty(&self.guest_path, "guest_path")?;
+        if !self.guest_path.starts_with('/') {
+            return Err(ValidationError::invalid(
+                "guest_path",
+                "must be an absolute path",
+            ));
+        }
+        if self.guest_path.contains('\\') {
+            return Err(ValidationError::invalid(
+                "guest_path",
+                "must not contain backslashes",
+            ));
+        }
+
+        let path = Path::new(self.guest_path.as_str());
+        for component in path.components() {
+            match component {
+                Component::RootDir | Component::Normal(_) => {}
+                Component::CurDir | Component::ParentDir => {
+                    return Err(ValidationError::invalid(
+                        "guest_path",
+                        "must not contain path traversal",
+                    ));
+                }
+                _ => {
+                    return Err(ValidationError::invalid(
+                        "guest_path",
+                        "contains unsupported path components",
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 /// Plugin delivery kind used by manifest/bootstrap dependency definitions.
 pub enum PluginKind {
@@ -299,6 +351,9 @@ pub struct RunnerBootstrap {
     pub args: Vec<String>,
     /// Environment variables passed to the runtime.
     pub envs: std::collections::BTreeMap<String, String>,
+    /// WASI preopened directory mounts.
+    #[serde(default)]
+    pub wasi_mounts: Vec<RunnerWasiMount>,
     /// Allowed outbound bindings for this service.
     pub bindings: Vec<ServiceBinding>,
     /// Plugin dependencies available for this app/plugin execution context.
@@ -373,6 +428,9 @@ impl Validate for RunnerBootstrap {
 
         for binding in &self.bindings {
             binding.validate()?;
+        }
+        for mount in &self.wasi_mounts {
+            mount.validate()?;
         }
         for dependency in &self.plugin_dependencies {
             dependency.validate()?;
@@ -960,6 +1018,7 @@ mod tests {
             component_path: PathBuf::from("/tmp/component.wasm"),
             args: vec![],
             envs: BTreeMap::new(),
+            wasi_mounts: vec![],
             bindings: vec![],
             plugin_dependencies: vec![],
             capabilities: CapabilityPolicy::default(),
@@ -1012,6 +1071,11 @@ mod tests {
             component_path: PathBuf::from("/tmp/component.wasm"),
             args: vec!["--help".to_string()],
             envs: std::collections::BTreeMap::new(),
+            wasi_mounts: vec![RunnerWasiMount {
+                host_path: PathBuf::from("/tmp/assets"),
+                guest_path: "/assets".to_string(),
+                read_only: true,
+            }],
             bindings: vec![],
             plugin_dependencies: vec![PluginDependency {
                 name: "yieldspace:plugin/example".to_string(),
@@ -1050,6 +1114,9 @@ mod tests {
             decoded.socket.as_ref().map(|cfg| cfg.protocol),
             Some(RunnerSocketProtocol::Udp)
         );
+        assert_eq!(decoded.wasi_mounts.len(), 1);
+        assert_eq!(decoded.wasi_mounts[0].guest_path, "/assets");
+        assert!(decoded.wasi_mounts[0].read_only);
         assert_eq!(decoded.plugin_dependencies.len(), 1);
         assert_eq!(
             decoded.plugin_dependencies[0].name,
@@ -1074,6 +1141,21 @@ mod tests {
             .validate()
             .expect_err("bootstrap should reject out-of-range http_worker_count");
         assert!(err.to_string().contains("http_worker_count"));
+    }
+
+    #[test]
+    fn runner_bootstrap_validate_rejects_invalid_wasi_guest_path() {
+        let mut bootstrap = valid_http_bootstrap();
+        bootstrap.wasi_mounts = vec![RunnerWasiMount {
+            host_path: PathBuf::from("/tmp/assets"),
+            guest_path: "../assets".to_string(),
+            read_only: true,
+        }];
+
+        let err = bootstrap
+            .validate()
+            .expect_err("bootstrap should reject invalid wasi guest path");
+        assert!(err.to_string().contains("guest_path"));
     }
 
     #[test]

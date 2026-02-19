@@ -17,8 +17,9 @@ use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{
     CapabilityPolicy, PluginDependency, RunnerAppType, RunnerBootstrap, RunnerInboundRequest,
-    RunnerInboundResponse, RunnerSocketConfig, ServiceBinding, compute_manager_auth_proof,
-    dbus_p2p::DbusP2pTransport, issue_invocation_token, now_unix_secs, random_secret_hex,
+    RunnerInboundResponse, RunnerSocketConfig, RunnerWasiMount, ServiceBinding,
+    compute_manager_auth_proof, dbus_p2p::DbusP2pTransport, issue_invocation_token, now_unix_secs,
+    random_secret_hex,
 };
 #[cfg(test)]
 use imagod_ipc::{ControlRequest, ControlResponse};
@@ -75,6 +76,8 @@ pub struct ServiceLaunch {
     pub args: Vec<String>,
     /// Environment variables for runtime.
     pub envs: BTreeMap<String, String>,
+    /// WASI preopened directory mounts.
+    pub wasi_mounts: Vec<RunnerWasiMount>,
     /// Allowed invocation bindings for this service.
     pub bindings: Vec<ServiceBinding>,
     /// Plugin dependencies available to the runtime.
@@ -314,6 +317,7 @@ impl ServiceSupervisor {
                 component_path: launch.component_path.clone(),
                 args: launch.args.clone(),
                 envs: launch.envs.clone(),
+                wasi_mounts: launch.wasi_mounts.clone(),
                 bindings: launch.bindings.clone(),
                 plugin_dependencies: launch.plugin_dependencies.clone(),
                 capabilities: launch.capabilities.clone(),

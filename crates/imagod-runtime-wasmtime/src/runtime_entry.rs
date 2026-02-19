@@ -11,7 +11,7 @@ use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{
     CapabilityPolicy, PluginDependency, RunnerAppType, RunnerSocketConfig, RunnerSocketDirection,
-    ServiceBinding,
+    RunnerWasiMount, ServiceBinding,
 };
 use imagod_runtime_internal::{
     ComponentRuntime, HttpComponentSupervisor, PluginResolver, RuntimeHttpRequest,
@@ -27,7 +27,7 @@ use wasmtime::{
     component::{Component, Func, Linker},
 };
 use wasmtime_wasi::{
-    WasiCtxBuilder,
+    DirPerms, FilePerms, WasiCtxBuilder,
     p2::{add_to_linker_async, bindings::Command},
     sockets::SocketAddrUse,
 };
@@ -126,6 +126,7 @@ impl WasmRuntime {
         &self,
         args: &[String],
         envs: &BTreeMap<String, String>,
+        wasi_mounts: &[RunnerWasiMount],
         socket: Option<&RunnerSocketConfig>,
         native_plugin_context: NativePluginContext,
     ) -> Result<Store<WasiState>, ImagodError> {
@@ -140,6 +141,9 @@ impl WasmRuntime {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect::<Vec<_>>();
             builder.envs(&vars);
+        }
+        if !wasi_mounts.is_empty() {
+            configure_wasi_mounts(&mut builder, wasi_mounts)?;
         }
         if let Some(socket) = socket {
             configure_socket_policy(&mut builder, socket)?;
@@ -190,6 +194,7 @@ impl WasmRuntime {
         component_path: &Path,
         args: &[String],
         envs: &BTreeMap<String, String>,
+        wasi_mounts: &[RunnerWasiMount],
         socket: Option<&RunnerSocketConfig>,
         native_plugin_context: NativePluginContext,
         plugin_dependencies: &[PluginDependency],
@@ -209,7 +214,7 @@ impl WasmRuntime {
         add_to_linker_async(&mut linker)
             .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
 
-        let mut store = self.build_store(args, envs, socket, native_plugin_context)?;
+        let mut store = self.build_store(args, envs, wasi_mounts, socket, native_plugin_context)?;
         let available_plugins = instantiate_plugin_dependencies(
             self.plugin_resolver.as_ref(),
             self.capability_checker.as_ref(),
@@ -274,6 +279,7 @@ impl WasmRuntime {
         component_path: &Path,
         args: &[String],
         envs: &BTreeMap<String, String>,
+        wasi_mounts: &[RunnerWasiMount],
         native_plugin_context: NativePluginContext,
         plugin_dependencies: &[PluginDependency],
         capabilities: &CapabilityPolicy,
@@ -297,7 +303,7 @@ impl WasmRuntime {
         add_only_http_to_linker_async(&mut linker)
             .map_err(|e| map_runtime_error(format!("failed to add WASI HTTP linker: {e}")))?;
 
-        let mut store = self.build_store(args, envs, None, native_plugin_context)?;
+        let mut store = self.build_store(args, envs, wasi_mounts, None, native_plugin_context)?;
         let available_plugins = instantiate_plugin_dependencies(
             self.plugin_resolver.as_ref(),
             self.capability_checker.as_ref(),
@@ -385,6 +391,7 @@ impl WasmRuntime {
         component_path: &Path,
         args: &[String],
         envs: &BTreeMap<String, String>,
+        wasi_mounts: &[RunnerWasiMount],
         native_plugin_context: NativePluginContext,
         plugin_dependencies: &[PluginDependency],
         capabilities: &CapabilityPolicy,
@@ -404,7 +411,7 @@ impl WasmRuntime {
         add_to_linker_async(&mut linker)
             .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
 
-        let mut store = self.build_store(args, envs, None, native_plugin_context)?;
+        let mut store = self.build_store(args, envs, wasi_mounts, None, native_plugin_context)?;
         let available_plugins = instantiate_plugin_dependencies(
             self.plugin_resolver.as_ref(),
             self.capability_checker.as_ref(),
@@ -510,6 +517,7 @@ impl WasmRuntime {
             component_path,
             args,
             envs,
+            wasi_mounts,
             plugin_dependencies,
             capabilities,
             bindings,
@@ -539,6 +547,7 @@ impl WasmRuntime {
             &component_path,
             &args,
             &envs,
+            &wasi_mounts,
             native_plugin_context,
             &plugin_dependencies,
             &capabilities,
@@ -636,6 +645,7 @@ impl ComponentRuntime for WasmRuntime {
             component_path,
             args,
             envs,
+            wasi_mounts,
             socket,
             plugin_dependencies,
             capabilities,
@@ -668,6 +678,7 @@ impl ComponentRuntime for WasmRuntime {
                     &component_path,
                     &args,
                     &envs,
+                    &wasi_mounts,
                     None,
                     native_plugin_context.clone(),
                     &plugin_dependencies,
@@ -696,6 +707,7 @@ impl ComponentRuntime for WasmRuntime {
                     &component_path,
                     &args,
                     &envs,
+                    &wasi_mounts,
                     native_plugin_context.clone(),
                     &plugin_dependencies,
                     &capabilities,
@@ -718,6 +730,7 @@ impl ComponentRuntime for WasmRuntime {
                     &component_path,
                     &args,
                     &envs,
+                    &wasi_mounts,
                     Some(socket),
                     native_plugin_context,
                     &plugin_dependencies,
@@ -770,6 +783,34 @@ fn configure_socket_policy(
     Ok(())
 }
 
+fn configure_wasi_mounts(
+    builder: &mut WasiCtxBuilder,
+    mounts: &[RunnerWasiMount],
+) -> Result<(), ImagodError> {
+    for mount in mounts {
+        let (dir_perms, file_perms) = if mount.read_only {
+            (DirPerms::READ, FilePerms::READ)
+        } else {
+            (DirPerms::all(), FilePerms::all())
+        };
+        builder
+            .preopened_dir(
+                &mount.host_path,
+                mount.guest_path.as_str(),
+                dir_perms,
+                file_perms,
+            )
+            .map_err(|err| {
+                map_runtime_error(format!(
+                    "failed to preopen mount {} -> {}: {err}",
+                    mount.host_path.display(),
+                    mount.guest_path
+                ))
+            })?;
+    }
+    Ok(())
+}
+
 fn socket_addr_allowed(
     address: SocketAddr,
     use_kind: SocketAddrUse,
@@ -801,8 +842,14 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imagod_ipc::{RunnerSocketConfig, RunnerSocketProtocol};
-    use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf};
+    use imagod_ipc::{RunnerSocketConfig, RunnerSocketProtocol, RunnerWasiMount};
+    use std::{
+        collections::BTreeMap,
+        fs,
+        net::SocketAddr,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn sample_socket_config() -> RunnerSocketConfig {
         RunnerSocketConfig {
@@ -820,6 +867,14 @@ mod tests {
             headers: Vec::new(),
             body: Vec::new(),
         }
+    }
+
+    fn temp_mount_root(prefix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("imago-runtime-wasi-mount-{prefix}-{nonce}"))
     }
 
     #[tokio::test]
@@ -853,6 +908,7 @@ mod tests {
                 component_path: PathBuf::from("/tmp/unused.wasm"),
                 args: Vec::new(),
                 envs: BTreeMap::new(),
+                wasi_mounts: Vec::new(),
                 socket: None,
                 plugin_dependencies: Vec::new(),
                 capabilities: CapabilityPolicy::default(),
@@ -888,6 +944,7 @@ mod tests {
                 component_path: PathBuf::from("/tmp/non-existent-socket-component.wasm"),
                 args: Vec::new(),
                 envs: BTreeMap::new(),
+                wasi_mounts: Vec::new(),
                 socket: Some(sample_socket_config()),
                 plugin_dependencies: Vec::new(),
                 capabilities: CapabilityPolicy::default(),
@@ -923,6 +980,7 @@ mod tests {
                 component_path: PathBuf::from("/tmp/non-existent-http-component.wasm"),
                 args: Vec::new(),
                 envs: BTreeMap::new(),
+                wasi_mounts: Vec::new(),
                 socket: None,
                 plugin_dependencies: Vec::new(),
                 capabilities: CapabilityPolicy::default(),
@@ -958,6 +1016,7 @@ mod tests {
                 component_path: PathBuf::from("/tmp/non-existent-rpc-component.wasm"),
                 args: Vec::new(),
                 envs: BTreeMap::new(),
+                wasi_mounts: Vec::new(),
                 socket: None,
                 plugin_dependencies: Vec::new(),
                 capabilities: CapabilityPolicy::default(),
@@ -986,6 +1045,7 @@ mod tests {
             component_path: PathBuf::from("/tmp/non-existent-rpc-component.wasm"),
             args: Vec::new(),
             envs: BTreeMap::new(),
+            wasi_mounts: Vec::new(),
             socket: None,
             plugin_dependencies: Vec::new(),
             capabilities: CapabilityPolicy::default(),
@@ -1085,5 +1145,34 @@ mod tests {
         );
         assert!(outbound_allowed);
         assert!(!outbound_denied);
+    }
+
+    #[test]
+    fn configure_wasi_mounts_accepts_read_write_and_read_only() {
+        let root = temp_mount_root("permissions");
+        let rw = root.join("rw");
+        let ro = root.join("ro");
+        fs::create_dir_all(&rw).expect("rw dir should be created");
+        fs::create_dir_all(&ro).expect("ro dir should be created");
+
+        let mut builder = WasiCtxBuilder::new();
+        configure_wasi_mounts(
+            &mut builder,
+            &[
+                RunnerWasiMount {
+                    host_path: rw,
+                    guest_path: "/guest/rw".to_string(),
+                    read_only: false,
+                },
+                RunnerWasiMount {
+                    host_path: ro,
+                    guest_path: "/guest/ro".to_string(),
+                    read_only: true,
+                },
+            ],
+        )
+        .expect("mount configuration should succeed");
+
+        let _ = fs::remove_dir_all(root);
     }
 }

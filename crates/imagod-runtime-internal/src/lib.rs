@@ -8,7 +8,8 @@ use std::{
 use async_trait::async_trait;
 use imagod_common::ImagodError;
 use imagod_ipc::{
-    CapabilityPolicy, PluginDependency, RunnerAppType, RunnerSocketConfig, ServiceBinding,
+    CapabilityPolicy, PluginDependency, RunnerAppType, RunnerSocketConfig, RunnerWasiMount,
+    ServiceBinding,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -29,6 +30,8 @@ pub struct RuntimeRunRequest {
     pub args: Vec<String>,
     /// Runtime environment variables.
     pub envs: BTreeMap<String, String>,
+    /// WASI preopened directory mounts.
+    pub wasi_mounts: Vec<RunnerWasiMount>,
     /// Socket runtime settings when `app_type=socket`.
     pub socket: Option<RunnerSocketConfig>,
     /// Plugin dependencies resolved from manifest and prepared by manager.
@@ -70,6 +73,8 @@ pub struct RuntimeInvokeRequest {
     pub args: Vec<String>,
     /// Runtime environment variables.
     pub envs: BTreeMap<String, String>,
+    /// WASI preopened directory mounts.
+    pub wasi_mounts: Vec<RunnerWasiMount>,
     /// Plugin dependencies resolved from manifest and prepared by manager.
     pub plugin_dependencies: Vec<PluginDependency>,
     /// App-level capability policy used by runtime bridge authorization.

@@ -7,18 +7,4 @@ command = "cargo build --target wasm32-wasip2 --release"
 
 [capabilities]
 privileged = false
-
-[capabilities.wasi]
-"wasi:cli/environment@0.2.6" = ["*"]
-"wasi:cli/exit@0.2.6" = ["*"]
-"wasi:cli/stderr@0.2.6" = ["*"]
-"wasi:cli/stdin@0.2.6" = ["*"]
-"wasi:cli/stdout@0.2.6" = ["*"]
-"wasi:clocks/monotonic-clock@0.2.6" = ["*"]
-"wasi:clocks/wall-clock@0.2.6" = ["*"]
-"wasi:io/error@0.2.6" = ["*"]
-"wasi:io/poll@0.2.6" = ["*"]
-"wasi:io/streams@0.2.6" = ["*"]
-"wasi:random/insecure-seed@0.2.6" = ["*"]
-"wasi:random/insecure@0.2.6" = ["*"]
-"wasi:random/random@0.2.6" = ["*"]
+wasi = true

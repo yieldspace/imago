@@ -317,8 +317,16 @@ backend 選択:
 
 - `imagod-runtime` は feature `runtime-wasmtime`（default ON）で backend を有効化する。
 - runner は `create_runtime_backend()` で backend を生成する。
-- runner bootstrap には `plugin_dependencies` / `capabilities` が含まれ、runtime bridge の認可入力として利用する。
+- runner bootstrap には `plugin_dependencies` / `capabilities` / `wasi` が含まれ、runtime bridge の認可入力として利用する。
 - feature OFF 時は runner 起動時に `E_INTERNAL` / `stage=runner.process` で明示的に失敗する。
+
+WASI 設定伝播（manager -> runner -> runtime）:
+
+- manager（`orchestrator`）は release `manifest.json` の `capabilities.wasi` と `wasi`（`args` / `env` / `mounts` / `read_only_mounts`）を `ServiceLaunch` に格納する。
+- `service_supervisor.start` は `ServiceLaunch` を `RunnerBootstrap`（stdin CBOR）へ変換して runner へ渡す。
+- runner process は `RunnerBootstrap` の `capabilities.wasi` と `wasi` を runtime request へ引き継ぎ、backend へ渡す。
+- runtime backend は mount 権限を `wasi.mounts` = `DirPerms::all` / `FilePerms::all`、`wasi.read_only_mounts` = `DirPerms::READ` / `FilePerms::READ` で適用する。
+- `wasi.mounts` / `wasi.read_only_mounts` の `guest_path`・`asset_dir` 重複（同一・跨ぎ）は manager 側の起動前検証で拒否し、runner 起動へ進ませない。
 
 設定:
 
@@ -517,6 +525,13 @@ flowchart TD
 - [BREAKING] transport 初期化は `tls.server_cert` / `tls.client_ca_cert` 読み込みをやめ、`tls.server_key` と `tls.client_public_keys` を正本にする。
 - server 側のクライアント認可は `client_public_keys` の静的 allowlist で判定する。
 - client 側のサーバ認証は `known_hosts` による pin を前提とし、初回接続時のみ TOFU 登録を許可する。
+
+## 実装反映ノート（WASI capability/mounts 伝播 / 2026-02-19）
+
+- `capabilities.wasi` は bool/table 両受理へ変更した。`true` は全 WASI 許可、`false` は空ルールとして扱う。
+- manager は `manifest.wasi.args` / `manifest.wasi.env` / `manifest.wasi.mounts` / `manifest.wasi.read_only_mounts` を `ServiceLaunch` に保持し、`RunnerBootstrap` 経由で runner へ伝播する。
+- runner は同設定を runtime backend へそのまま引き継ぎ、WASI コンテキスト構築に使用する。
+- mount 権限は `wasi.mounts` を read/write（`DirPerms::all` / `FilePerms::all`）、`wasi.read_only_mounts` を read-only（`DirPerms::READ` / `FilePerms::READ`）へ写像する。
 
 ## 実装参照インデックス
 
