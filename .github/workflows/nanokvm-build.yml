@@ -4,6 +4,10 @@ on:
     branches:
       - main
   workflow_dispatch:
+
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -11,7 +15,7 @@ jobs:
   build:
     runs-on: imago-nanokvm-runner-set
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -19,7 +23,7 @@ jobs:
         run: echo "/home/runner/riscv64-unknown-linux-musl/bin" >> "$GITHUB_PATH"
 
       - name: Install toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
 
@@ -30,12 +34,12 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release --bin imago-nanokvm -F host-nanokvm -F plugins/nanokvm --target riscv64gc-unknown-linux-musl
+        run: cargo build --locked --release --bin imagod --target riscv64gc-unknown-linux-musl
 
       - name: Upload Imago
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
-          if-no-files-found: 'error'
-          name: imago-${{ steps.checkout.outputs.commit }}
-          path: target/riscv64gc-unknown-linux-musl/release/imago-nanokvm
+          if-no-files-found: error
+          name: imago-${{ github.sha }}
+          path: target/riscv64gc-unknown-linux-musl/release/imagod
           retention-days: 12
