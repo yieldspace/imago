@@ -5,7 +5,8 @@ compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "certs/server.key"
-client_public_keys = ["43a7f7c1ed8c267ffc27ac39357e17a1a795d16b404c4bdb39f3ef314029ec63"]
+admin_public_keys = ["43a7f7c1ed8c267ffc27ac39357e17a1a795d16b404c4bdb39f3ef314029ec63"]
+client_public_keys = ["fcd89a1ca20df647e248b412ae08effc924ab4cde1622c6596aed291e4d22243"]
 
 [runtime]
 chunk_size = 1048576

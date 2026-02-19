@@ -40,7 +40,6 @@ Ferris plugin（`warg://sizumita:ferris@0.1.0`）を使う最短の実行例は
 ```bash
 git clone https://github.com/yieldspace/imago
 cd imago/examples/local-imagod-plugin-hello
-./scripts/generate-certs.sh
 cargo run --manifest-path ../../Cargo.toml -p imago-cli -- update
 # terminal 1: ./scripts/run-imagod.sh
 # terminal 2: ./scripts/deploy.sh

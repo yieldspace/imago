@@ -27,13 +27,7 @@ git clone https://github.com/yieldspace/imago
 cd imago/examples/local-imagod-plugin-hello
 ```
 
-## 2. 証明書を生成
-
-```bash
-./scripts/generate-certs.sh
-```
-
-## 3. 依存解決（必須）
+## 2. 依存解決（必須）
 
 ```bash
 cargo run --manifest-path ../../Cargo.toml -p imago-cli -- update
@@ -62,13 +56,13 @@ wit = "warg://sizumita:ferris@0.1.0"
 
 `warg://sizumita:ferris@0.1.0` は component のため、`[dependencies.component]` は不要です。
 
-## 4. `imagod` を起動（ターミナル1）
+## 3. `imagod` を起動（ターミナル1）
 
 ```bash
 ./scripts/run-imagod.sh
 ```
 
-## 5. デプロイ（ターミナル2）
+## 4. デプロイ（ターミナル2）
 
 ```bash
 ./scripts/deploy.sh
@@ -77,7 +71,7 @@ wit = "warg://sizumita:ferris@0.1.0"
 `imago build` / `imago deploy` は `.imago/deps/` を依存の正本として使います。
 必要な依存キャッシュが不足している場合は失敗し、`imago update` を要求します。
 
-## 6. 出力確認
+## 5. 出力確認
 
 ```bash
 ./scripts/verify-hello.sh
