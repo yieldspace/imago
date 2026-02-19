@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use imago_protocol::ErrorCode;
@@ -48,22 +48,25 @@ pub(crate) fn validate(config: &ImagodConfig) -> Result<(), ImagodError> {
         ));
     }
 
-    let mut seen = HashSet::with_capacity(config.tls.client_public_keys.len());
-    for (index, key_hex) in config.tls.client_public_keys.iter().enumerate() {
+    let client_keys =
+        parse_unique_public_key_hexes(&config.tls.client_public_keys, "tls.client_public_keys")?;
+    parse_unique_public_key_hexes(&config.tls.admin_public_keys, "tls.admin_public_keys")?;
+    parse_known_public_key_map(&config.tls.known_public_keys)?;
+
+    for (index, key_hex) in config.tls.admin_public_keys.iter().enumerate() {
         let decoded = parse_ed25519_raw_public_key_hex(key_hex).map_err(|reason| {
             ImagodError::new(
                 ErrorCode::BadRequest,
                 "config.load",
-                format!("tls.client_public_keys[{index}] {reason}"),
+                format!("tls.admin_public_keys[{index}] {reason}"),
             )
             .with_detail("index", index.to_string())
         })?;
-
-        if !seen.insert(decoded) {
+        if client_keys.contains(&decoded) {
             return Err(ImagodError::new(
                 ErrorCode::BadRequest,
                 "config.load",
-                format!("tls.client_public_keys[{index}] is duplicated"),
+                format!("tls.admin_public_keys[{index}] overlaps tls.client_public_keys"),
             )
             .with_detail("index", index.to_string()));
         }
@@ -186,4 +189,53 @@ pub(crate) fn validate(config: &ImagodConfig) -> Result<(), ImagodError> {
     }
 
     Ok(())
+}
+
+fn parse_known_public_key_map(entries: &BTreeMap<String, String>) -> Result<(), ImagodError> {
+    for (authority, key_hex) in entries {
+        let trimmed = authority.trim();
+        if trimmed.is_empty() {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.load",
+                "tls.known_public_keys authority must not be empty",
+            ));
+        }
+        parse_ed25519_raw_public_key_hex(key_hex).map_err(|reason| {
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.load",
+                format!("tls.known_public_keys['{trimmed}'] {reason}"),
+            )
+            .with_detail("authority", trimmed.to_string())
+        })?;
+    }
+    Ok(())
+}
+
+fn parse_unique_public_key_hexes(
+    key_hexes: &[String],
+    field: &str,
+) -> Result<HashSet<[u8; 32]>, ImagodError> {
+    let mut seen = HashSet::with_capacity(key_hexes.len());
+    for (index, key_hex) in key_hexes.iter().enumerate() {
+        let decoded = parse_ed25519_raw_public_key_hex(key_hex).map_err(|reason| {
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.load",
+                format!("{field}[{index}] {reason}"),
+            )
+            .with_detail("index", index.to_string())
+        })?;
+
+        if !seen.insert(decoded) {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.load",
+                format!("{field}[{index}] is duplicated"),
+            )
+            .with_detail("index", index.to_string()));
+        }
+    }
+    Ok(seen)
 }

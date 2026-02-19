@@ -1,11 +1,14 @@
-use std::{collections::HashSet, io::BufReader, path::Path, sync::Arc};
+use std::{io::BufReader, path::Path, sync::Arc};
 
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
-use imagod_config::{ImagodConfig, parse_ed25519_raw_public_key_hex};
+use imagod_config::ImagodConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer, UnixTime};
 
 use super::STAGE_TRANSPORT;
+use crate::protocol_handler::{
+    is_tls_client_key_allowlisted, sync_dynamic_public_keys_from_config,
+};
 
 const ED25519_SPKI_PREFIX: [u8; 12] = [
     0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
@@ -16,12 +19,10 @@ pub(crate) fn build_tls_server_config(
 ) -> Result<rustls::ServerConfig, ImagodError> {
     let provider = web_transport_quinn::crypto::default_provider();
     let server_key = load_server_raw_public_key(&config.tls.server_key, &provider)?;
-    let client_key_allowlist = parse_client_public_key_allowlist(&config.tls.client_public_keys)?;
+    sync_dynamic_public_keys_from_config(config)?;
 
-    let client_verifier = RawPublicKeyClientVerifier::new(
-        client_key_allowlist,
-        provider.signature_verification_algorithms,
-    );
+    let client_verifier =
+        RawPublicKeyClientVerifier::new(provider.signature_verification_algorithms);
 
     let mut tls = rustls::ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
@@ -45,18 +46,13 @@ pub(crate) fn build_tls_server_config(
 
 #[derive(Debug)]
 struct RawPublicKeyClientVerifier {
-    allowlist: HashSet<[u8; 32]>,
     supported_algs: rustls::crypto::WebPkiSupportedAlgorithms,
     root_hint_subjects: Vec<rustls::DistinguishedName>,
 }
 
 impl RawPublicKeyClientVerifier {
-    fn new(
-        allowlist: HashSet<[u8; 32]>,
-        supported_algs: rustls::crypto::WebPkiSupportedAlgorithms,
-    ) -> Self {
+    fn new(supported_algs: rustls::crypto::WebPkiSupportedAlgorithms) -> Self {
         Self {
-            allowlist,
             supported_algs,
             root_hint_subjects: Vec::new(),
         }
@@ -84,9 +80,10 @@ impl rustls::server::danger::ClientCertVerifier for RawPublicKeyClientVerifier {
             extract_ed25519_raw_public_key(end_entity.as_ref(), "client raw public key")
                 .map_err(rustls::Error::General)?;
 
-        if !self.allowlist.contains(&client_key) {
+        if !is_tls_client_key_allowlisted(&client_key) {
             return Err(rustls::Error::General(
-                "client raw public key is not present in tls.client_public_keys".to_string(),
+                "client raw public key is not present in tls.client_public_keys/admin_public_keys"
+                    .to_string(),
             ));
         }
 
@@ -126,25 +123,6 @@ impl rustls::server::danger::ClientCertVerifier for RawPublicKeyClientVerifier {
     fn requires_raw_public_keys(&self) -> bool {
         true
     }
-}
-
-fn parse_client_public_key_allowlist(
-    key_hexes: &[String],
-) -> Result<HashSet<[u8; 32]>, ImagodError> {
-    let mut allowlist = HashSet::with_capacity(key_hexes.len());
-
-    for (index, key_hex) in key_hexes.iter().enumerate() {
-        let key = parse_ed25519_raw_public_key_hex(key_hex).map_err(|reason| {
-            ImagodError::new(
-                ErrorCode::BadRequest,
-                STAGE_TRANSPORT,
-                format!("invalid tls.client_public_keys[{index}]: {reason}"),
-            )
-        })?;
-        allowlist.insert(key);
-    }
-
-    Ok(allowlist)
 }
 
 fn load_server_raw_public_key(
@@ -239,13 +217,27 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, ImagodError> 
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::Mutex, time::Duration};
+
     use super::*;
-    use std::time::Duration;
+    use crate::protocol_handler::{
+        replace_dynamic_public_keys_for_tests, upsert_dynamic_client_public_key,
+    };
+
+    static DYNAMIC_KEYS_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     fn ed25519_spki_from_raw(raw: [u8; 32]) -> Vec<u8> {
         let mut spki = ED25519_SPKI_PREFIX.to_vec();
         spki.extend_from_slice(&raw);
         spki
+    }
+
+    fn hex_32(byte: u8) -> String {
+        let mut out = String::with_capacity(64);
+        for _ in 0..32 {
+            out.push_str(&format!("{byte:02x}"));
+        }
+        out
     }
 
     #[test]
@@ -269,12 +261,13 @@ mod tests {
 
     #[test]
     fn verifier_accepts_allowlisted_client_key() {
+        let _guard = DYNAMIC_KEYS_TEST_MUTEX
+            .lock()
+            .expect("mutex lock should succeed");
         let key = [0x11u8; 32];
-        let mut allowlist = HashSet::new();
-        allowlist.insert(key);
+        replace_dynamic_public_keys_for_tests(&[], &[key]);
 
         let verifier = RawPublicKeyClientVerifier::new(
-            allowlist,
             web_transport_quinn::crypto::default_provider().signature_verification_algorithms,
         );
 
@@ -291,11 +284,12 @@ mod tests {
 
     #[test]
     fn verifier_rejects_non_allowlisted_client_key() {
-        let mut allowlist = HashSet::new();
-        allowlist.insert([0x11u8; 32]);
+        let _guard = DYNAMIC_KEYS_TEST_MUTEX
+            .lock()
+            .expect("mutex lock should succeed");
+        replace_dynamic_public_keys_for_tests(&[], &[[0x11u8; 32]]);
 
         let verifier = RawPublicKeyClientVerifier::new(
-            allowlist,
             web_transport_quinn::crypto::default_provider().signature_verification_algorithms,
         );
 
@@ -316,12 +310,44 @@ mod tests {
     }
 
     #[test]
-    fn verifier_rejects_non_ed25519_client_key() {
-        let mut allowlist = HashSet::new();
-        allowlist.insert([0x11u8; 32]);
+    fn verifier_reflects_dynamic_allowlist_update() {
+        let _guard = DYNAMIC_KEYS_TEST_MUTEX
+            .lock()
+            .expect("mutex lock should succeed");
+        replace_dynamic_public_keys_for_tests(&[], &[]);
 
         let verifier = RawPublicKeyClientVerifier::new(
-            allowlist,
+            web_transport_quinn::crypto::default_provider().signature_verification_algorithms,
+        );
+        let cert = CertificateDer::from(ed25519_spki_from_raw([0x44u8; 32]));
+        let now = UnixTime::since_unix_epoch(Duration::from_secs(0));
+        let initial = rustls::server::danger::ClientCertVerifier::verify_client_cert(
+            &verifier,
+            &cert,
+            &[],
+            now,
+        );
+        assert!(initial.is_err());
+
+        upsert_dynamic_client_public_key(&hex_32(0x44))
+            .expect("dynamic allowlist update should succeed");
+        let updated = rustls::server::danger::ClientCertVerifier::verify_client_cert(
+            &verifier,
+            &cert,
+            &[],
+            now,
+        );
+        assert!(updated.is_ok());
+    }
+
+    #[test]
+    fn verifier_rejects_non_ed25519_client_key() {
+        let _guard = DYNAMIC_KEYS_TEST_MUTEX
+            .lock()
+            .expect("mutex lock should succeed");
+        replace_dynamic_public_keys_for_tests(&[], &[[0x11u8; 32]]);
+
+        let verifier = RawPublicKeyClientVerifier::new(
             web_transport_quinn::crypto::default_provider().signature_verification_algorithms,
         );
 
@@ -346,11 +372,12 @@ mod tests {
 
     #[test]
     fn verifier_supports_only_ed25519_signature_scheme() {
-        let mut allowlist = HashSet::new();
-        allowlist.insert([0x11u8; 32]);
+        let _guard = DYNAMIC_KEYS_TEST_MUTEX
+            .lock()
+            .expect("mutex lock should succeed");
+        replace_dynamic_public_keys_for_tests(&[], &[[0x11u8; 32]]);
 
         let verifier = RawPublicKeyClientVerifier::new(
-            allowlist,
             web_transport_quinn::crypto::default_provider().signature_verification_algorithms,
         );
 

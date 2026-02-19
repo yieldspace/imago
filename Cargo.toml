@@ -1,3 +1,8 @@
+[profile.release]
+lto = true
+opt-level = "s"
+codegen-units = 1
+
 [workspace]
 resolver = "3"
 members = [
@@ -51,6 +56,7 @@ web-transport-quinn = "0.11.1"
 syn = "2.0.111"
 
 imago-plugin-imago-admin = { path = "plugins/imago-admin" }
+imago-plugin-imago-node = { path = "plugins/imago-node" }
 imago-lockfile = { path = "crates/imago-lockfile" }
 imago-plugin-macros = { path = "crates/imago-plugin-macros" }
 imago-protocol = { path = "crates/imago-protocol" }

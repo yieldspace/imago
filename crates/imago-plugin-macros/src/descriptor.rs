@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use wit_parser::{Resolve, WorldItem};
+use wit_parser::{Resolve, TypeDefKind, WorldItem};
 
 #[derive(Debug)]
 pub(crate) struct WitDescriptor {
@@ -59,8 +59,13 @@ pub(crate) fn parse_wit_descriptor(
     let (interface_id, import_name) = imported_interfaces.remove(0);
     let interface = &resolve.interfaces[interface_id];
 
-    if !interface.types.is_empty() {
-        return Err("imported interface must not define non-function types".to_string());
+    for (type_name, type_id) in &interface.types {
+        let type_def = &resolve.types[*type_id];
+        if !matches!(type_def.kind, TypeDefKind::Resource) {
+            return Err(format!(
+                "imported interface type '{type_name}' is not supported; only resource types are allowed"
+            ));
+        }
     }
 
     if interface.functions.is_empty() {
@@ -178,6 +183,42 @@ world host {
     }
 
     #[test]
+    fn parse_wit_descriptor_allows_resource_types() {
+        let root = new_temp_dir("resource-type");
+        write(
+            &root.join("wit/package.wit"),
+            r#"
+package imago:node@0.1.0;
+
+interface rpc {
+    resource connection {
+        disconnect: func();
+    }
+
+    connect: func(addr: string) -> result<connection, string>;
+}
+
+world host {
+    import rpc;
+}
+"#,
+        );
+
+        let descriptor = parse_wit_descriptor(&root.join("wit"), "host")
+            .expect("resource types should be accepted");
+        assert_eq!(descriptor.package_name, "imago:node");
+        assert_eq!(descriptor.import_name, "imago:node/rpc@0.1.0");
+        assert!(
+            descriptor
+                .symbols
+                .iter()
+                .any(|symbol| symbol.ends_with(".connect")),
+            "expected connect symbol in {:?}",
+            descriptor.symbols
+        );
+    }
+
+    #[test]
     fn parse_wit_descriptor_rejects_non_function_types() {
         let root = new_temp_dir("non-function-type");
         write(
@@ -199,7 +240,7 @@ world host {
         let err = parse_wit_descriptor(&root.join("wit"), "host")
             .expect_err("interface types should fail");
         assert!(
-            err.contains("must not define non-function types"),
+            err.contains("only resource types are allowed"),
             "unexpected error: {err}"
         );
     }

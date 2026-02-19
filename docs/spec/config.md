@@ -12,7 +12,7 @@
 ## 用語
 
 - base 設定: `imago.toml` のトップレベル設定。
-- env 設定: `[env.<name>]` 配下の上書き設定。
+- env 設定（廃止）: 旧仕様の `[env.<name>]` 配下上書き設定。
 - capabilities: runtime で明示許可する権限。
 
 <a id="required-keys"></a>
@@ -22,7 +22,7 @@
 |---|---|---|---|
 | `name` | string | 1-63 文字、空文字不可、`/` `\` `..` 禁止 | サービス識別名 |
 | `main` | string | 相対パス、空文字不可 | 実行対象の Wasm パス |
-| `type` | string | `cli` / `http` / `socket` のいずれか | 実行モデル |
+| `type` | string | `cli` / `http` / `socket` / `rpc` のいずれか | 実行モデル |
 | `target` | table | 必須 | デプロイ先設定 |
 
 `name` の許可文字は ASCII 英数字、`.`、`-`、`_`。`/`、`\`、`..` は path 文字として拒否する。
@@ -40,15 +40,13 @@
 - `bindings`
 
 <a id="env-override"></a>
-## `--env` 上書き規則
+## `--env` 廃止規則
 
-1. `--env` 未指定時は base 設定のみを使う。
-2. `--env <name>` 指定時は `[env.<name>]` を base 設定にマージする。
-3. `--env <name>` 指定時に読み込む環境変数ファイルは `.env.<name>` のみ。
-4. マージ範囲はトップレベルキー単位。`[env.<name>]` で指定したキーは base 側の同名キーを丸ごと置換する。
-5. 指定された env 名が存在しない場合はエラー。
+[BREAKING] `--env` は廃止した。現行実装では次を行わない。
 
-`<name>` の許可文字は ASCII 英数字、`.`、`-`、`_`。`/`、`\`、`..` は禁止する。
+- `[env.<name>]` のマージ
+- `.env.<name>` の読み込み
+- env 名バリデーション
 
 ## build コマンド設定
 
@@ -57,13 +55,13 @@
   - string: `sh -c "<command>"` として実行
   - array: `["cmd", "arg1", ...]` として直接実行
 - `build.command` 未指定時はビルドコマンドを実行せず、`main` の存在検証のみ行う。
-- `--env <name>` 指定時は `.env.<name>` の値を build サブプロセス環境へ注入する。
+- `--env` および `.env.<name>` 注入は廃止した（network RPC 導入時の breaking 変更）。
 
 ## `[[bindings]]`（service 間呼び出し許可）
 
 - `[[bindings]]` は service 間関数呼び出しの許可ルールを定義する。
 - 各要素は以下を必須とする。
-  - `target`: 呼び出し先 service 名（`name` と同じ文字制約）
+  - `name`: 呼び出し先 service 名（`name` と同じ文字制約）
   - `wit`: interface 識別子文字列
 - `imago build` はこの設定を `manifest.bindings[]` に正規化して出力する。
 - 未指定時は `manifest.bindings=[]` として扱い、runtime は deny-by-default で拒否する。
@@ -187,9 +185,6 @@
 
 ## 異常系
 
-- 存在しない env 指定。
-- 不正な env 名（`/`、`\`、`..` を含む、または許可文字外を含む）。
-- `.env.<name>` の読み込み失敗。
 - 型不正（例: `shutdown_timeout = "abc"`）。
 - 不正な `type`。
 
@@ -200,7 +195,6 @@
 
 ## 実装反映ノート
 
-- `[env.<name>]` の反映はトップレベルキー単位の置換で実装する。
 - `build.command` は string / array の両形式を受理する。
 - `build.command` は必須キー (`name`/`main`/`type`/`target`) と `vars`/`dependencies` の検証完了後に実行する。不正設定時は実行しない。
 - `imago update` は `warg://` / `file://` を受理し、依存WIT/Componentを `.imago/deps/` に保存した上で `wit/deps/` を再生成する。
@@ -212,13 +206,11 @@
 - `imago update` は `file://` source が存在する場合のみ hash 差分を監視し、差分があればキャッシュを再解決する。source が消えている場合は既存キャッシュを優先する。
 - `imago build` は `capabilities` を正規化して manifest に出力し、`capabilirties` キーは設定エラーとして拒否する。
 - `imago build` は `[[dependencies]]` がある場合、`.imago/deps` から `wit/deps` を再構築してから `imago.lock(version=1)` の `wit_*` / `component_*` / `wit_packages` を検証し、不一致時は `imago update` を要求して失敗する（`kind=wasm` で `component` 未指定の場合は `wit` 由来の期待値と照合する）。
-- `imago build --env <name>` は `build/manifest.<name>.json` を生成し、`build/manifest.json` は更新しない。
 - `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
 - `[[bindings]]` は `manifest.bindings[]` へ正規化し、runtime の呼び出し認可入力として扱う。
 - `type="http"` のときのみ `[http].port` / `[http].max_body_bytes` を受理し、`manifest.http.port` / `manifest.http.max_body_bytes` へ反映する。
 - `type="socket"` のときのみ `[socket].protocol` / `[socket].direction` / `[socket].listen_addr` / `[socket].listen_port` を受理し、`manifest.socket.*` へ反映する。
 - CLI の `name` 検証は `imagod` と同等に `..` を拒否し、path 文字を明示的に弾く。
-- `--env <name>` は manifest 出力先と `.env.<name>` 解決の双方で同一バリデーションを適用し、path traversal を拒否する。
 - `target.<name>.client_key` は path traversal と不正区切りを拒否し、相対指定を `project_root` 基準の絶対パスへ解決する。
 - `known_hosts` は設定キーとして受理せず、CLI 既定パス `~/.imago/known_hosts` を常に使用する。
 - `imagod.storage_root` の既定値は OS 別（Linux=`/var/lib/imago`, macOS=`/usr/local/var/imago`, Windows=`C:\ProgramData\imago`, その他=`/var/lib/imago`）にし、ビルド時環境変数 `IMAGOD_STORAGE_ROOT_DEFAULT` で上書きできる。`imagod.toml` の明示値を最優先する。
@@ -256,7 +248,9 @@
 - `server_version`
 - `compatibility_date`（`YYYY-MM-DD`、既定値 `2026-02-10`）
 - `tls.server_key`
-- `tls.client_public_keys`（ed25519 公開鍵 raw 32byte hex を 1 要素以上）
+- `tls.admin_public_keys`（ed25519 公開鍵 raw 32byte hex。管理操作を許可）
+- `tls.client_public_keys`（ed25519 公開鍵 raw 32byte hex を 1 要素以上。`rpc.invoke` 専用）
+- `tls.known_public_keys`（`authority -> ed25519 公開鍵 raw 32byte hex` の table。TOFU 永続化）
 - `runtime.chunk_size`
 - `runtime.max_inflight_chunks`
 - `runtime.max_artifact_size_bytes`（既定 `67108864` = 64 MiB）
@@ -301,3 +295,13 @@
 - [BREAKING] `target.<name>.ca_cert` / `target.<name>.client_cert` / `target.<name>.known_hosts` を廃止し、`target.<name>.client_key` + CLI 既定 `~/.imago/known_hosts` へ移行した。
 - [BREAKING] `imagod.tls.server_cert` / `imagod.tls.client_ca_cert` を廃止し、`imagod.tls.server_key` + `imagod.tls.client_public_keys` へ移行した。
 - サーバ認証は X.509 チェーン検証ではなく、RPK pin（`known_hosts`）+ TOFU で扱う。
+
+## 実装反映ノート（Network RPC / 2026-02-18）
+
+- [BREAKING] `imago build/deploy/run/stop` の `--env` は廃止した。`[env.*]` と `.env.<name>` の解決も行わない。
+- [BREAKING] `[[bindings]]` は `name` + `wit` のみ受理し、`target` は設定エラーとして拒否する。
+- `type = "rpc"` を追加し、`imago build` / manifest 正規化で受理する。
+- `imago bindings cert upload` / `imago bindings cert deploy` サブコマンドを追加した。
+- `imago compose update` / `imago compose build` / `imago compose logs` を追加した。
+- `imago-compose.toml` は `[target.<name>]` を受理し、`compose build/deploy/logs` は service `imago.toml` の `target` ではなく compose 側 target を優先して解決する。
+- 単体コマンド (`imago build/deploy/logs`) は従来どおり service `imago.toml` の `target.<name>` を必須とする（compose target への自動フォールバックなし）。

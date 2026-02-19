@@ -2241,6 +2241,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "imago-plugin-imago-node"
+version = "0.1.0"
+dependencies = [
+ "imago-protocol",
+ "imagod-ipc",
+ "imagod-runtime-wasmtime",
+ "serde",
+ "url",
+ "wasmtime",
+]
+
+[[package]]
 name = "imago-plugin-macros"
 version = "0.1.0"
 dependencies = [
@@ -2266,6 +2278,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "imago-plugin-imago-admin",
+ "imago-plugin-imago-node",
  "imagod-config",
  "imagod-control",
  "imagod-runtime",
@@ -2301,13 +2314,19 @@ dependencies = [
  "hex",
  "imago-protocol",
  "imagod-common",
+ "imagod-config",
  "imagod-ipc",
+ "quinn",
+ "rustls 0.23.36",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "sha2",
  "tar",
  "tokio",
+ "url",
  "uuid",
+ "web-transport-quinn",
 ]
 
 [[package]]
@@ -2363,6 +2382,7 @@ dependencies = [
  "imago-protocol",
  "imagod-common",
  "imagod-ipc",
+ "imagod-runtime-internal",
  "tokio",
 ]
 
@@ -2404,6 +2424,7 @@ dependencies = [
  "imagod-common",
  "imagod-ipc",
  "imagod-runtime-internal",
+ "serde",
  "tokio",
  "wasmtime",
  "wasmtime-wasi",

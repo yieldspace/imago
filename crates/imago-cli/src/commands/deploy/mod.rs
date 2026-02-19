@@ -282,7 +282,15 @@ pub async fn run(args: DeployArgs) -> CommandResult {
 }
 
 pub(crate) async fn run_with_project_root(args: DeployArgs, project_root: &Path) -> CommandResult {
-    match run_async(args, project_root).await {
+    run_with_project_root_and_target_override(args, project_root, None).await
+}
+
+pub(crate) async fn run_with_project_root_and_target_override(
+    args: DeployArgs,
+    project_root: &Path,
+    target_override: Option<&build::TargetConfig>,
+) -> CommandResult {
+    match run_async_with_target_override(args, project_root, target_override).await {
         Ok(()) => CommandResult {
             exit_code: 0,
             stderr: None,
@@ -294,7 +302,11 @@ pub(crate) async fn run_with_project_root(args: DeployArgs, project_root: &Path)
     }
 }
 
-async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> {
+async fn run_async_with_target_override(
+    args: DeployArgs,
+    project_root: &Path,
+    target_override: Option<&build::TargetConfig>,
+) -> anyhow::Result<()> {
     let dependency_resolver = StandardDependencyResolver;
     let target_connector = network::QuinnTargetConnector;
     let artifact_bundler = artifact::TarArtifactBundler;
@@ -303,8 +315,9 @@ async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> 
         .target
         .clone()
         .unwrap_or_else(|| build::default_target_name().to_string());
-    let build_output = build::build_project(args.env.as_deref(), &target_name, project_root)
-        .context("failed to run build before deploy")?;
+    let build_output =
+        build::build_project_with_target_override(&target_name, project_root, target_override)
+            .context("failed to run build before deploy")?;
 
     let manifest_path = build_output.manifest_path;
     let manifest_bytes = build_output.manifest_bytes;
@@ -1962,14 +1975,7 @@ mod tests {
             std::env::temp_dir().join(format!("imago-cli-deploy-run-fail-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).expect("temp dir should be created");
 
-        let result = run_with_project_root(
-            DeployArgs {
-                env: None,
-                target: None,
-            },
-            &root,
-        )
-        .await;
+        let result = run_with_project_root(DeployArgs { target: None }, &root).await;
 
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.expect("stderr should be present");

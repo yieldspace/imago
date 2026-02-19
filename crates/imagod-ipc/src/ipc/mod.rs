@@ -68,14 +68,14 @@ pub type BoxFutureResult<'a, T> = Pin<Box<dyn Future<Output = Result<T, ImagodEr
 /// Binding rule that allows one service to invoke an interface on another service.
 pub struct ServiceBinding {
     /// Name of the destination service.
-    pub target: String,
-    /// WIT interface identifier that is allowed for the target.
+    pub name: String,
+    /// WIT interface identifier that is allowed for the destination service.
     pub wit: String,
 }
 
 impl Validate for ServiceBinding {
     fn validate(&self) -> Result<(), ValidationError> {
-        validate_non_empty_fields(&[(&self.target, "target"), (&self.wit, "wit")])
+        validate_non_empty_fields(&[(&self.name, "name"), (&self.wit, "wit")])
     }
 }
 
@@ -84,6 +84,8 @@ impl Validate for ServiceBinding {
 pub enum RunnerAppType {
     #[serde(rename = "cli")]
     Cli,
+    #[serde(rename = "rpc")]
+    Rpc,
     #[serde(rename = "http")]
     Http,
     #[serde(rename = "socket")]
@@ -366,7 +368,7 @@ impl Validate for RunnerBootstrap {
                     .ok_or(ValidationError::missing("socket"))?;
                 socket.validate()?;
             }
-            RunnerAppType::Cli => {}
+            RunnerAppType::Cli | RunnerAppType::Rpc => {}
         }
 
         for binding in &self.bindings {
@@ -422,6 +424,42 @@ pub enum ControlRequest {
         /// Requested WIT interface identifier.
         wit: String,
     },
+    /// Establishes one manager-side remote RPC connection handle.
+    RpcConnectRemote {
+        /// Caller runner identifier.
+        runner_id: String,
+        /// Proof derived from manager secret and runner id.
+        manager_auth_proof: String,
+        /// Remote authority in `rpc://host:port` format.
+        authority: String,
+    },
+    /// Invokes one function through a manager-side remote RPC connection.
+    RpcInvokeRemote {
+        /// Caller runner identifier.
+        runner_id: String,
+        /// Proof derived from manager secret and runner id.
+        manager_auth_proof: String,
+        /// Manager-issued remote connection id.
+        connection_id: String,
+        /// Destination service name.
+        target_service: String,
+        /// Requested WIT interface identifier.
+        interface_id: String,
+        /// Target function name.
+        function: String,
+        /// CBOR-encoded invoke payload.
+        #[serde(default)]
+        args_cbor: Vec<u8>,
+    },
+    /// Closes one manager-side remote RPC connection handle.
+    RpcDisconnectRemote {
+        /// Caller runner identifier.
+        runner_id: String,
+        /// Proof derived from manager secret and runner id.
+        manager_auth_proof: String,
+        /// Manager-issued remote connection id.
+        connection_id: String,
+    },
 }
 
 impl Validate for ControlRequest {
@@ -464,6 +502,40 @@ impl Validate for ControlRequest {
                 (target_service, "target_service"),
                 (wit, "wit"),
             ]),
+            Self::RpcConnectRemote {
+                runner_id,
+                manager_auth_proof,
+                authority,
+            } => validate_non_empty_fields(&[
+                (runner_id, "runner_id"),
+                (manager_auth_proof, "manager_auth_proof"),
+                (authority, "authority"),
+            ]),
+            Self::RpcInvokeRemote {
+                runner_id,
+                manager_auth_proof,
+                connection_id,
+                target_service,
+                interface_id,
+                function,
+                ..
+            } => validate_non_empty_fields(&[
+                (runner_id, "runner_id"),
+                (manager_auth_proof, "manager_auth_proof"),
+                (connection_id, "connection_id"),
+                (target_service, "target_service"),
+                (interface_id, "interface_id"),
+                (function, "function"),
+            ]),
+            Self::RpcDisconnectRemote {
+                runner_id,
+                manager_auth_proof,
+                connection_id,
+            } => validate_non_empty_fields(&[
+                (runner_id, "runner_id"),
+                (manager_auth_proof, "manager_auth_proof"),
+                (connection_id, "connection_id"),
+            ]),
         }
     }
 }
@@ -480,6 +552,17 @@ pub enum ControlResponse {
         /// Authorization token scoped for one invocation target.
         token: String,
     },
+    /// One remote connection handle has been created by manager.
+    RpcRemoteConnected {
+        /// Manager-issued remote connection id.
+        connection_id: String,
+    },
+    /// One remote invoke call result.
+    RpcRemoteInvokeResult {
+        /// CBOR-encoded invoke result payload.
+        #[serde(default)]
+        result_cbor: Vec<u8>,
+    },
     /// Structured control-plane failure.
     Error(IpcErrorPayload),
 }
@@ -492,6 +575,10 @@ impl Validate for ControlResponse {
                 validate_non_empty_path(endpoint, "endpoint")?;
                 validate_non_empty(token, "token")
             }
+            Self::RpcRemoteConnected { connection_id } => {
+                validate_non_empty(connection_id, "connection_id")
+            }
+            Self::RpcRemoteInvokeResult { .. } => Ok(()),
             Self::Error(error) => error.validate(),
         }
     }
@@ -887,10 +974,22 @@ mod tests {
     #[test]
     fn runner_app_type_round_trip_via_cbor() {
         let encoded =
-            imago_protocol::to_cbor(&RunnerAppType::Http).expect("app type encoding should work");
+            imago_protocol::to_cbor(&RunnerAppType::Rpc).expect("app type encoding should work");
         let decoded = imago_protocol::from_cbor::<RunnerAppType>(&encoded)
             .expect("app type decoding should work");
-        assert_eq!(decoded, RunnerAppType::Http);
+        assert_eq!(decoded, RunnerAppType::Rpc);
+    }
+
+    #[test]
+    fn runner_bootstrap_validate_accepts_rpc_without_http_or_socket() {
+        let mut bootstrap = valid_http_bootstrap();
+        bootstrap.app_type = RunnerAppType::Rpc;
+        bootstrap.http_port = None;
+        bootstrap.http_max_body_bytes = None;
+        bootstrap.socket = None;
+        bootstrap
+            .validate()
+            .expect("rpc app type should be validated like cli");
     }
 
     #[test]
@@ -986,6 +1085,68 @@ mod tests {
             .validate()
             .expect_err("bootstrap should reject out-of-range http_worker_queue_capacity");
         assert!(err.to_string().contains("http_worker_queue_capacity"));
+    }
+
+    #[test]
+    fn control_request_validate_accepts_remote_rpc_variants() {
+        let connect = ControlRequest::RpcConnectRemote {
+            runner_id: "runner-a".to_string(),
+            manager_auth_proof: "proof".to_string(),
+            authority: "rpc://node-a:4443".to_string(),
+        };
+        connect.validate().expect("connect request should be valid");
+
+        let invoke = ControlRequest::RpcInvokeRemote {
+            runner_id: "runner-a".to_string(),
+            manager_auth_proof: "proof".to_string(),
+            connection_id: "conn-1".to_string(),
+            target_service: "svc-b".to_string(),
+            interface_id: "pkg:iface/invoke".to_string(),
+            function: "call".to_string(),
+            args_cbor: vec![0x01],
+        };
+        invoke.validate().expect("invoke request should be valid");
+
+        let disconnect = ControlRequest::RpcDisconnectRemote {
+            runner_id: "runner-a".to_string(),
+            manager_auth_proof: "proof".to_string(),
+            connection_id: "conn-1".to_string(),
+        };
+        disconnect
+            .validate()
+            .expect("disconnect request should be valid");
+    }
+
+    #[test]
+    fn control_request_validate_rejects_remote_rpc_with_empty_connection_id() {
+        let request = ControlRequest::RpcInvokeRemote {
+            runner_id: "runner-a".to_string(),
+            manager_auth_proof: "proof".to_string(),
+            connection_id: "".to_string(),
+            target_service: "svc-b".to_string(),
+            interface_id: "pkg:iface/invoke".to_string(),
+            function: "call".to_string(),
+            args_cbor: Vec::new(),
+        };
+        let err = request
+            .validate()
+            .expect_err("empty connection id should be rejected");
+        assert!(err.to_string().contains("connection_id"));
+    }
+
+    #[test]
+    fn control_response_validate_accepts_remote_rpc_variants() {
+        ControlResponse::RpcRemoteConnected {
+            connection_id: "conn-1".to_string(),
+        }
+        .validate()
+        .expect("remote connected should be valid");
+
+        ControlResponse::RpcRemoteInvokeResult {
+            result_cbor: vec![0x01, 0x02],
+        }
+        .validate()
+        .expect("remote invoke result should be valid");
     }
 
     #[test]

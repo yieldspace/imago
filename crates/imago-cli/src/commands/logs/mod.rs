@@ -156,7 +156,15 @@ pub async fn run(args: LogsArgs) -> CommandResult {
 }
 
 pub(crate) async fn run_with_project_root(args: LogsArgs, project_root: &Path) -> CommandResult {
-    match run_async(args, project_root).await {
+    run_with_project_root_and_target_override(args, project_root, None).await
+}
+
+pub(crate) async fn run_with_project_root_and_target_override(
+    args: LogsArgs,
+    project_root: &Path,
+    target_override: Option<&build::TargetConfig>,
+) -> CommandResult {
+    match run_async_with_target_override(args, project_root, target_override).await {
         Ok(()) => CommandResult {
             exit_code: 0,
             stderr: None,
@@ -168,11 +176,18 @@ pub(crate) async fn run_with_project_root(args: LogsArgs, project_root: &Path) -
     }
 }
 
-async fn run_async(args: LogsArgs, project_root: &Path) -> anyhow::Result<()> {
-    let target = build::load_target_config(None, build::default_target_name(), project_root)
-        .context("failed to load target configuration")?
-        .require_deploy_credentials()
-        .context("target settings are invalid for logs")?;
+async fn run_async_with_target_override(
+    args: LogsArgs,
+    project_root: &Path,
+    target_override: Option<&build::TargetConfig>,
+) -> anyhow::Result<()> {
+    let target = match target_override {
+        Some(target) => target.clone(),
+        None => build::load_target_config(build::default_target_name(), project_root)
+            .context("failed to load target configuration")?,
+    }
+    .require_deploy_credentials()
+    .context("target settings are invalid for logs")?;
     let session = deploy::connect_target(&target).await?;
 
     let request_id = Uuid::new_v4();

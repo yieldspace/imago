@@ -1,3 +1,4 @@
+#![cfg(target_arch = "wasm32")]
 use std::io::Write as _;
 
 use wasi::http::types::{

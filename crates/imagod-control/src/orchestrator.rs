@@ -72,7 +72,7 @@ struct ManifestAsset {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// Manifest binding authorization entry.
 struct ManifestBinding {
-    target: String,
+    name: String,
     wit: String,
 }
 
@@ -303,6 +303,19 @@ impl Orchestrator {
     ) -> Result<ServiceLogSubscription, ImagodError> {
         self.supervisor
             .open_logs(service_name, tail_lines, follow)
+            .await
+    }
+
+    /// Invokes one function on a running service runner.
+    pub async fn invoke(
+        &self,
+        target_service_name: &str,
+        interface_id: &str,
+        function: &str,
+        args_cbor: &[u8],
+    ) -> Result<Vec<u8>, ImagodError> {
+        self.supervisor
+            .invoke(target_service_name, interface_id, function, args_cbor)
             .await
     }
 
@@ -1151,22 +1164,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_launch_rejects_binding_with_empty_target() {
-        let root = temp_dir_path("orchestrator-binding-empty-target");
+    async fn build_launch_rejects_binding_with_empty_name() {
+        let root = temp_dir_path("orchestrator-binding-empty-name");
         fs::create_dir_all(&root).expect("release dir should exist");
         fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
 
         let mut manifest = valid_manifest();
         manifest.bindings = vec![ManifestBinding {
-            target: String::new(),
+            name: String::new(),
             wit: "yieldspace:service/invoke".to_string(),
         }];
 
         let err = build_launch_from_release(&root, "release-a", &root, &manifest)
             .await
-            .expect_err("empty binding target should be rejected");
+            .expect_err("empty binding name should be rejected");
         assert_eq!(err.code, ErrorCode::BadManifest);
-        assert!(err.message.contains("bindings[0].target"));
+        assert!(err.message.contains("bindings[0].name"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1536,7 +1549,7 @@ mod tests {
 
         let mut manifest = valid_manifest();
         manifest.bindings = vec![ManifestBinding {
-            target: "svc-b".to_string(),
+            name: "svc-b".to_string(),
             wit: String::new(),
         }];
 
@@ -1550,22 +1563,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_launch_rejects_binding_with_invalid_target_name() {
-        let root = temp_dir_path("orchestrator-binding-invalid-target");
+    async fn build_launch_rejects_binding_with_invalid_name() {
+        let root = temp_dir_path("orchestrator-binding-invalid-name");
         fs::create_dir_all(&root).expect("release dir should exist");
         fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
 
         let mut manifest = valid_manifest();
         manifest.bindings = vec![ManifestBinding {
-            target: "svc/invalid".to_string(),
+            name: "svc/invalid".to_string(),
             wit: "yieldspace:service/invoke".to_string(),
         }];
 
         let err = build_launch_from_release(&root, "release-a", &root, &manifest)
             .await
-            .expect_err("invalid binding target should be rejected");
+            .expect_err("invalid binding name should be rejected");
         assert_eq!(err.code, ErrorCode::BadManifest);
-        assert!(err.message.contains("bindings[0].target is invalid"));
+        assert!(err.message.contains("bindings[0].name is invalid"));
 
         let _ = fs::remove_dir_all(root);
     }

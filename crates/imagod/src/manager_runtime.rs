@@ -26,7 +26,7 @@ pub(crate) async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyh
     .await
     .map_err(anyhow::Error::new)?;
     let operations = OperationManager::new();
-    let supervisor = ServiceSupervisor::new(
+    let supervisor = ServiceSupervisor::new_with_config_path(
         &config.storage_root,
         config.runtime.stop_grace_timeout_secs,
         config.runtime.runner_ready_timeout_secs,
@@ -35,6 +35,7 @@ pub(crate) async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyh
         config.runtime.http_worker_queue_capacity,
         config.runtime.runner_log_buffer_bytes,
         config.runtime.epoch_tick_interval_ms,
+        &config_path,
     )
     .map_err(anyhow::Error::new)?;
     let orchestrator = Orchestrator::new(&config.storage_root, artifacts.clone(), supervisor);
@@ -83,7 +84,13 @@ pub(crate) async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyh
         }
     }
 
-    let handler = ProtocolHandler::new(config.clone(), artifacts, operations, orchestrator);
+    let handler = ProtocolHandler::new(
+        config.clone(),
+        config_path.clone(),
+        artifacts,
+        operations,
+        orchestrator,
+    );
 
     let maintenance_handler = handler.clone();
     let active_tick_interval =

@@ -1,0 +1,12 @@
+[package]
+name = "imago-plugin-imago-node"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+imago-protocol = { workspace = true }
+imagod-ipc = { workspace = true }
+imagod-runtime-wasmtime = { workspace = true }
+serde = { workspace = true }
+url = { workspace = true }
+wasmtime = { workspace = true, features = ["component-model"] }

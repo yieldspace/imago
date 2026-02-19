@@ -58,3 +58,9 @@
 - [BREAKING] deploy 通信の認証前提を mTLS/X.509 から RPK + TOFU へ更新した。
 - `target.<name>` は `client_key` を使い、`known_hosts` は CLI 既定 `~/.imago/known_hosts` 固定運用にした（`ca_cert` / `client_cert` / `known_hosts` は廃止）。
 - `imagod.toml` の TLS 設定は `server_key` と `client_public_keys`（ed25519 公開鍵 raw 32byte hex allowlist）を正本にする。
+
+## 実装反映ノート（Network RPC / 2026-02-18）
+
+- [BREAKING] `imago` CLI から `--env` を廃止し、`[env.*]` と `.env.<name>` の解決を削除した。
+- [BREAKING] manifest/config の `bindings` は `target` から `name` へ移行した。
+- `rpc.invoke` を protocol に追加し、local/remote RPC の payload を CBOR で統一した。

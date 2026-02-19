@@ -1,18 +1,30 @@
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{any::Any, fmt::Write, future::Future, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use imago_protocol::{ErrorCode, MessageType};
 use imagod_common::ImagodError;
+use rustls::pki_types::CertificateDer;
 use uuid::Uuid;
 use web_transport_quinn::{RecvStream, SendStream, Session};
 
 use super::{
-    MAX_STREAM_BYTES, ProtocolHandler, STREAM_READ_TIMEOUT_SECS,
+    DynamicClientRole, MAX_STREAM_BYTES, ProtocolHandler, STREAM_READ_TIMEOUT_SECS,
     envelope_io::{
         ensure_single_request_envelope, error_envelope, finish_stream, parse_stream_envelopes,
         response_message_type_for_request, write_envelope,
     },
+    resolve_dynamic_client_role,
 };
+
+const ED25519_SPKI_PREFIX: [u8; 12] = [
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionAuthContext {
+    role: DynamicClientRole,
+    public_key_hex: String,
+}
 
 #[async_trait]
 pub(crate) trait ProtocolSession: Send + Sync {
@@ -21,6 +33,8 @@ pub(crate) trait ProtocolSession: Send + Sync {
     fn max_datagram_size(&self) -> usize;
 
     fn send_datagram(&self, payload: Vec<u8>) -> Result<(), ImagodError>;
+
+    fn peer_identity(&self) -> Option<Box<dyn Any>>;
 
     async fn closed(&self);
 }
@@ -45,6 +59,10 @@ impl ProtocolSession for Session {
         })
     }
 
+    fn peer_identity(&self) -> Option<Box<dyn Any>> {
+        quinn::Connection::peer_identity(self)
+    }
+
     async fn closed(&self) {
         let _ = Session::closed(self).await;
     }
@@ -57,6 +75,7 @@ pub(crate) async fn run_session_loop<S>(
 where
     S: ProtocolSession + 'static,
 {
+    let auth_context = resolve_session_auth_context(handler, session.as_ref())?;
     let mut stream_tasks = tokio::task::JoinSet::new();
     let mut first_error = None;
     loop {
@@ -67,8 +86,9 @@ where
                 };
                 let handler = handler.clone();
                 let session = session.clone();
+                let auth_context = auth_context.clone();
                 stream_tasks.spawn(async move {
-                    run_single_stream(&handler, session, send, recv).await
+                    run_single_stream(&handler, session, auth_context, send, recv).await
                 });
             }
             joined = stream_tasks.join_next(), if !stream_tasks.is_empty() => {
@@ -95,6 +115,7 @@ where
 async fn run_single_stream<S>(
     handler: &ProtocolHandler,
     session: Arc<S>,
+    auth_context: SessionAuthContext,
     mut send: SendStream,
     mut recv: RecvStream,
 ) -> Result<(), ImagodError>
@@ -155,6 +176,18 @@ where
     }
 
     let request = envelopes[0].clone();
+    if let Err(err) = ensure_message_type_allowed(&request, &auth_context) {
+        let response = error_envelope(
+            response_message_type_for_request(request.message_type),
+            request.request_id,
+            request.correlation_id,
+            err.to_structured(),
+        );
+        write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
+        finish_stream(&mut send)?;
+        return Ok(());
+    }
+
     if request.message_type == MessageType::CommandStart {
         handler.handle_command_start(request, &mut send).await?;
         finish_stream(&mut send)?;
@@ -189,6 +222,140 @@ where
     write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
     finish_stream(&mut send)?;
     Ok(())
+}
+
+fn resolve_session_auth_context<S>(
+    _handler: &ProtocolHandler,
+    session: &S,
+) -> Result<SessionAuthContext, ImagodError>
+where
+    S: ProtocolSession + ?Sized,
+{
+    let public_key = extract_peer_public_key(session)?;
+    let role = resolve_client_role(&public_key);
+    Ok(SessionAuthContext {
+        role,
+        public_key_hex: encode_hex(&public_key),
+    })
+}
+
+fn extract_peer_public_key<S>(session: &S) -> Result<[u8; 32], ImagodError>
+where
+    S: ProtocolSession + ?Sized,
+{
+    let peer_identity = session.peer_identity().ok_or_else(|| {
+        ImagodError::new(
+            ErrorCode::Unauthorized,
+            "session.auth",
+            "peer identity is missing",
+        )
+    })?;
+    let certificates = peer_identity
+        .downcast::<Vec<CertificateDer<'static>>>()
+        .map_err(|_| {
+            ImagodError::new(
+                ErrorCode::Unauthorized,
+                "session.auth",
+                "peer identity type is not certificate chain",
+            )
+        })?;
+    let first_certificate = certificates.first().ok_or_else(|| {
+        ImagodError::new(
+            ErrorCode::Unauthorized,
+            "session.auth",
+            "peer certificate chain is empty",
+        )
+    })?;
+    extract_ed25519_public_key(first_certificate.as_ref())
+}
+
+fn extract_ed25519_public_key(spki_der: &[u8]) -> Result<[u8; 32], ImagodError> {
+    if spki_der.len() != ED25519_SPKI_PREFIX.len() + 32 {
+        return Err(ImagodError::new(
+            ErrorCode::Unauthorized,
+            "session.auth",
+            "peer certificate must contain an ed25519 raw public key",
+        ));
+    }
+    if !spki_der.starts_with(&ED25519_SPKI_PREFIX) {
+        return Err(ImagodError::new(
+            ErrorCode::Unauthorized,
+            "session.auth",
+            "peer certificate public key is not ed25519",
+        ));
+    }
+
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&spki_der[ED25519_SPKI_PREFIX.len()..]);
+    Ok(out)
+}
+
+fn resolve_client_role(public_key: &[u8; 32]) -> DynamicClientRole {
+    resolve_dynamic_client_role(public_key)
+}
+
+fn encode_hex(bytes: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        write!(&mut out, "{byte:02x}").expect("writing to string should not fail");
+    }
+    out
+}
+
+fn ensure_message_type_allowed(
+    request: &super::Envelope,
+    auth_context: &SessionAuthContext,
+) -> Result<(), ImagodError> {
+    match auth_context.role {
+        DynamicClientRole::Admin => Ok(()),
+        DynamicClientRole::Client => {
+            if matches!(
+                request.message_type,
+                MessageType::HelloNegotiate | MessageType::RpcInvoke
+            ) {
+                return Ok(());
+            }
+
+            Err(ImagodError::new(
+                ErrorCode::Unauthorized,
+                "session.authorize",
+                format!(
+                    "message type {} is not allowed for client role",
+                    message_type_name(request.message_type)
+                ),
+            )
+            .with_detail("role", "client")
+            .with_detail("message_type", message_type_name(request.message_type))
+            .with_detail("client_public_key", auth_context.public_key_hex.clone()))
+        }
+        DynamicClientRole::Unknown => Err(ImagodError::new(
+            ErrorCode::Unauthorized,
+            "session.authorize",
+            "client public key does not have an assigned role",
+        )
+        .with_detail("role", "unknown")
+        .with_detail("message_type", message_type_name(request.message_type))
+        .with_detail("client_public_key", auth_context.public_key_hex.clone())),
+    }
+}
+
+fn message_type_name(message_type: MessageType) -> &'static str {
+    match message_type {
+        MessageType::HelloNegotiate => "hello.negotiate",
+        MessageType::DeployPrepare => "deploy.prepare",
+        MessageType::ArtifactPush => "artifact.push",
+        MessageType::ArtifactCommit => "artifact.commit",
+        MessageType::CommandStart => "command.start",
+        MessageType::CommandEvent => "command.event",
+        MessageType::StateRequest => "state.request",
+        MessageType::StateResponse => "state.response",
+        MessageType::CommandCancel => "command.cancel",
+        MessageType::LogsRequest => "logs.request",
+        MessageType::LogsChunk => "logs.chunk",
+        MessageType::LogsEnd => "logs.end",
+        MessageType::RpcInvoke => "rpc.invoke",
+        MessageType::BindingsCertUpload => "bindings.cert.upload",
+    }
 }
 
 fn collect_stream_task_result(
@@ -243,4 +410,39 @@ pub(crate) fn stream_read_timeout_error() -> ImagodError {
             STREAM_READ_TIMEOUT_SECS
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::protocol_handler::{
+        replace_dynamic_public_keys_for_tests, upsert_dynamic_client_public_key,
+    };
+
+    static DYNAMIC_KEYS_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn hex_32(byte: u8) -> String {
+        let mut out = String::with_capacity(64);
+        for _ in 0..32 {
+            out.push_str(&format!("{byte:02x}"));
+        }
+        out
+    }
+
+    #[test]
+    fn resolve_client_role_observes_dynamic_updates() {
+        let _guard = DYNAMIC_KEYS_TEST_MUTEX
+            .lock()
+            .expect("mutex lock should succeed");
+        replace_dynamic_public_keys_for_tests(&[], &[]);
+        let key = [0x33u8; 32];
+
+        assert_eq!(resolve_client_role(&key), DynamicClientRole::Unknown);
+
+        upsert_dynamic_client_public_key(&hex_32(0x33))
+            .expect("upsert should register client key in memory");
+        assert_eq!(resolve_client_role(&key), DynamicClientRole::Client);
+    }
 }

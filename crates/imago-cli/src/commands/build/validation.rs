@@ -21,33 +21,11 @@ pub(crate) fn validate_service_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) fn validate_env_name(env_name: &str) -> anyhow::Result<()> {
-    if env_name.is_empty() {
-        return Err(anyhow!("env name must not be empty"));
-    }
-    if env_name.contains('/') || env_name.contains('\\') || env_name.contains("..") {
-        return Err(anyhow!(
-            "env name contains invalid path characters: {}",
-            env_name
-        ));
-    }
-    if !env_name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-    {
-        return Err(anyhow!(
-            "env name contains unsupported characters: {}",
-            env_name
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_app_type(app_type: &str) -> anyhow::Result<()> {
     match app_type {
-        "cli" | "http" | "socket" => Ok(()),
+        "cli" | "http" | "socket" | "rpc" => Ok(()),
         _ => Err(anyhow!(
-            "type must be one of: cli, http, socket (got: {})",
+            "type must be one of: cli, http, socket, rpc (got: {})",
             app_type
         )),
     }

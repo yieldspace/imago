@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
@@ -12,17 +12,25 @@ use tokio::{
     time,
 };
 
-#[derive(Debug, Default)]
-pub(super) struct DefaultManagerControlHandler;
+#[derive(Debug)]
+pub(super) struct DefaultManagerControlHandler {
+    remote_rpc: Mutex<super::remote_rpc::RemoteRpcManager>,
+}
 
 impl DefaultManagerControlHandler {
+    pub(super) fn new(config_path: PathBuf) -> Self {
+        Self {
+            remote_rpc: Mutex::new(super::remote_rpc::RemoteRpcManager::new(config_path)),
+        }
+    }
+
     pub(super) async fn handle_control_request(
         &self,
         inner: &Arc<RwLock<BTreeMap<String, super::RunningService>>>,
         pending_ready: &Arc<Mutex<super::PendingReadyMap>>,
         request: ControlRequest,
     ) -> ControlResponse {
-        handle_control_request_impl(inner, pending_ready, request).await
+        handle_control_request_impl(inner, pending_ready, self, request).await
     }
 
     pub(super) async fn handle_control_connection(
@@ -46,6 +54,7 @@ impl DefaultManagerControlHandler {
 pub(super) async fn handle_control_request_impl(
     inner: &Arc<RwLock<BTreeMap<String, super::RunningService>>>,
     pending_ready: &Arc<Mutex<super::PendingReadyMap>>,
+    handler: &DefaultManagerControlHandler,
     request: ControlRequest,
 ) -> ControlResponse {
     match request {
@@ -189,6 +198,114 @@ pub(super) async fn handle_control_request_impl(
                 token,
             }
         }
+        ControlRequest::RpcConnectRemote {
+            runner_id,
+            manager_auth_proof,
+            authority,
+        } => {
+            let guard = inner.read().await;
+            let Some((_, source_service)) = guard
+                .iter()
+                .find(|(_, service)| service.runner_id == runner_id)
+            else {
+                return control_error(ErrorCode::NotFound, "source runner is not registered");
+            };
+
+            if let Err(err) = validate_manager_auth(
+                &source_service.manager_auth_secret,
+                &runner_id,
+                &manager_auth_proof,
+            ) {
+                return ControlResponse::Error(IpcErrorPayload::from_error(&err));
+            }
+            drop(guard);
+
+            let mut remote_rpc = handler.remote_rpc.lock().await;
+            match remote_rpc.connect(&runner_id, &authority).await {
+                Ok(connection_id) => ControlResponse::RpcRemoteConnected { connection_id },
+                Err(err) => ControlResponse::Error(IpcErrorPayload::from_error(&err)),
+            }
+        }
+        ControlRequest::RpcInvokeRemote {
+            runner_id,
+            manager_auth_proof,
+            connection_id,
+            target_service,
+            interface_id,
+            function,
+            args_cbor,
+        } => {
+            let guard = inner.read().await;
+            let Some((_, source_service)) = guard
+                .iter()
+                .find(|(_, service)| service.runner_id == runner_id)
+            else {
+                return control_error(ErrorCode::NotFound, "source runner is not registered");
+            };
+
+            if let Err(err) = validate_manager_auth(
+                &source_service.manager_auth_secret,
+                &runner_id,
+                &manager_auth_proof,
+            ) {
+                return ControlResponse::Error(IpcErrorPayload::from_error(&err));
+            }
+            if !is_binding_allowed(&source_service.bindings, &target_service, &interface_id) {
+                return control_error(
+                    ErrorCode::Unauthorized,
+                    "binding does not allow target service/interface",
+                );
+            }
+            drop(guard);
+
+            let remote_rpc = handler.remote_rpc.lock().await;
+            match remote_rpc
+                .invoke(
+                    &runner_id,
+                    &connection_id,
+                    &target_service,
+                    &interface_id,
+                    &function,
+                    &args_cbor,
+                )
+                .await
+            {
+                Ok(result_cbor) => ControlResponse::RpcRemoteInvokeResult { result_cbor },
+                Err(err) => ControlResponse::Error(IpcErrorPayload::from_error(&err)),
+            }
+        }
+        ControlRequest::RpcDisconnectRemote {
+            runner_id,
+            manager_auth_proof,
+            connection_id,
+        } => {
+            let guard = inner.read().await;
+            let Some((_, source_service)) = guard
+                .iter()
+                .find(|(_, service)| service.runner_id == runner_id)
+            else {
+                return control_error(ErrorCode::NotFound, "source runner is not registered");
+            };
+
+            if let Err(err) = validate_manager_auth(
+                &source_service.manager_auth_secret,
+                &runner_id,
+                &manager_auth_proof,
+            ) {
+                return ControlResponse::Error(IpcErrorPayload::from_error(&err));
+            }
+            drop(guard);
+
+            let mut remote_rpc = handler.remote_rpc.lock().await;
+            if remote_rpc.disconnect(&runner_id, &connection_id) {
+                ControlResponse::Ack
+            } else {
+                control_error(
+                    ErrorCode::NotFound,
+                    format!("rpc connection '{connection_id}' is not available"),
+                )
+            }
+        }
     }
 }
 
@@ -276,5 +393,173 @@ pub(super) fn is_binding_allowed(
 ) -> bool {
     bindings
         .iter()
-        .any(|binding| binding.target == target_service && binding.wit == wit)
+        .any(|binding| binding.name == target_service && binding.wit == wit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use imagod_ipc::{compute_manager_auth_proof, random_secret_hex};
+    use std::{process::Stdio, sync::Arc};
+    use tokio::{
+        process::{Child, Command},
+        sync::broadcast,
+    };
+
+    fn new_running_service(
+        child: Child,
+        runner_id: &str,
+        manager_auth_secret: String,
+        bindings: Vec<imagod_ipc::ServiceBinding>,
+    ) -> super::super::RunningService {
+        let (log_sender, _) = broadcast::channel(16);
+        super::super::RunningService {
+            release_hash: "release-test".to_string(),
+            started_at: now_unix_secs().to_string(),
+            status: super::super::RunningStatus::Running,
+            is_ready: true,
+            runner_id: runner_id.to_string(),
+            runner_endpoint: PathBuf::from(format!("/tmp/{runner_id}.sock")),
+            manager_auth_secret,
+            invocation_secret: random_secret_hex(),
+            bindings,
+            child,
+            _stdout_log: Arc::new(Mutex::new(super::super::log_buffer::BoundedLogBuffer::new(
+                64,
+            ))),
+            _stderr_log: Arc::new(Mutex::new(super::super::log_buffer::BoundedLogBuffer::new(
+                64,
+            ))),
+            composite_log: Arc::new(Mutex::new(super::super::log_buffer::BoundedLogBuffer::new(
+                128,
+            ))),
+            log_sender,
+            last_heartbeat_at: now_unix_secs().to_string(),
+        }
+    }
+
+    async fn stop_running_service_best_effort(
+        inner: &Arc<RwLock<BTreeMap<String, super::super::RunningService>>>,
+        service_name: &str,
+    ) {
+        let service = {
+            let mut guard = inner.write().await;
+            guard.remove(service_name)
+        };
+        if let Some(mut service) = service {
+            let _ = service.child.start_kill();
+            let _ = service.child.wait().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_connect_remote_rejects_mismatched_manager_auth_proof() {
+        let inner: Arc<RwLock<BTreeMap<String, super::super::RunningService>>> =
+            Arc::new(RwLock::new(BTreeMap::new()));
+        let pending_ready: Arc<Mutex<super::super::PendingReadyMap>> =
+            Arc::new(Mutex::new(BTreeMap::new()));
+        let service_name = "svc-rpc-connect";
+        let runner_id = "runner-rpc-connect";
+        let manager_auth_secret = random_secret_hex();
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("runner child should spawn");
+        let service = new_running_service(child, runner_id, manager_auth_secret, Vec::new());
+        {
+            let mut guard = inner.write().await;
+            guard.insert(service_name.to_string(), service);
+        }
+
+        let handler =
+            DefaultManagerControlHandler::new(PathBuf::from("/tmp/imagod-control-test.toml"));
+        let response = handle_control_request_impl(
+            &inner,
+            &pending_ready,
+            &handler,
+            ControlRequest::RpcConnectRemote {
+                runner_id: runner_id.to_string(),
+                manager_auth_proof: "invalid-proof".to_string(),
+                authority: "rpc://example.com".to_string(),
+            },
+        )
+        .await;
+
+        match response {
+            ControlResponse::Error(err) => {
+                assert_eq!(err.code, ErrorCode::Unauthorized);
+                assert_eq!(err.message, "manager auth proof mismatch");
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        stop_running_service_best_effort(&inner, service_name).await;
+    }
+
+    #[tokio::test]
+    async fn rpc_invoke_remote_rejects_binding_mismatch() {
+        let inner: Arc<RwLock<BTreeMap<String, super::super::RunningService>>> =
+            Arc::new(RwLock::new(BTreeMap::new()));
+        let pending_ready: Arc<Mutex<super::super::PendingReadyMap>> =
+            Arc::new(Mutex::new(BTreeMap::new()));
+        let service_name = "svc-rpc-invoke";
+        let runner_id = "runner-rpc-invoke";
+        let manager_auth_secret = random_secret_hex();
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("runner child should spawn");
+        let service = new_running_service(
+            child,
+            runner_id,
+            manager_auth_secret.clone(),
+            vec![imagod_ipc::ServiceBinding {
+                name: "svc-allowed".to_string(),
+                wit: "pkg:iface/allowed".to_string(),
+            }],
+        );
+        {
+            let mut guard = inner.write().await;
+            guard.insert(service_name.to_string(), service);
+        }
+
+        let manager_auth_proof = compute_manager_auth_proof(&manager_auth_secret, runner_id)
+            .expect("manager auth proof should be generated");
+        let handler =
+            DefaultManagerControlHandler::new(PathBuf::from("/tmp/imagod-control-test.toml"));
+        let response = handle_control_request_impl(
+            &inner,
+            &pending_ready,
+            &handler,
+            ControlRequest::RpcInvokeRemote {
+                runner_id: runner_id.to_string(),
+                manager_auth_proof,
+                connection_id: "connection-1".to_string(),
+                target_service: "svc-target".to_string(),
+                interface_id: "pkg:iface/invoke".to_string(),
+                function: "call".to_string(),
+                args_cbor: vec![0x01],
+            },
+        )
+        .await;
+
+        match response {
+            ControlResponse::Error(err) => {
+                assert_eq!(err.code, ErrorCode::Unauthorized);
+                assert_eq!(
+                    err.message,
+                    "binding does not allow target service/interface"
+                );
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        stop_running_service_best_effort(&inner, service_name).await;
+    }
 }

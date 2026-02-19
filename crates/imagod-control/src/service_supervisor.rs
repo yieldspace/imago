@@ -17,8 +17,8 @@ use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{
     CapabilityPolicy, PluginDependency, RunnerAppType, RunnerBootstrap, RunnerInboundRequest,
-    RunnerSocketConfig, ServiceBinding, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
-    now_unix_secs, random_secret_hex,
+    RunnerInboundResponse, RunnerSocketConfig, ServiceBinding, compute_manager_auth_proof,
+    dbus_p2p::DbusP2pTransport, issue_invocation_token, now_unix_secs, random_secret_hex,
 };
 #[cfg(test)]
 use imagod_ipc::{ControlRequest, ControlResponse};
@@ -38,12 +38,14 @@ use self::{
 
 mod log_buffer;
 mod manager_control;
+mod remote_rpc;
 mod runner_spawn;
 
 const STAGE_START: &str = "service.start";
 const STAGE_STOP: &str = "service.stop";
 const STAGE_CONTROL: &str = "service.control";
 const STAGE_LOGS: &str = "service.logs";
+const STAGE_INVOKE: &str = "service.invoke";
 const STARTUP_EXIT_CHECK_INTERVAL_MS: u64 = 25;
 const INVOCATION_TOKEN_TTL_SECS: u64 = 30;
 const RUNNER_ENDPOINT_HASH_BYTES: usize = 16;
@@ -181,6 +183,36 @@ impl ServiceSupervisor {
         epoch_tick_interval_ms: u64,
     ) -> Result<Self, ImagodError> {
         let storage_root = storage_root.as_ref().to_path_buf();
+        let default_config_path = storage_root.join("imagod.toml");
+        Self::new_with_config_path(
+            storage_root,
+            stop_grace_timeout_secs,
+            runner_ready_timeout_secs,
+            manager_control_read_timeout_ms,
+            http_worker_count,
+            http_worker_queue_capacity,
+            runner_log_buffer_bytes,
+            epoch_tick_interval_ms,
+            default_config_path,
+        )
+    }
+
+    /// Creates a service supervisor and starts manager control socket server
+    /// with an explicit `imagod.toml` path for manager-side remote RPC TOFU.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_config_path(
+        storage_root: impl AsRef<Path>,
+        stop_grace_timeout_secs: u64,
+        runner_ready_timeout_secs: u64,
+        manager_control_read_timeout_ms: u64,
+        http_worker_count: u32,
+        http_worker_queue_capacity: u32,
+        runner_log_buffer_bytes: usize,
+        epoch_tick_interval_ms: u64,
+        config_path: impl AsRef<Path>,
+    ) -> Result<Self, ImagodError> {
+        let config_path = config_path.as_ref().to_path_buf();
+        let storage_root = storage_root.as_ref().to_path_buf();
         let runtime_root = storage_root.join("runtime").join("ipc");
         let stop_grace_timeout = Duration::from_secs(stop_grace_timeout_secs.max(1));
         let runner_ready_timeout = Duration::from_secs(runner_ready_timeout_secs.max(1));
@@ -227,7 +259,7 @@ impl ServiceSupervisor {
         let pending_ready = Arc::new(Mutex::new(BTreeMap::new()));
         let starting_services = Arc::new(Mutex::new(BTreeSet::new()));
         let stopping_count = Arc::new(AtomicUsize::new(0));
-        let manager_control_handler = Arc::new(DefaultManagerControlHandler);
+        let manager_control_handler = Arc::new(DefaultManagerControlHandler::new(config_path));
         let runner_spawner = DefaultRunnerSpawner;
         let manager_control_server = Arc::new(Self::spawn_manager_control_server(
             listener,
@@ -656,6 +688,67 @@ impl ServiceSupervisor {
         })
     }
 
+    /// Invokes one interface function on a running target service.
+    pub async fn invoke(
+        &self,
+        target_service_name: &str,
+        interface_id: &str,
+        function: &str,
+        payload_cbor: &[u8],
+    ) -> Result<Vec<u8>, ImagodError> {
+        let (runner_endpoint, invocation_secret) = {
+            let inner = self.inner.read().await;
+            let target_service = inner.get(target_service_name).ok_or_else(|| {
+                ImagodError::new(
+                    ErrorCode::NotFound,
+                    STAGE_INVOKE,
+                    format!("service '{target_service_name}' is not running"),
+                )
+            })?;
+            if target_service.status != RunningStatus::Running || !target_service.is_ready {
+                return Err(ImagodError::new(
+                    ErrorCode::NotFound,
+                    STAGE_INVOKE,
+                    format!("service '{target_service_name}' is not running"),
+                ));
+            }
+            (
+                target_service.runner_endpoint.clone(),
+                target_service.invocation_secret.clone(),
+            )
+        };
+
+        let claims = imagod_ipc::InvocationTokenClaims {
+            source_service: "remote".to_string(),
+            target_service: target_service_name.to_string(),
+            wit: interface_id.to_string(),
+            exp: now_unix_secs() + INVOCATION_TOKEN_TTL_SECS,
+            nonce: uuid::Uuid::new_v4().to_string(),
+        };
+        let token = issue_invocation_token(&invocation_secret, claims)?;
+
+        let response = DbusP2pTransport::call_runner(
+            &runner_endpoint,
+            &RunnerInboundRequest::Invoke {
+                interface_id: interface_id.to_string(),
+                function: function.to_string(),
+                payload_cbor: payload_cbor.to_vec(),
+                token,
+            },
+        )
+        .await?;
+
+        match response {
+            RunnerInboundResponse::InvokeResult { payload_cbor } => Ok(payload_cbor),
+            RunnerInboundResponse::Error(err) => Err(err.to_error()),
+            RunnerInboundResponse::Ack => Err(ImagodError::new(
+                ErrorCode::Internal,
+                STAGE_INVOKE,
+                "unexpected ack response for invoke",
+            )),
+        }
+    }
+
     /// Spawns the async manager control server loop on the provided listener.
     fn spawn_manager_control_server(
         listener: UnixListener,
@@ -999,7 +1092,9 @@ async fn handle_control_request(
     pending_ready: &Arc<Mutex<PendingReadyMap>>,
     request: ControlRequest,
 ) -> ControlResponse {
-    manager_control::handle_control_request_impl(inner, pending_ready, request).await
+    let handler =
+        manager_control::DefaultManagerControlHandler::new(PathBuf::from("/tmp/imagod.toml"));
+    manager_control::handle_control_request_impl(inner, pending_ready, &handler, request).await
 }
 
 /// Validates manager proof generated from shared secret and runner id.
@@ -1434,7 +1529,7 @@ mod tests {
     #[test]
     fn bindings_allow_target_and_wit_pair_only() {
         let bindings = vec![ServiceBinding {
-            target: "svc-b".to_string(),
+            name: "svc-b".to_string(),
             wit: "pkg:iface/callable".to_string(),
         }];
         assert!(is_binding_allowed(&bindings, "svc-b", "pkg:iface/callable"));
@@ -1493,7 +1588,7 @@ mod tests {
 
         let mut source = new_running_service(source_child, source_runner_id, source_endpoint);
         source.bindings = vec![ServiceBinding {
-            target: target_service_name.clone(),
+            name: target_service_name.clone(),
             wit: wit.clone(),
         }];
         let source_secret = source.manager_auth_secret.clone();
@@ -1564,7 +1659,7 @@ mod tests {
 
         let mut source = new_running_service(source_child, source_runner_id, source_endpoint);
         source.bindings = vec![ServiceBinding {
-            target: target_service_name.clone(),
+            name: target_service_name.clone(),
             wit: wit.clone(),
         }];
         let source_secret = source.manager_auth_secret.clone();
@@ -1625,6 +1720,123 @@ mod tests {
 
         stop_running_service_best_effort(&inner, "svc-source").await;
         stop_running_service_best_effort(&inner, "svc-target").await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn invoke_returns_not_found_when_target_is_not_ready() {
+        let root = new_test_root("invoke-not-ready");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
+        let target_service_name = "svc-target";
+        let runner_endpoint = root
+            .join("runtime")
+            .join("ipc")
+            .join("invoke-not-ready.sock");
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("target child should spawn");
+
+        let mut target = new_running_service(child, "runner-invoke-not-ready", runner_endpoint);
+        target.is_ready = false;
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(target_service_name.to_string(), target);
+        }
+
+        let err = supervisor
+            .invoke(
+                target_service_name,
+                "yieldspace:service/invoke",
+                "call",
+                b"",
+            )
+            .await
+            .expect_err("not-ready target should be rejected");
+        assert_eq!(err.code, ErrorCode::NotFound);
+
+        stop_running_service_best_effort(&supervisor.inner, target_service_name).await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn invoke_issues_remote_token_and_returns_runner_payload() {
+        let root = new_test_root("invoke-success");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
+        let target_service_name = "svc-target";
+        let runner_endpoint = root.join("runtime").join("ipc").join("invoke-success.sock");
+        if let Some(parent) = runner_endpoint.parent() {
+            std::fs::create_dir_all(parent).expect("runner endpoint parent should be created");
+        }
+        let _ = std::fs::remove_file(&runner_endpoint);
+        let listener = UnixListener::bind(&runner_endpoint).expect("runner listener should bind");
+
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("target child should spawn");
+        let target = new_running_service(child, "runner-invoke-success", runner_endpoint.clone());
+        let target_invocation_secret = target.invocation_secret.clone();
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(target_service_name.to_string(), target);
+        }
+
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept should succeed");
+            let request = DbusP2pTransport::read_message::<RunnerInboundRequest>(&mut stream)
+                .await
+                .expect("invoke request should decode");
+            match request {
+                RunnerInboundRequest::Invoke {
+                    interface_id,
+                    function,
+                    payload_cbor,
+                    token,
+                } => {
+                    assert_eq!(interface_id, "yieldspace:service/invoke");
+                    assert_eq!(function, "call");
+                    let claims =
+                        imagod_ipc::verify_invocation_token(&target_invocation_secret, &token)
+                            .expect("token should verify");
+                    assert_eq!(claims.source_service, "remote");
+                    assert_eq!(claims.target_service, "svc-target");
+                    assert_eq!(claims.wit, "yieldspace:service/invoke");
+
+                    DbusP2pTransport::write_message(
+                        &mut stream,
+                        &RunnerInboundResponse::InvokeResult { payload_cbor },
+                    )
+                    .await
+                    .expect("invoke response should write");
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
+        });
+
+        let payload = vec![0x01, 0x02, 0x03];
+        let result = supervisor
+            .invoke(
+                target_service_name,
+                "yieldspace:service/invoke",
+                "call",
+                &payload,
+            )
+            .await
+            .expect("invoke should succeed");
+        assert_eq!(result, payload);
+
+        server_task.await.expect("server task should complete");
+        stop_running_service_best_effort(&supervisor.inner, target_service_name).await;
+        let _ = std::fs::remove_file(&runner_endpoint);
         let _ = std::fs::remove_dir_all(&root);
     }
 

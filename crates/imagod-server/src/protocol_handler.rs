@@ -1,12 +1,17 @@
 //! Deploy protocol session handler and message dispatch implementation.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    sync::{
+        Arc, OnceLock, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
+use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
-use imagod_config::ImagodConfig;
+use imagod_config::{ImagodConfig, parse_ed25519_raw_public_key_hex, resolve_config_path};
 use imagod_control::{ArtifactStore, OperationManager, Orchestrator};
 use serde_json::Value;
 use web_transport_quinn::Session;
@@ -22,13 +27,124 @@ pub(crate) const MAX_STREAM_BYTES: usize = 1024 * 1024 * 16;
 pub(crate) const STREAM_READ_TIMEOUT_SECS: u64 = 30;
 pub(crate) const LOG_DATAGRAM_TARGET_BYTES: usize = 1024;
 
+const STAGE_DYNAMIC_KEYS: &str = "protocol.keys";
+
 /// JSON-backed envelope type used by stream decode/encode flow.
 pub(crate) type Envelope = imago_protocol::ProtocolEnvelope<Value>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DynamicClientRole {
+    Admin,
+    Client,
+    Unknown,
+}
+
+#[derive(Debug, Default)]
+struct DynamicPublicKeys {
+    admin_keys: HashSet<[u8; 32]>,
+    client_keys: HashSet<[u8; 32]>,
+}
+
+static DYNAMIC_PUBLIC_KEYS: OnceLock<RwLock<DynamicPublicKeys>> = OnceLock::new();
+
+fn dynamic_public_keys() -> &'static RwLock<DynamicPublicKeys> {
+    DYNAMIC_PUBLIC_KEYS.get_or_init(|| RwLock::new(DynamicPublicKeys::default()))
+}
+
+fn parse_configured_public_keys(
+    keys: &[String],
+    field_name: &'static str,
+) -> Result<HashSet<[u8; 32]>, ImagodError> {
+    let mut parsed = HashSet::with_capacity(keys.len());
+    for (index, key_hex) in keys.iter().enumerate() {
+        let key = parse_ed25519_raw_public_key_hex(key_hex).map_err(|reason| {
+            ImagodError::new(
+                ErrorCode::Internal,
+                STAGE_DYNAMIC_KEYS,
+                format!("invalid {field_name}[{index}]: {reason}"),
+            )
+        })?;
+        parsed.insert(key);
+    }
+    Ok(parsed)
+}
+
+pub(crate) fn sync_dynamic_public_keys_from_config(
+    config: &ImagodConfig,
+) -> Result<(), ImagodError> {
+    let updated = DynamicPublicKeys {
+        admin_keys: parse_configured_public_keys(
+            &config.tls.admin_public_keys,
+            "tls.admin_public_keys",
+        )?,
+        client_keys: parse_configured_public_keys(
+            &config.tls.client_public_keys,
+            "tls.client_public_keys",
+        )?,
+    };
+    let mut guard = match dynamic_public_keys().write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *guard = updated;
+    Ok(())
+}
+
+pub(crate) fn upsert_dynamic_client_public_key(public_key_hex: &str) -> Result<bool, ImagodError> {
+    let key = parse_ed25519_raw_public_key_hex(public_key_hex).map_err(|reason| {
+        ImagodError::new(
+            ErrorCode::BadRequest,
+            "bindings.cert.upload",
+            format!("public_key_hex is invalid: {reason}"),
+        )
+    })?;
+    let mut guard = match dynamic_public_keys().write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    Ok(guard.client_keys.insert(key))
+}
+
+pub(crate) fn resolve_dynamic_client_role(public_key: &[u8; 32]) -> DynamicClientRole {
+    let guard = match dynamic_public_keys().read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if guard.admin_keys.contains(public_key) {
+        return DynamicClientRole::Admin;
+    }
+    if guard.client_keys.contains(public_key) {
+        return DynamicClientRole::Client;
+    }
+    DynamicClientRole::Unknown
+}
+
+pub(crate) fn is_tls_client_key_allowlisted(public_key: &[u8; 32]) -> bool {
+    let guard = match dynamic_public_keys().read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.admin_keys.contains(public_key) || guard.client_keys.contains(public_key)
+}
+
+#[cfg(test)]
+pub(crate) fn replace_dynamic_public_keys_for_tests(
+    admin_keys: &[[u8; 32]],
+    client_keys: &[[u8; 32]],
+) {
+    let mut guard = match dynamic_public_keys().write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.admin_keys = admin_keys.iter().copied().collect();
+    guard.client_keys = client_keys.iter().copied().collect();
+}
 
 #[derive(Clone)]
 /// Handles one WebTransport session and dispatches protocol messages.
 pub struct ProtocolHandler {
     config: Arc<ImagodConfig>,
+    config_path: PathBuf,
     artifacts: ArtifactStore,
     operations: OperationManager,
     orchestrator: Orchestrator,
@@ -42,12 +158,14 @@ impl ProtocolHandler {
     /// Creates a protocol handler with shared manager dependencies.
     pub fn new(
         config: Arc<ImagodConfig>,
+        config_path: PathBuf,
         artifacts: ArtifactStore,
         operations: OperationManager,
         orchestrator: Orchestrator,
     ) -> Self {
-        Self::with_runtime_components(
+        Self::new_with_runtime_components(
             config,
+            config_path,
             artifacts,
             operations,
             orchestrator,
@@ -57,8 +175,26 @@ impl ProtocolHandler {
         )
     }
 
-    fn with_runtime_components(
+    /// Creates a protocol handler with default config path resolution.
+    pub fn new_with_default_config_path(
         config: Arc<ImagodConfig>,
+        artifacts: ArtifactStore,
+        operations: OperationManager,
+        orchestrator: Orchestrator,
+    ) -> Self {
+        Self::new(
+            config,
+            resolve_config_path(None),
+            artifacts,
+            operations,
+            orchestrator,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_runtime_components(
+        config: Arc<ImagodConfig>,
+        config_path: PathBuf,
         artifacts: ArtifactStore,
         operations: OperationManager,
         orchestrator: Orchestrator,
@@ -66,8 +202,11 @@ impl ProtocolHandler {
         clock: Arc<clock::SystemServerClock>,
         logs_forwarder: Arc<logs_forwarder::DefaultLogsForwarder>,
     ) -> Self {
+        sync_dynamic_public_keys_from_config(config.as_ref())
+            .expect("validated config should contain valid TLS public keys");
         Self {
             config,
+            config_path,
             artifacts,
             operations,
             orchestrator,

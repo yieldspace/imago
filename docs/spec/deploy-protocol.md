@@ -303,6 +303,26 @@ response:
 - `follow=false` は `logs.end`（または `is_last`）で終端する。
 - `follow=true` は明示中断または配信側終了時に `logs.end` を受けて終端する。
 
+### 5.10 `rpc.invoke`
+
+request:
+
+- `interface_id`
+- `function`
+- `args_cbor`（CBOR bytes）
+- `target_service.name`
+
+response:
+
+- `result_cbor`（成功時）
+- `error`（失敗時、`code` / `stage` / `message`）
+
+制約:
+
+- `result_cbor` と `error` は同時に存在してはならない。
+- `tls.client_public_keys` で認証された接続は `rpc.invoke` を許可し、それ以外の管理メッセージは拒否する。
+- 例: `examples/rpc.invoke.request.json` / `examples/rpc.invoke.response.success.json` / `examples/rpc.invoke.response.error.json`
+
 ## 6. 状態遷移
 
 `accepted -> running -> succeeded | failed | canceled`
@@ -394,3 +414,10 @@ response:
 - [BREAKING] 認証方式を mTLS/X.509 から RPK + TOFU へ移行した。
 - [BREAKING] 接続時のサーバ検証は CA チェーンではなく `known_hosts` の鍵 pin を正本にする。
 - `known_hosts` 未登録ホストへの初回接続のみ TOFU で登録し、登録済みホストの鍵不一致は `E_UNAUTHORIZED` を返す。
+
+## 実装反映ノート（Network RPC / 2026-02-18）
+
+- `rpc.invoke` を deploy protocol の有効メッセージ種別へ追加した。
+- `rpc.invoke` request は `interface_id` / `function` / `args_cbor` / `target_service.name` を持つ。
+- `rpc.invoke` response は `result_cbor` または構造化 `error` の排他的表現を返す。
+- クライアント鍵ロールを分離し、`tls.client_public_keys` は `hello.negotiate` と `rpc.invoke` のみ許可する。

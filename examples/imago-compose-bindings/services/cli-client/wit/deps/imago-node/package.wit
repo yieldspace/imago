@@ -1,0 +1,15 @@
+package imago:node@0.1.0;
+
+interface rpc {
+    resource connection {
+        invoke: func(target-service: string, interface-id: string, function: string, args-cbor: list<u8>) -> result<list<u8>, string>;
+        disconnect: func();
+    }
+
+    connect: func(addr: string) -> result<connection, string>;
+    local: func() -> result<connection, string>;
+}
+
+world host {
+    import rpc;
+}

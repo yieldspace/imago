@@ -12,8 +12,6 @@
 ## 出力場所
 
 - 固定パス: `build/manifest.json`
-- `imago build --env <name>` 時: `build/manifest.<name>.json`
-  - `<name>` の許可文字は ASCII 英数字、`.`、`-`、`_`。`/`、`\`、`..` は禁止。
 
 <a id="required-fields"></a>
 ## 必須フィールド
@@ -22,7 +20,7 @@
 |---|---|---|
 | `name` | string | サービス名 |
 | `main` | string | Wasm エントリパス |
-| `type` | string | `cli` / `http` / `socket` |
+| `type` | string | `cli` / `http` / `socket` / `rpc` |
 | `target` | object | 解決済みターゲット設定 |
 | `vars` | object | env 反映後の公開変数 |
 | `secrets` | object | env 反映後の secret 値 |
@@ -62,8 +60,8 @@
 
 ## `bindings` フィールド
 
-- `bindings` は `[{"target": "<service>", "wit": "<interface-id>"}, ...]` の配列。
-- `target` は service 名文字制約（`name` と同等）に従う。
+- `bindings` は `[{"name": "<service>", "wit": "<interface-id>"}, ...]` の配列。
+- `name` は service 名文字制約（`name` と同等）に従う。
 - `wit` は非空文字列。
 - `bindings` 未指定 manifest は `[]` と同等に扱う（後方互換）。
 
@@ -127,7 +125,7 @@
 - `hash.algorithm != "sha256"` は拒否。
 - `hash.targets` が不足または重複なら拒否。
 - `secrets` は key-value オブジェクトのみ許可。
-- `bindings` 指定時は配列のみ許可し、各要素は `target` / `wit` の非空文字列を必須とする。
+- `bindings` 指定時は配列のみ許可し、各要素は `name` / `wit` の非空文字列を必須とする。
 - `dependencies` 指定時は typed 構造のみ許可し、`kind=wasm` は `component.path` / `component.sha256` を必須とする（`imago build` 生成物として）。
 - `capabilities` は `privileged` / `deps` / `wasi` 以外のキーを拒否する。
 
@@ -149,3 +147,8 @@
 - CLI は `imago.toml` の `capabilities` を正規化して `manifest.capabilities` に出力する（`capabilirties` は互換受理しない）。
 - CLI は `type=http` 時のみ `imago.toml` の `[http].port` / `[http].max_body_bytes` を `manifest.http.port` / `manifest.http.max_body_bytes` へ正規化して出力する。
 - CLI は `type=socket` 時のみ `imago.toml` の `[socket].protocol` / `[socket].direction` / `[socket].listen_addr` / `[socket].listen_port` を `manifest.socket.*` へ正規化して出力する。
+
+## 実装反映ノート（Network RPC / 2026-02-18）
+
+- [BREAKING] `type` に `rpc` を追加した。
+- [BREAKING] `bindings` の契約を `target` から `name` へ変更した。

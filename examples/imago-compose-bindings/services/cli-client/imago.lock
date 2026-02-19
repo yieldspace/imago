@@ -1,0 +1,19 @@
+version = 1
+
+[[dependencies]]
+name = "acme:clock"
+version = "0.1.0"
+wit_source = "file://../rpc-greeter/wit/world.wit"
+wit_digest = "1f30762356393fa00052cfe54fec4a6d95817bff29efcf00af08c17246b45acd"
+wit_path = "wit/deps/acme-clock"
+component_source = "file://../rpc-greeter/target/wasm32-wasip2/release/rpc-greeter.wasm"
+component_sha256 = "bef6472dd0bd13ffafdb2260c4cacb70d891aac32e00c06097f4966c8bd49e09"
+resolved_at = "1771486508"
+
+[[dependencies]]
+name = "imago:node"
+version = "0.1.0"
+wit_source = "file://../../../../plugins/imago-node/wit"
+wit_digest = "03cf700a9e9965be63ba1860190b1f59763e96f94b262f56f162dd50d11d6528"
+wit_path = "wit/deps/imago-node"
+resolved_at = "1771486508"

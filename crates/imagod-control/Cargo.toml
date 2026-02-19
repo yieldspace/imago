@@ -8,10 +8,16 @@ base64 = { workspace = true }
 hex = { workspace = true }
 imago-protocol = { workspace = true }
 imagod-common = { workspace = true }
+imagod-config = { workspace = true }
 imagod-ipc = { workspace = true }
+quinn = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tar = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+url = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
+web-transport-quinn = { workspace = true }

@@ -56,9 +56,9 @@ compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "/etc/imago/certs/server.key"
-client_public_keys = [
-  "/etc/imago/certs/client-a.pub",
-]
+admin_public_keys = ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+client_public_keys = ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+known_public_keys = { "rpc://node-a:4443" = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
 
 [runtime]
 chunk_size = 1048576
@@ -127,3 +127,9 @@ epoch_tick_interval_ms = 50
 - [BREAKING] `imagod.toml` の `tls.server_cert` / `tls.client_ca_cert` を廃止し、`tls.server_key` / `tls.client_public_keys` へ移行した。
 - `imagod` はサーバ証明書チェーンを持たず、`server_key` から提示する RPK で識別される。
 - クライアント側は `known_hosts` でサーバ鍵 pin を行い、初回接続時のみ TOFU 登録する。
+
+## 実装反映ノート（Network RPC / 2026-02-18）
+
+- `tls.admin_public_keys` を追加し、管理操作（deploy/run/stop/logs/state/cert）を許可する鍵を分離した。
+- `tls.client_public_keys` は RPC クライアント鍵として扱い、`hello.negotiate` と `rpc.invoke` のみ許可する。
+- `tls.known_public_keys` は `authority -> public key` table へ変更した。

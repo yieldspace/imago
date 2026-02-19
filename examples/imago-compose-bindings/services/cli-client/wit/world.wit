@@ -1,0 +1,6 @@
+package example:cli-client;
+
+world cli-client {
+    import imago:node/rpc@0.1.0;
+    import acme:clock/api;
+}

@@ -1,0 +1,19 @@
+listen_addr = "127.0.0.1:4443"
+storage_root = ".imagod-data"
+server_version = "imagod/imago-compose-bindings-example"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_key = "certs/server.key"
+admin_public_keys = ["6d0671549a3a62ccf91f1931805cffaa3e7999534989014952a2750e274c10af"]
+client_public_keys = ["9729ac596d530443157603d57ad9abad733bd973ccfa4d7a769ae454b37bc4b3"]
+known_public_keys = {}
+
+[runtime]
+chunk_size = 1048576
+max_inflight_chunks = 16
+upload_session_ttl_secs = 900
+stop_grace_timeout_secs = 30
+runner_ready_timeout_secs = 3
+runner_log_buffer_bytes = 262144
+epoch_tick_interval_ms = 50

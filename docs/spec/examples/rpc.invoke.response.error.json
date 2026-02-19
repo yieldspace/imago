@@ -1,0 +1,13 @@
+{
+  "type": "rpc.invoke",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000",
+  "correlation_id": "d6f5fbe7-c9c2-4f4b-bc6b-3f17c60f8b9b",
+  "payload": {
+    "error": {
+      "code": "E_NOT_FOUND",
+      "stage": "service.invoke",
+      "message": "service 'svc-target' is not running"
+    }
+  },
+  "error": null
+}

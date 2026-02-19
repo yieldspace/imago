@@ -1,0 +1,13 @@
+[package]
+name = "rpc-greeter"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "rpc-greeter"
+path = "src/main.rs"
+
+[dependencies]
+wit-bindgen = "0.51.0"
+
+[workspace]
