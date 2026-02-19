@@ -14,6 +14,10 @@ concurrency:
 jobs:
   build:
     runs-on: imago-nanokvm-runner-set
+    env:
+      CC_riscv64gc_unknown_linux_musl: /home/runner/riscv64-unknown-linux-musl/bin/riscv64-unknown-linux-musl-gcc
+      AR_riscv64gc_unknown_linux_musl: /home/runner/riscv64-unknown-linux-musl/bin/riscv64-unknown-linux-musl-ar
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER: /home/runner/riscv64-unknown-linux-musl/bin/riscv64-unknown-linux-musl-gcc
     steps:
       - uses: actions/checkout@v6
         with:
@@ -33,16 +37,12 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Debug cross toolchain
+      - name: Verify cross toolchain
         run: |
-          set -euxo pipefail
-          echo "PATH=$PATH"
-          ls -la /home/runner/riscv64-unknown-linux-musl/bin
-          command -v riscv64-linux-musl-gcc || true
-          command -v riscv64-unknown-linux-musl-gcc || true
-          command -v riscv64-unknown-linux-musl-ar || true
-          rustup target list --installed
-          env | sort | egrep '^(CC|AR|CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL|PKG_CONFIG)' || true
+          set -euo pipefail
+          command -v riscv64-unknown-linux-musl-gcc
+          command -v riscv64-unknown-linux-musl-ar
+          command -v "$CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER"
 
       - name: Build
         run: cargo build --locked --release --bin imagod --target riscv64gc-unknown-linux-musl
