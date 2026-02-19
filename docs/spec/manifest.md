@@ -60,9 +60,10 @@
 
 ## `bindings` フィールド
 
-- `bindings` は `[{"name": "<service>", "wit": "<interface-id>"}, ...]` の配列。
+- `bindings` は `[{"name": "<service>", "wit": "<package>/<interface>"}, ...]` の配列。
 - `name` は service 名文字制約（`name` と同等）に従う。
-- `wit` は非空文字列。
+- `wit` は `<package>/<interface>` 形式の非空文字列。
+- `imago update` は `imago.toml` の `[[bindings]].wit` から解決した WIT package 内の全 interface を展開し、この形式で `bindings` を出力する。
 - `bindings` 未指定 manifest は `[]` と同等に扱う（後方互換）。
 
 ## `dependencies` フィールド
@@ -126,6 +127,7 @@
 - `hash.targets` が不足または重複なら拒否。
 - `secrets` は key-value オブジェクトのみ許可。
 - `bindings` 指定時は配列のみ許可し、各要素は `name` / `wit` の非空文字列を必須とする。
+- `bindings[].wit` は `<package>/<interface>` 形式のみ許可する。
 - `dependencies` 指定時は typed 構造のみ許可し、`kind=wasm` は `component.path` / `component.sha256` を必須とする（`imago build` 生成物として）。
 - `capabilities` は `privileged` / `deps` / `wasi` 以外のキーを拒否する。
 
@@ -141,7 +143,8 @@
 - CLI は `main` の実体 wasm を `build/<sha256>-<name>.wasm` へ配置し、`manifest.main` には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
 - `build/<sha256>-<name>.wasm` が既に存在する場合でも、内容の sha256 が不一致なら `main` の実体 wasm から上書き再生成する。
 - `hash.value` の wasm 対象は `manifest.main` が指す materialize 後ファイルとする。
-- CLI は `imago.toml` の `[[bindings]]` を `manifest.bindings[]` に正規化して出力する。
+- CLI は `imago.toml` の `[[bindings]].wit` を `imago update` で解決し、package 内の全 interface を `manifest.bindings[]` の `<package>/<interface>` として正規化して出力する。
+- [BREAKING] `imago.toml` の `[[bindings]].wit` で旧 `"<package>/<interface>"` 形式は受理しない。
 - CLI は `imago.toml` の `[[dependencies]]` を typed `manifest.dependencies[]` に正規化し、lock 検証済みの WIT/Component 参照情報を保持する。
   - `kind=wasm` で `component` 未指定の場合、`wit` source が component なら `imago update` が `component_*` を lock に自動固定し、`imago build` が manifest の `component.*` を補完する。
 - CLI は `imago.toml` の `capabilities` を正規化して `manifest.capabilities` に出力する（`capabilirties` は互換受理しない）。

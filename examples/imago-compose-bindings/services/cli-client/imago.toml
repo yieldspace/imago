@@ -11,31 +11,6 @@ version = "0.1.0"
 kind = "native"
 wit = "file://../../../../plugins/imago-node/wit"
 
-[[dependencies]]
-name = "acme:clock"
-version = "0.1.0"
-kind = "wasm"
-wit = "file://../rpc-greeter/wit/world.wit"
-component = { source = "file://../rpc-greeter/target/wasm32-wasip2/release/rpc_greeter.wasm" }
-
-[dependencies.capabilities]
-privileged = false
-
-[dependencies.capabilities.wasi]
-"wasi:cli/environment@0.2.6" = ["*"]
-"wasi:cli/exit@0.2.6" = ["*"]
-"wasi:cli/stderr@0.2.6" = ["*"]
-"wasi:cli/stdin@0.2.6" = ["*"]
-"wasi:cli/stdout@0.2.6" = ["*"]
-"wasi:clocks/monotonic-clock@0.2.6" = ["*"]
-"wasi:clocks/wall-clock@0.2.6" = ["*"]
-"wasi:io/error@0.2.6" = ["*"]
-"wasi:io/poll@0.2.6" = ["*"]
-"wasi:io/streams@0.2.6" = ["*"]
-"wasi:random/insecure-seed@0.2.6" = ["*"]
-"wasi:random/insecure@0.2.6" = ["*"]
-"wasi:random/random@0.2.6" = ["*"]
-
 [capabilities]
 privileged = false
 
@@ -60,4 +35,4 @@ privileged = false
 
 [[bindings]]
 name = "rpc-greeter"
-wit = "acme:clock/api"
+wit = "file://../rpc-greeter/wit/world.wit"

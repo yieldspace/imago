@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
+use imago_lockfile::BindingWitExpectation;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
@@ -179,6 +180,13 @@ pub(crate) struct ProjectDependency {
     pub capabilities: ManifestCapabilityPolicy,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectBindingSource {
+    pub name: String,
+    pub wit_source: String,
+    pub wit_registry: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ManifestHttp {
     port: u16,
@@ -312,7 +320,7 @@ pub(crate) fn build_project_with_target_override(
     let restart_policy = parse_restart_policy(&root)?;
 
     let vars = parse_string_table(root.get("vars"), "vars")?;
-    let bindings = parse_bindings(root.get("bindings"))?;
+    let project_bindings = parse_project_binding_sources(root.get("bindings"))?;
     let project_dependencies = parse_project_dependencies(root.get("dependencies"))?;
     if !project_dependencies.is_empty() {
         let wit_deps_root = project_root.join("wit").join("deps");
@@ -328,6 +336,7 @@ pub(crate) fn build_project_with_target_override(
     let dependency_resolver = StandardDependencyResolver;
     let dependencies = dependency_resolver
         .resolve_manifest_dependencies_from_lock(project_root, &project_dependencies)?;
+    let bindings = resolve_manifest_bindings_from_lock(project_root, &project_bindings)?;
     let target = match target_override {
         Some(target) => target.clone(),
         None => parse_target(&root, target_name, project_root)?,
@@ -773,6 +782,13 @@ pub(crate) fn load_project_dependencies(
     parse_project_dependencies(root.get("dependencies"))
 }
 
+pub(crate) fn load_project_binding_sources(
+    project_root: &Path,
+) -> anyhow::Result<Vec<ProjectBindingSource>> {
+    let root = load_resolved_toml(project_root)?;
+    parse_project_binding_sources(root.get("bindings"))
+}
+
 fn parse_project_dependencies(value: Option<&TomlValue>) -> anyhow::Result<Vec<ProjectDependency>> {
     let Some(value) = value else {
         return Ok(Vec::new());
@@ -1153,23 +1169,9 @@ fn validate_dependency_package_name(name: &str) -> anyhow::Result<()> {
     validation::validate_dependency_package_name(name)
 }
 
-fn validate_binding_wit(binding_wit: &str) -> anyhow::Result<()> {
-    let (package_name, interface_name) = binding_wit.split_once('/').ok_or_else(|| {
-        anyhow!(
-            "binding wit '{}' must be '<package>/<interface>'",
-            binding_wit
-        )
-    })?;
-    if package_name.trim().is_empty() || interface_name.trim().is_empty() {
-        return Err(anyhow!(
-            "binding wit '{}' must be '<package>/<interface>'",
-            binding_wit
-        ));
-    }
-    Ok(())
-}
-
-fn parse_bindings(value: Option<&TomlValue>) -> anyhow::Result<Vec<ManifestBinding>> {
+fn parse_project_binding_sources(
+    value: Option<&TomlValue>,
+) -> anyhow::Result<Vec<ProjectBindingSource>> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
@@ -1178,6 +1180,8 @@ fn parse_bindings(value: Option<&TomlValue>) -> anyhow::Result<Vec<ManifestBindi
         .as_array()
         .ok_or_else(|| anyhow!("bindings must be an array"))?;
     let mut bindings = Vec::with_capacity(array.len());
+    let mut wit_to_name = BTreeMap::<(String, Option<String>), String>::new();
+    let mut seen_bindings = BTreeSet::<(String, String, Option<String>)>::new();
     for (index, entry) in array.iter().enumerate() {
         let table = entry
             .as_table()
@@ -1198,7 +1202,7 @@ fn parse_bindings(value: Option<&TomlValue>) -> anyhow::Result<Vec<ManifestBindi
             .ok_or_else(|| anyhow!("bindings[{index}].name must be a string"))?
             .trim()
             .to_string();
-        let wit = table
+        let wit_source = table
             .get("wit")
             .and_then(TomlValue::as_str)
             .ok_or_else(|| anyhow!("bindings[{index}].wit must be a string"))?
@@ -1208,7 +1212,7 @@ fn parse_bindings(value: Option<&TomlValue>) -> anyhow::Result<Vec<ManifestBindi
         if name.is_empty() {
             return Err(anyhow!("bindings[{index}].name must not be empty"));
         }
-        if wit.is_empty() {
+        if wit_source.is_empty() {
             return Err(anyhow!("bindings[{index}].wit must not be empty"));
         }
         validate_service_name(&name).map_err(|e| {
@@ -1217,11 +1221,76 @@ fn parse_bindings(value: Option<&TomlValue>) -> anyhow::Result<Vec<ManifestBindi
                 e.to_string().replace("name ", "")
             )
         })?;
-        validate_binding_wit(&wit)?;
+        if !wit_source.contains("://")
+            && wit_source.contains('/')
+            && !wit_source.starts_with("file://")
+            && !wit_source.starts_with("warg://")
+        {
+            return Err(anyhow!(
+                "bindings[{index}].wit no longer accepts '<package>/<interface>'; use file://... or warg://..."
+            ));
+        }
+        plugin_sources::validate_wit_source(&wit_source, &format!("bindings[{index}].wit"))?;
+        let wit_registry = plugin_sources::normalize_registry_for_source(
+            &wit_source,
+            None,
+            &format!("bindings[{index}].wit"),
+        )?;
 
-        bindings.push(ManifestBinding { name, wit });
+        let source_key = (wit_source.clone(), wit_registry.clone());
+        if let Some(existing_name) = wit_to_name.get(&source_key) {
+            if existing_name != &name {
+                return Err(anyhow!(
+                    "bindings wit '{}' maps to multiple services ('{}' and '{}'); this is ambiguous",
+                    wit_source,
+                    existing_name,
+                    name
+                ));
+            }
+        } else {
+            wit_to_name.insert(source_key, name.clone());
+        }
+
+        if seen_bindings.insert((name.clone(), wit_source.clone(), wit_registry.clone())) {
+            bindings.push(ProjectBindingSource {
+                name,
+                wit_source,
+                wit_registry,
+            });
+        }
     }
     Ok(bindings)
+}
+
+fn resolve_manifest_bindings_from_lock(
+    project_root: &Path,
+    bindings: &[ProjectBindingSource],
+) -> anyhow::Result<Vec<ManifestBinding>> {
+    if bindings.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let lock = imago_lockfile::load_from_project_root(project_root)?;
+    let mut expectations = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        expectations.push(BindingWitExpectation {
+            name: binding.name.clone(),
+            wit_source: binding.wit_source.clone(),
+            wit_registry: binding.wit_registry.clone(),
+        });
+    }
+    let resolved = imago_lockfile::resolve_binding_wits(project_root, &lock, &expectations)?;
+
+    let mut expanded = BTreeSet::<(String, String)>::new();
+    for binding in resolved {
+        for interface_id in binding.interfaces {
+            expanded.insert((binding.name.clone(), interface_id));
+        }
+    }
+    Ok(expanded
+        .into_iter()
+        .map(|(name, wit)| ManifestBinding { name, wit })
+        .collect())
 }
 
 fn parse_target(
@@ -1622,8 +1691,8 @@ mod tests {
         commands::{dependency_cache, update},
     };
     use imago_lockfile::{
-        IMAGO_LOCK_VERSION, ImagoLock, ImagoLockDependency, ImagoLockWitPackage,
-        ImagoLockWitPackageVersion,
+        IMAGO_LOCK_VERSION, ImagoLock, ImagoLockBindingWit, ImagoLockDependency,
+        ImagoLockWitPackage, ImagoLockWitPackageVersion,
     };
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
@@ -2334,7 +2403,7 @@ client_key = "certs/client.key"
     }
 
     #[test]
-    fn manifest_includes_bindings_from_imago_toml() {
+    fn manifest_expands_bindings_from_lock_sources() {
         let root = new_temp_dir("manifest-bindings");
         write_imago_toml(
             &root,
@@ -2345,19 +2414,66 @@ type = "cli"
 
 [[bindings]]
 name = "svc-b"
-wit = "yieldspace:svc/invoke"
+wit = "file://registry/acme-clock.wit"
 
 [target.default]
 remote = "127.0.0.1:4443"
 "#,
         );
+        write_file(
+            &root.join("registry/acme-clock.wit"),
+            b"package acme:clock@0.1.0;\ninterface api { now: func() -> u64; }\n",
+        );
+        write_file(
+            &root.join("wit/deps/acme-clock/package.wit"),
+            br#"
+package acme:clock@0.1.0;
+
+interface api {
+  now: func() -> u64;
+}
+
+interface admin {
+  health: func() -> string;
+}
+"#,
+        );
+        let wit_digest =
+            compute_path_digest_hex(&root.join("wit/deps/acme-clock")).expect("wit digest");
+        write_imago_lock(
+            &root,
+            &ImagoLock {
+                version: IMAGO_LOCK_VERSION,
+                dependencies: vec![],
+                wit_packages: vec![],
+                binding_wits: vec![ImagoLockBindingWit {
+                    name: "svc-b".to_string(),
+                    wit_source: "file://registry/acme-clock.wit".to_string(),
+                    wit_registry: None,
+                    wit_digest,
+                    wit_path: "wit/deps/acme-clock".to_string(),
+                    interfaces: vec!["acme:clock/admin".to_string(), "acme:clock/api".to_string()],
+                    resolved_at: "0".to_string(),
+                }],
+            },
+        );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
         let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
-        assert_eq!(manifest.bindings.len(), 1);
-        assert_eq!(manifest.bindings[0].name, "svc-b");
-        assert_eq!(manifest.bindings[0].wit, "yieldspace:svc/invoke");
+        assert_eq!(manifest.bindings.len(), 2);
+        let actual = manifest
+            .bindings
+            .iter()
+            .map(|binding| (binding.name.clone(), binding.wit.clone()))
+            .collect::<BTreeSet<_>>();
+        let expected = [
+            ("svc-b".to_string(), "acme:clock/admin".to_string()),
+            ("svc-b".to_string(), "acme:clock/api".to_string()),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2400,7 +2516,7 @@ type = "cli"
 
 [[bindings]]
 name = "svc-b"
-wit = "yieldspace:svc/invoke"
+wit = "file://registry/acme-clock.wit"
 target = "legacy"
 
 [target.default]
@@ -2417,8 +2533,8 @@ remote = "127.0.0.1:4443"
     }
 
     #[test]
-    fn build_accepts_bindings_wit_package_interface_with_whitespace() {
-        let root = new_temp_dir("manifest-bindings-wit-whitespace");
+    fn build_rejects_legacy_bindings_wit_format() {
+        let root = new_temp_dir("manifest-bindings-legacy-wit-format");
         write_imago_toml(
             &root,
             r#"
@@ -2428,36 +2544,7 @@ type = "cli"
 
 [[bindings]]
 name = "svc-b"
-wit = "yieldspace:svc / invoke"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
-        );
-        write_file(&root.join("build/app.wasm"), b"wasm-a");
-
-        let output = build_project("default", &root).expect("build should succeed");
-        let manifest = read_manifest(&root, &output.manifest_path);
-        assert_eq!(manifest.bindings.len(), 1);
-        assert_eq!(manifest.bindings[0].name, "svc-b");
-        assert_eq!(manifest.bindings[0].wit, "yieldspace:svc / invoke");
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn build_rejects_bindings_wit_without_interface_separator() {
-        let root = new_temp_dir("manifest-bindings-invalid-wit-format");
-        write_imago_toml(
-            &root,
-            r#"
-name = "svc-a"
-main = "build/app.wasm"
-type = "cli"
-
-[[bindings]]
-name = "svc-b"
-wit = "yieldspace:svc"
+wit = "yieldspace:svc/invoke"
 
 [target.default]
 remote = "127.0.0.1:4443"
@@ -2466,10 +2553,40 @@ remote = "127.0.0.1:4443"
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
         let err =
-            build_project("default", &root).expect_err("build must fail on invalid bindings.wit");
+            build_project("default", &root).expect_err("legacy bindings format must be rejected");
         assert!(
             err.to_string()
-                .contains("binding wit 'yieldspace:svc' must be '<package>/<interface>'")
+                .contains("no longer accepts '<package>/<interface>'")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_bindings_wit_without_supported_scheme() {
+        let root = new_temp_dir("manifest-bindings-invalid-wit-scheme");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-a"
+main = "build/app.wasm"
+type = "cli"
+
+[[bindings]]
+name = "svc-b"
+wit = "https://example.invalid/acme-clock.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project("default", &root)
+            .expect_err("build must fail when bindings.wit scheme is unsupported");
+        assert!(
+            err.to_string()
+                .contains("must start with one of: file://, warg://")
         );
 
         let _ = fs::remove_dir_all(root);
@@ -2828,6 +2945,7 @@ remote = "127.0.0.1:4443"
                     component_sha256: None,
                     resolved_at: "0".to_string(),
                 }],
+                binding_wits: vec![],
                 wit_packages: vec![ImagoLockWitPackage {
                     name: "test:dep".to_string(),
                     registry: None,
@@ -3034,6 +3152,7 @@ remote = "127.0.0.1:4443"
                     component_sha256: None,
                     resolved_at: "0".to_string(),
                 }],
+                binding_wits: vec![],
                 wit_packages: vec![ImagoLockWitPackage {
                     name: "test:dep".to_string(),
                     registry: None,
@@ -3196,6 +3315,7 @@ remote = "127.0.0.1:4443"
                     component_sha256: Some(plugin_sha.clone()),
                     resolved_at: "0".to_string(),
                 }],
+                binding_wits: vec![],
                 wit_packages: vec![],
             },
         );
@@ -3286,6 +3406,7 @@ remote = "127.0.0.1:4443"
                     component_sha256: Some(plugin_sha.clone()),
                     resolved_at: "0".to_string(),
                 }],
+                binding_wits: vec![],
                 wit_packages: vec![],
             },
         );

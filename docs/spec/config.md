@@ -62,8 +62,9 @@
 - `[[bindings]]` は service 間関数呼び出しの許可ルールを定義する。
 - 各要素は以下を必須とする。
   - `name`: 呼び出し先 service 名（`name` と同じ文字制約）
-  - `wit`: interface 識別子文字列
-- `imago build` はこの設定を `manifest.bindings[]` に正規化して出力する。
+  - `wit`: string（`file://...` / `warg://...`）
+- [BREAKING] 旧 `wit = "<package>/<interface>"` 形式は受理しない。
+- `imago update` は `wit` で指定した source から解決した WIT package 内の全 interface を展開し、`manifest.bindings[]` へ `{"name":"<service>","wit":"<package>/<interface>"}` の形式で正規化して出力する。
 - 未指定時は `manifest.bindings=[]` として扱い、runtime は deny-by-default で拒否する。
 
 ## `[[dependencies]]`（プラグイン依存）
@@ -174,6 +175,8 @@
 - `restart` が許可値（`never` / `on-failure` / `always` / `unless-stopped`）以外ならエラー。
 - `runtime.restart_policy` を指定した場合はエラー（互換受理なし）。
 - `dependencies[].wit` に `https://wa.dev/...` shorthand を指定した場合はエラー（`warg://<package>@<version>` を使用）。
+- `bindings[].wit` に `file://...` / `warg://...` 以外を指定した場合はエラー。
+- `bindings[].wit` に旧 `"<package>/<interface>"` 文字列を指定した場合はエラー。
 - `dependencies[].wit.source` に `file://wit/deps/...`（または同等の `wit/deps` 配下パス）を指定した場合はエラー。
 - 複数 dependency が同一 `wit/deps` 出力パスへ解決される場合はエラー。
 - `dependencies[].name` と `dependencies[].requires[]` に、絶対パス・drive prefix・`./`・`../` を含む path component を指定した場合はエラー。
@@ -207,7 +210,8 @@
 - `imago build` は `capabilities` を正規化して manifest に出力し、`capabilirties` キーは設定エラーとして拒否する。
 - `imago build` は `[[dependencies]]` がある場合、`.imago/deps` から `wit/deps` を再構築してから `imago.lock(version=1)` の `wit_*` / `component_*` / `wit_packages` を検証し、不一致時は `imago update` を要求して失敗する（`kind=wasm` で `component` 未指定の場合は `wit` 由来の期待値と照合する）。
 - `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
-- `[[bindings]]` は `manifest.bindings[]` へ正規化し、runtime の呼び出し認可入力として扱う。
+- `imago update` は `[[bindings]].wit` から WIT package を解決し、package 内の全 interface を `manifest.bindings[]` の `<package>/<interface>` へ展開する。
+- `imago build` は展開済み `manifest.bindings[]` を出力し、runtime の呼び出し認可入力として扱う。
 - `type="http"` のときのみ `[http].port` / `[http].max_body_bytes` を受理し、`manifest.http.port` / `manifest.http.max_body_bytes` へ反映する。
 - `type="socket"` のときのみ `[socket].protocol` / `[socket].direction` / `[socket].listen_addr` / `[socket].listen_port` を受理し、`manifest.socket.*` へ反映する。
 - CLI の `name` 検証は `imagod` と同等に `..` を拒否し、path 文字を明示的に弾く。
@@ -299,7 +303,7 @@
 ## 実装反映ノート（Network RPC / 2026-02-18）
 
 - [BREAKING] `imago build/deploy/run/stop` の `--env` は廃止した。`[env.*]` と `.env.<name>` の解決も行わない。
-- [BREAKING] `[[bindings]]` は `name` + `wit` のみ受理し、`target` は設定エラーとして拒否する。
+- [BREAKING] `[[bindings]]` は `name` + `wit`（`file://...` / `warg://...`）のみ受理し、`target` と旧 `wit="<package>/<interface>"` 形式は設定エラーとして拒否する。
 - `type = "rpc"` を追加し、`imago build` / manifest 正規化で受理する。
 - `type = "rpc"` は `main` を必須キーとして維持しつつ、runner 起動時に `main` を自動実行しない（実行契機は `rpc.invoke` のみ）。
 - `imago bindings cert upload` / `imago bindings cert deploy` サブコマンドを追加した。

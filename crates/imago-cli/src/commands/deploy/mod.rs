@@ -2006,6 +2006,7 @@ mod tests {
                     component_sha256: Some(component_sha.clone()),
                     resolved_at: "0".to_string(),
                 }],
+                binding_wits: vec![],
                 wit_packages: vec![],
             },
         );
@@ -2078,6 +2079,7 @@ mod tests {
                     component_sha256: Some(component_sha.clone()),
                     resolved_at: "0".to_string(),
                 }],
+                binding_wits: vec![],
                 wit_packages: vec![],
             },
         );

@@ -36,7 +36,7 @@
   - `target.default` に `remote/server_name/client_key` を集約
   - 実行順序: `rpc-greeter` -> `cli-client`
 - `services/cli-client`
-  - `[[bindings]] name="rpc-greeter" wit="acme:clock/api"`
-  - `imago update` 実行時に `wit/deps` を自動生成
+  - `[[bindings]] name="rpc-greeter" wit="file://../rpc-greeter/wit/world.wit"`
+  - `imago update` 実行時に `wit` source から package 内の全 interface を展開し、`manifest.bindings` へ `<package>/<interface>` を出力する
 - 各 service の `imago.toml`
   - `target.*` は持たず、compose 側 target を利用

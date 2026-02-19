@@ -77,10 +77,11 @@ name = "..."
 wit = "warg://sizumita:ferris@0.1.0"
 ```
 
-のようにwitを登録する。
+のように `wit` へ source を登録する（`file://...` / `warg://...`）。
 
-imagoは、`imago update`コマンドが実行された時にこのwitを読み、
-全ての関数の定義の先頭に`imago:node/rpc`のconnectionを引数を受け取るように改造された上でwit/depsに置かれる。
+imagoは、`imago update`コマンドが実行された時にこの `wit` source を読み、
+WIT package 内の全 interface を `manifest.bindings` の `<package>/<interface>` 形式へ展開する。
+そのうえで全ての関数の定義の先頭に`imago:node/rpc`のconnectionを引数を受け取るように改造された上でwit/depsに置かれる。
 関数が実行されると、そのrpcの先にがservice名（bindings.name）とwitの構造が同じサービスが存在するかを確認したのち（失敗したらerrorが帰る）、関数を実行する。
 resourceは渡すことができないし、witに存在したら`imago update`コマンド時にエラーになる。
 rpcが閉じられれている場合は呼び出しがエラーになるため、全ての関数の返り値はresultを上からwrapしたものになる。

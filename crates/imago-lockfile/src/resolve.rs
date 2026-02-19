@@ -9,8 +9,9 @@ use anyhow::{Context, anyhow};
 use crate::{
     hash::{DigestProvider, Sha256DigestProvider},
     types::{
-        DependencyExpectation, IMAGO_LOCK_VERSION, ImagoLock, ImagoLockWitPackage,
-        ImagoLockWitPackageVersion, ResolvedDependency, TransitivePackageRecord,
+        BindingWitExpectation, DependencyExpectation, IMAGO_LOCK_VERSION, ImagoLock,
+        ImagoLockWitPackage, ImagoLockWitPackageVersion, ResolvedBindingWit, ResolvedDependency,
+        TransitivePackageRecord,
     },
     validation::{
         PathVerifier, StrictPathVerifier, parse_prefixed_sha256, validate_sha256_hex,
@@ -203,6 +204,114 @@ fn resolve_dependencies_with(
     Ok(resolved)
 }
 
+pub fn resolve_binding_wits(
+    project_root: &Path,
+    lock: &ImagoLock,
+    expectations: &[BindingWitExpectation],
+) -> anyhow::Result<Vec<ResolvedBindingWit>> {
+    let digest_provider = Sha256DigestProvider;
+    let path_verifier = StrictPathVerifier;
+    resolve_binding_wits_with(
+        project_root,
+        lock,
+        expectations,
+        &digest_provider,
+        &path_verifier,
+    )
+}
+
+fn resolve_binding_wits_with(
+    project_root: &Path,
+    lock: &ImagoLock,
+    expectations: &[BindingWitExpectation],
+    digest_provider: &impl DigestProvider,
+    path_verifier: &impl PathVerifier,
+) -> anyhow::Result<Vec<ResolvedBindingWit>> {
+    ensure_supported_lock_version(lock.version)?;
+
+    let mut by_key = BTreeMap::new();
+    for entry in &lock.binding_wits {
+        let lock_key = binding_wit_key(
+            &entry.name,
+            &entry.wit_source,
+            entry.wit_registry.as_deref(),
+        );
+        if by_key
+            .insert(lock_key.clone(), ResolvedBindingWit::from(entry))
+            .is_some()
+        {
+            return Err(anyhow!(
+                "imago.lock contains duplicate binding_wits entry (name='{}', source='{}', registry='{}'); run `imago update`",
+                lock_key.0,
+                lock_key.1,
+                lock_key.2.as_deref().unwrap_or("")
+            ));
+        }
+    }
+
+    let mut seen_expectations = BTreeSet::new();
+    let mut resolved = Vec::with_capacity(expectations.len());
+    for expected in expectations {
+        let expected_key = binding_wit_key(
+            &expected.name,
+            &expected.wit_source,
+            expected.wit_registry.as_deref(),
+        );
+        if !seen_expectations.insert(expected_key.clone()) {
+            return Err(anyhow!(
+                "duplicate binding wit expectation (name='{}', source='{}', registry='{}')",
+                expected_key.0,
+                expected_key.1,
+                expected_key.2.as_deref().unwrap_or("")
+            ));
+        }
+
+        let entry = by_key.get(&expected_key).ok_or_else(|| {
+            anyhow!(
+                "binding wit (name='{}', source='{}', registry='{}') is not resolved in imago.lock; run `imago update`",
+                expected_key.0,
+                expected_key.1,
+                expected_key.2.as_deref().unwrap_or("")
+            )
+        })?;
+
+        validate_wit_source(
+            &entry.wit_source,
+            &format!("imago.lock.binding_wits['{}'].wit_source", entry.name),
+        )?;
+        let relative_wit_path = path_verifier.validate_safe_wit_path(
+            &entry.wit_path,
+            &format!("imago.lock.binding_wits['{}'].wit_path", entry.name),
+        )?;
+        path_verifier.ensure_no_symlink_in_relative_path(
+            project_root,
+            &relative_wit_path,
+            &format!("imago.lock.binding_wits['{}'].wit_path", entry.name),
+        )?;
+        let resolved_wit_path = project_root.join(relative_wit_path);
+        let digest = digest_provider
+            .compute_path_digest_hex(&resolved_wit_path)
+            .with_context(|| {
+                format!(
+                    "failed to compute digest for binding wit '{}' from imago.lock at '{}'",
+                    entry.name,
+                    resolved_wit_path.display()
+                )
+            })?;
+        if digest != entry.wit_digest {
+            return Err(anyhow!(
+                "binding wit '{}' lock digest mismatch; run `imago update`",
+                entry.name
+            ));
+        }
+
+        validate_binding_interfaces(entry)?;
+        resolved.push(entry.clone());
+    }
+
+    Ok(resolved)
+}
+
 pub fn collect_wit_packages(
     records: impl IntoIterator<Item = TransitivePackageRecord>,
 ) -> Vec<ImagoLockWitPackage> {
@@ -248,6 +357,49 @@ pub fn collect_wit_packages(
         });
     }
     packages
+}
+
+fn binding_wit_key(
+    name: &str,
+    wit_source: &str,
+    wit_registry: Option<&str>,
+) -> (String, String, Option<String>) {
+    (
+        name.to_string(),
+        wit_source.to_string(),
+        wit_registry.map(ToString::to_string),
+    )
+}
+
+fn validate_binding_interfaces(entry: &ResolvedBindingWit) -> anyhow::Result<()> {
+    if entry.interfaces.is_empty() {
+        return Err(anyhow!(
+            "imago.lock.binding_wits['{}'].interfaces must not be empty; run `imago update`",
+            entry.name
+        ));
+    }
+    for interface in &entry.interfaces {
+        validate_binding_interface_format(
+            interface,
+            &format!("imago.lock.binding_wits['{}'].interfaces[]", entry.name),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_binding_interface_format(interface: &str, field_name: &str) -> anyhow::Result<()> {
+    let Some((package, interface_name)) = interface.split_once('/') else {
+        return Err(anyhow!(
+            "{field_name} must be in '<package>/<interface>' format; run `imago update`"
+        ));
+    };
+    if package.trim().is_empty() || interface_name.trim().is_empty() || interface_name.contains('/')
+    {
+        return Err(anyhow!(
+            "{field_name} must be in '<package>/<interface>' format; run `imago update`"
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_supported_lock_version(version: u32) -> anyhow::Result<()> {
