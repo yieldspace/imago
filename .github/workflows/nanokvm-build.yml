@@ -33,6 +33,17 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Debug cross toolchain
+        run: |
+          set -euxo pipefail
+          echo "PATH=$PATH"
+          ls -la /home/runner/riscv64-unknown-linux-musl/bin
+          command -v riscv64-linux-musl-gcc || true
+          command -v riscv64-unknown-linux-musl-gcc || true
+          command -v riscv64-unknown-linux-musl-ar || true
+          rustup target list --installed
+          env | sort | egrep '^(CC|AR|CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL|PKG_CONFIG)' || true
+
       - name: Build
         run: cargo build --locked --release --bin imagod --target riscv64gc-unknown-linux-musl
 
