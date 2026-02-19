@@ -1,0 +1,5 @@
+FROM rust:bookworm
+
+WORKDIR /workspace
+RUN rustup target add wasm32-wasip2
+COPY . .

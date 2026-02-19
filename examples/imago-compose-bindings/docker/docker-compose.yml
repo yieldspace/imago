@@ -1,0 +1,42 @@
+services:
+  imagod-alice:
+    container_name: imagod-alice
+    build:
+      context: ../../..
+      dockerfile: examples/imago-compose-bindings/docker/Dockerfile.imagod
+    command:
+      - --config
+      - /etc/imago/example/imagod-alice.toml
+    ports:
+      - "4443:4443"
+    volumes:
+      - imagod-alice-data:/var/lib/imagod
+
+  imagod-bob:
+    container_name: imagod-bob
+    build:
+      context: ../../..
+      dockerfile: examples/imago-compose-bindings/docker/Dockerfile.imagod
+    command:
+      - --config
+      - /etc/imago/example/imagod-bob.toml
+    ports:
+      - "5443:4443"
+    volumes:
+      - imagod-bob-data:/var/lib/imagod
+
+  imago-deployer:
+    container_name: imago-deployer
+    build:
+      context: ../../..
+      dockerfile: examples/imago-compose-bindings/docker/Dockerfile.imago-cli
+    command:
+      - sleep
+      - infinity
+    depends_on:
+      - imagod-alice
+      - imagod-bob
+
+volumes:
+  imagod-alice-data:
+  imagod-bob-data:

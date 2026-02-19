@@ -1,0 +1,10 @@
+name = "rpc-greeter"
+main = "target/wasm32-wasip2/release/rpc_greeter.wasm"
+type = "rpc"
+
+[build]
+command = "cargo build --manifest-path ../../../services/rpc-greeter/Cargo.toml --target wasm32-wasip2 --release --target-dir target"
+
+[capabilities]
+privileged = false
+wasi = true

@@ -1,0 +1,18 @@
+# Rust build artifacts
+target/
+**/target/
+
+# VCS
+.git/
+
+# Local runtime artifacts
+**/.imago/
+**/.imagod-data/
+**/.imagod-data-*/
+**/.imagod-e2e.log
+
+# Example-generated certs/logs
+examples/imago-compose-bindings/certs/
+
+# Common noise
+*.log
