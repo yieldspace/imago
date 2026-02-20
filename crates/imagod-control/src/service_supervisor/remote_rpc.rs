@@ -43,7 +43,7 @@ const ED25519_SPKI_PREFIX: [u8; 12] = [
 type Envelope = ProtocolEnvelope<Value>;
 
 #[derive(Debug, Clone)]
-struct RemoteAuthority {
+pub(super) struct RemoteAuthority {
     key: String,
     host: String,
     host_for_url: String,
@@ -69,47 +69,55 @@ impl RemoteRpcManager {
         }
     }
 
-    pub(super) async fn connect(
+    pub(super) fn config_path(&self) -> &Path {
+        &self.config_path
+    }
+
+    pub(super) async fn probe_remote_authority(
+        config_path: &Path,
+        authority: &str,
+    ) -> Result<RemoteAuthority, ImagodError> {
+        let authority = parse_rpc_authority(authority)?;
+        let session = connect_remote_session(config_path, &authority).await?;
+        session.close(0, b"rpc.connect probe complete");
+        Ok(authority)
+    }
+
+    pub(super) fn insert_connection(
         &mut self,
         runner_id: &str,
-        authority: &str,
-    ) -> Result<String, ImagodError> {
-        let authority = parse_rpc_authority(authority)?;
-        let session = connect_remote_session(&self.config_path, &authority).await?;
-        session.close(0, b"rpc.connect probe complete");
-
+        authority: RemoteAuthority,
+    ) -> String {
         let connection_id = Uuid::new_v4().to_string();
         self.by_runner
             .entry(runner_id.to_string())
             .or_default()
             .insert(connection_id.clone(), RemoteConnection { authority });
-        Ok(connection_id)
+        connection_id
     }
 
-    pub(super) async fn invoke(
+    pub(super) fn connection_for(
         &self,
         runner_id: &str,
         connection_id: &str,
+    ) -> Option<RemoteAuthority> {
+        self.by_runner
+            .get(runner_id)
+            .and_then(|connections| connections.get(connection_id))
+            .map(|connection| connection.authority.clone())
+    }
+
+    pub(super) async fn invoke_with_authority(
+        config_path: &Path,
+        authority: &RemoteAuthority,
         target_service: &str,
         interface_id: &str,
         function: &str,
         args_cbor: &[u8],
     ) -> Result<Vec<u8>, ImagodError> {
-        let Some(connections) = self.by_runner.get(runner_id) else {
-            return Err(remote_error(
-                ErrorCode::NotFound,
-                format!("rpc connection '{connection_id}' is not available"),
-            ));
-        };
-        let Some(connection) = connections.get(connection_id) else {
-            return Err(remote_error(
-                ErrorCode::NotFound,
-                format!("rpc connection '{connection_id}' is not available"),
-            ));
-        };
         invoke_remote_authority(
-            &self.config_path,
-            &connection.authority,
+            config_path,
+            authority,
             target_service,
             interface_id,
             function,

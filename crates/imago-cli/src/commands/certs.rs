@@ -255,6 +255,20 @@ fn read_known_host_public_key(path: &Path, authority: &str) -> anyhow::Result<St
     entries
         .get(authority)
         .cloned()
+        .or_else(|| {
+            if let Some(without_scheme) = authority.strip_prefix("rpc://") {
+                entries
+                    .get(without_scheme)
+                    .cloned()
+                    .or_else(|| entries.get(&without_scheme.to_ascii_lowercase()).cloned())
+            } else {
+                let normalized = format!("rpc://{authority}");
+                entries
+                    .get(&normalized)
+                    .cloned()
+                    .or_else(|| entries.get(&normalized.to_ascii_lowercase()).cloned())
+            }
+        })
         .ok_or_else(|| anyhow!("authority '{authority}' was not found in known_hosts"))
 }
 
@@ -311,7 +325,7 @@ fn normalize_known_hosts_authority(remote: &str) -> anyhow::Result<String> {
         .to_string();
     let port = url.port().unwrap_or(4443);
     Ok(format!(
-        "{}:{}",
+        "rpc://{}:{}",
         format_host_for_url(&host).to_ascii_lowercase(),
         port
     ))
@@ -571,7 +585,7 @@ mod tests {
     fn normalizes_known_hosts_authority_from_rpc_url() {
         let authority =
             normalize_known_hosts_authority("rpc://Node-A.Example.com:9443").expect("valid url");
-        assert_eq!(authority, "node-a.example.com:9443");
+        assert_eq!(authority, "rpc://node-a.example.com:9443");
     }
 
     #[test]
@@ -582,12 +596,30 @@ mod tests {
         std::fs::write(
             &known_hosts_path,
             format!(
-                "# comment\nnode-b:4443\t{key}\nnode-c:4443\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+                "# comment\nnode-b:4443\t{key}\nnode-c:4443\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
             ),
         )
         .expect("known_hosts should be written");
 
         let loaded = read_known_host_public_key(&known_hosts_path, "node-b:4443")
+            .expect("key should be loaded");
+        assert_eq!(loaded, key);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn reads_known_host_public_key_using_normalized_authority() {
+        let dir = temp_dir("reads_known_host_public_key_using_normalized_authority");
+        let known_hosts_path = dir.join("known_hosts");
+        let key = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        std::fs::write(
+            &known_hosts_path,
+            format!("#\n# comment\nrpc://node-b:4443\t{key}\n"),
+        )
+        .expect("known_hosts should be written");
+
+        let loaded = read_known_host_public_key(&known_hosts_path, "rpc://node-b:4443")
             .expect("key should be loaded");
         assert_eq!(loaded, key);
 

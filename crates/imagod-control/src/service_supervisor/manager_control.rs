@@ -220,11 +220,23 @@ pub(super) async fn handle_control_request_impl(
             }
             drop(guard);
 
+            let config_path = {
+                let remote_rpc = handler.remote_rpc.lock().await;
+                remote_rpc.config_path().to_path_buf()
+            };
+            let authority = match super::remote_rpc::RemoteRpcManager::probe_remote_authority(
+                &config_path,
+                &authority,
+            )
+            .await
+            {
+                Ok(authority) => authority,
+                Err(err) => return ControlResponse::Error(IpcErrorPayload::from_error(&err)),
+            };
+
             let mut remote_rpc = handler.remote_rpc.lock().await;
-            match remote_rpc.connect(&runner_id, &authority).await {
-                Ok(connection_id) => ControlResponse::RpcRemoteConnected { connection_id },
-                Err(err) => ControlResponse::Error(IpcErrorPayload::from_error(&err)),
-            }
+            let connection_id = remote_rpc.insert_connection(&runner_id, authority);
+            ControlResponse::RpcRemoteConnected { connection_id }
         }
         ControlRequest::RpcInvokeRemote {
             runner_id,
@@ -258,17 +270,29 @@ pub(super) async fn handle_control_request_impl(
             }
             drop(guard);
 
-            let remote_rpc = handler.remote_rpc.lock().await;
-            match remote_rpc
-                .invoke(
-                    &runner_id,
-                    &connection_id,
-                    &target_service,
-                    &interface_id,
-                    &function,
-                    &args_cbor,
+            let (remote_authority, config_path) = {
+                let remote_rpc = handler.remote_rpc.lock().await;
+                (
+                    remote_rpc.connection_for(&runner_id, &connection_id),
+                    remote_rpc.config_path().to_path_buf(),
                 )
-                .await
+            };
+            let Some(remote_authority) = remote_authority else {
+                return control_error(
+                    ErrorCode::NotFound,
+                    format!("rpc connection '{connection_id}' is not available"),
+                );
+            };
+
+            match super::remote_rpc::RemoteRpcManager::invoke_with_authority(
+                &config_path,
+                &remote_authority,
+                &target_service,
+                &interface_id,
+                &function,
+                &args_cbor,
+            )
+            .await
             {
                 Ok(result_cbor) => ControlResponse::RpcRemoteInvokeResult { result_cbor },
                 Err(err) => ControlResponse::Error(IpcErrorPayload::from_error(&err)),
