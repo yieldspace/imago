@@ -276,7 +276,8 @@ response:
 
 制約:
 
-- `name=None` は「リクエスト時点で running の全サービス」を対象とする。
+- `name=None` は「リクエスト時点で running のサービス + retained logs が残る停止済みサービス」を対象とする。
+- retained logs は imagod プロセス寿命内メモリの global ring にのみ保持し、eviction または imagod 再起動後は参照不可とする。
 - 全サービス購読では `tail_lines` は各サービス単位で適用する。
 - 受理前エラー（対象未存在・未起動など）は stream 応答の `error` で返す。
 
@@ -302,6 +303,7 @@ response:
 - follow 配信で内部購読が `Lagged` した場合、サーバは `seq` を前進させて欠損をクライアントへ通知する（欠落 chunk は送られない）。
 - `follow=false` は `logs.end`（または `is_last`）で終端する。
 - `follow=true` は明示中断または配信側終了時に `logs.end` を受けて終端する。
+- 停止済みサービスに `follow=true` を指定した場合は snapshot 送信後に `logs.end` を返して即終端する。
 
 ### 5.10 `rpc.invoke`
 
@@ -389,7 +391,7 @@ response:
 ## 実装反映ノート（Issue #31 / 2026-02-13）
 
 - `imago logs` の本文転送を stream から DATAGRAM へ移し、`logs.request`（stream）+ `logs.chunk`/`logs.end`（DATAGRAM）へ分離した。
-- `name=None` を全サービス購読として定義し、対象はリクエスト時点の running サービスに固定した。
+- `name=None` を全サービス購読として定義し、対象集合はリクエスト時点で固定した。
 - `seq` は欠損検知のみとし、再送や順序補正は導入しない。
 
 ## 実装反映ノート（PR #145 follow-up / 2026-02-13）
@@ -400,7 +402,7 @@ response:
 ## 実装反映ノート（Issue #87 / 2026-02-15）
 
 - `logs.request` のフィルタキーを `name` へ統一した。
-- `logs.request.name=None` は「リクエスト時点で running の全サービス」を対象とする。
+- `logs.request.name=None` は `logs.request` 契約に従う（詳細は 5.9）。
 - `logs.request` ACK の対象一覧キーを `names` へ統一した。
 
 ## 実装反映ノート（CLI request stream timeout/retry / 2026-02-18）
@@ -427,3 +429,9 @@ response:
 
 - `type="rpc"` の runner は起動時に `manifest.main` を自動実行しない。
 - `rpc.invoke` が到着するまで runner は常駐待機し、関数実行は `rpc.invoke` でのみ開始する。
+
+## 実装反映ノート（Retained logs 契約 / 2026-02-20）
+
+- `logs.request.name=None` は running サービスに加え、retained logs が残る停止済みサービスも対象に含める。
+- retained logs は imagod プロセス寿命内メモリの global ring に保持し、eviction または imagod 再起動後は参照できない。
+- 停止済みサービスへ `follow=true` を指定した場合は snapshot 後に `logs.end` を返して即終了する。

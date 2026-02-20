@@ -699,17 +699,36 @@ mod tests {
     fn reads_known_host_public_key_from_file() {
         let dir = temp_dir("reads_known_host_public_key_from_file");
         let known_hosts_path = dir.join("known_hosts");
-        let key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let other_key = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let key = "a".repeat(64);
+        let node_c_key = "b".repeat(64);
         std::fs::write(
             &known_hosts_path,
-            format!("# comment\nnode-b:4443\t{key}\nnode-c:4443\t{other_key}\n"),
+            format!("# comment\nnode-b:4443\t{key}\nnode-c:4443\t{node_c_key}\n"),
         )
         .expect("known_hosts should be written");
 
         let loaded = read_known_host_public_key(&known_hosts_path, "node-b:4443")
             .expect("key should be loaded");
         assert_eq!(loaded, key);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn load_known_hosts_entries_rejects_34_byte_key() {
+        let dir = temp_dir("load_known_hosts_entries_rejects_34_byte_key");
+        let known_hosts_path = dir.join("known_hosts");
+        let key = "b".repeat(68);
+        std::fs::write(&known_hosts_path, format!("node-c:4443\t{key}\n"))
+            .expect("known_hosts should be written");
+
+        let err =
+            load_known_hosts_entries(&known_hosts_path).expect_err("34-byte key must be rejected");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("key must be a 32-byte ed25519 raw key (got 34 bytes)"),
+            "unexpected error: {message}"
+        );
 
         cleanup(&dir);
     }

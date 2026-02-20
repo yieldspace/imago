@@ -290,7 +290,7 @@
 - `runtime.upload_session_ttl_secs`
 - `runtime.stop_grace_timeout_secs`（既定 `30`）
 - `runtime.runner_ready_timeout_secs`（既定 `3`）
-- `runtime.runner_log_buffer_bytes`（既定 `262144`）
+- `runtime.runner_log_buffer_bytes`（既定 `262144`。runner log 一時保持と retained logs 用 global ring の総量上限に使用）
 - `runtime.epoch_tick_interval_ms`（既定 `50`）
 - `runtime.http_worker_count`（既定 `2`）
 - `runtime.http_worker_queue_capacity`（既定 `4`）
@@ -339,3 +339,8 @@
 - `imago compose update` / `imago compose build` / `imago compose logs` を追加した。
 - `imago-compose.toml` は `[target.<name>]` を受理し、`compose build/deploy/logs` は service `imago.toml` の `target` ではなく compose 側 target を優先して解決する。
 - 単体コマンド (`imago build/deploy/logs`) は従来どおり service `imago.toml` の `target.<name>` を必須とする（compose target への自動フォールバックなし）。
+
+## 実装反映ノート（Retained logs 契約 / 2026-02-20）
+
+- `runtime.runner_log_buffer_bytes` は runner log バッファに加えて retained logs 用 global ring の総量上限としても使用する。
+- retained logs は imagod プロセス寿命内メモリでのみ保持し、eviction または imagod 再起動後は参照できない。

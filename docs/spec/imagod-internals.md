@@ -576,7 +576,8 @@ flowchart TD
   - runner は未指定時 8MiB を既定値として扱う。
 - ログ回収を追加した。
   - runner stdout/stderr を pipe で manager が回収する。
-  - service ごとに容量上限付き ring buffer（`runner_log_buffer_bytes`）へ保持する。
+  - running 中は service ごとの容量上限付き ring buffer（`runner_log_buffer_bytes`）へ保持する。
+  - service 停止後の snapshot は imagod プロセス寿命内メモリの retained global ring へ退避し、eviction 後は参照できない。
 - epoch 割り込みの駆動点を変更した。
   - 旧: manager の maintenance loop で `increment_epoch`
   - 新: runner 内で `epoch_tick_interval_ms` 周期の tick task が `increment_epoch`
@@ -607,7 +608,7 @@ flowchart TD
 
 - `protocol_handler` に `logs.request` 分岐を追加し、ログ本文を DATAGRAM 専用経路へ移行した。
 - `service_supervisor` に `running_service_names` / `open_logs` を追加し、tail snapshot + follow 受信を提供する。
-- 全サービス購読は `name=None` で受理し、リクエスト時点の running サービスのみを対象に固定した。
+- 全サービス購読は `name=None` で受理し、リクエスト時点の running サービスを対象に固定した。
 
 ## 実装反映ノート（Runtime Backend Split / 2026-02-13）
 
@@ -648,3 +649,9 @@ flowchart TD
 - manager control server は `accept` 後に handler permit を取得する順序へ変更し、permit の占有時間を短縮した。
 - protocol session は 1 session 内の複数 bi-stream を並列処理する。
 - logs datagram 送信は一時失敗時に 10ms / 50ms / 100ms の bounded retry を実施する。
+
+## 実装反映ノート（Retained logs 契約 / 2026-02-20）
+
+- `logs.request.name=None` は running サービスだけでなく retained logs が残る停止済みサービスも対象とする。
+- retained logs は imagod プロセス寿命内メモリの global ring でのみ保持し、eviction またはプロセス再起動後は参照不可とする。
+- 停止済みサービスへ `follow=true` を指定した場合は snapshot 後に `logs.end` を返して即終了する。
