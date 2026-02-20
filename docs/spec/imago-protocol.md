@@ -51,9 +51,11 @@
 - `command.start` は `command_type` と `payload` の組み合わせ一致を必須とする。
 - `state.request` の応答メッセージ種別は `state.response`。
 - `state.response.state` は `accepted`/`running` のみ許可し、terminal state を禁止する。
-- `logs.request` は `name: Option<String>` を持ち、`None` は「現在稼働中の全サービス」を意味する。
+- `logs.request` は `name: Option<String>` を持ち、`None` は「現在稼働中のサービス + retained logs が残る停止済みサービス」を意味する。
 - `logs.chunk` は DATAGRAM 用 payload であり、`seq` は欠損検知用（再送制御なし）として扱う。
 - `logs.end` はログ購読の終端メッセージで、配信開始後の異常は `error` に格納する。
+- retained logs は imagod プロセス寿命内メモリの global ring を参照し、eviction または imagod 再起動後は取得できない。
+- 停止済みサービスへ `follow=true` を指定した場合、snapshot 送信後に `logs.end` で即終端する。
 - `StructuredError.details` は `BTreeMap<String, String>`。
 
 ## 関連仕様
@@ -80,3 +82,9 @@
 - `RpcInvokeRequest` を `interface_id` / `function` / `args_cbor` / `target_service.name` へ更新した。
 - `RpcInvokeResponse` は `result_cbor` または構造化 `error` のどちらか一方を返す契約にした。
 - 例: `examples/rpc.invoke.request.json` / `examples/rpc.invoke.response.success.json` / `examples/rpc.invoke.response.error.json`
+
+## 実装反映ノート（Retained logs 契約 / 2026-02-20）
+
+- `LogRequest.name=None` は running サービスに加えて retained logs が残る停止済みサービスも含む対象選択へ更新した。
+- retained logs の可視範囲は imagod プロセス寿命内メモリに限定し、eviction 後の再参照は不可とした。
+- 停止済みサービスへの `follow=true` は snapshot 後に `logs.end` で即終端する契約へ更新した。
