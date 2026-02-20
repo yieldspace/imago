@@ -802,7 +802,7 @@ impl ServiceSupervisor {
             ImagodError::new(
                 ErrorCode::NotFound,
                 STAGE_LOGS,
-                format!("service '{service_name}' is not running"),
+                format!("service '{service_name}' has no available logs"),
             )
         })?;
 
