@@ -27,7 +27,7 @@
   ],
   "bindings": [
     {
-      "target": "svc-target",
+      "name": "svc-target",
       "wit": "yieldspace:service/invoke"
     }
   ],

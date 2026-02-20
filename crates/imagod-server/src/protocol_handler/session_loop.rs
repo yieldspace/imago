@@ -274,14 +274,14 @@ fn extract_ed25519_public_key(spki_der: &[u8]) -> Result<[u8; 32], ImagodError> 
         return Err(ImagodError::new(
             ErrorCode::Unauthorized,
             "session.auth",
-            "peer certificate must contain an ed25519 raw public key",
+            "peer public key (SPKI) must contain an ed25519 raw public key",
         ));
     }
     if !spki_der.starts_with(&ED25519_SPKI_PREFIX) {
         return Err(ImagodError::new(
             ErrorCode::Unauthorized,
             "session.auth",
-            "peer certificate public key is not ed25519",
+            "peer public key (SPKI) is not ed25519",
         ));
     }
 
@@ -418,7 +418,7 @@ mod tests {
 
     use super::*;
     use crate::protocol_handler::{
-        replace_dynamic_public_keys_for_tests, upsert_dynamic_client_public_key,
+        replace_dynamic_public_keys_for_tests, upsert_dynamic_client_public_key, Envelope,
     };
 
     static DYNAMIC_KEYS_TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -444,5 +444,71 @@ mod tests {
         upsert_dynamic_client_public_key(&hex_32(0x33))
             .expect("upsert should register client key in memory");
         assert_eq!(resolve_client_role(&key), DynamicClientRole::Client);
+    }
+
+    #[test]
+    fn client_role_allows_only_hello_and_rpc_invokes() {
+        let request_hello = Envelope::new(
+            MessageType::HelloNegotiate,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            serde_json::json!({}),
+        );
+        let request_rpc = Envelope::new(
+            MessageType::RpcInvoke,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            serde_json::json!({}),
+        );
+        let request_event = Envelope::new(
+            MessageType::CommandEvent,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            serde_json::json!({}),
+        );
+
+        let client_context = SessionAuthContext {
+            role: DynamicClientRole::Client,
+            public_key_hex: hex_32(0x11),
+        };
+
+        assert!(ensure_message_type_allowed(&request_hello, &client_context).is_ok());
+        assert!(ensure_message_type_allowed(&request_rpc, &client_context).is_ok());
+        assert!(ensure_message_type_allowed(&request_event, &client_context).is_err());
+    }
+
+    #[test]
+    fn client_role_rejects_command_start() {
+        let request = Envelope::new(
+            MessageType::CommandStart,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            serde_json::json!({}),
+        );
+        let context = SessionAuthContext {
+            role: DynamicClientRole::Client,
+            public_key_hex: hex_32(0x11),
+        };
+
+        let err = ensure_message_type_allowed(&request, &context).expect_err("client must not allow command.start");
+        assert_eq!(err.code, ErrorCode::Unauthorized);
+    }
+
+    #[test]
+    fn unknown_role_rejects_any_message_type() {
+        let request = Envelope::new(
+            MessageType::HelloNegotiate,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            serde_json::json!({}),
+        );
+        let context = SessionAuthContext {
+            role: DynamicClientRole::Unknown,
+            public_key_hex: hex_32(0x22),
+        };
+
+        let err = ensure_message_type_allowed(&request, &context)
+            .expect_err("unknown role must not allow message type");
+        assert_eq!(err.code, ErrorCode::Unauthorized);
     }
 }

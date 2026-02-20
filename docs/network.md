@@ -60,8 +60,8 @@ interface rpc {
     invoke: func(target-service: string, interface-id: string, function: string, args-cbor: list<u8>) -> result<list<u8>, string>;
     disconnect: func();
   }
-  connect: func(addr: string) -> result<connection, error>
-  local: func() -> result<connection, error>
+  connect: func(addr: string) -> result<connection, string>
+  local: func() -> result<connection, string>
 }
 ```
 
