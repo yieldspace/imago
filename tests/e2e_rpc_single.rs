@@ -63,7 +63,7 @@ fn e2e_rpc_single_node_local_flow() -> TestResult {
         &["deploy", "--target", "default"],
     )?;
     ensure_success("rpc-greeter deploy", &deploy_greeter)?;
-    assert_succeeded("rpc-greeter deploy", &deploy_greeter.combined)?;
+    assert_command_completed("rpc-greeter deploy", &deploy_greeter)?;
 
     let update_client = run_imago_cli(&workspace_root, &client_dir, &control_home, &["update"])?;
     ensure_success("rpc-caller update", &update_client)?;
@@ -75,7 +75,7 @@ fn e2e_rpc_single_node_local_flow() -> TestResult {
         &["deploy", "--target", "default"],
     )?;
     ensure_success("rpc-caller deploy", &deploy_client)?;
-    assert_succeeded("rpc-caller deploy", &deploy_client.combined)?;
+    assert_command_completed("rpc-caller deploy", &deploy_client)?;
 
     let success_logs = wait_logs_with_marker(
         &workspace_root,
@@ -120,7 +120,7 @@ fn wait_logs(
             &["logs", "rpc-caller", "--tail", "200"],
         )?;
         if logs.success {
-            return Ok(logs.combined);
+            return Ok(logs.log_messages().join("\n"));
         }
         thread::sleep(Duration::from_secs(1));
     }
@@ -170,13 +170,18 @@ fn ensure_success(label: &str, output: &CmdOutput) -> TestResult {
     ))
 }
 
-fn assert_succeeded(label: &str, output: &str) -> TestResult {
-    if output.to_ascii_lowercase().contains("succeeded") {
-        return Ok(());
+fn assert_command_completed(label: &str, output: &CmdOutput) -> TestResult {
+    match output.command_summary_status().as_deref() {
+        Some("completed") => Ok(()),
+        Some(status) => Err(anyhow::anyhow!(
+            "{label} summary status was '{status}', expected 'completed': {}",
+            output.combined
+        )),
+        None => Err(anyhow::anyhow!(
+            "{label} command.summary was not found: {}",
+            output.combined
+        )),
     }
-    Err(anyhow::anyhow!(
-        "{label} did not contain succeeded marker: {output}"
-    ))
 }
 
 fn prepare_project_dir(project_dir: &Path) -> TestResult {

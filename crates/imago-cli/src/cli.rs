@@ -5,6 +5,9 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Debug, Parser, PartialEq, Eq)]
 #[command(name = "imago", version, about = "imago CLI")]
 pub struct Cli {
+    #[arg(long, global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -112,9 +115,6 @@ pub struct ComposeLogsArgs {
 
     #[arg(long, value_name = "N", default_value_t = 200)]
     pub tail: u32,
-
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
@@ -127,9 +127,6 @@ pub struct LogsArgs {
 
     #[arg(long, value_name = "N", default_value_t = 200)]
     pub tail: u32,
-
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
@@ -214,6 +211,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Build(BuildArgs {
                     target: "default".to_string(),
                 }),
@@ -229,6 +227,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Build(BuildArgs {
                     target: "edge".to_string(),
                 }),
@@ -250,6 +249,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Update(UpdateArgs {}),
             }
         );
@@ -262,6 +262,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Deploy(DeployArgs { target: None }),
             }
         );
@@ -282,6 +283,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Deploy(DeployArgs {
                     target: Some("default".to_string()),
                 }),
@@ -304,6 +306,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Compose(ComposeSubcommandArgs {
                     command: ComposeCommands::Build(ComposeBuildArgs {
                         profile: "nanokvm-mini".to_string(),
@@ -329,6 +332,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Compose(ComposeSubcommandArgs {
                     command: ComposeCommands::Update(ComposeUpdateArgs {
                         profile: "nanokvm-mini".to_string(),
@@ -353,6 +357,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Compose(ComposeSubcommandArgs {
                     command: ComposeCommands::Deploy(ComposeDeployArgs {
                         profile: "nanokvm-mini".to_string(),
@@ -391,6 +396,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: true,
                 command: Commands::Compose(ComposeSubcommandArgs {
                     command: ComposeCommands::Logs(ComposeLogsArgs {
                         profile: "nanokvm-mini".to_string(),
@@ -398,7 +404,6 @@ mod tests {
                         name: Some("svc-a".to_string()),
                         follow: true,
                         tail: 50,
-                        json: true,
                     }),
                 }),
             }
@@ -419,11 +424,11 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Logs(LogsArgs {
                     name: None,
                     follow: false,
                     tail: 200,
-                    json: false,
                 }),
             }
         );
@@ -436,6 +441,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Run(RunArgs {
                     name: None,
                     target: None,
@@ -452,6 +458,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Run(RunArgs {
                     name: Some("svc-a".to_string()),
                     target: Some("edge".to_string()),
@@ -474,6 +481,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Stop(StopArgs {
                     name: None,
                     force: false,
@@ -491,6 +499,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Stop(StopArgs {
                     name: Some("svc-a".to_string()),
                     force: true,
@@ -515,11 +524,11 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Logs(LogsArgs {
                     name: Some("svc-a".to_string()),
                     follow: true,
                     tail: 50,
-                    json: false,
                 }),
             }
         );
@@ -533,11 +542,11 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: true,
                 command: Commands::Logs(LogsArgs {
                     name: Some("svc-a".to_string()),
                     follow: false,
                     tail: 10,
-                    json: true,
                 }),
             }
         );
@@ -565,6 +574,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Bindings(BindingsSubcommandArgs {
                     command: BindingsCommands::Cert(BindingsCertSubcommandArgs {
                         command: BindingsCertCommands::Upload(BindingsCertUploadArgs {
@@ -596,6 +606,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Bindings(BindingsSubcommandArgs {
                     command: BindingsCommands::Cert(BindingsCertSubcommandArgs {
                         command: BindingsCertCommands::Deploy(BindingsCertDeployArgs {
@@ -616,6 +627,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Certs(CertsSubcommandArgs {
                     command: CertsCommands::Generate(CertsGenerateArgs {
                         out_dir: PathBuf::from("certs"),
@@ -650,6 +662,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Certs(CertsSubcommandArgs {
                     command: CertsCommands::Generate(CertsGenerateArgs {
                         out_dir: PathBuf::from("tmp-certs"),

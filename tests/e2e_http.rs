@@ -1,7 +1,7 @@
 #[path = "e2e_helper/mod.rs"]
 mod e2e_helper;
 
-use e2e_helper::{AppKind, Scenario, TestResult, WasmArtifact};
+use e2e_helper::{AppKind, CmdOutput, Scenario, TestResult, WasmArtifact};
 use std::net::TcpListener;
 use std::time::Duration;
 
@@ -21,7 +21,7 @@ fn e2e_http_deploy_and_respond() -> TestResult {
     )?;
 
     let deploy_v1 = service.deploy(&scenario, "default")?;
-    assert_succeeded("http deploy v1", &deploy_v1.combined)?;
+    assert_command_completed("http deploy v1", &deploy_v1)?;
 
     let response_v1 = scenario.wait_http_response(http_port, Duration::from_secs(20))?;
     assert!(
@@ -31,7 +31,7 @@ fn e2e_http_deploy_and_respond() -> TestResult {
 
     service.replace_wasm(&mut scenario, WasmArtifact::Http)?;
     let deploy_v2 = service.deploy(&scenario, "default")?;
-    assert_succeeded("http deploy v2", &deploy_v2.combined)?;
+    assert_command_completed("http deploy v2", &deploy_v2)?;
 
     let response_v2 = scenario.wait_http_response(http_port, Duration::from_secs(20))?;
     assert!(
@@ -48,11 +48,16 @@ fn pick_free_port() -> TestResult<u16> {
     Ok(listener.local_addr()?.port())
 }
 
-fn assert_succeeded(label: &str, output: &str) -> TestResult {
-    if output.to_ascii_lowercase().contains("succeeded") {
-        return Ok(());
+fn assert_command_completed(label: &str, output: &CmdOutput) -> TestResult {
+    match output.command_summary_status().as_deref() {
+        Some("completed") => Ok(()),
+        Some(status) => Err(anyhow::anyhow!(
+            "{label} summary status was '{status}', expected 'completed': {}",
+            output.combined
+        )),
+        None => Err(anyhow::anyhow!(
+            "{label} command.summary was not found: {}",
+            output.combined
+        )),
     }
-    Err(anyhow::anyhow!(
-        "{label} did not contain succeeded marker: {output}"
-    ))
 }

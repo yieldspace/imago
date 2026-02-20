@@ -12,6 +12,7 @@
 - マニフェスト仕様: [`manifest.md`](./manifest.md)
 - デプロイ通信仕様: [`deploy-protocol.md`](./deploy-protocol.md)
 - 観測・状態照会仕様: [`observability.md`](./observability.md)
+- CLI 出力仕様: [`cli-output.md`](./cli-output.md)
 
 ### Layer 2: サブシステム概要
 - `imagod` 概要: [`imagod.md`](./imagod.md)
@@ -28,7 +29,7 @@
 ## 適用範囲
 
 - MVP の実装判断をなくすための最小仕様を定義する。
-- 対象は `imago.toml`、`build/manifest.json`、deploy protocol、command stream 観測性、`imagod`/`imago-protocol` の責務と内部構造。
+- 対象は `imago.toml`、`build/manifest.json`、deploy protocol、command stream 観測性、CLI 出力契約、`imagod`/`imago-protocol` の責務と内部構造。
 - `logs` は `logs.request`（stream）+ `logs.chunk`/`logs.end`（DATAGRAM）の混在契約として扱う。
 - 実装コードより仕様を優先する。
 

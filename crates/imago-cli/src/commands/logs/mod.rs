@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     io::{self, Write},
     path::Path,
+    time::Instant,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -17,7 +18,13 @@ use web_transport_quinn::Session;
 
 use crate::{
     cli::LogsArgs,
-    commands::{CommandResult, build, deploy},
+    commands::{
+        CommandResult, build,
+        command_common::{
+            format_local_context_line, format_peer_context_line, negotiate_hello_with_features,
+        },
+        deploy, ui,
+    },
 };
 
 mod render;
@@ -25,6 +32,11 @@ mod render;
 const NON_FOLLOW_IDLE_TIMEOUT_SECS: u64 = 2;
 const POST_END_DRAIN_TIMEOUT_MS: u64 = 200;
 const JSON_PENDING_MAX_BYTES_PER_STREAM: usize = 64 * 1024;
+const LOGS_HELLO_REQUIRED_FEATURES: [&str; 1] = ["logs.request"];
+
+fn logs_service_for_context(name: Option<&str>) -> &str {
+    name.unwrap_or("<all-running>")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogsOutputFormat {
@@ -34,7 +46,10 @@ enum LogsOutputFormat {
 
 #[derive(Debug, Serialize)]
 struct JsonLogLine<'a> {
+    #[serde(rename = "type")]
+    line_type: &'static str,
     name: &'a str,
+    stream: &'a str,
     timestamp: String,
     log: &'a str,
 }
@@ -164,15 +179,24 @@ pub(crate) async fn run_with_project_root_and_target_override(
     project_root: &Path,
     target_override: Option<&build::TargetConfig>,
 ) -> CommandResult {
+    let started_at = Instant::now();
+    ui::command_start("logs", "starting");
     match run_async_with_target_override(args, project_root, target_override).await {
-        Ok(()) => CommandResult {
-            exit_code: 0,
-            stderr: None,
-        },
-        Err(err) => CommandResult {
-            exit_code: 2,
-            stderr: Some(err.to_string()),
-        },
+        Ok(()) => {
+            ui::command_finish("logs", true, "completed");
+            CommandResult::success("logs", started_at).without_json_summary()
+        }
+        Err(err) => {
+            let message = err.to_string();
+            ui::command_finish("logs", false, &message);
+            let mut result =
+                CommandResult::failure("logs", started_at, message.clone()).without_json_summary();
+            if ui::current_mode() == ui::UiMode::Json {
+                ui::emit_command_error_json("logs", &message, "logs", "E_UNKNOWN");
+                result.stderr = None;
+            }
+            result
+        }
     }
 }
 
@@ -181,14 +205,47 @@ async fn run_async_with_target_override(
     project_root: &Path,
     target_override: Option<&build::TargetConfig>,
 ) -> anyhow::Result<()> {
+    let target_name = if target_override.is_some() {
+        "override".to_string()
+    } else {
+        build::default_target_name().to_string()
+    };
+    let service_name = logs_service_for_context(args.name.as_deref());
+    ui::command_stage("logs", "load-config", "loading target configuration");
     let target = match target_override {
         Some(target) => target.clone(),
-        None => build::load_target_config(build::default_target_name(), project_root)
+        None => build::load_target_config(&target_name, project_root)
             .context("failed to load target configuration")?,
     }
     .require_deploy_credentials()
     .context("target settings are invalid for logs")?;
-    let session = deploy::connect_target(&target).await?;
+    ui::command_info(
+        "logs",
+        &format_local_context_line(
+            project_root,
+            service_name,
+            &target_name,
+            &target.remote,
+            target.server_name.as_deref(),
+        ),
+    );
+    ui::command_stage("logs", "connect", "connecting target");
+    let connected = deploy::connect_target(&target).await?;
+    ui::command_stage("logs", "hello", "negotiating hello");
+    let hello = negotiate_hello_with_features(
+        &connected.session,
+        Uuid::new_v4(),
+        &LOGS_HELLO_REQUIRED_FEATURES,
+    )
+    .await?;
+    ui::command_info(
+        "logs",
+        &format_peer_context_line(
+            &connected.authority,
+            &connected.resolved_addr.to_string(),
+            &hello,
+        ),
+    );
 
     let request_id = Uuid::new_v4();
     let correlation_id = Uuid::new_v4();
@@ -203,7 +260,7 @@ async fn run_async_with_target_override(
         },
     )?;
     let ack: LogsRequestAck =
-        deploy::response_payload(deploy::request_response(&session, &request).await?)?;
+        deploy::response_payload(deploy::request_response(&connected.session, &request).await?)?;
     if !ack.accepted {
         return Err(anyhow!("logs.request was not accepted"));
     }
@@ -211,13 +268,13 @@ async fn run_async_with_target_override(
         return Err(anyhow!("logs.request returned no target service"));
     }
 
-    let output_format = if args.json {
+    let output_format = if ui::current_mode() == ui::UiMode::Json {
         LogsOutputFormat::JsonLines
     } else {
         LogsOutputFormat::Text
     };
     receive_logs_datagrams(
-        &session,
+        &connected.session,
         request_id,
         args.follow,
         args.name.is_none(),
@@ -424,7 +481,7 @@ fn detect_seq_gap(expected_seq: &mut Option<u64>, actual: u64) -> bool {
 
 fn warn_if_seq_gap(expected_seq: &mut Option<u64>, actual: u64, truncated_warned: &mut bool) {
     if detect_seq_gap(expected_seq, actual) && !*truncated_warned {
-        eprintln!("<<logs truncated>>");
+        ui::command_warn("logs", "<<logs truncated>>");
         *truncated_warned = true;
     }
 }
@@ -447,7 +504,10 @@ fn finalize_stream_result(
 ) -> anyhow::Result<()> {
     match (stream_result, flush_result) {
         (Err(stream_err), Err(flush_err)) => {
-            eprintln!("failed to flush buffered json log tails after stream error: {flush_err}");
+            ui::command_warn(
+                "logs",
+                &format!("failed to flush buffered json log tails after stream error: {flush_err}"),
+            );
             Err(stream_err)
         }
         (Err(stream_err), Ok(())) => Err(stream_err),
@@ -490,22 +550,10 @@ fn render_text_chunk(
     prefix_state: &mut PrefixRenderState,
 ) -> anyhow::Result<()> {
     let rendered = renderable_chunk_bytes(chunk, all_processes, prefix_state);
-    if all_processes
-        || matches!(
-            chunk.stream_kind,
-            LogStreamKind::Stdout | LogStreamKind::Composite
-        )
-    {
-        let mut stdout = io::stdout().lock();
-        stdout
-            .write_all(rendered.as_ref())
-            .context("failed to write log chunk to stdout")?;
-    } else {
-        let mut stderr = io::stderr().lock();
-        stderr
-            .write_all(rendered.as_ref())
-            .context("failed to write log chunk to stderr")?;
-    }
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(rendered.as_ref())
+        .context("failed to write log chunk to stdout")?;
 
     Ok(())
 }
@@ -526,7 +574,9 @@ fn write_json_lines(lines: &[BufferedJsonLogLine]) -> anyhow::Result<()> {
     let mut stdout = io::stdout().lock();
     for line in lines {
         let payload = JsonLogLine {
+            line_type: "log.line",
             name: &line.name,
+            stream: stream_kind_label(line.stream_kind),
             timestamp: current_timestamp_unix_secs(),
             log: &line.log,
         };
@@ -654,30 +704,33 @@ fn renderable_chunk_bytes<'a>(
     all_processes: bool,
     prefix_state: &mut PrefixRenderState,
 ) -> Cow<'a, [u8]> {
-    if !all_processes {
-        return Cow::Borrowed(&chunk.bytes);
-    }
-
+    let _ = all_processes;
     let at_line_start = prefix_state.at_line_start(&chunk.name, chunk.stream_kind);
     let (rendered, next_at_line_start) =
-        format_prefixed_bytes(&chunk.name, chunk.stream_kind, &chunk.bytes, at_line_start);
+        format_structured_bytes(&chunk.name, chunk.stream_kind, &chunk.bytes, at_line_start);
     prefix_state.set_at_line_start(&chunk.name, chunk.stream_kind, next_at_line_start);
     Cow::Owned(rendered)
 }
 
-fn format_prefixed_bytes(
+fn format_structured_bytes(
     name: &str,
     stream_kind: LogStreamKind,
     bytes: &[u8],
     mut at_line_start: bool,
 ) -> (Vec<u8>, bool) {
-    let prefix = format!("[{}][{}] ", name, stream_kind_label(stream_kind));
-    let prefix_bytes = prefix.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len().saturating_add(prefix_bytes.len()));
+    let mut out = Vec::new();
 
     let mut segment_start = 0usize;
     while segment_start < bytes.len() {
         if at_line_start {
+            let prefix = format!(
+                "{} {} {} | ",
+                current_timestamp_unix_secs(),
+                name,
+                stream_kind_label(stream_kind)
+            );
+            let prefix_bytes = prefix.as_bytes();
+            out.reserve(bytes.len().saturating_add(prefix_bytes.len()));
             out.extend_from_slice(prefix_bytes);
         }
 
@@ -757,10 +810,12 @@ mod tests {
     }
 
     #[test]
-    fn format_prefixed_bytes_adds_prefix_for_each_newline_terminated_line() {
+    fn format_structured_bytes_adds_prefix_for_each_newline_terminated_line() {
         let (rendered, at_line_start) =
-            format_prefixed_bytes("svc-a", LogStreamKind::Stdout, b"a\nb\n", true);
-        assert_eq!(rendered, b"[svc-a][stdout] a\n[svc-a][stdout] b\n");
+            format_structured_bytes("svc-a", LogStreamKind::Stdout, b"a\nb\n", true);
+        let rendered_text = String::from_utf8_lossy(&rendered);
+        assert!(rendered_text.contains(" svc-a stdout | a\n"));
+        assert!(rendered_text.contains(" svc-a stdout | b\n"));
         assert!(at_line_start);
     }
 
@@ -785,10 +840,9 @@ mod tests {
             is_last: false,
         };
 
-        assert_eq!(
-            renderable_chunk_bytes(&first, true, &mut prefix_state).as_ref(),
-            b"[svc-a][stdout] hel"
-        );
+        let first_rendered = renderable_chunk_bytes(&first, true, &mut prefix_state).into_owned();
+        let first_text = String::from_utf8_lossy(&first_rendered);
+        assert!(first_text.contains(" svc-a stdout | hel"));
         assert_eq!(
             renderable_chunk_bytes(&second, true, &mut prefix_state).as_ref(),
             b"lo\n"
@@ -816,10 +870,10 @@ mod tests {
             is_last: false,
         };
 
-        assert_eq!(
-            renderable_chunk_bytes(&first, false, &mut prefix_state).as_ref(),
-            &[0xe3, 0x81]
-        );
+        let first_rendered = renderable_chunk_bytes(&first, false, &mut prefix_state).into_owned();
+        let first_prefix_text = String::from_utf8_lossy(&first_rendered);
+        assert!(first_prefix_text.contains(" svc-a stdout | "));
+        assert!(first_rendered.ends_with(&[0xe3, 0x81]));
         assert_eq!(
             renderable_chunk_bytes(&second, false, &mut prefix_state).as_ref(),
             &[0x82]
@@ -953,18 +1007,21 @@ mod tests {
     }
 
     #[test]
-    fn json_log_line_serializes_only_name_timestamp_and_log() {
+    fn json_log_line_serializes_with_type_and_stream() {
         let line = JsonLogLine {
+            line_type: "log.line",
             name: "svc-a",
+            stream: "stdout",
             timestamp: "123".to_string(),
             log: "oops",
         };
         let value = serde_json::to_value(line).expect("json serialization should succeed");
 
+        assert_eq!(value["type"], "log.line");
         assert_eq!(value["name"], "svc-a");
+        assert_eq!(value["stream"], "stdout");
         assert_eq!(value["timestamp"], "123");
         assert_eq!(value["log"], "oops");
-        assert!(value.get("stream").is_none());
     }
 
     #[test]
@@ -1100,5 +1157,16 @@ mod tests {
     #[test]
     fn normalize_log_line_trims_trailing_carriage_return() {
         assert_eq!(normalize_log_line(b"hello\r".to_vec()), "hello");
+    }
+
+    #[test]
+    fn logs_hello_required_features_are_fixed() {
+        assert_eq!(LOGS_HELLO_REQUIRED_FEATURES, ["logs.request"]);
+    }
+
+    #[test]
+    fn logs_service_for_context_uses_all_running_placeholder() {
+        assert_eq!(logs_service_for_context(None), "<all-running>");
+        assert_eq!(logs_service_for_context(Some("svc-a")), "svc-a");
     }
 }

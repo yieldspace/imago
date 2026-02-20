@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use anyhow::{Context, anyhow};
@@ -12,7 +13,7 @@ use crate::{
         BuildArgs, ComposeBuildArgs, ComposeCommands, ComposeDeployArgs, ComposeLogsArgs,
         ComposeSubcommandArgs, ComposeUpdateArgs, DeployArgs, LogsArgs, UpdateArgs,
     },
-    commands::{CommandResult, build, deploy, logs, update},
+    commands::{CommandResult, build, deploy, logs, ui, update},
 };
 
 const COMPOSE_FILE_NAME: &str = "imago-compose.toml";
@@ -67,15 +68,18 @@ pub(crate) async fn run_with_project_root(
     args: ComposeSubcommandArgs,
     project_root: &Path,
 ) -> CommandResult {
+    let started_at = Instant::now();
+    ui::command_start("compose", "starting");
     match run_async(args, project_root).await {
-        Ok(()) => CommandResult {
-            exit_code: 0,
-            stderr: None,
-        },
-        Err(err) => CommandResult {
-            exit_code: 2,
-            stderr: Some(err.to_string()),
-        },
+        Ok(()) => {
+            ui::command_finish("compose", true, "completed");
+            CommandResult::success("compose", started_at)
+        }
+        Err(err) => {
+            let message = err.to_string();
+            ui::command_finish("compose", false, &message);
+            CommandResult::failure("compose", started_at, message)
+        }
     }
 }
 
@@ -89,12 +93,26 @@ async fn run_async(args: ComposeSubcommandArgs, project_root: &Path) -> anyhow::
 }
 
 async fn run_compose_build(args: ComposeBuildArgs, project_root: &Path) -> anyhow::Result<()> {
+    ui::command_stage("compose", "load-config", "loading compose build profile");
     let compose_file = load_compose_file(project_root)?;
     let resolved = resolve_compose_config(&compose_file, &args.profile)?;
     ensure_compose_services_non_empty(resolved.config, &args.profile)?;
     let target = resolve_compose_target(&compose_file, &args.target, project_root)?;
+    let total = resolved.config.services.len();
+    ui::command_info(
+        "compose",
+        &format!(
+            "profile={} target={} services={}",
+            args.profile, args.target, total
+        ),
+    );
 
     for (index, service) in resolved.config.services.iter().enumerate() {
+        ui::command_stage(
+            "compose",
+            "service",
+            &format!("build {}/{} {}", index + 1, total, service.imago),
+        );
         let service_project_root = resolve_service_project_root(project_root, &service.imago)
             .with_context(|| {
                 format!(
@@ -128,11 +146,18 @@ async fn run_compose_build(args: ComposeBuildArgs, project_root: &Path) -> anyho
 }
 
 async fn run_compose_update(args: ComposeUpdateArgs, project_root: &Path) -> anyhow::Result<()> {
+    ui::command_stage("compose", "load-config", "loading compose update profile");
     let compose_file = load_compose_file(project_root)?;
     let resolved = resolve_compose_config(&compose_file, &args.profile)?;
     ensure_compose_services_non_empty(resolved.config, &args.profile)?;
+    let total = resolved.config.services.len();
 
     for (index, service) in resolved.config.services.iter().enumerate() {
+        ui::command_stage(
+            "compose",
+            "service",
+            &format!("update {}/{} {}", index + 1, total, service.imago),
+        );
         let service_project_root = resolve_service_project_root(project_root, &service.imago)
             .with_context(|| {
                 format!(
@@ -161,12 +186,28 @@ async fn run_compose_update(args: ComposeUpdateArgs, project_root: &Path) -> any
 }
 
 async fn run_compose_deploy(args: ComposeDeployArgs, project_root: &Path) -> anyhow::Result<()> {
+    ui::command_stage("compose", "load-config", "loading compose deploy profile");
     let compose_file = load_compose_file(project_root)?;
     let resolved = resolve_compose_config(&compose_file, &args.profile)?;
     ensure_compose_services_non_empty(resolved.config, &args.profile)?;
     let target = resolve_compose_target(&compose_file, &args.target, project_root)?;
+    ui::command_info(
+        "compose",
+        &format!(
+            "profile={} target={} services={}",
+            args.profile,
+            args.target,
+            resolved.config.services.len()
+        ),
+    );
+    let total = resolved.config.services.len();
 
     for (index, service) in resolved.config.services.iter().enumerate() {
+        ui::command_stage(
+            "compose",
+            "service",
+            &format!("deploy {}/{} {}", index + 1, total, service.imago),
+        );
         let service_project_root = resolve_service_project_root(project_root, &service.imago)
             .with_context(|| {
                 format!(
@@ -201,6 +242,7 @@ async fn run_compose_deploy(args: ComposeDeployArgs, project_root: &Path) -> any
 }
 
 async fn run_compose_logs(args: ComposeLogsArgs, project_root: &Path) -> anyhow::Result<()> {
+    ui::command_stage("compose", "load-config", "loading compose logs profile");
     let compose_file = load_compose_file(project_root)?;
     let resolved = resolve_compose_config(&compose_file, &args.profile)?;
     ensure_compose_services_non_empty(resolved.config, &args.profile)?;
@@ -217,7 +259,6 @@ async fn run_compose_logs(args: ComposeLogsArgs, project_root: &Path) -> anyhow:
             name: args.name.clone(),
             follow: args.follow,
             tail: args.tail,
-            json: args.json,
         },
         project_root,
         Some(&target),
@@ -584,7 +625,6 @@ type = "cli"
                     name: Some("svc-a".to_string()),
                     follow: false,
                     tail: 10,
-                    json: false,
                 }),
             },
             &root,

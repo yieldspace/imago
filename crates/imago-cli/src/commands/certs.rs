@@ -2,13 +2,11 @@ use std::{
     collections::BTreeMap,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use anyhow::{Context, anyhow};
-use imago_protocol::{
-    BindingsCertUploadRequest, BindingsCertUploadResponse, HelloNegotiateRequest,
-    HelloNegotiateResponse, MessageType,
-};
+use imago_protocol::{BindingsCertUploadRequest, BindingsCertUploadResponse, MessageType};
 use rcgen::{KeyPair, PKCS_ED25519};
 use url::Url;
 use uuid::Uuid;
@@ -16,13 +14,21 @@ use web_transport_quinn::Session;
 
 use crate::{
     cli::{BindingsCertDeployArgs, BindingsCertUploadArgs, CertsGenerateArgs},
-    commands::{build, deploy},
+    commands::{
+        build,
+        command_common::{
+            format_local_context_line, format_peer_context_line, negotiate_hello_with_features,
+        },
+        deploy, ui,
+    },
 };
 
 use super::CommandResult;
 
 const GITIGNORE_CONTENT: &str = "*\n!.gitignore\n";
 const BINDINGS_CERT_UPLOAD_FEATURE: &str = "bindings.cert.upload";
+const BINDINGS_CERT_UPLOAD_REQUIRED_FEATURES: [&str; 1] = [BINDINGS_CERT_UPLOAD_FEATURE];
+const BINDINGS_CERT_NO_REQUIRED_FEATURES: [&str; 0] = [];
 const IMAGO_DIR_NAME: &str = ".imago";
 const KNOWN_HOSTS_FILE_NAME: &str = "known_hosts";
 
@@ -36,25 +42,29 @@ struct OutputPaths {
 }
 
 pub fn run_generate(args: CertsGenerateArgs) -> CommandResult {
+    let started_at = Instant::now();
+    ui::command_start("certs.generate", "starting");
+    ui::command_stage("certs.generate", "generate", "creating key material");
     match run_generate_inner(args) {
         Ok(paths) => {
-            println!("generated key material:");
-            println!("  {}", paths.server_key.display());
-            println!("  {}", paths.client_key.display());
-            println!("  {}", paths.server_pub_hex.display());
-            println!("  {}", paths.client_pub_hex.display());
-            println!("  {}", paths.gitignore.display());
-            println!("private keys are sensitive. do not commit or share them.");
-
-            CommandResult {
-                exit_code: 0,
-                stderr: None,
+            if ui::current_mode() != ui::UiMode::Json {
+                println!("generated key material:");
+                println!("  {}", paths.server_key.display());
+                println!("  {}", paths.client_key.display());
+                println!("  {}", paths.server_pub_hex.display());
+                println!("  {}", paths.client_pub_hex.display());
+                println!("  {}", paths.gitignore.display());
+                println!("private keys are sensitive. do not commit or share them.");
             }
+
+            ui::command_finish("certs.generate", true, "completed");
+            CommandResult::success("certs.generate", started_at)
         }
-        Err(err) => CommandResult {
-            exit_code: 2,
-            stderr: Some(err.to_string()),
-        },
+        Err(err) => {
+            let message = err.to_string();
+            ui::command_finish("certs.generate", false, &message);
+            CommandResult::failure("certs.generate", started_at, message)
+        }
     }
 }
 
@@ -66,15 +76,18 @@ pub(crate) async fn run_bindings_cert_upload_with_project_root(
     args: BindingsCertUploadArgs,
     project_root: &Path,
 ) -> CommandResult {
+    let started_at = Instant::now();
+    ui::command_start("bindings.cert.upload", "starting");
     match run_bindings_cert_upload_async(args, project_root).await {
-        Ok(()) => CommandResult {
-            exit_code: 0,
-            stderr: None,
-        },
-        Err(err) => CommandResult {
-            exit_code: 2,
-            stderr: Some(err.to_string()),
-        },
+        Ok(()) => {
+            ui::command_finish("bindings.cert.upload", true, "completed");
+            CommandResult::success("bindings.cert.upload", started_at)
+        }
+        Err(err) => {
+            let message = err.to_string();
+            ui::command_finish("bindings.cert.upload", false, &message);
+            CommandResult::failure("bindings.cert.upload", started_at, message)
+        }
     }
 }
 
@@ -86,15 +99,18 @@ pub(crate) async fn run_bindings_cert_deploy_with_project_root(
     args: BindingsCertDeployArgs,
     project_root: &Path,
 ) -> CommandResult {
+    let started_at = Instant::now();
+    ui::command_start("bindings.cert.deploy", "starting");
     match run_bindings_cert_deploy_async(args, project_root).await {
-        Ok(()) => CommandResult {
-            exit_code: 0,
-            stderr: None,
-        },
-        Err(err) => CommandResult {
-            exit_code: 2,
-            stderr: Some(err.to_string()),
-        },
+        Ok(()) => {
+            ui::command_finish("bindings.cert.deploy", true, "completed");
+            CommandResult::success("bindings.cert.deploy", started_at)
+        }
+        Err(err) => {
+            let message = err.to_string();
+            ui::command_finish("bindings.cert.deploy", false, &message);
+            CommandResult::failure("bindings.cert.deploy", started_at, message)
+        }
     }
 }
 
@@ -102,24 +118,87 @@ async fn run_bindings_cert_upload_async(
     args: BindingsCertUploadArgs,
     project_root: &Path,
 ) -> anyhow::Result<()> {
+    ui::command_stage(
+        "bindings.cert.upload",
+        "load-config",
+        "loading target credentials",
+    );
     let public_key_hex = normalize_ed25519_public_key_hex(&args.public_key)
         .context("invalid PUBLIC_KEY_HEX for bindings cert upload")?;
     let authority = normalize_known_hosts_authority(&args.to)
         .with_context(|| format!("failed to normalize --to authority: {}", args.to))?;
     let client_key = load_bindings_client_key(project_root)?;
+    ui::command_info(
+        "bindings.cert.upload",
+        &format_local_context_line(
+            project_root,
+            "bindings.cert.upload",
+            build::default_target_name(),
+            &args.to,
+            None,
+        ),
+    );
 
-    upload_public_key_to_remote(&args.to, &public_key_hex, &authority, &client_key).await
+    upload_public_key_to_remote(
+        "bindings.cert.upload",
+        &args.to,
+        &public_key_hex,
+        &authority,
+        &client_key,
+        &BINDINGS_CERT_UPLOAD_REQUIRED_FEATURES,
+    )
+    .await
 }
 
 async fn run_bindings_cert_deploy_async(
     args: BindingsCertDeployArgs,
     project_root: &Path,
 ) -> anyhow::Result<()> {
+    ui::command_stage(
+        "bindings.cert.deploy",
+        "load-config",
+        "loading target credentials",
+    );
     let client_key = load_bindings_client_key(project_root)?;
     let mut from_failures = Vec::new();
+    ui::command_info(
+        "bindings.cert.deploy",
+        &format_local_context_line(
+            project_root,
+            "bindings.cert.deploy.from",
+            build::default_target_name(),
+            &args.from,
+            None,
+        ),
+    );
 
     match connect_remote(&args.from, &client_key).await {
-        Ok(session) => session.close(0, b"bindings cert deploy from probe complete"),
+        Ok(connected) => {
+            ui::command_stage("bindings.cert.deploy", "hello", "negotiating hello (from)");
+            let correlation_id = Uuid::new_v4();
+            match negotiate_bindings_cert_hello(
+                &connected.session,
+                correlation_id,
+                &BINDINGS_CERT_NO_REQUIRED_FEATURES,
+            )
+            .await
+            {
+                Ok(hello) => {
+                    ui::command_info(
+                        "bindings.cert.deploy",
+                        &format_peer_context_line(
+                            &connected.authority,
+                            &connected.resolved_addr.to_string(),
+                            &hello,
+                        ),
+                    );
+                    connected
+                        .session
+                        .close(0, b"bindings cert deploy from probe complete");
+                }
+                Err(err) => from_failures.push(format!("hello failed: {err}")),
+            }
+        }
         Err(err) => from_failures.push(format!("connect failed: {err}")),
     }
 
@@ -139,10 +218,27 @@ async fn run_bindings_cert_deploy_async(
     };
 
     let to_error = if let Some(public_key_hex) = from_public_key_hex.as_deref() {
-        upload_public_key_to_remote(&args.to, public_key_hex, &from_authority, &client_key)
-            .await
-            .err()
-            .map(|err| format!("upload failed: {err}"))
+        ui::command_info(
+            "bindings.cert.deploy",
+            &format_local_context_line(
+                project_root,
+                "bindings.cert.deploy.to",
+                build::default_target_name(),
+                &args.to,
+                None,
+            ),
+        );
+        upload_public_key_to_remote(
+            "bindings.cert.deploy",
+            &args.to,
+            public_key_hex,
+            &from_authority,
+            &client_key,
+            &BINDINGS_CERT_UPLOAD_REQUIRED_FEATURES,
+        )
+        .await
+        .err()
+        .map(|err| format!("upload failed: {err}"))
     } else {
         Some("skipped because from public key is unavailable".to_string())
     };
@@ -171,7 +267,10 @@ fn load_bindings_client_key(project_root: &Path) -> anyhow::Result<PathBuf> {
     Ok(target.client_key)
 }
 
-async fn connect_remote(remote: &str, client_key: &Path) -> anyhow::Result<Session> {
+async fn connect_remote(
+    remote: &str,
+    client_key: &Path,
+) -> anyhow::Result<deploy::ConnectedTargetSession> {
     let target = build::DeployTargetConfig {
         remote: remote.to_string(),
         server_name: None,
@@ -181,45 +280,53 @@ async fn connect_remote(remote: &str, client_key: &Path) -> anyhow::Result<Sessi
 }
 
 async fn upload_public_key_to_remote(
+    command_name: &str,
     remote: &str,
     public_key_hex: &str,
     authority: &str,
     client_key: &Path,
+    required_features: &[&str],
 ) -> anyhow::Result<()> {
-    let session = connect_remote(remote, client_key).await?;
+    ui::command_stage(command_name, "connect", "connecting remote");
+    let connected = connect_remote(remote, client_key).await?;
     let correlation_id = Uuid::new_v4();
 
-    negotiate_bindings_cert_upload_hello(&session, correlation_id).await?;
-    send_bindings_cert_upload_request(&session, correlation_id, public_key_hex, authority).await?;
-    session.close(0, b"bindings cert upload complete");
+    ui::command_stage(command_name, "hello", "negotiating hello");
+    let hello =
+        negotiate_bindings_cert_hello(&connected.session, correlation_id, required_features)
+            .await?;
+    ui::command_info(
+        command_name,
+        &format_peer_context_line(
+            &connected.authority,
+            &connected.resolved_addr.to_string(),
+            &hello,
+        ),
+    );
+    ui::command_stage(command_name, "upload", "uploading public key");
+    send_bindings_cert_upload_request(
+        command_name,
+        &connected.session,
+        correlation_id,
+        public_key_hex,
+        authority,
+    )
+    .await?;
+    connected.session.close(0, b"bindings cert upload complete");
 
     Ok(())
 }
 
-async fn negotiate_bindings_cert_upload_hello(
+async fn negotiate_bindings_cert_hello(
     session: &Session,
     correlation_id: Uuid,
-) -> anyhow::Result<()> {
-    let hello_request = deploy::request_envelope(
-        MessageType::HelloNegotiate,
-        Uuid::new_v4(),
-        correlation_id,
-        &HelloNegotiateRequest {
-            compatibility_date: deploy::COMPATIBILITY_DATE.to_string(),
-            client_version: env!("CARGO_PKG_VERSION").to_string(),
-            required_features: vec![BINDINGS_CERT_UPLOAD_FEATURE.to_string()],
-        },
-    )?;
-    let hello_response: HelloNegotiateResponse =
-        deploy::response_payload(deploy::request_response(session, &hello_request).await?)?;
-    if hello_response.accepted {
-        return Ok(());
-    }
-
-    Err(anyhow!("hello.negotiate was rejected by server"))
+    required_features: &[&str],
+) -> anyhow::Result<crate::commands::command_common::HelloSummary> {
+    negotiate_hello_with_features(session, correlation_id, required_features).await
 }
 
 async fn send_bindings_cert_upload_request(
+    command_name: &str,
     session: &Session,
     correlation_id: Uuid,
     public_key_hex: &str,
@@ -237,7 +344,7 @@ async fn send_bindings_cert_upload_request(
     let response: BindingsCertUploadResponse =
         deploy::response_payload(deploy::request_response(session, &request).await?)?;
     if !response.detail.is_empty() {
-        eprintln!("{}", response.detail);
+        ui::command_warn(command_name, &response.detail);
     }
     Ok(())
 }
@@ -593,11 +700,10 @@ mod tests {
         let dir = temp_dir("reads_known_host_public_key_from_file");
         let known_hosts_path = dir.join("known_hosts");
         let key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other_key = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         std::fs::write(
             &known_hosts_path,
-            format!(
-                "# comment\nnode-b:4443\t{key}\nnode-c:4443\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
-            ),
+            format!("# comment\nnode-b:4443\t{key}\nnode-c:4443\t{other_key}\n"),
         )
         .expect("known_hosts should be written");
 
