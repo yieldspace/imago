@@ -418,7 +418,7 @@ mod tests {
 
     use super::*;
     use crate::protocol_handler::{
-        replace_dynamic_public_keys_for_tests, upsert_dynamic_client_public_key, Envelope,
+        Envelope, replace_dynamic_public_keys_for_tests, upsert_dynamic_client_public_key,
     };
 
     static DYNAMIC_KEYS_TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -490,7 +490,8 @@ mod tests {
             public_key_hex: hex_32(0x11),
         };
 
-        let err = ensure_message_type_allowed(&request, &context).expect_err("client must not allow command.start");
+        let err = ensure_message_type_allowed(&request, &context)
+            .expect_err("client must not allow command.start");
         assert_eq!(err.code, ErrorCode::Unauthorized);
     }
 
