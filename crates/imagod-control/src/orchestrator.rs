@@ -316,6 +316,11 @@ impl Orchestrator {
         self.supervisor.running_service_names().await
     }
 
+    /// Returns names of services that have log snapshots (running + retained).
+    pub async fn loggable_service_names(&self) -> Vec<String> {
+        self.supervisor.loggable_service_names().await
+    }
+
     /// Opens one service logs snapshot and optional follow stream.
     pub async fn open_logs(
         &self,

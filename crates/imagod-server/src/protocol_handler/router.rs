@@ -252,27 +252,24 @@ impl ProtocolHandler {
         payload
             .validate()
             .map_err(|e| bad_request("logs.request", e.to_string()))?;
+        let imago_protocol::LogRequest {
+            name,
+            tail_lines,
+            follow,
+        } = payload;
 
-        let service_names = match payload.name {
-            Some(name) => vec![name],
-            None => {
-                let names = self.orchestrator.running_service_names().await;
-                if names.is_empty() {
-                    return Err(ImagodError::new(
-                        imago_protocol::ErrorCode::NotFound,
-                        "logs.request",
-                        "no running services are available",
-                    ));
-                }
-                names
-            }
+        let loggable_names = if name.is_none() {
+            self.orchestrator.loggable_service_names().await
+        } else {
+            Vec::new()
         };
+        let service_names = resolve_logs_request_service_names(name, loggable_names)?;
 
         let mut subscriptions = Vec::with_capacity(service_names.len());
         for service_name in &service_names {
             let subscription = self
                 .orchestrator
-                .open_logs(service_name, payload.tail_lines, payload.follow)
+                .open_logs(service_name, tail_lines, follow)
                 .await?;
             subscriptions.push(subscription);
         }
@@ -291,7 +288,7 @@ impl ProtocolHandler {
             &LogsRequestAck {
                 accepted: true,
                 names: service_names,
-                follow: payload.follow,
+                follow,
             },
         )?;
         write_envelope(send, &ack, self.frame_codec.as_ref()).await?;
@@ -521,6 +518,21 @@ pub(crate) fn validate_push_payload(payload: &ArtifactPushRequest) -> Result<(),
         .map_err(|e| bad_request("artifact.push", e.to_string()))
 }
 
+fn resolve_logs_request_service_names(
+    requested_name: Option<String>,
+    loggable_names: Vec<String>,
+) -> Result<Vec<String>, ImagodError> {
+    match requested_name {
+        Some(name) => Ok(vec![name]),
+        None if !loggable_names.is_empty() => Ok(loggable_names),
+        None => Err(ImagodError::new(
+            imago_protocol::ErrorCode::NotFound,
+            "logs.request",
+            "no loggable services are available",
+        )),
+    }
+}
+
 /// Finalizes operation bookkeeping after writing terminal event.
 pub(crate) async fn finalize_operation_after_terminal_event(
     operations: &OperationManager,
@@ -534,4 +546,28 @@ pub(crate) async fn finalize_operation_after_terminal_event(
         .await;
     operations.remove(request_id).await;
     terminal_write_result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_logs_request_service_names;
+    use imago_protocol::ErrorCode;
+
+    #[test]
+    fn logs_request_name_none_uses_loggable_service_names() {
+        let names = resolve_logs_request_service_names(
+            None,
+            vec!["svc-running".to_string(), "svc-retained".to_string()],
+        )
+        .expect("name=None should use loggable names");
+        assert_eq!(names, vec!["svc-running", "svc-retained"]);
+    }
+
+    #[test]
+    fn logs_request_name_none_rejects_when_no_loggable_services_exist() {
+        let err = resolve_logs_request_service_names(None, Vec::new())
+            .expect_err("empty loggable names should be rejected");
+        assert_eq!(err.code, ErrorCode::NotFound);
+        assert_eq!(err.message, "no loggable services are available");
+    }
 }

@@ -114,10 +114,12 @@ operation が存在しない場合の扱い:
 - follow 配信で内部購読が `Lagged` になった場合、サーバは欠落分の `seq` を前進させて欠損を可視化する（欠落 chunk 自体は再送しない）。
 - `logs.chunk.is_last=true` は最終データチャンクを示す。
 - `logs.end` は購読終端を示し、配信開始後の異常は `logs.end.error` で返す。
+- 停止済みサービスに `follow=true` を指定した場合、retained snapshot 送信後に `logs.end` を返して即終了する。
 
 ### 9.3 `name` と全サービス購読
 
-- `logs.request.name=None` は「リクエスト時点で running の全サービス」を意味する。
+- `logs.request.name=None` は「リクエスト時点で running のサービス + retained logs が残る停止済みサービス」を意味する。
+- retained logs は imagod プロセス寿命内メモリの global ring にのみ保持し、eviction または imagod 再起動後は参照できない。
 - 後から起動したサービスは同一購読に自動追加しない。
 - 全サービス購読時の `--tail N` は各サービスごとに末尾 N 行を返す。
 
@@ -137,7 +139,7 @@ operation が存在しない場合の扱い:
 
 - `logs.request` は stream、`logs.chunk` / `logs.end` は DATAGRAM で扱う契約へ拡張した。
 - `seq` ギャップは欠損検知のみを目的とし、再送制御は行わない。
-- `name=None` の全サービス購読は「現在 running のみ・後起動は非対象」と定義した。
+- `name=None` の全サービス購読は対象集合をリクエスト時点で固定し、後起動サービスは非対象と定義した。
 
 ## 実装反映ノート（PR #145 follow-up / 2026-02-13）
 
@@ -147,10 +149,16 @@ operation が存在しない場合の扱い:
 ## 実装反映ノート（Issue #87 / 2026-02-15）
 
 - `logs.request` の識別子キーを `name` に統一した。
-- `name=None` の意味は従来どおり「現在 running の全サービス」とする。
+- `name=None` の意味は `logs.request` 契約に従う（詳細は 9.3）。
 
 ## 実装反映ノート（Session 並列化と logs retry / 2026-02-18）
 
 - protocol session は 1 session 内で複数 stream を並列処理する。`command.start` / `logs.request` / 単発 request は stream 単位で独立して処理される。
 - logs datagram 配信は send 失敗時に 10ms / 50ms / 100ms の bounded retry を行い、瞬断時の即終了を緩和する。
 - retry 後も送信不能な場合は従来どおり `logs.end.error` で終端を通知する。
+
+## 実装反映ノート（Retained logs 契約 / 2026-02-20）
+
+- `logs.request.name=None` の対象を running に加えて retained logs が残る停止済みサービスまで拡張した。
+- retained logs は imagod プロセス寿命内メモリの global ring に保持し、eviction またはプロセス再起動後は参照不可とした。
+- 停止済みサービスへの `follow=true` は snapshot 後に `logs.end` を返して即終了する。

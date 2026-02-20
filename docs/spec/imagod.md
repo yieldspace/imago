@@ -73,6 +73,8 @@ epoch_tick_interval_ms = 50
 
 `storage_root` の未指定時既定値は OS とビルド時設定で変わる。優先順位と OS 別値は [`config.md`](./config.md) を参照。
 
+`runtime.runner_log_buffer_bytes` は runner stdout/stderr の保持に加え、停止済みサービスの retained logs を保持する global ring の総量上限としても使う。
+
 詳細は [`config.md`](./config.md) を参照。
 
 ## 6. 実装追従方針
@@ -139,3 +141,10 @@ epoch_tick_interval_ms = 50
 
 - `type=rpc` は runner 起動時に `main` を自動実行せず、shutdown まで常駐待機する。
 - `rpc.invoke` が到着したタイミングでのみ、`manifest.main` が指す component の関数を実行する。
+
+## 実装反映ノート（Retained logs 契約 / 2026-02-20）
+
+- `logs.request.name=None` は running サービスに加え、retained logs が残る停止済みサービスも対象に含める。
+- retained logs は imagod プロセス寿命内メモリの global ring にのみ保持し、eviction またはプロセス再起動後は参照できない。
+- 停止済みサービスへ `follow=true` を指定した場合は snapshot 後に `logs.end` で即終了する。
+- `runtime.runner_log_buffer_bytes` は retained global ring の総量上限にも適用される。
