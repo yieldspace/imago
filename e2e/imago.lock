@@ -1,0 +1,75 @@
+version = 1
+
+[[dependencies]]
+name = "imago:node"
+version = "0.1.0"
+wit_source = "file://../plugins/imago-node/wit"
+wit_digest = "03cf700a9e9965be63ba1860190b1f59763e96f94b262f56f162dd50d11d6528"
+wit_path = "wit/deps/imago-node"
+resolved_at = "1771587671"
+
+[[dependencies]]
+name = "sizumita:ferris"
+version = "0.1.0"
+wit_source = "warg://sizumita:ferris@0.1.0"
+wit_registry = "wa.dev"
+wit_digest = "52a26fa11868e3ba234c438d8c4d946e9cec82f667948f098ae1fba59ed7bb77"
+wit_path = "wit/deps/sizumita-ferris"
+component_source = "warg://sizumita:ferris@0.1.0"
+component_registry = "wa.dev"
+component_sha256 = "040ba9bf6aec60ae0667b34f41890df8c0597a323fe76a8e6588666f2b8c8b41"
+resolved_at = "1771587671"
+
+[[binding_wits]]
+name = "rpc-greeter"
+wit_source = "file://wit/rpc-greeter/world.wit"
+wit_digest = "1f30762356393fa00052cfe54fec4a6d95817bff29efcf00af08c17246b45acd"
+wit_path = "wit/deps/acme-clock"
+interfaces = ["acme:clock/api"]
+resolved_at = "1771587671"
+
+[[wit_packages]]
+name = "root:component"
+registry = "wa.dev"
+
+[[wit_packages.versions]]
+requirement = "*"
+digest = "sha256:c6b798b79d754439cc469148ae7d9dfb3731d68b3fe72c632af6cf4cb680a5e1"
+path = "wit/deps/root-component"
+via = ["sizumita:ferris"]
+
+[[wit_packages]]
+name = "wasi:cli"
+registry = "wa.dev"
+
+[[wit_packages.versions]]
+requirement = "=0.2.6"
+version = "0.2.6"
+digest = "sha256:0e600a9f02960b51d48c9d5b9f8b436da89dd3c6cc7f69988d0d831a7e67c635"
+source = "warg://wasi:cli@0.2.6"
+path = "wit/deps/wasi-cli"
+via = ["sizumita:ferris"]
+
+[[wit_packages]]
+name = "wasi:io"
+registry = "wa.dev"
+
+[[wit_packages.versions]]
+requirement = "=0.2.6"
+version = "0.2.6"
+digest = "sha256:a3dba35b2db97b7023e0f8985de4d411031a2c81788672d7692505458890509d"
+source = "warg://wasi:io@0.2.6"
+path = "wit/deps/wasi-io"
+via = ["sizumita:ferris"]
+
+[[wit_packages]]
+name = "wasi:random"
+registry = "wa.dev"
+
+[[wit_packages.versions]]
+requirement = "=0.2.6"
+version = "0.2.6"
+digest = "sha256:6284ca21d3ff1b92ed30a9e7100b03787e9271215489e1e3dc39fcd1944777a2"
+source = "warg://wasi:random@0.2.6"
+path = "wit/deps/wasi-random"
+via = ["sizumita:ferris"]

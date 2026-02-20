@@ -1,3 +1,21 @@
+[package]
+name = "imago"
+version = "0.1.0"
+edition = "2024"
+publish = false
+autotests = false
+build = "build.rs"
+
+[features]
+default = []
+e2e = []
+
+[dev-dependencies]
+anyhow = { workspace = true }
+hex = { workspace = true }
+rcgen = { workspace = true }
+tempfile = { workspace = true }
+
 [profile.release]
 lto = true
 opt-level = "s"
@@ -12,7 +30,7 @@ members = [
     "examples/local-imagod-plugin-native-admin",
     "examples/local-imagod-plugin-hello",
     "examples/local-imagod-socket",
-    "plugins/*",
+    "plugins/*", "e2e",
 ]
 
 [workspace.dependencies]
@@ -40,6 +58,7 @@ sha2 = "0.10.9"
 tar = "0.4.44"
 thiserror = "2.0.18"
 time = "0.3.36"
+tempfile = "3.17.1"
 tokio = "1.49.0"
 toml = "0.8.23"
 proc-macro2 = "1.0.103"
@@ -50,6 +69,7 @@ wasm-pkg-common = "0.15.0"
 wasmtime = "41.0.3"
 wasmtime-wasi = "41.0.3"
 wasmtime-wasi-http = "41.0.3"
+wat = "1.244.0"
 wit-component = "0.244.0"
 wit-parser = "0.244.0"
 web-transport-quinn = "0.11.1"
@@ -71,3 +91,18 @@ imagod-runtime-ingress = { path = "crates/imagod-runtime-ingress" }
 imagod-runtime-internal = { path = "crates/imagod-runtime-internal" }
 imagod-runtime-wasmtime = { path = "crates/imagod-runtime-wasmtime" }
 imagod-server = { path = "crates/imagod-server" }
+
+[[test]]
+name = "e2e_cli"
+path = "tests/e2e_cli.rs"
+required-features = ["e2e"]
+
+[[test]]
+name = "e2e_http"
+path = "tests/e2e_http.rs"
+required-features = ["e2e"]
+
+[[test]]
+name = "e2e_rpc"
+path = "tests/e2e_rpc.rs"
+required-features = ["e2e"]

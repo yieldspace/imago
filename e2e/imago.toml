@@ -1,0 +1,23 @@
+name = "e2e"
+main = "wrong.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "sizumita:ferris"
+version = "0.1.0"
+kind = "wasm"
+wit = "warg://sizumita:ferris@0.1.0"
+
+[[dependencies]]
+name = "imago:node"
+version = "0.1.0"
+kind = "native"
+wit = "file://../plugins/imago-node/wit"
+
+[[bindings]]
+name = "rpc-greeter"
+wit = "file://wit/rpc-greeter/world.wit"
+
+[capabilities]
+privileged = true
+wasi = true
