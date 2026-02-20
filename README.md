@@ -35,7 +35,17 @@ cargo install imago
 ```bash
 git clone https://github.com/yieldspace/imago
 cd imago
-./examples/local-imagod/scripts/quickstart.sh
+cd examples/local-imagod
+# ターミナル1
+cargo run -p imagod -- --config imagod.toml
+```
+
+```bash
+# ターミナル2
+cd examples/local-imagod
+# ターミナル1 で imagod が起動したことを確認してから実行
+cargo run -p imago-cli -- deploy --target default
+cargo run -p imago-cli -- logs local-imagod-app --tail 200
 ```
 
 他の example は [`examples/README.md`](examples/README.md)、詳細手順は [`QUICKSTART.md`](QUICKSTART.md) を参照してください。

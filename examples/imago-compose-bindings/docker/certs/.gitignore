@@ -1,2 +1,5 @@
 *
 !.gitignore
+!control/
+!alice/
+!bob/

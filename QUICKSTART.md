@@ -29,12 +29,22 @@ cd imago
 ## 実行
 
 ```bash
-./examples/local-imagod/scripts/quickstart.sh
+# ターミナル1
+cd examples/local-imagod
+cargo run -p imagod -- --config imagod.toml
+```
+
+```bash
+# ターミナル2
+cd examples/local-imagod
+# ターミナル1 で imagod が起動したことを確認してから実行
+cargo run -p imago-cli -- deploy --target default
+cargo run -p imago-cli -- logs local-imagod-app --tail 200
 ```
 
 ## 成功判定
 
-`command.event` が `succeeded` で終われば成功です。
+`imago-cli logs` の出力に `local-imagod-app started` が含まれていれば成功です。
 
 ## 他のexamples参照
 

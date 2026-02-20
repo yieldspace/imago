@@ -8,16 +8,27 @@
 
 Rust toolchain と `wasm32-wasip2` target を用意します（未導入なら `rustup target add wasm32-wasip2`）。
 
+1. ターミナル A で `imagod` を起動します。
+
 ```bash
 cd examples/local-imagod-plugin-native-admin
-cargo run --manifest-path ../../Cargo.toml -p imago-cli -- update
-./scripts/run-imagod.sh
-# 別ターミナル
+cargo run -p imago-cli -- update
+cargo run -p imagod -- --config "$(pwd)/imagod.toml"
+```
+
+2. ターミナル B で deploy とログ確認を行います。
+
+```bash
 cd examples/local-imagod-plugin-native-admin
-./scripts/deploy.sh
-./scripts/verify-admin.sh
+cargo run -p imago-cli -- deploy --target default
+cargo run -p imago-cli -- logs local-imagod-plugin-native-admin-app --tail 200
 ```
 
 ## 成功判定
 
-`./scripts/verify-admin.sh` で `imago-admin service-name=` などの管理情報が確認できれば成功です。
+ログに次の文字列が含まれれば成功です。
+
+- `imago-admin service-name=`
+- `imago-admin release-hash=`
+- `imago-admin runner-id=`
+- `imago-admin app-type=cli`

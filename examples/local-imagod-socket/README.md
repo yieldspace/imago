@@ -4,20 +4,32 @@
 
 同一マシンで `type=socket` の UDP echo アプリを deploy し、疎通確認するサンプルです。
 
-## 実行
+## 前提
 
 Rust toolchain と `wasm32-wasip2` target を用意します（未導入なら `rustup target add wasm32-wasip2`）。
 
+## 実行
+
 ```bash
+# ターミナル1
 cd examples/local-imagod-socket
-./scripts/run-imagod.sh
-# 別ターミナル
+cargo run -p imagod -- --config imagod.toml
+```
+
+```bash
+# ターミナル2
 cd examples/local-imagod-socket
-./scripts/deploy.sh
-# さらに別ターミナル
-printf "hello-udp\n" | nc -u -w 1 127.0.0.1 5000
+# ターミナル1 で imagod が起動したことを確認してから実行
+cargo run -p imago-cli -- deploy --target default
+cargo run -p imago-cli -- logs local-imagod-socket-app --tail 200
 ```
 
 ## 成功判定
 
-`imagod` 側ログに受信/送信が出て、同じ payload が返れば成功です。
+`imago-cli logs` の出力に `local-imagod-socket-app listening on udp://0.0.0.0:5000` が含まれていれば成功です。
+
+## Troubleshooting
+
+### known_hosts の古いエントリで deploy が失敗する
+
+`certificate mismatch` などで `deploy` が失敗する場合のみ、`~/.imago/known_hosts` から `localhost:4443` / `127.0.0.1:4443` の行を削除して再実行してください。

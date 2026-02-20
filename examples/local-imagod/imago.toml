@@ -5,6 +5,9 @@ type = "cli"
 [build]
 command = "CARGO_TARGET_DIR=target cargo build --target wasm32-wasip2 --release"
 
+[wasi.env]
+IMAGO_EXAMPLE = "Hello"
+
 [capabilities]
 wasi = true
 

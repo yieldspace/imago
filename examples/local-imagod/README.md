@@ -4,17 +4,32 @@
 
 同一マシンで `imagod` を起動し、`imago deploy` の最小フローを確認するサンプルです。
 
-## 実行
+## 前提
 
 Rust toolchain と `wasm32-wasip2` target を用意します（未導入なら `rustup target add wasm32-wasip2`）。
 
+## 実行
+
 ```bash
+# ターミナル1
 cd examples/local-imagod
-./scripts/quickstart.sh
+cargo run -p imagod -- --config imagod.toml
 ```
 
-`./scripts/quickstart.sh` は deploy 前に `.imagod-data/runtime/ipc/manager-control.sock` が ready になるまで待機します。待機上限は `IMAGOD_READY_TIMEOUT_SECS`（デフォルト: 30秒）で変更できます。
+```bash
+# ターミナル2
+cd examples/local-imagod
+# ターミナル1 で imagod が起動したことを確認してから実行
+cargo run -p imago-cli -- deploy --target default
+cargo run -p imago-cli -- logs local-imagod-app --tail 200
+```
 
 ## 成功判定
 
-`./scripts/quickstart.sh` の最後に `ok: local-imagod-app started log detected` が表示されれば成功です。
+`imago-cli logs` の出力に `local-imagod-app started` が含まれていれば成功です。
+
+## Troubleshooting
+
+### known_hosts の古いエントリで deploy が失敗する
+
+`certificate mismatch` などで `deploy` が失敗する場合のみ、`~/.imago/known_hosts` から `localhost:4443` / `127.0.0.1:4443` の行を削除して再実行してください。
