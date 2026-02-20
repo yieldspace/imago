@@ -1,0 +1,4 @@
+[target.default]
+remote = "imagod-alice:4443"
+server_name = "imagod-alice"
+client_key = "certs/control/client.key"

@@ -1,52 +1,35 @@
 # local-imagod-http example
 
-同一マシン上で `imagod` を起動し、`type=http` の Wasm `incoming-handler` を deploy して、
-`curl` で応答確認する最小 example です。
+## 目的
 
-## 事前条件
+同一マシンで `type=http` アプリを deploy し、HTTP 応答を確認するサンプルです。
 
-- Rust toolchain（`rustc 1.90` 以上）
-- `wasm32-wasip2` target（未導入なら `rustup target add wasm32-wasip2`）
-- `cargo run -p imago-cli -- certs generate ...` が実行できること
+## 前提
 
-## ディレクトリ構成
+Rust toolchain と `wasm32-wasip2` target を用意します（未導入なら `rustup target add wasm32-wasip2`）。
 
-- `imago.toml`: `type=http` + `[http].port=18080` を持つ build/deploy 設定
-- `imagod.toml`: ローカル `imagod` 設定
-- `Cargo.toml`, `src/lib.rs`: `wasi:http/incoming-handler` を export する Wasm コンポーネント
-- `scripts/generate-certs.sh`: ローカル mTLS 証明書生成
-- `scripts/run-imagod.sh`: ローカル `imagod` 起動
-- `scripts/deploy.sh`: deploy 実行（内部で build も実行）
-- `scripts/verify-http.sh`: `curl http://127.0.0.1:18080/` 応答検証
-
-## 手順
-
-1. 証明書を生成
+## 実行
 
 ```bash
+# ターミナル1
 cd examples/local-imagod-http
-./scripts/generate-certs.sh
+cargo run -p imagod -- --config imagod.toml
 ```
-
-2. `imagod` を起動（ターミナル1）
 
 ```bash
+# ターミナル2
 cd examples/local-imagod-http
-./scripts/run-imagod.sh
+# ターミナル1 で imagod が起動したことを確認してから実行
+cargo run -p imago-cli -- deploy --target default
+cargo run -p imago-cli -- logs local-imagod-http-app --tail 200
 ```
 
-3. deploy を実行（ターミナル2）
+## 成功判定
 
-```bash
-cd examples/local-imagod-http
-./scripts/deploy.sh
-```
+`imago-cli logs` の出力に `local-imagod-http-app started` が含まれていれば成功です。
 
-4. HTTP 応答を検証
+## Troubleshooting
 
-```bash
-cd examples/local-imagod-http
-./scripts/verify-http.sh
-```
+### known_hosts の古いエントリで deploy が失敗する
 
-成功時は `ok: hello from local-imagod-http` が表示されます。
+`certificate mismatch` などで `deploy` が失敗する場合のみ、`~/.imago/known_hosts` から `localhost:4443` / `127.0.0.1:4443` の行を削除して再実行してください。

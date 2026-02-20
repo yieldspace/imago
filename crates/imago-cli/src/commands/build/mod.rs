@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
+use imago_lockfile::BindingWitExpectation;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
@@ -35,8 +36,6 @@ const RESTART_POLICY_UNLESS_STOPPED: &str = "unless-stopped";
 pub struct TargetConfig {
     pub remote: String,
     pub server_name: Option<String>,
-    pub ca_cert: Option<PathBuf>,
-    pub client_cert: Option<PathBuf>,
     pub client_key: Option<PathBuf>,
 }
 
@@ -44,8 +43,6 @@ pub struct TargetConfig {
 pub struct DeployTargetConfig {
     pub remote: String,
     pub server_name: Option<String>,
-    pub ca_cert: PathBuf,
-    pub client_cert: PathBuf,
     pub client_key: PathBuf,
 }
 
@@ -60,14 +57,6 @@ impl TargetConfig {
     }
 
     pub fn require_deploy_credentials(&self) -> anyhow::Result<DeployTargetConfig> {
-        let ca_cert = self
-            .ca_cert
-            .clone()
-            .ok_or_else(|| anyhow!("target is missing required key: ca_cert"))?;
-        let client_cert = self
-            .client_cert
-            .clone()
-            .ok_or_else(|| anyhow!("target is missing required key: client_cert"))?;
         let client_key = self
             .client_key
             .clone()
@@ -76,8 +65,6 @@ impl TargetConfig {
         Ok(DeployTargetConfig {
             remote: self.remote.clone(),
             server_name: self.server_name.clone(),
-            ca_cert,
-            client_cert,
             client_key,
         })
     }
@@ -107,6 +94,8 @@ struct Manifest {
     http: Option<ManifestHttp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     socket: Option<ManifestSocket>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wasi: Option<ManifestWasiConfig>,
     dependencies: Vec<ManifestDependency>,
     #[serde(default, skip_serializing_if = "ManifestCapabilityPolicy::is_empty")]
     capabilities: ManifestCapabilityPolicy,
@@ -122,7 +111,7 @@ struct ManifestAsset {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ManifestBinding {
-    target: String,
+    name: String,
     wit: String,
 }
 
@@ -193,6 +182,13 @@ pub(crate) struct ProjectDependency {
     pub capabilities: ManifestCapabilityPolicy,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectBindingSource {
+    pub name: String,
+    pub wit_source: String,
+    pub wit_registry: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ManifestHttp {
     port: u16,
@@ -227,6 +223,33 @@ struct ManifestSocket {
     listen_port: u16,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ManifestWasiMount {
+    asset_dir: String,
+    guest_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+struct ManifestWasiConfig {
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    mounts: Vec<ManifestWasiMount>,
+    #[serde(default)]
+    read_only_mounts: Vec<ManifestWasiMount>,
+}
+
+impl ManifestWasiConfig {
+    fn is_empty(&self) -> bool {
+        self.args.is_empty()
+            && self.env.is_empty()
+            && self.mounts.is_empty()
+            && self.read_only_mounts.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ManifestHash {
     algorithm: String,
@@ -251,7 +274,15 @@ pub fn run(args: BuildArgs) -> CommandResult {
 }
 
 pub(crate) fn run_with_project_root(args: BuildArgs, project_root: &Path) -> CommandResult {
-    match run_inner(args, project_root) {
+    run_with_project_root_and_target_override(args, project_root, None)
+}
+
+pub(crate) fn run_with_project_root_and_target_override(
+    args: BuildArgs,
+    project_root: &Path,
+    target_override: Option<&TargetConfig>,
+) -> CommandResult {
+    match run_inner_with_target_override(args, project_root, target_override) {
         Ok(()) => CommandResult {
             exit_code: 0,
             stderr: None,
@@ -263,43 +294,45 @@ pub(crate) fn run_with_project_root(args: BuildArgs, project_root: &Path) -> Com
     }
 }
 
-fn run_inner(args: BuildArgs, project_root: &Path) -> anyhow::Result<()> {
-    build_project(args.env.as_deref(), &args.target, project_root)?;
+fn run_inner_with_target_override(
+    args: BuildArgs,
+    project_root: &Path,
+    target_override: Option<&TargetConfig>,
+) -> anyhow::Result<()> {
+    match target_override {
+        Some(target) => {
+            build_project_with_target_override(&args.target, project_root, Some(target))?;
+        }
+        None => {
+            build_project(&args.target, project_root)?;
+        }
+    }
     Ok(())
 }
 
-pub fn load_target_config(
-    env: Option<&str>,
-    target_name: &str,
-    project_root: &Path,
-) -> anyhow::Result<TargetConfig> {
-    if let Some(env_name) = env {
-        validate_env_name(env_name)?;
-    }
-    let root = load_resolved_toml(project_root, env)?;
+pub fn load_target_config(target_name: &str, project_root: &Path) -> anyhow::Result<TargetConfig> {
+    let root = load_resolved_toml(project_root)?;
     parse_target(&root, target_name, project_root)
 }
 
-pub fn load_service_name(env: Option<&str>, project_root: &Path) -> anyhow::Result<String> {
-    if let Some(env_name) = env {
-        validate_env_name(env_name)?;
-    }
-    let root = load_resolved_toml(project_root, env)?;
+pub fn load_service_name(project_root: &Path) -> anyhow::Result<String> {
+    let root = load_resolved_toml(project_root)?;
     let name = required_string(&root, "name")?;
     validate_service_name(&name)?;
     Ok(name)
 }
 
-pub fn build_project(
-    env: Option<&str>,
+pub fn build_project(target_name: &str, project_root: &Path) -> anyhow::Result<BuildOutput> {
+    build_project_with_target_override(target_name, project_root, None)
+}
+
+pub(crate) fn build_project_with_target_override(
     target_name: &str,
     project_root: &Path,
+    target_override: Option<&TargetConfig>,
 ) -> anyhow::Result<BuildOutput> {
-    if let Some(env_name) = env {
-        validate_env_name(env_name)?;
-    }
-    let root = load_resolved_toml(project_root, env)?;
-    let secrets = load_env_file(project_root, env)?;
+    let root = load_resolved_toml(project_root)?;
+    let secrets = parse_string_table(root.get("secrets"), "secrets")?;
 
     let command = parse_build_command(&root)?;
 
@@ -316,19 +349,29 @@ pub fn build_project(
     let restart_policy = parse_restart_policy(&root)?;
 
     let vars = parse_string_table(root.get("vars"), "vars")?;
-    let bindings = parse_bindings(root.get("bindings"))?;
+    let project_bindings = parse_project_binding_sources(root.get("bindings"))?;
     let project_dependencies = parse_project_dependencies(root.get("dependencies"))?;
     if !project_dependencies.is_empty() {
-        dependency_cache::hydrate_project_wit_deps(project_root, &project_dependencies)
-            .context("failed to hydrate dependency cache")?;
+        let wit_deps_root = project_root.join("wit").join("deps");
+        if !wit_deps_root.exists() {
+            dependency_cache::hydrate_project_wit_deps(project_root, &project_dependencies)
+                .context("failed to hydrate dependency cache")?;
+        } else {
+            dependency_cache::verify_project_dependency_cache(project_root, &project_dependencies)
+                .context("failed to validate dependency cache")?;
+        }
     }
     let capabilities = parse_root_capabilities(&root)?;
     let dependency_resolver = StandardDependencyResolver;
     let dependencies = dependency_resolver
         .resolve_manifest_dependencies_from_lock(project_root, &project_dependencies)?;
-    let target = parse_target(&root, target_name, project_root)?;
+    let bindings = resolve_manifest_bindings_from_lock(project_root, &project_bindings)?;
+    let target = match target_override {
+        Some(target) => target.clone(),
+        None => parse_target(&root, target_name, project_root)?,
+    };
 
-    run_build_command(command.as_ref(), project_root, &secrets)?;
+    run_build_command(command.as_ref(), project_root)?;
 
     ensure_file_exists(project_root, &source_main_path, "main")?;
     let materialized_main_path = materialize_hashed_wasm(project_root, &source_main_path, &name)?;
@@ -338,6 +381,7 @@ pub fn build_project(
         .to_os_string();
 
     let assets = parse_assets(root.get("assets"), project_root)?;
+    let wasi = parse_wasi_section(&root, &assets, &vars, &secrets)?;
 
     let mut manifest = Manifest {
         name,
@@ -353,6 +397,7 @@ pub fn build_project(
         bindings,
         http,
         socket,
+        wasi,
         dependencies,
         capabilities,
         hash: ManifestHash {
@@ -373,7 +418,7 @@ pub fn build_project(
         serde_json::to_vec_pretty(&manifest).context("failed to serialize build manifest")?;
     manifest_bytes.push(b'\n');
 
-    let manifest_path = resolve_manifest_output_path(env)?;
+    let manifest_path = resolve_manifest_output_path();
     let output_path = project_root.join(&manifest_path);
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent).with_context(|| {
@@ -391,36 +436,15 @@ pub fn build_project(
     })
 }
 
-fn load_resolved_toml(project_root: &Path, env: Option<&str>) -> anyhow::Result<toml::Table> {
+fn load_resolved_toml(project_root: &Path) -> anyhow::Result<toml::Table> {
     let path = project_root.join("imago.toml");
     let raw =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let parsed: TomlValue = toml::from_str(&raw).context("failed to parse imago.toml")?;
-    let mut root = parsed
+    let root = parsed
         .as_table()
         .cloned()
         .ok_or_else(|| anyhow!("imago.toml root must be a table"))?;
-
-    if let Some(env_name) = env {
-        let envs = root
-            .get("env")
-            .and_then(TomlValue::as_table)
-            .ok_or_else(|| anyhow!("env '{}' is not defined in imago.toml", env_name))?;
-        let env_value = envs
-            .get(env_name)
-            .ok_or_else(|| anyhow!("env '{}' is not defined in imago.toml", env_name))?;
-        let env_table = env_value
-            .as_table()
-            .ok_or_else(|| anyhow!("env '{}' must be a table", env_name))?;
-        let replacements = env_table
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect::<Vec<_>>();
-
-        for (key, value) in replacements {
-            root.insert(key, value);
-        }
-    }
 
     if let Some(runtime) = root.get("runtime").and_then(TomlValue::as_table)
         && runtime.get("restart_policy").is_some()
@@ -496,11 +520,7 @@ fn parse_build_command(root: &toml::Table) -> anyhow::Result<Option<BuildCommand
     Ok(Some(BuildCommand::Argv(argv)))
 }
 
-fn run_build_command(
-    command: Option<&BuildCommand>,
-    project_root: &Path,
-    env_vars: &BTreeMap<String, String>,
-) -> anyhow::Result<()> {
+fn run_build_command(command: Option<&BuildCommand>, project_root: &Path) -> anyhow::Result<()> {
     let Some(command) = command else {
         return Ok(());
     };
@@ -521,9 +541,6 @@ fn run_build_command(
     };
 
     process.current_dir(project_root);
-    for (key, value) in env_vars {
-        process.env(key, value);
-    }
 
     let status = process.status().context("failed to run build.command")?;
 
@@ -536,65 +553,6 @@ fn run_build_command(
     } else {
         Err(anyhow!("build.command was terminated by signal"))
     }
-}
-
-fn load_env_file(
-    project_root: &Path,
-    env: Option<&str>,
-) -> anyhow::Result<BTreeMap<String, String>> {
-    let Some(env_name) = env else {
-        return Ok(BTreeMap::new());
-    };
-    validate_env_name(env_name)?;
-
-    let path = project_root.join(format!(".env.{env_name}"));
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read env file: {}", path.display()))?;
-
-    let mut values = BTreeMap::new();
-    for (line_no, line) in raw.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        let body = if let Some(rest) = trimmed.strip_prefix("export ") {
-            rest.trim_start()
-        } else {
-            trimmed
-        };
-
-        let (raw_key, raw_value) = body.split_once('=').ok_or_else(|| {
-            anyhow!(
-                "invalid env line at {}:{} (expected KEY=VALUE)",
-                path.display(),
-                line_no + 1
-            )
-        })?;
-
-        let key = raw_key.trim();
-        if key.is_empty() {
-            return Err(anyhow!(
-                "invalid env line at {}:{} (empty key)",
-                path.display(),
-                line_no + 1
-            ));
-        }
-
-        let mut value = raw_value.trim().to_string();
-        if value.len() >= 2 {
-            let bytes = value.as_bytes();
-            if (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
-                || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
-            {
-                value = value[1..value.len() - 1].to_string();
-            }
-        }
-
-        values.insert(key.to_string(), value);
-    }
-
-    Ok(values)
 }
 
 fn required_string(root: &toml::Table, key: &str) -> anyhow::Result<String> {
@@ -614,10 +572,6 @@ fn required_string(root: &toml::Table, key: &str) -> anyhow::Result<String> {
 
 pub(crate) fn validate_service_name(name: &str) -> anyhow::Result<()> {
     validation::validate_service_name(name)
-}
-
-fn validate_env_name(env_name: &str) -> anyhow::Result<()> {
-    validation::validate_env_name(env_name)
 }
 
 fn validate_app_type(app_type: &str) -> anyhow::Result<()> {
@@ -855,8 +809,15 @@ fn parse_string_table(
 pub(crate) fn load_project_dependencies(
     project_root: &Path,
 ) -> anyhow::Result<Vec<ProjectDependency>> {
-    let root = load_resolved_toml(project_root, None)?;
+    let root = load_resolved_toml(project_root)?;
     parse_project_dependencies(root.get("dependencies"))
+}
+
+pub(crate) fn load_project_binding_sources(
+    project_root: &Path,
+) -> anyhow::Result<Vec<ProjectBindingSource>> {
+    let root = load_resolved_toml(project_root)?;
+    parse_project_binding_sources(root.get("bindings"))
 }
 
 fn parse_project_dependencies(value: Option<&TomlValue>) -> anyhow::Result<Vec<ProjectDependency>> {
@@ -1172,13 +1133,31 @@ fn parse_capability_policy(
     };
 
     let deps = parse_capability_rule_table(table.get("deps"), &format!("{field_name}.deps"))?;
-    let wasi = parse_capability_rule_table(table.get("wasi"), &format!("{field_name}.wasi"))?;
+    let wasi = parse_wasi_capability_rules(table.get("wasi"), &format!("{field_name}.wasi"))?;
 
     Ok(ManifestCapabilityPolicy {
         privileged,
         deps,
         wasi,
     })
+}
+
+fn parse_wasi_capability_rules(
+    value: Option<&TomlValue>,
+    field_name: &str,
+) -> anyhow::Result<BTreeMap<String, Vec<String>>> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+
+    if let Some(allow_all) = value.as_bool() {
+        if allow_all {
+            return Ok(BTreeMap::from([("*".to_string(), vec!["*".to_string()])]));
+        }
+        return Ok(BTreeMap::new());
+    }
+
+    parse_capability_rule_table(Some(value), field_name)
 }
 
 fn parse_capability_rule_table(
@@ -1239,7 +1218,9 @@ fn validate_dependency_package_name(name: &str) -> anyhow::Result<()> {
     validation::validate_dependency_package_name(name)
 }
 
-fn parse_bindings(value: Option<&TomlValue>) -> anyhow::Result<Vec<ManifestBinding>> {
+fn parse_project_binding_sources(
+    value: Option<&TomlValue>,
+) -> anyhow::Result<Vec<ProjectBindingSource>> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
@@ -1248,39 +1229,117 @@ fn parse_bindings(value: Option<&TomlValue>) -> anyhow::Result<Vec<ManifestBindi
         .as_array()
         .ok_or_else(|| anyhow!("bindings must be an array"))?;
     let mut bindings = Vec::with_capacity(array.len());
+    let mut wit_to_name = BTreeMap::<(String, Option<String>), String>::new();
+    let mut seen_bindings = BTreeSet::<(String, String, Option<String>)>::new();
     for (index, entry) in array.iter().enumerate() {
         let table = entry
             .as_table()
             .ok_or_else(|| anyhow!("bindings[{index}] must be a table"))?;
-        let target = table
-            .get("target")
+        for key in table.keys() {
+            if key == "target" {
+                return Err(anyhow!(
+                    "bindings[{index}].target is no longer supported; use bindings[{index}].name"
+                ));
+            }
+            if !matches!(key.as_str(), "name" | "wit") {
+                return Err(anyhow!("bindings[{index}].{key} is not supported"));
+            }
+        }
+        let name = table
+            .get("name")
             .and_then(TomlValue::as_str)
-            .ok_or_else(|| anyhow!("bindings[{index}].target must be a string"))?
+            .ok_or_else(|| anyhow!("bindings[{index}].name must be a string"))?
             .trim()
             .to_string();
-        let wit = table
+        let wit_source = table
             .get("wit")
             .and_then(TomlValue::as_str)
             .ok_or_else(|| anyhow!("bindings[{index}].wit must be a string"))?
             .trim()
             .to_string();
 
-        if target.is_empty() {
-            return Err(anyhow!("bindings[{index}].target must not be empty"));
+        if name.is_empty() {
+            return Err(anyhow!("bindings[{index}].name must not be empty"));
         }
-        if wit.is_empty() {
+        if wit_source.is_empty() {
             return Err(anyhow!("bindings[{index}].wit must not be empty"));
         }
-        validate_service_name(&target).map_err(|e| {
+        validate_service_name(&name).map_err(|e| {
             anyhow!(
-                "bindings[{index}].target is invalid: {}",
+                "bindings[{index}].name is invalid: {}",
                 e.to_string().replace("name ", "")
             )
         })?;
+        if !wit_source.contains("://")
+            && wit_source.contains('/')
+            && !wit_source.starts_with("file://")
+            && !wit_source.starts_with("warg://")
+        {
+            return Err(anyhow!(
+                "bindings[{index}].wit no longer accepts '<package>/<interface>'; use file://... or warg://..."
+            ));
+        }
+        plugin_sources::validate_wit_source(&wit_source, &format!("bindings[{index}].wit"))?;
+        let wit_registry = plugin_sources::normalize_registry_for_source(
+            &wit_source,
+            None,
+            &format!("bindings[{index}].wit"),
+        )?;
 
-        bindings.push(ManifestBinding { target, wit });
+        let source_key = (wit_source.clone(), wit_registry.clone());
+        if let Some(existing_name) = wit_to_name.get(&source_key) {
+            if existing_name != &name {
+                return Err(anyhow!(
+                    "bindings wit '{}' maps to multiple services ('{}' and '{}'); this is ambiguous",
+                    wit_source,
+                    existing_name,
+                    name
+                ));
+            }
+        } else {
+            wit_to_name.insert(source_key, name.clone());
+        }
+
+        if seen_bindings.insert((name.clone(), wit_source.clone(), wit_registry.clone())) {
+            bindings.push(ProjectBindingSource {
+                name,
+                wit_source,
+                wit_registry,
+            });
+        }
     }
     Ok(bindings)
+}
+
+fn resolve_manifest_bindings_from_lock(
+    project_root: &Path,
+    bindings: &[ProjectBindingSource],
+) -> anyhow::Result<Vec<ManifestBinding>> {
+    if bindings.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let lock = imago_lockfile::load_from_project_root(project_root)?;
+    let mut expectations = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        expectations.push(BindingWitExpectation {
+            name: binding.name.clone(),
+            wit_source: binding.wit_source.clone(),
+            wit_registry: binding.wit_registry.clone(),
+        });
+    }
+    let resolved = imago_lockfile::resolve_binding_wits(project_root, &lock, &expectations)?;
+
+    let mut expanded = BTreeSet::<(String, String)>::new();
+    for binding in resolved {
+        for interface_id in binding.interfaces {
+            expanded.insert((binding.name.clone(), interface_id));
+        }
+    }
+    Ok(expanded
+        .into_iter()
+        .map(|(name, wit)| ManifestBinding { name, wit })
+        .collect())
 }
 
 fn parse_target(
@@ -1306,15 +1365,26 @@ fn parse_target(
         .to_string();
 
     let server_name = optional_string(target_table, "server_name")?;
-    let ca_cert = optional_target_cert_path(target_table, "ca_cert", project_root)?;
-    let client_cert = optional_target_cert_path(target_table, "client_cert", project_root)?;
-    let client_key = optional_target_cert_path(target_table, "client_key", project_root)?;
+    if target_table.contains_key("ca_cert") {
+        return Err(anyhow!(
+            "target key 'ca_cert' is no longer supported; use target.<name>.client_key with RPK+TOFU"
+        ));
+    }
+    if target_table.contains_key("client_cert") {
+        return Err(anyhow!(
+            "target key 'client_cert' is no longer supported; use target.<name>.client_key with RPK+TOFU"
+        ));
+    }
+    if target_table.contains_key("known_hosts") {
+        return Err(anyhow!(
+            "target key 'known_hosts' is no longer supported; CLI always uses ~/.imago/known_hosts"
+        ));
+    }
+    let client_key = optional_target_credential_path(target_table, "client_key", project_root)?;
 
     Ok(TargetConfig {
         remote,
         server_name,
-        ca_cert,
-        client_cert,
         client_key,
     })
 }
@@ -1330,7 +1400,7 @@ fn optional_string(table: &toml::Table, key: &str) -> anyhow::Result<Option<Stri
     Ok(Some(text))
 }
 
-fn optional_target_cert_path(
+fn optional_target_credential_path(
     table: &toml::Table,
     key: &str,
     project_root: &Path,
@@ -1341,15 +1411,14 @@ fn optional_target_cert_path(
     let text = value
         .as_str()
         .ok_or_else(|| anyhow!("target key '{}' must be a string", key))?;
-    let normalized = normalize_target_cert_path(text, key)?;
-    if normalized.is_absolute() {
-        Ok(Some(normalized))
-    } else {
-        Ok(Some(project_root.join(normalized)))
-    }
+    Ok(Some(resolve_target_credential_path(
+        text,
+        key,
+        project_root,
+    )?))
 }
 
-fn normalize_target_cert_path(raw: &str, key: &str) -> anyhow::Result<PathBuf> {
+fn normalize_target_credential_path(raw: &str, key: &str) -> anyhow::Result<PathBuf> {
     if raw.is_empty() {
         return Err(anyhow!("target key '{}' must not be empty", key));
     }
@@ -1403,6 +1472,19 @@ fn normalize_target_cert_path(raw: &str, key: &str) -> anyhow::Result<PathBuf> {
     }
 }
 
+pub(crate) fn resolve_target_credential_path(
+    raw: &str,
+    key: &str,
+    project_root: &Path,
+) -> anyhow::Result<PathBuf> {
+    let normalized = normalize_target_credential_path(raw, key)?;
+    if normalized.is_absolute() {
+        Ok(normalized)
+    } else {
+        Ok(project_root.join(normalized))
+    }
+}
+
 fn parse_assets(
     value: Option<&TomlValue>,
     project_root: &Path,
@@ -1448,6 +1530,216 @@ fn parse_assets(
     }
 
     Ok(assets)
+}
+
+fn parse_wasi_section(
+    root: &toml::Table,
+    assets: &[AssetSource],
+    vars: &BTreeMap<String, String>,
+    secrets: &BTreeMap<String, String>,
+) -> anyhow::Result<Option<ManifestWasiConfig>> {
+    let Some(value) = root.get("wasi") else {
+        return Ok(None);
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| anyhow!("wasi must be a table"))?;
+    for key in table.keys() {
+        if !matches!(key.as_str(), "args" | "env" | "mounts" | "read_only_mounts") {
+            return Err(anyhow!("wasi.{key} is not supported"));
+        }
+    }
+
+    let args = parse_wasi_args(table.get("args"))?;
+    let env = parse_string_table(table.get("env"), "wasi.env")?;
+    for key in env.keys() {
+        if vars.contains_key(key) || secrets.contains_key(key) {
+            return Err(anyhow!(
+                "wasi.env.{key} duplicates key defined in vars or secrets"
+            ));
+        }
+    }
+
+    let allowed_asset_dirs = collect_allowed_wasi_asset_dirs(assets);
+    let mounts = parse_wasi_mount_entries(table.get("mounts"), "wasi.mounts", &allowed_asset_dirs)?;
+    let read_only_mounts = parse_wasi_mount_entries(
+        table.get("read_only_mounts"),
+        "wasi.read_only_mounts",
+        &allowed_asset_dirs,
+    )?;
+    validate_wasi_mount_uniqueness(&mounts, &read_only_mounts)?;
+
+    let wasi = ManifestWasiConfig {
+        args,
+        env,
+        mounts,
+        read_only_mounts,
+    };
+    if wasi.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(wasi))
+    }
+}
+
+fn parse_wasi_args(value: Option<&TomlValue>) -> anyhow::Result<Vec<String>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| anyhow!("wasi.args must be an array of strings"))?;
+    let mut args = Vec::with_capacity(array.len());
+    for (index, value) in array.iter().enumerate() {
+        let arg = value
+            .as_str()
+            .ok_or_else(|| anyhow!("wasi.args[{index}] must be a string"))?
+            .trim()
+            .to_string();
+        if arg.is_empty() {
+            return Err(anyhow!("wasi.args[{index}] must not be empty"));
+        }
+        args.push(arg);
+    }
+    Ok(args)
+}
+
+fn collect_allowed_wasi_asset_dirs(assets: &[AssetSource]) -> BTreeSet<PathBuf> {
+    let mut allowed = BTreeSet::new();
+    for asset in assets {
+        if let Some(parent) = asset.source_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            allowed.insert(parent.to_path_buf());
+        }
+    }
+    allowed
+}
+
+fn parse_wasi_mount_entries(
+    value: Option<&TomlValue>,
+    field_name: &str,
+    allowed_asset_dirs: &BTreeSet<PathBuf>,
+) -> anyhow::Result<Vec<ManifestWasiMount>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| anyhow!("{field_name} must be an array"))?;
+    let mut mounts = Vec::with_capacity(array.len());
+    for (index, item) in array.iter().enumerate() {
+        let entry = item
+            .as_table()
+            .ok_or_else(|| anyhow!("{field_name}[{index}] must be a table"))?;
+        for key in entry.keys() {
+            if !matches!(key.as_str(), "asset_dir" | "guest_path") {
+                return Err(anyhow!("{field_name}[{index}].{key} is not supported"));
+            }
+        }
+
+        let asset_dir_raw = entry
+            .get("asset_dir")
+            .and_then(TomlValue::as_str)
+            .ok_or_else(|| anyhow!("{field_name}[{index}].asset_dir must be a string"))?;
+        let asset_dir =
+            normalize_relative_path(asset_dir_raw, &format!("{field_name}[{index}].asset_dir"))?;
+        if !allowed_asset_dirs.contains(&asset_dir) {
+            return Err(anyhow!(
+                "{field_name}[{index}].asset_dir must match a directory derived from assets[].path"
+            ));
+        }
+
+        let guest_path_raw = entry
+            .get("guest_path")
+            .and_then(TomlValue::as_str)
+            .ok_or_else(|| anyhow!("{field_name}[{index}].guest_path must be a string"))?;
+        let guest_path = normalize_wasi_guest_path(
+            guest_path_raw,
+            &format!("{field_name}[{index}].guest_path"),
+        )?;
+
+        mounts.push(ManifestWasiMount {
+            asset_dir: normalized_path_to_string(&asset_dir),
+            guest_path,
+        });
+    }
+    Ok(mounts)
+}
+
+fn validate_wasi_mount_uniqueness(
+    mounts: &[ManifestWasiMount],
+    read_only_mounts: &[ManifestWasiMount],
+) -> anyhow::Result<()> {
+    let mut seen_guest_paths = BTreeSet::new();
+    let mut seen_asset_dirs = BTreeSet::new();
+    for mount in mounts.iter().chain(read_only_mounts.iter()) {
+        if !seen_guest_paths.insert(mount.guest_path.clone()) {
+            return Err(anyhow!(
+                "wasi mounts contain duplicate guest_path: {}",
+                mount.guest_path
+            ));
+        }
+        if !seen_asset_dirs.insert(mount.asset_dir.clone()) {
+            return Err(anyhow!(
+                "wasi mounts contain duplicate asset_dir: {}",
+                mount.asset_dir
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_wasi_guest_path(raw: &str, field_name: &str) -> anyhow::Result<String> {
+    let path = Path::new(raw.trim());
+    if path.as_os_str().is_empty() {
+        return Err(anyhow!("{field_name} must not be empty"));
+    }
+    if raw.contains('\\') {
+        return Err(anyhow!(
+            "{field_name} must not contain backslashes: {}",
+            raw.trim()
+        ));
+    }
+    if !path.is_absolute() {
+        return Err(anyhow!(
+            "{field_name} must be an absolute path: {}",
+            raw.trim()
+        ));
+    }
+
+    let raw_os = path.as_os_str().to_string_lossy();
+    if raw_os.len() >= 2 && raw_os.as_bytes()[1] == b':' {
+        return Err(anyhow!(
+            "{field_name} must not be windows-prefixed: {}",
+            raw.trim()
+        ));
+    }
+
+    let mut segments = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(segment) => {
+                segments.push(segment.to_string_lossy().to_string());
+            }
+            Component::ParentDir | Component::CurDir => {
+                return Err(anyhow!(
+                    "{field_name} must not contain path traversal: {}",
+                    raw.trim()
+                ));
+            }
+            _ => {
+                return Err(anyhow!("{field_name} is invalid: {}", raw.trim()));
+            }
+        }
+    }
+
+    if segments.is_empty() {
+        Ok("/".to_string())
+    } else {
+        Ok(format!("/{}", segments.join("/")))
+    }
 }
 
 fn toml_to_json_normalized(value: &TomlValue) -> anyhow::Result<JsonValue> {
@@ -1642,14 +1934,8 @@ fn copy_materialized_wasm(source: &Path, destination: &Path) -> anyhow::Result<(
     Ok(())
 }
 
-pub fn resolve_manifest_output_path(env: Option<&str>) -> anyhow::Result<PathBuf> {
-    match env {
-        Some(env_name) => {
-            validate_env_name(env_name)?;
-            Ok(PathBuf::from(format!("build/manifest.{env_name}.json")))
-        }
-        None => Ok(PathBuf::from("build/manifest.json")),
-    }
+pub fn resolve_manifest_output_path() -> PathBuf {
+    PathBuf::from("build/manifest.json")
 }
 
 pub fn default_target_name() -> &'static str {
@@ -1664,8 +1950,8 @@ mod tests {
         commands::{dependency_cache, update},
     };
     use imago_lockfile::{
-        IMAGO_LOCK_VERSION, ImagoLock, ImagoLockDependency, ImagoLockWitPackage,
-        ImagoLockWitPackageVersion,
+        IMAGO_LOCK_VERSION, ImagoLock, ImagoLockBindingWit, ImagoLockDependency,
+        ImagoLockWitPackage, ImagoLockWitPackageVersion,
     };
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
@@ -1786,34 +2072,30 @@ mod tests {
     }
 
     #[test]
-    fn build_generates_env_manifest_only_when_env_is_specified() {
-        let root = new_temp_dir("env-manifest-only");
+    fn build_generates_default_manifest_and_reads_top_level_secrets() {
+        let root = new_temp_dir("default-manifest-and-secrets");
         write_imago_toml(
             &root,
             r#"
 name = "svc"
 main = "build/app.wasm"
-type = "cli"
+type = "http"
+
+[http]
+port = 18080
+
+[secrets]
+SECRET_TOKEN = "abc"
 
 [target.default]
 remote = "127.0.0.1:4443"
-
-[env.prod]
-type = "http"
-
-[env.prod.http]
-port = 18080
 "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
-        write_file(&root.join(".env.prod"), b"SECRET_TOKEN=abc\n");
 
-        let output = build_project(Some("prod"), "default", &root).expect("build should succeed");
-        assert_eq!(
-            output.manifest_path,
-            PathBuf::from("build/manifest.prod.json")
-        );
-        assert!(!root.join("build/manifest.json").exists());
+        let output = build_project("default", &root).expect("build should succeed");
+        assert_eq!(output.manifest_path, PathBuf::from("build/manifest.json"));
+        assert!(root.join("build/manifest.json").exists());
 
         let manifest = read_manifest(&root, &output.manifest_path);
         assert_eq!(manifest.app_type, "http");
@@ -1851,7 +2133,7 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-http");
 
-        let output = build_project(None, "default", &root).expect("build should succeed");
+        let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
         assert_eq!(manifest.app_type, "http");
         assert_eq!(manifest.http.as_ref().map(|v| v.port), Some(18080));
@@ -1883,7 +2165,7 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-http");
 
-        let output = build_project(None, "default", &root).expect("build should succeed");
+        let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
         assert_eq!(manifest.http.as_ref().map(|v| v.max_body_bytes), Some(4096));
 
@@ -1906,7 +2188,7 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-http");
 
-        let err = build_project(None, "default", &root)
+        let err = build_project("default", &root)
             .expect_err("build must fail when type=http has no http.port");
         assert!(err.to_string().contains("requires [http] table"));
 
@@ -1915,7 +2197,7 @@ remote = "127.0.0.1:4443"
 
     #[test]
     fn build_rejects_http_section_for_non_http_type() {
-        for app_type in ["cli", "socket"] {
+        for app_type in ["cli", "socket", "rpc"] {
             let root = new_temp_dir(&format!("http-section-non-http-{app_type}"));
             write_imago_toml(
                 &root,
@@ -1935,7 +2217,7 @@ remote = "127.0.0.1:4443"
             );
             write_file(&root.join("build/app.wasm"), b"wasm-cli");
 
-            let err = build_project(None, "default", &root)
+            let err = build_project("default", &root)
                 .expect_err("build must fail when non-http type uses [http]");
             assert!(
                 err.to_string()
@@ -1944,6 +2226,31 @@ remote = "127.0.0.1:4443"
 
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn build_succeeds_for_rpc_type_without_http_or_socket() {
+        let root = new_temp_dir("rpc-type-valid");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-rpc"
+main = "build/app.wasm"
+type = "rpc"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-rpc");
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        assert_eq!(manifest.app_type, "rpc");
+        assert!(manifest.http.is_none());
+        assert!(manifest.socket.is_none());
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1969,8 +2276,8 @@ remote = "127.0.0.1:4443"
             );
             write_file(&root.join("build/app.wasm"), b"wasm-http");
 
-            let err = build_project(None, "default", &root)
-                .expect_err("invalid max_body_bytes must fail");
+            let err =
+                build_project("default", &root).expect_err("invalid max_body_bytes must fail");
             assert!(err.to_string().contains("http.max_body_bytes"));
 
             let _ = fs::remove_dir_all(root);
@@ -1999,7 +2306,7 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-socket");
 
-        let output = build_project(None, "default", &root).expect("build should succeed");
+        let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
         let socket = manifest
             .socket
@@ -2029,8 +2336,8 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-socket");
 
-        let err = build_project(None, "default", &root)
-            .expect_err("type=socket without [socket] must fail");
+        let err =
+            build_project("default", &root).expect_err("type=socket without [socket] must fail");
         assert!(
             err.to_string()
                 .contains("type=\"socket\" requires [socket] table")
@@ -2041,7 +2348,9 @@ remote = "127.0.0.1:4443"
 
     #[test]
     fn build_rejects_socket_section_for_non_socket_type() {
-        for (app_type, app_type_extra) in [("cli", ""), ("http", "[http]\nport = 18080\n")] {
+        for (app_type, app_type_extra) in
+            [("cli", ""), ("http", "[http]\nport = 18080\n"), ("rpc", "")]
+        {
             let root = new_temp_dir(&format!("socket-section-non-socket-{app_type}"));
             write_imago_toml(
                 &root,
@@ -2066,7 +2375,7 @@ remote = "127.0.0.1:4443"
             );
             write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-            let err = build_project(None, "default", &root)
+            let err = build_project("default", &root)
                 .expect_err("build must fail when non-socket type uses [socket]");
             assert!(
                 err.to_string()
@@ -2159,7 +2468,7 @@ remote = "127.0.0.1:4443"
             write_imago_toml(&root, body);
             write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-            let err = build_project(None, "default", &root).expect_err("invalid socket section");
+            let err = build_project("default", &root).expect_err("invalid socket section");
             assert!(
                 err.to_string().contains(expected),
                 "unexpected error for {suffix}: {err}"
@@ -2170,34 +2479,8 @@ remote = "127.0.0.1:4443"
     }
 
     #[test]
-    fn build_fails_when_env_file_is_missing() {
-        let root = new_temp_dir("env-missing");
-        write_imago_toml(
-            &root,
-            r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-
-[env.prod]
-type = "cli"
-"#,
-        );
-        write_file(&root.join("build/app.wasm"), b"wasm-a");
-
-        let err = build_project(Some("prod"), "default", &root)
-            .expect_err("missing env file should fail");
-        assert!(err.to_string().contains(".env.prod"));
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn env_override_replaces_top_level_table() {
-        let root = new_temp_dir("env-override");
+    fn build_does_not_merge_env_table_overrides() {
+        let root = new_temp_dir("env-table-ignored");
         write_imago_toml(
             &root,
             r#"
@@ -2207,21 +2490,23 @@ type = "cli"
 
 [vars]
 A = "1"
-B = "2"
 
 [target.default]
 remote = "127.0.0.1:4443"
+
+[env.prod]
+type = "http"
 
 [env.prod.vars]
 C = "3"
 "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
-        write_file(&root.join(".env.prod"), b"\n");
 
-        let output = build_project(Some("prod"), "default", &root).expect("build should succeed");
+        let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
-        assert_eq!(manifest.vars.get("C"), Some(&"3".to_string()));
+        assert_eq!(manifest.app_type, "cli");
+        assert_eq!(manifest.vars.get("A"), Some(&"1".to_string()));
         assert_eq!(manifest.vars.len(), 1);
 
         let _ = fs::remove_dir_all(root);
@@ -2245,7 +2530,7 @@ remote = "127.0.0.1:4443"
 "#,
         );
 
-        let output = build_project(None, "default", &root).expect("build should succeed");
+        let output = build_project("default", &root).expect("build should succeed");
         assert!(root.join("build/app.wasm").exists());
         let manifest = read_manifest(&root, &output.manifest_path);
         let hashed_main = assert_hashed_main_path(&manifest, "svc");
@@ -2275,44 +2560,13 @@ remote = "127.0.0.1:4443"
 "#,
         );
 
-        let output = build_project(None, "default", &root).expect("build should succeed");
+        let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
         let hashed_main = assert_hashed_main_path(&manifest, "svc");
         assert_eq!(
             fs::read(root.join("build/app.wasm")).unwrap(),
             fs::read(root.join(hashed_main)).unwrap()
         );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn build_command_receives_env_file_values() {
-        let root = new_temp_dir("command-env-injection");
-        write_imago_toml(
-            &root,
-            r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[build]
-command = ["sh", "-c", "mkdir -p build && printf \"$BUILD_TOKEN\" > build/app.wasm"]
-
-[target.default]
-remote = "127.0.0.1:4443"
-
-[env.prod]
-type = "cli"
-"#,
-        );
-        write_file(&root.join(".env.prod"), b"BUILD_TOKEN=token123\n");
-
-        let _ = build_project(Some("prod"), "default", &root).expect("build should succeed");
-        let manifest = read_manifest(&root, Path::new("build/manifest.prod.json"));
-        let hashed_main = assert_hashed_main_path(&manifest, "svc");
-        let wasm = fs::read(root.join(hashed_main)).expect("wasm should exist");
-        assert_eq!(wasm, b"token123");
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2332,11 +2586,11 @@ remote = "127.0.0.1:4443"
 "#,
         );
 
-        let err = build_project(None, "default", &root).expect_err("missing main file should fail");
+        let err = build_project("default", &root).expect_err("missing main file should fail");
         assert!(err.to_string().contains("main file is not accessible"));
 
         write_file(&root.join("build/app.wasm"), b"wasm-a");
-        let output = build_project(None, "default", &root).expect("build should succeed");
+        let output = build_project("default", &root).expect("build should succeed");
         assert_eq!(output.manifest_path, PathBuf::from("build/manifest.json"));
         let manifest = read_manifest(&root, &output.manifest_path);
         let hashed_main = assert_hashed_main_path(&manifest, "svc");
@@ -2362,7 +2616,7 @@ remote = "127.0.0.1:4443"
 "#,
         );
 
-        let err = build_project(None, "default", &root)
+        let err = build_project("default", &root)
             .expect_err("missing required key should fail before build.command");
         assert!(
             err.to_string()
@@ -2386,14 +2640,12 @@ type = "cli"
 [target.default]
 remote = "127.0.0.1:4443"
 server_name = "localhost"
-ca_cert = "certs/ca.crt"
-client_cert = "certs/client.crt"
 client_key = "certs/client.key"
 "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let output = build_project(None, "default", &root).expect("build should succeed");
+        let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
 
         assert_eq!(
@@ -2410,7 +2662,7 @@ client_key = "certs/client.key"
     }
 
     #[test]
-    fn manifest_includes_bindings_from_imago_toml() {
+    fn manifest_expands_bindings_from_lock_sources() {
         let root = new_temp_dir("manifest-bindings");
         write_imago_toml(
             &root,
@@ -2420,20 +2672,67 @@ main = "build/app.wasm"
 type = "cli"
 
 [[bindings]]
-target = "svc-b"
-wit = "yieldspace:svc/invoke"
+name = "svc-b"
+wit = "file://registry/acme-clock.wit"
 
 [target.default]
 remote = "127.0.0.1:4443"
 "#,
         );
+        write_file(
+            &root.join("registry/acme-clock.wit"),
+            b"package acme:clock@0.1.0;\ninterface api { now: func() -> u64; }\n",
+        );
+        write_file(
+            &root.join("wit/deps/acme-clock/package.wit"),
+            br#"
+package acme:clock@0.1.0;
+
+interface api {
+  now: func() -> u64;
+}
+
+interface admin {
+  health: func() -> string;
+}
+"#,
+        );
+        let wit_digest =
+            compute_path_digest_hex(&root.join("wit/deps/acme-clock")).expect("wit digest");
+        write_imago_lock(
+            &root,
+            &ImagoLock {
+                version: IMAGO_LOCK_VERSION,
+                dependencies: vec![],
+                wit_packages: vec![],
+                binding_wits: vec![ImagoLockBindingWit {
+                    name: "svc-b".to_string(),
+                    wit_source: "file://registry/acme-clock.wit".to_string(),
+                    wit_registry: None,
+                    wit_digest,
+                    wit_path: "wit/deps/acme-clock".to_string(),
+                    interfaces: vec!["acme:clock/admin".to_string(), "acme:clock/api".to_string()],
+                    resolved_at: "0".to_string(),
+                }],
+            },
+        );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let output = build_project(None, "default", &root).expect("build should succeed");
+        let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
-        assert_eq!(manifest.bindings.len(), 1);
-        assert_eq!(manifest.bindings[0].target, "svc-b");
-        assert_eq!(manifest.bindings[0].wit, "yieldspace:svc/invoke");
+        assert_eq!(manifest.bindings.len(), 2);
+        let actual = manifest
+            .bindings
+            .iter()
+            .map(|binding| (binding.name.clone(), binding.wit.clone()))
+            .collect::<BTreeSet<_>>();
+        let expected = [
+            ("svc-b".to_string(), "acme:clock/admin".to_string()),
+            ("svc-b".to_string(), "acme:clock/api".to_string()),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2449,7 +2748,7 @@ main = "build/app.wasm"
 type = "cli"
 
 [[bindings]]
-target = "svc-b"
+name = "svc-b"
 
 [target.default]
 remote = "127.0.0.1:4443"
@@ -2457,9 +2756,97 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let err = build_project(None, "default", &root)
+        let err = build_project("default", &root)
             .expect_err("build must fail when bindings.wit is missing");
         assert!(err.to_string().contains("bindings[0].wit"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_bindings_target_key() {
+        let root = new_temp_dir("manifest-bindings-target-key");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-a"
+main = "build/app.wasm"
+type = "cli"
+
+[[bindings]]
+name = "svc-b"
+wit = "file://registry/acme-clock.wit"
+target = "legacy"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project("default", &root).expect_err("build must fail on bindings.target");
+        assert!(err.to_string().contains("bindings[0].target"));
+        assert!(err.to_string().contains("no longer supported"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_legacy_bindings_wit_format() {
+        let root = new_temp_dir("manifest-bindings-legacy-wit-format");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-a"
+main = "build/app.wasm"
+type = "cli"
+
+[[bindings]]
+name = "svc-b"
+wit = "yieldspace:svc/invoke"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err =
+            build_project("default", &root).expect_err("legacy bindings format must be rejected");
+        assert!(
+            err.to_string()
+                .contains("no longer accepts '<package>/<interface>'")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_bindings_wit_without_supported_scheme() {
+        let root = new_temp_dir("manifest-bindings-invalid-wit-scheme");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-a"
+main = "build/app.wasm"
+type = "cli"
+
+[[bindings]]
+name = "svc-b"
+wit = "https://example.invalid/acme-clock.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project("default", &root)
+            .expect_err("build must fail when bindings.wit scheme is unsupported");
+        assert!(
+            err.to_string()
+                .contains("must start with one of: file://, warg://")
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2483,8 +2870,300 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let err = build_project(None, "default", &root).expect_err("typo key must be rejected");
+        let err = build_project("default", &root).expect_err("typo key must be rejected");
         assert!(err.to_string().contains("capabilirties"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_accepts_capabilities_wasi_true_as_wildcard() {
+        let root = new_temp_dir("capability-wasi-bool-true");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[capabilities]
+wasi = true
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        assert_eq!(
+            manifest.capabilities.wasi.get("*").cloned(),
+            Some(vec!["*".to_string()])
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_accepts_capabilities_wasi_false_as_empty_policy() {
+        let root = new_temp_dir("capability-wasi-bool-false");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[capabilities]
+wasi = false
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        assert!(manifest.capabilities.wasi.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_accepts_wasi_section_with_mounts_and_read_only_mounts() {
+        let root = new_temp_dir("wasi-section-mounts");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[assets]]
+path = "assets/rw/input.txt"
+
+[[assets]]
+path = "assets/ro/input.txt"
+
+[wasi]
+args = ["--serve"]
+
+[wasi.env]
+WASI_ONLY = "1"
+
+[[wasi.mounts]]
+asset_dir = "assets/rw"
+guest_path = "/guest/rw"
+
+[[wasi.read_only_mounts]]
+asset_dir = "assets/ro"
+guest_path = "/guest/ro"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(&root.join("assets/rw/input.txt"), b"rw");
+        write_file(&root.join("assets/ro/input.txt"), b"ro");
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        let wasi = manifest.wasi.expect("wasi section should be emitted");
+        assert_eq!(wasi.args, vec!["--serve".to_string()]);
+        assert_eq!(wasi.env.get("WASI_ONLY"), Some(&"1".to_string()));
+        assert_eq!(
+            wasi.mounts,
+            vec![ManifestWasiMount {
+                asset_dir: "assets/rw".to_string(),
+                guest_path: "/guest/rw".to_string(),
+            }]
+        );
+        assert_eq!(
+            wasi.read_only_mounts,
+            vec![ManifestWasiMount {
+                asset_dir: "assets/ro".to_string(),
+                guest_path: "/guest/ro".to_string(),
+            }]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_wasi_env_duplicate_with_vars() {
+        let root = new_temp_dir("wasi-env-duplicate");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[vars]
+SHARED = "a"
+
+[wasi.env]
+SHARED = "b"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project("default", &root).expect_err("duplicate env key must be rejected");
+        assert!(
+            err.to_string()
+                .contains("duplicates key defined in vars or secrets")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_wasi_mount_duplicate_guest_path_across_sections() {
+        let root = new_temp_dir("wasi-mount-duplicate-guest");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[assets]]
+path = "assets/rw/input.txt"
+
+[[assets]]
+path = "assets/ro/input.txt"
+
+[[wasi.mounts]]
+asset_dir = "assets/rw"
+guest_path = "/guest/shared"
+
+[[wasi.read_only_mounts]]
+asset_dir = "assets/ro"
+guest_path = "/guest/shared"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(&root.join("assets/rw/input.txt"), b"rw");
+        write_file(&root.join("assets/ro/input.txt"), b"ro");
+
+        let err = build_project("default", &root).expect_err("duplicate guest path must fail");
+        assert!(err.to_string().contains("duplicate guest_path"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_wasi_mount_duplicate_asset_dir_across_sections() {
+        let root = new_temp_dir("wasi-mount-duplicate-asset-dir");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[assets]]
+path = "assets/shared/input.txt"
+
+[[wasi.mounts]]
+asset_dir = "assets/shared"
+guest_path = "/guest/rw"
+
+[[wasi.read_only_mounts]]
+asset_dir = "assets/shared"
+guest_path = "/guest/ro"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(&root.join("assets/shared/input.txt"), b"shared");
+
+        let err = build_project("default", &root).expect_err("duplicate asset_dir must fail");
+        assert!(err.to_string().contains("duplicate asset_dir"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_accepts_wasi_read_only_mounts_without_rw_mounts() {
+        let root = new_temp_dir("wasi-read-only-only");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[assets]]
+path = "assets/ro/input.txt"
+
+[[wasi.read_only_mounts]]
+asset_dir = "assets/ro"
+guest_path = "/guest/ro"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(&root.join("assets/ro/input.txt"), b"ro");
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        let wasi = manifest.wasi.expect("wasi section should be emitted");
+        assert!(wasi.mounts.is_empty());
+        assert_eq!(
+            wasi.read_only_mounts,
+            vec![ManifestWasiMount {
+                asset_dir: "assets/ro".to_string(),
+                guest_path: "/guest/ro".to_string(),
+            }]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_wasi_mount_asset_dir_not_derived_from_assets() {
+        let root = new_temp_dir("wasi-mount-asset-dir-invalid");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[assets]]
+path = "assets/rw/input.txt"
+
+[[wasi.mounts]]
+asset_dir = "assets/not-listed"
+guest_path = "/guest/rw"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(&root.join("assets/rw/input.txt"), b"rw");
+
+        let err = build_project("default", &root)
+            .expect_err("mount source outside assets dirs must fail");
+        assert!(
+            err.to_string()
+                .contains("must match a directory derived from assets[].path")
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2517,8 +3196,8 @@ remote = "127.0.0.1:4443"
         run_update(&root);
         fs::remove_file(root.join("imago.lock")).expect("lock should be removable");
 
-        let err = build_project(None, "default", &root)
-            .expect_err("build should fail when lock is missing");
+        let err =
+            build_project("default", &root).expect_err("build should fail when lock is missing");
         assert!(err.to_string().contains("imago.lock is missing"));
 
         let _ = fs::remove_dir_all(root);
@@ -2552,7 +3231,7 @@ remote = "127.0.0.1:4443"
         run_update(&root);
         fs::remove_dir_all(root.join("wit/deps")).expect("wit/deps should be removable");
 
-        build_project(None, "default", &root)
+        build_project("default", &root)
             .expect("build should succeed by hydrating wit/deps from dependency cache");
         assert!(
             root.join("wit/deps/yieldspace-plugin/example/example.wit")
@@ -2591,7 +3270,7 @@ remote = "127.0.0.1:4443"
         run_update(&root);
         fs::remove_dir_all(root.join(".imago/deps")).expect("dependency cache should be removable");
 
-        let err = build_project(None, "default", &root)
+        let err = build_project("default", &root)
             .expect_err("build should fail when dependency cache is missing");
         let err_chain = format!("{err:#}");
         assert!(
@@ -2628,7 +3307,7 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let err = build_project(None, "default", &root)
+        let err = build_project("default", &root)
             .expect_err("absolute dependency package name must fail");
         let err_text = err.to_string();
         assert!(
@@ -2665,7 +3344,7 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let err = build_project(None, "default", &root)
+        let err = build_project("default", &root)
             .expect_err("dependency package with normalized path segment must fail");
         let err_text = err.to_string();
         assert!(
@@ -2703,8 +3382,8 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let err = build_project(None, "default", &root)
-            .expect_err("absolute dependency requirement must fail");
+        let err =
+            build_project("default", &root).expect_err("absolute dependency requirement must fail");
         let err_text = err.to_string();
         assert!(
             err_text.contains("dependencies[0].requires[0] is invalid"),
@@ -2751,7 +3430,7 @@ remote = "127.0.0.1:4443"
         lock.version = 2;
         write_imago_lock(&root, &lock);
 
-        let err = build_project(None, "default", &root)
+        let err = build_project("default", &root)
             .expect_err("build should reject unsupported lock version");
         assert!(
             err.to_string()
@@ -2817,6 +3496,7 @@ remote = "127.0.0.1:4443"
                     component_sha256: None,
                     resolved_at: "0".to_string(),
                 }],
+                binding_wits: vec![],
                 wit_packages: vec![ImagoLockWitPackage {
                     name: "test:dep".to_string(),
                     registry: None,
@@ -2866,7 +3546,7 @@ remote = "127.0.0.1:4443"
         dependency_cache::save_entry(&root, &cache_entry)
             .expect("dependency cache should be written");
 
-        let err = build_project(None, "default", &root)
+        let err = build_project("default", &root)
             .expect_err("build should reject unknown via dependency");
         assert!(err.to_string().contains("via contains unknown dependency"));
 
@@ -2903,8 +3583,8 @@ remote = "127.0.0.1:4443"
             b"package test:example;\n",
         );
 
-        let err = build_project(None, "default", &root)
-            .expect_err("legacy component.path must be rejected");
+        let err =
+            build_project("default", &root).expect_err("legacy component.path must be rejected");
         assert!(
             err.to_string()
                 .contains("component.path is no longer supported")
@@ -2946,7 +3626,7 @@ remote = "127.0.0.1:4443"
         );
         run_update(&root);
 
-        let output = build_project(None, "default", &root).expect("build should succeed");
+        let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
         assert_eq!(manifest.dependencies.len(), 1);
         assert_eq!(manifest.dependencies[0].name, "yieldspace:plugin/example");
@@ -3023,6 +3703,7 @@ remote = "127.0.0.1:4443"
                     component_sha256: None,
                     resolved_at: "0".to_string(),
                 }],
+                binding_wits: vec![],
                 wit_packages: vec![ImagoLockWitPackage {
                     name: "test:dep".to_string(),
                     registry: None,
@@ -3073,7 +3754,7 @@ remote = "127.0.0.1:4443"
         dependency_cache::save_entry(&root, &cache_entry)
             .expect("dependency cache should be written");
 
-        let err = build_project(None, "default", &root)
+        let err = build_project("default", &root)
             .expect_err("build should reject transitive lock digest mismatch");
         assert!(
             err.to_string()
@@ -3124,7 +3805,7 @@ remote = "127.0.0.1:4443"
             .clone()
             .expect("component sha should be resolved");
 
-        let output = build_project(None, "default", &root).expect("build should succeed");
+        let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
         assert_eq!(manifest.dependencies.len(), 1);
         let component = manifest.dependencies[0]
@@ -3185,6 +3866,7 @@ remote = "127.0.0.1:4443"
                     component_sha256: Some(plugin_sha.clone()),
                     resolved_at: "0".to_string(),
                 }],
+                binding_wits: vec![],
                 wit_packages: vec![],
             },
         );
@@ -3215,7 +3897,7 @@ remote = "127.0.0.1:4443"
         dependency_cache::save_entry(&root, &cache_entry)
             .expect("dependency cache should be written");
 
-        let output = build_project(None, "default", &root).expect("build should succeed");
+        let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
         let component = manifest.dependencies[0]
             .component
@@ -3275,6 +3957,7 @@ remote = "127.0.0.1:4443"
                     component_sha256: Some(plugin_sha.clone()),
                     resolved_at: "0".to_string(),
                 }],
+                binding_wits: vec![],
                 wit_packages: vec![],
             },
         );
@@ -3305,7 +3988,7 @@ remote = "127.0.0.1:4443"
         dependency_cache::save_entry(&root, &cache_entry)
             .expect("dependency cache should be written");
 
-        let err = build_project(None, "default", &root)
+        let err = build_project("default", &root)
             .expect_err("build should fail when derived component source mismatches lock");
         assert!(err.to_string().contains("component source mismatch"));
 
@@ -3313,8 +3996,8 @@ remote = "127.0.0.1:4443"
     }
 
     #[test]
-    fn target_cert_paths_are_resolved_relative_to_project_root() {
-        let root = new_temp_dir("target-cert-relative");
+    fn target_client_key_path_is_resolved_relative_to_project_root() {
+        let root = new_temp_dir("target-client-key-relative");
         write_imago_toml(
             &root,
             r#"
@@ -3324,19 +4007,12 @@ type = "cli"
 
 [target.default]
 remote = "127.0.0.1:4443"
-ca_cert = "certs/ca.crt"
-client_cert = "certs/client.crt"
 client_key = "certs/client.key"
 "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let output = build_project(None, "default", &root).expect("build should succeed");
-        assert_eq!(output.target.ca_cert, Some(root.join("certs/ca.crt")));
-        assert_eq!(
-            output.target.client_cert,
-            Some(root.join("certs/client.crt"))
-        );
+        let output = build_project("default", &root).expect("build should succeed");
         assert_eq!(
             output.target.client_key,
             Some(root.join("certs/client.key"))
@@ -3346,10 +4022,8 @@ client_key = "certs/client.key"
     }
 
     #[test]
-    fn target_cert_paths_allow_absolute_values() {
-        let root = new_temp_dir("target-cert-absolute");
-        let abs_ca = root.join("abs-ca.crt");
-        let abs_client_cert = root.join("abs-client.crt");
+    fn target_client_key_path_allows_absolute_values() {
+        let root = new_temp_dir("target-client-key-absolute");
         let abs_client_key = root.join("abs-client.key");
         write_imago_toml(
             &root,
@@ -3361,28 +4035,22 @@ type = "cli"
 
 [target.default]
 remote = "127.0.0.1:4443"
-ca_cert = "{}"
-client_cert = "{}"
 client_key = "{}"
 "#,
-                abs_ca.display(),
-                abs_client_cert.display(),
                 abs_client_key.display()
             ),
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let output = build_project(None, "default", &root).expect("build should succeed");
-        assert_eq!(output.target.ca_cert, Some(abs_ca));
-        assert_eq!(output.target.client_cert, Some(abs_client_cert));
+        let output = build_project("default", &root).expect("build should succeed");
         assert_eq!(output.target.client_key, Some(abs_client_key));
 
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn target_cert_path_rejects_parent_traversal() {
-        let root = new_temp_dir("target-cert-dotdot");
+    fn target_client_key_path_rejects_parent_traversal() {
+        let root = new_temp_dir("target-client-key-dotdot");
         write_imago_toml(
             &root,
             r#"
@@ -3392,23 +4060,23 @@ type = "cli"
 
 [target.default]
 remote = "127.0.0.1:4443"
-ca_cert = "../secrets/ca.crt"
+client_key = "../secrets/client.key"
 "#,
         );
 
-        let err = build_project(None, "default", &root)
+        let err = build_project("default", &root)
             .expect_err("target cert path with parent traversal must fail");
         assert!(
             err.to_string()
-                .contains("target key 'ca_cert' must not contain path traversal")
+                .contains("target key 'client_key' must not contain path traversal")
         );
 
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn target_cert_path_rejects_backslashes() {
-        let root = new_temp_dir("target-cert-backslash");
+    fn target_client_key_path_rejects_backslashes() {
+        let root = new_temp_dir("target-client-key-backslash");
         write_imago_toml(
             &root,
             r#"
@@ -3418,23 +4086,22 @@ type = "cli"
 
 [target.default]
 remote = "127.0.0.1:4443"
-ca_cert = "certs\\ca.crt"
+client_key = "certs\\client.key"
 "#,
         );
 
-        let err =
-            build_project(None, "default", &root).expect_err("backslash path must be rejected");
+        let err = build_project("default", &root).expect_err("backslash path must be rejected");
         assert!(
             err.to_string()
-                .contains("target key 'ca_cert' must not contain backslashes")
+                .contains("target key 'client_key' must not contain backslashes")
         );
 
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn target_cert_path_rejects_windows_prefix() {
-        let root = new_temp_dir("target-cert-windows-prefix");
+    fn target_client_key_path_rejects_windows_prefix() {
+        let root = new_temp_dir("target-client-key-windows-prefix");
         write_imago_toml(
             &root,
             r#"
@@ -3444,22 +4111,91 @@ type = "cli"
 
 [target.default]
 remote = "127.0.0.1:4443"
-ca_cert = "C:/certs/ca.crt"
+client_key = "C:/certs/client.key"
 "#,
         );
 
-        let err = build_project(None, "default", &root)
+        let err = build_project("default", &root)
             .expect_err("windows-prefixed cert path must be rejected");
         assert!(
             err.to_string()
-                .contains("target key 'ca_cert' must not be windows-prefixed")
+                .contains("target key 'client_key' must not be windows-prefixed")
         );
 
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn secrets_are_loaded_only_from_env_file() {
+    fn target_rejects_deprecated_ca_cert_key() {
+        let root = new_temp_dir("target-rejects-ca-cert");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+ca_cert = "certs/ca.crt"
+"#,
+        );
+
+        let err = build_project("default", &root).expect_err("ca_cert should be rejected");
+        assert!(err.to_string().contains("ca_cert"));
+        assert!(err.to_string().contains("no longer supported"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn target_rejects_deprecated_client_cert_key() {
+        let root = new_temp_dir("target-rejects-client-cert");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+client_cert = "certs/client.crt"
+"#,
+        );
+
+        let err = build_project("default", &root).expect_err("client_cert should be rejected");
+        assert!(err.to_string().contains("client_cert"));
+        assert!(err.to_string().contains("no longer supported"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn target_rejects_deprecated_known_hosts_key() {
+        let root = new_temp_dir("target-rejects-known-hosts");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+known_hosts = "certs/known_hosts"
+"#,
+        );
+
+        let err = build_project("default", &root).expect_err("known_hosts should be rejected");
+        assert!(err.to_string().contains("known_hosts"));
+        assert!(err.to_string().contains("no longer supported"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn secrets_are_loaded_from_toml_table() {
         let root = new_temp_dir("secrets-source");
         write_imago_toml(
             &root,
@@ -3473,18 +4209,14 @@ FROM_TOML = "nope"
 
 [target.default]
 remote = "127.0.0.1:4443"
-
-[env.prod]
-type = "cli"
 "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
-        write_file(&root.join(".env.prod"), b"FROM_ENV=ok\n");
 
-        let output = build_project(Some("prod"), "default", &root).expect("build should succeed");
+        let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
 
-        assert_eq!(manifest.secrets.get("FROM_ENV"), Some(&"ok".to_string()));
+        assert_eq!(manifest.secrets.get("FROM_TOML"), Some(&"nope".to_string()));
         assert_eq!(manifest.secrets.len(), 1);
 
         let _ = fs::remove_dir_all(root);
@@ -3512,12 +4244,12 @@ remote = "127.0.0.1:4443"
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(&root.join("assets/message.txt"), b"hello");
 
-        let first = build_project(None, "default", &root).expect("first build should succeed");
+        let first = build_project("default", &root).expect("first build should succeed");
         let first_manifest = read_manifest(&root, &first.manifest_path);
 
         write_file(&root.join("assets/message.txt"), b"hello-updated");
 
-        let second = build_project(None, "default", &root).expect("second build should succeed");
+        let second = build_project("default", &root).expect("second build should succeed");
         let second_manifest = read_manifest(&root, &second.manifest_path);
 
         assert_ne!(first_manifest.hash.value, second_manifest.hash.value);
@@ -3541,11 +4273,11 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let first = build_project(None, "default", &root).expect("first build should succeed");
+        let first = build_project("default", &root).expect("first build should succeed");
         let first_manifest = read_manifest(&root, &first.manifest_path);
         let first_main = assert_hashed_main_path(&first_manifest, "svc");
 
-        let second = build_project(None, "default", &root).expect("second build should succeed");
+        let second = build_project("default", &root).expect("second build should succeed");
         let second_manifest = read_manifest(&root, &second.manifest_path);
         let second_main = assert_hashed_main_path(&second_manifest, "svc");
 
@@ -3571,13 +4303,13 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let first = build_project(None, "default", &root).expect("first build should succeed");
+        let first = build_project("default", &root).expect("first build should succeed");
         let first_manifest = read_manifest(&root, &first.manifest_path);
         let first_main = assert_hashed_main_path(&first_manifest, "svc");
 
         write_file(&root.join("build/app.wasm"), b"wasm-b");
 
-        let second = build_project(None, "default", &root).expect("second build should succeed");
+        let second = build_project("default", &root).expect("second build should succeed");
         let second_manifest = read_manifest(&root, &second.manifest_path);
         let second_main = assert_hashed_main_path(&second_manifest, "svc");
 
@@ -3604,13 +4336,13 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let first = build_project(None, "default", &root).expect("first build should succeed");
+        let first = build_project("default", &root).expect("first build should succeed");
         let first_manifest = read_manifest(&root, &first.manifest_path);
         let first_main = assert_hashed_main_path(&first_manifest, "svc");
 
         write_file(&root.join(&first_main), b"tampered");
 
-        let second = build_project(None, "default", &root).expect("second build should succeed");
+        let second = build_project("default", &root).expect("second build should succeed");
         let second_manifest = read_manifest(&root, &second.manifest_path);
         let second_main = assert_hashed_main_path(&second_manifest, "svc");
 
@@ -3642,35 +4374,21 @@ remote = "127.0.0.1:4443"
         let target = TargetConfig {
             remote: "127.0.0.1:4443".to_string(),
             server_name: Some("localhost".to_string()),
-            ca_cert: None,
-            client_cert: Some(PathBuf::from("certs/client.crt")),
-            client_key: Some(PathBuf::from("certs/client.key")),
+            client_key: None,
         };
 
         let err = target
             .require_deploy_credentials()
             .expect_err("missing cert should fail");
-        assert!(err.to_string().contains("ca_cert"));
+        assert!(err.to_string().contains("client_key"));
     }
 
     #[test]
-    fn resolve_manifest_output_path_follows_env_rule() {
+    fn resolve_manifest_output_path_returns_default_manifest_path() {
         assert_eq!(
-            resolve_manifest_output_path(None).expect("default manifest path should resolve"),
+            resolve_manifest_output_path(),
             PathBuf::from("build/manifest.json")
         );
-        assert_eq!(
-            resolve_manifest_output_path(Some("prod"))
-                .expect("env manifest path should resolve for valid env"),
-            PathBuf::from("build/manifest.prod.json")
-        );
-    }
-
-    #[test]
-    fn resolve_manifest_output_path_rejects_path_traversal_env() {
-        let err = resolve_manifest_output_path(Some("../../../outside"))
-            .expect_err("path traversal env must be rejected");
-        assert!(err.to_string().contains("invalid path characters"));
     }
 
     #[test]
@@ -3689,74 +4407,11 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let err = build_project(None, "default", &root)
+        let err = build_project("default", &root)
             .expect_err("service name containing path traversal must fail");
         assert!(
             err.to_string()
                 .contains("name contains invalid path characters")
-        );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn build_rejects_invalid_env_name_before_manifest_write() {
-        let root = new_temp_dir("invalid-env-name");
-        write_imago_toml(
-            &root,
-            r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-
-[env."../../../outside"]
-type = "cli"
-"#,
-        );
-        write_file(&root.join("build/app.wasm"), b"wasm-a");
-
-        let err = build_project(Some("../../../outside"), "default", &root)
-            .expect_err("invalid env name must fail before any manifest write");
-        assert!(
-            err.to_string()
-                .contains("env name contains invalid path characters")
-        );
-        assert!(!root.join("build/manifest.json").exists());
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn build_still_succeeds_for_valid_env_name() {
-        let root = new_temp_dir("valid-env-name");
-        write_imago_toml(
-            &root,
-            r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-
-[env.prod]
-type = "http"
-
-[env.prod.http]
-port = 18080
-"#,
-        );
-        write_file(&root.join("build/app.wasm"), b"wasm-a");
-        write_file(&root.join(".env.prod"), b"TOKEN=ok\n");
-
-        let output = build_project(Some("prod"), "default", &root)
-            .expect("valid env name should continue to work");
-        assert_eq!(
-            output.manifest_path,
-            PathBuf::from("build/manifest.prod.json")
         );
 
         let _ = fs::remove_dir_all(root);
@@ -3778,7 +4433,7 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let output = build_project(None, "default", &root).expect("build should succeed");
+        let output = build_project("default", &root).expect("build should succeed");
         assert_eq!(output.restart_policy, "never");
 
         let _ = fs::remove_dir_all(root);
@@ -3804,7 +4459,7 @@ remote = "127.0.0.1:4443"
             );
             write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-            let output = build_project(None, "default", &root).expect("build should succeed");
+            let output = build_project("default", &root).expect("build should succeed");
             assert_eq!(output.restart_policy, policy);
 
             let _ = fs::remove_dir_all(root);
@@ -3828,8 +4483,7 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let err =
-            build_project(None, "default", &root).expect_err("invalid restart policy should fail");
+        let err = build_project("default", &root).expect_err("invalid restart policy should fail");
         assert!(err.to_string().contains("imago.toml key 'restart'"));
 
         let _ = fs::remove_dir_all(root);
@@ -3854,16 +4508,16 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let err = build_project(None, "default", &root)
-            .expect_err("legacy runtime.restart_policy should fail");
+        let err =
+            build_project("default", &root).expect_err("legacy runtime.restart_policy should fail");
         assert!(err.to_string().contains("runtime.restart_policy"));
 
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn load_service_name_uses_env_override() {
-        let root = new_temp_dir("load-service-name-env");
+    fn load_service_name_uses_top_level_name() {
+        let root = new_temp_dir("load-service-name-top-level");
         write_imago_toml(
             &root,
             r#"
@@ -3879,11 +4533,9 @@ name = "svc-prod"
 "#,
         );
 
-        let default_name = load_service_name(None, &root).expect("default name should load");
-        let env_name = load_service_name(Some("prod"), &root).expect("env name should load");
+        let default_name = load_service_name(&root).expect("default name should load");
 
         assert_eq!(default_name, "svc-default");
-        assert_eq!(env_name, "svc-prod");
 
         let _ = fs::remove_dir_all(root);
     }

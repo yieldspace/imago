@@ -4,20 +4,24 @@ use std::{
 };
 
 use imagod_common::ImagodError;
-use imagod_ipc::{CapabilityPolicy, PluginDependency, PluginKind};
+use imagod_ipc::{CapabilityPolicy, PluginDependency, PluginKind, ServiceBinding};
 use imagod_runtime_internal::{
     CapabilityChecker, PluginComponentInterfaces, PluginImportProvider, PluginResolver,
 };
 use wasmtime::{
     Engine, Store,
-    component::{Component, Func, Linker, types},
+    component::{Component, Func, Linker, Val, types},
 };
 use wasmtime_wasi::p2::add_to_linker_async;
 use wasmtime_wasi_http::add_only_http_to_linker_async;
 
 use crate::{
-    WasiState, capability_checker::enforce_wasi_import_capabilities, map_runtime_error,
+    WasiState,
+    capability_checker::enforce_wasi_import_capabilities,
+    map_runtime_error,
     native_plugins::NativePluginRegistry,
+    rpc_bridge,
+    rpc_values::{decode_payload_values, encode_payload_values},
 };
 
 #[derive(Clone)]
@@ -231,6 +235,7 @@ where
                     &dep.name,
                     &explicit_dependency_names,
                     &dep.capabilities,
+                    &[],
                     &available,
                     Some(self_instance.clone()),
                 )?;
@@ -274,6 +279,7 @@ pub(crate) fn register_plugin_import_shims(
     caller_name: &str,
     explicit_dependency_names: &BTreeSet<String>,
     capabilities: &CapabilityPolicy,
+    bindings: &[ServiceBinding],
     available_plugins: &BTreeMap<String, AvailablePlugin>,
     self_instance: Option<Arc<tokio::sync::Mutex<Option<wasmtime::component::Instance>>>>,
 ) -> Result<(), ImagodError> {
@@ -282,6 +288,7 @@ pub(crate) fn register_plugin_import_shims(
     let allow_self_provider = self_instance.is_some();
     let mut linked_native_imports = BTreeSet::<String>::new();
     let available_dependency_names = available_plugins.keys().cloned().collect::<BTreeSet<_>>();
+    let binding_targets = build_binding_target_map(bindings)?;
 
     for (import_name, import_item) in component_ty.imports(engine) {
         let types::ComponentItem::ComponentInstance(instance_ty) = import_item else {
@@ -295,6 +302,20 @@ pub(crate) fn register_plugin_import_shims(
                 import_name,
                 &instance_ty,
                 engine,
+            )?;
+            continue;
+        }
+
+        if let Some((target_service, interface_id)) =
+            resolve_binding_target_for_import(&binding_targets, import_name)
+        {
+            register_binding_import_shims(
+                engine,
+                linker,
+                import_name,
+                &instance_ty,
+                target_service,
+                interface_id,
             )?;
             continue;
         }
@@ -483,6 +504,217 @@ pub(crate) fn register_plugin_import_shims(
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct BindingShimSignature {
+    param_types: Vec<types::Type>,
+    ok_type: Option<types::Type>,
+}
+
+fn build_binding_target_map(
+    bindings: &[ServiceBinding],
+) -> Result<BTreeMap<String, String>, ImagodError> {
+    let mut by_wit = BTreeMap::new();
+    for binding in bindings {
+        let normalized_wit = normalize_binding_wit_id(&binding.wit);
+        if normalized_wit.is_empty() {
+            return Err(map_runtime_error(
+                "binding wit must not be empty".to_string(),
+            ));
+        }
+        if let Some(existing) = by_wit.get(&normalized_wit) {
+            if existing != &binding.name {
+                return Err(map_runtime_error(format!(
+                    "binding wit '{}' maps to multiple services ('{}' and '{}')",
+                    normalized_wit, existing, binding.name
+                )));
+            }
+            continue;
+        }
+        by_wit.insert(normalized_wit, binding.name.clone());
+    }
+    Ok(by_wit)
+}
+
+fn resolve_binding_target_for_import(
+    binding_targets: &BTreeMap<String, String>,
+    import_name: &str,
+) -> Option<(String, String)> {
+    let normalized = normalize_binding_wit_id(import_name);
+    binding_targets
+        .get(&normalized)
+        .map(|target_service| (target_service.clone(), normalized))
+}
+
+fn normalize_binding_wit_id(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let Some((package, interface_with_version)) = trimmed.split_once('/') else {
+        return trimmed.to_string();
+    };
+    let interface = interface_with_version
+        .split('@')
+        .next()
+        .unwrap_or(interface_with_version);
+    format!("{package}/{interface}")
+}
+
+fn register_binding_import_shims(
+    engine: &Engine,
+    linker: &mut Linker<WasiState>,
+    import_name: &str,
+    instance_ty: &types::ComponentInstance,
+    target_service: String,
+    interface_id: String,
+) -> Result<(), ImagodError> {
+    let exports = instance_ty.exports(engine).collect::<Vec<_>>();
+    let mut import_instance = linker.instance(import_name).map_err(|e| {
+        map_runtime_error(format!(
+            "failed to define binding import namespace '{}': {e}",
+            import_name
+        ))
+    })?;
+
+    for (func_name, item) in exports {
+        let types::ComponentItem::ComponentFunc(import_ty) = item else {
+            continue;
+        };
+        let signature = parse_binding_shim_signature(&import_ty, import_name, func_name)?;
+        let function_name = func_name.to_string();
+        let param_types = signature.param_types.clone();
+        let ok_type = signature.ok_type.clone();
+        let target_service = target_service.clone();
+        let interface_id = interface_id.clone();
+
+        import_instance
+            .func_new_async(func_name, move |mut store, _ty, params, results| {
+                let function_name = function_name.clone();
+                let param_types = param_types.clone();
+                let ok_type = ok_type.clone();
+                let target_service = target_service.clone();
+                let interface_id = interface_id.clone();
+                Box::new(async move {
+                    if results.len() != 1 {
+                        return Err(wasmtime::Error::msg(format!(
+                            "binding shim '{}.{}' must return exactly one result",
+                            interface_id, function_name
+                        )));
+                    }
+
+                    let connection_rep =
+                        extract_binding_connection_rep(&mut store, params, &param_types)
+                            .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+                    let args_cbor = encode_payload_values(&params[1..], &param_types[1..])
+                        .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+                    let invoke_result = rpc_bridge::invoke_connection(
+                        store.data().native_plugin_context(),
+                        connection_rep,
+                        &target_service,
+                        &interface_id,
+                        &function_name,
+                        &args_cbor,
+                    );
+
+                    results[0] = match invoke_result {
+                        Ok(result_cbor) => {
+                            let ok_values = match &ok_type {
+                                Some(ok_ty) => {
+                                    decode_payload_values(&result_cbor, std::slice::from_ref(ok_ty))
+                                        .map_err(|err| wasmtime::Error::msg(err.to_string()))?
+                                }
+                                None => decode_payload_values(&result_cbor, &[])
+                                    .map_err(|err| wasmtime::Error::msg(err.to_string()))?,
+                            };
+                            let ok_payload = ok_values.into_iter().next().map(Box::new);
+                            Val::Result(Ok(ok_payload))
+                        }
+                        Err(message) => Val::Result(Err(Some(Box::new(Val::String(message))))),
+                    };
+                    Ok(())
+                })
+            })
+            .map_err(|e| {
+                map_runtime_error(format!(
+                    "failed to define binding rpc shim '{}.{}': {e}",
+                    import_name, func_name
+                ))
+            })?;
+    }
+
+    Ok(())
+}
+
+fn parse_binding_shim_signature(
+    import_ty: &types::ComponentFunc,
+    import_name: &str,
+    func_name: &str,
+) -> Result<BindingShimSignature, ImagodError> {
+    let param_types = import_ty.params().map(|(_, ty)| ty).collect::<Vec<_>>();
+    let first_param = param_types.first().ok_or_else(|| {
+        map_runtime_error(format!(
+            "binding import '{}.{}' must take connection as first argument",
+            import_name, func_name
+        ))
+    })?;
+    if !matches!(first_param, types::Type::Borrow(_)) {
+        return Err(map_runtime_error(format!(
+            "binding import '{}.{}' first argument must be borrow<connection>",
+            import_name, func_name
+        )));
+    }
+
+    let result_types = import_ty.results().collect::<Vec<_>>();
+    if result_types.len() != 1 {
+        return Err(map_runtime_error(format!(
+            "binding import '{}.{}' must return exactly one result",
+            import_name, func_name
+        )));
+    }
+    let types::Type::Result(result_ty) = &result_types[0] else {
+        return Err(map_runtime_error(format!(
+            "binding import '{}.{}' must return result<_, string>",
+            import_name, func_name
+        )));
+    };
+    let err_ty = result_ty.err().ok_or_else(|| {
+        map_runtime_error(format!(
+            "binding import '{}.{}' result must define err type",
+            import_name, func_name
+        ))
+    })?;
+    if err_ty != types::Type::String {
+        return Err(map_runtime_error(format!(
+            "binding import '{}.{}' err type must be string",
+            import_name, func_name
+        )));
+    }
+
+    Ok(BindingShimSignature {
+        param_types,
+        ok_type: result_ty.ok(),
+    })
+}
+
+fn extract_binding_connection_rep(
+    mut store: impl wasmtime::AsContextMut<Data = WasiState>,
+    params: &[Val],
+    param_types: &[types::Type],
+) -> Result<u32, ImagodError> {
+    let first_type = param_types.first().ok_or_else(|| {
+        map_runtime_error("binding shim requires connection parameter".to_string())
+    })?;
+    if !matches!(first_type, types::Type::Borrow(_)) {
+        return Err(map_runtime_error(
+            "binding shim first parameter must be borrow<connection>".to_string(),
+        ));
+    }
+
+    let Some(connection_value) = params.first() else {
+        return Err(map_runtime_error(
+            "binding shim first runtime argument must be a connection resource".to_string(),
+        ));
+    };
+    rpc_bridge::extract_connection_rep(store.as_context_mut(), connection_value)
 }
 
 fn add_dependency_edge(
@@ -792,5 +1024,38 @@ mod tests {
             &by_name,
         );
         assert_eq!(indices, BTreeSet::from([1usize]));
+    }
+
+    #[test]
+    fn normalize_binding_wit_id_drops_interface_version_suffix() {
+        assert_eq!(
+            normalize_binding_wit_id("yieldspace:svc/invoke@0.1.0"),
+            "yieldspace:svc/invoke"
+        );
+        assert_eq!(
+            normalize_binding_wit_id("yieldspace:svc/invoke"),
+            "yieldspace:svc/invoke"
+        );
+    }
+
+    #[test]
+    fn build_binding_target_map_rejects_ambiguous_wit_mapping() {
+        let bindings = vec![
+            ServiceBinding {
+                name: "svc-a".to_string(),
+                wit: "yieldspace:svc/invoke".to_string(),
+            },
+            ServiceBinding {
+                name: "svc-b".to_string(),
+                wit: "yieldspace:svc/invoke@0.1.0".to_string(),
+            },
+        ];
+        let err = build_binding_target_map(&bindings)
+            .expect_err("same wit must not map to multiple services");
+        assert!(
+            err.message.contains("maps to multiple services"),
+            "unexpected message: {}",
+            err.message
+        );
     }
 }

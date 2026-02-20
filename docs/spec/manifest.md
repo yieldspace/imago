@@ -12,8 +12,6 @@
 ## 出力場所
 
 - 固定パス: `build/manifest.json`
-- `imago build --env <name>` 時: `build/manifest.<name>.json`
-  - `<name>` の許可文字は ASCII 英数字、`.`、`-`、`_`。`/`、`\`、`..` は禁止。
 
 <a id="required-fields"></a>
 ## 必須フィールド
@@ -22,7 +20,7 @@
 |---|---|---|
 | `name` | string | サービス名 |
 | `main` | string | Wasm エントリパス |
-| `type` | string | `cli` / `http` / `socket` |
+| `type` | string | `cli` / `http` / `socket` / `rpc` |
 | `target` | object | 解決済みターゲット設定 |
 | `vars` | object | env 反映後の公開変数 |
 | `secrets` | object | env 反映後の secret 値 |
@@ -30,6 +28,7 @@
 | `bindings` | array | service 間呼び出し許可一覧（省略時は `[]`） |
 | `http` | object | `type=http` 時の HTTP 実行設定（`port` 必須） |
 | `socket` | object | `type=socket` 時の socket 実行設定（必須） |
+| `wasi` | object | WASI 実行設定（`args` / `env` / `mounts` / `read_only_mounts`） |
 | `dependencies` | array | typed plugin 依存解決結果 |
 | `capabilities` | object | 正規化済み capability ルール（省略時は deny-by-default） |
 | `hash` | object | 全体整合性情報 |
@@ -62,9 +61,10 @@
 
 ## `bindings` フィールド
 
-- `bindings` は `[{"target": "<service>", "wit": "<interface-id>"}, ...]` の配列。
-- `target` は service 名文字制約（`name` と同等）に従う。
-- `wit` は非空文字列。
+- `bindings` は `[{"name": "<service>", "wit": "<package>/<interface>"}, ...]` の配列。
+- `name` は service 名文字制約（`name` と同等）に従う。
+- `wit` は `<package>/<interface>` 形式の非空文字列。
+- `imago update` は `imago.toml` の `[[bindings]].wit` から解決した WIT package 内の全 interface を展開し、この形式で `bindings` を出力する。
 - `bindings` 未指定 manifest は `[]` と同等に扱う（後方互換）。
 
 ## `dependencies` フィールド
@@ -85,6 +85,10 @@
 - ルート `manifest.capabilities` は app caller 用のルール。
 - `privileged=true` の場合は全許可。
 - それ以外は `deps` / `wasi` で明示許可された関数のみ許可（default deny）。
+- `capabilities.wasi` は `true` / `false` または table を受理する。
+  - `true`: 全 WASI を許可。
+  - `false`: 空ルールとして扱い、WASI を許可しない。
+  - table: `capabilities.wasi.<interface>` ごとに `"*"` または関数名文字列配列で許可関数を定義する。
 - self 解決（caller 自身の component export）には `deps` 認可を要求しない。
 
 ## `http` フィールド
@@ -103,6 +107,21 @@
 - `socket.listen_addr` は IP アドレス文字列（IPv4/IPv6）。
 - `socket.listen_port` は必須で `1..=65535`。
 - `type!=socket` で `socket` を含む manifest は不正として拒否する。
+
+## `wasi` フィールド
+
+- `wasi` は任意の object。
+- `wasi.args` は string 配列。
+- `wasi.env` は `key -> value` がともに string の table。
+- `wasi.mounts` は read/write mount 配列。
+- `wasi.read_only_mounts` は read-only mount 配列。
+- `wasi.mounts[]` / `wasi.read_only_mounts[]` の各要素は `asset_dir` と `guest_path` を必須とする。
+  - `asset_dir` は `assets` 由来ディレクトリのみ受理する（mount 単位はディレクトリのみで、ファイル単位は不可）。
+  - `guest_path` は guest 側の絶対パスのみ受理する。
+- `wasi.mounts[]` と `wasi.read_only_mounts[]` では、同一 `guest_path` または同一 `asset_dir` の重複指定（同一配列内および配列跨ぎ）を禁止する。
+- runtime 権限マッピングは次を適用する。
+  - `wasi.mounts[]`: `DirPerms::all` / `FilePerms::all`
+  - `wasi.read_only_mounts[]`: `DirPerms::READ` / `FilePerms::READ`
 
 ## 正常例と異常例
 
@@ -127,9 +146,17 @@
 - `hash.algorithm != "sha256"` は拒否。
 - `hash.targets` が不足または重複なら拒否。
 - `secrets` は key-value オブジェクトのみ許可。
-- `bindings` 指定時は配列のみ許可し、各要素は `target` / `wit` の非空文字列を必須とする。
+- `bindings` 指定時は配列のみ許可し、各要素は `name` / `wit` の非空文字列を必須とする。
+- `bindings[].wit` は `<package>/<interface>` 形式のみ許可する。
 - `dependencies` 指定時は typed 構造のみ許可し、`kind=wasm` は `component.path` / `component.sha256` を必須とする（`imago build` 生成物として）。
 - `capabilities` は `privileged` / `deps` / `wasi` 以外のキーを拒否する。
+- `capabilities.wasi` は `bool` または table 以外を拒否する。
+- `wasi.args` は string 配列以外を拒否する。
+- `wasi.env` は string 値の table 以外を拒否する。
+- `wasi.mounts[]` / `wasi.read_only_mounts[]` の要素に `asset_dir` または `guest_path` 欠落がある場合は拒否する。
+- `wasi.mounts[]` / `wasi.read_only_mounts[]` の `asset_dir` が `assets` 由来ディレクトリ以外、またはファイル単位の場合は拒否する。
+- `wasi.mounts[]` / `wasi.read_only_mounts[]` の `guest_path` が絶対パスでない場合は拒否する。
+- `wasi.mounts[]` / `wasi.read_only_mounts[]` で同一 `guest_path` または同一 `asset_dir` が重複（同一配列内・配列跨ぎ）した場合は拒否する。
 
 ## 実装ノート
 
@@ -143,9 +170,18 @@
 - CLI は `main` の実体 wasm を `build/<sha256>-<name>.wasm` へ配置し、`manifest.main` には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
 - `build/<sha256>-<name>.wasm` が既に存在する場合でも、内容の sha256 が不一致なら `main` の実体 wasm から上書き再生成する。
 - `hash.value` の wasm 対象は `manifest.main` が指す materialize 後ファイルとする。
-- CLI は `imago.toml` の `[[bindings]]` を `manifest.bindings[]` に正規化して出力する。
+- CLI は `imago.toml` の `[[bindings]].wit` を `imago update` で解決し、package 内の全 interface を `manifest.bindings[]` の `<package>/<interface>` として正規化して出力する。
+- [BREAKING] `imago.toml` の `[[bindings]].wit` で旧 `"<package>/<interface>"` 形式は受理しない。
 - CLI は `imago.toml` の `[[dependencies]]` を typed `manifest.dependencies[]` に正規化し、lock 検証済みの WIT/Component 参照情報を保持する。
   - `kind=wasm` で `component` 未指定の場合、`wit` source が component なら `imago update` が `component_*` を lock に自動固定し、`imago build` が manifest の `component.*` を補完する。
 - CLI は `imago.toml` の `capabilities` を正規化して `manifest.capabilities` に出力する（`capabilirties` は互換受理しない）。
+- CLI は `capabilities.wasi` に `bool` / table の両形式を受理し、`true` は全許可、`false` は空ルールとして正規化する。
 - CLI は `type=http` 時のみ `imago.toml` の `[http].port` / `[http].max_body_bytes` を `manifest.http.port` / `manifest.http.max_body_bytes` へ正規化して出力する。
 - CLI は `type=socket` 時のみ `imago.toml` の `[socket].protocol` / `[socket].direction` / `[socket].listen_addr` / `[socket].listen_port` を `manifest.socket.*` へ正規化して出力する。
+- CLI は `[wasi]` を `manifest.wasi`（`args` / `env` / `mounts` / `read_only_mounts`）へ正規化して出力する。
+- runtime は `wasi.mounts[]` を `DirPerms::all` / `FilePerms::all`、`wasi.read_only_mounts[]` を `DirPerms::READ` / `FilePerms::READ` として適用する。
+
+## 実装反映ノート（Network RPC / 2026-02-18）
+
+- [BREAKING] `type` に `rpc` を追加した。
+- [BREAKING] `bindings` の契約を `target` から `name` へ変更した。

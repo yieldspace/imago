@@ -4,12 +4,14 @@ mod types;
 mod validation;
 
 pub use resolve::{
-    collect_wit_packages, load_from_project_root, resolve_dependencies, save_to_project_root,
+    collect_wit_packages, load_from_project_root, resolve_binding_wits, resolve_dependencies,
+    save_to_project_root,
 };
 pub use types::{
-    ComponentExpectation, DependencyExpectation, IMAGO_LOCK_VERSION, ImagoLock,
-    ImagoLockDependency, ImagoLockWitPackage, ImagoLockWitPackageVersion, ResolvedDependency,
-    TransitivePackageRecord, default_lock_version,
+    BindingWitExpectation, ComponentExpectation, DependencyExpectation, IMAGO_LOCK_VERSION,
+    ImagoLock, ImagoLockBindingWit, ImagoLockDependency, ImagoLockWitPackage,
+    ImagoLockWitPackageVersion, ResolvedBindingWit, ResolvedDependency, TransitivePackageRecord,
+    default_lock_version,
 };
 
 #[cfg(test)]
@@ -50,6 +52,7 @@ mod tests {
         let lock = ImagoLock {
             version: 2,
             dependencies: vec![],
+            binding_wits: vec![],
             wit_packages: vec![],
         };
         let err = resolve_dependencies(&root, &lock, &[]).expect_err("must fail");
@@ -79,6 +82,7 @@ mod tests {
                 component_sha256: None,
                 resolved_at: "0".to_string(),
             }],
+            binding_wits: vec![],
             wit_packages: vec![],
         };
         let err = resolve_dependencies(
@@ -114,6 +118,7 @@ mod tests {
                 component_sha256: None,
                 resolved_at: "0".to_string(),
             }],
+            binding_wits: vec![],
             wit_packages: vec![],
         };
         let err = resolve_dependencies(
@@ -153,6 +158,7 @@ mod tests {
                 component_sha256: None,
                 resolved_at: "0".to_string(),
             }],
+            binding_wits: vec![],
             wit_packages: vec![],
         };
         let err = resolve_dependencies(
@@ -200,6 +206,7 @@ mod tests {
                 component_sha256: None,
                 resolved_at: "0".to_string(),
             }],
+            binding_wits: vec![],
             wit_packages: vec![ImagoLockWitPackage {
                 name: "transitive:dep".to_string(),
                 registry: None,
@@ -256,6 +263,7 @@ mod tests {
                 component_sha256: None,
                 resolved_at: "0".to_string(),
             }],
+            binding_wits: vec![],
             wit_packages: vec![ImagoLockWitPackage {
                 name: "transitive:dep".to_string(),
                 registry: None,
@@ -321,6 +329,7 @@ mod tests {
                 component_sha256: None,
                 resolved_at: "0".to_string(),
             }],
+            binding_wits: vec![],
             wit_packages: vec![ImagoLockWitPackage {
                 name: "transitive:dep".to_string(),
                 registry: None,
@@ -373,6 +382,7 @@ mod tests {
                 component_sha256: None,
                 resolved_at: "0".to_string(),
             }],
+            binding_wits: vec![],
             wit_packages: vec![],
         };
 
@@ -425,6 +435,7 @@ mod tests {
                 component_sha256: None,
                 resolved_at: "0".to_string(),
             }],
+            binding_wits: vec![],
             wit_packages: vec![ImagoLockWitPackage {
                 name: "transitive:dep".to_string(),
                 registry: None,
@@ -458,6 +469,206 @@ mod tests {
             "unexpected error: {err:#}"
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_binding_wits_success() {
+        let root = new_temp_dir("binding-wits-success");
+        write(
+            &root.join("wit/deps/alpha/package.wit"),
+            b"package alpha:bindings;\n",
+        );
+        write(
+            &root.join("wit/deps/beta/package.wit"),
+            b"package beta:bindings;\n",
+        );
+        let alpha_digest = compute_path_digest_hex(&root.join("wit/deps/alpha")).expect("digest");
+        let beta_digest = compute_path_digest_hex(&root.join("wit/deps/beta")).expect("digest");
+
+        let lock = ImagoLock {
+            version: IMAGO_LOCK_VERSION,
+            dependencies: vec![],
+            binding_wits: vec![
+                ImagoLockBindingWit {
+                    name: "beta".to_string(),
+                    wit_source: "warg://beta@0.1.0".to_string(),
+                    wit_registry: Some("wa.dev".to_string()),
+                    wit_digest: beta_digest.clone(),
+                    wit_path: "wit/deps/beta".to_string(),
+                    interfaces: vec!["beta/pkg".to_string()],
+                    resolved_at: "1".to_string(),
+                },
+                ImagoLockBindingWit {
+                    name: "alpha".to_string(),
+                    wit_source: "file://registry/alpha.wit".to_string(),
+                    wit_registry: None,
+                    wit_digest: alpha_digest.clone(),
+                    wit_path: "wit/deps/alpha".to_string(),
+                    interfaces: vec!["alpha/export".to_string()],
+                    resolved_at: "2".to_string(),
+                },
+            ],
+            wit_packages: vec![],
+        };
+
+        let resolved = resolve_binding_wits(
+            &root,
+            &lock,
+            &[
+                BindingWitExpectation {
+                    name: "alpha".to_string(),
+                    wit_source: "file://registry/alpha.wit".to_string(),
+                    wit_registry: None,
+                },
+                BindingWitExpectation {
+                    name: "beta".to_string(),
+                    wit_source: "warg://beta@0.1.0".to_string(),
+                    wit_registry: Some("wa.dev".to_string()),
+                },
+            ],
+        )
+        .expect("binding wits should resolve");
+
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].name, "alpha");
+        assert_eq!(resolved[0].wit_digest, alpha_digest);
+        assert_eq!(resolved[1].name, "beta");
+        assert_eq!(resolved[1].wit_digest, beta_digest);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_binding_wits_rejects_missing_lock_entry() {
+        let root = new_temp_dir("binding-wits-missing");
+        let lock = ImagoLock {
+            version: IMAGO_LOCK_VERSION,
+            dependencies: vec![],
+            binding_wits: vec![],
+            wit_packages: vec![],
+        };
+
+        let err = resolve_binding_wits(
+            &root,
+            &lock,
+            &[BindingWitExpectation {
+                name: "missing".to_string(),
+                wit_source: "file://registry/missing.wit".to_string(),
+                wit_registry: None,
+            }],
+        )
+        .expect_err("missing lock entry must fail");
+        assert!(err.to_string().contains("is not resolved in imago.lock"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_binding_wits_rejects_digest_mismatch() {
+        let root = new_temp_dir("binding-wits-digest-mismatch");
+        write(
+            &root.join("wit/deps/alpha/package.wit"),
+            b"package alpha:bindings;\n",
+        );
+        let lock = ImagoLock {
+            version: IMAGO_LOCK_VERSION,
+            dependencies: vec![],
+            binding_wits: vec![ImagoLockBindingWit {
+                name: "alpha".to_string(),
+                wit_source: "file://registry/alpha.wit".to_string(),
+                wit_registry: None,
+                wit_digest: "deadbeef".to_string(),
+                wit_path: "wit/deps/alpha".to_string(),
+                interfaces: vec!["alpha/export".to_string()],
+                resolved_at: "0".to_string(),
+            }],
+            wit_packages: vec![],
+        };
+
+        let err = resolve_binding_wits(
+            &root,
+            &lock,
+            &[BindingWitExpectation {
+                name: "alpha".to_string(),
+                wit_source: "file://registry/alpha.wit".to_string(),
+                wit_registry: None,
+            }],
+        )
+        .expect_err("digest mismatch must fail");
+        assert!(err.to_string().contains("lock digest mismatch"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_binding_wits_rejects_invalid_interface_format() {
+        let root = new_temp_dir("binding-wits-invalid-interface");
+        write(
+            &root.join("wit/deps/alpha/package.wit"),
+            b"package alpha:bindings;\n",
+        );
+        let digest = compute_path_digest_hex(&root.join("wit/deps/alpha")).expect("digest");
+        let lock = ImagoLock {
+            version: IMAGO_LOCK_VERSION,
+            dependencies: vec![],
+            binding_wits: vec![ImagoLockBindingWit {
+                name: "alpha".to_string(),
+                wit_source: "file://registry/alpha.wit".to_string(),
+                wit_registry: None,
+                wit_digest: digest,
+                wit_path: "wit/deps/alpha".to_string(),
+                interfaces: vec!["invalid-interface".to_string()],
+                resolved_at: "0".to_string(),
+            }],
+            wit_packages: vec![],
+        };
+
+        let err = resolve_binding_wits(
+            &root,
+            &lock,
+            &[BindingWitExpectation {
+                name: "alpha".to_string(),
+                wit_source: "file://registry/alpha.wit".to_string(),
+                wit_registry: None,
+            }],
+        )
+        .expect_err("invalid interface format must fail");
+        assert!(err.to_string().contains("<package>/<interface>"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_binding_wits_rejects_duplicate_lock_entries() {
+        let root = new_temp_dir("binding-wits-duplicate-lock");
+        let lock = ImagoLock {
+            version: IMAGO_LOCK_VERSION,
+            dependencies: vec![],
+            binding_wits: vec![
+                ImagoLockBindingWit {
+                    name: "alpha".to_string(),
+                    wit_source: "file://registry/alpha.wit".to_string(),
+                    wit_registry: None,
+                    wit_digest: "a".repeat(64),
+                    wit_path: "wit/deps/alpha".to_string(),
+                    interfaces: vec!["alpha/export".to_string()],
+                    resolved_at: "0".to_string(),
+                },
+                ImagoLockBindingWit {
+                    name: "alpha".to_string(),
+                    wit_source: "file://registry/alpha.wit".to_string(),
+                    wit_registry: None,
+                    wit_digest: "b".repeat(64),
+                    wit_path: "wit/deps/alpha-copy".to_string(),
+                    interfaces: vec!["alpha/export".to_string()],
+                    resolved_at: "1".to_string(),
+                },
+            ],
+            wit_packages: vec![],
+        };
+
+        let err = resolve_binding_wits(&root, &lock, &[]).expect_err("duplicate lock must fail");
+        assert!(
+            err.to_string()
+                .contains("contains duplicate binding_wits entry")
+        );
         let _ = fs::remove_dir_all(root);
     }
 

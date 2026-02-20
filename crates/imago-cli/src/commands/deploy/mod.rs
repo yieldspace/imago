@@ -1,9 +1,10 @@
 use std::{
     collections::BTreeMap,
-    io::{BufReader, Read},
+    fs,
+    io::{BufReader, Read, Write},
     net::{IpAddr, SocketAddr},
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -16,7 +17,16 @@ use imago_protocol::{
     DeployPrepareResponse, ErrorCode, HelloNegotiateRequest, HelloNegotiateResponse, MessageType,
     ProtocolEnvelope, StructuredError, from_cbor, to_cbor,
 };
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::{
+    DigitallySignedStruct, SignatureScheme,
+    client::{
+        AlwaysResolvesClientRawPublicKeys,
+        danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    },
+    crypto::CryptoProvider,
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
+    sign::CertifiedKey,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -52,6 +62,15 @@ const DEFAULT_DEPLOY_STREAM_TIMEOUT_SECS: u64 = 30;
 const DEPLOY_STREAM_RETRY_BACKOFF_MS: [u64; 2] = [100, 250];
 const DEPLOY_STREAM_MAX_ATTEMPTS: usize = DEPLOY_STREAM_RETRY_BACKOFF_MS.len() + 1;
 const DATAGRAM_BUFFER_BYTES: usize = 1024 * 1024;
+const IMAGO_DIR_NAME: &str = ".imago";
+const KNOWN_HOSTS_FILE_NAME: &str = "known_hosts";
+#[cfg(unix)]
+const IMAGO_DIR_MODE: u32 = 0o700;
+#[cfg(unix)]
+const KNOWN_HOSTS_MODE: u32 = 0o600;
+const ED25519_SPKI_PREFIX: [u8; 12] = [
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+];
 
 pub(crate) type Envelope = ProtocolEnvelope<Value>;
 
@@ -118,6 +137,108 @@ impl std::fmt::Display for CommitNotVerifiedError {
 
 impl std::error::Error for CommitNotVerifiedError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ServerIdentityStatus {
+    Matched {
+        presented_key_hex: String,
+    },
+    Unknown {
+        presented_key_hex: String,
+    },
+    Mismatch {
+        expected_key_hex: String,
+        presented_key_hex: String,
+    },
+}
+
+#[derive(Debug)]
+struct TofuServerCertVerifier {
+    provider: Arc<CryptoProvider>,
+    expected_key_hex: Option<String>,
+    observed_status: Mutex<Option<ServerIdentityStatus>>,
+}
+
+impl TofuServerCertVerifier {
+    fn new(provider: Arc<CryptoProvider>, expected_key_hex: Option<String>) -> Self {
+        Self {
+            provider,
+            expected_key_hex: expected_key_hex.map(|value| value.to_ascii_lowercase()),
+            observed_status: Mutex::new(None),
+        }
+    }
+
+    fn take_observed_status(&self) -> Option<ServerIdentityStatus> {
+        self.observed_status
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
+    }
+}
+
+impl ServerCertVerifier for TofuServerCertVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let raw_key = extract_ed25519_raw_public_key_from_spki(end_entity.as_ref())
+            .map_err(|err| rustls::Error::General(err.to_string()))?;
+        let presented_key_hex = hex::encode(raw_key);
+
+        let status = match &self.expected_key_hex {
+            Some(expected_key_hex) if expected_key_hex.eq_ignore_ascii_case(&presented_key_hex) => {
+                ServerIdentityStatus::Matched { presented_key_hex }
+            }
+            Some(expected_key_hex) => ServerIdentityStatus::Mismatch {
+                expected_key_hex: expected_key_hex.clone(),
+                presented_key_hex,
+            },
+            None => ServerIdentityStatus::Unknown { presented_key_hex },
+        };
+        if let Ok(mut guard) = self.observed_status.lock() {
+            *guard = Some(status);
+        }
+
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::General(
+            "TLS1.2 server signatures are not supported for raw public keys".to_string(),
+        ))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature_with_raw_key(
+            message,
+            &rustls::pki_types::SubjectPublicKeyInfoDer::from(cert.as_ref()),
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![SignatureScheme::ED25519]
+    }
+
+    fn requires_raw_public_keys(&self) -> bool {
+        true
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct Manifest {
     name: String,
@@ -161,7 +282,15 @@ pub async fn run(args: DeployArgs) -> CommandResult {
 }
 
 pub(crate) async fn run_with_project_root(args: DeployArgs, project_root: &Path) -> CommandResult {
-    match run_async(args, project_root).await {
+    run_with_project_root_and_target_override(args, project_root, None).await
+}
+
+pub(crate) async fn run_with_project_root_and_target_override(
+    args: DeployArgs,
+    project_root: &Path,
+    target_override: Option<&build::TargetConfig>,
+) -> CommandResult {
+    match run_async_with_target_override(args, project_root, target_override).await {
         Ok(()) => CommandResult {
             exit_code: 0,
             stderr: None,
@@ -173,7 +302,11 @@ pub(crate) async fn run_with_project_root(args: DeployArgs, project_root: &Path)
     }
 }
 
-async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> {
+async fn run_async_with_target_override(
+    args: DeployArgs,
+    project_root: &Path,
+    target_override: Option<&build::TargetConfig>,
+) -> anyhow::Result<()> {
     let dependency_resolver = StandardDependencyResolver;
     let target_connector = network::QuinnTargetConnector;
     let artifact_bundler = artifact::TarArtifactBundler;
@@ -182,8 +315,9 @@ async fn run_async(args: DeployArgs, project_root: &Path) -> anyhow::Result<()> 
         .target
         .clone()
         .unwrap_or_else(|| build::default_target_name().to_string());
-    let build_output = build::build_project(args.env.as_deref(), &target_name, project_root)
-        .context("failed to run build before deploy")?;
+    let build_output =
+        build::build_project_with_target_override(&target_name, project_root, target_override)
+            .context("failed to run build before deploy")?;
 
     let manifest_path = build_output.manifest_path;
     let manifest_bytes = build_output.manifest_bytes;
@@ -536,23 +670,26 @@ fn contains_unauthorized_marker(err: &anyhow::Error) -> bool {
 }
 
 pub(crate) async fn connect_target(target: &build::DeployTargetConfig) -> anyhow::Result<Session> {
-    let ca_chain = load_certs(&target.ca_cert)?;
-    let client_chain = load_certs(&target.client_cert)?;
     let client_key = load_private_key(&target.client_key)?;
+    let endpoint_info = parse_remote_endpoint(&target.remote).await?;
+    let configured_host = target.server_name.as_deref().unwrap_or(&endpoint_info.host);
+    let authority = format_authority(configured_host, endpoint_info.port);
+    let known_hosts_path = known_hosts_path()?;
+    let known_hosts_entries = load_known_hosts_entries(&known_hosts_path)?;
+    let expected_key_hex = known_hosts_entries.get(&authority).cloned();
 
-    let mut roots = rustls::RootCertStore::empty();
-    for cert in ca_chain {
-        roots
-            .add(cert)
-            .map_err(|e| anyhow!("failed to add CA certificate: {e}"))?;
-    }
+    let provider = web_transport_quinn::crypto::default_provider();
+    let verifier = Arc::new(TofuServerCertVerifier::new(
+        provider.clone(),
+        expected_key_hex,
+    ));
+    let client_resolver = build_client_raw_public_key_resolver(provider.clone(), &client_key)?;
 
-    let mut tls = rustls::ClientConfig::builder_with_provider(
-        web_transport_quinn::crypto::default_provider(),
-    )
-    .with_protocol_versions(&[&rustls::version::TLS13])?
-    .with_root_certificates(roots)
-    .with_client_auth_cert(client_chain, client_key)?;
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier.clone())
+        .with_client_cert_resolver(client_resolver);
     tls.alpn_protocols = vec![web_transport_quinn::ALPN.as_bytes().to_vec()];
 
     let quic_tls = quinn::crypto::rustls::QuicClientConfig::try_from(tls)?;
@@ -563,8 +700,6 @@ pub(crate) async fn connect_target(target: &build::DeployTargetConfig) -> anyhow
     quic_config.transport_config(Arc::new(transport));
     let endpoint = create_client_endpoint()?;
 
-    let endpoint_info = parse_remote_endpoint(&target.remote).await?;
-    let configured_host = target.server_name.as_deref().unwrap_or(&endpoint_info.host);
     let sni = configured_host.to_string();
     let connecting = endpoint
         .connect_with(quic_config, endpoint_info.remote_addr, &sni)
@@ -575,9 +710,56 @@ pub(crate) async fn connect_target(target: &build::DeployTargetConfig) -> anyhow
     let request_url = Url::parse(&format!("https://{}:{}/", request_host, endpoint_info.port))
         .context("failed to build webtransport request URL")?;
     let request = ConnectRequest::new(request_url);
-    Session::connect(connection, request)
+    let session = Session::connect(connection, request)
         .await
-        .map_err(map_webtransport_client_error)
+        .map_err(map_webtransport_client_error)?;
+
+    match verifier.take_observed_status() {
+        Some(ServerIdentityStatus::Matched { .. }) => Ok(session),
+        Some(ServerIdentityStatus::Unknown { presented_key_hex }) => {
+            if let Err(err) =
+                save_known_host_entry(&known_hosts_path, &authority, &presented_key_hex)
+            {
+                session.close(0, b"failed to persist known_hosts entry");
+                return Err(err);
+            }
+            Ok(session)
+        }
+        Some(ServerIdentityStatus::Mismatch {
+            expected_key_hex,
+            presented_key_hex,
+        }) => {
+            session.close(0, b"server raw public key mismatch");
+            Err(server_identity_mismatch_error(
+                &authority,
+                &expected_key_hex,
+                &presented_key_hex,
+                &known_hosts_path,
+            ))
+        }
+        None => {
+            session.close(0, b"missing server identity verification");
+            Err(missing_server_identity_error(&authority))
+        }
+    }
+}
+
+fn server_identity_mismatch_error(
+    authority: &str,
+    expected_key_hex: &str,
+    presented_key_hex: &str,
+    known_hosts_path: &Path,
+) -> anyhow::Error {
+    unauthorized_connect_error(format!(
+        "server key mismatch for authority '{authority}': expected {expected_key_hex}, got {presented_key_hex}. if the server key changed intentionally, edit {} manually and retry",
+        known_hosts_path.display()
+    ))
+}
+
+fn missing_server_identity_error(authority: &str) -> anyhow::Error {
+    unauthorized_connect_error(format!(
+        "failed to verify server raw public key for authority: {authority}"
+    ))
 }
 
 fn is_certificate_alert_transport_code(code: quinn::TransportErrorCode) -> bool {
@@ -593,6 +775,7 @@ fn is_certificate_alert_code(alert_code: u8) -> bool {
     matches!(
         alert_code,
         code if code == u8::from(rustls::AlertDescription::NoCertificate)
+            || code == u8::from(rustls::AlertDescription::HandshakeFailure)
             || code == u8::from(rustls::AlertDescription::BadCertificate)
             || code == u8::from(rustls::AlertDescription::UnsupportedCertificate)
             || code == u8::from(rustls::AlertDescription::CertificateRevoked)
@@ -620,7 +803,7 @@ fn is_certificate_auth_connection_error(err: &quinn::ConnectionError) -> bool {
 
 fn unauthorized_connect_error(source: impl std::fmt::Display) -> anyhow::Error {
     anyhow!(
-        "server error: certificate authentication failed (E_UNAUTHORIZED) at {TRANSPORT_CONNECT_STAGE}: {source}"
+        "server error: public key authentication failed (E_UNAUTHORIZED) at {TRANSPORT_CONNECT_STAGE}: {source}"
     )
 }
 
@@ -1337,19 +1520,6 @@ fn add_file_to_tar<W: std::io::Write>(
     Ok(())
 }
 
-fn load_certs(path: &Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("failed to open cert: {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let certs = rustls_pemfile::certs(&mut reader)
-        .collect::<Result<Vec<_>, _>>()
-        .with_context(|| format!("failed to parse certs: {}", path.display()))?;
-    if certs.is_empty() {
-        return Err(anyhow!("certificate file is empty: {}", path.display()));
-    }
-    Ok(certs)
-}
-
 fn load_private_key(path: &Path) -> anyhow::Result<PrivateKeyDer<'static>> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("failed to open private key: {}", path.display()))?;
@@ -1358,6 +1528,243 @@ fn load_private_key(path: &Path) -> anyhow::Result<PrivateKeyDer<'static>> {
         .with_context(|| format!("failed to parse private key: {}", path.display()))?
         .ok_or_else(|| anyhow!("private key is missing: {}", path.display()))?;
     Ok(key)
+}
+
+fn build_client_raw_public_key_resolver(
+    provider: Arc<CryptoProvider>,
+    client_key: &PrivateKeyDer<'static>,
+) -> anyhow::Result<Arc<dyn rustls::client::ResolvesClientCert>> {
+    let signing_key = provider
+        .key_provider
+        .load_private_key(client_key.clone_key())
+        .map_err(|e| anyhow!("failed to load client private key: {e}"))?;
+
+    if signing_key.algorithm() != rustls::SignatureAlgorithm::ED25519 {
+        return Err(anyhow!(
+            "client private key must be ed25519 for raw public key TLS"
+        ));
+    }
+
+    let spki = signing_key
+        .public_key()
+        .ok_or_else(|| anyhow!("failed to derive client public key from private key"))?;
+    let _ = extract_ed25519_raw_public_key_from_spki(spki.as_ref())?;
+
+    let certified_key = CertifiedKey::new(
+        vec![CertificateDer::from(spki.as_ref().to_vec())],
+        signing_key,
+    );
+    Ok(Arc::new(AlwaysResolvesClientRawPublicKeys::new(Arc::new(
+        certified_key,
+    ))))
+}
+
+fn extract_ed25519_raw_public_key_from_spki(spki_der: &[u8]) -> anyhow::Result<[u8; 32]> {
+    if spki_der.len() != ED25519_SPKI_PREFIX.len() + 32 {
+        return Err(anyhow!(
+            "raw public key must be ed25519 (expected 32-byte key)"
+        ));
+    }
+    if !spki_der.starts_with(&ED25519_SPKI_PREFIX) {
+        return Err(anyhow!("raw public key must be ed25519"));
+    }
+
+    let mut raw = [0u8; 32];
+    raw.copy_from_slice(&spki_der[ED25519_SPKI_PREFIX.len()..]);
+    Ok(raw)
+}
+
+fn format_authority(host: &str, port: u16) -> String {
+    format!(
+        "{}:{}",
+        format_host_for_url(host).to_ascii_lowercase(),
+        port
+    )
+}
+
+fn known_hosts_path() -> anyhow::Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("failed to resolve home directory for known_hosts"))?;
+    Ok(home.join(IMAGO_DIR_NAME).join(KNOWN_HOSTS_FILE_NAME))
+}
+
+fn load_known_hosts_entries(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read known_hosts: {}", path.display()))?;
+    let mut entries = BTreeMap::new();
+    for (index, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let (authority, key_hex) = trimmed.split_once('\t').ok_or_else(|| {
+            anyhow!(
+                "invalid known_hosts format at line {} in {}",
+                index + 1,
+                path.display()
+            )
+        })?;
+
+        let normalized_key = normalize_ed25519_raw_key_hex(key_hex).with_context(|| {
+            format!(
+                "invalid key at line {} in known_hosts {}",
+                index + 1,
+                path.display()
+            )
+        })?;
+
+        if entries
+            .insert(authority.to_string(), normalized_key)
+            .is_some()
+        {
+            return Err(anyhow!(
+                "duplicate authority '{}' in known_hosts {}",
+                authority,
+                path.display()
+            ));
+        }
+    }
+
+    Ok(entries)
+}
+
+fn save_known_host_entry(path: &Path, authority: &str, key_hex: &str) -> anyhow::Result<()> {
+    let normalized_key = normalize_ed25519_raw_key_hex(key_hex)?;
+    let mut entries = load_known_hosts_entries(path)?;
+
+    if let Some(existing) = entries.get(authority) {
+        if existing.eq_ignore_ascii_case(&normalized_key) {
+            return Ok(());
+        }
+        return Err(anyhow!(
+            "refusing to overwrite known_hosts entry for '{authority}': existing key differs; edit {} manually",
+            path.display()
+        ));
+    }
+
+    entries.insert(authority.to_string(), normalized_key);
+    write_known_hosts_entries(path, &entries)
+}
+
+fn normalize_ed25519_raw_key_hex(value: &str) -> anyhow::Result<String> {
+    let trimmed = value.trim();
+    let bytes = hex::decode(trimmed).with_context(|| format!("key is not valid hex: {trimmed}"))?;
+    if bytes.len() != 32 {
+        return Err(anyhow!(
+            "key must be a 32-byte ed25519 raw key (got {} bytes)",
+            bytes.len()
+        ));
+    }
+    Ok(hex::encode(bytes))
+}
+
+fn write_known_hosts_entries(
+    path: &Path,
+    entries: &BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    let dir = path.parent().ok_or_else(|| {
+        anyhow!(
+            "failed to determine parent directory for known_hosts: {}",
+            path.display()
+        )
+    })?;
+    fs::create_dir_all(dir)
+        .with_context(|| format!("failed to create known_hosts dir: {}", dir.display()))?;
+    set_restrictive_permissions_for_dir(dir)?;
+
+    let tmp_path = dir.join(format!(".{}.tmp-{}", KNOWN_HOSTS_FILE_NAME, Uuid::new_v4()));
+    {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .with_context(|| format!("failed to open temp known_hosts: {}", tmp_path.display()))?;
+        set_restrictive_permissions_for_file(&tmp_path)?;
+
+        for (authority, key_hex) in entries {
+            writeln!(file, "{authority}\t{key_hex}").with_context(|| {
+                format!(
+                    "failed to write temp known_hosts entries: {}",
+                    tmp_path.display()
+                )
+            })?;
+        }
+        file.flush().with_context(|| {
+            format!(
+                "failed to flush temp known_hosts entries: {}",
+                tmp_path.display()
+            )
+        })?;
+        file.sync_all().with_context(|| {
+            format!(
+                "failed to sync temp known_hosts entries: {}",
+                tmp_path.display()
+            )
+        })?;
+    }
+
+    rename_replace(&tmp_path, path)?;
+    set_restrictive_permissions_for_file(path)?;
+    Ok(())
+}
+
+fn rename_replace(from: &Path, to: &Path) -> anyhow::Result<()> {
+    match fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if to.exists() {
+                fs::remove_file(to).with_context(|| {
+                    format!(
+                        "failed to remove existing known_hosts file: {}",
+                        to.display()
+                    )
+                })?;
+                fs::rename(from, to).with_context(|| {
+                    format!("failed to replace known_hosts file: {}", to.display())
+                })
+            } else {
+                Err(err).with_context(|| {
+                    format!(
+                        "failed to move known_hosts temp file from {} to {}",
+                        from.display(),
+                        to.display()
+                    )
+                })
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn set_restrictive_permissions_for_dir(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(IMAGO_DIR_MODE))
+        .with_context(|| format!("failed to set directory permissions: {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_restrictive_permissions_for_dir(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_restrictive_permissions_for_file(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(KNOWN_HOSTS_MODE))
+        .with_context(|| format!("failed to set known_hosts permissions: {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_restrictive_permissions_for_file(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
 }
 
 fn encode_frame(payload: &[u8]) -> Vec<u8> {
@@ -1514,6 +1921,29 @@ mod tests {
     }
 
     #[test]
+    fn server_identity_mismatch_error_is_normalized_as_unauthorized() {
+        let err = server_identity_mismatch_error(
+            "example.com:4443",
+            &"aa".repeat(32),
+            &"bb".repeat(32),
+            Path::new("/tmp/.imago/known_hosts"),
+        );
+        let message = err.to_string();
+        assert!(message.contains("E_UNAUTHORIZED"));
+        assert!(message.contains("transport.connect"));
+        assert!(message.contains("server key mismatch"));
+    }
+
+    #[test]
+    fn missing_server_identity_error_is_normalized_as_unauthorized() {
+        let err = missing_server_identity_error("example.com:4443");
+        let message = err.to_string();
+        assert!(message.contains("E_UNAUTHORIZED"));
+        assert!(message.contains("transport.connect"));
+        assert!(message.contains("failed to verify server raw public key"));
+    }
+
+    #[test]
     fn parse_connect_error_status_ignores_unrelated_numbers_before_status() {
         let status = parse_connect_error_status(
             "connection to 127.0.0.1:443 failed: http error status: 401 Unauthorized",
@@ -1545,14 +1975,7 @@ mod tests {
             std::env::temp_dir().join(format!("imago-cli-deploy-run-fail-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).expect("temp dir should be created");
 
-        let result = run_with_project_root(
-            DeployArgs {
-                env: None,
-                target: None,
-            },
-            &root,
-        )
-        .await;
+        let result = run_with_project_root(DeployArgs { target: None }, &root).await;
 
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.expect("stderr should be present");
@@ -1583,6 +2006,7 @@ mod tests {
                     component_sha256: Some(component_sha.clone()),
                     resolved_at: "0".to_string(),
                 }],
+                binding_wits: vec![],
                 wit_packages: vec![],
             },
         );
@@ -1655,6 +2079,7 @@ mod tests {
                     component_sha256: Some(component_sha.clone()),
                     resolved_at: "0".to_string(),
                 }],
+                binding_wits: vec![],
                 wit_packages: vec![],
             },
         );
@@ -1969,7 +2394,7 @@ mod tests {
     #[test]
     fn retry_classification_does_not_retry_unstructured_unauthorized_error() {
         let err = anyhow!(
-            "server error: certificate authentication failed (E_UNAUTHORIZED) at transport.connect"
+            "server error: public key authentication failed (E_UNAUTHORIZED) at transport.connect"
         );
         assert!(!should_retry_upload_error(&err));
     }
@@ -1996,6 +2421,67 @@ mod tests {
         assert!(message.contains("upload attempt 1/4 failed"));
         assert!(message.contains("retrying in 250ms"));
         assert!(message.contains("reason=E_BUSY"));
+    }
+
+    #[test]
+    fn extracts_ed25519_raw_public_key_from_spki() {
+        let mut spki = ED25519_SPKI_PREFIX.to_vec();
+        spki.extend_from_slice(&[0x11; 32]);
+        let key =
+            extract_ed25519_raw_public_key_from_spki(&spki).expect("ed25519 spki should parse");
+        assert_eq!(key, [0x11; 32]);
+    }
+
+    #[test]
+    fn tofu_verifier_supports_only_ed25519_verify_scheme() {
+        let verifier =
+            TofuServerCertVerifier::new(web_transport_quinn::crypto::default_provider(), None);
+        let schemes =
+            rustls::client::danger::ServerCertVerifier::supported_verify_schemes(&verifier);
+        assert_eq!(schemes, vec![SignatureScheme::ED25519]);
+    }
+
+    #[test]
+    fn rejects_non_ed25519_spki() {
+        let mut spki = ED25519_SPKI_PREFIX.to_vec();
+        spki.extend_from_slice(&[0x11; 32]);
+        spki[0] = 0x31;
+        let err =
+            extract_ed25519_raw_public_key_from_spki(&spki).expect_err("invalid spki should fail");
+        assert!(err.to_string().contains("ed25519"));
+    }
+
+    #[test]
+    fn format_authority_brackets_ipv6_and_lowercases() {
+        assert_eq!(
+            format_authority("EXAMPLE.COM", 4443),
+            "example.com:4443".to_string()
+        );
+        assert_eq!(format_authority("::1", 4443), "[::1]:4443".to_string());
+    }
+
+    #[test]
+    fn known_hosts_round_trip_and_conflict_detection() {
+        let root = new_temp_dir("known-hosts");
+        let path = root.join("known_hosts");
+        let authority = "example.com:4443";
+        let key_hex_upper = "AA".repeat(32);
+
+        save_known_host_entry(&path, authority, &key_hex_upper).expect("entry should be written");
+        let entries = load_known_hosts_entries(&path).expect("entries should load");
+        assert_eq!(
+            entries.get(authority),
+            Some(&"aa".repeat(32)),
+            "stored key should be normalized to lowercase"
+        );
+
+        save_known_host_entry(&path, authority, &"aa".repeat(32))
+            .expect("same key should be idempotent");
+        let err = save_known_host_entry(&path, authority, &"bb".repeat(32))
+            .expect_err("conflicting key must be rejected");
+        assert!(err.to_string().contains("refusing to overwrite"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

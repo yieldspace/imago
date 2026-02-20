@@ -1,45 +1,35 @@
 # local-imagod example
 
-同一マシン上で `imagod` を起動し、`imago deploy` を実行する最小 example です。
+## 目的
 
-## 事前条件
+同一マシンで `imagod` を起動し、`imago deploy` の最小フローを確認するサンプルです。
 
-- Rust toolchain（`rustc 1.90` 以上）が使えること
-- `wasm32-wasip2` target が入っていること  
-  （未導入なら `rustup target add wasm32-wasip2`）
-- `cargo run -p imago-cli -- certs generate ...` が実行できること
+## 前提
 
-## ディレクトリ構成
+Rust toolchain と `wasm32-wasip2` target を用意します（未導入なら `rustup target add wasm32-wasip2`）。
 
-- `imago.toml`: build/deploy 設定（`[build].command` で直下 `Cargo.toml` を `cargo build --target wasm32-wasip2 --release` 実行し、`main` は `target/.../*.wasm` を参照）
-- `imagod.toml`: `imagod` が読むサーバ設定
-- `Cargo.toml`, `src/`: 配置対象の最小 CLI Wasm アプリ
-- `assets/`: bundle に含めるサンプル asset
-- `scripts/generate-certs.sh`: ローカル mTLS 証明書生成
-- `scripts/run-imagod.sh`: ローカル `imagod` 起動
-- `scripts/deploy.sh`: deploy 実行（内部で build も実行）
-
-## 手順
-
-1. 証明書を生成
+## 実行
 
 ```bash
+# ターミナル1
 cd examples/local-imagod
-./scripts/generate-certs.sh
+cargo run -p imagod -- --config imagod.toml
 ```
-
-2. `imagod` を起動（ターミナル1）
 
 ```bash
+# ターミナル2
 cd examples/local-imagod
-./scripts/run-imagod.sh
+# ターミナル1 で imagod が起動したことを確認してから実行
+cargo run -p imago-cli -- deploy --target default
+cargo run -p imago-cli -- logs local-imagod-app --tail 200
 ```
 
-3. deploy を実行（ターミナル2）
+## 成功判定
 
-```bash
-cd examples/local-imagod
-./scripts/deploy.sh
-```
+`imago-cli logs` の出力に `local-imagod-app started` が含まれていれば成功です。
 
-成功時は `command.event` の終端が `succeeded` になり、`imagod` 側にも deploy 成功ログが出ます。
+## Troubleshooting
+
+### known_hosts の古いエントリで deploy が失敗する
+
+`certificate mismatch` などで `deploy` が失敗する場合のみ、`~/.imago/known_hosts` から `localhost:4443` / `127.0.0.1:4443` の行を削除して再実行してください。

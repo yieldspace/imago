@@ -1,13 +1,16 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, anyhow};
 use imago_lockfile::{
-    IMAGO_LOCK_VERSION, ImagoLock, ImagoLockDependency, TransitivePackageRecord,
-    collect_wit_packages, save_to_project_root,
+    IMAGO_LOCK_VERSION, ImagoLock, ImagoLockBindingWit, ImagoLockDependency,
+    TransitivePackageRecord, collect_wit_packages, save_to_project_root,
 };
+use wit_component::WitPrinter;
+use wit_parser::{FunctionKind, InterfaceId, PackageId, Resolve, Type, TypeDefKind, TypeId};
 
 use crate::{
     cli::UpdateArgs,
@@ -21,6 +24,19 @@ use crate::{
 };
 
 mod cache;
+
+const IMAGO_NODE_CONNECTION_USE: &str = "use imago:node/rpc@0.1.0.{connection};";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedBindingWit {
+    name: String,
+    wit_source: String,
+    wit_registry: Option<String>,
+    package_name: String,
+    package_version: Option<String>,
+    wit_path: String,
+    interface_names: BTreeSet<String>,
+}
 
 pub async fn run(args: UpdateArgs) -> CommandResult {
     run_with_project_root(args, Path::new(".")).await
@@ -69,6 +85,7 @@ fn normalize_absolute_path_for_compare(path: &Path) -> anyhow::Result<PathBuf> {
 fn validate_wit_sources_outside_wit_deps(
     project_root: &Path,
     dependencies: &[build::ProjectDependency],
+    bindings: &[build::ProjectBindingSource],
 ) -> anyhow::Result<()> {
     let project_root_abs = normalize_absolute_path_for_compare(project_root)?;
     let mut wit_deps_roots = vec![normalize_path_for_compare(
@@ -85,7 +102,7 @@ fn validate_wit_sources_outside_wit_deps(
         }
     }
 
-    let validate_file_source = |dependency_name: &str,
+    let validate_file_source = |subject_name: &str,
                                 source_label: &str,
                                 source: &str|
      -> anyhow::Result<()> {
@@ -114,8 +131,8 @@ fn validate_wit_sources_outside_wit_deps(
                 .any(|wit_deps_root| candidate.starts_with(wit_deps_root))
         }) {
             return Err(anyhow!(
-                "dependency '{}' {} '{}' points under wit/deps, which `imago update` resets; move the source outside wit/deps",
-                dependency_name,
+                "{} {} '{}' points under wit/deps, which `imago update` resets; move the source outside wit/deps",
+                subject_name,
                 source_label,
                 source
             ));
@@ -128,6 +145,9 @@ fn validate_wit_sources_outside_wit_deps(
         if let Some(component) = dependency.component.as_ref() {
             validate_file_source(&dependency.name, "component source", &component.source)?;
         }
+    }
+    for binding in bindings {
+        validate_file_source(&binding.name, "binding wit source", &binding.wit_source)?;
     }
     Ok(())
 }
@@ -162,10 +182,806 @@ fn validate_wit_output_path_collisions(
     Ok(())
 }
 
+fn package_name_from_resolve(resolve: &Resolve, package_id: PackageId) -> String {
+    let package = &resolve.packages[package_id].name;
+    format!("{}:{}", package.namespace, package.name)
+}
+
+fn package_version_from_resolve(resolve: &Resolve, package_id: PackageId) -> Option<String> {
+    resolve.packages[package_id]
+        .name
+        .version
+        .as_ref()
+        .map(ToString::to_string)
+}
+
+fn package_interface_names(resolve: &Resolve, package_id: PackageId) -> BTreeSet<String> {
+    resolve.packages[package_id]
+        .interfaces
+        .keys()
+        .cloned()
+        .collect()
+}
+
+fn package_interface_ids(package_name: &str, interface_names: &BTreeSet<String>) -> Vec<String> {
+    interface_names
+        .iter()
+        .map(|interface_name| format!("{package_name}/{interface_name}"))
+        .collect()
+}
+
+fn validate_binding_dependency_collision(
+    binding: &build::ProjectBindingSource,
+    package_name: &str,
+    package_version: Option<&str>,
+    dependency: &build::ProjectDependency,
+) -> anyhow::Result<()> {
+    if dependency.wit.source != binding.wit_source
+        || dependency.wit.registry != binding.wit_registry
+    {
+        return Err(anyhow!(
+            "binding '{}' points to package '{}' but dependency '{}' has different wit source/registry; align bindings.wit with dependencies.wit or remove one side",
+            binding.name,
+            package_name,
+            dependency.name
+        ));
+    }
+    if let Some(package_version) = package_version
+        && dependency.version != package_version
+    {
+        return Err(anyhow!(
+            "binding '{}' package '{}' version '{}' does not match dependency '{}' version '{}'",
+            binding.name,
+            package_name,
+            package_version,
+            dependency.name,
+            dependency.version
+        ));
+    }
+    Ok(())
+}
+
+async fn materialize_binding_wit_source(
+    project_root: &Path,
+    binding: &build::ProjectBindingSource,
+    destination_root: &Path,
+) -> anyhow::Result<()> {
+    fs::create_dir_all(destination_root).with_context(|| {
+        format!(
+            "failed to create binding wit destination {}",
+            destination_root.display()
+        )
+    })?;
+    plugin_sources::materialize_wit_source(
+        project_root,
+        &binding.wit_source,
+        binding.wit_registry.as_deref(),
+        "",
+        destination_root,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to resolve binding '{}' wit source '{}'",
+            binding.name, binding.wit_source
+        )
+    })?;
+    Ok(())
+}
+
+async fn resolve_binding_wits(
+    project_root: &Path,
+    dependencies: &[build::ProjectDependency],
+    lock_entries: &[ImagoLockDependency],
+    bindings: &[build::ProjectBindingSource],
+) -> anyhow::Result<Vec<ResolvedBindingWit>> {
+    if bindings.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let deps_root = project_root.join("wit").join("deps");
+    let dependency_by_name = dependencies
+        .iter()
+        .map(|dependency| (dependency.name.as_str(), dependency))
+        .collect::<BTreeMap<_, _>>();
+    let lock_by_name = lock_entries
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut package_resolutions = BTreeMap::<
+        String,
+        (
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            BTreeSet<String>,
+        ),
+    >::new();
+    let mut path_to_package = BTreeMap::<String, String>::new();
+    for lock_entry in lock_entries {
+        path_to_package.insert(lock_entry.wit_path.clone(), lock_entry.name.clone());
+    }
+
+    let mut resolved_bindings = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        let temp_root =
+            std::env::temp_dir().join(format!("imago-update-binding-{}", uuid::Uuid::new_v4()));
+        let temp_top = temp_root.join("top");
+        fs::create_dir_all(&temp_root)
+            .with_context(|| format!("failed to create temp dir {}", temp_root.display()))?;
+        let resolve_result = async {
+            materialize_binding_wit_source(project_root, binding, &temp_top).await?;
+            let (temp_resolve, temp_package_id) = parse_dependency_wit_with_deps(&temp_top, &temp_root)
+                .with_context(|| {
+                    format!(
+                        "failed to parse binding '{}' WIT source '{}'",
+                        binding.name, binding.wit_source
+                    )
+                })?;
+            let package_name = package_name_from_resolve(&temp_resolve, temp_package_id);
+            let package_version = package_version_from_resolve(&temp_resolve, temp_package_id);
+            let interface_names = package_interface_names(&temp_resolve, temp_package_id);
+            if interface_names.is_empty() {
+                return Err(anyhow!(
+                    "binding '{}' source '{}' resolved package '{}' has no interfaces",
+                    binding.name,
+                    binding.wit_source,
+                    package_name
+                ));
+            }
+
+            if let Some((
+                existing_source,
+                existing_registry,
+                existing_version,
+                existing_path,
+                existing_interfaces,
+            )) = package_resolutions.get(&package_name)
+            {
+                if existing_source != &binding.wit_source
+                    || existing_registry != &binding.wit_registry
+                    || existing_version != &package_version
+                {
+                    return Err(anyhow!(
+                        "binding '{}' package '{}' conflicts with another binding source; same package must use identical source/version/registry",
+                        binding.name,
+                        package_name
+                    ));
+                }
+                return Ok(ResolvedBindingWit {
+                    name: binding.name.clone(),
+                    wit_source: binding.wit_source.clone(),
+                    wit_registry: binding.wit_registry.clone(),
+                    package_name: package_name.clone(),
+                    package_version,
+                    wit_path: existing_path.clone(),
+                    interface_names: existing_interfaces.clone(),
+                });
+            }
+
+            let wit_path = if let Some(dependency) = dependency_by_name.get(package_name.as_str()) {
+                validate_binding_dependency_collision(
+                    binding,
+                    &package_name,
+                    package_version.as_deref(),
+                    dependency,
+                )?;
+                let lock_entry = lock_by_name.get(package_name.as_str()).ok_or_else(|| {
+                    anyhow!(
+                        "dependency '{}' is not resolved in imago.lock; run `imago update`",
+                        package_name
+                    )
+                })?;
+                let wit_path = lock_entry.wit_path.clone();
+                let dependency_wit_root = project_root.join(&wit_path);
+                let (resolve, package_id) =
+                    parse_dependency_wit_with_deps(&dependency_wit_root, &deps_root).with_context(
+                        || {
+                            format!(
+                                "failed to parse hydrated dependency WIT for binding package '{}'",
+                                package_name
+                            )
+                        },
+                    )?;
+                let hydrated_interface_names = package_interface_names(&resolve, package_id);
+                if hydrated_interface_names.is_empty() {
+                    return Err(anyhow!(
+                        "binding '{}' target package '{}' has no interfaces in hydrated dependency WIT",
+                        binding.name,
+                        package_name
+                    ));
+                }
+                package_resolutions.insert(
+                    package_name.clone(),
+                    (
+                        binding.wit_source.clone(),
+                        binding.wit_registry.clone(),
+                        package_version.clone(),
+                        wit_path.clone(),
+                        hydrated_interface_names.clone(),
+                    ),
+                );
+                return Ok(ResolvedBindingWit {
+                    name: binding.name.clone(),
+                    wit_source: binding.wit_source.clone(),
+                    wit_registry: binding.wit_registry.clone(),
+                    package_name: package_name.clone(),
+                    package_version,
+                    wit_path,
+                    interface_names: hydrated_interface_names,
+                });
+            } else {
+                dependency_cache::dependency_wit_path(&package_name)
+            };
+
+            if let Some(existing_package) = path_to_package.get(&wit_path)
+                && existing_package != &package_name
+            {
+                return Err(anyhow!(
+                    "binding '{}' package '{}' resolves to '{}' which is already used by package '{}'",
+                    binding.name,
+                    package_name,
+                    wit_path,
+                    existing_package
+                ));
+            }
+            path_to_package.insert(wit_path.clone(), package_name.clone());
+
+            let project_wit_root = project_root.join(&wit_path);
+            materialize_binding_wit_source(project_root, binding, &project_wit_root).await?;
+            let (project_resolve, project_package_id) =
+                parse_dependency_wit_with_deps(&project_wit_root, &deps_root).with_context(|| {
+                    format!(
+                        "failed to parse hydrated binding package '{}' at {}",
+                        package_name,
+                        project_wit_root.display()
+                    )
+                })?;
+            let project_package_name = package_name_from_resolve(&project_resolve, project_package_id);
+            if project_package_name != package_name {
+                return Err(anyhow!(
+                    "binding '{}' hydrated package mismatch: expected '{}', actual '{}'",
+                    binding.name,
+                    package_name,
+                    project_package_name
+                ));
+            }
+            let hydrated_interface_names = package_interface_names(&project_resolve, project_package_id);
+            if hydrated_interface_names.is_empty() {
+                return Err(anyhow!(
+                    "binding '{}' package '{}' has no interfaces after hydration",
+                    binding.name,
+                    package_name
+                ));
+            }
+
+            package_resolutions.insert(
+                package_name.clone(),
+                (
+                    binding.wit_source.clone(),
+                    binding.wit_registry.clone(),
+                    package_version.clone(),
+                    wit_path.clone(),
+                    hydrated_interface_names.clone(),
+                ),
+            );
+            Ok(ResolvedBindingWit {
+                name: binding.name.clone(),
+                wit_source: binding.wit_source.clone(),
+                wit_registry: binding.wit_registry.clone(),
+                package_name,
+                package_version,
+                wit_path,
+                interface_names: hydrated_interface_names,
+            })
+        }
+        .await;
+        let _ = fs::remove_dir_all(&temp_root);
+        resolved_bindings.push(resolve_result?);
+    }
+
+    let mut deduped =
+        BTreeMap::<(String, String, Option<String>, String), ResolvedBindingWit>::new();
+    for binding in resolved_bindings {
+        let key = (
+            binding.name.clone(),
+            binding.wit_source.clone(),
+            binding.wit_registry.clone(),
+            binding.package_name.clone(),
+        );
+        deduped
+            .entry(key)
+            .and_modify(|existing| {
+                existing
+                    .interface_names
+                    .extend(binding.interface_names.iter().cloned());
+            })
+            .or_insert(binding);
+    }
+    Ok(deduped.into_values().collect())
+}
+
+fn rewrite_bound_wit_packages(
+    project_root: &Path,
+    bindings: &[ResolvedBindingWit],
+) -> anyhow::Result<()> {
+    if bindings.is_empty() {
+        return Ok(());
+    }
+
+    let mut rewrite_targets = BTreeMap::<String, (String, BTreeSet<String>)>::new();
+    for binding in bindings {
+        if let Some((package_name, interfaces)) = rewrite_targets.get_mut(&binding.wit_path) {
+            if package_name != &binding.package_name {
+                return Err(anyhow!(
+                    "bindings package '{}' conflicts with '{}' on shared wit path '{}'",
+                    binding.package_name,
+                    package_name,
+                    binding.wit_path
+                ));
+            }
+            interfaces.extend(binding.interface_names.iter().cloned());
+            continue;
+        }
+        rewrite_targets.insert(
+            binding.wit_path.clone(),
+            (
+                binding.package_name.clone(),
+                binding.interface_names.clone(),
+            ),
+        );
+    }
+
+    let deps_root = project_root.join("wit").join("deps");
+    for (wit_path, (package_name, interface_names)) in rewrite_targets {
+        let dependency_wit_root = project_root.join(&wit_path);
+        rewrite_dependency_wit_interfaces(
+            &package_name,
+            &dependency_wit_root,
+            &deps_root,
+            &interface_names,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn rewrite_dependency_wit_interfaces(
+    dependency_name: &str,
+    dependency_wit_root: &Path,
+    deps_root: &Path,
+    interface_names: &BTreeSet<String>,
+) -> anyhow::Result<()> {
+    let (resolve, package_id) = parse_dependency_wit_with_deps(dependency_wit_root, deps_root)
+        .with_context(|| {
+            format!(
+                "failed to parse hydrated WIT package for dependency '{}' at {}",
+                dependency_name,
+                dependency_wit_root.display()
+            )
+        })?;
+
+    for interface_name in interface_names {
+        let interface_id =
+            find_interface_id(&resolve, package_id, interface_name).ok_or_else(|| {
+                anyhow!(
+                    "binding interface '{} / {}' was not found in dependency WIT at {}",
+                    dependency_name,
+                    interface_name,
+                    dependency_wit_root.display()
+                )
+            })?;
+        ensure_interface_contains_no_resource(
+            &resolve,
+            interface_id,
+            dependency_name,
+            interface_name,
+        )?;
+    }
+
+    let canonical = render_wit_package_text(&resolve, package_id).with_context(|| {
+        format!(
+            "failed to render canonical WIT package for dependency '{}' from {}",
+            dependency_name,
+            dependency_wit_root.display()
+        )
+    })?;
+    let rewritten = rewrite_interfaces_in_wit_text(canonical, interface_names)?;
+    persist_rewritten_dependency_wit(dependency_wit_root, &rewritten)?;
+    Ok(())
+}
+
+fn parse_dependency_wit_with_deps(
+    dependency_wit_root: &Path,
+    deps_root: &Path,
+) -> anyhow::Result<(Resolve, PackageId)> {
+    let temp_root =
+        std::env::temp_dir().join(format!("imago-update-rewrite-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&temp_root)
+        .with_context(|| format!("failed to create temp dir {}", temp_root.display()))?;
+
+    let parse_result = (|| -> anyhow::Result<(Resolve, PackageId)> {
+        copy_tree_recursive(dependency_wit_root, &temp_root).with_context(|| {
+            format!(
+                "failed to stage dependency WIT files from {}",
+                dependency_wit_root.display()
+            )
+        })?;
+
+        let deps_dst = temp_root.join("deps");
+        fs::create_dir_all(&deps_dst)
+            .with_context(|| format!("failed to create deps dir {}", deps_dst.display()))?;
+
+        let self_name = dependency_wit_root.file_name().ok_or_else(|| {
+            anyhow!(
+                "failed to resolve dependency dir name for {}",
+                dependency_wit_root.display()
+            )
+        })?;
+        if deps_root.is_dir() {
+            for entry in fs::read_dir(deps_root)
+                .with_context(|| format!("failed to read {}", deps_root.display()))?
+            {
+                let entry = entry.with_context(|| {
+                    format!(
+                        "failed to read dependency entry under {}",
+                        deps_root.display()
+                    )
+                })?;
+                if entry.file_name() == self_name {
+                    continue;
+                }
+                copy_tree_recursive(&entry.path(), &deps_dst.join(entry.file_name()))
+                    .with_context(|| {
+                        format!(
+                            "failed to stage transitive dependency {}",
+                            entry.path().display()
+                        )
+                    })?;
+            }
+        }
+
+        let mut resolve = Resolve::default();
+        let (package_id, _) = resolve.push_dir(&temp_root).with_context(|| {
+            format!(
+                "failed to parse staged dependency package {}",
+                temp_root.display()
+            )
+        })?;
+        Ok((resolve, package_id))
+    })();
+
+    let _ = fs::remove_dir_all(&temp_root);
+    parse_result
+}
+
+fn copy_tree_recursive(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    let metadata = fs::metadata(source)
+        .with_context(|| format!("failed to inspect source path {}", source.display()))?;
+    if metadata.is_file() {
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::copy(source, destination).with_context(|| {
+            format!(
+                "failed to copy file {} -> {}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Err(anyhow!(
+            "source path is not file or dir: {}",
+            source.display()
+        ));
+    }
+
+    fs::create_dir_all(destination)
+        .with_context(|| format!("failed to create directory {}", destination.display()))?;
+    for entry in fs::read_dir(source)
+        .with_context(|| format!("failed to read directory {}", source.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("failed to read entry under {}", source.display()))?;
+        let entry_path = entry.path();
+        let file_name = entry.file_name();
+        copy_tree_recursive(&entry_path, &destination.join(file_name))?;
+    }
+    Ok(())
+}
+
+fn find_interface_id(
+    resolve: &Resolve,
+    package_id: PackageId,
+    interface_name: &str,
+) -> Option<InterfaceId> {
+    resolve.packages[package_id]
+        .interfaces
+        .get(interface_name)
+        .copied()
+}
+
+fn ensure_interface_contains_no_resource(
+    resolve: &Resolve,
+    interface_id: InterfaceId,
+    dependency_name: &str,
+    interface_name: &str,
+) -> anyhow::Result<()> {
+    let interface = &resolve.interfaces[interface_id];
+    for function in interface.functions.values() {
+        if !matches!(
+            function.kind,
+            FunctionKind::Freestanding | FunctionKind::AsyncFreestanding
+        ) {
+            return Err(anyhow!(
+                "binding WIT '{}/{}' contains resource methods; `imago update` does not support resources",
+                dependency_name,
+                interface_name
+            ));
+        }
+        for (_, param_type) in &function.params {
+            if type_contains_resource(resolve, param_type, &mut BTreeSet::new()) {
+                return Err(anyhow!(
+                    "binding WIT '{}/{}' contains resource types; `imago update` does not support resources",
+                    dependency_name,
+                    interface_name
+                ));
+            }
+        }
+        if let Some(result) = &function.result
+            && type_contains_resource(resolve, result, &mut BTreeSet::new())
+        {
+            return Err(anyhow!(
+                "binding WIT '{}/{}' contains resource types; `imago update` does not support resources",
+                dependency_name,
+                interface_name
+            ));
+        }
+    }
+    for type_id in interface.types.values() {
+        if type_id_contains_resource(resolve, *type_id, &mut BTreeSet::new()) {
+            return Err(anyhow!(
+                "binding WIT '{}/{}' contains resource definitions; `imago update` does not support resources",
+                dependency_name,
+                interface_name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn type_contains_resource(resolve: &Resolve, ty: &Type, seen: &mut BTreeSet<TypeId>) -> bool {
+    match ty {
+        Type::Id(type_id) => type_id_contains_resource(resolve, *type_id, seen),
+        _ => false,
+    }
+}
+
+fn type_id_contains_resource(
+    resolve: &Resolve,
+    type_id: TypeId,
+    seen: &mut BTreeSet<TypeId>,
+) -> bool {
+    if !seen.insert(type_id) {
+        return false;
+    }
+    let typedef = &resolve.types[type_id];
+    match &typedef.kind {
+        TypeDefKind::Resource | TypeDefKind::Handle(_) => true,
+        TypeDefKind::Record(record) => record
+            .fields
+            .iter()
+            .any(|field| type_contains_resource(resolve, &field.ty, seen)),
+        TypeDefKind::Tuple(tuple) => tuple
+            .types
+            .iter()
+            .any(|item| type_contains_resource(resolve, item, seen)),
+        TypeDefKind::Variant(variant) => variant.cases.iter().any(|case| {
+            case.ty
+                .as_ref()
+                .is_some_and(|ty| type_contains_resource(resolve, ty, seen))
+        }),
+        TypeDefKind::Option(ty) => type_contains_resource(resolve, ty, seen),
+        TypeDefKind::Result(result) => {
+            result
+                .ok
+                .as_ref()
+                .is_some_and(|ty| type_contains_resource(resolve, ty, seen))
+                || result
+                    .err
+                    .as_ref()
+                    .is_some_and(|ty| type_contains_resource(resolve, ty, seen))
+        }
+        TypeDefKind::List(ty) => type_contains_resource(resolve, ty, seen),
+        TypeDefKind::Map(key, value) => {
+            type_contains_resource(resolve, key, seen)
+                || type_contains_resource(resolve, value, seen)
+        }
+        TypeDefKind::FixedSizeList(ty, _) => type_contains_resource(resolve, ty, seen),
+        TypeDefKind::Future(ty) | TypeDefKind::Stream(ty) => ty
+            .as_ref()
+            .is_some_and(|item| type_contains_resource(resolve, item, seen)),
+        TypeDefKind::Type(ty) => type_contains_resource(resolve, ty, seen),
+        TypeDefKind::Flags(_) | TypeDefKind::Enum(_) | TypeDefKind::Unknown => false,
+    }
+}
+
+fn render_wit_package_text(resolve: &Resolve, package_id: PackageId) -> anyhow::Result<String> {
+    let mut printer = WitPrinter::default();
+    printer
+        .print(resolve, package_id, &[])
+        .context("failed to print WIT package")?;
+    Ok(printer.output.to_string())
+}
+
+fn rewrite_interfaces_in_wit_text(
+    package_text: String,
+    interface_names: &BTreeSet<String>,
+) -> anyhow::Result<String> {
+    let mut lines = package_text.lines().map(str::to_string).collect::<Vec<_>>();
+    for interface_name in interface_names {
+        rewrite_one_interface_block(&mut lines, interface_name)?;
+    }
+    Ok(lines.join("\n") + "\n")
+}
+
+fn rewrite_one_interface_block(
+    lines: &mut Vec<String>,
+    interface_name: &str,
+) -> anyhow::Result<()> {
+    let open_index = lines
+        .iter()
+        .position(|line| {
+            let trimmed = line.trim();
+            if !(trimmed.starts_with("interface ") && trimmed.ends_with('{')) {
+                return false;
+            }
+            let name = trimmed
+                .trim_start_matches("interface ")
+                .trim_end_matches('{')
+                .trim();
+            name == interface_name
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "interface '{}' was not found in rendered WIT package",
+                interface_name
+            )
+        })?;
+
+    let close_index = (open_index + 1..lines.len())
+        .find(|idx| lines[*idx].trim() == "}")
+        .ok_or_else(|| anyhow!("interface '{}' block is not closed", interface_name))?;
+
+    let has_use_line = lines[open_index + 1..close_index]
+        .iter()
+        .any(|line| line.trim() == IMAGO_NODE_CONNECTION_USE);
+    if !has_use_line {
+        lines.insert(open_index + 1, format!("    {IMAGO_NODE_CONNECTION_USE}"));
+    }
+
+    let close_index = (open_index + 1..lines.len())
+        .find(|idx| lines[*idx].trim() == "}")
+        .ok_or_else(|| anyhow!("interface '{}' block is not closed", interface_name))?;
+    for line in lines.iter_mut().take(close_index).skip(open_index + 1) {
+        if let Some(rewritten) = rewrite_function_signature_line(line)? {
+            *line = rewritten;
+        }
+    }
+    Ok(())
+}
+
+fn rewrite_function_signature_line(line: &str) -> anyhow::Result<Option<String>> {
+    let indent_len = line.chars().take_while(|ch| ch.is_whitespace()).count();
+    let indent = &line[..indent_len];
+    let trimmed = line.trim();
+    if !trimmed.ends_with(';') {
+        return Ok(None);
+    }
+    let Some((name, after_name)) = trimmed.split_once(':') else {
+        return Ok(None);
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    let mut rest = after_name.trim_start();
+    let async_prefix = if rest.starts_with("async ") {
+        rest = rest["async ".len()..].trim_start();
+        "async "
+    } else {
+        ""
+    };
+    if !rest.starts_with("func(") {
+        return Ok(None);
+    }
+    let after_open = &rest["func(".len()..];
+    let Some(params_end) = after_open.find(')') else {
+        return Err(anyhow!("failed to parse function signature '{}'", trimmed));
+    };
+    let params = after_open[..params_end].trim();
+    let after_params = after_open[params_end + 1..].trim_start();
+    let after_params = after_params
+        .strip_suffix(';')
+        .ok_or_else(|| anyhow!("failed to parse function signature '{}'", trimmed))?
+        .trim();
+    let return_type = if after_params.is_empty() {
+        None
+    } else if let Some(raw) = after_params.strip_prefix("->") {
+        Some(raw.trim())
+    } else {
+        return Ok(None);
+    };
+
+    if params.starts_with("connection:") {
+        return Ok(None);
+    }
+
+    let params = if params.is_empty() {
+        "connection: borrow<connection>".to_string()
+    } else {
+        format!("connection: borrow<connection>, {params}")
+    };
+    let wrapped_result = match return_type {
+        Some(result_type) => format!("result<{result_type}, string>"),
+        None => "result<_, string>".to_string(),
+    };
+    Ok(Some(format!(
+        "{indent}{name}: {async_prefix}func({params}) -> {wrapped_result};"
+    )))
+}
+
+fn persist_rewritten_dependency_wit(
+    dependency_wit_root: &Path,
+    package_text: &str,
+) -> anyhow::Result<()> {
+    fs::create_dir_all(dependency_wit_root)
+        .with_context(|| format!("failed to create {}", dependency_wit_root.display()))?;
+    let package_wit_path = dependency_wit_root.join("package.wit");
+    fs::write(&package_wit_path, package_text)
+        .with_context(|| format!("failed to write {}", package_wit_path.display()))?;
+    remove_other_wit_files(dependency_wit_root, &package_wit_path)?;
+    Ok(())
+}
+
+fn remove_other_wit_files(root: &Path, keep: &Path) -> anyhow::Result<()> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))? {
+        let entry = entry.with_context(|| format!("failed to read entry in {}", root.display()))?;
+        let path = entry.path();
+        if path == keep {
+            continue;
+        }
+        let metadata =
+            fs::metadata(&path).with_context(|| format!("failed to inspect {}", path.display()))?;
+        if metadata.is_dir() {
+            remove_other_wit_files(&path, keep)?;
+            continue;
+        }
+        if metadata.is_file()
+            && path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("wit"))
+        {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
 async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
     let dependency_resolver = StandardDependencyResolver;
     let dependencies = build::load_project_dependencies(project_root)?;
-    validate_wit_sources_outside_wit_deps(project_root, &dependencies)?;
+    let bindings = build::load_project_binding_sources(project_root)?;
+    validate_wit_sources_outside_wit_deps(project_root, &dependencies, &bindings)?;
     validate_wit_output_path_collisions(&dependencies)?;
 
     let resolved_at = time::OffsetDateTime::now_utc().unix_timestamp().to_string();
@@ -203,6 +1019,9 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
     }
 
     dependency_cache::hydrate_project_wit_deps(project_root, &dependencies)?;
+    let resolved_binding_wits =
+        resolve_binding_wits(project_root, &dependencies, &lock_entries, &bindings).await?;
+    rewrite_bound_wit_packages(project_root, &resolved_binding_wits)?;
     for entry in &mut lock_entries {
         let hydrated_path = project_root.join(&entry.wit_path);
         entry.wit_digest = build::compute_path_digest_hex(&hydrated_path).with_context(|| {
@@ -214,11 +1033,48 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
         })?;
     }
 
+    let mut binding_wits = Vec::new();
+    let mut seen_binding_keys = BTreeSet::<(String, String, Option<String>, String)>::new();
+    for binding in resolved_binding_wits {
+        let key = (
+            binding.name.clone(),
+            binding.wit_source.clone(),
+            binding.wit_registry.clone(),
+            binding.wit_path.clone(),
+        );
+        if !seen_binding_keys.insert(key) {
+            continue;
+        }
+        let hydrated_path = project_root.join(&binding.wit_path);
+        let wit_digest = build::compute_path_digest_hex(&hydrated_path).with_context(|| {
+            format!(
+                "failed to compute hydrated binding wit digest for '{}' at {}",
+                binding.name,
+                hydrated_path.display()
+            )
+        })?;
+        binding_wits.push(ImagoLockBindingWit {
+            name: binding.name,
+            wit_source: binding.wit_source,
+            wit_registry: binding.wit_registry,
+            wit_digest,
+            wit_path: binding.wit_path,
+            interfaces: package_interface_ids(&binding.package_name, &binding.interface_names),
+            resolved_at: resolved_at.clone(),
+        });
+    }
+    binding_wits.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then(a.wit_source.cmp(&b.wit_source))
+            .then(a.wit_path.cmp(&b.wit_path))
+    });
     lock_entries.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
     let lock = ImagoLock {
         version: IMAGO_LOCK_VERSION,
         dependencies: lock_entries,
         wit_packages: collect_wit_packages(transitive_records),
+        binding_wits,
     };
     save_to_project_root(project_root, &lock)?;
 
@@ -1465,6 +2321,315 @@ world example {
         let stderr = result.stderr.unwrap_or_default();
         assert!(
             stderr.contains("contains foreign imports in plain .wit form"),
+            "unexpected stderr: {stderr}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_rewrites_binding_interfaces_with_connection_and_outer_result() {
+        let root = new_temp_dir("bindings-rewrite");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/hello.wit"
+
+[[bindings]]
+name = "svc-target"
+wit = "file://registry/hello.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("registry/hello.wit"),
+            br#"
+package chikoski:hello@0.1.0;
+
+interface greet {
+  hello: func() -> string;
+  ping: func(a: u32) -> u32;
+}
+
+interface untouched {
+  pass-through: func() -> string;
+}
+"#,
+        );
+        write(&root.join("build/app.wasm"), b"\0asm");
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+
+        let rewritten = fs::read_to_string(root.join("wit/deps/chikoski-hello/package.wit"))
+            .expect("rewritten package.wit should exist");
+        assert!(
+            rewritten.contains("use imago:node/rpc@0.1.0.{connection};"),
+            "connection use must be injected: {rewritten}"
+        );
+        assert!(
+            rewritten
+                .contains("hello: func(connection: borrow<connection>) -> result<string, string>;"),
+            "return must be wrapped: {rewritten}"
+        );
+        assert!(
+            rewritten.contains(
+                "ping: func(connection: borrow<connection>, a: u32) -> result<u32, string>;"
+            ),
+            "connection arg must be injected: {rewritten}"
+        );
+        assert!(
+            rewritten.contains(
+                "pass-through: func(connection: borrow<connection>) -> result<string, string>;"
+            ),
+            "all interfaces in package must be rewritten: {rewritten}"
+        );
+
+        let second = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(
+            second.exit_code, 0,
+            "second update should keep rewrite idempotent: {:?}",
+            second.stderr
+        );
+        let rewritten_second = fs::read_to_string(root.join("wit/deps/chikoski-hello/package.wit"))
+            .expect("rewritten package.wit should exist");
+        let use_count = rewritten_second
+            .matches("use imago:node/rpc@0.1.0.{connection};")
+            .count();
+        assert_eq!(
+            use_count, 2,
+            "connection use should exist once per rewritten interface"
+        );
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        assert_eq!(lock.binding_wits.len(), 1);
+        assert_eq!(lock.binding_wits[0].name, "svc-target");
+        assert_eq!(
+            lock.binding_wits[0].wit_source,
+            "file://registry/hello.wit".to_string()
+        );
+        assert_eq!(
+            lock.binding_wits[0].interfaces,
+            vec![
+                "chikoski:hello/greet".to_string(),
+                "chikoski:hello/untouched".to_string()
+            ]
+        );
+        build::build_project("default", &root)
+            .expect("build should succeed after rewrite by using synchronized dependency cache");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_generates_wit_deps_for_bindings_without_dependencies() {
+        let root = new_temp_dir("bindings-only");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[bindings]]
+name = "svc-target"
+wit = "file://registry/hello.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("registry/hello.wit"),
+            br#"
+package chikoski:hello@0.1.0;
+
+interface greet {
+  hello: func() -> string;
+}
+"#,
+        );
+        write(&root.join("build/app.wasm"), b"\0asm");
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+
+        let rewritten = fs::read_to_string(root.join("wit/deps/chikoski-hello/package.wit"))
+            .expect("binding-only package.wit should exist");
+        assert!(
+            rewritten
+                .contains("hello: func(connection: borrow<connection>) -> result<string, string>;"),
+            "binding-only WIT should be rewritten: {rewritten}"
+        );
+
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        assert!(lock.dependencies.is_empty());
+        assert_eq!(lock.binding_wits.len(), 1);
+        assert_eq!(lock.binding_wits[0].name, "svc-target");
+        assert_eq!(
+            lock.binding_wits[0].interfaces,
+            vec!["chikoski:hello/greet".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_dependency_binding_package_collision_on_source_mismatch() {
+        let root = new_temp_dir("binding-dependency-source-mismatch");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/hello-a.wit"
+
+[[bindings]]
+name = "svc-target"
+wit = "file://registry/hello-b.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("registry/hello-a.wit"),
+            br#"
+package chikoski:hello@0.1.0;
+interface greet { hello: func() -> string; }
+"#,
+        );
+        write(
+            &root.join("registry/hello-b.wit"),
+            br#"
+package chikoski:hello@0.1.0;
+interface greet { hello2: func() -> string; }
+"#,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("different wit source/registry"),
+            "unexpected stderr: {stderr}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_binding_wit_with_resource_definition() {
+        let root = new_temp_dir("bindings-resource-reject");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/hello.wit"
+
+[[bindings]]
+name = "svc-target"
+wit = "file://registry/hello.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("registry/hello.wit"),
+            br#"
+package chikoski:hello@0.1.0;
+
+interface greet {
+  resource connection {
+    close: func();
+  }
+  hello: func(connection: borrow<connection>) -> string;
+}
+"#,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("does not support resources"),
+            "unexpected stderr: {stderr}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_same_wit_mapped_to_multiple_binding_names() {
+        let root = new_temp_dir("bindings-ambiguous");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/hello.wit"
+
+[[bindings]]
+name = "svc-target-a"
+wit = "file://registry/hello.wit"
+
+[[bindings]]
+name = "svc-target-b"
+wit = "file://registry/hello.wit"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("registry/hello.wit"),
+            b"package chikoski:hello@0.1.0;\ninterface greet { hello: func() -> string; }\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("maps to multiple services"),
             "unexpected stderr: {stderr}"
         );
 

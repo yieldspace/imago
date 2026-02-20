@@ -3,14 +3,17 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub mod artifact;
+pub mod bindings;
 pub mod command;
 pub mod hello;
 pub mod log;
+pub mod rpc;
 
 pub use artifact::{
     ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushChunkHeader,
     ArtifactPushRequest, ArtifactStatus, ByteRange, DeployPrepareRequest, DeployPrepareResponse,
 };
+pub use bindings::{BindingsCertUploadRequest, BindingsCertUploadResponse};
 pub use command::{
     CommandCancelRequest, CommandCancelResponse, CommandEvent, CommandEventType, CommandPayload,
     CommandStartRequest, CommandStartResponse, CommandState, CommandType, DeployCommandPayload,
@@ -18,6 +21,7 @@ pub use command::{
 };
 pub use hello::{HelloNegotiateRequest, HelloNegotiateResponse};
 pub use log::{LogChunk, LogEnd, LogError, LogErrorCode, LogRequest, LogStreamKind};
+pub use rpc::{RpcInvokeError, RpcInvokeRequest, RpcInvokeResponse, RpcInvokeTargetService};
 
 pub type StringMap = BTreeMap<String, String>;
 
@@ -47,6 +51,10 @@ pub enum MessageType {
     LogsChunk,
     #[serde(rename = "logs.end")]
     LogsEnd,
+    #[serde(rename = "rpc.invoke")]
+    RpcInvoke,
+    #[serde(rename = "bindings.cert.upload")]
+    BindingsCertUpload,
 }
 
 #[cfg(test)]

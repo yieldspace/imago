@@ -13,7 +13,6 @@ const HELLO_REQUIRED_FEATURES: [&str; 2] = ["command.start", "command.event"];
 
 pub(crate) fn resolve_service_name(
     explicit_name: Option<&str>,
-    env: Option<&str>,
     project_root: &Path,
 ) -> anyhow::Result<String> {
     if let Some(name) = explicit_name {
@@ -21,7 +20,7 @@ pub(crate) fn resolve_service_name(
         build::validate_service_name(trimmed)?;
         return Ok(trimmed.to_string());
     }
-    build::load_service_name(env, project_root)
+    build::load_service_name(project_root)
 }
 
 pub(crate) async fn negotiate_hello(

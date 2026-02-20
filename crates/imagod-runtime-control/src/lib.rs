@@ -10,6 +10,7 @@ use imagod_ipc::{
     RunnerInboundResponse, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
     verify_invocation_token, verify_manager_auth_proof,
 };
+use imagod_runtime_internal::{RuntimeInvokeRequest, RuntimeInvoker};
 use tokio::{
     net::{UnixListener, UnixStream},
     sync::{Semaphore, watch},
@@ -256,6 +257,7 @@ pub fn apply_retryable_heartbeat_failure(consecutive_failures: &mut u32) -> Hear
 pub async fn run_inbound_server(
     listener: UnixListener,
     bootstrap: RunnerBootstrap,
+    runtime_invoker: Arc<dyn RuntimeInvoker>,
     shutdown_tx: watch::Sender<bool>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
@@ -302,11 +304,12 @@ pub async fn run_inbound_server(
         };
 
         let bootstrap = bootstrap.clone();
+        let runtime_invoker = runtime_invoker.clone();
         let shutdown_tx = shutdown_tx.clone();
         tokio::spawn(async move {
             let _permit = permit;
             let mut stream = stream;
-            handle_inbound_connection(&mut stream, bootstrap, shutdown_tx).await;
+            handle_inbound_connection(&mut stream, bootstrap, runtime_invoker, shutdown_tx).await;
         });
     }
 }
@@ -324,6 +327,7 @@ pub fn should_retry_inbound_accept(err: &std::io::Error) -> bool {
 pub async fn handle_inbound_connection(
     stream: &mut UnixStream,
     bootstrap: RunnerBootstrap,
+    runtime_invoker: Arc<dyn RuntimeInvoker>,
     shutdown_tx: watch::Sender<bool>,
 ) {
     let request = match time::timeout(
@@ -355,7 +359,8 @@ pub async fn handle_inbound_connection(
         }
     };
 
-    let response = handle_inbound_request(&bootstrap, request, &shutdown_tx).await;
+    let response =
+        handle_inbound_request(&bootstrap, runtime_invoker.as_ref(), request, &shutdown_tx).await;
     let _ = DbusP2pTransport::write_message(stream, &response).await;
 }
 
@@ -382,6 +387,7 @@ pub fn validate_shutdown_auth(
 /// Handles a single inbound request and performs token validation for invoke calls.
 pub async fn handle_inbound_request(
     bootstrap: &RunnerBootstrap,
+    runtime_invoker: &dyn RuntimeInvoker,
     request: RunnerInboundRequest,
     shutdown_tx: &watch::Sender<bool>,
 ) -> RunnerInboundResponse {
@@ -400,7 +406,7 @@ pub async fn handle_inbound_request(
         RunnerInboundRequest::Invoke {
             interface_id,
             function,
-            payload_cbor: _,
+            payload_cbor,
             token,
         } => {
             let claims = match verify_invocation_token(&bootstrap.invocation_secret, &token) {
@@ -426,14 +432,31 @@ pub async fn handle_inbound_request(
                 });
             }
 
-            RunnerInboundResponse::Error(IpcErrorPayload {
-                code: ErrorCode::Internal,
-                stage: "runner.invoke".to_string(),
-                message: format!(
-                    "invoke is not implemented yet (interface={}, function={})",
-                    interface_id, function
-                ),
-            })
+            let invoke_request = RuntimeInvokeRequest {
+                app_type: bootstrap.app_type,
+                runner_id: bootstrap.runner_id.clone(),
+                service_name: bootstrap.service_name.clone(),
+                release_hash: bootstrap.release_hash.clone(),
+                component_path: bootstrap.component_path.clone(),
+                args: bootstrap.args.clone(),
+                envs: bootstrap.envs.clone(),
+                wasi_mounts: bootstrap.wasi_mounts.clone(),
+                plugin_dependencies: bootstrap.plugin_dependencies.clone(),
+                capabilities: bootstrap.capabilities.clone(),
+                bindings: bootstrap.bindings.clone(),
+                manager_control_endpoint: bootstrap.manager_control_endpoint.clone(),
+                manager_auth_secret: bootstrap.manager_auth_secret.clone(),
+                interface_id,
+                function,
+                payload_cbor,
+            };
+
+            match runtime_invoker.invoke_component(invoke_request).await {
+                Ok(result_cbor) => RunnerInboundResponse::InvokeResult {
+                    payload_cbor: result_cbor,
+                },
+                Err(err) => RunnerInboundResponse::Error(IpcErrorPayload::from_error(&err)),
+            }
         }
     }
 }
@@ -444,11 +467,27 @@ mod tests {
     use std::{
         collections::BTreeMap,
         path::{Path, PathBuf},
+        sync::Arc,
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use imagod_ipc::{ControlRequest, RunnerAppType, random_secret_hex};
+    use imagod_ipc::{
+        ControlRequest, InvocationTokenClaims, RunnerAppType, issue_invocation_token,
+        now_unix_secs, random_secret_hex,
+    };
     use tokio::sync::oneshot;
+
+    struct EchoRuntimeInvoker;
+
+    #[async_trait]
+    impl RuntimeInvoker for EchoRuntimeInvoker {
+        async fn invoke_component(
+            &self,
+            request: RuntimeInvokeRequest,
+        ) -> Result<Vec<u8>, ImagodError> {
+            Ok(request.payload_cbor)
+        }
+    }
 
     fn new_test_root(prefix: &str) -> PathBuf {
         let ts = SystemTime::now()
@@ -471,6 +510,7 @@ mod tests {
             component_path: root.join("component.wasm"),
             args: Vec::new(),
             envs: BTreeMap::new(),
+            wasi_mounts: Vec::new(),
             bindings: Vec::new(),
             plugin_dependencies: Vec::new(),
             capabilities: imagod_ipc::CapabilityPolicy::default(),
@@ -499,8 +539,10 @@ mod tests {
         let bootstrap = new_test_bootstrap(&root, "runner.sock");
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+        let runtime_invoker = EchoRuntimeInvoker;
         let response = handle_inbound_request(
             &bootstrap,
+            &runtime_invoker,
             RunnerInboundRequest::ShutdownRunner {
                 manager_auth_proof: "invalid-proof".to_string(),
             },
@@ -529,8 +571,10 @@ mod tests {
         let manager_auth_proof =
             compute_manager_auth_proof(&bootstrap.manager_auth_secret, &bootstrap.runner_id)
                 .expect("manager proof should compute");
+        let runtime_invoker = EchoRuntimeInvoker;
         let response = handle_inbound_request(
             &bootstrap,
+            &runtime_invoker,
             RunnerInboundRequest::ShutdownRunner { manager_auth_proof },
             &shutdown_tx,
         )
@@ -541,6 +585,51 @@ mod tests {
             "valid auth should be accepted"
         );
         assert!(*shutdown_rx.borrow(), "shutdown signal should be requested");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn invoke_returns_payload_cbor_on_valid_token() {
+        let root = new_test_root("invoke-success");
+        let bootstrap = new_test_bootstrap(&root, "runner.sock");
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let payload_cbor = vec![0x01, 0x02, 0x03];
+
+        let token = issue_invocation_token(
+            &bootstrap.invocation_secret,
+            InvocationTokenClaims {
+                source_service: "remote".to_string(),
+                target_service: bootstrap.service_name.clone(),
+                wit: "yieldspace:service/invoke".to_string(),
+                exp: now_unix_secs() + 30,
+                nonce: "nonce-invoke-test".to_string(),
+            },
+        )
+        .expect("token should be issued");
+
+        let runtime_invoker = EchoRuntimeInvoker;
+        let response = handle_inbound_request(
+            &bootstrap,
+            &runtime_invoker,
+            RunnerInboundRequest::Invoke {
+                interface_id: "yieldspace:service/invoke".to_string(),
+                function: "call".to_string(),
+                payload_cbor: payload_cbor.clone(),
+                token,
+            },
+            &shutdown_tx,
+        )
+        .await;
+
+        match response {
+            RunnerInboundResponse::InvokeResult {
+                payload_cbor: actual,
+            } => {
+                assert_eq!(actual, payload_cbor);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -558,6 +647,7 @@ mod tests {
         let server_task = tokio::spawn(run_inbound_server(
             listener,
             bootstrap.clone(),
+            Arc::new(EchoRuntimeInvoker),
             shutdown_tx.clone(),
             shutdown_rx,
         ));

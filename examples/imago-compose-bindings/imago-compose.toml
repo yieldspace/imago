@@ -1,0 +1,19 @@
+[[compose.devstack.services]]
+imago = "services/rpc-greeter/imago.toml"
+
+[[compose.devstack.services]]
+imago = "services/cli-client/imago.toml"
+
+[[compose.prepare.services]]
+imago = "services/rpc-greeter/imago.toml"
+
+[profile.dev]
+config = "devstack"
+
+[profile.prepare]
+config = "prepare"
+
+[target.default]
+remote = "127.0.0.1:4443"
+server_name = "localhost"
+client_key = "certs/client.key"

@@ -11,10 +11,12 @@ use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{
     CapabilityPolicy, PluginDependency, RunnerAppType, RunnerSocketConfig, RunnerSocketDirection,
+    RunnerWasiMount, ServiceBinding,
 };
 use imagod_runtime_internal::{
     ComponentRuntime, HttpComponentSupervisor, PluginResolver, RuntimeHttpRequest,
-    RuntimeHttpResponse, RuntimeHttpWorkItem, RuntimeRunRequest,
+    RuntimeHttpResponse, RuntimeHttpWorkItem, RuntimeInvokeRequest, RuntimeInvoker,
+    RuntimeRunRequest,
 };
 use tokio::{
     sync::{mpsc, oneshot, watch},
@@ -22,17 +24,17 @@ use tokio::{
 };
 use wasmtime::{
     Config, Engine, Store,
-    component::{Component, Linker},
+    component::{Component, Func, Linker},
 };
 use wasmtime_wasi::{
-    WasiCtxBuilder,
+    DirPerms, FilePerms, WasiCtxBuilder,
     p2::{add_to_linker_async, bindings::Command},
     sockets::SocketAddrUse,
 };
 use wasmtime_wasi_http::{add_only_http_to_linker_async, bindings::Proxy};
 
 use crate::{
-    HTTP_REQUEST_QUEUE_CAPACITY, NativePluginContext, STAGE_RUNTIME, WasiState,
+    HTTP_REQUEST_QUEUE_CAPACITY, NativePluginContext, STAGE_RUNTIME, WasiState, app_type_text,
     capability_checker::DefaultCapabilityChecker,
     http_supervisor::{DefaultHttpComponentSupervisor, run_http_worker},
     map_runtime_error,
@@ -40,6 +42,7 @@ use crate::{
     plugin_resolver::{
         DefaultPluginResolver, instantiate_plugin_dependencies, register_plugin_import_shims,
     },
+    rpc_values::{decode_payload_values, encode_payload_values, placeholder_values},
 };
 
 /// Runner-local wrapper around a configured Wasmtime engine.
@@ -123,6 +126,7 @@ impl WasmRuntime {
         &self,
         args: &[String],
         envs: &BTreeMap<String, String>,
+        wasi_mounts: &[RunnerWasiMount],
         socket: Option<&RunnerSocketConfig>,
         native_plugin_context: NativePluginContext,
     ) -> Result<Store<WasiState>, ImagodError> {
@@ -137,6 +141,9 @@ impl WasmRuntime {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect::<Vec<_>>();
             builder.envs(&vars);
+        }
+        if !wasi_mounts.is_empty() {
+            configure_wasi_mounts(&mut builder, wasi_mounts)?;
         }
         if let Some(socket) = socket {
             configure_socket_policy(&mut builder, socket)?;
@@ -187,10 +194,12 @@ impl WasmRuntime {
         component_path: &Path,
         args: &[String],
         envs: &BTreeMap<String, String>,
+        wasi_mounts: &[RunnerWasiMount],
         socket: Option<&RunnerSocketConfig>,
         native_plugin_context: NativePluginContext,
         plugin_dependencies: &[PluginDependency],
         capabilities: &CapabilityPolicy,
+        bindings: &[ServiceBinding],
         mut shutdown: watch::Receiver<bool>,
         epoch_tick_interval_ms: u64,
     ) -> Result<(), ImagodError> {
@@ -205,7 +214,7 @@ impl WasmRuntime {
         add_to_linker_async(&mut linker)
             .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
 
-        let mut store = self.build_store(args, envs, socket, native_plugin_context)?;
+        let mut store = self.build_store(args, envs, wasi_mounts, socket, native_plugin_context)?;
         let available_plugins = instantiate_plugin_dependencies(
             self.plugin_resolver.as_ref(),
             self.capability_checker.as_ref(),
@@ -229,6 +238,7 @@ impl WasmRuntime {
             "app",
             &explicit_dependency_names,
             capabilities,
+            bindings,
             &available_plugins,
             None,
         )?;
@@ -269,9 +279,11 @@ impl WasmRuntime {
         component_path: &Path,
         args: &[String],
         envs: &BTreeMap<String, String>,
+        wasi_mounts: &[RunnerWasiMount],
         native_plugin_context: NativePluginContext,
         plugin_dependencies: &[PluginDependency],
         capabilities: &CapabilityPolicy,
+        bindings: &[ServiceBinding],
         mut shutdown: watch::Receiver<bool>,
         epoch_tick_interval_ms: u64,
         http_worker_count: u32,
@@ -291,7 +303,7 @@ impl WasmRuntime {
         add_only_http_to_linker_async(&mut linker)
             .map_err(|e| map_runtime_error(format!("failed to add WASI HTTP linker: {e}")))?;
 
-        let mut store = self.build_store(args, envs, None, native_plugin_context)?;
+        let mut store = self.build_store(args, envs, wasi_mounts, None, native_plugin_context)?;
         let available_plugins = instantiate_plugin_dependencies(
             self.plugin_resolver.as_ref(),
             self.capability_checker.as_ref(),
@@ -315,6 +327,7 @@ impl WasmRuntime {
             "app",
             &explicit_dependency_names,
             capabilities,
+            bindings,
             &available_plugins,
             None,
         )?;
@@ -363,6 +376,225 @@ impl WasmRuntime {
             )
         })?
     }
+
+    async fn run_rpc_component_async(
+        &self,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> Result<(), ImagodError> {
+        wait_for_shutdown(&mut shutdown).await;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn invoke_rpc_component_async(
+        &self,
+        component_path: &Path,
+        args: &[String],
+        envs: &BTreeMap<String, String>,
+        wasi_mounts: &[RunnerWasiMount],
+        native_plugin_context: NativePluginContext,
+        plugin_dependencies: &[PluginDependency],
+        capabilities: &CapabilityPolicy,
+        bindings: &[ServiceBinding],
+        interface_id: &str,
+        function: &str,
+        payload_cbor: &[u8],
+    ) -> Result<Vec<u8>, ImagodError> {
+        let component = Component::from_file(&self.engine, component_path).map_err(|e| {
+            map_runtime_error(format!(
+                "failed to load component {}: {e}",
+                component_path.display()
+            ))
+        })?;
+
+        let mut linker = Linker::new(&self.engine);
+        add_to_linker_async(&mut linker)
+            .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
+
+        let mut store = self.build_store(args, envs, wasi_mounts, None, native_plugin_context)?;
+        let available_plugins = instantiate_plugin_dependencies(
+            self.plugin_resolver.as_ref(),
+            self.capability_checker.as_ref(),
+            &self.native_plugins,
+            &self.engine,
+            &mut store,
+            plugin_dependencies,
+        )
+        .await?;
+        let explicit_dependency_names = self
+            .plugin_resolver
+            .all_dependency_names(plugin_dependencies);
+        register_plugin_import_shims(
+            self.plugin_resolver.as_ref(),
+            self.capability_checker.as_ref(),
+            &self.native_plugins,
+            &self.engine,
+            &mut linker,
+            &mut store,
+            &component,
+            "app",
+            &explicit_dependency_names,
+            capabilities,
+            bindings,
+            &available_plugins,
+            None,
+        )?;
+
+        let instance = linker
+            .instantiate_async(&mut store, &component)
+            .await
+            .map_err(|e| map_runtime_error(format!("rpc component instantiate failed: {e}")))?;
+        let func = resolve_component_export_func(&mut store, &instance, interface_id, function)
+            .map_err(|e| {
+                map_runtime_error(format!(
+                    "failed to resolve rpc export '{}.{}': {e}",
+                    interface_id, function
+                ))
+            })?;
+
+        if let Ok(typed_func) = func.typed::<(Vec<u8>,), (Vec<u8>,)>(&store) {
+            let (result_bytes,) = typed_func
+                .call_async(&mut store, (payload_cbor.to_vec(),))
+                .await
+                .map_err(|e| map_runtime_error(format!("rpc invoke trap: {e}")))?;
+            typed_func
+                .post_return_async(&mut store)
+                .await
+                .map_err(|e| map_runtime_error(format!("rpc invoke post-return failed: {e}")))?;
+            return Ok(result_bytes);
+        }
+
+        if let Ok(typed_func) = func.typed::<(Vec<u8>,), (Result<Vec<u8>, String>,)>(&store) {
+            let (result_value,) = typed_func
+                .call_async(&mut store, (payload_cbor.to_vec(),))
+                .await
+                .map_err(|e| map_runtime_error(format!("rpc invoke trap: {e}")))?;
+            typed_func
+                .post_return_async(&mut store)
+                .await
+                .map_err(|e| map_runtime_error(format!("rpc invoke post-return failed: {e}")))?;
+            return match result_value {
+                Ok(result_bytes) => Ok(result_bytes),
+                Err(message) => Err(map_runtime_error(format!(
+                    "rpc invoke returned error: {message}"
+                ))),
+            };
+        }
+
+        let func_ty = func.ty(&store);
+        let param_types = func_ty.params().map(|(_, ty)| ty).collect::<Vec<_>>();
+        let result_types = func_ty.results().collect::<Vec<_>>();
+        let params = decode_payload_values(payload_cbor, &param_types).map_err(|err| {
+            map_runtime_error(format!(
+                "failed to decode rpc payload for '{}.{}': {}",
+                interface_id, function, err.message
+            ))
+        })?;
+        let mut results = placeholder_values(&result_types)?;
+        func.call_async(&mut store, &params, &mut results)
+            .await
+            .map_err(|e| map_runtime_error(format!("rpc invoke trap: {e}")))?;
+        func.post_return_async(&mut store)
+            .await
+            .map_err(|e| map_runtime_error(format!("rpc invoke post-return failed: {e}")))?;
+        encode_payload_values(&results, &result_types).map_err(|err| {
+            map_runtime_error(format!(
+                "failed to encode rpc result payload: {}",
+                err.message
+            ))
+        })
+    }
+
+    async fn invoke_rpc_component(
+        &self,
+        request: RuntimeInvokeRequest,
+    ) -> Result<Vec<u8>, ImagodError> {
+        let RuntimeInvokeRequest {
+            app_type,
+            runner_id,
+            service_name,
+            release_hash,
+            component_path,
+            args,
+            envs,
+            wasi_mounts,
+            plugin_dependencies,
+            capabilities,
+            bindings,
+            manager_control_endpoint,
+            manager_auth_secret,
+            interface_id,
+            function,
+            payload_cbor,
+        } = request;
+
+        if app_type != RunnerAppType::Rpc {
+            return Err(map_runtime_error(format!(
+                "rpc invoke is only allowed when app_type=rpc (got: {})",
+                app_type_text(app_type)
+            )));
+        }
+
+        let native_plugin_context = NativePluginContext::new(
+            service_name,
+            release_hash,
+            runner_id,
+            app_type,
+            manager_control_endpoint,
+            manager_auth_secret,
+        );
+        self.invoke_rpc_component_async(
+            &component_path,
+            &args,
+            &envs,
+            &wasi_mounts,
+            native_plugin_context,
+            &plugin_dependencies,
+            &capabilities,
+            &bindings,
+            &interface_id,
+            &function,
+            &payload_cbor,
+        )
+        .await
+    }
+}
+
+fn resolve_component_export_func(
+    mut store: impl wasmtime::AsContextMut<Data = WasiState>,
+    instance: &wasmtime::component::Instance,
+    interface_name: &str,
+    function_name: &str,
+) -> Result<Func, ImagodError> {
+    let interface_index = instance
+        .get_export_index(store.as_context_mut(), None, interface_name)
+        .ok_or_else(|| {
+            map_runtime_error(format!(
+                "rpc export interface '{}' was not found",
+                interface_name
+            ))
+        })?;
+    let function_index = instance
+        .get_export_index(
+            store.as_context_mut(),
+            Some(&interface_index),
+            function_name,
+        )
+        .or_else(|| instance.get_export_index(store.as_context_mut(), None, function_name))
+        .ok_or_else(|| {
+            map_runtime_error(format!(
+                "rpc export function '{}.{}' was not found",
+                interface_name, function_name
+            ))
+        })?;
+    instance
+        .get_func(store.as_context_mut(), function_index)
+        .ok_or_else(|| {
+            map_runtime_error(format!(
+                "rpc export '{}.{}' is not a function",
+                interface_name, function_name
+            ))
+        })
 }
 
 fn dispatch_http_work_item(
@@ -413,17 +645,27 @@ impl ComponentRuntime for WasmRuntime {
             component_path,
             args,
             envs,
+            wasi_mounts,
             socket,
             plugin_dependencies,
             capabilities,
+            bindings,
+            manager_control_endpoint,
+            manager_auth_secret,
             shutdown,
             epoch_tick_interval_ms,
             http_worker_count,
             http_worker_queue_capacity,
             http_ready_tx,
         } = request;
-        let native_plugin_context =
-            NativePluginContext::new(service_name, release_hash, runner_id, app_type);
+        let native_plugin_context = NativePluginContext::new(
+            service_name,
+            release_hash,
+            runner_id,
+            app_type,
+            manager_control_endpoint,
+            manager_auth_secret,
+        );
 
         match app_type {
             RunnerAppType::Cli => {
@@ -436,14 +678,24 @@ impl ComponentRuntime for WasmRuntime {
                     &component_path,
                     &args,
                     &envs,
+                    &wasi_mounts,
                     None,
                     native_plugin_context.clone(),
                     &plugin_dependencies,
                     &capabilities,
+                    &bindings,
                     shutdown,
                     epoch_tick_interval_ms,
                 )
                 .await
+            }
+            RunnerAppType::Rpc => {
+                if socket.is_some() {
+                    return Err(map_runtime_error(
+                        "socket config is only allowed when app_type=socket".to_string(),
+                    ));
+                }
+                self.run_rpc_component_async(shutdown).await
             }
             RunnerAppType::Http => {
                 if socket.is_some() {
@@ -455,9 +707,11 @@ impl ComponentRuntime for WasmRuntime {
                     &component_path,
                     &args,
                     &envs,
+                    &wasi_mounts,
                     native_plugin_context.clone(),
                     &plugin_dependencies,
                     &capabilities,
+                    &bindings,
                     shutdown,
                     epoch_tick_interval_ms,
                     http_worker_count,
@@ -476,10 +730,12 @@ impl ComponentRuntime for WasmRuntime {
                     &component_path,
                     &args,
                     &envs,
+                    &wasi_mounts,
                     Some(socket),
                     native_plugin_context,
                     &plugin_dependencies,
                     &capabilities,
+                    &bindings,
                     shutdown,
                     epoch_tick_interval_ms,
                 )
@@ -493,6 +749,16 @@ impl ComponentRuntime for WasmRuntime {
         request: RuntimeHttpRequest,
     ) -> Result<RuntimeHttpResponse, ImagodError> {
         self.handle_http_request_async(request).await
+    }
+}
+
+#[async_trait]
+impl RuntimeInvoker for WasmRuntime {
+    async fn invoke_component(
+        &self,
+        request: RuntimeInvokeRequest,
+    ) -> Result<Vec<u8>, ImagodError> {
+        self.invoke_rpc_component(request).await
     }
 }
 
@@ -514,6 +780,34 @@ fn configure_socket_policy(
         let allowed = socket_addr_allowed(address, use_kind, listen_socket, direction);
         Box::pin(async move { allowed })
     });
+    Ok(())
+}
+
+fn configure_wasi_mounts(
+    builder: &mut WasiCtxBuilder,
+    mounts: &[RunnerWasiMount],
+) -> Result<(), ImagodError> {
+    for mount in mounts {
+        let (dir_perms, file_perms) = if mount.read_only {
+            (DirPerms::READ, FilePerms::READ)
+        } else {
+            (DirPerms::all(), FilePerms::all())
+        };
+        builder
+            .preopened_dir(
+                &mount.host_path,
+                mount.guest_path.as_str(),
+                dir_perms,
+                file_perms,
+            )
+            .map_err(|err| {
+                map_runtime_error(format!(
+                    "failed to preopen mount {} -> {}: {err}",
+                    mount.host_path.display(),
+                    mount.guest_path
+                ))
+            })?;
+    }
     Ok(())
 }
 
@@ -548,8 +842,14 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imagod_ipc::{RunnerSocketConfig, RunnerSocketProtocol};
-    use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf};
+    use imagod_ipc::{RunnerSocketConfig, RunnerSocketProtocol, RunnerWasiMount};
+    use std::{
+        collections::BTreeMap,
+        fs,
+        net::SocketAddr,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn sample_socket_config() -> RunnerSocketConfig {
         RunnerSocketConfig {
@@ -567,6 +867,14 @@ mod tests {
             headers: Vec::new(),
             body: Vec::new(),
         }
+    }
+
+    fn temp_mount_root(prefix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("imago-runtime-wasi-mount-{prefix}-{nonce}"))
     }
 
     #[tokio::test]
@@ -600,9 +908,13 @@ mod tests {
                 component_path: PathBuf::from("/tmp/unused.wasm"),
                 args: Vec::new(),
                 envs: BTreeMap::new(),
+                wasi_mounts: Vec::new(),
                 socket: None,
                 plugin_dependencies: Vec::new(),
                 capabilities: CapabilityPolicy::default(),
+                bindings: Vec::new(),
+                manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+                manager_auth_secret: "secret".to_string(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: 50,
                 http_worker_count: 2,
@@ -632,9 +944,13 @@ mod tests {
                 component_path: PathBuf::from("/tmp/non-existent-socket-component.wasm"),
                 args: Vec::new(),
                 envs: BTreeMap::new(),
+                wasi_mounts: Vec::new(),
                 socket: Some(sample_socket_config()),
                 plugin_dependencies: Vec::new(),
                 capabilities: CapabilityPolicy::default(),
+                bindings: Vec::new(),
+                manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+                manager_auth_secret: "secret".to_string(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: 50,
                 http_worker_count: 2,
@@ -664,9 +980,13 @@ mod tests {
                 component_path: PathBuf::from("/tmp/non-existent-http-component.wasm"),
                 args: Vec::new(),
                 envs: BTreeMap::new(),
+                wasi_mounts: Vec::new(),
                 socket: None,
                 plugin_dependencies: Vec::new(),
                 capabilities: CapabilityPolicy::default(),
+                bindings: Vec::new(),
+                manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+                manager_auth_secret: "secret".to_string(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: 50,
                 http_worker_count: 2,
@@ -681,6 +1001,79 @@ mod tests {
             "unexpected message: {}",
             err.message
         );
+    }
+
+    #[tokio::test]
+    async fn rpc_type_returns_without_loading_component_when_shutdown_already_signaled() {
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let (_shutdown_tx, shutdown_rx) = watch::channel(true);
+        runtime
+            .run_component(RuntimeRunRequest {
+                app_type: RunnerAppType::Rpc,
+                runner_id: "runner-test".to_string(),
+                service_name: "svc-test".to_string(),
+                release_hash: "release-test".to_string(),
+                component_path: PathBuf::from("/tmp/non-existent-rpc-component.wasm"),
+                args: Vec::new(),
+                envs: BTreeMap::new(),
+                wasi_mounts: Vec::new(),
+                socket: None,
+                plugin_dependencies: Vec::new(),
+                capabilities: CapabilityPolicy::default(),
+                bindings: Vec::new(),
+                manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+                manager_auth_secret: "secret".to_string(),
+                shutdown: shutdown_rx,
+                epoch_tick_interval_ms: 50,
+                http_worker_count: 2,
+                http_worker_queue_capacity: 4,
+                http_ready_tx: None,
+            })
+            .await
+            .expect("rpc run should exit cleanly when shutdown is already signaled");
+    }
+
+    #[tokio::test]
+    async fn rpc_type_waits_for_shutdown_signal() {
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let run_future = runtime.run_component(RuntimeRunRequest {
+            app_type: RunnerAppType::Rpc,
+            runner_id: "runner-test".to_string(),
+            service_name: "svc-test".to_string(),
+            release_hash: "release-test".to_string(),
+            component_path: PathBuf::from("/tmp/non-existent-rpc-component.wasm"),
+            args: Vec::new(),
+            envs: BTreeMap::new(),
+            wasi_mounts: Vec::new(),
+            socket: None,
+            plugin_dependencies: Vec::new(),
+            capabilities: CapabilityPolicy::default(),
+            bindings: Vec::new(),
+            manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+            manager_auth_secret: "secret".to_string(),
+            shutdown: shutdown_rx,
+            epoch_tick_interval_ms: 50,
+            http_worker_count: 2,
+            http_worker_queue_capacity: 4,
+            http_ready_tx: None,
+        });
+        tokio::pin!(run_future);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut run_future)
+                .await
+                .is_err(),
+            "rpc runner should stay alive until shutdown is signaled"
+        );
+
+        shutdown_tx
+            .send(true)
+            .expect("shutdown sender should still be connected");
+        tokio::time::timeout(Duration::from_secs(1), &mut run_future)
+            .await
+            .expect("rpc runner should stop promptly after shutdown")
+            .expect("rpc run should stop without error");
     }
 
     #[tokio::test]
@@ -751,5 +1144,34 @@ mod tests {
         );
         assert!(outbound_allowed);
         assert!(!outbound_denied);
+    }
+
+    #[test]
+    fn configure_wasi_mounts_accepts_read_write_and_read_only() {
+        let root = temp_mount_root("permissions");
+        let rw = root.join("rw");
+        let ro = root.join("ro");
+        fs::create_dir_all(&rw).expect("rw dir should be created");
+        fs::create_dir_all(&ro).expect("ro dir should be created");
+
+        let mut builder = WasiCtxBuilder::new();
+        configure_wasi_mounts(
+            &mut builder,
+            &[
+                RunnerWasiMount {
+                    host_path: rw,
+                    guest_path: "/guest/rw".to_string(),
+                    read_only: false,
+                },
+                RunnerWasiMount {
+                    host_path: ro,
+                    guest_path: "/guest/ro".to_string(),
+                    read_only: true,
+                },
+            ],
+        )
+        .expect("mount configuration should succeed");
+
+        let _ = fs::remove_dir_all(root);
     }
 }

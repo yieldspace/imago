@@ -1,0 +1,5 @@
+package e2e:components;
+
+world rpc-caller {
+  import acme:clock/api;
+}

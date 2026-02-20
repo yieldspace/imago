@@ -129,7 +129,7 @@ impl ManifestValidator for DefaultManifestValidator {
                 }
                 Ok((Some(http.port), Some(http.max_body_bytes)))
             }
-            RunnerAppType::Cli | RunnerAppType::Socket => {
+            RunnerAppType::Cli | RunnerAppType::Rpc | RunnerAppType::Socket => {
                 if manifest.http.is_some() {
                     return Err(super::map_bad_manifest(
                         "manifest.http is only allowed when type=\"http\"".to_string(),
@@ -164,7 +164,7 @@ impl ManifestValidator for DefaultManifestValidator {
                 })?;
                 Ok(Some(socket))
             }
-            RunnerAppType::Cli | RunnerAppType::Http => {
+            RunnerAppType::Cli | RunnerAppType::Rpc | RunnerAppType::Http => {
                 if manifest.socket.is_some() {
                     return Err(super::map_bad_manifest(
                         "manifest.socket is only allowed when type=\"socket\"".to_string(),
@@ -181,9 +181,9 @@ impl ManifestValidator for DefaultManifestValidator {
     ) -> Result<Vec<ServiceBinding>, ImagodError> {
         let mut normalized = Vec::with_capacity(bindings.len());
         for (idx, binding) in bindings.iter().enumerate() {
-            if binding.target.is_empty() {
+            if binding.name.is_empty() {
                 return Err(super::map_bad_manifest(format!(
-                    "manifest.bindings[{idx}].target must not be empty"
+                    "manifest.bindings[{idx}].name must not be empty"
                 )));
             }
             if binding.wit.is_empty() {
@@ -191,14 +191,14 @@ impl ManifestValidator for DefaultManifestValidator {
                     "manifest.bindings[{idx}].wit must not be empty"
                 )));
             }
-            if let Err(err) = self.validate_service_name(&binding.target) {
+            if let Err(err) = self.validate_service_name(&binding.name) {
                 return Err(super::map_bad_manifest(format!(
-                    "manifest.bindings[{idx}].target is invalid '{}': {}",
-                    binding.target, err.message
+                    "manifest.bindings[{idx}].name is invalid '{}': {}",
+                    binding.name, err.message
                 )));
             }
             normalized.push(ServiceBinding {
-                target: binding.target.clone(),
+                name: binding.name.clone(),
                 wit: binding.wit.clone(),
             });
         }

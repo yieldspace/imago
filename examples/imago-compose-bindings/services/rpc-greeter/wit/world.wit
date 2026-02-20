@@ -1,0 +1,9 @@
+package acme:clock;
+
+interface api {
+    now: func() -> string;
+}
+
+world rpc-greeter {
+    export api;
+}

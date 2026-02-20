@@ -23,3 +23,5 @@ target
 .imago/
 .imagod-data/
 examples/**/build/
+
+*.log

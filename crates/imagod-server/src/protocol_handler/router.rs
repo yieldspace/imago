@@ -6,12 +6,16 @@ use std::{
     },
 };
 
+use imago_protocol::messages::{
+    BindingsCertUploadRequest, BindingsCertUploadResponse, RpcInvokeRequest, RpcInvokeResponse,
+};
 use imago_protocol::{
     ArtifactPushRequest, CommandCancelRequest, CommandEventType, CommandPayload,
     CommandStartRequest, CommandStartResponse, CommandState, CommandType, DeployPrepareRequest,
     MessageType, StateRequest, Validate,
 };
 use imagod_common::ImagodError;
+use imagod_config::upsert_tls_known_client_key;
 use imagod_control::{OperationManager, SpawnTransition};
 use serde::Serialize;
 use web_transport_quinn::SendStream;
@@ -21,6 +25,7 @@ use super::{
     envelope_io::{bad_request, event_envelope, payload_as, response_envelope, write_envelope},
     logs_forwarder::LogsForwarder,
     session_loop::ProtocolSession,
+    upsert_dynamic_client_public_key,
 };
 
 impl ProtocolHandler {
@@ -33,6 +38,8 @@ impl ProtocolHandler {
             MessageType::ArtifactCommit => self.handle_commit(request).await,
             MessageType::StateRequest => self.handle_state_request(request).await,
             MessageType::CommandCancel => self.handle_command_cancel(request).await,
+            MessageType::RpcInvoke => self.handle_rpc_invoke(request).await,
+            MessageType::BindingsCertUpload => self.handle_bindings_cert_upload(request),
             _ => Err(ImagodError::new(
                 imago_protocol::ErrorCode::BadRequest,
                 "dispatch",
@@ -90,6 +97,8 @@ impl ProtocolHandler {
                     "logs.request".to_string(),
                     "logs.chunk".to_string(),
                     "logs.end".to_string(),
+                    "rpc.invoke".to_string(),
+                    "bindings.cert.upload".to_string(),
                 ],
                 limits,
             },
@@ -169,6 +178,63 @@ impl ProtocolHandler {
             request.request_id,
             request.correlation_id,
             &response,
+        )
+    }
+
+    async fn handle_rpc_invoke(&self, request: Envelope) -> Result<Envelope, ImagodError> {
+        let payload: RpcInvokeRequest = payload_as(&request)?;
+        payload
+            .validate()
+            .map_err(|e| bad_request("rpc.invoke", e.to_string()))?;
+
+        let response = match self
+            .orchestrator
+            .invoke(
+                &payload.target_service.name,
+                &payload.interface_id,
+                &payload.function,
+                &payload.args_cbor,
+            )
+            .await
+        {
+            Ok(result_cbor) => RpcInvokeResponse::from_result(result_cbor),
+            Err(err) => RpcInvokeResponse::from_error(err.code, err.stage, err.message),
+        };
+
+        response_envelope(
+            MessageType::RpcInvoke,
+            request.request_id,
+            request.correlation_id,
+            &response,
+        )
+    }
+
+    fn handle_bindings_cert_upload(&self, request: Envelope) -> Result<Envelope, ImagodError> {
+        let payload: BindingsCertUploadRequest = payload_as(&request)?;
+        payload
+            .validate()
+            .map_err(|e| bad_request("bindings.cert.upload", e.to_string()))?;
+
+        upsert_tls_known_client_key(
+            self.config_path.as_path(),
+            &payload.authority,
+            &payload.public_key_hex,
+        )?;
+        let updated = upsert_dynamic_client_public_key(&payload.public_key_hex)?;
+        let detail = if updated {
+            format!("registered client key for authority {}", payload.authority)
+        } else {
+            format!(
+                "client key already registered for authority {}",
+                payload.authority
+            )
+        };
+
+        response_envelope(
+            MessageType::BindingsCertUpload,
+            request.request_id,
+            request.correlation_id,
+            &BindingsCertUploadResponse { updated, detail },
         )
     }
 

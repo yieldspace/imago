@@ -1,0 +1,28 @@
+[package]
+name = "e2e"
+version = "0.1.0"
+edition = "2024"
+autobins = false
+
+[features]
+e2e = ["wit-bindgen", "wasi"]
+
+[[bin]]
+name = "e2e_cli_base"
+required-features = ["e2e"]
+
+[[bin]]
+name = "e2e_http"
+required-features = ["e2e"]
+
+[[bin]]
+name = "e2e_rpc_caller"
+required-features = ["e2e"]
+
+[[bin]]
+name = "e2e_rpc_callee"
+required-features = ["e2e"]
+
+[dependencies]
+wit-bindgen = {version = "0.53.1", optional = true}
+wasi = {version = "0.14.7", optional = true}

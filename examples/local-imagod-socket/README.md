@@ -1,52 +1,35 @@
 # local-imagod-socket example
 
-同一マシン上で `imagod` を起動し、`type=socket` の UDP echo アプリを deploy する example です。
+## 目的
 
-このアプリは `tokio::runtime::Builder::new_current_thread()` を使って current-thread runtime を構築し、
-nonblocking UDP 受信キューを反復的に drain して、受信した datagram をすべて送信元へ echo します。
+同一マシンで `type=socket` の UDP echo アプリを deploy し、疎通確認するサンプルです。
 
-## 事前条件
+## 前提
 
-- Rust toolchain（`rustc 1.90` 以上）
-- `wasm32-wasip2` target（未導入なら `rustup target add wasm32-wasip2`）
-- `cargo run -p imago-cli -- certs generate ...` が実行できること
+Rust toolchain と `wasm32-wasip2` target を用意します（未導入なら `rustup target add wasm32-wasip2`）。
 
-## ディレクトリ構成
-
-- `imago.toml`: `type=socket` + `[socket]` 設定（`udp` / `both` / `0.0.0.0:5000`）
-- `imagod.toml`: ローカル `imagod` 設定
-- `Cargo.toml`, `src/main.rs`: tokio current-thread runtime + UDP echo 実装
-- `scripts/generate-certs.sh`: ローカル mTLS 証明書生成
-- `scripts/run-imagod.sh`: ローカル `imagod` 起動
-- `scripts/deploy.sh`: deploy 実行（内部で build も実行）
-
-## 手順
-
-1. 証明書を生成
+## 実行
 
 ```bash
+# ターミナル1
 cd examples/local-imagod-socket
-./scripts/generate-certs.sh
+cargo run -p imagod -- --config imagod.toml
 ```
 
-2. `imagod` を起動（ターミナル1）
-
 ```bash
+# ターミナル2
 cd examples/local-imagod-socket
-./scripts/run-imagod.sh
+# ターミナル1 で imagod が起動したことを確認してから実行
+cargo run -p imago-cli -- deploy --target default
+cargo run -p imago-cli -- logs local-imagod-socket-app --tail 200
 ```
 
-3. deploy を実行（ターミナル2）
+## 成功判定
 
-```bash
-cd examples/local-imagod-socket
-./scripts/deploy.sh
-```
+`imago-cli logs` の出力に `local-imagod-socket-app listening on udp://0.0.0.0:5000` が含まれていれば成功です。
 
-4. UDP echo を確認（ターミナル3）
+## Troubleshooting
 
-```bash
-printf "hello-udp\n" | nc -u -w 1 127.0.0.1 5000
-```
+### known_hosts の古いエントリで deploy が失敗する
 
-`imagod` 側ログに receive/send が出力され、同じ payload が返れば成功です。
+`certificate mismatch` などで `deploy` が失敗する場合のみ、`~/.imago/known_hosts` から `localhost:4443` / `127.0.0.1:4443` の行を削除して再実行してください。

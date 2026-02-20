@@ -1,0 +1,19 @@
+listen_addr = "0.0.0.0:4443"
+storage_root = "/var/lib/imagod/alice"
+server_version = "imagod/imago-compose-bindings-alice"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_key = "/etc/imago/example/certs/alice/server.key"
+admin_public_keys = ["dce247b50928fc9b04e956739b1865e6468ad52303b6959bdfc98864f2354b94"]
+client_public_keys = ["07bce666d6cdb167358c521a757aa2ce2b1478850661b9bcbb1b517dbe6547ea"]
+known_public_keys = {}
+
+[runtime]
+chunk_size = 1048576
+max_inflight_chunks = 16
+upload_session_ttl_secs = 900
+stop_grace_timeout_secs = 30
+runner_ready_timeout_secs = 3
+runner_log_buffer_bytes = 262144
+epoch_tick_interval_ms = 50

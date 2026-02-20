@@ -5,6 +5,8 @@ pub mod native_plugins;
 mod capability_checker;
 mod http_supervisor;
 mod plugin_resolver;
+pub mod rpc_bridge;
+mod rpc_values;
 mod runtime_entry;
 
 use imago_protocol::ErrorCode;
@@ -26,6 +28,8 @@ pub struct NativePluginContext {
     release_hash: String,
     runner_id: String,
     app_type: String,
+    manager_control_endpoint: std::path::PathBuf,
+    manager_auth_secret: String,
 }
 
 impl NativePluginContext {
@@ -34,12 +38,16 @@ impl NativePluginContext {
         release_hash: String,
         runner_id: String,
         app_type: RunnerAppType,
+        manager_control_endpoint: std::path::PathBuf,
+        manager_auth_secret: String,
     ) -> Self {
         Self {
             service_name,
             release_hash,
             runner_id,
             app_type: app_type_text(app_type).to_string(),
+            manager_control_endpoint,
+            manager_auth_secret,
         }
     }
 
@@ -58,11 +66,20 @@ impl NativePluginContext {
     pub fn app_type(&self) -> &str {
         &self.app_type
     }
+
+    pub fn manager_control_endpoint(&self) -> &std::path::Path {
+        &self.manager_control_endpoint
+    }
+
+    pub fn manager_auth_secret(&self) -> &str {
+        &self.manager_auth_secret
+    }
 }
 
 pub fn app_type_text(app_type: RunnerAppType) -> &'static str {
     match app_type {
         RunnerAppType::Cli => "cli",
+        RunnerAppType::Rpc => "rpc",
         RunnerAppType::Http => "http",
         RunnerAppType::Socket => "socket",
     }
@@ -117,6 +134,7 @@ mod tests {
     #[test]
     fn native_plugin_app_type_text_is_stable() {
         assert_eq!(app_type_text(RunnerAppType::Cli), "cli");
+        assert_eq!(app_type_text(RunnerAppType::Rpc), "rpc");
         assert_eq!(app_type_text(RunnerAppType::Http), "http");
         assert_eq!(app_type_text(RunnerAppType::Socket), "socket");
     }
@@ -128,10 +146,17 @@ mod tests {
             "release-test".to_string(),
             "runner-test".to_string(),
             RunnerAppType::Http,
+            std::path::PathBuf::from("/tmp/manager.sock"),
+            "secret".to_string(),
         );
         assert_eq!(context.service_name(), "svc-test");
         assert_eq!(context.release_hash(), "release-test");
         assert_eq!(context.runner_id(), "runner-test");
         assert_eq!(context.app_type(), "http");
+        assert_eq!(
+            context.manager_control_endpoint(),
+            std::path::Path::new("/tmp/manager.sock")
+        );
+        assert_eq!(context.manager_auth_secret(), "secret");
     }
 }

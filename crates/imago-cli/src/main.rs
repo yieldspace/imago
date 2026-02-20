@@ -2,7 +2,10 @@ mod cli;
 mod commands;
 
 use clap::Parser;
-use cli::{CertsCommands, CertsSubcommandArgs, Cli, Commands};
+use cli::{
+    BindingsCertCommands, BindingsCertSubcommandArgs, BindingsCommands, BindingsSubcommandArgs,
+    CertsCommands, CertsSubcommandArgs, Cli, Commands,
+};
 use commands::CommandResult;
 
 async fn dispatch_async(cli: Cli) -> CommandResult {
@@ -10,9 +13,20 @@ async fn dispatch_async(cli: Cli) -> CommandResult {
         Commands::Build(args) => commands::build::run(args),
         Commands::Update(args) => commands::update::run(args).await,
         Commands::Deploy(args) => commands::deploy::run(args).await,
+        Commands::Compose(args) => commands::compose::run(args).await,
         Commands::Run(args) => commands::run::run(args).await,
         Commands::Stop(args) => commands::stop::run(args).await,
         Commands::Logs(args) => commands::logs::run(args).await,
+        Commands::Bindings(BindingsSubcommandArgs { command }) => match command {
+            BindingsCommands::Cert(BindingsCertSubcommandArgs { command }) => match command {
+                BindingsCertCommands::Upload(args) => {
+                    commands::certs::run_bindings_cert_upload(args).await
+                }
+                BindingsCertCommands::Deploy(args) => {
+                    commands::certs::run_bindings_cert_deploy(args).await
+                }
+            },
+        },
         Commands::Certs(CertsSubcommandArgs { command }) => match command {
             CertsCommands::Generate(args) => commands::certs::run_generate(args),
         },
@@ -28,9 +42,24 @@ async fn dispatch_with_project_root_async(
         Commands::Build(args) => commands::build::run_with_project_root(args, project_root),
         Commands::Update(args) => commands::update::run_with_project_root(args, project_root).await,
         Commands::Deploy(args) => commands::deploy::run_with_project_root(args, project_root).await,
+        Commands::Compose(args) => {
+            commands::compose::run_with_project_root(args, project_root).await
+        }
         Commands::Run(args) => commands::run::run_with_project_root(args, project_root).await,
         Commands::Stop(args) => commands::stop::run_with_project_root(args, project_root).await,
         Commands::Logs(args) => commands::logs::run_with_project_root(args, project_root).await,
+        Commands::Bindings(BindingsSubcommandArgs { command }) => match command {
+            BindingsCommands::Cert(BindingsCertSubcommandArgs { command }) => match command {
+                BindingsCertCommands::Upload(args) => {
+                    commands::certs::run_bindings_cert_upload_with_project_root(args, project_root)
+                        .await
+                }
+                BindingsCertCommands::Deploy(args) => {
+                    commands::certs::run_bindings_cert_deploy_with_project_root(args, project_root)
+                        .await
+                }
+            },
+        },
         Commands::Certs(CertsSubcommandArgs { command }) => match command {
             CertsCommands::Generate(args) => commands::certs::run_generate(args),
         },
@@ -66,7 +95,12 @@ fn install_rustls_provider() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{BuildArgs, DeployArgs, RunArgs, StopArgs};
+    use crate::cli::{
+        BindingsCertCommands, BindingsCertDeployArgs, BindingsCertSubcommandArgs,
+        BindingsCertUploadArgs, BindingsCommands, BindingsSubcommandArgs, BuildArgs,
+        ComposeBuildArgs, ComposeCommands, ComposeDeployArgs, ComposeLogsArgs,
+        ComposeSubcommandArgs, ComposeUpdateArgs, DeployArgs, RunArgs, StopArgs,
+    };
     use std::path::PathBuf;
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
@@ -90,7 +124,6 @@ mod tests {
         let result = dispatch_with_project_root_async(
             Cli {
                 command: Commands::Build(BuildArgs {
-                    env: None,
                     target: "default".to_string(),
                 }),
             },
@@ -108,10 +141,7 @@ mod tests {
         let root = new_temp_dir("dispatch-deploy");
         let result = dispatch_with_project_root_async(
             Cli {
-                command: Commands::Deploy(DeployArgs {
-                    env: None,
-                    target: None,
-                }),
+                command: Commands::Deploy(DeployArgs { target: None }),
             },
             &root,
         )
@@ -129,7 +159,6 @@ mod tests {
             Cli {
                 command: Commands::Run(RunArgs {
                     name: None,
-                    env: None,
                     target: None,
                 }),
             },
@@ -150,8 +179,94 @@ mod tests {
                 command: Commands::Stop(StopArgs {
                     name: None,
                     force: false,
-                    env: None,
                     target: None,
+                }),
+            },
+            &root,
+        )
+        .await;
+
+        assert_eq!(result.exit_code, 2);
+        assert!(result.stderr.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dispatches_compose_deploy_and_returns_non_zero_without_imago_compose_toml() {
+        let root = new_temp_dir("dispatch-compose");
+        let result = dispatch_with_project_root_async(
+            Cli {
+                command: Commands::Compose(ComposeSubcommandArgs {
+                    command: ComposeCommands::Deploy(ComposeDeployArgs {
+                        profile: "mini".to_string(),
+                        target: "default".to_string(),
+                    }),
+                }),
+            },
+            &root,
+        )
+        .await;
+
+        assert_eq!(result.exit_code, 2);
+        assert!(result.stderr.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dispatches_compose_build_and_returns_non_zero_without_imago_compose_toml() {
+        let root = new_temp_dir("dispatch-compose-build");
+        let result = dispatch_with_project_root_async(
+            Cli {
+                command: Commands::Compose(ComposeSubcommandArgs {
+                    command: ComposeCommands::Build(ComposeBuildArgs {
+                        profile: "mini".to_string(),
+                        target: "default".to_string(),
+                    }),
+                }),
+            },
+            &root,
+        )
+        .await;
+
+        assert_eq!(result.exit_code, 2);
+        assert!(result.stderr.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dispatches_compose_update_and_returns_non_zero_without_imago_compose_toml() {
+        let root = new_temp_dir("dispatch-compose-update");
+        let result = dispatch_with_project_root_async(
+            Cli {
+                command: Commands::Compose(ComposeSubcommandArgs {
+                    command: ComposeCommands::Update(ComposeUpdateArgs {
+                        profile: "mini".to_string(),
+                    }),
+                }),
+            },
+            &root,
+        )
+        .await;
+
+        assert_eq!(result.exit_code, 2);
+        assert!(result.stderr.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dispatches_compose_logs_and_returns_non_zero_without_imago_compose_toml() {
+        let root = new_temp_dir("dispatch-compose-logs");
+        let result = dispatch_with_project_root_async(
+            Cli {
+                command: Commands::Compose(ComposeSubcommandArgs {
+                    command: ComposeCommands::Logs(ComposeLogsArgs {
+                        profile: "mini".to_string(),
+                        target: "default".to_string(),
+                        name: None,
+                        follow: false,
+                        tail: 200,
+                        json: false,
+                    }),
                 }),
             },
             &root,
@@ -193,5 +308,65 @@ mod tests {
         assert!(result.stderr.is_none());
 
         let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[tokio::test]
+    async fn dispatches_bindings_cert_upload_and_returns_non_zero() {
+        let root = new_temp_dir("dispatch-bindings-upload");
+        let result = dispatch_with_project_root_async(
+            Cli {
+                command: Commands::Bindings(BindingsSubcommandArgs {
+                    command: BindingsCommands::Cert(BindingsCertSubcommandArgs {
+                        command: BindingsCertCommands::Upload(BindingsCertUploadArgs {
+                            public_key:
+                                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                                    .to_string(),
+                            to: "rpc://node-a:4443".to_string(),
+                        }),
+                    }),
+                }),
+            },
+            &root,
+        )
+        .await;
+
+        assert_eq!(result.exit_code, 2);
+        assert!(
+            result
+                .stderr
+                .as_deref()
+                .expect("stderr should be present")
+                .contains("failed to load target configuration")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dispatches_bindings_cert_deploy_and_returns_non_zero() {
+        let root = new_temp_dir("dispatch-bindings-deploy");
+        let result = dispatch_with_project_root_async(
+            Cli {
+                command: Commands::Bindings(BindingsSubcommandArgs {
+                    command: BindingsCommands::Cert(BindingsCertSubcommandArgs {
+                        command: BindingsCertCommands::Deploy(BindingsCertDeployArgs {
+                            to: "rpc://node-a:4443".to_string(),
+                            from: "rpc://node-b:4443".to_string(),
+                        }),
+                    }),
+                }),
+            },
+            &root,
+        )
+        .await;
+
+        assert_eq!(result.exit_code, 2);
+        assert!(
+            result
+                .stderr
+                .as_deref()
+                .expect("stderr should be present")
+                .contains("failed to load target configuration")
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -1,7 +1,14 @@
 //! Configuration loader and validation for the `imagod` manager process.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
+use imago_protocol::ErrorCode;
 use serde::Deserialize;
 
 use imagod_common::ImagodError;
@@ -33,14 +40,18 @@ pub struct ImagodConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-/// TLS material locations for mTLS server startup.
+/// TLS material locations for raw public key mTLS server startup.
 pub struct TlsConfig {
-    /// Server certificate chain in PEM format.
-    pub server_cert: PathBuf,
     /// Server private key in PEM format.
     pub server_key: PathBuf,
-    /// Client CA certificate bundle for client verification.
-    pub client_ca_cert: PathBuf,
+    #[serde(default)]
+    /// Allowlist of admin Ed25519 raw public keys (32-byte hex).
+    pub admin_public_keys: Vec<String>,
+    /// Allowlist of client Ed25519 raw public keys (32-byte hex).
+    pub client_public_keys: Vec<String>,
+    #[serde(default)]
+    /// TOFU-known remote authorities mapped to Ed25519 raw public key hex.
+    pub known_public_keys: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -134,6 +145,263 @@ pub fn resolve_config_path(cli_path: Option<PathBuf>) -> PathBuf {
     PathBuf::from("/etc/imago/imagod.toml")
 }
 
+/// Adds one public key to `tls.client_public_keys` and updates
+/// `tls.known_public_keys[authority]` in `imagod.toml` atomically.
+pub fn upsert_tls_known_client_key(
+    config_path: &Path,
+    authority: &str,
+    public_key_hex: &str,
+) -> Result<(), ImagodError> {
+    let authority = authority.trim();
+    if authority.is_empty() {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.update",
+            "authority must not be empty",
+        ));
+    }
+    parse_ed25519_raw_public_key_hex(public_key_hex).map_err(|reason| {
+        ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.update",
+            format!("public key is invalid: {reason}"),
+        )
+    })?;
+
+    let mut root = load_toml_root(config_path)?;
+    let tls = ensure_tls_table_mut(&mut root)?;
+
+    let key_lower = public_key_hex.to_ascii_lowercase();
+    upsert_client_public_key_value(tls, &key_lower)?;
+    upsert_known_public_key_value(tls, authority, &key_lower)?;
+
+    write_toml_root_atomic(config_path, &root)?;
+    let _ = ImagodConfig::load(config_path)?;
+    Ok(())
+}
+
+/// Adds or updates one `tls.known_public_keys[authority]` entry in
+/// `imagod.toml` atomically.
+pub fn upsert_tls_known_public_key(
+    config_path: &Path,
+    authority: &str,
+    public_key_hex: &str,
+) -> Result<(), ImagodError> {
+    let authority = authority.trim();
+    if authority.is_empty() {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.update",
+            "authority must not be empty",
+        ));
+    }
+    parse_ed25519_raw_public_key_hex(public_key_hex).map_err(|reason| {
+        ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.update",
+            format!("public key is invalid: {reason}"),
+        )
+    })?;
+
+    let mut root = load_toml_root(config_path)?;
+    let tls = ensure_tls_table_mut(&mut root)?;
+
+    let key_lower = public_key_hex.to_ascii_lowercase();
+    upsert_known_public_key_value(tls, authority, &key_lower)?;
+
+    write_toml_root_atomic(config_path, &root)?;
+    let _ = ImagodConfig::load(config_path)?;
+    Ok(())
+}
+
+fn load_toml_root(config_path: &Path) -> Result<toml::Table, ImagodError> {
+    let body = fs::read_to_string(config_path).map_err(|e| {
+        ImagodError::new(
+            ErrorCode::Internal,
+            "config.update",
+            format!("failed to read {}: {e}", config_path.display()),
+        )
+    })?;
+    let parsed: toml::Value = toml::from_str(&body).map_err(|e| {
+        ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.update",
+            format!("failed to parse {}: {e}", config_path.display()),
+        )
+    })?;
+    parsed.as_table().cloned().ok_or_else(|| {
+        ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.update",
+            "root must be a table",
+        )
+    })
+}
+
+fn ensure_tls_table_mut(root: &mut toml::Table) -> Result<&mut toml::Table, ImagodError> {
+    if !root.contains_key("tls") {
+        root.insert("tls".to_string(), toml::Value::Table(toml::Table::new()));
+    }
+    root.get_mut("tls")
+        .and_then(toml::Value::as_table_mut)
+        .ok_or_else(|| {
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.update",
+                "tls must be a table",
+            )
+        })
+}
+
+fn upsert_client_public_key_value(tls: &mut toml::Table, key_hex: &str) -> Result<(), ImagodError> {
+    if !tls.contains_key("client_public_keys") {
+        tls.insert(
+            "client_public_keys".to_string(),
+            toml::Value::Array(Vec::new()),
+        );
+    }
+    let array = tls
+        .get_mut("client_public_keys")
+        .and_then(toml::Value::as_array_mut)
+        .ok_or_else(|| {
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.update",
+                "tls.client_public_keys must be an array",
+            )
+        })?;
+
+    let mut normalized = Vec::with_capacity(array.len() + 1);
+    for (index, value) in array.iter().enumerate() {
+        let text = value.as_str().ok_or_else(|| {
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.update",
+                format!("tls.client_public_keys[{index}] must be a string"),
+            )
+        })?;
+        normalized.push(text.to_ascii_lowercase());
+    }
+    if !normalized.iter().any(|existing| existing == key_hex) {
+        normalized.push(key_hex.to_string());
+    }
+    *array = normalized
+        .into_iter()
+        .map(toml::Value::String)
+        .collect::<Vec<_>>();
+    Ok(())
+}
+
+fn upsert_known_public_key_value(
+    tls: &mut toml::Table,
+    authority: &str,
+    key_hex: &str,
+) -> Result<(), ImagodError> {
+    if !tls.contains_key("known_public_keys") {
+        tls.insert(
+            "known_public_keys".to_string(),
+            toml::Value::Table(toml::Table::new()),
+        );
+    }
+    let map = tls
+        .get_mut("known_public_keys")
+        .and_then(toml::Value::as_table_mut)
+        .ok_or_else(|| {
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.update",
+                "tls.known_public_keys must be a table",
+            )
+        })?;
+
+    for (existing_authority, value) in map.iter() {
+        if value.as_str().is_none() {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                "config.update",
+                format!("tls.known_public_keys['{existing_authority}'] must be a string"),
+            ));
+        }
+    }
+    map.insert(
+        authority.to_string(),
+        toml::Value::String(key_hex.to_string()),
+    );
+    Ok(())
+}
+
+fn write_toml_root_atomic(config_path: &Path, root: &toml::Table) -> Result<(), ImagodError> {
+    let body = toml::to_string_pretty(root).map_err(|e| {
+        ImagodError::new(
+            ErrorCode::Internal,
+            "config.update",
+            format!("failed to serialize config: {e}"),
+        )
+    })?;
+
+    let parent = config_path.parent().ok_or_else(|| {
+        ImagodError::new(
+            ErrorCode::Internal,
+            "config.update",
+            format!("config path has no parent: {}", config_path.display()),
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|e| {
+        ImagodError::new(
+            ErrorCode::Internal,
+            "config.update",
+            format!("failed to create parent dir {}: {e}", parent.display()),
+        )
+    })?;
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp_path = parent.join(format!(
+        ".{}.tmp-{unique}",
+        config_path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or("imagod.toml")
+    ));
+
+    let mut file = fs::File::create(&tmp_path).map_err(|e| {
+        ImagodError::new(
+            ErrorCode::Internal,
+            "config.update",
+            format!("failed to create temp file {}: {e}", tmp_path.display()),
+        )
+    })?;
+    file.write_all(body.as_bytes()).map_err(|e| {
+        ImagodError::new(
+            ErrorCode::Internal,
+            "config.update",
+            format!("failed to write temp file {}: {e}", tmp_path.display()),
+        )
+    })?;
+    file.sync_all().map_err(|e| {
+        ImagodError::new(
+            ErrorCode::Internal,
+            "config.update",
+            format!("failed to flush temp file {}: {e}", tmp_path.display()),
+        )
+    })?;
+
+    fs::rename(&tmp_path, config_path).map_err(|e| {
+        ImagodError::new(
+            ErrorCode::Internal,
+            "config.update",
+            format!(
+                "failed to atomically replace {} with {}: {e}",
+                config_path.display(),
+                tmp_path.display()
+            ),
+        )
+    })?;
+    Ok(())
+}
+
 fn default_listen_addr() -> String {
     "[::]:4443".to_string()
 }
@@ -220,6 +488,40 @@ fn default_deploy_stream_timeout_secs() -> u64 {
     15
 }
 
+/// Parse a 32-byte Ed25519 raw public key from hex.
+pub fn parse_ed25519_raw_public_key_hex(value: &str) -> Result<[u8; 32], String> {
+    if value.len() != 64 {
+        return Err(format!("must be 64 hex characters (got {})", value.len()));
+    }
+
+    let bytes = value.as_bytes();
+    let mut out = [0u8; 32];
+    for (index, slot) in out.iter_mut().enumerate() {
+        let pos = index * 2;
+        let hi = decode_hex_nibble(bytes[pos]).ok_or_else(|| {
+            format!("must contain only hex characters (invalid byte at position {pos})")
+        })?;
+        let lo = decode_hex_nibble(bytes[pos + 1]).ok_or_else(|| {
+            format!(
+                "must contain only hex characters (invalid byte at position {})",
+                pos + 1
+            )
+        })?;
+        *slot = (hi << 4) | lo;
+    }
+
+    Ok(out)
+}
+
+fn decode_hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn is_valid_compatibility_date(value: &str) -> bool {
     if value.len() != 10 {
         return false;
@@ -265,9 +567,8 @@ listen_addr = "127.0.0.1:4443"
 server_version = "imagod/test"
 
 [tls]
-server_cert = "server.crt"
 server_key = "server.key"
-client_ca_cert = "ca.crt"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
 "#,
         );
 
@@ -302,9 +603,8 @@ storage_root = "/tmp/imago-explicit"
 server_version = "imagod/test"
 
 [tls]
-server_cert = "server.crt"
 server_key = "server.key"
-client_ca_cert = "ca.crt"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
 "#,
         );
 
@@ -357,9 +657,8 @@ server_version = "imagod/test"
 protocol_draft = "imago-mvp-v1"
 
 [tls]
-server_cert = "server.crt"
 server_key = "server.key"
-client_ca_cert = "ca.crt"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
 "#,
         );
 
@@ -369,6 +668,256 @@ client_ca_cert = "ca.crt"
         assert!(message.contains("compatibility_date"));
 
         cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_legacy_tls_server_cert_key() {
+        let path = write_temp_config(
+            "rejects_legacy_tls_server_cert_key",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+server_cert = "server.crt"
+"#,
+        );
+
+        let err = ImagodConfig::load(&path).expect_err("config should reject tls.server_cert");
+        assert!(err.to_string().contains("tls.server_cert"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_legacy_tls_client_ca_cert_key() {
+        let path = write_temp_config(
+            "rejects_legacy_tls_client_ca_cert_key",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+client_ca_cert = "ca.crt"
+"#,
+        );
+
+        let err = ImagodConfig::load(&path).expect_err("config should reject tls.client_ca_cert");
+        assert!(err.to_string().contains("tls.client_ca_cert"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_empty_client_public_keys() {
+        let path = write_temp_config(
+            "rejects_empty_client_public_keys",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = []
+"#,
+        );
+
+        let err = ImagodConfig::load(&path).expect_err("config should reject empty allowlist");
+        assert!(err.to_string().contains("tls.client_public_keys"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_duplicate_client_public_keys() {
+        let path = write_temp_config(
+            "rejects_duplicate_client_public_keys",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = [
+  "1111111111111111111111111111111111111111111111111111111111111111",
+  "1111111111111111111111111111111111111111111111111111111111111111",
+]
+"#,
+        );
+
+        let err = ImagodConfig::load(&path).expect_err("config should reject duplicated key");
+        assert!(err.to_string().contains("duplicated"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_non_hex_client_public_key() {
+        let path = write_temp_config(
+            "rejects_non_hex_client_public_key",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["zz11111111111111111111111111111111111111111111111111111111111111"]
+"#,
+        );
+
+        let err = ImagodConfig::load(&path).expect_err("config should reject non-hex key");
+        assert!(err.to_string().contains("hex"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_invalid_length_client_public_key() {
+        let path = write_temp_config(
+            "rejects_invalid_length_client_public_key",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["11111111111111111111111111111111111111111111111111111111111111"]
+"#,
+        );
+
+        let err = ImagodConfig::load(&path).expect_err("config should reject invalid length key");
+        assert!(err.to_string().contains("64 hex"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn accepts_admin_and_known_public_keys() {
+        let path = write_temp_config(
+            "accepts_admin_and_known_public_keys",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+admin_public_keys = ["2222222222222222222222222222222222222222222222222222222222222222"]
+known_public_keys = { "rpc://node-a:4443" = "1111111111111111111111111111111111111111111111111111111111111111", "rpc://node-b:4443" = "2222222222222222222222222222222222222222222222222222222222222222" }
+"#,
+        );
+
+        let config = ImagodConfig::load(&path).expect("config should load");
+        assert_eq!(config.tls.admin_public_keys.len(), 1);
+        assert_eq!(config.tls.known_public_keys.len(), 2);
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_duplicate_admin_public_keys() {
+        let path = write_temp_config(
+            "rejects_duplicate_admin_public_keys",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+admin_public_keys = [
+  "2222222222222222222222222222222222222222222222222222222222222222",
+  "2222222222222222222222222222222222222222222222222222222222222222",
+]
+"#,
+        );
+
+        let err = ImagodConfig::load(&path).expect_err("config should reject duplicated admin key");
+        assert!(err.to_string().contains("tls.admin_public_keys"));
+        assert!(err.to_string().contains("duplicated"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_admin_client_key_overlap() {
+        let path = write_temp_config(
+            "rejects_admin_client_key_overlap",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+admin_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+"#,
+        );
+
+        let err = ImagodConfig::load(&path).expect_err("config should reject overlap");
+        assert!(err.to_string().contains("overlaps"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_known_public_keys_with_empty_authority() {
+        let path = write_temp_config(
+            "rejects_known_public_keys_with_empty_authority",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+admin_public_keys = ["2222222222222222222222222222222222222222222222222222222222222222"]
+known_public_keys = { "" = "2222222222222222222222222222222222222222222222222222222222222222" }
+"#,
+        );
+
+        let err = ImagodConfig::load(&path).expect_err("config should reject empty authority");
+        assert!(err.to_string().contains("authority"));
+        assert!(err.to_string().contains("tls.known_public_keys"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn parses_ed25519_raw_public_key_hex() {
+        let key = parse_ed25519_raw_public_key_hex(
+            "00112233445566778899AABBCCDDEEFF00112233445566778899aabbccddeeff",
+        )
+        .expect("hex parsing should succeed");
+        assert_eq!(
+            key,
+            [
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
+                0xcc, 0xdd, 0xee, 0xff
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_ed25519_raw_public_key_hex() {
+        let err = parse_ed25519_raw_public_key_hex("00xx")
+            .expect_err("hex parser should reject invalid length and chars");
+        assert!(err.contains("64 hex"));
     }
 
     #[test]
@@ -382,9 +931,8 @@ server_version = "imagod/test"
 compatibility_date = "2026-02-10"
 
 [tls]
-server_cert = "server.crt"
 server_key = "server.key"
-client_ca_cert = "ca.crt"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
 
 [runtime]
 stop_grace_timeout_secs = 0
@@ -413,9 +961,8 @@ server_version = "imagod/test"
 compatibility_date = "2026-02-10"
 
 [tls]
-server_cert = "server.crt"
 server_key = "server.key"
-client_ca_cert = "ca.crt"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
 
 [runtime]
 max_artifact_size_bytes = 0
@@ -439,9 +986,8 @@ server_version = "imagod/test"
 compatibility_date = "2026-02-10"
 
 [tls]
-server_cert = "server.crt"
 server_key = "server.key"
-client_ca_cert = "ca.crt"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
 
 [runtime]
 runner_ready_timeout_secs = 0
@@ -469,9 +1015,8 @@ server_version = "imagod/test"
 compatibility_date = "2026-02-10"
 
 [tls]
-server_cert = "server.crt"
 server_key = "server.key"
-client_ca_cert = "ca.crt"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
 
 [runtime]
 runner_log_buffer_bytes = 0
@@ -496,9 +1041,8 @@ server_version = "imagod/test"
 compatibility_date = "2026-02-10"
 
 [tls]
-server_cert = "server.crt"
 server_key = "server.key"
-client_ca_cert = "ca.crt"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
 
 [runtime]
 http_worker_count = 5
@@ -523,9 +1067,8 @@ server_version = "imagod/test"
 compatibility_date = "2026-02-10"
 
 [tls]
-server_cert = "server.crt"
 server_key = "server.key"
-client_ca_cert = "ca.crt"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
 
 [runtime]
 http_worker_queue_capacity = 17
@@ -553,9 +1096,8 @@ server_version = "imagod/test"
 compatibility_date = "2026-02-10"
 
 [tls]
-server_cert = "server.crt"
 server_key = "server.key"
-client_ca_cert = "ca.crt"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
 
 [runtime]
 manager_control_read_timeout_ms = 0
@@ -583,9 +1125,8 @@ server_version = "imagod/test"
 compatibility_date = "2026-02-10"
 
 [tls]
-server_cert = "server.crt"
 server_key = "server.key"
-client_ca_cert = "ca.crt"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
 
 [runtime]
 max_concurrent_sessions = 0
@@ -610,9 +1151,8 @@ server_version = "imagod/test"
 compatibility_date = "2026-02-10"
 
 [tls]
-server_cert = "server.crt"
 server_key = "server.key"
-client_ca_cert = "ca.crt"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
 
 [runtime]
 deploy_stream_timeout_secs = 0
@@ -640,9 +1180,8 @@ server_version = "imagod/test"
 compatibility_date = "2026-02-10"
 
 [tls]
-server_cert = "server.crt"
 server_key = "server.key"
-client_ca_cert = "ca.crt"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
 
 [runtime]
 chunk_size = 0
@@ -666,9 +1205,8 @@ server_version = "imagod/test"
 compatibility_date = "2026-02-10"
 
 [tls]
-server_cert = "server.crt"
 server_key = "server.key"
-client_ca_cert = "ca.crt"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
 
 [runtime]
 max_inflight_chunks = 0
@@ -693,9 +1231,8 @@ server_version = "imagod/test"
 compatibility_date = "2026-02-10"
 
 [tls]
-server_cert = "server.crt"
 server_key = "server.key"
-client_ca_cert = "ca.crt"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
 
 [runtime]
 chunk_size = 8388609
@@ -705,6 +1242,60 @@ chunk_size = 8388609
         let err =
             ImagodConfig::load(&path).expect_err("config should reject chunk_size above 8MiB");
         assert!(err.to_string().contains("runtime.chunk_size"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn upsert_known_public_key_updates_known_map_only() {
+        let path = write_temp_config(
+            "upsert_known_public_key_updates_known_map_only",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+known_public_keys = {}
+
+[runtime]
+chunk_size = 1048576
+max_inflight_chunks = 16
+max_artifact_size_bytes = 67108864
+upload_session_ttl_secs = 600
+stop_grace_timeout_secs = 30
+runner_ready_timeout_secs = 3
+runner_log_buffer_bytes = 262144
+epoch_tick_interval_ms = 50
+http_worker_count = 2
+http_worker_queue_capacity = 4
+manager_control_read_timeout_ms = 500
+max_concurrent_sessions = 256
+deploy_stream_timeout_secs = 15
+"#,
+        );
+
+        upsert_tls_known_public_key(
+            &path,
+            "rpc://node-a:4443",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect("known key update should succeed");
+
+        let config = ImagodConfig::load(&path).expect("config should load");
+        assert_eq!(config.tls.client_public_keys.len(), 1);
+        assert_eq!(
+            config
+                .tls
+                .known_public_keys
+                .get("rpc://node-a:4443")
+                .cloned()
+                .expect("known key entry should be created"),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
 
         cleanup_temp_path(path);
     }

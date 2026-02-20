@@ -49,6 +49,8 @@ struct Manifest {
     #[serde(default)]
     socket: Option<RunnerSocketConfig>,
     #[serde(default)]
+    wasi: Option<ManifestWasiConfig>,
+    #[serde(default)]
     vars: BTreeMap<String, String>,
     #[serde(default)]
     secrets: BTreeMap<String, String>,
@@ -72,7 +74,7 @@ struct ManifestAsset {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// Manifest binding authorization entry.
 struct ManifestBinding {
-    target: String,
+    name: String,
     wit: String,
 }
 
@@ -82,6 +84,26 @@ struct ManifestHttp {
     port: u16,
     #[serde(default = "default_http_max_body_bytes")]
     max_body_bytes: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+/// Manifest WASI execution settings.
+struct ManifestWasiConfig {
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    mounts: Vec<ManifestWasiMount>,
+    #[serde(default)]
+    read_only_mounts: Vec<ManifestWasiMount>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+/// One WASI mount declaration from manifest.
+struct ManifestWasiMount {
+    asset_dir: String,
+    guest_path: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -303,6 +325,19 @@ impl Orchestrator {
     ) -> Result<ServiceLogSubscription, ImagodError> {
         self.supervisor
             .open_logs(service_name, tail_lines, follow)
+            .await
+    }
+
+    /// Invokes one function on a running service runner.
+    pub async fn invoke(
+        &self,
+        target_service_name: &str,
+        interface_id: &str,
+        function: &str,
+        args_cbor: &[u8],
+    ) -> Result<Vec<u8>, ImagodError> {
+        self.supervisor
+            .invoke(target_service_name, interface_id, function, args_cbor)
             .await
     }
 
@@ -939,8 +974,8 @@ fn map_rollback_error(err: ImagodError) -> ImagodError {
 mod tests {
     use super::{
         DEFAULT_HTTP_MAX_BODY_BYTES, HashTarget, MAX_HTTP_MAX_BODY_BYTES, Manifest, ManifestAsset,
-        ManifestBinding, ManifestHash, ManifestHttp, RESTART_POLICY_ALWAYS,
-        RESTART_POLICY_FILE_NAME, RunnerAppType, build_launch_from_release,
+        ManifestBinding, ManifestHash, ManifestHttp, ManifestWasiConfig, ManifestWasiMount,
+        RESTART_POLICY_ALWAYS, RESTART_POLICY_FILE_NAME, RunnerAppType, build_launch_from_release,
         classify_boot_restore_entry, collect_boot_restore_candidates, extract_tar,
         gc_unused_plugin_components_on_boot, normalize_archive_entry_path,
         normalize_manifest_main_path, promote_staging_release, release_id_from_artifact_digest,
@@ -949,7 +984,7 @@ mod tests {
     use imago_protocol::{DeployCommandPayload, ErrorCode};
     use imagod_ipc::{
         CapabilityPolicy, PluginComponent, PluginDependency, PluginKind, RunnerSocketConfig,
-        RunnerSocketDirection, RunnerSocketProtocol,
+        RunnerSocketDirection, RunnerSocketProtocol, RunnerWasiMount,
     };
     use sha2::{Digest, Sha256};
     use std::{
@@ -971,6 +1006,7 @@ mod tests {
             app_type: RunnerAppType::Cli,
             http: None,
             socket: None,
+            wasi: None,
             vars: BTreeMap::new(),
             secrets: BTreeMap::new(),
             assets: Vec::<ManifestAsset>::new(),
@@ -1151,22 +1187,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_launch_rejects_binding_with_empty_target() {
-        let root = temp_dir_path("orchestrator-binding-empty-target");
+    async fn build_launch_rejects_binding_with_empty_name() {
+        let root = temp_dir_path("orchestrator-binding-empty-name");
         fs::create_dir_all(&root).expect("release dir should exist");
         fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
 
         let mut manifest = valid_manifest();
         manifest.bindings = vec![ManifestBinding {
-            target: String::new(),
+            name: String::new(),
             wit: "yieldspace:service/invoke".to_string(),
         }];
 
         let err = build_launch_from_release(&root, "release-a", &root, &manifest)
             .await
-            .expect_err("empty binding target should be rejected");
+            .expect_err("empty binding name should be rejected");
         assert_eq!(err.code, ErrorCode::BadManifest);
-        assert!(err.message.contains("bindings[0].target"));
+        assert!(err.message.contains("bindings[0].name"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1193,6 +1229,131 @@ mod tests {
             launch.http_max_body_bytes,
             Some(DEFAULT_HTTP_MAX_BODY_BYTES)
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_applies_wasi_settings_and_mount_permissions() {
+        let root = temp_dir_path("orchestrator-wasi-settings");
+        fs::create_dir_all(root.join("assets/rw")).expect("rw assets dir should exist");
+        fs::create_dir_all(root.join("assets/ro")).expect("ro assets dir should exist");
+        fs::write(root.join("assets/rw/input.txt"), b"rw").expect("rw asset should exist");
+        fs::write(root.join("assets/ro/input.txt"), b"ro").expect("ro asset should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.vars.insert("VAR_A".to_string(), "1".to_string());
+        manifest
+            .secrets
+            .insert("SECRET_B".to_string(), "2".to_string());
+        manifest.assets = vec![
+            ManifestAsset {
+                path: "assets/rw/input.txt".to_string(),
+            },
+            ManifestAsset {
+                path: "assets/ro/input.txt".to_string(),
+            },
+        ];
+        manifest.wasi = Some(ManifestWasiConfig {
+            args: vec!["--serve".to_string()],
+            env: BTreeMap::from([("WASI_ONLY".to_string(), "1".to_string())]),
+            mounts: vec![ManifestWasiMount {
+                asset_dir: "assets/rw".to_string(),
+                guest_path: "/guest/rw".to_string(),
+            }],
+            read_only_mounts: vec![ManifestWasiMount {
+                asset_dir: "assets/ro".to_string(),
+                guest_path: "/guest/ro".to_string(),
+            }],
+        });
+
+        let launch = build_launch_from_release(&root, "release-a", &root, &manifest)
+            .await
+            .expect("launch should be built");
+        assert_eq!(launch.args, vec!["--serve".to_string()]);
+        assert_eq!(launch.envs.get("VAR_A"), Some(&"1".to_string()));
+        assert_eq!(launch.envs.get("SECRET_B"), Some(&"2".to_string()));
+        assert_eq!(launch.envs.get("WASI_ONLY"), Some(&"1".to_string()));
+        assert_eq!(
+            launch.wasi_mounts,
+            vec![
+                RunnerWasiMount {
+                    host_path: root.join("assets/rw"),
+                    guest_path: "/guest/rw".to_string(),
+                    read_only: false,
+                },
+                RunnerWasiMount {
+                    host_path: root.join("assets/ro"),
+                    guest_path: "/guest/ro".to_string(),
+                    read_only: true,
+                }
+            ]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_duplicate_wasi_guest_path() {
+        let root = temp_dir_path("orchestrator-wasi-duplicate-guest");
+        fs::create_dir_all(root.join("assets/rw")).expect("rw assets dir should exist");
+        fs::create_dir_all(root.join("assets/ro")).expect("ro assets dir should exist");
+        fs::write(root.join("assets/rw/input.txt"), b"rw").expect("rw asset should exist");
+        fs::write(root.join("assets/ro/input.txt"), b"ro").expect("ro asset should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.assets = vec![
+            ManifestAsset {
+                path: "assets/rw/input.txt".to_string(),
+            },
+            ManifestAsset {
+                path: "assets/ro/input.txt".to_string(),
+            },
+        ];
+        manifest.wasi = Some(ManifestWasiConfig {
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            mounts: vec![ManifestWasiMount {
+                asset_dir: "assets/rw".to_string(),
+                guest_path: "/guest/shared".to_string(),
+            }],
+            read_only_mounts: vec![ManifestWasiMount {
+                asset_dir: "assets/ro".to_string(),
+                guest_path: "/guest/shared".to_string(),
+            }],
+        });
+
+        let err = build_launch_from_release(&root, "release-a", &root, &manifest)
+            .await
+            .expect_err("duplicate guest path must be rejected");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("guest_path"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_wasi_env_duplicate_with_vars_or_secrets() {
+        let root = temp_dir_path("orchestrator-wasi-env-duplicate");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.vars.insert("DUP".to_string(), "1".to_string());
+        manifest.wasi = Some(ManifestWasiConfig {
+            args: Vec::new(),
+            env: BTreeMap::from([("DUP".to_string(), "2".to_string())]),
+            mounts: Vec::new(),
+            read_only_mounts: Vec::new(),
+        });
+
+        let err = build_launch_from_release(&root, "release-a", &root, &manifest)
+            .await
+            .expect_err("duplicate env key must be rejected");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("duplicate key"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1536,7 +1697,7 @@ mod tests {
 
         let mut manifest = valid_manifest();
         manifest.bindings = vec![ManifestBinding {
-            target: "svc-b".to_string(),
+            name: "svc-b".to_string(),
             wit: String::new(),
         }];
 
@@ -1550,22 +1711,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_launch_rejects_binding_with_invalid_target_name() {
-        let root = temp_dir_path("orchestrator-binding-invalid-target");
+    async fn build_launch_rejects_binding_with_invalid_name() {
+        let root = temp_dir_path("orchestrator-binding-invalid-name");
         fs::create_dir_all(&root).expect("release dir should exist");
         fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
 
         let mut manifest = valid_manifest();
         manifest.bindings = vec![ManifestBinding {
-            target: "svc/invalid".to_string(),
+            name: "svc/invalid".to_string(),
             wit: "yieldspace:service/invoke".to_string(),
         }];
 
         let err = build_launch_from_release(&root, "release-a", &root, &manifest)
             .await
-            .expect_err("invalid binding target should be rejected");
+            .expect_err("invalid binding name should be rejected");
         assert_eq!(err.code, ErrorCode::BadManifest);
-        assert!(err.message.contains("bindings[0].target is invalid"));
+        assert!(err.message.contains("bindings[0].name is invalid"));
 
         let _ = fs::remove_dir_all(root);
     }

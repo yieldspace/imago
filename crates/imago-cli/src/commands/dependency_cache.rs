@@ -334,6 +334,32 @@ pub(crate) fn hydrate_project_wit_deps(
     Ok(())
 }
 
+pub(crate) fn verify_project_dependency_cache(
+    project_root: &Path,
+    dependencies: &[ProjectDependency],
+) -> anyhow::Result<()> {
+    for dependency in dependencies {
+        let entry = load_entry(project_root, &dependency.name)?;
+        entry.validate_for_dependency(dependency).map_err(|err| {
+            anyhow!(
+                "dependency '{}' cache is stale under {}; {}: {err}",
+                dependency.name,
+                CACHE_ROOT_REL,
+                MISSING_CACHE_HINT
+            )
+        })?;
+        if !entry_files_are_complete(project_root, &entry)? {
+            return Err(anyhow!(
+                "dependency '{}' cache is stale under {}; {}",
+                dependency.name,
+                CACHE_ROOT_REL,
+                MISSING_CACHE_HINT
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_cached_component_path(
     project_root: &Path,
     dependency_name: &str,

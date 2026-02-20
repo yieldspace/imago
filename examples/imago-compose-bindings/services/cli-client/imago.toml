@@ -1,0 +1,24 @@
+name = "cli-client"
+main = "target/wasm32-wasip2/release/cli-client.wasm"
+type = "cli"
+
+[build]
+command = "cargo build --target wasm32-wasip2 --release"
+
+[[dependencies]]
+name = "imago:node"
+version = "0.1.0"
+kind = "native"
+wit = "file://../../../../plugins/imago-node/wit"
+
+[capabilities]
+privileged = false
+wasi = true
+
+[capabilities.deps]
+"acme:clock" = ["*"]
+"imago:node" = ["*"]
+
+[[bindings]]
+name = "rpc-greeter"
+wit = "file://../rpc-greeter/wit/world.wit"

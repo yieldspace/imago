@@ -59,7 +59,11 @@ impl CapabilityChecker for DefaultCapabilityChecker {
         if policy.privileged {
             return true;
         }
-        let Some(rules) = policy.wasi.get(interface_name) else {
+        let rules = policy
+            .wasi
+            .get(interface_name)
+            .or_else(|| policy.wasi.get("*"));
+        let Some(rules) = rules else {
             return false;
         };
         rules
@@ -171,6 +175,19 @@ mod tests {
         let allowed =
             checker.is_wasi_function_allowed(&policy, "wasi:cli/environment", "get-environment");
         assert!(!allowed, "unlisted function should be denied");
+    }
+
+    #[test]
+    fn wasi_capability_allows_when_interface_wildcard_key_is_present() {
+        let checker = DefaultCapabilityChecker;
+        let policy = CapabilityPolicy {
+            privileged: false,
+            deps: std::collections::BTreeMap::new(),
+            wasi: std::collections::BTreeMap::from([("*".to_string(), vec!["*".to_string()])]),
+        };
+        let allowed =
+            checker.is_wasi_function_allowed(&policy, "wasi:cli/environment", "get-environment");
+        assert!(allowed, "wildcard interface key should allow wasi function");
     }
 
     #[test]

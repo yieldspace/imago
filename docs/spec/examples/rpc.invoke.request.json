@@ -1,0 +1,14 @@
+{
+  "type": "rpc.invoke",
+  "request_id": "00000000-0000-0000-0000-000000000001",
+  "correlation_id": "00000000-0000-0000-0000-000000000002",
+  "payload": {
+    "interface_id": "yieldspace:service/invoke",
+    "function": "call",
+    "args_cbor": [128],
+    "target_service": {
+      "name": "svc"
+    }
+  },
+  "error": null
+}

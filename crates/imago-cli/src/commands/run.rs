@@ -35,13 +35,12 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<()> {
         .target
         .clone()
         .unwrap_or_else(|| build::default_target_name().to_string());
-    let target = build::load_target_config(args.env.as_deref(), &target_name, project_root)
+    let target = build::load_target_config(&target_name, project_root)
         .context("failed to load target configuration")?
         .require_deploy_credentials()
         .context("target settings are invalid for run")?;
-    let service_name =
-        resolve_service_name(args.name.as_deref(), args.env.as_deref(), project_root)
-            .context("failed to resolve service name for run")?;
+    let service_name = resolve_service_name(args.name.as_deref(), project_root)
+        .context("failed to resolve service name for run")?;
 
     let session = deploy::connect_target(&target).await?;
     let correlation_id = Uuid::new_v4();
@@ -84,7 +83,7 @@ mod tests {
     fn resolve_service_name_accepts_explicit_valid_name() {
         let root = new_temp_dir("resolve-explicit-valid");
         let name =
-            resolve_service_name(Some("svc-a"), None, &root).expect("explicit name should resolve");
+            resolve_service_name(Some("svc-a"), &root).expect("explicit name should resolve");
         assert_eq!(name, "svc-a");
 
         let _ = fs::remove_dir_all(root);
@@ -93,7 +92,7 @@ mod tests {
     #[test]
     fn resolve_service_name_rejects_explicit_path_traversal() {
         let root = new_temp_dir("resolve-explicit-dotdot");
-        let err = resolve_service_name(Some("../foo"), None, &root)
+        let err = resolve_service_name(Some("../foo"), &root)
             .expect_err("path traversal name should be rejected");
         assert!(
             err.to_string()
@@ -106,7 +105,7 @@ mod tests {
     #[test]
     fn resolve_service_name_rejects_explicit_forward_slash() {
         let root = new_temp_dir("resolve-explicit-slash");
-        let err = resolve_service_name(Some("svc/foo"), None, &root)
+        let err = resolve_service_name(Some("svc/foo"), &root)
             .expect_err("slash name should be rejected");
         assert!(
             err.to_string()
@@ -119,7 +118,7 @@ mod tests {
     #[test]
     fn resolve_service_name_rejects_explicit_backslash() {
         let root = new_temp_dir("resolve-explicit-backslash");
-        let err = resolve_service_name(Some("svc\\foo"), None, &root)
+        let err = resolve_service_name(Some("svc\\foo"), &root)
             .expect_err("backslash name should be rejected");
         assert!(
             err.to_string()
@@ -130,8 +129,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_service_name_uses_env_name_when_explicit_is_none() {
-        let root = new_temp_dir("resolve-from-env");
+    fn resolve_service_name_uses_default_name_when_explicit_is_none() {
+        let root = new_temp_dir("resolve-from-default");
         write_imago_toml(
             &root,
             r#"
@@ -141,15 +140,11 @@ type = "cli"
 
 [target.default]
 remote = "127.0.0.1:4443"
-
-[env.prod]
-name = "svc-prod"
 "#,
         );
 
-        let name = resolve_service_name(None, Some("prod"), &root)
-            .expect("env override service name should resolve");
-        assert_eq!(name, "svc-prod");
+        let name = resolve_service_name(None, &root).expect("default service name should resolve");
+        assert_eq!(name, "svc-default");
 
         let _ = fs::remove_dir_all(root);
     }

@@ -1,35 +1,33 @@
 {
-  "name": "syslog-forwarder",
+  "name": "svc",
   "main": "app.wasm",
   "type": "socket",
   "socket": {
     "protocol": "udp",
     "direction": "inbound",
     "listen_addr": "0.0.0.0",
-    "listen_port": 514
+    "listen_port": 1
   },
   "target": {
-    "host": "nanokvm-01"
+    "host": "n1"
   },
   "vars": {
-    "SYSLOG_CACHE_DIR": "/var/tmp/imago-cache",
-    "SYSLOG_CACHE_MAX_MB": "100",
-    "SYSLOG_CACHE_TTL_SEC": "86400"
+    "V": "1"
   },
   "secrets": {
-    "DISCORD_WEBHOOK_URL": "https://discord.example/webhook"
+    "S": "x"
   },
   "assets": [
     {
       "path": "assets/certs/ca.pem",
       "mount": "/etc/imago/certs/ca.pem",
-      "sha256": "6a33a9f6c6f48d7f1d7f03545f0f8d8df7ad2501f7f0d5b3c86f31b2c4ecfaaa",
-      "size": 2048
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 1
     }
   ],
   "bindings": [
     {
-      "target": "capture-service",
+      "name": "svc-target",
       "wit": "yieldspace:service/invoke"
     }
   ],
@@ -38,12 +36,12 @@
       "name": "yieldspace:nanokvm-capture",
       "version": "0.1.0",
       "source": "ghcr.io/yieldspace/plugins/nanokvm-capture",
-      "resolved": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      "resolved": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
     }
   ],
   "hash": {
     "algorithm": "sha256",
-    "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "value": "1111111111111111111111111111111111111111111111111111111111111111",
     "targets": [
       "wasm",
       "manifest",

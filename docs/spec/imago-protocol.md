@@ -73,3 +73,10 @@
 
 - `LogRequest` のフィルタフィールドを `name: Option<String>` に統一した。
 - `LogChunk` の識別フィールドを `name: String` に統一した。
+
+## 実装反映ノート（Network RPC / 2026-02-18）
+
+- `MessageType` に `rpc.invoke` を追加した。
+- `RpcInvokeRequest` を `interface_id` / `function` / `args_cbor` / `target_service.name` へ更新した。
+- `RpcInvokeResponse` は `result_cbor` または構造化 `error` のどちらか一方を返す契約にした。
+- 例: `examples/rpc.invoke.request.json` / `examples/rpc.invoke.response.success.json` / `examples/rpc.invoke.response.error.json`

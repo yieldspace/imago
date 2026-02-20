@@ -428,6 +428,7 @@ mod tests {
             component_path: root.join("component.wasm"),
             args: Vec::new(),
             envs: BTreeMap::new(),
+            wasi_mounts: Vec::new(),
             bindings: Vec::new(),
             plugin_dependencies: Vec::new(),
             capabilities: imagod_ipc::CapabilityPolicy::default(),

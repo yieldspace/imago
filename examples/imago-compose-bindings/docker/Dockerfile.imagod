@@ -1,0 +1,14 @@
+FROM rust:bookworm AS builder
+
+WORKDIR /workspace
+COPY . .
+RUN cargo build --release -p imagod
+
+FROM debian:bookworm-slim AS runtime
+
+WORKDIR /var/lib/imagod
+RUN mkdir -p /etc/imago/example
+COPY --from=builder /workspace/target/release/imagod /usr/local/bin/imagod
+COPY examples/imago-compose-bindings/docker /etc/imago/example
+EXPOSE 4443
+ENTRYPOINT ["/usr/local/bin/imagod"]

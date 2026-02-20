@@ -9,6 +9,8 @@ pub struct ImagoLock {
     #[serde(default)]
     pub dependencies: Vec<ImagoLockDependency>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub binding_wits: Vec<ImagoLockBindingWit>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wit_packages: Vec<ImagoLockWitPackage>,
 }
 
@@ -27,6 +29,18 @@ pub struct ImagoLockDependency {
     pub component_registry: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component_sha256: Option<String>,
+    pub resolved_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImagoLockBindingWit {
+    pub name: String,
+    pub wit_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wit_registry: Option<String>,
+    pub wit_digest: String,
+    pub wit_path: String,
+    pub interfaces: Vec<String>,
     pub resolved_at: String,
 }
 
@@ -69,6 +83,13 @@ pub struct DependencyExpectation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingWitExpectation {
+    pub name: String,
+    pub wit_source: String,
+    pub wit_registry: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedDependency {
     pub name: String,
     pub version: String,
@@ -79,6 +100,17 @@ pub struct ResolvedDependency {
     pub component_source: Option<String>,
     pub component_registry: Option<String>,
     pub component_sha256: Option<String>,
+    pub resolved_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedBindingWit {
+    pub name: String,
+    pub wit_source: String,
+    pub wit_registry: Option<String>,
+    pub wit_digest: String,
+    pub wit_path: String,
+    pub interfaces: Vec<String>,
     pub resolved_at: String,
 }
 
@@ -94,6 +126,20 @@ impl From<&ImagoLockDependency> for ResolvedDependency {
             component_source: value.component_source.clone(),
             component_registry: value.component_registry.clone(),
             component_sha256: value.component_sha256.clone(),
+            resolved_at: value.resolved_at.clone(),
+        }
+    }
+}
+
+impl From<&ImagoLockBindingWit> for ResolvedBindingWit {
+    fn from(value: &ImagoLockBindingWit) -> Self {
+        Self {
+            name: value.name.clone(),
+            wit_source: value.wit_source.clone(),
+            wit_registry: value.wit_registry.clone(),
+            wit_digest: value.wit_digest.clone(),
+            wit_path: value.wit_path.clone(),
+            interfaces: value.interfaces.clone(),
             resolved_at: value.resolved_at.clone(),
         }
     }

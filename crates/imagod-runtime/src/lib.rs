@@ -28,7 +28,8 @@ pub use imagod_runtime_ingress::{
 };
 /// Runtime abstraction types.
 pub use imagod_runtime_internal::{
-    ComponentRuntime, RuntimeHttpRequest, RuntimeHttpResponse, RuntimeRunRequest,
+    ComponentRuntime, RuntimeHttpRequest, RuntimeHttpResponse, RuntimeInvokeRequest,
+    RuntimeInvoker, RuntimeRunRequest,
 };
 /// Runner runtime wrapper around a shared Wasmtime engine.
 #[cfg(feature = "runtime-wasmtime")]

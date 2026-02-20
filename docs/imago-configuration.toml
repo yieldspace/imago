@@ -1,0 +1,288 @@
+# imago.toml template aligned with crates/imago-cli/src/commands/build/mod.rs
+# Required keys are active lines.
+# Optional keys are commented out with metadata.
+# Metadata format:
+# - required: required|optional
+# - type: TOML type
+# - constraints: runtime validation rules
+# - default: value when omitted (if any)
+
+# key: name
+# required: required
+# type: string
+# constraints: 1..=63 chars; ASCII [A-Za-z0-9._-] only; no '/' '\\' '..'
+# default: none
+name = "example-service"
+
+# key: main
+# required: required
+# type: string (relative path)
+# constraints: non-empty; relative only; no backslashes; no windows drive prefix; no path traversal; file must exist
+# default: none
+main = "build/app.wasm"
+
+# key: type
+# required: required
+# type: string enum
+# constraints: one of "cli", "http", "socket", "rpc"
+# default: none
+# note: [http] is allowed only when type="http"; [socket] is allowed only when type="socket" (mutually exclusive)
+type = "http"
+
+# key: restart
+# required: optional
+# type: string enum
+# constraints: one of "never", "on-failure", "always", "unless-stopped"
+# default: "never"
+# restart = "never"
+
+# [build]
+# key: build.command
+# required: optional
+# type: string OR array(string)
+# constraints: string must be non-empty; array must be non-empty and all elements must be strings
+# default: none
+# [build]
+# command = "cargo component build --release"
+
+# [vars]
+# key: vars.<KEY>
+# required: optional
+# type: string
+# constraints: table values must be strings
+# default: empty table
+# [vars]
+# APP_MODE = "prod"
+
+# [secrets]
+# key: secrets.<KEY>
+# required: optional
+# type: string
+# constraints: table values must be strings
+# default: empty table
+# [secrets]
+# SECRET_TOKEN = "change-me"
+
+# [target.<name>] (selected by CLI target argument; default target name is "default")
+[target.default]
+# key: target.<name>.remote
+# required: required (for selected target)
+# type: string
+# constraints: string required; endpoint format is validated in deploy/run paths
+# default: none
+remote = "127.0.0.1:4443"
+
+# key: target.<name>.server_name
+# required: optional
+# type: string
+# constraints: must be a string
+# default: none
+# server_name = "node-a.example.com"
+
+# key: target.<name>.client_key
+# required: optional for build; required for deploy
+# type: string (path)
+# constraints: non-empty; no backslashes; no windows drive prefix; no path traversal; relative paths resolve from project root; absolute paths allowed
+# default: none
+# client_key = "certs/client.key"
+
+# [http] (required when type="http")
+[http]
+# key: http.port
+# required: required when type="http"
+# type: integer
+# constraints: 1..=65535
+# default: none
+port = 8080
+
+# key: http.max_body_bytes
+# required: optional when type="http"
+# type: integer
+# constraints: 1..=67108864 (64 MiB)
+# default: 8388608 (8 MiB)
+# max_body_bytes = 8388608
+
+# [socket] (required when type="socket"; forbidden for other type values)
+# [socket]
+# key: socket.protocol
+# required: required when type="socket"
+# type: string enum
+# constraints: one of "udp", "tcp", "both"
+# default: none
+# protocol = "tcp"
+#
+# key: socket.direction
+# required: required when type="socket"
+# type: string enum
+# constraints: one of "inbound", "outbound", "both"
+# default: none
+# direction = "inbound"
+#
+# key: socket.listen_addr
+# required: required when type="socket"
+# type: string
+# constraints: valid IP address literal
+# default: none
+# listen_addr = "0.0.0.0"
+#
+# key: socket.listen_port
+# required: required when type="socket"
+# type: integer
+# constraints: 1..=65535
+# default: none
+# listen_port = 9000
+
+# [[assets]]
+# key: assets[].path
+# required: optional (array entry required field)
+# type: string (relative path)
+# constraints: non-empty; relative path rules same as `main`; file must exist
+# default: none
+# note: additional keys in each assets[] entry are accepted and forwarded to manifest as JSON values
+# [[assets]]
+# path = "assets/config.json"
+# mode = "0644"
+
+# [wasi]
+# key: wasi.args
+# required: optional
+# type: array(string)
+# constraints: each item is non-empty string
+# default: empty
+# key: wasi.env.<KEY>
+# required: optional
+# type: string
+# constraints: must not duplicate keys already defined in [vars] or [secrets]
+# default: empty
+# key: wasi.mounts[] / wasi.read_only_mounts[]
+# required: optional
+# type: array(table)
+# constraints:
+# - each entry keys are exactly asset_dir and guest_path
+# - asset_dir: relative path matching a directory derived from assets[].path parent directories
+# - guest_path: absolute unix path; no backslashes; no path traversal
+# - guest_path and asset_dir must be unique across both mounts arrays
+# [wasi]
+# args = ["--serve"]
+# [wasi.env]
+# WASI_ONLY = "1"
+# [[wasi.mounts]]
+# asset_dir = "assets"
+# guest_path = "/app/assets"
+# [[wasi.read_only_mounts]]
+# asset_dir = "readonly"
+# guest_path = "/app/readonly"
+
+# [capabilities]
+# key: capabilities.privileged
+# required: optional
+# type: boolean
+# constraints: bool only
+# default: false
+# key: capabilities.deps.<dependency_name>
+# required: optional
+# type: array(string)
+# constraints: non-empty string items; duplicates normalized
+# default: empty table
+# key: capabilities.wasi
+# required: optional
+# type: boolean OR table(map<string, array(string)>)
+# constraints: bool true means wildcard allow; bool false means empty policy
+# default: empty table
+# [capabilities]
+# privileged = false
+# [capabilities.deps]
+# "yieldspace:plugin/example" = ["invoke"]
+# [capabilities.wasi]
+# "filesystem" = ["/app/assets"]
+
+# [[bindings]]
+# key: bindings[].name
+# required: optional (array entry required field)
+# type: string
+# constraints: same naming rules as `name`
+# default: none
+# key: bindings[].wit
+# required: optional (array entry required field)
+# type: string
+# constraints: non-empty; must start with file:// or warg://; legacy "<package>/<interface>" format is rejected
+# default: none
+# [[bindings]]
+# name = "example-service"
+# wit = "warg://yieldspace:plugin/example@1.0.0"
+
+# [[dependencies]]
+# key: dependencies[].name
+# required: optional (array entry required field)
+# type: string
+# constraints: dependency package name; ASCII alnum plus . _ - : / ; no empty/path traversal components; unique in array
+# default: none
+# key: dependencies[].version
+# required: optional (array entry required field)
+# type: string
+# constraints: non-empty
+# default: none
+# key: dependencies[].kind
+# required: optional (array entry required field)
+# type: string enum
+# constraints: one of "native", "wasm"
+# default: none
+# key: dependencies[].requires
+# required: optional
+# type: array(string)
+# constraints: non-empty dependency package names; duplicates normalized
+# default: empty
+# [[dependencies]]
+# name = "yieldspace:plugin/example"
+# version = "1.0.0"
+# kind = "wasm"
+# requires = ["yieldspace:plugin/base"]
+
+# [dependencies.wit]
+# key: dependencies[].wit
+# required: optional
+# type: string OR table
+# constraints:
+# - string: non-empty; must start with file:// or warg://
+# - table keys: source, registry
+# - source: required string with file:// or warg://
+# - registry: optional string; allowed only for warg source
+# default when omitted:
+# - source = "warg://<dependencies[].name>@<dependencies[].version>"
+# - registry = "wa.dev"
+# [dependencies.wit]
+# source = "warg://yieldspace:plugin/example@1.0.0"
+# registry = "wa.dev"
+
+# [dependencies.component]
+# key: dependencies[].component
+# required: optional
+# type: table (allowed only when dependencies[].kind="wasm")
+# constraints:
+# - supported keys: source, registry, sha256
+# - source: required string; file:// or warg://
+# - registry: optional string; allowed only for warg source
+# - sha256: optional 64-char hex string
+# default: none
+# [dependencies.component]
+# source = "file://plugins/example.wasm"
+# sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+# [dependencies.capabilities]
+# key: dependencies[].capabilities.*
+# required: optional
+# type/constraints/default: same shape as top-level [capabilities]
+# [dependencies.capabilities]
+# privileged = false
+
+# -------------------------
+# Unsupported / removed keys
+# -------------------------
+# runtime.restart_policy
+# target.<name>.ca_cert
+# target.<name>.client_cert
+# target.<name>.known_hosts
+# bindings[].target
+# dependencies[].component.path
+# limits.shutdown_timeout
+# top-level args

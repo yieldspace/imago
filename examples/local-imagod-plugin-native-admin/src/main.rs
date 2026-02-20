@@ -1,8 +1,10 @@
+#[cfg(target_arch = "wasm32")]
 wit_bindgen::generate!({
     path: "wit",
     generate_all
 });
 
+#[cfg(target_arch = "wasm32")]
 fn main() {
     let service_name = imago::admin::runtime::service_name();
     let release_hash = imago::admin::runtime::release_hash();
@@ -16,3 +18,6 @@ fn main() {
 
     std::thread::sleep(std::time::Duration::from_secs(5));
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+fn main() {}

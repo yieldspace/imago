@@ -24,9 +24,9 @@ use tokio::{
 use crate::NativePluginRegistry;
 #[cfg(feature = "runtime-wasmtime")]
 use crate::WasmRuntime;
-use crate::runtime::{ComponentRuntime, RuntimeRunRequest};
+use crate::runtime::{ComponentRuntime, RuntimeInvoker, RuntimeRunRequest};
 #[cfg(not(feature = "runtime-wasmtime"))]
-use crate::runtime::{RuntimeHttpRequest, RuntimeHttpResponse};
+use crate::runtime::{RuntimeHttpRequest, RuntimeHttpResponse, RuntimeInvokeRequest};
 
 const STARTUP_CONFIRM_WINDOW: Duration = Duration::from_millis(200);
 
@@ -63,6 +63,17 @@ fn runtime_backend_unavailable_error() -> ImagodError {
         STAGE_RUNNER,
         "runtime backend is not enabled; enable feature 'runtime-wasmtime'",
     )
+}
+
+#[cfg(not(feature = "runtime-wasmtime"))]
+#[async_trait]
+impl RuntimeInvoker for RuntimeBackend {
+    async fn invoke_component(
+        &self,
+        _request: RuntimeInvokeRequest,
+    ) -> Result<Vec<u8>, ImagodError> {
+        Err(runtime_backend_unavailable_error())
+    }
 }
 
 /// Startup observation result for runner workload task.
@@ -115,9 +126,11 @@ pub async fn run_runner_from_stdin_with_registry(
     register(&bootstrap, &manager_client).await?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let runtime_invoker: Arc<dyn RuntimeInvoker> = runtime.clone();
     let inbound_task = tokio::spawn(run_inbound_server(
         listener,
         bootstrap.clone(),
+        runtime_invoker.clone(),
         shutdown_tx.clone(),
         shutdown_rx.clone(),
     ));
@@ -141,9 +154,13 @@ pub async fn run_runner_from_stdin_with_registry(
                 component_path: bootstrap_for_run.component_path.clone(),
                 args: bootstrap_for_run.args.clone(),
                 envs: bootstrap_for_run.envs.clone(),
+                wasi_mounts: bootstrap_for_run.wasi_mounts.clone(),
                 socket: bootstrap_for_run.socket.clone(),
                 plugin_dependencies: bootstrap_for_run.plugin_dependencies.clone(),
                 capabilities: bootstrap_for_run.capabilities.clone(),
+                bindings: bootstrap_for_run.bindings.clone(),
+                manager_control_endpoint: bootstrap_for_run.manager_control_endpoint.clone(),
+                manager_auth_secret: bootstrap_for_run.manager_auth_secret.clone(),
                 shutdown: shutdown_rx,
                 epoch_tick_interval_ms: bootstrap_for_run.epoch_tick_interval_ms,
                 http_worker_count: bootstrap_for_run.http_worker_count,
@@ -208,7 +225,7 @@ pub async fn run_runner_from_stdin_with_registry(
 
             Some(ingress)
         }
-        RunnerAppType::Cli | RunnerAppType::Socket => None,
+        RunnerAppType::Cli | RunnerAppType::Rpc | RunnerAppType::Socket => None,
     };
 
     if bootstrap.app_type != RunnerAppType::Http {

@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 imago-plugin-imago-admin = { workspace = true }
+imago-plugin-imago-node = { workspace = true }
 imagod-config = { workspace = true }
 imagod-control = { workspace = true }
 imagod-runtime = { workspace = true }

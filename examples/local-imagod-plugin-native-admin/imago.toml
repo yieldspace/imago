@@ -13,6 +13,7 @@ wit = "file://../../plugins/imago-admin/wit"
 
 [capabilities]
 privileged = true
+wasi = true
 
 [capabilities.deps]
 "imago:admin" = ["*"]
@@ -20,6 +21,4 @@ privileged = true
 [target.default]
 remote = "127.0.0.1:4443"
 server_name = "localhost"
-ca_cert = "certs/ca.crt"
-client_cert = "certs/client.crt"
 client_key = "certs/client.key"
