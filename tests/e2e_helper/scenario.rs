@@ -1,10 +1,10 @@
 use super::certs::{generate_key_material, write_known_hosts};
-use super::cli::{CmdOutput, run_imago_cli};
+use super::cli::{run_imago_cli, CmdOutput};
 use super::cluster::Cluster;
 use super::http::wait_http_response;
 use super::projects::{AppKind, ProjectLayout, TargetSpec};
-use super::wasm_assets::{WasmArtifact, wasm_file_name, wasm_path};
-use anyhow::{Context, Result, anyhow, bail};
+use super::wasm_assets::{wasm_file_name, wasm_path, WasmArtifact};
+use anyhow::{anyhow, bail, Context, Result};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
@@ -36,11 +36,7 @@ impl ServiceHandle {
         scenario.deploy_service(&self.service_name, target)
     }
 
-    pub fn replace_wasm(
-        &self,
-        scenario: &mut Scenario,
-        wasm: WasmArtifact,
-    ) -> TestResult<()> {
+    pub fn replace_wasm(&self, scenario: &mut Scenario, wasm: WasmArtifact) -> TestResult<()> {
         scenario.replace_service_wasm(&self.service_name, wasm)
     }
 
@@ -222,11 +218,7 @@ impl Scenario {
         wait_http_response(port, timeout)
     }
 
-    fn replace_service_wasm(
-        &mut self,
-        service_name: &str,
-        wasm: WasmArtifact,
-    ) -> TestResult<()> {
+    fn replace_service_wasm(&mut self, service_name: &str, wasm: WasmArtifact) -> TestResult<()> {
         let service = self.service_mut(service_name)?;
         let main_path = copy_wasm_to_project(&service.project, wasm)?;
         let default_target = service

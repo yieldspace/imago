@@ -22,6 +22,7 @@
 - `imago-protocol` 内部詳細: [`imago-protocol-internals.md`](./imago-protocol-internals.md)
 
 ### 具体例
+- examples 一覧: [`examples/README.md`](./examples/README.md)
 - サンプル JSON: [`examples/`](./examples/)
 
 ## 適用範囲

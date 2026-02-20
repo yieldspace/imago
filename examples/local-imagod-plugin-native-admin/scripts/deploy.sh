@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-REPO_ROOT="$(cd -- "${ROOT_DIR}/../.." && pwd)"
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../_shared" && pwd)/common.sh"
 
-cd "${ROOT_DIR}"
-cargo run --manifest-path "${REPO_ROOT}/Cargo.toml" -p imago-cli -- deploy --target default
+resolve_paths "${BASH_SOURCE[0]}"
+deploy_default

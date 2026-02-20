@@ -1,6 +1,6 @@
-use super::certs::{KnownHostEntry, generate_key_material};
+use super::certs::{generate_key_material, KnownHostEntry};
 use super::projects::TargetSpec;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -173,7 +173,10 @@ impl Cluster {
     }
 
     pub fn known_hosts_entries(&self) -> Vec<KnownHostEntry> {
-        self.nodes.iter().map(|node| node.known_host.clone()).collect()
+        self.nodes
+            .iter()
+            .map(|node| node.known_host.clone())
+            .collect()
     }
 
     pub fn authority_for(&self, name: &str) -> Result<String> {
@@ -214,7 +217,10 @@ fn wait_for_imagod_ready(
             return Ok(());
         }
 
-        if let Some(status) = child.try_wait().context("failed while waiting for imagod")? {
+        if let Some(status) = child
+            .try_wait()
+            .context("failed while waiting for imagod")?
+        {
             bail!("imagod exited before ready: {status}");
         }
 

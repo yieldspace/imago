@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use rcgen::{KeyPair, PKCS_ED25519};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,7 +25,8 @@ pub fn generate_key_material(cert_dir: &Path) -> Result<KeyMaterial> {
 
     let server_key =
         KeyPair::generate_for(&PKCS_ED25519).context("failed to generate server keypair")?;
-    let admin_key = KeyPair::generate_for(&PKCS_ED25519).context("failed to generate admin keypair")?;
+    let admin_key =
+        KeyPair::generate_for(&PKCS_ED25519).context("failed to generate admin keypair")?;
     let client_key =
         KeyPair::generate_for(&PKCS_ED25519).context("failed to generate client keypair")?;
 
@@ -53,7 +54,10 @@ pub fn generate_key_material(cert_dir: &Path) -> Result<KeyMaterial> {
 pub fn write_known_hosts(home_dir: &Path, entries: &[KnownHostEntry]) -> Result<PathBuf> {
     let known_hosts_path = home_dir.join(".imago").join("known_hosts");
     let parent = known_hosts_path.parent().ok_or_else(|| {
-        anyhow::anyhow!("failed to resolve parent for known_hosts: {}", known_hosts_path.display())
+        anyhow::anyhow!(
+            "failed to resolve parent for known_hosts: {}",
+            known_hosts_path.display()
+        )
     })?;
     fs::create_dir_all(parent)
         .with_context(|| format!("failed to create known_hosts dir: {}", parent.display()))?;
@@ -69,8 +73,12 @@ pub fn write_known_hosts(home_dir: &Path, entries: &[KnownHostEntry]) -> Result<
         body.push('\n');
     }
 
-    fs::write(&known_hosts_path, body)
-        .with_context(|| format!("failed to write known_hosts: {}", known_hosts_path.display()))?;
+    fs::write(&known_hosts_path, body).with_context(|| {
+        format!(
+            "failed to write known_hosts: {}",
+            known_hosts_path.display()
+        )
+    })?;
     Ok(known_hosts_path)
 }
 

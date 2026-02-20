@@ -28,29 +28,17 @@ imagoは、**組込み開発の敷居を下げる**、Wasm Component Modelベー
 curl -sSf https://imago.yield.space | sh
 ```
 
-From cargo:
-
 ```bash
 cargo install imago
 ```
 
-Ferris plugin（`warg://sizumita:ferris@0.1.0`）を使う最短の実行例は
-`examples/local-imagod-plugin-hello` にあります。
-
 ```bash
 git clone https://github.com/yieldspace/imago
-cd imago/examples/local-imagod-plugin-hello
-cargo run --manifest-path ../../Cargo.toml -p imago-cli -- update
-# terminal 1: ./scripts/run-imagod.sh
-# terminal 2: ./scripts/deploy.sh
-./scripts/verify-hello.sh
+cd imago
+./examples/local-imagod/scripts/quickstart.sh
 ```
 
-補足:
-
-- 依存 (`[[dependencies]]`) を追加・変更したら `imago update` を先に実行してください。
-- ログ確認は service 名で行います（例: `imago logs local-imagod-plugin-hello-app --tail 200`）。
-- 詳細手順は `QUICKSTART.md` を参照してください。
+他の example は [`examples/README.md`](examples/README.md)、詳細手順は [`QUICKSTART.md`](QUICKSTART.md) を参照してください。
 
 ## WITプラグイン
 

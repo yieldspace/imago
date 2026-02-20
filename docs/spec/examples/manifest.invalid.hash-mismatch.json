@@ -1,15 +1,15 @@
 {
-  "name": "syslog-forwarder",
+  "name": "svc",
   "main": "app.wasm",
   "type": "socket",
   "socket": {
     "protocol": "udp",
     "direction": "inbound",
     "listen_addr": "0.0.0.0",
-    "listen_port": 514
+    "listen_port": 1
   },
   "target": {
-    "host": "nanokvm-01"
+    "host": "n1"
   },
   "vars": {},
   "secrets": {},
@@ -17,7 +17,7 @@
   "dependencies": [],
   "hash": {
     "algorithm": "sha256",
-    "value": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "value": "2222222222222222222222222222222222222222222222222222222222222222",
     "targets": [
       "wasm",
       "assets"

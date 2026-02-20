@@ -2,10 +2,8 @@
 mod e2e_helper;
 
 use e2e_helper::certs::{generate_key_material, write_known_hosts};
-use e2e_helper::cli::{CmdOutput, run_imago_cli};
-use e2e_helper::{
-    Cluster, TargetSpec, TestResult, WasmArtifact, wasm_file_name, wasm_path,
-};
+use e2e_helper::cli::{run_imago_cli, CmdOutput};
+use e2e_helper::{wasm_file_name, wasm_path, Cluster, TargetSpec, TestResult, WasmArtifact};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -96,6 +94,46 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
         "pre-cert failure marker was not found: {pre_fail_logs}"
     );
 
+    let invalid_to_authority = "rpc://[::1";
+    let deploy_cert_partial_fail = run_imago_cli(
+        &workspace_root,
+        &client_dir,
+        &control_home,
+        &[
+            "bindings",
+            "cert",
+            "deploy",
+            "--from",
+            alice_authority.as_str(),
+            "--to",
+            invalid_to_authority,
+        ],
+    )?;
+    assert!(
+        !deploy_cert_partial_fail.success,
+        "bindings cert deploy (partial failure) unexpectedly succeeded: {}",
+        deploy_cert_partial_fail.combined
+    );
+    assert!(
+        deploy_cert_partial_fail
+            .combined
+            .contains("bindings cert deploy completed with errors:"),
+        "partial failure summary was not found: {}",
+        deploy_cert_partial_fail.combined
+    );
+    assert!(
+        deploy_cert_partial_fail.combined.contains("from: ok"),
+        "from status was not ok in partial failure output: {}",
+        deploy_cert_partial_fail.combined
+    );
+    assert!(
+        deploy_cert_partial_fail
+            .combined
+            .contains("to: upload failed:"),
+        "to upload failure marker was not found: {}",
+        deploy_cert_partial_fail.combined
+    );
+
     let deploy_cert = run_imago_cli(
         &workspace_root,
         &client_dir,
@@ -125,6 +163,14 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
         "rpc return value must be positive unix timestamp: {returned}"
     );
 
+    let _greeter_logs = wait_logs_for_service(
+        &workspace_root,
+        &greeter_dir,
+        &control_home,
+        "rpc-greeter",
+        40,
+    )?;
+
     let _ = run_imago_cli(
         &workspace_root,
         &client_dir,
@@ -147,19 +193,31 @@ fn wait_logs(
     home: &Path,
     retries: usize,
 ) -> TestResult<String> {
+    wait_logs_for_service(workspace_root, project_dir, home, "cli-client", retries)
+}
+
+fn wait_logs_for_service(
+    workspace_root: &Path,
+    project_dir: &Path,
+    home: &Path,
+    service_name: &str,
+    retries: usize,
+) -> TestResult<String> {
     for _ in 0..retries {
         let logs = run_imago_cli(
             workspace_root,
             project_dir,
             home,
-            &["logs", "cli-client", "--tail", "200"],
+            &["logs", service_name, "--tail", "200"],
         )?;
         if logs.success {
             return Ok(logs.combined);
         }
         thread::sleep(Duration::from_secs(1));
     }
-    Err(anyhow::anyhow!("timed out while collecting cli-client logs"))
+    Err(anyhow::anyhow!(
+        "timed out while collecting {service_name} logs"
+    ))
 }
 
 fn wait_logs_with_marker(
@@ -207,7 +265,9 @@ fn assert_succeeded(label: &str, output: &str) -> TestResult {
     if output.to_ascii_lowercase().contains("succeeded") {
         return Ok(());
     }
-    Err(anyhow::anyhow!("{label} did not contain succeeded marker: {output}"))
+    Err(anyhow::anyhow!(
+        "{label} did not contain succeeded marker: {output}"
+    ))
 }
 
 fn prepare_project_dir(project_dir: &Path) -> TestResult {
@@ -225,7 +285,9 @@ fn install_control_key(project_dir: &Path, control_key_path: &Path) -> TestResul
 
 fn install_wasm(project_dir: &Path, artifact: WasmArtifact) -> TestResult<PathBuf> {
     let source = wasm_path(artifact)?;
-    let destination = project_dir.join("components").join(wasm_file_name(artifact));
+    let destination = project_dir
+        .join("components")
+        .join(wasm_file_name(artifact));
     fs::copy(source, &destination)?;
     Ok(destination)
 }
@@ -253,8 +315,15 @@ fn write_cli_client_imago_toml(
     workspace_root: &Path,
     main_wasm_file: &str,
 ) -> TestResult {
-    let imago_node_wit = workspace_root.join("plugins").join("imago-node").join("wit");
-    let rpc_greeter_world = workspace_root.join("e2e").join("wit").join("rpc-greeter").join("world.wit");
+    let imago_node_wit = workspace_root
+        .join("plugins")
+        .join("imago-node")
+        .join("wit");
+    let rpc_greeter_world = workspace_root
+        .join("e2e")
+        .join("wit")
+        .join("rpc-greeter")
+        .join("world.wit");
     let body = format!(
         "name = \"cli-client\"\nmain = \"components/{}\"\ntype = \"cli\"\n\n[[dependencies]]\nname = \"imago:node\"\nversion = \"0.1.0\"\nkind = \"native\"\nwit = \"file://{}\"\n\n[capabilities]\nprivileged = false\nwasi = true\n\n[capabilities.deps]\n\"acme:clock\" = [\"*\"]\n\"imago:node\" = [\"*\"]\n\n[[bindings]]\nname = \"rpc-greeter\"\nwit = \"file://{}\"\n\n[wasi.env]\nIMAGO_RPC_ADDR = \"{}\"\n\n[target.default]\nremote = \"{}\"\nserver_name = \"{}\"\nclient_key = \"{}\"\n",
         toml_escape(main_wasm_file),
