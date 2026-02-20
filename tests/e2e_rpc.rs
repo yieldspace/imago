@@ -2,8 +2,8 @@
 mod e2e_helper;
 
 use e2e_helper::certs::{generate_key_material, write_known_hosts};
-use e2e_helper::cli::{run_imago_cli, CmdOutput};
-use e2e_helper::{wasm_file_name, wasm_path, Cluster, TargetSpec, TestResult, WasmArtifact};
+use e2e_helper::cli::{CmdOutput, run_imago_cli};
+use e2e_helper::{Cluster, TargetSpec, TestResult, WasmArtifact, wasm_file_name, wasm_path};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;

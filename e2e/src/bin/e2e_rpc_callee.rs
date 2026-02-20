@@ -1,6 +1,5 @@
 #![no_main]
 
-
 use wit_bindgen::generate;
 
 generate!({
@@ -8,7 +7,6 @@ generate!({
     world: "acme:clock/rpc-greeter",
     generate_all,
 });
-
 
 struct Greeter;
 

@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rcgen::{KeyPair, PKCS_ED25519};
 use std::fs;
 use std::path::{Path, PathBuf};

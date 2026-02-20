@@ -206,10 +206,10 @@ async fn run_compose_logs(args: ComposeLogsArgs, project_root: &Path) -> anyhow:
     ensure_compose_services_non_empty(resolved.config, &args.profile)?;
     let target = resolve_compose_target(&compose_file, &args.target, project_root)?;
 
-    if let Some(name) = &args.name {
-        if name.trim().is_empty() {
-            return Err(anyhow!("compose logs --name must not be empty"));
-        }
+    if let Some(name) = &args.name
+        && name.trim().is_empty()
+    {
+        return Err(anyhow!("compose logs --name must not be empty"));
     }
 
     let logs_result = logs::run_with_project_root_and_target_override(

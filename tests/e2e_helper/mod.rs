@@ -10,4 +10,4 @@ pub use cli::CmdOutput;
 pub use cluster::{Cluster, NodeHandle};
 pub use projects::{AppKind, TargetSpec};
 pub use scenario::{Scenario, ServiceHandle, TestResult};
-pub use wasm_assets::{wasm_file_name, wasm_path, WasmArtifact};
+pub use wasm_assets::{WasmArtifact, wasm_file_name, wasm_path};

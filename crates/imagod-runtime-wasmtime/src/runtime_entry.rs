@@ -1070,11 +1070,10 @@ mod tests {
         shutdown_tx
             .send(true)
             .expect("shutdown sender should still be connected");
-        let result = tokio::time::timeout(Duration::from_secs(1), &mut run_future)
+        tokio::time::timeout(Duration::from_secs(1), &mut run_future)
             .await
             .expect("rpc runner should stop promptly after shutdown")
             .expect("rpc run should stop without error");
-        assert_eq!(result, ());
     }
 
     #[tokio::test]

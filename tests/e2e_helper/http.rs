@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::thread;

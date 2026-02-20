@@ -1,10 +1,10 @@
 use super::certs::{generate_key_material, write_known_hosts};
-use super::cli::{run_imago_cli, CmdOutput};
+use super::cli::{CmdOutput, run_imago_cli};
 use super::cluster::Cluster;
 use super::http::wait_http_response;
 use super::projects::{AppKind, ProjectLayout, TargetSpec};
-use super::wasm_assets::{wasm_file_name, wasm_path, WasmArtifact};
-use anyhow::{anyhow, bail, Context, Result};
+use super::wasm_assets::{WasmArtifact, wasm_file_name, wasm_path};
+use anyhow::{Context, Result, anyhow, bail};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;

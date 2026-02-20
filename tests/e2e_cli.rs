@@ -108,9 +108,7 @@ fn assert_unknown_target_failure(label: &str, output: &str, success: bool) -> Te
     if success {
         return Err(anyhow::anyhow!("{label} unexpectedly succeeded: {output}"));
     }
-    if output
-        .to_ascii_lowercase()
-        .contains("unknown target")
+    if output.to_ascii_lowercase().contains("unknown target")
         || output.contains("target 'unknown' is not defined in imago.toml")
     {
         return Ok(());

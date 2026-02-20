@@ -124,7 +124,9 @@ fn wait_logs(
         }
         thread::sleep(Duration::from_secs(1));
     }
-    Err(anyhow::anyhow!("timed out while collecting rpc-caller logs"))
+    Err(anyhow::anyhow!(
+        "timed out while collecting rpc-caller logs"
+    ))
 }
 
 fn wait_logs_with_marker(
@@ -172,7 +174,9 @@ fn assert_succeeded(label: &str, output: &str) -> TestResult {
     if output.to_ascii_lowercase().contains("succeeded") {
         return Ok(());
     }
-    Err(anyhow::anyhow!("{label} did not contain succeeded marker: {output}"))
+    Err(anyhow::anyhow!(
+        "{label} did not contain succeeded marker: {output}"
+    ))
 }
 
 fn prepare_project_dir(project_dir: &Path) -> TestResult {
@@ -190,7 +194,9 @@ fn install_control_key(project_dir: &Path, control_key_path: &Path) -> TestResul
 
 fn install_wasm(project_dir: &Path, artifact: WasmArtifact) -> TestResult<PathBuf> {
     let source = wasm_path(artifact)?;
-    let destination = project_dir.join("components").join(wasm_file_name(artifact));
+    let destination = project_dir
+        .join("components")
+        .join(wasm_file_name(artifact));
     fs::copy(source, &destination)?;
     Ok(destination)
 }
@@ -217,7 +223,10 @@ fn write_cli_client_imago_toml(
     workspace_root: &Path,
     main_wasm_file: &str,
 ) -> TestResult {
-    let imago_node_wit = workspace_root.join("plugins").join("imago-node").join("wit");
+    let imago_node_wit = workspace_root
+        .join("plugins")
+        .join("imago-node")
+        .join("wit");
     let rpc_greeter_world = workspace_root
         .join("e2e")
         .join("wit")

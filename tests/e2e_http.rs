@@ -52,5 +52,7 @@ fn assert_succeeded(label: &str, output: &str) -> TestResult {
     if output.to_ascii_lowercase().contains("succeeded") {
         return Ok(());
     }
-    Err(anyhow::anyhow!("{label} did not contain succeeded marker: {output}"))
+    Err(anyhow::anyhow!(
+        "{label} did not contain succeeded marker: {output}"
+    ))
 }
