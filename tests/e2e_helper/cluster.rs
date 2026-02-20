@@ -2,7 +2,7 @@ use super::certs::{KnownHostEntry, generate_key_material};
 use super::projects::TargetSpec;
 use anyhow::{Context, Result, anyhow, bail};
 use std::fs;
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -144,7 +144,12 @@ impl Cluster {
                 .join("runtime")
                 .join("ipc")
                 .join("manager-control.sock");
-            wait_for_imagod_ready(&mut child, &manager_socket_path, Duration::from_secs(20))?;
+            wait_for_imagod_ready(
+                &mut child,
+                &manager_socket_path,
+                &node.target.remote,
+                Duration::from_secs(90),
+            )?;
             self.running.push(NodeProcess { child });
         }
 
@@ -189,17 +194,23 @@ impl Drop for Cluster {
     }
 }
 
-fn wait_for_imagod_ready(child: &mut Child, manager_socket_path: &Path, timeout: Duration) -> Result<()> {
+fn wait_for_imagod_ready(
+    child: &mut Child,
+    manager_socket_path: &Path,
+    listen_addr: &str,
+    timeout: Duration,
+) -> Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
         if Instant::now() > deadline {
             bail!(
-                "timed out waiting for imagod socket {}",
-                manager_socket_path.display()
+                "timed out waiting for imagod readiness: socket={}, listen_addr={}",
+                manager_socket_path.display(),
+                listen_addr
             );
         }
 
-        if manager_socket_path.exists() {
+        if manager_socket_path.exists() || is_tcp_listening(listen_addr) {
             return Ok(());
         }
 
@@ -209,6 +220,17 @@ fn wait_for_imagod_ready(child: &mut Child, manager_socket_path: &Path, timeout:
 
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn is_tcp_listening(listen_addr: &str) -> bool {
+    TcpStream::connect_timeout(
+        &match listen_addr.parse() {
+            Ok(addr) => addr,
+            Err(_) => return false,
+        },
+        Duration::from_millis(150),
+    )
+    .is_ok()
 }
 
 fn pick_free_port() -> Result<u16> {
