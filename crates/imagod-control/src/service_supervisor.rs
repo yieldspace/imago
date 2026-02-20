@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     process::ExitStatus,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -54,6 +54,7 @@ const MAX_MANAGER_CONTROL_CONNECTION_HANDLERS: usize = 32;
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
 const LOG_CHANNEL_CAPACITY: usize = 256;
 type PendingReadyMap = BTreeMap<String, oneshot::Sender<Result<(), ImagodError>>>;
+type StoppingServicesMap = BTreeMap<String, usize>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Launch specification used to spawn one runner process.
@@ -141,6 +142,7 @@ struct RunningService {
 struct RetainedServiceLogEntry {
     service_name: String,
     snapshot_bytes: Vec<u8>,
+    weight_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -166,24 +168,22 @@ impl RetainedServiceLogRing {
             .position(|entry| entry.service_name == service_name)
             && let Some(removed) = self.entries.remove(index)
         {
-            self.total_bytes = self
-                .total_bytes
-                .saturating_sub(removed.snapshot_bytes.len());
+            self.total_bytes = self.total_bytes.saturating_sub(removed.weight_bytes);
         }
 
-        self.total_bytes = self.total_bytes.saturating_add(snapshot_bytes.len());
+        let weight_bytes = retained_entry_weight_bytes(&service_name, snapshot_bytes.len());
+        self.total_bytes = self.total_bytes.saturating_add(weight_bytes);
         self.entries.push_back(RetainedServiceLogEntry {
             service_name,
             snapshot_bytes,
+            weight_bytes,
         });
 
         while self.total_bytes > self.capacity_bytes {
             let Some(evicted) = self.entries.pop_front() else {
                 break;
             };
-            self.total_bytes = self
-                .total_bytes
-                .saturating_sub(evicted.snapshot_bytes.len());
+            self.total_bytes = self.total_bytes.saturating_sub(evicted.weight_bytes);
         }
     }
 
@@ -200,6 +200,11 @@ impl RetainedServiceLogRing {
             .map(|entry| entry.service_name.clone())
             .collect()
     }
+}
+
+fn retained_entry_weight_bytes(service_name: &str, snapshot_bytes_len: usize) -> usize {
+    // Keep empty snapshots bounded too by charging key bytes with a floor of 1.
+    service_name.len().saturating_add(snapshot_bytes_len).max(1)
 }
 
 #[derive(Debug)]
@@ -230,6 +235,7 @@ pub struct ServiceSupervisor {
     manager_control_endpoint: PathBuf,
     inner: Arc<RwLock<BTreeMap<String, RunningService>>>,
     retained_logs: Arc<Mutex<RetainedServiceLogRing>>,
+    stopping_services: Arc<StdMutex<StoppingServicesMap>>,
     pending_ready: Arc<Mutex<PendingReadyMap>>,
     starting_services: Arc<Mutex<BTreeSet<String>>>,
     stopping_count: Arc<AtomicUsize>,
@@ -329,6 +335,7 @@ impl ServiceSupervisor {
         let retained_logs = Arc::new(Mutex::new(RetainedServiceLogRing::new(
             runner_log_buffer_bytes,
         )));
+        let stopping_services = Arc::new(StdMutex::new(BTreeMap::new()));
         let pending_ready = Arc::new(Mutex::new(BTreeMap::new()));
         let starting_services = Arc::new(Mutex::new(BTreeSet::new()));
         let stopping_count = Arc::new(AtomicUsize::new(0));
@@ -354,6 +361,7 @@ impl ServiceSupervisor {
             manager_control_endpoint,
             inner,
             retained_logs,
+            stopping_services,
             pending_ready,
             starting_services,
             stopping_count,
@@ -509,6 +517,7 @@ impl ServiceSupervisor {
 
     /// Stops a running service, optionally forcing immediate kill.
     pub async fn stop(&self, service_name: &str, force: bool) -> Result<(), ImagodError> {
+        let _stopping_service_guard = self.begin_stop_service(service_name);
         let _stopping_guard = StoppingCounterGuard::new(self.stopping_count.clone());
         let mut service = self.take_running(service_name).await?;
 
@@ -733,10 +742,12 @@ impl ServiceSupervisor {
             let retained = self.retained_logs.lock().await;
             retained.service_names()
         };
+        let stopping_names = self.stopping_service_names();
 
         let mut merged = BTreeSet::new();
         merged.extend(running_names);
         merged.extend(retained_names);
+        merged.retain(|name| !stopping_names.contains(name));
         merged.into_iter().collect()
     }
 
@@ -773,6 +784,14 @@ impl ServiceSupervisor {
                 snapshot_bytes,
                 receiver,
             });
+        }
+
+        if self.is_service_stopping(service_name) {
+            return Err(ImagodError::new(
+                ErrorCode::NotFound,
+                STAGE_LOGS,
+                format!("service '{service_name}' is not running"),
+            ));
         }
 
         let retained_snapshot = {
@@ -993,6 +1012,39 @@ impl ServiceSupervisor {
             STAGE_START,
             format!("runner '{runner_id}' readiness channel closed unexpectedly"),
         )
+    }
+
+    fn begin_stop_service(&self, service_name: &str) -> StoppingServiceGuard {
+        {
+            let mut stopping_services = match self.stopping_services.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let entry = stopping_services
+                .entry(service_name.to_string())
+                .or_insert(0);
+            *entry = entry.saturating_add(1);
+        }
+        StoppingServiceGuard {
+            service_name: service_name.to_string(),
+            stopping_services: self.stopping_services.clone(),
+        }
+    }
+
+    fn stopping_service_names(&self) -> BTreeSet<String> {
+        let stopping_services = match self.stopping_services.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        stopping_services.keys().cloned().collect()
+    }
+
+    fn is_service_stopping(&self, service_name: &str) -> bool {
+        let stopping_services = match self.stopping_services.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        stopping_services.contains_key(service_name)
     }
 
     async fn reserve_start(&self, service_name: &str) -> Result<(), ImagodError> {
@@ -1363,6 +1415,26 @@ impl Drop for StoppingCounterGuard {
     }
 }
 
+struct StoppingServiceGuard {
+    service_name: String,
+    stopping_services: Arc<StdMutex<StoppingServicesMap>>,
+}
+
+impl Drop for StoppingServiceGuard {
+    fn drop(&mut self) {
+        let mut stopping_services = match self.stopping_services.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(count) = stopping_services.get_mut(&self.service_name) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                stopping_services.remove(&self.service_name);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 static FAIL_KILL_AND_WAIT_FOR_PID: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(0);
@@ -1443,19 +1515,16 @@ mod tests {
 
     #[test]
     fn retained_log_ring_evicts_oldest_entries_when_total_bytes_exceed_capacity() {
-        let mut ring = RetainedServiceLogRing::new(6);
-        ring.upsert("svc-a".to_string(), b"abc".to_vec());
-        ring.upsert("svc-b".to_string(), b"de".to_vec());
-        ring.upsert("svc-c".to_string(), b"1234".to_vec());
+        let mut ring = RetainedServiceLogRing::new(9);
+        ring.upsert("a".to_string(), b"abc".to_vec());
+        ring.upsert("b".to_string(), b"de".to_vec());
+        ring.upsert("c".to_string(), b"1234".to_vec());
 
         assert!(
-            ring.snapshot("svc-a").is_none(),
+            ring.snapshot("a").is_none(),
             "oldest entry should be evicted"
         );
-        assert_eq!(
-            ring.service_names(),
-            vec!["svc-b".to_string(), "svc-c".to_string()]
-        );
+        assert_eq!(ring.service_names(), vec!["b".to_string(), "c".to_string()]);
     }
 
     #[test]
@@ -1470,6 +1539,20 @@ mod tests {
             ring.service_names(),
             vec!["svc-b".to_string(), "svc-a".to_string()]
         );
+    }
+
+    #[test]
+    fn retained_log_ring_counts_empty_snapshots_toward_capacity() {
+        let mut ring = RetainedServiceLogRing::new(2);
+        ring.upsert("a".to_string(), Vec::new());
+        ring.upsert("b".to_string(), Vec::new());
+        ring.upsert("c".to_string(), Vec::new());
+
+        assert!(
+            ring.snapshot("a").is_none(),
+            "empty snapshots must still consume capacity and evict old entries"
+        );
+        assert_eq!(ring.service_names(), vec!["b".to_string(), "c".to_string()]);
     }
 
     #[tokio::test]
@@ -1613,6 +1696,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_logs_does_not_return_retained_snapshot_while_service_is_stopping() {
+        let root = new_test_root("open-logs-retained-stopping");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
+        let service_name = "svc-open-logs-retained-stopping";
+
+        supervisor
+            .retained_logs
+            .lock()
+            .await
+            .upsert(service_name.to_string(), b"old-a\nold-b\n".to_vec());
+
+        let _stopping_guard = supervisor.begin_stop_service(service_name);
+        let err = supervisor
+            .open_logs(service_name, 10, true)
+            .await
+            .expect_err("stopping service should not serve stale retained logs");
+        assert_eq!(err.code, ErrorCode::NotFound);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
     async fn open_logs_prefers_running_snapshot_over_retained_snapshot() {
         let root = new_test_root("open-logs-priority");
         let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
@@ -1736,6 +1842,25 @@ mod tests {
         );
 
         stop_running_service_best_effort(&supervisor.inner, "svc-running").await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn loggable_service_names_excludes_services_being_stopped() {
+        let root = new_test_root("loggable-names-stopping");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
+
+        {
+            let mut retained = supervisor.retained_logs.lock().await;
+            retained.upsert("svc-stopping".to_string(), b"retained\n".to_vec());
+            retained.upsert("svc-available".to_string(), b"retained\n".to_vec());
+        }
+        let _stopping_guard = supervisor.begin_stop_service("svc-stopping");
+
+        let names = supervisor.loggable_service_names().await;
+        assert_eq!(names, vec!["svc-available".to_string()]);
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
