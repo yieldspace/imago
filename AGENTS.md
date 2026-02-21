@@ -37,22 +37,18 @@ Default workflow:
 - Add a `## 実装反映ノート` section to the relevant existing spec file(s).
 - If the delta is too large for inline notes, create a separate document and link it from both `docs/spec/README.md` and the related spec file(s).
 
-PR body requirements for design-impacting changes:
-- A short summary of design deltas.
-- The list of updated spec files.
-- Validation command results (for example, `cargo test ...`, `cargo check ...`).
+PR body requirements for design-impacting changes (must be included in `.github/pull_request_template.md`):
+- `## Motivation`: why the design change is needed.
+- `## Summary`: a short summary of design deltas and the list of updated spec files.
+- `## Validation`: validation command results (for example, `cargo test ...`, `cargo check ...`).
 
 ## Testing Guidelines
 Use t-wada style TDD for new behavior: Red (failing test first), Green (minimum implementation), Refactor (cleanup with tests still green). Add unit tests close to implementation using `#[cfg(test)] mod tests`. Name tests by behavior (for example, `rejects_invalid_manifest_hash`). For protocol or schema changes, add both success and failure-path tests and keep `docs/spec/examples/` synchronized. No strict coverage target exists, but new logic should cover key branches.
 
 ## Commit & Pull Request Guidelines
 Follow the observed commit style: short, imperative subjects such as `Add ...`, `Update ...`, or scoped forms like `docs: ...`. Keep commits focused on one logical change.  
-PRs should include:
-- What changed and why.
-- Linked issue/PR context.
-- Validation commands you ran (for example, `cargo test --workspace`, `cargo clippy ...`).
-- Notes on spec or compatibility impact when touching `docs/spec/`.
-- PR body must follow `.github/pull_request_template.md` and explicitly fill `## Motivation`, `## Summary`, and `## Validation`.
+PR body must follow `.github/pull_request_template.md` and explicitly fill `## Motivation`, `## Summary`, and `## Validation`.
+Include required details (what changed and why, linked issue/PR context, validation commands, and notes on spec/compatibility impact) inside those template sections.
 
 ## Phase / Issue 運用ルール
 - 現在の Phase は `0` とする。
