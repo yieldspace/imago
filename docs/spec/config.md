@@ -276,13 +276,22 @@
 
 `imagod` は `imagod.toml` を読む。既定パスは `/etc/imago/imagod.toml`。
 
+起動時に解決された設定パス（既定は `/etc/imago/imagod.toml`、`--config` / `IMAGOD_CONFIG` 指定時はそのパス）の `imagod.toml` が存在しない場合、`imagod` は同パスへ最小有効構成を自動生成して起動を継続する。
+
+- 既存 `imagod.toml` が存在する場合は上書きしない。
+- 自動生成時は「設定ファイルを自動生成した」旨を起動ログで通知する。
+- 自動生成される `imagod.toml` には英語コメントを含める。
+- 自動生成対象は `listen_addr` / `server_version` / `compatibility_date` / `tls.server_key` / `tls.client_public_keys` のみ。
+- `tls.server_key` は自動生成した `imagod.toml` と同じディレクトリの `server.key`（絶対パス）を指す。該当ファイルが未存在なら `imagod.toml` 自動生成と同時に `server.key` 実体も生成する。既存ファイルは上書きしない。
+- `tls.client_public_keys` は空配列 `[]` を許容し、運用者が後から公開鍵を追加できる。
+
 - `listen_addr`
 - `storage_root`
 - `server_version`
 - `compatibility_date`（`YYYY-MM-DD`、既定値 `2026-02-10`）
 - `tls.server_key`
 - `tls.admin_public_keys`（ed25519 公開鍵 raw 32byte hex。管理操作を許可）
-- `tls.client_public_keys`（ed25519 公開鍵 raw 32byte hex を 1 要素以上。`rpc.invoke` 専用）
+- `tls.client_public_keys`（ed25519 公開鍵 raw 32byte hex の配列。空配列許容。`rpc.invoke` 専用）
 - `tls.known_public_keys`（`authority -> ed25519 公開鍵 raw 32byte hex` の table。TOFU 永続化）
 - `runtime.chunk_size`
 - `runtime.max_inflight_chunks`
@@ -349,3 +358,11 @@
 
 - `target.<name>` の接続キー参照対象に `imago ps` / `imago compose ps` を追加した。
 - `ps` 系コマンドも `remote` / `server_name` / `client_key` / `known_hosts` の同一解決規則を使う。
+
+## 実装反映ノート（imagod.toml 自動生成 / 2026-02-21）
+
+- 起動時に `imagod.toml` が未存在なら、英語コメント付きの最小有効構成（`listen_addr` / `server_version` / `compatibility_date` / `tls.server_key` / `tls.client_public_keys`）を自動生成して起動を継続する。
+- 既存 `imagod.toml` がある場合は上書きしない。
+- 自動生成時は起動ログで通知する。
+- `tls.server_key` は自動生成した `imagod.toml` と同じディレクトリの `server.key`（絶対パス）を指し、該当ファイルが未存在なら `imagod.toml` 自動生成と同時に `server.key` 実体も生成する。
+- `tls.client_public_keys` は空配列 `[]` を許容する。

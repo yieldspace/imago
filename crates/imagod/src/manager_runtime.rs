@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use imagod_config::{ImagodConfig, resolve_config_path};
+use imagod_config::{load_or_create_default, resolve_config_path};
 use imagod_control::{ArtifactStore, OperationManager, Orchestrator, ServiceSupervisor};
 use imagod_server::{ProtocolHandler, build_server};
 use web_transport_quinn::http::StatusCode;
@@ -13,7 +13,14 @@ const SESSION_TASK_DRAIN_TIMEOUT_SECS: u64 = 15;
 
 pub(crate) async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyhow::Error> {
     let config_path = resolve_config_path(config_path);
-    let config = Arc::new(ImagodConfig::load(&config_path).map_err(anyhow::Error::new)?);
+    let load_result = load_or_create_default(&config_path).map_err(anyhow::Error::new)?;
+    if load_result.created_default {
+        eprintln!(
+            "imagod created default config at {}; review tls.server_key and tls.client_public_keys",
+            config_path.display()
+        );
+    }
+    let config = Arc::new(load_result.config);
 
     let artifact_root = config.storage_root.join("artifacts");
     let artifacts = ArtifactStore::new(
