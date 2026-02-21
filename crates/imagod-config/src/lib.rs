@@ -1667,7 +1667,8 @@ client_public_keys = ["222222222222222222222222222222222222222222222222222222222
     #[cfg(unix)]
     #[test]
     fn load_or_create_default_does_not_replace_broken_symlink() {
-        let path = make_missing_config_path("load_or_create_default_does_not_replace_broken_symlink");
+        let path =
+            make_missing_config_path("load_or_create_default_does_not_replace_broken_symlink");
         let link_target = path
             .parent()
             .expect("config path should have parent")
