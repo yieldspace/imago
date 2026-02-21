@@ -1,8 +1,9 @@
 [package]
 name = "imago-cli"
-version = "0.1.0"
-edition = "2024"
-
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
 [[bin]]
 name = "imago"
 path = "src/main.rs"
