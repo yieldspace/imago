@@ -44,6 +44,7 @@ def fetch_pull_request(repo: str, number: int, token: str) -> dict:
         headers={
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
         },
     )
 
@@ -148,6 +149,10 @@ def main() -> int:
     if not repository:
         emit_error("Environment variable GITHUB_REPOSITORY is not set.")
         return 1
+    owner_repo = repository.split("/", 1)
+    if "/" not in repository or not owner_repo[0] or not owner_repo[1]:
+        emit_error("Environment variable GITHUB_REPOSITORY must be in owner/repo format.")
+        return 1
 
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     if not event_path:
@@ -165,13 +170,19 @@ def main() -> int:
         return 1
 
     pr_number = pull_request.get("number")
-    if not isinstance(pr_number, int):
-        emit_error("pull_request.number must be an integer.")
+    if not isinstance(pr_number, int) or pr_number <= 0:
+        emit_error("pull_request.number must be a positive integer.")
         return 1
 
     try:
         pr = fetch_pull_request(repository, pr_number, token)
-    except Exception:
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        json.JSONDecodeError,
+        ValueError,
+    ):
         return 1
 
     pr_body = pr.get("body")
