@@ -60,4 +60,4 @@ jobs:
           echo "Found $ignore_count #[ignore] annotation(s) in root package tests/."
 
       - name: Run ignored e2e tests
-        run: cargo test -p imago --features e2e -- --ignored
+        run: cargo test -p imago --features e2e -- --ignored --test-threads=1
