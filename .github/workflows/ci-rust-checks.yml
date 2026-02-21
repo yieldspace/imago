@@ -33,26 +33,33 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            base_sha='${{ github.event.pull_request.base.sha }}'
-            head_sha='${{ github.event.pull_request.head.sha }}'
-            mapfile -t files < <(git diff --name-only --no-renames "$base_sha" "$head_sha")
-          else
-            files=("force/rust" "force/workflow")
-          fi
-
           rust_related=false
           workflow_related=false
 
-          for file in "${files[@]}"; do
-            if [[ "$file" == "Cargo.toml" || "$file" == "Cargo.lock" || "$file" == "build.rs" || "$file" == crates/* || "$file" == src/* || "$file" == tests/* || "$file" == e2e/* || "$file" == examples/* || "$file" == plugins/* ]]; then
-              rust_related=true
-            fi
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base_sha='${{ github.event.pull_request.base.sha }}'
+            head_sha='${{ github.event.pull_request.head.sha }}'
+            diff_output="$(git diff --name-only --no-renames "$base_sha...$head_sha")"
 
-            if [[ "$file" == .github/workflows/* || "$file" == ".github/coverage.yml" || "$file" == ".github/pull_request_template.md" || "$file" == .github/codex/* ]]; then
-              workflow_related=true
-            fi
-          done
+            while IFS= read -r file; do
+              [[ -n "$file" ]] || continue
+
+              case "$file" in
+                Cargo.toml|Cargo.lock|build.rs|crates/*|src/*|tests/*|e2e/*|examples/*|plugins/*)
+                  rust_related=true
+                  ;;
+              esac
+
+              case "$file" in
+                .github/workflows/*|.github/codex/*)
+                  workflow_related=true
+                  ;;
+              esac
+            done <<< "$diff_output"
+          else
+            rust_related=true
+            workflow_related=true
+          fi
 
           echo "rust_related=$rust_related" >> "$GITHUB_OUTPUT"
           echo "workflow_related=$workflow_related" >> "$GITHUB_OUTPUT"
@@ -145,7 +152,7 @@ jobs:
               }
             else
               [[ "$rust_result" == "skipped" || "$rust_result" == "success" ]] || {
-                echo "::error::rust_checks should be skipped for non-Rust pull requests."
+                echo "::error::rust_checks must be skipped or succeed for non-Rust pull requests."
                 exit 1
               }
             fi
@@ -156,7 +163,7 @@ jobs:
             }
 
             [[ "$pr_body_lint_result" == "skipped" || "$pr_body_lint_result" == "success" ]] || {
-              echo "::error::pr_body_lint should be skipped outside pull requests."
+              echo "::error::pr_body_lint must be skipped or succeed outside pull requests."
               exit 1
             }
           fi

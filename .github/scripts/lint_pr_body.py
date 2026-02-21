@@ -118,6 +118,10 @@ def main() -> int:
         return 1
 
     pr_body = pull_request.get("body")
+    if pr_body is None:
+        emit_error("pull_request.body is null/empty.")
+        return 1
+
     if not isinstance(pr_body, str):
         emit_error("pull_request.body must be a string.")
         return 1
