@@ -60,6 +60,88 @@ struct ResolvedComposeConfig<'a> {
     config: &'a ComposeConfig,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposeRunKind {
+    Build,
+    Update,
+    Deploy,
+    Logs,
+}
+
+impl ComposeRunKind {
+    fn from_command(command: &ComposeCommands) -> Self {
+        match command {
+            ComposeCommands::Build(_) => Self::Build,
+            ComposeCommands::Update(_) => Self::Update,
+            ComposeCommands::Deploy(_) => Self::Deploy,
+            ComposeCommands::Logs(_) => Self::Logs,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ComposeCommandError {
+    message: String,
+    suppress_json_summary: bool,
+}
+
+impl ComposeCommandError {
+    fn suppresses_json_summary(&self) -> bool {
+        self.suppress_json_summary
+    }
+}
+
+impl std::fmt::Display for ComposeCommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for ComposeCommandError {}
+
+fn should_suppress_json_summary_for_compose_success(
+    run_kind: ComposeRunKind,
+    ui_mode: ui::UiMode,
+) -> bool {
+    run_kind == ComposeRunKind::Logs && ui_mode == ui::UiMode::Json
+}
+
+fn delegated_logs_failure_already_emitted_json_error(
+    logs_result: &CommandResult,
+    ui_mode: ui::UiMode,
+) -> bool {
+    ui_mode == ui::UiMode::Json
+        && logs_result.exit_code != 0
+        && logs_result.skip_json_summary
+        && logs_result.stderr.is_none()
+}
+
+fn compose_logs_failure_error(
+    logs_result: &CommandResult,
+    ui_mode: ui::UiMode,
+) -> ComposeCommandError {
+    let detail = logs_result
+        .stderr
+        .clone()
+        .unwrap_or_else(|| format!("exit code {}", logs_result.exit_code));
+    ComposeCommandError {
+        message: format!("compose logs failed: {detail}"),
+        suppress_json_summary: delegated_logs_failure_already_emitted_json_error(
+            logs_result,
+            ui_mode,
+        ),
+    }
+}
+
+fn should_suppress_json_summary_for_compose_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<ComposeCommandError>()
+            .map(ComposeCommandError::suppresses_json_summary)
+            .unwrap_or(false)
+    })
+}
+
 pub async fn run(args: ComposeSubcommandArgs) -> CommandResult {
     run_with_project_root(args, Path::new(".")).await
 }
@@ -69,16 +151,26 @@ pub(crate) async fn run_with_project_root(
     project_root: &Path,
 ) -> CommandResult {
     let started_at = Instant::now();
+    let run_kind = ComposeRunKind::from_command(&args.command);
+    let ui_mode = ui::current_mode();
     ui::command_start("compose", "starting");
     match run_async(args, project_root).await {
         Ok(()) => {
             ui::command_finish("compose", true, "completed");
-            CommandResult::success("compose", started_at)
+            let mut result = CommandResult::success("compose", started_at);
+            if should_suppress_json_summary_for_compose_success(run_kind, ui_mode) {
+                result = result.without_json_summary();
+            }
+            result
         }
         Err(err) => {
             let message = err.to_string();
             ui::command_finish("compose", false, &message);
-            CommandResult::failure("compose", started_at, message)
+            let mut result = CommandResult::failure("compose", started_at, message);
+            if should_suppress_json_summary_for_compose_error(&err) {
+                result = result.without_json_summary();
+            }
+            result
         }
     }
 }
@@ -266,10 +358,7 @@ async fn run_compose_logs(args: ComposeLogsArgs, project_root: &Path) -> anyhow:
     .await;
 
     if logs_result.exit_code != 0 {
-        let detail = logs_result
-            .stderr
-            .unwrap_or_else(|| format!("exit code {}", logs_result.exit_code));
-        return Err(anyhow!("compose logs failed: {detail}"));
+        return Err(compose_logs_failure_error(&logs_result, ui::current_mode()).into());
     }
 
     Ok(())
@@ -446,6 +535,52 @@ mod tests {
             fs::create_dir_all(parent).expect("parent dir should be created");
         }
         fs::write(path, bytes).expect("file should be written");
+    }
+
+    #[test]
+    fn compose_logs_success_suppresses_json_summary_only_for_json_mode() {
+        assert!(should_suppress_json_summary_for_compose_success(
+            ComposeRunKind::Logs,
+            ui::UiMode::Json
+        ));
+        assert!(!should_suppress_json_summary_for_compose_success(
+            ComposeRunKind::Logs,
+            ui::UiMode::Plain
+        ));
+        assert!(!should_suppress_json_summary_for_compose_success(
+            ComposeRunKind::Build,
+            ui::UiMode::Json
+        ));
+    }
+
+    #[test]
+    fn compose_logs_json_delegate_failure_marks_outer_summary_suppressed() {
+        let logs_result = CommandResult {
+            command: "logs".to_string(),
+            exit_code: 2,
+            stderr: None,
+            duration_ms: 0,
+            meta: BTreeMap::new(),
+            skip_json_summary: true,
+        };
+
+        let err: anyhow::Error = compose_logs_failure_error(&logs_result, ui::UiMode::Json).into();
+        assert!(should_suppress_json_summary_for_compose_error(&err));
+    }
+
+    #[test]
+    fn compose_logs_non_json_delegate_failure_keeps_outer_summary() {
+        let logs_result = CommandResult {
+            command: "logs".to_string(),
+            exit_code: 2,
+            stderr: Some("network failed".to_string()),
+            duration_ms: 0,
+            meta: BTreeMap::new(),
+            skip_json_summary: true,
+        };
+
+        let err: anyhow::Error = compose_logs_failure_error(&logs_result, ui::UiMode::Plain).into();
+        assert!(!should_suppress_json_summary_for_compose_error(&err));
     }
 
     #[tokio::test]

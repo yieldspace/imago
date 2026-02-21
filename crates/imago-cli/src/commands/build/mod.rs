@@ -726,13 +726,13 @@ fn spawn_build_command_reader<R: Read + Send + 'static>(
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut reader = BufReader::new(reader);
-        let mut buf = String::new();
+        let mut buf = Vec::new();
         loop {
             buf.clear();
-            match reader.read_line(&mut buf) {
+            match reader.read_until(b'\n', &mut buf) {
                 Ok(0) => break,
                 Ok(_) => {
-                    let line = buf.trim_end_matches(['\r', '\n']).to_string();
+                    let line = decode_build_command_log_line(&buf);
                     if sender
                         .send(Ok(BuildCommandLogLine { stream, line }))
                         .is_err()
@@ -750,6 +750,12 @@ fn spawn_build_command_reader<R: Read + Send + 'static>(
             }
         }
     })
+}
+
+fn decode_build_command_log_line(raw_line: &[u8]) -> String {
+    String::from_utf8_lossy(raw_line)
+        .trim_end_matches(['\r', '\n'])
+        .to_string()
 }
 
 fn make_build_process(command: &BuildCommand, project_root: &Path) -> Command {
@@ -2876,6 +2882,36 @@ remote = "127.0.0.1:4443"
         }));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_command_reader_handles_non_utf8_bytes() {
+        let reader = std::io::Cursor::new(vec![b'o', b'k', 0xff, b'\n', 0xfe]);
+        let (sender, receiver) = mpsc::channel();
+        let handle = spawn_build_command_reader(reader, BuildCommandLogStream::Stdout, sender);
+
+        let events = receiver
+            .into_iter()
+            .map(|event| event.expect("reader should not emit errors"))
+            .collect::<Vec<_>>();
+
+        handle
+            .join()
+            .expect("build.command reader thread should not panic");
+
+        assert_eq!(
+            events,
+            vec![
+                BuildCommandLogLine {
+                    stream: BuildCommandLogStream::Stdout,
+                    line: "ok\u{fffd}".to_string(),
+                },
+                BuildCommandLogLine {
+                    stream: BuildCommandLogStream::Stdout,
+                    line: "\u{fffd}".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]

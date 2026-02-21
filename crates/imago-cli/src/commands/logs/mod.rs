@@ -550,12 +550,23 @@ fn render_text_chunk(
     prefix_state: &mut PrefixRenderState,
 ) -> anyhow::Result<()> {
     let rendered = renderable_chunk_bytes(chunk, all_processes, prefix_state);
-    let mut stdout = io::stdout().lock();
-    stdout
-        .write_all(rendered.as_ref())
-        .context("failed to write log chunk to stdout")?;
+    if should_write_text_chunk_to_stderr(chunk, all_processes) {
+        let mut stderr = io::stderr().lock();
+        stderr
+            .write_all(rendered.as_ref())
+            .context("failed to write log chunk to stderr")?;
+    } else {
+        let mut stdout = io::stdout().lock();
+        stdout
+            .write_all(rendered.as_ref())
+            .context("failed to write log chunk to stdout")?;
+    }
 
     Ok(())
+}
+
+fn should_write_text_chunk_to_stderr(chunk: &LogChunk, all_processes: bool) -> bool {
+    !all_processes && matches!(chunk.stream_kind, LogStreamKind::Stderr)
 }
 
 fn render_json_chunk(
@@ -1157,6 +1168,34 @@ mod tests {
     #[test]
     fn normalize_log_line_trims_trailing_carriage_return() {
         assert_eq!(normalize_log_line(b"hello\r".to_vec()), "hello");
+    }
+
+    #[test]
+    fn stderr_text_chunk_uses_stderr_only_for_single_process_output() {
+        let chunk = LogChunk {
+            request_id: Uuid::new_v4(),
+            seq: 0,
+            name: "svc-a".to_string(),
+            stream_kind: LogStreamKind::Stderr,
+            bytes: b"oops".to_vec(),
+            is_last: false,
+        };
+        assert!(should_write_text_chunk_to_stderr(&chunk, false));
+        assert!(!should_write_text_chunk_to_stderr(&chunk, true));
+    }
+
+    #[test]
+    fn stdout_text_chunk_does_not_use_stderr() {
+        let chunk = LogChunk {
+            request_id: Uuid::new_v4(),
+            seq: 0,
+            name: "svc-a".to_string(),
+            stream_kind: LogStreamKind::Stdout,
+            bytes: b"ok".to_vec(),
+            is_last: false,
+        };
+        assert!(!should_write_text_chunk_to_stderr(&chunk, false));
+        assert!(!should_write_text_chunk_to_stderr(&chunk, true));
     }
 
     #[test]

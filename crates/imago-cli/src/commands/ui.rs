@@ -425,6 +425,15 @@ pub fn emit_command_error_json(command: &str, message: &str, stage: &str, code: 
     write_json_line(&payload);
 }
 
+fn finalize_error_output_line(result: &CommandResult) -> Option<String> {
+    if result.exit_code != 0
+        && let Some(message) = result.stderr.as_deref()
+    {
+        return Some(format!("[error] {} {}", result.command, message));
+    }
+    None
+}
+
 pub fn finalize_result(result: &CommandResult) {
     match current_mode() {
         UiMode::Json => {
@@ -448,10 +457,8 @@ pub fn finalize_result(result: &CommandResult) {
             write_json_line(&payload);
         }
         UiMode::Plain | UiMode::Rich => {
-            if result.exit_code != 0
-                && let Some(message) = result.stderr.as_deref()
-            {
-                println!("[error] {} {}", result.command, message);
+            if let Some(message) = finalize_error_output_line(result) {
+                eprintln!("{message}");
             }
         }
     }
@@ -460,6 +467,7 @@ pub fn finalize_result(result: &CommandResult) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn detects_json_flag_first() {
@@ -546,5 +554,34 @@ mod tests {
     #[test]
     fn startup_banner_lines_are_not_generated_for_json() {
         assert_eq!(startup_banner_lines_for_mode(UiMode::Json, "0.1.0"), None);
+    }
+
+    #[test]
+    fn finalize_error_output_line_formats_failure() {
+        let result = CommandResult {
+            command: "deploy".to_string(),
+            exit_code: 2,
+            stderr: Some("failed".to_string()),
+            duration_ms: 0,
+            meta: BTreeMap::new(),
+            skip_json_summary: false,
+        };
+        assert_eq!(
+            finalize_error_output_line(&result),
+            Some("[error] deploy failed".to_string())
+        );
+    }
+
+    #[test]
+    fn finalize_error_output_line_is_none_for_success() {
+        let result = CommandResult {
+            command: "deploy".to_string(),
+            exit_code: 0,
+            stderr: Some("ignored".to_string()),
+            duration_ms: 0,
+            meta: BTreeMap::new(),
+            skip_json_summary: false,
+        };
+        assert_eq!(finalize_error_output_line(&result), None);
     }
 }
