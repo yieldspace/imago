@@ -7,6 +7,8 @@ import json
 import os
 import re
 import sys
+import urllib.error
+import urllib.request
 
 REQUIRED_HEADINGS = ("Motivation", "Summary", "Validation")
 HEADING_PATTERN = re.compile(r"^##[ \t]+(?P<title>[^\n]+)\s*$")
@@ -32,6 +34,42 @@ def load_event(event_path: str) -> dict:
     if not isinstance(data, dict):
         emit_error("GITHUB_EVENT_PATH JSON root must be an object.")
         raise ValueError("event json root is not object")
+    return data
+
+
+def fetch_pull_request(repo: str, number: int, token: str) -> dict:
+    url = f"https://api.github.com/repos/{repo}/pulls/{number}"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = response.read()
+    except urllib.error.HTTPError as exc:
+        emit_error(f"GitHub API request failed with status {exc.code}: {exc.reason}")
+        raise
+    except urllib.error.URLError as exc:
+        emit_error(f"GitHub API request failed: {exc.reason}")
+        raise
+    except OSError as exc:
+        emit_error(f"GitHub API request failed: {exc}")
+        raise
+
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        emit_error(f"Failed to parse GitHub API response as JSON: {exc}")
+        raise
+
+    if not isinstance(data, dict):
+        emit_error("GitHub API response root must be an object.")
+        raise ValueError("api response root is not object")
     return data
 
 
@@ -102,6 +140,20 @@ def validate_pr_body(pr_body: str) -> list[str]:
 
 
 def main() -> int:
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        emit_error("Environment variable GITHUB_TOKEN is not set.")
+        return 1
+
+    repository = os.environ.get("GITHUB_REPOSITORY")
+    if not repository:
+        emit_error("Environment variable GITHUB_REPOSITORY is not set.")
+        return 1
+    owner_repo = repository.split("/", 1)
+    if "/" not in repository or not owner_repo[0] or not owner_repo[1]:
+        emit_error("Environment variable GITHUB_REPOSITORY must be in owner/repo format.")
+        return 1
+
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     if not event_path:
         emit_error("Environment variable GITHUB_EVENT_PATH is not set.")
@@ -117,13 +169,29 @@ def main() -> int:
         emit_error("Event payload does not contain pull_request object.")
         return 1
 
-    pr_body = pull_request.get("body")
+    pr_number = pull_request.get("number")
+    if not isinstance(pr_number, int) or pr_number <= 0:
+        emit_error("pull_request.number must be a positive integer.")
+        return 1
+
+    try:
+        pr = fetch_pull_request(repository, pr_number, token)
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        json.JSONDecodeError,
+        ValueError,
+    ):
+        return 1
+
+    pr_body = pr.get("body")
     if pr_body is None:
-        emit_error("pull_request.body is null/empty.")
+        emit_error("GitHub API pull_request.body is null/empty.")
         return 1
 
     if not isinstance(pr_body, str):
-        emit_error("pull_request.body must be a string.")
+        emit_error("GitHub API pull_request.body must be a string.")
         return 1
 
     errors = validate_pr_body(pr_body)
