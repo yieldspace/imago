@@ -30,38 +30,42 @@
 1. `install_rustls_provider`
 2. CLI 解析（`manager` / `--runner`）
 3. manager モード:
-4. `resolve_config_path` + `ImagodConfig::load`
-5. `ArtifactStore::new`
-6. `OperationManager::new`
-7. `ServiceSupervisor::new`（manager control socket 起動）
-8. `Orchestrator::new`
-9. `build_server` で WebTransport サーバ構築
-10. `Orchestrator::gc_unused_plugin_components_on_boot`（active release 未参照の plugin component cache を削除）
-11. `Orchestrator::restore_active_services_on_boot`（`restart_policy=always` かつ `active_release` を持つ service を best-effort で自動復元）
-12. `ProtocolHandler::new`
-13. maintenance loop 起動
-14. `accept` ループで session task を `tokio::spawn`
-15. runner モード:
-16. stdin から `RunnerBootstrap` を読込
-17. `create_runtime_backend`（`runtime-wasmtime` 有効時は `WasmRuntime::new_with_native_plugins`） + component 実行
+4. `resolve_config_path`
+5. `imagod.toml` の存在確認（未存在時は英語コメント付き最小有効構成を自動生成して起動ログで通知。既存ファイルは非上書き。`server.key` 実体も同時生成）
+6. `ImagodConfig::load`
+7. `ArtifactStore::new`
+8. `OperationManager::new`
+9. `ServiceSupervisor::new`（manager control socket 起動）
+10. `Orchestrator::new`
+11. `build_server` で WebTransport サーバ構築
+12. `Orchestrator::gc_unused_plugin_components_on_boot`（active release 未参照の plugin component cache を削除）
+13. `Orchestrator::restore_active_services_on_boot`（`restart_policy=always` かつ `active_release` を持つ service を best-effort で自動復元）
+14. `ProtocolHandler::new`
+15. maintenance loop 起動
+16. `accept` ループで session task を `tokio::spawn`
+17. runner モード:
+18. stdin から `RunnerBootstrap` を読込
+19. `create_runtime_backend`（`runtime-wasmtime` 有効時は `WasmRuntime::new_with_native_plugins`） + component 実行
 
 ```mermaid
 flowchart TD
   A["main"] --> B["dispatch"]
   B --> C["install_rustls_provider"]
   B --> D{"mode"}
-  D -->|manager| E["ImagodConfig::load"]
-  E --> F["ArtifactStore"]
-  E --> G["ServiceSupervisor"]
-  F --> H["Orchestrator"]
-  G --> H
-  H --> I["build_server"]
-  I --> J["boot restore(active_release)"]
-  J --> K["ProtocolHandler"]
-  K --> L["maintenance loop"]
-  K --> M["session task"]
-  D -->|runner| O["RunnerBootstrap(from stdin)"]
-  O --> P["create_runtime_backend + run component"]
+  D -->|manager| E["resolve_config_path"]
+  E --> F["ensure imagod.toml (create commented minimal + server.key + notify when missing)"]
+  F --> G["ImagodConfig::load"]
+  G --> H["ArtifactStore"]
+  G --> I["ServiceSupervisor"]
+  H --> J["Orchestrator"]
+  I --> J
+  J --> K["build_server"]
+  K --> L["boot restore(active_release)"]
+  L --> M["ProtocolHandler"]
+  M --> N["maintenance loop"]
+  M --> O["session task"]
+  D -->|runner| P["RunnerBootstrap(from stdin)"]
+  P --> Q["create_runtime_backend + run component"]
 ```
 
 ## 3. モジュール責務マップ
@@ -659,3 +663,11 @@ flowchart TD
 - `logs.request.name=None` は running サービスだけでなく retained logs が残る停止済みサービスも対象とする。
 - retained logs は imagod プロセス寿命内メモリの global ring でのみ保持し、eviction またはプロセス再起動後は参照不可とする。
 - 停止済みサービスへ `follow=true` を指定した場合は snapshot 後に `logs.end` を返して即終了する。
+
+## 実装反映ノート（imagod.toml 自動生成 / 2026-02-21）
+
+- manager 起動時に解決された設定パス（既定は `/etc/imago/imagod.toml`、`--config` / `IMAGOD_CONFIG` 指定時はそのパス）の `imagod.toml` が未存在なら、英語コメント付きで `listen_addr` / `server_version` / `compatibility_date` / `tls.server_key` / `tls.client_public_keys` を含む最小有効構成を自動生成して起動を継続する。
+- 既存ファイルがある場合は上書きしない。
+- 自動生成時は起動ログで通知する。
+- `tls.server_key` は自動生成した `imagod.toml` と同じディレクトリの `server.key`（絶対パス）を指し、該当ファイルが未存在なら `imagod.toml` 自動生成と同時に `server.key` 実体も生成する。
+- `tls.client_public_keys` は空配列 `[]` を許容する。

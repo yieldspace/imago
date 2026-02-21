@@ -40,14 +40,6 @@ pub(crate) fn reject_legacy_keys(path: &Path, raw: &toml::Value) -> Result<(), I
 }
 
 pub(crate) fn validate(config: &ImagodConfig) -> Result<(), ImagodError> {
-    if config.tls.client_public_keys.is_empty() {
-        return Err(ImagodError::new(
-            ErrorCode::BadRequest,
-            "config.load",
-            "tls.client_public_keys must not be empty",
-        ));
-    }
-
     let client_keys =
         parse_unique_public_key_hexes(&config.tls.client_public_keys, "tls.client_public_keys")?;
     parse_unique_public_key_hexes(&config.tls.admin_public_keys, "tls.admin_public_keys")?;

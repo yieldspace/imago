@@ -12,7 +12,7 @@
 
 - QUIC + WebTransport セッション受理
 - `ProtocolEnvelope` (`MessageType`) の decode/dispatch
-- RPK 認証（クライアント公開鍵 allowlist 必須）
+- RPK 認証（クライアント公開鍵 allowlist で認可）
 - `deploy.prepare` / `artifact.push` / `artifact.commit`
 - `command.start` (`deploy` / `run` / `stop`) と `command.event` 配信
 - `type=rpc` runner の常駐管理（起動時は `main` 非実行、`rpc.invoke` で関数実行）
@@ -56,9 +56,9 @@ server_version = "imagod/0.1.0"
 compatibility_date = "2026-02-10"
 
 [tls]
-server_key = "/etc/imago/certs/server.key"
+server_key = "/etc/imago/server.key"
 admin_public_keys = ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
-client_public_keys = ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+client_public_keys = []
 known_public_keys = { "rpc://node-a:4443" = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
 
 [runtime]
@@ -74,6 +74,15 @@ epoch_tick_interval_ms = 50
 `storage_root` の未指定時既定値は OS とビルド時設定で変わる。優先順位と OS 別値は [`config.md`](./config.md) を参照。
 
 `runtime.runner_log_buffer_bytes` は runner stdout/stderr の保持に加え、停止済みサービスの retained logs を保持する global ring の総量上限としても使う。
+
+起動時に解決された設定パス（既定は `/etc/imago/imagod.toml`、`--config` / `IMAGOD_CONFIG` 指定時はそのパス）の `imagod.toml` が存在しない場合、`imagod` は最小有効構成を自動生成して起動を継続する。
+
+- 既存ファイルがある場合は上書きしない。
+- 自動生成時は設定ファイルを生成した旨を起動ログで通知する。
+- 自動生成される `imagod.toml` には英語コメントを含める。
+- 自動生成対象は `listen_addr` / `server_version` / `compatibility_date` / `tls.server_key` / `tls.client_public_keys`。
+- `tls.server_key` は自動生成した `imagod.toml` と同じディレクトリの `server.key`（絶対パス）を指す。該当ファイルが未存在なら、`imagod.toml` 自動生成と同時に `server.key` 実体も生成する。
+- `tls.client_public_keys` は空配列 `[]` を許容し、運用者が必要な公開鍵を追記する。
 
 詳細は [`config.md`](./config.md) を参照。
 
@@ -148,3 +157,11 @@ epoch_tick_interval_ms = 50
 - retained logs は imagod プロセス寿命内メモリの global ring にのみ保持し、eviction またはプロセス再起動後は参照できない。
 - 停止済みサービスへ `follow=true` を指定した場合は snapshot 後に `logs.end` で即終了する。
 - `runtime.runner_log_buffer_bytes` は retained global ring の総量上限にも適用される。
+
+## 実装反映ノート（imagod.toml 自動生成 / 2026-02-21）
+
+- manager 起動時に `imagod.toml` が未存在なら、英語コメント付きの最小有効構成（`listen_addr` / `server_version` / `compatibility_date` / `tls.server_key` / `tls.client_public_keys`）を自動生成して起動を継続する。
+- 既存の `imagod.toml` は上書きしない。
+- 自動生成時は起動ログで通知する。
+- `tls.server_key` は自動生成した `imagod.toml` と同じディレクトリの `server.key`（絶対パス）を指し、該当ファイルが未存在なら `imagod.toml` 自動生成と同時に `server.key` 実体も生成する。
+- `tls.client_public_keys` は空配列 `[]` を許容する。

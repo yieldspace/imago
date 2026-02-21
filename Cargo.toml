@@ -108,6 +108,11 @@ path = "tests/e2e_cli.rs"
 required-features = ["e2e"]
 
 [[test]]
+name = "e2e_imagod_config_autocreate"
+path = "tests/e2e_imagod_config_autocreate.rs"
+required-features = ["e2e"]
+
+[[test]]
 name = "e2e_http"
 path = "tests/e2e_http.rs"
 required-features = ["e2e"]

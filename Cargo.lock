@@ -2332,6 +2332,7 @@ version = "0.1.0"
 dependencies = [
  "imago-protocol",
  "imagod-common",
+ "rcgen",
  "serde",
  "toml 0.8.23",
 ]

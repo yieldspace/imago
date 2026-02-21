@@ -1,5 +1,6 @@
 # imagod.toml template (current accepted keys from implementation)
 # Rule: required keys are active lines; optional keys are commented lines.
+# Note: autocreate output keeps English comments in this style.
 
 # optional | type=string
 # constraint: must be parseable as SocketAddr at server bootstrap
@@ -28,7 +29,8 @@
 # required | type=string(path)
 # constraint: none at load-time (runtime bootstrap loads key material)
 # default: none
-server_key = "/etc/imago/server.key"
+# autocreate: writes "<config_dir>/server.key" as absolute path and generates key material if missing
+server_key = "/absolute/path/to/server.key"
 
 # optional | type=array<string>
 # constraint: each entry is ed25519 raw public key hex (64 hex chars), unique,
@@ -39,11 +41,9 @@ server_key = "/etc/imago/server.key"
 # ]
 
 # required | type=array<string>
-# constraint: non-empty, each entry is ed25519 raw public key hex (64 hex chars), unique
-# default: none
-client_public_keys = [
-  "1111111111111111111111111111111111111111111111111111111111111111",
-]
+# constraint: each entry is ed25519 raw public key hex (64 hex chars), unique; empty array is allowed
+# default: none (autocreate writes [])
+client_public_keys = []
 
 # optional | type=table<string,string>
 # constraint: authority key must be non-empty after trim;

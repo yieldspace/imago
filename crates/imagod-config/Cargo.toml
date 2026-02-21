@@ -7,5 +7,6 @@ publish.workspace = true
 [dependencies]
 imago-protocol = { workspace = true }
 imagod-common = { workspace = true }
+rcgen = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 toml = { workspace = true }
