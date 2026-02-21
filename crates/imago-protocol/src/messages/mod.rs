@@ -8,6 +8,7 @@ pub mod command;
 pub mod hello;
 pub mod log;
 pub mod rpc;
+pub mod service;
 
 pub use artifact::{
     ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushChunkHeader,
@@ -22,6 +23,7 @@ pub use command::{
 pub use hello::{HelloNegotiateRequest, HelloNegotiateResponse};
 pub use log::{LogChunk, LogEnd, LogError, LogErrorCode, LogRequest, LogStreamKind};
 pub use rpc::{RpcInvokeError, RpcInvokeRequest, RpcInvokeResponse, RpcInvokeTargetService};
+pub use service::{ServiceListRequest, ServiceListResponse, ServiceState, ServiceStatusEntry};
 
 pub type StringMap = BTreeMap<String, String>;
 
@@ -43,6 +45,8 @@ pub enum MessageType {
     StateRequest,
     #[serde(rename = "state.response")]
     StateResponse,
+    #[serde(rename = "services.list")]
+    ServicesList,
     #[serde(rename = "command.cancel")]
     CommandCancel,
     #[serde(rename = "logs.request")]

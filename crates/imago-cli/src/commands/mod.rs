@@ -9,6 +9,7 @@ pub mod deploy;
 pub(crate) mod error_diagnostics;
 pub mod logs;
 pub(crate) mod plugin_sources;
+pub mod ps;
 pub mod run;
 pub(crate) mod shared;
 pub mod stop;

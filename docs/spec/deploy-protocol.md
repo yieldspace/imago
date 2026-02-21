@@ -113,6 +113,11 @@ response:
 `compatibility_date` は `protocol_draft` に戻さない。
 `hello.negotiate` request は unknown field を受理しない（legacy `protocol_draft` を含め拒否）。
 
+`required_features` 運用方針:
+
+- `imago ps` / `imago compose ps` は `required_features` に `services.list` を含める。
+- `hello.negotiate` response の `features` に `services.list` が存在しない場合、CLI は `ps` 系コマンドを実行しない。
+
 ### 5.2 `deploy.prepare`
 
 request:
@@ -326,6 +331,29 @@ response:
 - `type="rpc"` service の runner は起動時に `manifest.main` を自動実行せず、`rpc.invoke` 到着時のみ対象関数を実行する。
 - 例: `examples/rpc.invoke.request.json` / `examples/rpc.invoke.response.success.json` / `examples/rpc.invoke.response.error.json`
 
+### 5.11 `services.list`
+
+`services.list` request:
+
+- `names: Option<Vec<String>>`
+
+`services.list` response:
+
+- `services`
+  - `name`
+  - `state`（`running` / `stopping` / `stopped`）
+  - `release_hash`
+  - `started_at`（`state=stopped` で unknown の場合は空文字を許容）
+
+制約:
+
+- `names=None` は service 一覧を返す。
+- `names=Some([...])` は指定名の一致集合のみ返す。
+- `names` に unknown service 名が含まれていてもエラーにしない。
+- 指定名がすべて unknown の場合は `services=[]` を返す。
+- deployed 情報（`active_release`）が未観測でも runtime snapshot がある service は結果に含める。
+- `started_at` は `running` / `stopping` では非空必須、`stopped` では空文字（unknown）を許容する。
+
 ## 6. 状態遷移
 
 `accepted -> running -> succeeded | failed | canceled`
@@ -435,3 +463,14 @@ response:
 - `logs.request.name=None` は running サービスに加え、retained logs が残る停止済みサービスも対象に含める。
 - retained logs は imagod プロセス寿命内メモリの global ring に保持し、eviction または imagod 再起動後は参照できない。
 - 停止済みサービスへ `follow=true` を指定した場合は snapshot 後に `logs.end` を返して即終了する。
+
+## 実装反映ノート（services.list / ps feature gate / 2026-02-21）
+
+- `services.list` を追加し、`names` フィルタで service 一覧照会できる契約を明示した。
+- `names` に unknown service 名が含まれてもエラーにせず、該当なしは `services=[]` を返す方針を追加した。
+- `imago ps` / `imago compose ps` は `hello.negotiate.required_features` で `services.list` を必須化する方針を追加した。
+
+## 実装反映ノート（services.list runtime-only + started_at unknown / 2026-02-21）
+
+- `services.list` は deployed 情報が無くても runtime snapshot がある service を返す契約へ更新した。
+- `ServiceStatusEntry.started_at` は `running` / `stopping` で非空必須、`stopped` で空文字（unknown）を許容する契約へ更新した。

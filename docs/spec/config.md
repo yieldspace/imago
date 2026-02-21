@@ -253,7 +253,7 @@
 
 ## `target.<name>` の接続キー（deploy 通信）
 
-`imago deploy` / `imago run` / `imago stop` / `imago logs` は `target.<name>` から下記キーを読む。
+`imago deploy` / `imago run` / `imago stop` / `imago logs` / `imago ps` / `imago compose ps` は `target.<name>` から下記キーを読む。
 
 - `remote`: `host` または `host:port`（`https://` 省略可）
   - IPv6 は `::1`, `[::1]`, `[::1]:4443`, `https://[::1]:4443` を許可
@@ -344,3 +344,8 @@
 
 - `runtime.runner_log_buffer_bytes` は runner log バッファに加えて retained logs 用 global ring の総量上限としても使用する。
 - retained logs は imagod プロセス寿命内メモリでのみ保持し、eviction または imagod 再起動後は参照できない。
+
+## 実装反映ノート（`ps` 接続キー適用範囲 / 2026-02-21）
+
+- `target.<name>` の接続キー参照対象に `imago ps` / `imago compose ps` を追加した。
+- `ps` 系コマンドも `remote` / `server_name` / `client_key` / `known_hosts` の同一解決規則を使う。

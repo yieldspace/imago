@@ -349,6 +349,7 @@ fn message_type_name(message_type: MessageType) -> &'static str {
         MessageType::CommandEvent => "command.event",
         MessageType::StateRequest => "state.request",
         MessageType::StateResponse => "state.response",
+        MessageType::ServicesList => "services.list",
         MessageType::CommandCancel => "command.cancel",
         MessageType::LogsRequest => "logs.request",
         MessageType::LogsChunk => "logs.chunk",
@@ -511,5 +512,13 @@ mod tests {
         let err = ensure_message_type_allowed(&request, &context)
             .expect_err("unknown role must not allow message type");
         assert_eq!(err.code, ErrorCode::Unauthorized);
+    }
+
+    #[test]
+    fn message_type_name_supports_services_list() {
+        assert_eq!(
+            message_type_name(MessageType::ServicesList),
+            "services.list"
+        );
     }
 }
