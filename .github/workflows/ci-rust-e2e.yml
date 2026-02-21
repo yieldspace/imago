@@ -49,7 +49,7 @@ jobs:
             exit 1
           fi
 
-          ignore_count="$(find tests -type f -name '*.rs' -exec grep -hE '^[[:space:]]*#\\[ignore' {} + | wc -l | tr -d '[:space:]' || true)"
+          ignore_count="$(find tests -type f -name '*.rs' -exec grep -hE '^[[:space:]]*#\[ignore([[:space:]]*=[[:space:]]*\"[^\"]*\")?[[:space:]]*\]' {} + | wc -l | tr -d '[:space:]' || true)"
           if [ "$ignore_count" -eq 0 ]; then
             echo "Error: expected at least one #[ignore] in root package tests/ Rust files." >&2
             exit 1
