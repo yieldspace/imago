@@ -52,6 +52,7 @@ PRs should include:
 - Linked issue/PR context.
 - Validation commands you ran (for example, `cargo test --workspace`, `cargo clippy ...`).
 - Notes on spec or compatibility impact when touching `docs/spec/`.
+- PR body must follow `.github/pull_request_template.md` and explicitly fill `## Motivation`, `## Summary`, and `## Validation`.
 
 ## Phase / Issue 運用ルール
 - 現在の Phase は `0` とする。
