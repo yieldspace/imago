@@ -97,7 +97,7 @@ CLI は起動時に 1 つの出力モードを選ぶ。
 - `name`: サービス名
 - `state`: `"running"` / `"stopping"` / `"stopped"`
 - `release`: リリース識別子
-- `started_at`: 起動時刻（protocol の Unix 秒文字列を CLI 実行マシンのローカル時刻文字列へ変換した値。変換不可時は入力文字列をそのまま出力）
+- `started_at`: 起動時刻（protocol の Unix 秒文字列を CLI 実行マシンのローカル時刻文字列へ変換した値。`state=stopped` かつ unknown（空文字または `"0"`）は `"-"` を出力。その他の変換不可時は入力文字列をそのまま出力）
 
 ## 6. 実装反映ノート（CLI UI mode/summary 契約 / 2026-02-20）
 
@@ -132,3 +132,8 @@ CLI は起動時に 1 つの出力モードを選ぶ。
 - `ps --json` は `type="service.state"` の JSON Lines を出力する契約を追加した。
 - `service.state` は `name` / `state` / `release` / `started_at` を含み、`state` は `running` / `stopping` / `stopped` を許可する。
 - `ps --json` は `command.summary` を出力せず、失敗時のみ `command.error` を 1 行出力する。
+
+## 11. 実装反映ノート（`ps started_at` unknown 表示 / 2026-02-21）
+
+- `ps` / `compose ps` は `started_at` 表示を `chrono` ベースのローカル時刻変換へ更新した。
+- `state=stopped` で `started_at` が空文字または `"0"` の場合、table/JSON ともに `"-"` を表示する契約を追加した。

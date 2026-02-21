@@ -457,6 +457,37 @@ mod tests {
     }
 
     #[test]
+    fn service_list_response_allows_empty_started_at_when_stopped() {
+        let response = ServiceListResponse {
+            services: vec![ServiceStatusEntry {
+                name: "svc-a".to_string(),
+                release_hash: "release-a".to_string(),
+                started_at: "".to_string(),
+                state: ServiceState::Stopped,
+            }],
+        };
+        assert!(response.validate().is_ok());
+    }
+
+    #[test]
+    fn service_list_response_requires_started_at_for_running_and_stopping() {
+        for state in [ServiceState::Running, ServiceState::Stopping] {
+            let invalid = ServiceListResponse {
+                services: vec![ServiceStatusEntry {
+                    name: "svc-a".to_string(),
+                    release_hash: "release-a".to_string(),
+                    started_at: "".to_string(),
+                    state,
+                }],
+            };
+            assert!(
+                invalid.validate().is_err(),
+                "state {state:?} should require non-empty started_at"
+            );
+        }
+    }
+
+    #[test]
     fn service_list_response_rejects_empty_required_fields() {
         let invalid = ServiceListResponse {
             services: vec![ServiceStatusEntry {

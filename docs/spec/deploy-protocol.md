@@ -343,7 +343,7 @@ response:
   - `name`
   - `state`（`running` / `stopping` / `stopped`）
   - `release_hash`
-  - `started_at`
+  - `started_at`（`state=stopped` で unknown の場合は空文字を許容）
 
 制約:
 
@@ -351,6 +351,8 @@ response:
 - `names=Some([...])` は指定名の一致集合のみ返す。
 - `names` に unknown service 名が含まれていてもエラーにしない。
 - 指定名がすべて unknown の場合は `services=[]` を返す。
+- deployed 情報（`active_release`）が未観測でも runtime snapshot がある service は結果に含める。
+- `started_at` は `running` / `stopping` では非空必須、`stopped` では空文字（unknown）を許容する。
 
 ## 6. 状態遷移
 
@@ -467,3 +469,8 @@ response:
 - `services.list` を追加し、`names` フィルタで service 一覧照会できる契約を明示した。
 - `names` に unknown service 名が含まれてもエラーにせず、該当なしは `services=[]` を返す方針を追加した。
 - `imago ps` / `imago compose ps` は `hello.negotiate.required_features` で `services.list` を必須化する方針を追加した。
+
+## 実装反映ノート（services.list runtime-only + started_at unknown / 2026-02-21）
+
+- `services.list` は deployed 情報が無くても runtime snapshot がある service を返す契約へ更新した。
+- `ServiceStatusEntry.started_at` は `running` / `stopping` で非空必須、`stopped` で空文字（unknown）を許容する契約へ更新した。

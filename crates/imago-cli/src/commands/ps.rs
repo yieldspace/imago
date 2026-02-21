@@ -5,16 +5,13 @@ use std::{
 };
 
 use anyhow::Context;
+use chrono::{DateTime, Local, Utc};
 use imago_protocol::{
     MessageType, ServiceListRequest, ServiceListResponse, ServiceState as ProtocolServiceState,
     ServiceStatusEntry,
 };
 use serde::Serialize;
-use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
-
-#[cfg(unix)]
-use std::ptr;
 
 use crate::{
     cli::PsArgs,
@@ -178,7 +175,7 @@ fn render_services_table(services: &[ServiceStatusEntry]) -> anyhow::Result<()> 
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "NAME STATE RELEASE STARTED_AT").context("failed to write ps table header")?;
     for service in services {
-        let started_at = format_started_at_local(&service.started_at);
+        let started_at = format_service_started_at(service);
         writeln!(
             stdout,
             "{} {} {} {}",
@@ -195,7 +192,7 @@ fn render_services_table(services: &[ServiceStatusEntry]) -> anyhow::Result<()> 
 fn render_services_json_lines(services: &[ServiceStatusEntry]) -> anyhow::Result<()> {
     let mut stdout = io::stdout().lock();
     for service in services {
-        let started_at = format_started_at_local(&service.started_at);
+        let started_at = format_service_started_at(service);
         let line = JsonServiceStateLine {
             line_type: "service.state",
             name: &service.name,
@@ -211,87 +208,30 @@ fn render_services_json_lines(services: &[ServiceStatusEntry]) -> anyhow::Result
     Ok(())
 }
 
+fn format_service_started_at(service: &ServiceStatusEntry) -> String {
+    if service.state == ProtocolServiceState::Stopped
+        && (service.started_at.is_empty() || service.started_at == "0")
+    {
+        return "-".to_string();
+    }
+
+    format_started_at_local(&service.started_at)
+}
+
 fn format_started_at_local(started_at: &str) -> String {
     let unix_seconds = match started_at.parse::<i64>() {
         Ok(value) => value,
         Err(_) => return started_at.to_string(),
     };
 
-    let utc = match OffsetDateTime::from_unix_timestamp(unix_seconds) {
-        Ok(value) => value,
-        Err(_) => return started_at.to_string(),
-    };
-
-    let local_offset = match local_offset_from_unix_seconds(unix_seconds) {
+    let utc = match DateTime::<Utc>::from_timestamp(unix_seconds, 0) {
         Some(value) => value,
         None => return started_at.to_string(),
     };
 
-    let local = utc.to_offset(local_offset);
-    let offset_seconds = local.offset().whole_seconds();
-    let sign = if offset_seconds < 0 { '-' } else { '+' };
-    let abs_offset = offset_seconds.unsigned_abs();
-    let offset_hours = abs_offset / 3600;
-    let offset_minutes = (abs_offset % 3600) / 60;
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{}{:02}:{:02}",
-        local.year(),
-        u8::from(local.month()),
-        local.day(),
-        local.hour(),
-        local.minute(),
-        local.second(),
-        sign,
-        offset_hours,
-        offset_minutes,
-    )
-}
-
-#[cfg(unix)]
-fn local_offset_from_unix_seconds(unix_seconds: i64) -> Option<UtcOffset> {
-    let timestamp: c_time_t = unix_seconds;
-    let mut local_tm = LocalTm::default();
-    let local_tm_ptr = unsafe {
-        // SAFETY: `local_tm` is a valid out pointer and `timestamp` points to initialized data.
-        localtime_r(ptr::from_ref(&timestamp), ptr::from_mut(&mut local_tm))
-    };
-    if local_tm_ptr.is_null() {
-        return None;
-    }
-
-    let seconds = local_tm.tm_gmtoff.try_into().ok()?;
-    UtcOffset::from_whole_seconds(seconds).ok()
-}
-
-#[cfg(not(unix))]
-fn local_offset_from_unix_seconds(_unix_seconds: i64) -> Option<UtcOffset> {
-    None
-}
-
-#[cfg(unix)]
-#[allow(non_camel_case_types)]
-type c_time_t = std::ffi::c_long;
-
-#[cfg(unix)]
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-struct LocalTm {
-    tm_sec: std::ffi::c_int,
-    tm_min: std::ffi::c_int,
-    tm_hour: std::ffi::c_int,
-    tm_mday: std::ffi::c_int,
-    tm_mon: std::ffi::c_int,
-    tm_year: std::ffi::c_int,
-    tm_wday: std::ffi::c_int,
-    tm_yday: std::ffi::c_int,
-    tm_isdst: std::ffi::c_int,
-    tm_gmtoff: std::ffi::c_long,
-    tm_zone: *const std::ffi::c_char,
-}
-
-#[cfg(unix)]
-unsafe extern "C" {
-    fn localtime_r(timep: *const c_time_t, result: *mut LocalTm) -> *mut LocalTm;
+    utc.with_timezone(&Local)
+        .format("%Y-%m-%dT%H:%M:%S%:z")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -350,7 +290,6 @@ mod tests {
         assert_eq!(PS_HELLO_REQUIRED_FEATURES, ["services.list"]);
     }
 
-    #[cfg(unix)]
     #[test]
     fn format_started_at_local_converts_unix_seconds() {
         let formatted = format_started_at_local("1735732800");
@@ -366,5 +305,45 @@ mod tests {
     #[test]
     fn format_started_at_local_falls_back_on_invalid_value() {
         assert_eq!(format_started_at_local("invalid"), "invalid");
+    }
+
+    #[test]
+    fn format_service_started_at_uses_unknown_for_stopped_without_timestamp() {
+        let stopped_empty = ServiceStatusEntry {
+            name: "svc-a".to_string(),
+            release_hash: "sha256:abc".to_string(),
+            started_at: "".to_string(),
+            state: ProtocolServiceState::Stopped,
+        };
+        let stopped_zero = ServiceStatusEntry {
+            name: "svc-b".to_string(),
+            release_hash: "sha256:def".to_string(),
+            started_at: "0".to_string(),
+            state: ProtocolServiceState::Stopped,
+        };
+
+        assert_eq!(format_service_started_at(&stopped_empty), "-");
+        assert_eq!(format_service_started_at(&stopped_zero), "-");
+    }
+
+    #[test]
+    fn json_service_state_line_uses_unknown_started_at_for_stopped() {
+        let service = ServiceStatusEntry {
+            name: "svc-a".to_string(),
+            release_hash: "sha256:abc".to_string(),
+            started_at: "0".to_string(),
+            state: ProtocolServiceState::Stopped,
+        };
+
+        let started_at = format_service_started_at(&service);
+        let line = JsonServiceStateLine {
+            line_type: "service.state",
+            name: &service.name,
+            state: service_state_text(service.state),
+            release: &service.release_hash,
+            started_at: &started_at,
+        };
+        let value = serde_json::to_value(line).expect("line should serialize");
+        assert_eq!(value["started_at"], "-");
     }
 }

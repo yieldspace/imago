@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::validate::{Validate, ValidationError, ensure_required_strings};
+use crate::validate::{Validate, ValidationError, ensure_non_empty, ensure_required_strings};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -58,8 +58,14 @@ impl Validate for ServiceStatusEntry {
         ensure_required_strings(&[
             (&self.name, "services.name"),
             (&self.release_hash, "services.release_hash"),
-            (&self.started_at, "services.started_at"),
-        ])
+        ])?;
+
+        match self.state {
+            ServiceState::Running | ServiceState::Stopping => {
+                ensure_non_empty(&self.started_at, "services.started_at")
+            }
+            ServiceState::Stopped => Ok(()),
+        }
     }
 }
 

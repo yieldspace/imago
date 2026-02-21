@@ -55,6 +55,8 @@
 - `services.list` は `names: Option<Vec<String>>` を持ち、応答で `services[]`（`name`, `state`, `release_hash`, `started_at`）を返す。
 - `services.list.state` は `running` / `stopping` / `stopped` を許可する。
 - `services.list.names` に unknown service 名が含まれる場合もエラーにせず、該当なしは `services=[]` を返す。
+- `services.list` は deployed 情報が無くても runtime snapshot がある service を返す。
+- `services.list.started_at` は `running` / `stopping` で非空必須、`stopped` では空文字（unknown）を許容する。
 - `logs.request` は `name: Option<String>` を持ち、`None` は「現在稼働中のサービス + retained logs が残る停止済みサービス」を意味する。
 - `logs.chunk` は DATAGRAM 用 payload であり、`seq` は欠損検知用（再送制御なし）として扱う。
 - `logs.end` はログ購読の終端メッセージで、配信開始後の異常は `error` に格納する。
@@ -98,3 +100,8 @@
 - `MessageType` に `services.list` を追加する契約を明示した。
 - `services.list.names` の unknown 指定はエラーにせず、0件応答（`services=[]`）を許可する方針を追加した。
 - `imago ps` / `imago compose ps` は `hello.negotiate.required_features` に `services.list` を必須化する方針を追加した。
+
+## 実装反映ノート（services.list runtime-only + started_at unknown / 2026-02-21）
+
+- `services.list` は runtime-only service（runtime snapshot のみ存在）を応答へ含める方針へ更新した。
+- `ServiceStatusEntry.started_at` は `stopped` で空文字（unknown）を許容する方針へ更新した。

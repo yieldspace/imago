@@ -42,7 +42,7 @@ const RESTART_POLICY_UNLESS_STOPPED: &str = "unless-stopped";
 const RESTART_POLICY_FILE_NAME: &str = "restart_policy";
 const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_HTTP_MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
-const STOPPED_SERVICE_STARTED_AT: &str = "0";
+const STOPPED_SERVICE_STARTED_AT: &str = "";
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 /// Release manifest loaded from extracted artifact.
@@ -780,6 +780,21 @@ async fn collect_deployed_service_releases(
     names_filter: Option<&BTreeSet<String>>,
 ) -> Result<BTreeMap<String, String>, ImagodError> {
     let services_root = storage_root.join("services");
+    if let Some(names_filter) = names_filter {
+        let mut deployed = BTreeMap::new();
+        for service_name in names_filter {
+            let active_file = services_root.join(service_name).join("active_release");
+            let Some(active_release) = read_active_release(&active_file).await? else {
+                continue;
+            };
+            if active_release.is_empty() {
+                continue;
+            }
+            deployed.insert(service_name.clone(), active_release);
+        }
+        return Ok(deployed);
+    }
+
     let mut entries = match fs::read_dir(&services_root).await {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
@@ -808,12 +823,6 @@ async fn collect_deployed_service_releases(
         }
 
         let service_name = entry.file_name().to_string_lossy().to_string();
-        if let Some(names_filter) = names_filter
-            && !names_filter.contains(&service_name)
-        {
-            continue;
-        }
-
         let active_file = entry.path().join("active_release");
         let Some(active_release) = read_active_release(&active_file).await? else {
             continue;
@@ -846,12 +855,23 @@ fn merge_deployed_and_runtime_service_states(
         .collect::<BTreeMap<_, _>>();
 
     for runtime_state in runtime_states {
-        let Some(service) = merged.get_mut(&runtime_state.name) else {
-            continue;
-        };
-        service.release_hash = runtime_state.release_hash;
-        service.started_at = runtime_state.started_at;
-        service.state = runtime_status_to_service_state(runtime_state.status);
+        let RuntimeServiceState {
+            name,
+            release_hash,
+            started_at,
+            status,
+        } = runtime_state;
+        let service = merged
+            .entry(name.clone())
+            .or_insert_with(|| ServiceStatusEntry {
+                name,
+                release_hash: String::new(),
+                started_at: STOPPED_SERVICE_STARTED_AT.to_string(),
+                state: ServiceState::Stopped,
+            });
+        service.release_hash = release_hash;
+        service.started_at = started_at;
+        service.state = runtime_status_to_service_state(status);
     }
 
     merged.into_values().collect()
@@ -1912,12 +1932,18 @@ mod tests {
                     started_at: "100".to_string(),
                     state: ServiceState::Stopping,
                 },
+                ServiceStatusEntry {
+                    name: "svc-undeployed".to_string(),
+                    release_hash: "release-x".to_string(),
+                    started_at: "200".to_string(),
+                    state: ServiceState::Running,
+                },
             ]
         );
     }
 
     #[tokio::test]
-    async fn collect_deployed_service_releases_applies_filter_and_skips_invalid_entries() {
+    async fn collect_deployed_service_releases_scans_directories_when_filter_is_none() {
         let root = temp_dir_path("orchestrator-service-list");
         let services_root = root.join("services");
         fs::create_dir_all(&services_root).expect("services root should exist");
@@ -1931,10 +1957,40 @@ mod tests {
         fs::create_dir_all(&svc_b).expect("svc-b dir should exist");
         fs::write(svc_b.join("active_release"), b"\n").expect("svc-b active_release should exist");
 
+        fs::write(services_root.join("not-a-service"), b"skip")
+            .expect("non-directory entry should exist");
+
+        let releases = collect_deployed_service_releases(&root, None)
+            .await
+            .expect("collection should succeed");
+        assert_eq!(
+            releases,
+            BTreeMap::from([("svc-a".to_string(), "release-a".to_string())])
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn collect_deployed_service_releases_reads_only_filtered_names_and_ignores_unknown() {
+        let root = temp_dir_path("orchestrator-service-list-filter");
+        let services_root = root.join("services");
+        fs::create_dir_all(&services_root).expect("services root should exist");
+
+        let svc_a = services_root.join("svc-a");
+        fs::create_dir_all(&svc_a).expect("svc-a dir should exist");
+        fs::write(svc_a.join("active_release"), b"release-a\n")
+            .expect("svc-a active_release should exist");
+
+        let svc_b = services_root.join("svc-b");
+        fs::create_dir_all(&svc_b).expect("svc-b dir should exist");
+        fs::write(svc_b.join("active_release"), b"release-b\n")
+            .expect("svc-b active_release should exist");
+
         let filter = BTreeSet::from(["svc-a".to_string(), "svc-unknown".to_string()]);
         let releases = collect_deployed_service_releases(&root, Some(&filter))
             .await
-            .expect("collection should succeed");
+            .expect("filtered collection should succeed");
         assert_eq!(
             releases,
             BTreeMap::from([("svc-a".to_string(), "release-a".to_string())])

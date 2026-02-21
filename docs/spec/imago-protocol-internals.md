@@ -378,12 +378,14 @@
 - `name: String`
 - `state: ServiceState`（`running` / `stopping` / `stopped`）
 - `release_hash: String`
-- `started_at: String`
+- `started_at: String`（`state=stopped` の unknown は空文字を許容）
 
 `Validate`:
 
-- `request_id` nil UUID 禁止
-- `error` がある場合は `LogError.validate()` 成功必須
+- `ServiceListRequest.names` は `Some` の場合、空文字と重複を拒否する
+- `ServiceStatusEntry.name` / `release_hash` は常に非空必須
+- `ServiceStatusEntry.started_at` は `running` / `stopping` で非空必須、`stopped` で空文字を許容する
+- `ServiceListResponse.services[]` は各要素に `ServiceStatusEntry.validate()` を適用する
 
 ## 7. Validate 基盤（`validate.rs`）
 
@@ -438,3 +440,8 @@
 
 - logs payload の識別子キーを `name` へ統一した。
 - `LogRequest` / `LogChunk` の `Validate` で `name` 非空制約を適用するよう更新した。
+
+## 実装反映ノート（services.list runtime-only + started_at unknown / 2026-02-21）
+
+- `services.list` の `ServiceStatusEntry.started_at` validate 契約を `state` 依存へ更新した（`stopped` は空文字許容）。
+- runtime snapshot がある runtime-only service を `services.list` 応答へ含める実装方針を追加した。

@@ -86,6 +86,7 @@ operation が存在しない場合の扱い:
 
 - 出力: `services[]`（`name`, `state`, `release_hash`, `started_at`）
 - `state` は `running` / `stopping` / `stopped`
+- `started_at` は `running` / `stopping` で非空、`stopped` では空文字（unknown）を許容する
 
 ### 5.5 `names` フィルタ運用
 
@@ -93,6 +94,7 @@ operation が存在しない場合の扱い:
 - `names=Some([...])` は指定名の一致集合のみ返す。
 - `names` に unknown service 名が含まれていてもエラーにしない。
 - 指定名がすべて unknown の場合は `services=[]` を返す。
+- deployed 情報が無くても runtime snapshot がある service は一覧に含める。
 
 ## 6. cancel 契約
 
@@ -205,3 +207,8 @@ operation が存在しない場合の扱い:
 - `services.list` による service 一覧照会契約を追加した。
 - 一覧の `state` は `running` / `stopping` / `stopped` を許可する方針を明示した。
 - `names` フィルタで unknown service を指定してもエラーにせず、該当なしは `services=[]` を返す契約を追加した。
+
+## 実装反映ノート（services.list runtime-only + started_at unknown / 2026-02-21）
+
+- `services.list` は runtime snapshot が存在する runtime-only service も返す契約へ更新した。
+- `started_at` は `stopped` で unknown を空文字で表現できる契約へ更新した。
