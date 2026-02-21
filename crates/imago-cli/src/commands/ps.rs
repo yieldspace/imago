@@ -249,7 +249,7 @@ fn format_started_at_local(started_at: &str) -> String {
 
 #[cfg(unix)]
 fn local_offset_from_unix_seconds(unix_seconds: i64) -> Option<UtcOffset> {
-    let timestamp = unix_seconds.try_into().ok()?;
+    let timestamp: c_time_t = unix_seconds;
     let mut local_tm = LocalTm::default();
     let local_tm_ptr = unsafe {
         // SAFETY: `local_tm` is a valid out pointer and `timestamp` points to initialized data.
