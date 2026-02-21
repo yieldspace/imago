@@ -72,7 +72,7 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
         &["deploy", "--target", "default"],
     )?;
     ensure_success("rpc-greeter deploy", &deploy_greeter)?;
-    assert_succeeded("rpc-greeter deploy", &deploy_greeter.combined)?;
+    assert_command_completed("rpc-greeter deploy", &deploy_greeter)?;
 
     let update_client = run_imago_cli(&workspace_root, &client_dir, &control_home, &["update"])?;
     ensure_success("cli-client update", &update_client)?;
@@ -84,7 +84,7 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
         &["deploy", "--target", "default"],
     )?;
     ensure_success("cli-client deploy", &deploy_client)?;
-    assert_succeeded("cli-client deploy", &deploy_client.combined)?;
+    assert_command_completed("cli-client deploy", &deploy_client)?;
 
     let pre_fail_logs = wait_logs(&workspace_root, &client_dir, &control_home, 40)?;
     assert!(
@@ -114,24 +114,25 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
         "bindings cert deploy (partial failure) unexpectedly succeeded: {}",
         deploy_cert_partial_fail.combined
     );
+    let failed_by_contract = deploy_cert_partial_fail.command_summary_status().as_deref()
+        == Some("failed")
+        || deploy_cert_partial_fail.has_command_error();
     assert!(
-        deploy_cert_partial_fail
-            .combined
-            .contains("bindings cert deploy completed with errors:"),
-        "partial failure summary was not found: {}",
+        failed_by_contract,
+        "bindings cert deploy (partial failure) did not emit failed summary/command.error: {}",
         deploy_cert_partial_fail.combined
     );
+
+    let partial_fail_message = deploy_cert_partial_fail
+        .command_summary_error()
+        .unwrap_or_else(|| deploy_cert_partial_fail.command_error_messages().join("\n"));
     assert!(
-        deploy_cert_partial_fail.combined.contains("from: ok"),
-        "from status was not ok in partial failure output: {}",
-        deploy_cert_partial_fail.combined
+        partial_fail_message.contains("from: ok"),
+        "from status was not ok in partial failure output: {partial_fail_message}"
     );
     assert!(
-        deploy_cert_partial_fail
-            .combined
-            .contains("to: upload failed:"),
-        "to upload failure marker was not found: {}",
-        deploy_cert_partial_fail.combined
+        partial_fail_message.contains("to: upload failed:"),
+        "to upload failure marker was not found: {partial_fail_message}"
     );
 
     let deploy_cert = run_imago_cli(
@@ -149,6 +150,7 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
         ],
     )?;
     ensure_success("bindings cert deploy", &deploy_cert)?;
+    assert_command_completed("bindings cert deploy", &deploy_cert)?;
 
     let success_logs = wait_logs_with_marker(
         &workspace_root,
@@ -211,7 +213,7 @@ fn wait_logs_for_service(
             &["logs", service_name, "--tail", "200"],
         )?;
         if logs.success {
-            return Ok(logs.combined);
+            return Ok(logs.log_messages().join("\n"));
         }
         thread::sleep(Duration::from_secs(1));
     }
@@ -261,13 +263,18 @@ fn ensure_success(label: &str, output: &CmdOutput) -> TestResult {
     ))
 }
 
-fn assert_succeeded(label: &str, output: &str) -> TestResult {
-    if output.to_ascii_lowercase().contains("succeeded") {
-        return Ok(());
+fn assert_command_completed(label: &str, output: &CmdOutput) -> TestResult {
+    match output.command_summary_status().as_deref() {
+        Some("completed") => Ok(()),
+        Some(status) => Err(anyhow::anyhow!(
+            "{label} summary status was '{status}', expected 'completed': {}",
+            output.combined
+        )),
+        None => Err(anyhow::anyhow!(
+            "{label} command.summary was not found: {}",
+            output.combined
+        )),
     }
-    Err(anyhow::anyhow!(
-        "{label} did not contain succeeded marker: {output}"
-    ))
 }
 
 fn prepare_project_dir(project_dir: &Path) -> TestResult {

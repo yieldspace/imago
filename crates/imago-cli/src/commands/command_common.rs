@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use anyhow::anyhow;
 use imago_protocol::{
@@ -7,9 +7,17 @@ use imago_protocol::{
 };
 use uuid::Uuid;
 
+use crate::commands::ui;
 use crate::commands::{build, deploy};
 
 const HELLO_REQUIRED_FEATURES: [&str; 2] = ["command.start", "command.event"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HelloSummary {
+    pub server_version: String,
+    pub features: Vec<String>,
+    pub limits: BTreeMap<String, String>,
+}
 
 pub(crate) fn resolve_service_name(
     explicit_name: Option<&str>,
@@ -26,7 +34,15 @@ pub(crate) fn resolve_service_name(
 pub(crate) async fn negotiate_hello(
     session: &web_transport_quinn::Session,
     correlation_id: Uuid,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<HelloSummary> {
+    negotiate_hello_with_features(session, correlation_id, &HELLO_REQUIRED_FEATURES).await
+}
+
+pub(crate) async fn negotiate_hello_with_features(
+    session: &web_transport_quinn::Session,
+    correlation_id: Uuid,
+    required_features: &[&str],
+) -> anyhow::Result<HelloSummary> {
     let hello_request = deploy::request_envelope(
         MessageType::HelloNegotiate,
         Uuid::new_v4(),
@@ -34,7 +50,7 @@ pub(crate) async fn negotiate_hello(
         &HelloNegotiateRequest {
             compatibility_date: deploy::COMPATIBILITY_DATE.to_string(),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
-            required_features: HELLO_REQUIRED_FEATURES
+            required_features: required_features
                 .iter()
                 .map(|feature| feature.to_string())
                 .collect(),
@@ -42,10 +58,78 @@ pub(crate) async fn negotiate_hello(
     )?;
     let hello_response: HelloNegotiateResponse =
         deploy::response_payload(deploy::request_response(session, &hello_request).await?)?;
-    if hello_response.accepted {
-        return Ok(());
+    if !hello_response.accepted {
+        return Err(anyhow!("hello.negotiate was rejected by server"));
     }
-    Err(anyhow!("hello.negotiate was rejected by server"))
+
+    Ok(HelloSummary {
+        server_version: hello_response.server_version,
+        features: hello_response.features,
+        limits: hello_response.limits,
+    })
+}
+
+fn absolute_project_path(project_root: &Path) -> String {
+    if project_root.is_absolute() {
+        return project_root.display().to_string();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(project_root).display().to_string(),
+        Err(_) => project_root.display().to_string(),
+    }
+}
+
+pub(crate) fn format_local_context_line(
+    project_root: &Path,
+    service: &str,
+    target_name: &str,
+    remote: &str,
+    server_name: Option<&str>,
+) -> String {
+    let normalized_server_name = server_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("-");
+    format!(
+        "cli={} project={} service={} target={} remote={} server_name={}",
+        env!("CARGO_PKG_VERSION"),
+        absolute_project_path(project_root),
+        service,
+        target_name,
+        remote,
+        normalized_server_name
+    )
+}
+
+pub(crate) fn format_peer_context_line(
+    authority: &str,
+    resolved: &str,
+    hello: &HelloSummary,
+) -> String {
+    let chunk_size = hello
+        .limits
+        .get("chunk_size")
+        .map(String::as_str)
+        .unwrap_or("-");
+    let max_inflight = hello
+        .limits
+        .get("max_inflight_chunks")
+        .map(String::as_str)
+        .unwrap_or("-");
+    let deploy_stream_timeout_secs = hello
+        .limits
+        .get("deploy_stream_timeout_secs")
+        .map(String::as_str)
+        .unwrap_or("-");
+    format!(
+        "authority={} resolved={} server_version={} limit_chunk_size={} limit_max_inflight_chunks={} limit_deploy_stream_timeout_secs={}",
+        authority,
+        resolved,
+        hello.server_version,
+        chunk_size,
+        max_inflight,
+        deploy_stream_timeout_secs
+    )
 }
 
 pub(crate) fn handle_terminal_event(
@@ -67,6 +151,11 @@ pub(crate) fn handle_terminal_event(
             continue;
         }
         let event: CommandEvent = deploy::response_payload(envelope.clone())?;
+        if event.event_type == CommandEventType::Progress
+            && let Some(stage) = event.stage.as_deref()
+        {
+            ui::command_stage(command_name, stage, "remote progress");
+        }
         if matches!(
             event.event_type,
             CommandEventType::Succeeded | CommandEventType::Failed | CommandEventType::Canceled
@@ -96,5 +185,59 @@ pub(crate) fn handle_terminal_event(
         }
         CommandEventType::Canceled => Err(anyhow!("{command_name} was canceled")),
         _ => Err(anyhow!("unexpected terminal event")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_local_context_line_contains_required_keys_and_placeholder() {
+        let line = format_local_context_line(
+            Path::new("/tmp/imago"),
+            "<all-running>",
+            "default",
+            "127.0.0.1:4443",
+            None,
+        );
+        assert_eq!(
+            line,
+            format!(
+                "cli={} project=/tmp/imago service=<all-running> target=default remote=127.0.0.1:4443 server_name=-",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+    }
+
+    #[test]
+    fn format_peer_context_line_uses_expected_limits() {
+        let hello = HelloSummary {
+            server_version: "imagod/0.1.0".to_string(),
+            features: vec!["hello.negotiate".to_string()],
+            limits: BTreeMap::from([
+                ("chunk_size".to_string(), "1048576".to_string()),
+                ("max_inflight_chunks".to_string(), "16".to_string()),
+                ("deploy_stream_timeout_secs".to_string(), "30".to_string()),
+            ]),
+        };
+        let line = format_peer_context_line("imagod.local:4443", "127.0.0.1:4443", &hello);
+        assert_eq!(
+            line,
+            "authority=imagod.local:4443 resolved=127.0.0.1:4443 server_version=imagod/0.1.0 limit_chunk_size=1048576 limit_max_inflight_chunks=16 limit_deploy_stream_timeout_secs=30"
+        );
+    }
+
+    #[test]
+    fn format_peer_context_line_defaults_missing_limits_to_dash() {
+        let hello = HelloSummary {
+            server_version: "imagod/0.1.0".to_string(),
+            features: vec![],
+            limits: BTreeMap::new(),
+        };
+        let line = format_peer_context_line("imagod.local:4443", "127.0.0.1:4443", &hello);
+        assert!(line.contains("limit_chunk_size=-"));
+        assert!(line.contains("limit_max_inflight_chunks=-"));
+        assert!(line.contains("limit_deploy_stream_timeout_secs=-"));
     }
 }

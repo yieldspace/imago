@@ -1,10 +1,13 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::Read,
+    io::{BufRead, BufReader, Read},
     net::IpAddr,
     path::{Component, Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::Instant,
 };
 
 use anyhow::{Context, anyhow};
@@ -17,8 +20,9 @@ use toml::Value as TomlValue;
 use crate::{
     cli::BuildArgs,
     commands::{
-        CommandResult, dependency_cache, plugin_sources,
+        CommandResult, dependency_cache, error_diagnostics, plugin_sources,
         shared::dependency::{DependencyResolver, StandardDependencyResolver},
+        ui,
     },
 };
 
@@ -269,6 +273,65 @@ enum BuildCommand {
     Argv(Vec<String>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuildCommandLogStream {
+    Stdout,
+    Stderr,
+}
+
+impl BuildCommandLogStream {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BuildCommandLogLine {
+    pub stream: BuildCommandLogStream,
+    pub line: String,
+}
+
+type BuildCommandLineCallback<'a> = dyn FnMut(&BuildCommandLogLine) + 'a;
+
+#[derive(Debug, Clone)]
+pub(crate) struct BuildCommandFailure {
+    status_code: Option<i32>,
+    logs: Vec<BuildCommandLogLine>,
+}
+
+impl BuildCommandFailure {
+    fn from_status(status: std::process::ExitStatus, logs: Vec<BuildCommandLogLine>) -> Self {
+        Self {
+            status_code: status.code(),
+            logs,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new(status_code: Option<i32>, logs: Vec<BuildCommandLogLine>) -> Self {
+        Self { status_code, logs }
+    }
+
+    pub(crate) fn logs(&self) -> &[BuildCommandLogLine] {
+        &self.logs
+    }
+}
+
+impl std::fmt::Display for BuildCommandFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(code) = self.status_code {
+            write!(f, "build.command failed with exit code {code}")
+        } else {
+            write!(f, "build.command was terminated by signal")
+        }
+    }
+}
+
+impl std::error::Error for BuildCommandFailure {}
+
 pub fn run(args: BuildArgs) -> CommandResult {
     run_with_project_root(args, Path::new("."))
 }
@@ -282,15 +345,19 @@ pub(crate) fn run_with_project_root_and_target_override(
     project_root: &Path,
     target_override: Option<&TargetConfig>,
 ) -> CommandResult {
+    let started_at = Instant::now();
+    ui::command_start("build", "starting");
     match run_inner_with_target_override(args, project_root, target_override) {
-        Ok(()) => CommandResult {
-            exit_code: 0,
-            stderr: None,
-        },
-        Err(err) => CommandResult {
-            exit_code: 2,
-            stderr: Some(err.to_string()),
-        },
+        Ok(()) => {
+            ui::command_finish("build", true, "completed");
+            CommandResult::success("build", started_at)
+        }
+        Err(err) => {
+            let summary = err.to_string();
+            ui::command_finish("build", false, &summary);
+            let message = error_diagnostics::format_command_error("build", &err);
+            CommandResult::failure("build", started_at, message)
+        }
     }
 }
 
@@ -331,6 +398,49 @@ pub(crate) fn build_project_with_target_override(
     project_root: &Path,
     target_override: Option<&TargetConfig>,
 ) -> anyhow::Result<BuildOutput> {
+    build_project_with_target_override_inner(target_name, project_root, target_override, true, None)
+}
+
+pub(crate) fn build_project_with_target_override_for_compose(
+    target_name: &str,
+    project_root: &Path,
+    target_override: Option<&TargetConfig>,
+    on_build_line: Option<&mut BuildCommandLineCallback<'_>>,
+) -> anyhow::Result<BuildOutput> {
+    build_project_with_target_override_inner(
+        target_name,
+        project_root,
+        target_override,
+        false,
+        on_build_line,
+    )
+}
+
+pub(crate) fn build_project_with_target_override_for_deploy(
+    target_name: &str,
+    project_root: &Path,
+    target_override: Option<&TargetConfig>,
+    on_build_line: &mut BuildCommandLineCallback<'_>,
+) -> anyhow::Result<BuildOutput> {
+    build_project_with_target_override_inner(
+        target_name,
+        project_root,
+        target_override,
+        false,
+        Some(on_build_line),
+    )
+}
+
+fn build_project_with_target_override_inner(
+    target_name: &str,
+    project_root: &Path,
+    target_override: Option<&TargetConfig>,
+    emit_progress: bool,
+    on_build_line: Option<&mut BuildCommandLineCallback<'_>>,
+) -> anyhow::Result<BuildOutput> {
+    if emit_progress {
+        ui::command_stage("build", "load-config", "loading imago.toml");
+    }
     let root = load_resolved_toml(project_root)?;
     let secrets = parse_string_table(root.get("secrets"), "secrets")?;
 
@@ -363,6 +473,9 @@ pub(crate) fn build_project_with_target_override(
     }
     let capabilities = parse_root_capabilities(&root)?;
     let dependency_resolver = StandardDependencyResolver;
+    if emit_progress {
+        ui::command_stage("build", "resolve-deps", "resolving dependencies");
+    }
     let dependencies = dependency_resolver
         .resolve_manifest_dependencies_from_lock(project_root, &project_dependencies)?;
     let bindings = resolve_manifest_bindings_from_lock(project_root, &project_bindings)?;
@@ -371,8 +484,14 @@ pub(crate) fn build_project_with_target_override(
         None => parse_target(&root, target_name, project_root)?,
     };
 
-    run_build_command(command.as_ref(), project_root)?;
+    if emit_progress {
+        ui::command_stage("build", "run-build-command", "running build command");
+    }
+    run_build_command(command.as_ref(), project_root, on_build_line)?;
 
+    if emit_progress {
+        ui::command_stage("build", "materialize", "materializing hashed artifact");
+    }
     ensure_file_exists(project_root, &source_main_path, "main")?;
     let materialized_main_path = materialize_hashed_wasm(project_root, &source_main_path, &name)?;
     let manifest_main = materialized_main_path
@@ -418,6 +537,9 @@ pub(crate) fn build_project_with_target_override(
         serde_json::to_vec_pretty(&manifest).context("failed to serialize build manifest")?;
     manifest_bytes.push(b'\n');
 
+    if emit_progress {
+        ui::command_stage("build", "write-manifest", "writing build/manifest.json");
+    }
     let manifest_path = resolve_manifest_output_path();
     let output_path = project_root.join(&manifest_path);
     if let Some(parent) = output_path.parent() {
@@ -520,11 +642,139 @@ fn parse_build_command(root: &toml::Table) -> anyhow::Result<Option<BuildCommand
     Ok(Some(BuildCommand::Argv(argv)))
 }
 
-fn run_build_command(command: Option<&BuildCommand>, project_root: &Path) -> anyhow::Result<()> {
+fn run_build_command(
+    command: Option<&BuildCommand>,
+    project_root: &Path,
+    on_build_line: Option<&mut BuildCommandLineCallback<'_>>,
+) -> anyhow::Result<()> {
     let Some(command) = command else {
         return Ok(());
     };
 
+    if let Some(on_build_line) = on_build_line {
+        return run_build_command_capture_for_deploy(command, project_root, on_build_line);
+    }
+    run_build_command_passthrough(command, project_root)
+}
+
+fn run_build_command_passthrough(
+    command: &BuildCommand,
+    project_root: &Path,
+) -> anyhow::Result<()> {
+    let mut process = make_build_process(command, project_root);
+    let status = process.status().context("failed to run build.command")?;
+
+    if status.success() {
+        return Ok(());
+    }
+
+    if let Some(code) = status.code() {
+        Err(anyhow!("build.command failed with exit code {code}"))
+    } else {
+        Err(anyhow!("build.command was terminated by signal"))
+    }
+}
+
+fn run_build_command_capture_for_deploy(
+    command: &BuildCommand,
+    project_root: &Path,
+    on_build_line: &mut BuildCommandLineCallback<'_>,
+) -> anyhow::Result<()> {
+    let mut process = make_build_process(command, project_root);
+    process.stdout(Stdio::piped());
+    process.stderr(Stdio::piped());
+    let mut child = process.spawn().context("failed to run build.command")?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture build.command stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture build.command stderr"))?;
+
+    let (tx, rx) = mpsc::channel::<anyhow::Result<BuildCommandLogLine>>();
+    let stdout_handle =
+        spawn_build_command_reader(stdout, BuildCommandLogStream::Stdout, tx.clone());
+    let stderr_handle = spawn_build_command_reader(stderr, BuildCommandLogStream::Stderr, tx);
+
+    let mut logs = Vec::new();
+    let mut read_error: Option<anyhow::Error> = None;
+    for event in rx {
+        match event {
+            Ok(log) => {
+                on_build_line(&log);
+                logs.push(log);
+            }
+            Err(err) => {
+                if read_error.is_none() {
+                    read_error = Some(err);
+                }
+            }
+        }
+    }
+
+    let status = child.wait().context("failed to wait for build.command")?;
+
+    if stdout_handle.join().is_err() {
+        return Err(anyhow!("build.command stdout reader thread panicked"));
+    }
+    if stderr_handle.join().is_err() {
+        return Err(anyhow!("build.command stderr reader thread panicked"));
+    }
+
+    if let Some(err) = read_error {
+        return Err(err);
+    }
+
+    if status.success() {
+        return Ok(());
+    }
+
+    Err(BuildCommandFailure::from_status(status, logs).into())
+}
+
+fn spawn_build_command_reader<R: Read + Send + 'static>(
+    reader: R,
+    stream: BuildCommandLogStream,
+    sender: mpsc::Sender<anyhow::Result<BuildCommandLogLine>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let line = decode_build_command_log_line(&buf);
+                    if sender
+                        .send(Ok(BuildCommandLogLine { stream, line }))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    let _ = sender.send(Err(anyhow!(
+                        "failed to read build.command {}: {err}",
+                        stream.as_str()
+                    )));
+                    break;
+                }
+            }
+        }
+    })
+}
+
+fn decode_build_command_log_line(raw_line: &[u8]) -> String {
+    String::from_utf8_lossy(raw_line)
+        .trim_end_matches(['\r', '\n'])
+        .to_string()
+}
+
+fn make_build_process(command: &BuildCommand, project_root: &Path) -> Command {
     let mut process = match command {
         BuildCommand::Shell(script) => {
             let mut cmd = Command::new("sh");
@@ -541,18 +791,7 @@ fn run_build_command(command: Option<&BuildCommand>, project_root: &Path) -> any
     };
 
     process.current_dir(project_root);
-
-    let status = process.status().context("failed to run build.command")?;
-
-    if status.success() {
-        return Ok(());
-    }
-
-    if let Some(code) = status.code() {
-        Err(anyhow!("build.command failed with exit code {code}"))
-    } else {
-        Err(anyhow!("build.command was terminated by signal"))
-    }
+    process
 }
 
 fn required_string(root: &toml::Table, key: &str) -> anyhow::Result<String> {
@@ -2597,6 +2836,137 @@ remote = "127.0.0.1:4443"
         assert!(root.join(hashed_main).exists());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn capture_for_deploy_streams_build_command_lines() {
+        let root = new_temp_dir("capture-for-deploy-lines");
+        let command = BuildCommand::Argv(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf 'out-a\\n'; printf 'err-a\\n' >&2".to_string(),
+        ]);
+        let mut captured = Vec::new();
+        let mut on_line = |line: &BuildCommandLogLine| captured.push(line.clone());
+
+        run_build_command(Some(&command), &root, Some(&mut on_line))
+            .expect("capture mode build.command should succeed");
+
+        assert!(
+            captured.iter().any(|line| {
+                line.stream == BuildCommandLogStream::Stdout && line.line == "out-a"
+            })
+        );
+        assert!(
+            captured.iter().any(|line| {
+                line.stream == BuildCommandLogStream::Stderr && line.line == "err-a"
+            })
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compose_build_streams_build_command_lines_when_callback_is_set() {
+        let root = new_temp_dir("compose-capture-lines");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[build]
+command = ["sh", "-c", "mkdir -p build && printf 'compose-out\n' && printf 'compose-err\n' >&2 && printf wasm > build/app.wasm"]
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+
+        let mut streamed = Vec::new();
+        let mut on_line = |line: &BuildCommandLogLine| streamed.push(line.clone());
+
+        let output = build_project_with_target_override_for_compose(
+            "default",
+            &root,
+            None,
+            Some(&mut on_line),
+        )
+        .expect("compose build with callback should succeed");
+        assert_eq!(output.manifest_path, PathBuf::from("build/manifest.json"));
+        assert!(streamed.iter().any(|line| {
+            line.stream == BuildCommandLogStream::Stdout && line.line == "compose-out"
+        }));
+        assert!(streamed.iter().any(|line| {
+            line.stream == BuildCommandLogStream::Stderr && line.line == "compose-err"
+        }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn capture_for_deploy_failure_keeps_full_logs() {
+        let root = new_temp_dir("capture-for-deploy-failure");
+        let command = BuildCommand::Argv(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf 'ok-before-fail\\n'; printf 'err-before-fail\\n' >&2; exit 7".to_string(),
+        ]);
+        let mut streamed = Vec::new();
+        let mut on_line = |line: &BuildCommandLogLine| streamed.push(line.clone());
+
+        let err = run_build_command(Some(&command), &root, Some(&mut on_line))
+            .expect_err("capture mode build.command should fail");
+        let failure = err
+            .downcast_ref::<BuildCommandFailure>()
+            .expect("error should be BuildCommandFailure");
+
+        assert!(err.to_string().contains("exit code 7"));
+        assert!(streamed.iter().any(|line| {
+            line.stream == BuildCommandLogStream::Stdout && line.line == "ok-before-fail"
+        }));
+        assert!(streamed.iter().any(|line| {
+            line.stream == BuildCommandLogStream::Stderr && line.line == "err-before-fail"
+        }));
+        assert!(failure.logs().iter().any(|line| {
+            line.stream == BuildCommandLogStream::Stdout && line.line == "ok-before-fail"
+        }));
+        assert!(failure.logs().iter().any(|line| {
+            line.stream == BuildCommandLogStream::Stderr && line.line == "err-before-fail"
+        }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_command_reader_handles_non_utf8_bytes() {
+        let reader = std::io::Cursor::new(vec![b'o', b'k', 0xff, b'\n', 0xfe]);
+        let (sender, receiver) = mpsc::channel();
+        let handle = spawn_build_command_reader(reader, BuildCommandLogStream::Stdout, sender);
+
+        let events = receiver
+            .into_iter()
+            .map(|event| event.expect("reader should not emit errors"))
+            .collect::<Vec<_>>();
+
+        handle
+            .join()
+            .expect("build.command reader thread should not panic");
+
+        assert_eq!(
+            events,
+            vec![
+                BuildCommandLogLine {
+                    stream: BuildCommandLogStream::Stdout,
+                    line: "ok\u{fffd}".to_string(),
+                },
+                BuildCommandLogLine {
+                    stream: BuildCommandLogStream::Stdout,
+                    line: "\u{fffd}".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]

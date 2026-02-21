@@ -2,12 +2,13 @@
 
 ## 1. 目的
 
-`deploy` / `run` / `stop` の実行状態と `logs` の配信挙動を軽量に追跡する契約を固定する。
+`deploy` / `run` / `stop` の実行状態と `logs` の配信挙動、CLI の観測出力契約を軽量に追跡する契約を固定する。
 
 関連仕様:
 
 - 通信手順: [`deploy-protocol.md`](./deploy-protocol.md)
 - 型契約: [`imago-protocol.md`](./imago-protocol.md)
+- CLI 出力契約: [`cli-output.md`](./cli-output.md)
 
 ## 2. 前提
 
@@ -129,6 +130,13 @@ operation が存在しない場合の扱い:
 - 切断後はクライアントが新しい `logs.request` を再発行して再購読する。
 - 欠損補填が必要な場合は `--tail` 付きで再接続して直近ログを取り直す。
 
+## 10. CLI 出力契約（`logs` 関連）
+
+- UI モード判定優先順位は `--json > CI=true > Rich` とする（詳細は [`cli-output.md`](./cli-output.md)）。
+- `logs --json` は JSON Lines の line-only 出力で、`type=log.line` を 1 行ずつ返す。
+- `logs --json` は `command.summary` を出力しない。
+- `logs --json` で `command.error` を出力するのは失敗時のみとする。
+
 ## 実装反映ノート（Milestone Phase 1 / 2026-02-10）
 
 - `state.response` は terminal state を禁止する。
@@ -156,6 +164,18 @@ operation が存在しない場合の扱い:
 - protocol session は 1 session 内で複数 stream を並列処理する。`command.start` / `logs.request` / 単発 request は stream 単位で独立して処理される。
 - logs datagram 配信は send 失敗時に 10ms / 50ms / 100ms の bounded retry を行い、瞬断時の即終了を緩和する。
 - retry 後も送信不能な場合は従来どおり `logs.end.error` で終端を通知する。
+
+## 実装反映ノート（CLI output mode/JSON line 契約 / 2026-02-20）
+
+- CLI 出力モード優先順位を `--json > CI=true > Rich` で固定した。
+- `logs --json` は `log.line` の line-only 出力とし、`command.summary` を出さない。
+- `command.error` は `logs --json` の失敗時のみ出力する契約へ統一した。
+
+## 実装反映ノート（接続コンテキスト表示 / 2026-02-20）
+
+- 接続系コマンドは接続前にローカル文脈（`cli/project/service/target/remote/server_name`）を `Rich` / `Plain` で補助表示する。
+- `hello.negotiate` 成功後にピア文脈（`authority/resolved/server_version` と主要 `limits`）を `Rich` / `Plain` で補助表示する。
+- `Json` は既存の line 契約（`command.summary`, `log.line`, `command.error`）のみを維持し、接続コンテキスト行を追加しない。
 
 ## 実装反映ノート（Retained logs 契約 / 2026-02-20）
 

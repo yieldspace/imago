@@ -2,202 +2,269 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
+/// Build, update, and operate imago services.
 #[derive(Debug, Parser, PartialEq, Eq)]
 #[command(name = "imago", version, about = "imago CLI")]
 pub struct Cli {
+    /// Emit JSON Lines output instead of rich/plain terminal UI.
+    #[arg(long, global = true)]
+    pub json: bool,
+
+    /// Command to execute.
     #[command(subcommand)]
     pub command: Commands,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Commands {
+    /// Build project artifacts and manifest.
     Build(BuildArgs),
+    /// Resolve dependencies and refresh lock/cache state.
     Update(UpdateArgs),
+    /// Build and deploy the current service to imagod.
     Deploy(DeployArgs),
+    /// Run compose profile operations across multiple services.
     Compose(ComposeSubcommandArgs),
+    /// Start a deployed service instance.
     Run(RunArgs),
+    /// Stop a running service instance.
     Stop(StopArgs),
+    /// Stream or tail service logs.
     Logs(LogsArgs),
+    /// Manage binding certificates and trust data.
     Bindings(BindingsSubcommandArgs),
+    /// Generate local development certificates.
     Certs(CertsSubcommandArgs),
 }
 
+/// Build artifacts for a service project.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct BuildArgs {
+    /// Target name defined in imago.toml [target.<name>].
     #[arg(long, value_name = "TARGET_NAME", default_value = "default")]
     pub target: String,
 }
 
+/// Resolve dependencies and update lock/cache files.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct UpdateArgs {}
 
+/// Build and deploy the service to a remote imagod.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct DeployArgs {
+    /// Target name defined in imago.toml [target.<name>].
     #[arg(long, value_name = "TARGET_NAME")]
     pub target: Option<String>,
 }
 
+/// Start a deployed service.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct RunArgs {
+    /// Service name. If omitted, uses the project default service name.
     #[arg(value_name = "SERVICE_NAME")]
     pub name: Option<String>,
 
+    /// Target name defined in imago.toml [target.<name>].
     #[arg(long, value_name = "TARGET_NAME")]
     pub target: Option<String>,
 }
 
+/// Stop a running service.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct StopArgs {
+    /// Service name. If omitted, uses the project default service name.
     #[arg(value_name = "SERVICE_NAME")]
     pub name: Option<String>,
 
+    /// Force stop even if graceful shutdown fails.
     #[arg(long)]
     pub force: bool,
 
+    /// Target name defined in imago.toml [target.<name>].
     #[arg(long, value_name = "TARGET_NAME")]
     pub target: Option<String>,
 }
 
+/// Compose profile subcommands.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct ComposeSubcommandArgs {
+    /// Compose operation to run.
     #[command(subcommand)]
     pub command: ComposeCommands,
 }
 
 #[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
 pub enum ComposeCommands {
+    /// Build all services in a compose profile.
     Build(ComposeBuildArgs),
+    /// Update dependencies for all services in a compose profile.
     Update(ComposeUpdateArgs),
+    /// Deploy all services in a compose profile.
     Deploy(ComposeDeployArgs),
+    /// Stream or tail logs for services in a compose profile.
     Logs(ComposeLogsArgs),
 }
 
+/// Build services for a compose profile.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct ComposeBuildArgs {
+    /// Compose profile name.
     #[arg(value_name = "PROFILE_NAME")]
     pub profile: String,
 
+    /// Target name used for all services in this profile.
     #[arg(long, value_name = "TARGET_NAME")]
     pub target: String,
 }
 
+/// Update dependencies for services in a compose profile.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct ComposeUpdateArgs {
+    /// Compose profile name.
     #[arg(value_name = "PROFILE_NAME")]
     pub profile: String,
 }
 
+/// Deploy services in a compose profile.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct ComposeDeployArgs {
+    /// Compose profile name.
     #[arg(value_name = "PROFILE_NAME")]
     pub profile: String,
 
+    /// Target name used for all services in this profile.
     #[arg(long, value_name = "TARGET_NAME")]
     pub target: String,
 }
 
+/// Stream or tail logs for services in a compose profile.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct ComposeLogsArgs {
+    /// Compose profile name.
     #[arg(value_name = "PROFILE_NAME")]
     pub profile: String,
 
+    /// Target name used for all services in this profile.
     #[arg(long, value_name = "TARGET_NAME")]
     pub target: String,
 
+    /// Optional service name filter. If omitted, streams all running services.
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
 
+    /// Keep streaming logs until interrupted.
     #[arg(long)]
     pub follow: bool,
 
+    /// Number of recent log lines to fetch before streaming.
     #[arg(long, value_name = "N", default_value_t = 200)]
     pub tail: u32,
-
-    #[arg(long)]
-    pub json: bool,
 }
 
+/// Stream or tail service logs.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct LogsArgs {
+    /// Optional service name filter. If omitted, streams all running services.
     #[arg(value_name = "NAME")]
     pub name: Option<String>,
 
+    /// Keep streaming logs until interrupted.
     #[arg(long)]
     pub follow: bool,
 
+    /// Number of recent log lines to fetch before streaming.
     #[arg(long, value_name = "N", default_value_t = 200)]
     pub tail: u32,
-
-    #[arg(long)]
-    pub json: bool,
 }
 
+/// Bindings subcommands.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct BindingsSubcommandArgs {
+    /// Bindings operation to run.
     #[command(subcommand)]
     pub command: BindingsCommands,
 }
 
 #[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
 pub enum BindingsCommands {
+    /// Manage binding certificate operations.
     Cert(BindingsCertSubcommandArgs),
 }
 
+/// Binding certificate subcommands.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct BindingsCertSubcommandArgs {
+    /// Binding certificate operation to run.
     #[command(subcommand)]
     pub command: BindingsCertCommands,
 }
 
 #[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
 pub enum BindingsCertCommands {
+    /// Upload a public key to a remote authority.
     Upload(BindingsCertUploadArgs),
+    /// Copy a binding certificate from one authority to another.
     Deploy(BindingsCertDeployArgs),
 }
 
+/// Upload a binding public key.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct BindingsCertUploadArgs {
+    /// Public key in 64-byte hex format.
     #[arg(value_name = "PUBLIC_KEY_HEX")]
     pub public_key: String,
 
+    /// Destination remote authority (for example: rpc://node-a:4443).
     #[arg(long, value_name = "REMOTE_AUTHORITY")]
     pub to: String,
 }
 
+/// Deploy binding trust from one authority to another.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct BindingsCertDeployArgs {
+    /// Destination remote authority.
     #[arg(long, value_name = "REMOTE_AUTHORITY")]
     pub to: String,
 
+    /// Source remote authority.
     #[arg(long, value_name = "REMOTE_AUTHORITY")]
     pub from: String,
 }
 
+/// Certificate utility subcommands.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct CertsSubcommandArgs {
+    /// Certificate operation to run.
     #[command(subcommand)]
     pub command: CertsCommands,
 }
 
 #[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
 pub enum CertsCommands {
+    /// Generate local development certificates.
     Generate(CertsGenerateArgs),
 }
 
+/// Generate local certificates for imagod and client auth.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct CertsGenerateArgs {
+    /// Output directory for generated certificate and key files.
     #[arg(long, value_name = "PATH", default_value = "certs")]
     pub out_dir: PathBuf,
 
+    /// DNS subject name for the server certificate.
     #[arg(long, value_name = "DNS_NAME", default_value = "localhost")]
     pub server_name: String,
 
+    /// IP subject alternative name for the server certificate.
     #[arg(long, value_name = "IP_ADDR", default_value = "127.0.0.1")]
     pub server_ip: String,
 
+    /// Certificate validity period in days.
     #[arg(long, value_name = "DAYS", default_value_t = 3650)]
     pub days: u32,
 
+    /// Overwrite existing files in the output directory.
     #[arg(long)]
     pub force: bool,
 }
@@ -205,7 +272,7 @@ pub struct CertsGenerateArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     #[test]
     fn parses_build_without_options() {
@@ -214,6 +281,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Build(BuildArgs {
                     target: "default".to_string(),
                 }),
@@ -229,6 +297,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Build(BuildArgs {
                     target: "edge".to_string(),
                 }),
@@ -250,6 +319,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Update(UpdateArgs {}),
             }
         );
@@ -262,6 +332,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Deploy(DeployArgs { target: None }),
             }
         );
@@ -282,6 +353,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Deploy(DeployArgs {
                     target: Some("default".to_string()),
                 }),
@@ -304,6 +376,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Compose(ComposeSubcommandArgs {
                     command: ComposeCommands::Build(ComposeBuildArgs {
                         profile: "nanokvm-mini".to_string(),
@@ -329,6 +402,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Compose(ComposeSubcommandArgs {
                     command: ComposeCommands::Update(ComposeUpdateArgs {
                         profile: "nanokvm-mini".to_string(),
@@ -353,6 +427,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Compose(ComposeSubcommandArgs {
                     command: ComposeCommands::Deploy(ComposeDeployArgs {
                         profile: "nanokvm-mini".to_string(),
@@ -391,6 +466,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: true,
                 command: Commands::Compose(ComposeSubcommandArgs {
                     command: ComposeCommands::Logs(ComposeLogsArgs {
                         profile: "nanokvm-mini".to_string(),
@@ -398,7 +474,6 @@ mod tests {
                         name: Some("svc-a".to_string()),
                         follow: true,
                         tail: 50,
-                        json: true,
                     }),
                 }),
             }
@@ -419,11 +494,11 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Logs(LogsArgs {
                     name: None,
                     follow: false,
                     tail: 200,
-                    json: false,
                 }),
             }
         );
@@ -436,6 +511,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Run(RunArgs {
                     name: None,
                     target: None,
@@ -452,6 +528,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Run(RunArgs {
                     name: Some("svc-a".to_string()),
                     target: Some("edge".to_string()),
@@ -474,6 +551,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Stop(StopArgs {
                     name: None,
                     force: false,
@@ -491,6 +569,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Stop(StopArgs {
                     name: Some("svc-a".to_string()),
                     force: true,
@@ -515,11 +594,11 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Logs(LogsArgs {
                     name: Some("svc-a".to_string()),
                     follow: true,
                     tail: 50,
-                    json: false,
                 }),
             }
         );
@@ -533,11 +612,11 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: true,
                 command: Commands::Logs(LogsArgs {
                     name: Some("svc-a".to_string()),
                     follow: false,
                     tail: 10,
-                    json: true,
                 }),
             }
         );
@@ -565,6 +644,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Bindings(BindingsSubcommandArgs {
                     command: BindingsCommands::Cert(BindingsCertSubcommandArgs {
                         command: BindingsCertCommands::Upload(BindingsCertUploadArgs {
@@ -596,6 +676,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Bindings(BindingsSubcommandArgs {
                     command: BindingsCommands::Cert(BindingsCertSubcommandArgs {
                         command: BindingsCertCommands::Deploy(BindingsCertDeployArgs {
@@ -616,6 +697,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Certs(CertsSubcommandArgs {
                     command: CertsCommands::Generate(CertsGenerateArgs {
                         out_dir: PathBuf::from("certs"),
@@ -650,6 +732,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                json: false,
                 command: Commands::Certs(CertsSubcommandArgs {
                     command: CertsCommands::Generate(CertsGenerateArgs {
                         out_dir: PathBuf::from("tmp-certs"),
@@ -661,5 +744,53 @@ mod tests {
                 }),
             }
         );
+    }
+
+    #[test]
+    fn root_help_includes_non_empty_command_descriptions() {
+        let mut command = Cli::command();
+        let help = command.render_long_help().to_string();
+
+        assert!(help.contains("Build project artifacts and manifest"));
+        assert!(help.contains("Build and deploy the current service to imagod"));
+        assert!(help.contains("Run compose profile operations across multiple services"));
+    }
+
+    #[test]
+    fn deploy_help_includes_target_help_text() {
+        let err = Cli::try_parse_from(["imago", "deploy", "--help"]).expect_err("help should exit");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+
+        assert!(help.contains("--target <TARGET_NAME>"));
+        assert!(help.contains("Target name defined in imago.toml [target.<name>]"));
+    }
+
+    #[test]
+    fn compose_logs_help_includes_follow_and_tail_help_text() {
+        let err = Cli::try_parse_from(["imago", "compose", "logs", "--help"])
+            .expect_err("help should exit");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+
+        assert!(help.contains("--follow"));
+        assert!(help.contains("Keep streaming logs until interrupted"));
+        assert!(help.contains("--tail <N>"));
+        assert!(help.contains("Number of recent log lines to fetch before streaming"));
+        assert!(help.contains("--target <TARGET_NAME>"));
+        assert!(help.contains("Target name used for all services in this profile"));
+    }
+
+    #[test]
+    fn bindings_cert_deploy_help_includes_from_to_help_text() {
+        let err = Cli::try_parse_from(["imago", "bindings", "cert", "deploy", "--help"])
+            .expect_err("help should exit");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+
+        assert!(help.contains("--to <REMOTE_AUTHORITY>"));
+        assert!(help.contains("Destination remote authority"));
+        assert!(help.contains("--from <REMOTE_AUTHORITY>"));
+        assert!(help.contains("Source remote authority"));
     }
 }

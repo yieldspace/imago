@@ -48,6 +48,32 @@ cargo run -p imago-cli -- deploy --target default
 cargo run -p imago-cli -- logs local-imagod-app --tail 200
 ```
 
+### CLI 出力モード
+
+`imago` CLI の出力モード判定は `--json > CI=true > Rich` です。
+
+- `Rich`: 既定。対話端末向け UI。
+- `Plain`: `CI=true`（`CI=1` を含む）時のプレーンテキスト。
+- `Json`: `--json` 指定時の JSON Lines。
+
+`imago --json deploy` の終端では `command.summary` を 1 行出力します。
+
+```json
+{"type":"command.summary","command":"deploy","status":"completed","duration_ms":1234,"timestamp":"2026-02-20T12:34:56Z","meta":{},"error":null}
+```
+
+`imago --json logs` は `log.line` の line-only 出力です。
+
+```json
+{"type":"log.line","name":"local-imagod-app","stream":"stdout","timestamp":"1739982001","log":"local-imagod-app started"}
+```
+
+失敗時のみ `command.error` を 1 行出力します。
+
+```json
+{"type":"command.error","command":"logs","message":"...","stage":"logs","code":"E_UNKNOWN"}
+```
+
 他の example は [`examples/README.md`](examples/README.md)、詳細手順は [`QUICKSTART.md`](QUICKSTART.md) を参照してください。
 
 ## WITプラグイン

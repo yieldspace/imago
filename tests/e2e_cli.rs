@@ -1,7 +1,7 @@
 #[path = "e2e_helper/mod.rs"]
 mod e2e_helper;
 
-use e2e_helper::{AppKind, Scenario, TestResult, WasmArtifact};
+use e2e_helper::{AppKind, CmdOutput, Scenario, TestResult, WasmArtifact};
 
 #[test]
 #[ignore]
@@ -18,11 +18,11 @@ fn e2e_cli_deploy() -> TestResult {
     )?;
 
     let deploy_v1 = service.deploy(&scenario, "default")?;
-    assert_succeeded("deploy v1", &deploy_v1.combined)?;
+    assert_command_completed("deploy v1", &deploy_v1)?;
 
     service.replace_wasm(&mut scenario, WasmArtifact::CliBase)?;
     let deploy_v2 = service.deploy(&scenario, "default")?;
-    assert_succeeded("deploy v2", &deploy_v2.combined)?;
+    assert_command_completed("deploy v2", &deploy_v2)?;
 
     if let Err(err) = service.stop(&scenario, "default") {
         if !err.to_string().contains("is not running") {
@@ -49,7 +49,7 @@ fn e2e_cli_deploy_and_stop_on_non_default_target() -> TestResult {
     )?;
 
     let deploy_edge = service.deploy(&scenario, "edge")?;
-    assert_succeeded("deploy edge", &deploy_edge.combined)?;
+    assert_command_completed("deploy edge", &deploy_edge)?;
 
     if let Err(err) = service.stop(&scenario, "edge") {
         if !err.to_string().contains("is not running") {
@@ -76,44 +76,61 @@ fn e2e_cli_unknown_target_fails_via_run_service_cli() -> TestResult {
 
     let deploy_unknown =
         scenario.run_service_cli(service.name(), &["deploy", "--target", "unknown"])?;
-    assert_unknown_target_failure(
-        "deploy unknown target",
-        &deploy_unknown.combined,
-        deploy_unknown.success,
-    )?;
+    assert_unknown_target_failure("deploy unknown target", &deploy_unknown)?;
 
     let stop_unknown = scenario.run_service_cli(
         service.name(),
         &["stop", service.name(), "--target", "unknown"],
     )?;
-    assert_unknown_target_failure(
-        "stop unknown target",
-        &stop_unknown.combined,
-        stop_unknown.success,
-    )?;
+    assert_unknown_target_failure("stop unknown target", &stop_unknown)?;
 
     Ok(())
 }
 
-fn assert_succeeded(label: &str, output: &str) -> TestResult {
-    if output.to_ascii_lowercase().contains("succeeded") {
-        return Ok(());
+fn assert_command_completed(label: &str, output: &CmdOutput) -> TestResult {
+    match output.command_summary_status().as_deref() {
+        Some("completed") => Ok(()),
+        Some(status) => Err(anyhow::anyhow!(
+            "{label} summary status was '{status}', expected 'completed': {}",
+            output.combined
+        )),
+        None => Err(anyhow::anyhow!(
+            "{label} command.summary was not found: {}",
+            output.combined
+        )),
     }
-    Err(anyhow::anyhow!(
-        "{label} did not contain succeeded marker: {output}"
-    ))
 }
 
-fn assert_unknown_target_failure(label: &str, output: &str, success: bool) -> TestResult {
-    if success {
-        return Err(anyhow::anyhow!("{label} unexpectedly succeeded: {output}"));
+fn assert_unknown_target_failure(label: &str, output: &CmdOutput) -> TestResult {
+    if output.success {
+        return Err(anyhow::anyhow!(
+            "{label} unexpectedly succeeded: {}",
+            output.combined
+        ));
     }
-    if output.to_ascii_lowercase().contains("unknown target")
-        || output.contains("target 'unknown' is not defined in imago.toml")
+
+    let failed_by_contract =
+        output.command_summary_status().as_deref() == Some("failed") || output.has_command_error();
+    if !failed_by_contract {
+        return Err(anyhow::anyhow!(
+            "{label} did not emit failed summary/command.error: {}",
+            output.combined
+        ));
+    }
+
+    if output
+        .combined
+        .to_ascii_lowercase()
+        .contains("unknown target")
+        || output
+            .combined
+            .contains("target 'unknown' is not defined in imago.toml")
     {
         return Ok(());
     }
+
     Err(anyhow::anyhow!(
-        "{label} did not contain unknown-target specific message: {output}"
+        "{label} did not contain unknown-target specific message: {}",
+        output.combined
     ))
 }

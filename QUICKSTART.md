@@ -44,7 +44,27 @@ cargo run -p imago-cli -- logs local-imagod-app --tail 200
 
 ## 成功判定
 
-`imago-cli logs` の出力に `local-imagod-app started` が含まれていれば成功です。
+既定（Rich）または `CI=true`（Plain）では、`imago-cli logs` の出力に次の形式で `local-imagod-app started` が含まれていれば成功です。
+
+```text
+1739982001 local-imagod-app stdout | local-imagod-app started
+```
+
+`--json` 指定時は JSON Lines で `log.line` が出力されます（`logs --json` は `command.summary` を出力しません）。
+
+```bash
+cargo run -p imago-cli -- --json logs local-imagod-app --tail 200
+```
+
+```json
+{"type":"log.line","name":"local-imagod-app","stream":"stdout","timestamp":"1739982001","log":"local-imagod-app started"}
+```
+
+失敗時のみ `command.error` が 1 行出力されます。
+
+```json
+{"type":"command.error","command":"logs","message":"...","stage":"logs","code":"E_UNKNOWN"}
+```
 
 ## 他のexamples参照
 

@@ -14,6 +14,7 @@ e2e = []
 anyhow = { workspace = true }
 hex = { workspace = true }
 rcgen = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 
 [profile.release]
@@ -40,6 +41,7 @@ base64 = "0.22.1"
 bytes = "1.11.1"
 ciborium = "0.2.2"
 clap = "4.5.58"
+indicatif = "0.17.11"
 futures-util = "0.3.31"
 hex = "0.4.3"
 hmac = "0.12.1"

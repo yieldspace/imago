@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, time::Instant};
 
 use anyhow::Context;
 use imago_protocol::{CommandPayload, CommandType, StopCommandPayload};
@@ -8,8 +8,11 @@ use crate::{
     cli::StopArgs,
     commands::{
         CommandResult, build,
-        command_common::{handle_terminal_event, negotiate_hello, resolve_service_name},
-        deploy,
+        command_common::{
+            format_local_context_line, format_peer_context_line, handle_terminal_event,
+            negotiate_hello, resolve_service_name,
+        },
+        deploy, error_diagnostics, ui,
     },
 };
 
@@ -18,19 +21,24 @@ pub async fn run(args: StopArgs) -> CommandResult {
 }
 
 pub(crate) async fn run_with_project_root(args: StopArgs, project_root: &Path) -> CommandResult {
+    let started_at = Instant::now();
+    ui::command_start("stop", "starting");
     match run_async(args, project_root).await {
-        Ok(()) => CommandResult {
-            exit_code: 0,
-            stderr: None,
-        },
-        Err(err) => CommandResult {
-            exit_code: 2,
-            stderr: Some(err.to_string()),
-        },
+        Ok(()) => {
+            ui::command_finish("stop", true, "completed");
+            CommandResult::success("stop", started_at)
+        }
+        Err(err) => {
+            let summary = err.to_string();
+            ui::command_finish("stop", false, &summary);
+            let message = error_diagnostics::format_command_error("stop", &err);
+            CommandResult::failure("stop", started_at, message)
+        }
     }
 }
 
 async fn run_async(args: StopArgs, project_root: &Path) -> anyhow::Result<()> {
+    ui::command_stage("stop", "load-config", "loading target configuration");
     let target_name = args
         .target
         .clone()
@@ -41,11 +49,32 @@ async fn run_async(args: StopArgs, project_root: &Path) -> anyhow::Result<()> {
         .context("target settings are invalid for stop")?;
     let service_name = resolve_service_name(args.name.as_deref(), project_root)
         .context("failed to resolve service name for stop")?;
+    ui::command_info(
+        "stop",
+        &format_local_context_line(
+            project_root,
+            &service_name,
+            &target_name,
+            &target.remote,
+            target.server_name.as_deref(),
+        ),
+    );
 
-    let session = deploy::connect_target(&target).await?;
+    ui::command_stage("stop", "connect", "connecting target");
+    let connected = deploy::connect_target(&target).await?;
     let correlation_id = Uuid::new_v4();
-    negotiate_hello(&session, correlation_id).await?;
+    ui::command_stage("stop", "hello", "negotiating hello");
+    let hello = negotiate_hello(&connected.session, correlation_id).await?;
+    ui::command_info(
+        "stop",
+        &format_peer_context_line(
+            &connected.authority,
+            &connected.resolved_addr.to_string(),
+            &hello,
+        ),
+    );
 
+    ui::command_stage("stop", "command.start", "sending stop request");
     let command = deploy::build_command_start_envelope(
         correlation_id,
         Uuid::new_v4(),
@@ -55,7 +84,7 @@ async fn run_async(args: StopArgs, project_root: &Path) -> anyhow::Result<()> {
             force: args.force,
         }),
     )?;
-    let responses = deploy::request_events(&session, &command).await?;
+    let responses = deploy::request_events(&connected.session, &command).await?;
     handle_terminal_event("stop", responses)
 }
 

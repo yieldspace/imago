@@ -5,7 +5,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, anyhow};
@@ -42,8 +42,9 @@ use web_transport_quinn::{Session, proto::ConnectRequest};
 use crate::{
     cli::DeployArgs,
     commands::{
-        CommandResult, build,
+        CommandResult, build, command_common, error_diagnostics,
         shared::dependency::{DependencyResolver, StandardDependencyResolver},
+        ui,
     },
 };
 
@@ -61,6 +62,17 @@ const UPLOAD_RETRY_MAX_BACKOFF_MS: u64 = 1000;
 const DEFAULT_DEPLOY_STREAM_TIMEOUT_SECS: u64 = 30;
 const DEPLOY_STREAM_RETRY_BACKOFF_MS: [u64; 2] = [100, 250];
 const DEPLOY_STREAM_MAX_ATTEMPTS: usize = DEPLOY_STREAM_RETRY_BACKOFF_MS.len() + 1;
+const DEPLOY_PHASE_TOTAL: u8 = 8;
+const DEPLOY_PHASE_BUILD: u8 = 1;
+const DEPLOY_PHASE_BUNDLE: u8 = 2;
+const DEPLOY_PHASE_CONNECT: u8 = 3;
+const DEPLOY_PHASE_HELLO: u8 = 4;
+const DEPLOY_PHASE_PREPARE: u8 = 5;
+const DEPLOY_PHASE_UPLOAD: u8 = 6;
+const DEPLOY_PHASE_COMMIT: u8 = 7;
+const DEPLOY_PHASE_COMMAND: u8 = 8;
+const ANSI_DIM: &str = "\x1b[2m";
+const ANSI_RESET: &str = "\x1b[0m";
 const DATAGRAM_BUFFER_BYTES: usize = 1024 * 1024;
 const IMAGO_DIR_NAME: &str = ".imago";
 const KNOWN_HOSTS_FILE_NAME: &str = "known_hosts";
@@ -107,6 +119,82 @@ struct UploadPhaseResult {
     session: Session,
     deploy_id: String,
     deploy_stream_timeout: Duration,
+}
+
+pub(crate) struct ConnectedTargetSession {
+    pub session: Session,
+    pub authority: String,
+    pub resolved_addr: SocketAddr,
+    #[allow(dead_code)]
+    pub configured_host: String,
+    #[allow(dead_code)]
+    pub remote_input: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConnectedTargetMetadata {
+    authority: String,
+    resolved_addr: SocketAddr,
+    configured_host: String,
+    remote_input: String,
+}
+
+fn build_connected_target_metadata(
+    target: &build::DeployTargetConfig,
+    configured_host: &str,
+    authority: &str,
+    resolved_addr: SocketAddr,
+) -> ConnectedTargetMetadata {
+    ConnectedTargetMetadata {
+        authority: authority.to_string(),
+        resolved_addr,
+        configured_host: configured_host.to_string(),
+        remote_input: target.remote.clone(),
+    }
+}
+
+fn deploy_phase_detail(phase: u8, detail: &str) -> String {
+    format!("phase {phase}/{DEPLOY_PHASE_TOTAL} {detail}")
+}
+
+fn deploy_stage(phase: u8, stage: &str, detail: &str) {
+    ui::command_stage("deploy", stage, &deploy_phase_detail(phase, detail));
+}
+
+fn format_deploy_build_preview(line: &build::BuildCommandLogLine) -> String {
+    format!(
+        "{} | {ANSI_DIM}  > [{}] {}{ANSI_RESET}",
+        deploy_phase_detail(DEPLOY_PHASE_BUILD, "building project and manifest"),
+        line.stream.as_str(),
+        line.line
+    )
+}
+
+fn format_build_failure_log(line: &build::BuildCommandLogLine) -> String {
+    format!("  > {}", line.line)
+}
+
+fn build_failure_footer_line() -> &'static str {
+    "build.command failed with errors; deploy aborted"
+}
+
+fn extract_build_failure_logs(err: &anyhow::Error) -> Option<&[build::BuildCommandLogLine]> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<build::BuildCommandFailure>())
+        .map(|failure| failure.logs())
+}
+
+fn print_build_failure_logs(err: &anyhow::Error) {
+    if ui::current_mode() == ui::UiMode::Json {
+        return;
+    }
+    let Some(lines) = extract_build_failure_logs(err) else {
+        return;
+    };
+    for line in lines {
+        println!("{}", format_build_failure_log(line));
+    }
+    println!("{}", build_failure_footer_line());
 }
 
 #[derive(Debug, Clone)]
@@ -290,15 +378,19 @@ pub(crate) async fn run_with_project_root_and_target_override(
     project_root: &Path,
     target_override: Option<&build::TargetConfig>,
 ) -> CommandResult {
+    let started_at = Instant::now();
+    ui::command_start("deploy", "starting");
     match run_async_with_target_override(args, project_root, target_override).await {
-        Ok(()) => CommandResult {
-            exit_code: 0,
-            stderr: None,
-        },
-        Err(err) => CommandResult {
-            exit_code: 2,
-            stderr: Some(err.to_string()),
-        },
+        Ok(()) => {
+            ui::command_finish("deploy", true, "completed");
+            CommandResult::success("deploy", started_at)
+        }
+        Err(err) => {
+            let summary = err.to_string();
+            ui::command_finish("deploy", false, &summary);
+            let message = error_diagnostics::format_command_error("deploy", &err);
+            CommandResult::failure("deploy", started_at, message)
+        }
     }
 }
 
@@ -315,9 +407,46 @@ async fn run_async_with_target_override(
         .target
         .clone()
         .unwrap_or_else(|| build::default_target_name().to_string());
-    let build_output =
-        build::build_project_with_target_override(&target_name, project_root, target_override)
-            .context("failed to run build before deploy")?;
+    let service_name =
+        build::load_service_name(project_root).unwrap_or_else(|_| "<unknown>".to_string());
+    let context_target = match target_override {
+        Some(target) => Ok(target.clone()),
+        None => build::load_target_config(&target_name, project_root),
+    };
+    if let Ok(context_target) =
+        context_target.and_then(|target| target.require_deploy_credentials())
+    {
+        ui::command_info(
+            "deploy",
+            &command_common::format_local_context_line(
+                project_root,
+                &service_name,
+                &target_name,
+                &context_target.remote,
+                context_target.server_name.as_deref(),
+            ),
+        );
+    }
+
+    deploy_stage(DEPLOY_PHASE_BUILD, "build", "building project and manifest");
+    let mut on_build_line = |line: &build::BuildCommandLogLine| {
+        if ui::current_mode() != ui::UiMode::Rich {
+            return;
+        }
+        ui::command_stage("deploy", "build", &format_deploy_build_preview(line));
+    };
+    let build_output = match build::build_project_with_target_override_for_deploy(
+        &target_name,
+        project_root,
+        target_override,
+        &mut on_build_line,
+    ) {
+        Ok(output) => output,
+        Err(err) => {
+            print_build_failure_logs(&err);
+            return Err(err).context("failed to run build before deploy");
+        }
+    };
 
     let manifest_path = build_output.manifest_path;
     let manifest_bytes = build_output.manifest_bytes;
@@ -332,6 +461,11 @@ async fn run_async_with_target_override(
         .require_deploy_credentials()
         .context("target settings are invalid for deploy")?;
 
+    deploy_stage(
+        DEPLOY_PHASE_BUNDLE,
+        "bundle",
+        "creating deploy artifact bundle",
+    );
     let artifact = artifact::ArtifactBundler::bundle(
         &artifact_bundler,
         artifact::ArtifactBundleRequest {
@@ -373,6 +507,11 @@ async fn run_async_with_target_override(
     )
     .await?;
 
+    deploy_stage(
+        DEPLOY_PHASE_COMMAND,
+        "command.start",
+        "sending deploy command",
+    );
     let command_request_id = Uuid::new_v4();
     let command = build_command_start_envelope(
         correlation_id,
@@ -408,7 +547,7 @@ async fn run_async_with_target_override(
         }
         let event: CommandEvent = response_payload(envelope.clone())?;
         if let Some(stage) = &event.stage {
-            eprintln!("event={:?} stage={}", event.event_type, stage);
+            deploy_stage(DEPLOY_PHASE_COMMAND, stage, "remote progress");
         }
         if matches!(
             event.event_type,
@@ -455,14 +594,14 @@ async fn run_upload_phase_with_resume<C: network::TargetConnector>(
                 }
 
                 let backoff = retry_backoff_duration(attempt);
-                eprintln!(
-                    "{}",
-                    format_retry_log_message(
+                ui::command_warn(
+                    "deploy",
+                    &format_retry_log_message(
                         attempt,
                         UPLOAD_MAX_ATTEMPTS,
                         backoff,
                         &summarize_retry_error(&err),
-                    )
+                    ),
                 );
                 tokio::time::sleep(backoff).await;
             }
@@ -478,8 +617,15 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
     target_connector: &C,
     inputs: &UploadPhaseInputs<'_>,
 ) -> anyhow::Result<UploadPhaseResult> {
-    let session = target_connector.connect(inputs.target).await?;
+    deploy_stage(
+        DEPLOY_PHASE_CONNECT,
+        "connect",
+        "establishing transport session",
+    );
+    let connected = target_connector.connect(inputs.target).await?;
+    let session = connected.session;
 
+    deploy_stage(DEPLOY_PHASE_HELLO, "hello", "negotiating upload features");
     let hello = request_envelope(
         MessageType::HelloNegotiate,
         Uuid::new_v4(),
@@ -501,8 +647,18 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
     if !hello_response.accepted {
         return Err(anyhow!("hello.negotiate was rejected by server"));
     }
+    let hello_summary = hello_summary_from_response(&hello_response);
+    ui::command_info(
+        "deploy",
+        &command_common::format_peer_context_line(
+            &connected.authority,
+            &connected.resolved_addr.to_string(),
+            &hello_summary,
+        ),
+    );
     let upload_limits = parse_upload_limits(&hello_response)?;
 
+    deploy_stage(DEPLOY_PHASE_PREPARE, "prepare", "requesting deploy.prepare");
     let prepare = request_envelope(
         MessageType::DeployPrepare,
         Uuid::new_v4(),
@@ -529,6 +685,12 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
         inputs.artifact_size,
     )?;
     if !upload_ranges.is_empty() {
+        deploy_stage(DEPLOY_PHASE_UPLOAD, "upload", "uploading artifact");
+        let upload_total_bytes = upload_ranges
+            .iter()
+            .fold(0u64, |acc, range| acc.saturating_add(range.length));
+        let upload_detail = deploy_phase_detail(DEPLOY_PHASE_UPLOAD, "uploading artifact");
+        ui::command_upload_start("deploy", upload_total_bytes, &upload_detail);
         let upload_context = UploadRequestContext {
             session: &session,
             correlation_id: inputs.correlation_id,
@@ -544,8 +706,16 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
             upload_limits,
         )
         .await?;
+        ui::command_upload_finish("deploy");
+    } else {
+        deploy_stage(
+            DEPLOY_PHASE_UPLOAD,
+            "upload",
+            "upload skipped (already present)",
+        );
     }
 
+    deploy_stage(DEPLOY_PHASE_COMMIT, "commit", "requesting artifact.commit");
     let commit = request_envelope(
         MessageType::ArtifactCommit,
         Uuid::new_v4(),
@@ -669,7 +839,9 @@ fn contains_unauthorized_marker(err: &anyhow::Error) -> bool {
         .any(|cause| cause.to_string().contains("E_UNAUTHORIZED"))
 }
 
-pub(crate) async fn connect_target(target: &build::DeployTargetConfig) -> anyhow::Result<Session> {
+pub(crate) async fn connect_target(
+    target: &build::DeployTargetConfig,
+) -> anyhow::Result<ConnectedTargetSession> {
     let client_key = load_private_key(&target.client_key)?;
     let endpoint_info = parse_remote_endpoint(&target.remote).await?;
     let configured_host = target.server_name.as_deref().unwrap_or(&endpoint_info.host);
@@ -713,23 +885,40 @@ pub(crate) async fn connect_target(target: &build::DeployTargetConfig) -> anyhow
     let session = Session::connect(connection, request)
         .await
         .map_err(map_webtransport_client_error)?;
+    let metadata = build_connected_target_metadata(
+        target,
+        configured_host,
+        &authority,
+        endpoint_info.remote_addr,
+    );
+    let connected = ConnectedTargetSession {
+        session,
+        authority: metadata.authority,
+        resolved_addr: metadata.resolved_addr,
+        configured_host: metadata.configured_host,
+        remote_input: metadata.remote_input,
+    };
 
     match verifier.take_observed_status() {
-        Some(ServerIdentityStatus::Matched { .. }) => Ok(session),
+        Some(ServerIdentityStatus::Matched { .. }) => Ok(connected),
         Some(ServerIdentityStatus::Unknown { presented_key_hex }) => {
             if let Err(err) =
                 save_known_host_entry(&known_hosts_path, &authority, &presented_key_hex)
             {
-                session.close(0, b"failed to persist known_hosts entry");
+                connected
+                    .session
+                    .close(0, b"failed to persist known_hosts entry");
                 return Err(err);
             }
-            Ok(session)
+            Ok(connected)
         }
         Some(ServerIdentityStatus::Mismatch {
             expected_key_hex,
             presented_key_hex,
         }) => {
-            session.close(0, b"server raw public key mismatch");
+            connected
+                .session
+                .close(0, b"server raw public key mismatch");
             Err(server_identity_mismatch_error(
                 &authority,
                 &expected_key_hex,
@@ -738,7 +927,9 @@ pub(crate) async fn connect_target(target: &build::DeployTargetConfig) -> anyhow
             ))
         }
         None => {
-            session.close(0, b"missing server identity verification");
+            connected
+                .session
+                .close(0, b"missing server identity verification");
             Err(missing_server_identity_error(&authority))
         }
     }
@@ -848,6 +1039,14 @@ fn map_webtransport_client_error(err: web_transport_quinn::ClientError) -> anyho
             anyhow!("failed to establish webtransport session: {connect_err}")
         }
         other => anyhow!("failed to establish webtransport session: {other}"),
+    }
+}
+
+fn hello_summary_from_response(response: &HelloNegotiateResponse) -> command_common::HelloSummary {
+    command_common::HelloSummary {
+        server_version: response.server_version.clone(),
+        features: response.features.clone(),
+        limits: response.limits.clone(),
     }
 }
 
@@ -1072,9 +1271,12 @@ pub(crate) async fn request_events_with_timeout(
                 let Some(backoff) = deploy_stream_retry_backoff(attempt) else {
                     return Err(err);
                 };
-                eprintln!(
-                    "request stream attempt {attempt}/{DEPLOY_STREAM_MAX_ATTEMPTS} failed, retrying in {}ms",
-                    backoff.as_millis()
+                ui::command_warn(
+                    "deploy",
+                    &format!(
+                        "request stream attempt {attempt}/{DEPLOY_STREAM_MAX_ATTEMPTS} failed, retrying in {}ms",
+                        backoff.as_millis()
+                    ),
                 );
                 tokio::time::sleep(backoff).await;
                 attempt = attempt.saturating_add(1);
@@ -1231,7 +1433,8 @@ async fn push_artifact_ranges(
                 .join_next()
                 .await
                 .ok_or_else(|| anyhow!("upload task set was unexpectedly empty"))?;
-            completed.map_err(|err| anyhow!("upload task join failed: {err}"))??;
+            let uploaded = completed.map_err(|err| anyhow!("upload task join failed: {err}"))??;
+            ui::command_upload_inc("deploy", uploaded);
         }
 
         let mut chunk = vec![0u8; chunk_len];
@@ -1253,6 +1456,7 @@ async fn push_artifact_ranges(
         let task_deploy_id = deploy_id.clone();
         let task_upload_token = upload_token.clone();
         let task_stream_timeout = context.stream_timeout;
+        let uploaded_len = u64::try_from(chunk_len).context("chunk length conversion failed")?;
         uploads.spawn(async move {
             push_single_artifact_chunk(
                 task_session,
@@ -1263,12 +1467,14 @@ async fn push_artifact_ranges(
                 chunk,
                 task_stream_timeout,
             )
-            .await
+            .await?;
+            Ok::<u64, anyhow::Error>(uploaded_len)
         });
     }
 
     while let Some(completed) = uploads.join_next().await {
-        completed.map_err(|err| anyhow!("upload task join failed: {err}"))??;
+        let uploaded = completed.map_err(|err| anyhow!("upload task join failed: {err}"))??;
+        ui::command_upload_inc("deploy", uploaded);
     }
 
     Ok(())
@@ -1980,6 +2186,8 @@ mod tests {
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.expect("stderr should be present");
         assert!(stderr.contains("failed to run build before deploy"));
+        assert!(stderr.contains("causes:"));
+        assert!(stderr.contains("hints:"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2421,6 +2629,126 @@ mod tests {
         assert!(message.contains("upload attempt 1/4 failed"));
         assert!(message.contains("retrying in 250ms"));
         assert!(message.contains("reason=E_BUSY"));
+    }
+
+    #[test]
+    fn deploy_phase_detail_formats_phase_fraction() {
+        assert_eq!(
+            deploy_phase_detail(DEPLOY_PHASE_BUILD, "building project and manifest"),
+            "phase 1/8 building project and manifest"
+        );
+        assert_eq!(
+            deploy_phase_detail(DEPLOY_PHASE_UPLOAD, "uploading artifact"),
+            "phase 6/8 uploading artifact"
+        );
+    }
+
+    #[test]
+    fn deploy_command_phase_is_fixed_to_eight_of_eight() {
+        assert_eq!(
+            deploy_phase_detail(DEPLOY_PHASE_COMMAND, "sending deploy command"),
+            "phase 8/8 sending deploy command"
+        );
+        assert_eq!(
+            deploy_phase_detail(DEPLOY_PHASE_COMMAND, "remote progress"),
+            "phase 8/8 remote progress"
+        );
+    }
+
+    #[test]
+    fn deploy_build_preview_formats_dimmed_single_line() {
+        let line = build::BuildCommandLogLine {
+            stream: build::BuildCommandLogStream::Stdout,
+            line: "building crate-a".to_string(),
+        };
+        let preview = format_deploy_build_preview(&line);
+        assert!(preview.contains("phase 1/8 building project and manifest"));
+        assert!(preview.contains("\u{1b}[2m  > [stdout] building crate-a\u{1b}[0m"));
+    }
+
+    #[test]
+    fn build_failure_log_omits_stream_label_for_copy_paste() {
+        let line = build::BuildCommandLogLine {
+            stream: build::BuildCommandLogStream::Stderr,
+            line: "error: expected `;`".to_string(),
+        };
+        assert_eq!(format_build_failure_log(&line), "  > error: expected `;`");
+    }
+
+    #[test]
+    fn build_failure_footer_line_mentions_abort() {
+        assert_eq!(
+            build_failure_footer_line(),
+            "build.command failed with errors; deploy aborted"
+        );
+    }
+
+    #[test]
+    fn extract_build_failure_logs_finds_nested_build_error() {
+        let lines = vec![build::BuildCommandLogLine {
+            stream: build::BuildCommandLogStream::Stderr,
+            line: "compile error: expected `;`".to_string(),
+        }];
+        let err = anyhow::Error::new(build::BuildCommandFailure::new(Some(7), lines.clone()))
+            .context("failed to run build before deploy");
+
+        let extracted = extract_build_failure_logs(&err).expect("build logs should be found");
+        assert_eq!(extracted, lines.as_slice());
+    }
+
+    #[test]
+    fn build_connected_target_metadata_carries_expected_fields() {
+        let target = build::DeployTargetConfig {
+            remote: "127.0.0.1:4443".to_string(),
+            server_name: Some("imagod.local".to_string()),
+            client_key: PathBuf::from("/tmp/client.key"),
+        };
+        let metadata = build_connected_target_metadata(
+            &target,
+            "imagod.local",
+            "imagod.local:4443",
+            "127.0.0.1:4443".parse().expect("valid socket addr"),
+        );
+
+        assert_eq!(metadata.authority, "imagod.local:4443");
+        assert_eq!(metadata.resolved_addr.to_string(), "127.0.0.1:4443");
+        assert_eq!(metadata.configured_host, "imagod.local");
+        assert_eq!(metadata.remote_input, "127.0.0.1:4443");
+    }
+
+    #[test]
+    fn hello_summary_from_response_reflects_server_limits() {
+        let response = HelloNegotiateResponse {
+            accepted: true,
+            server_version: "imagod/0.2.0".to_string(),
+            features: vec!["logs.request".to_string()],
+            limits: BTreeMap::from([
+                ("chunk_size".to_string(), "4096".to_string()),
+                ("max_inflight_chunks".to_string(), "8".to_string()),
+                ("deploy_stream_timeout_secs".to_string(), "20".to_string()),
+            ]),
+        };
+        let summary = hello_summary_from_response(&response);
+
+        assert_eq!(summary.server_version, "imagod/0.2.0");
+        assert_eq!(
+            summary.limits.get("chunk_size").map(String::as_str),
+            Some("4096")
+        );
+        assert_eq!(
+            summary
+                .limits
+                .get("max_inflight_chunks")
+                .map(String::as_str),
+            Some("8")
+        );
+        assert_eq!(
+            summary
+                .limits
+                .get("deploy_stream_timeout_secs")
+                .map(String::as_str),
+            Some("20")
+        );
     }
 
     #[test]

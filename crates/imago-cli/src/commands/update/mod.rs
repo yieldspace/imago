@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use anyhow::{Context, anyhow};
@@ -18,8 +19,10 @@ use crate::{
         CommandResult,
         build::{self},
         dependency_cache::{self},
+        error_diagnostics::format_command_error,
         plugin_sources,
         shared::dependency::StandardDependencyResolver,
+        ui,
     },
 };
 
@@ -43,15 +46,19 @@ pub async fn run(args: UpdateArgs) -> CommandResult {
 }
 
 pub(crate) async fn run_with_project_root(_args: UpdateArgs, project_root: &Path) -> CommandResult {
+    let started_at = Instant::now();
+    ui::command_start("update", "starting");
     match run_inner_async(project_root).await {
-        Ok(()) => CommandResult {
-            exit_code: 0,
-            stderr: None,
-        },
-        Err(err) => CommandResult {
-            exit_code: 2,
-            stderr: Some(format!("{err:#}")),
-        },
+        Ok(()) => {
+            ui::command_finish("update", true, "completed");
+            CommandResult::success("update", started_at)
+        }
+        Err(err) => {
+            let summary_message = err.to_string();
+            let diagnostic_message = format_command_error("update", &err);
+            ui::command_finish("update", false, &summary_message);
+            CommandResult::failure("update", started_at, diagnostic_message)
+        }
     }
 }
 
@@ -978,6 +985,7 @@ fn remove_other_wit_files(root: &Path, keep: &Path) -> anyhow::Result<()> {
 }
 
 async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
+    ui::command_stage("update", "load-input", "loading dependencies and bindings");
     let dependency_resolver = StandardDependencyResolver;
     let dependencies = build::load_project_dependencies(project_root)?;
     let bindings = build::load_project_binding_sources(project_root)?;
@@ -988,6 +996,7 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
     let mut lock_entries = Vec::with_capacity(dependencies.len());
     let mut transitive_records = Vec::new();
 
+    ui::command_stage("update", "refresh-cache", "refreshing dependency cache");
     for dependency in &dependencies {
         let cache_entry =
             cache::load_or_refresh_cache_entry(&dependency_resolver, project_root, dependency)
@@ -1018,6 +1027,7 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
         });
     }
 
+    ui::command_stage("update", "hydrate-wit", "hydrating wit/deps");
     dependency_cache::hydrate_project_wit_deps(project_root, &dependencies)?;
     let resolved_binding_wits =
         resolve_binding_wits(project_root, &dependencies, &lock_entries, &bindings).await?;
@@ -1076,6 +1086,7 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
         wit_packages: collect_wit_packages(transitive_records),
         binding_wits,
     };
+    ui::command_stage("update", "write-lock", "writing imago.lock");
     save_to_project_root(project_root, &lock)?;
 
     Ok(())

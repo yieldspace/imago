@@ -14,6 +14,7 @@ base64 = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 futures-util = { workspace = true }
 hex = { workspace = true }
+indicatif = { workspace = true }
 imago-lockfile = { workspace = true }
 imago-protocol = { workspace = true }
 quinn = { workspace = true }
