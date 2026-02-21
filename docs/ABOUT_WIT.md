@@ -73,6 +73,34 @@ wit = "file://../../plugins/imago-admin/wit"
 `examples/local-imagod-plugin-native-admin` はこの native plugin を使って
 runner メタデータを取得する最小例です。
 
+### built-in + 追加 native plugin を使う専用 daemon 例
+
+`imagod` crate は built-in plugin を維持したまま追加 plugin を登録できます。
+方式は静的登録（再ビルド前提）です。
+
+```rust
+use std::sync::Arc;
+
+use imagod::{
+    NativePluginRegistryBuilder, dispatch_from_env_with_registry, register_builtin_native_plugins,
+};
+use my_plugin::MyNativePlugin;
+
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    let mut builder = NativePluginRegistryBuilder::new();
+    register_builtin_native_plugins(&mut builder)?;
+    builder
+        .register_plugin(Arc::new(MyNativePlugin))
+        .map_err(anyhow::Error::new)?;
+
+    dispatch_from_env_with_registry(builder.build()).await
+}
+```
+
+この daemon は manager モードでも runner モードでも同じバイナリを使うため、
+`--runner` で起動された子プロセスにも同じ plugin 構成が適用されます。
+
 `warg://sizumita:ferris@0.1.0` の wasm plugin を使って
 `sizumita:ferris/says.say` を呼び出す実行例は
 `examples/local-imagod-plugin-hello` を参照してください。

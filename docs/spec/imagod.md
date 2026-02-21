@@ -89,7 +89,7 @@ epoch_tick_interval_ms = 50
 ## 6. 実装追従方針
 
 - 概要ページは責務境界と外部契約の橋渡しに限定する。
-- 内部挙動は `crates/imagod/src/main.rs` と `crates/imagod-*/src/*` の関数/型名で追跡し、[`imagod-internals.md`](./imagod-internals.md) を更新する。
+- 内部挙動は `crates/imagod/src/lib.rs`（dispatch API）/ `crates/imagod/src/main.rs`（thin entrypoint）と `crates/imagod-*/src/*` の関数/型名で追跡し、[`imagod-internals.md`](./imagod-internals.md) を更新する。
 - `imago-protocol` 側の型・検証契約を変更した場合、`imagod` 側ドキュメントを同時に更新する。
 
 ## 実装反映ノート（Crate Split 6+1 / 2026-02-11）
@@ -165,3 +165,10 @@ epoch_tick_interval_ms = 50
 - 自動生成時は起動ログで通知する。
 - `tls.server_key` は自動生成した `imagod.toml` と同じディレクトリの `server.key`（絶対パス）を指し、該当ファイルが未存在なら `imagod.toml` 自動生成と同時に `server.key` 実体も生成する。
 - `tls.client_public_keys` は空配列 `[]` を許容する。
+
+## 実装反映ノート（Library Dispatch + Native Plugin Registry API / 2026-02-21）
+
+- `crates/imagod` は `lib + bin` 構成になり、`imagod::dispatch_from_env()` / `imagod::dispatch_from_env_with_registry(...)` を公開した。
+- `crates/imagod/src/main.rs` は `imagod::dispatch_from_env()` へ委譲する thin entrypoint に変更した。
+- `imagod` library は `register_builtin_native_plugins(...)` / `builtin_native_plugin_registry()` を公開し、built-in（`imago:admin`, `imago:node`）へ追加 native plugin を静的登録で上乗せできる。
+- manager 側の process model（`current_exe --runner`）は維持し、未登録 `kind=native` dependency の起動時エラー契約は変更しない。
