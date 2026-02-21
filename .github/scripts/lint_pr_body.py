@@ -9,9 +9,8 @@ import re
 import sys
 
 REQUIRED_HEADINGS = ("Motivation", "Summary", "Validation")
-SECTION_PATTERN = re.compile(
-    r"(?ms)^##[ \t]+(?P<title>[^\n]+)\s*\n(?P<body>.*?)(?=^##[ \t]+|\Z)"
-)
+HEADING_PATTERN = re.compile(r"^##[ \t]+(?P<title>[^\n]+)\s*$")
+FENCE_PATTERN = re.compile(r"^[ \t]*(?P<fence>`{3,}|~{3,})")
 REQUIRED_MARKER_PATTERN = re.compile(r"\s*\(\s*required\s*\)\s*$", re.IGNORECASE)
 
 
@@ -38,10 +37,42 @@ def load_event(event_path: str) -> dict:
 
 def parse_sections(pr_body: str) -> dict[str, str]:
     sections: dict[str, str] = {}
-    for match in SECTION_PATTERN.finditer(pr_body):
-        title = normalize_section_title(match.group("title"))
-        body = match.group("body").strip()
-        sections.setdefault(title, body)
+    current_title: str | None = None
+    current_body_lines: list[str] = []
+    in_fenced_code_block = False
+    fence_char = ""
+    fence_len = 0
+
+    for line in pr_body.splitlines():
+        fence_match = FENCE_PATTERN.match(line)
+        if fence_match:
+            fence = fence_match.group("fence")
+            if not in_fenced_code_block:
+                in_fenced_code_block = True
+                fence_char = fence[0]
+                fence_len = len(fence)
+            elif fence[0] == fence_char and len(fence) >= fence_len:
+                in_fenced_code_block = False
+                fence_char = ""
+                fence_len = 0
+
+        if not in_fenced_code_block:
+            heading_match = HEADING_PATTERN.match(line)
+            if heading_match:
+                if current_title is not None:
+                    body = "\n".join(current_body_lines).strip()
+                    sections.setdefault(current_title, body)
+                current_title = normalize_section_title(heading_match.group("title"))
+                current_body_lines = []
+                continue
+
+        if current_title is not None:
+            current_body_lines.append(line)
+
+    if current_title is not None:
+        body = "\n".join(current_body_lines).strip()
+        sections.setdefault(current_title, body)
+
     return sections
 
 
