@@ -1,8 +1,9 @@
 [package]
 name = "imagod-runtime-bootstrap"
-version = "0.1.0"
-edition = "2024"
-
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
 [dependencies]
 imago-protocol = { workspace = true }
 imagod-common = { workspace = true }

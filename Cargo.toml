@@ -1,8 +1,9 @@
 [package]
 name = "imago"
-version = "0.1.0"
-edition = "2024"
-publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
 autotests = false
 build = "build.rs"
 
@@ -33,6 +34,12 @@ members = [
     "examples/local-imagod-socket",
     "plugins/*", "e2e",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
 
 [workspace.dependencies]
 async-trait = "0.1.89"
@@ -78,22 +85,22 @@ wit-parser = "0.244.0"
 web-transport-quinn = "0.11.6"
 syn = "2.0.111"
 
-imago-plugin-imago-admin = { path = "plugins/imago-admin" }
-imago-plugin-imago-node = { path = "plugins/imago-node" }
-imago-lockfile = { path = "crates/imago-lockfile" }
-imago-plugin-macros = { path = "crates/imago-plugin-macros" }
-imago-protocol = { path = "crates/imago-protocol" }
-imagod-common = { path = "crates/imagod-common" }
-imagod-config = { path = "crates/imagod-config" }
-imagod-control = { path = "crates/imagod-control" }
-imagod-ipc = { path = "crates/imagod-ipc" }
-imagod-runtime = { path = "crates/imagod-runtime", default-features = false }
-imagod-runtime-bootstrap = { path = "crates/imagod-runtime-bootstrap" }
-imagod-runtime-control = { path = "crates/imagod-runtime-control" }
-imagod-runtime-ingress = { path = "crates/imagod-runtime-ingress" }
-imagod-runtime-internal = { path = "crates/imagod-runtime-internal" }
-imagod-runtime-wasmtime = { path = "crates/imagod-runtime-wasmtime" }
-imagod-server = { path = "crates/imagod-server" }
+imago-plugin-imago-admin = { path = "plugins/imago-admin", version = "0.1.0" }
+imago-plugin-imago-node = { path = "plugins/imago-node", version = "0.1.0" }
+imago-lockfile = { path = "crates/imago-lockfile", version = "0.1.0" }
+imago-plugin-macros = { path = "crates/imago-plugin-macros", version = "0.1.0" }
+imago-protocol = { path = "crates/imago-protocol", version = "0.1.0" }
+imagod-common = { path = "crates/imagod-common", version = "0.1.0" }
+imagod-config = { path = "crates/imagod-config", version = "0.1.0" }
+imagod-control = { path = "crates/imagod-control", version = "0.1.0" }
+imagod-ipc = { path = "crates/imagod-ipc", version = "0.1.0" }
+imagod-runtime = { path = "crates/imagod-runtime", version = "0.1.0", default-features = false }
+imagod-runtime-bootstrap = { path = "crates/imagod-runtime-bootstrap", version = "0.1.0" }
+imagod-runtime-control = { path = "crates/imagod-runtime-control", version = "0.1.0" }
+imagod-runtime-ingress = { path = "crates/imagod-runtime-ingress", version = "0.1.0" }
+imagod-runtime-internal = { path = "crates/imagod-runtime-internal", version = "0.1.0" }
+imagod-runtime-wasmtime = { path = "crates/imagod-runtime-wasmtime", version = "0.1.0" }
+imagod-server = { path = "crates/imagod-server", version = "0.1.0" }
 
 [[test]]
 name = "e2e_cli"
