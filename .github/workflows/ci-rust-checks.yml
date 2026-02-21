@@ -5,6 +5,7 @@ on:
     branches:
       - main
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,8 +15,59 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  checks:
-    name: checks
+  changed:
+    name: detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust_related: ${{ steps.detect.outputs.rust_related }}
+      workflow_related: ${{ steps.detect.outputs.workflow_related }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rust_related=false
+          workflow_related=false
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base_sha='${{ github.event.pull_request.base.sha }}'
+            head_sha='${{ github.event.pull_request.head.sha }}'
+            diff_output="$(git diff --name-only --no-renames "$base_sha...$head_sha")"
+
+            while IFS= read -r file; do
+              [[ -n "$file" ]] || continue
+
+              case "$file" in
+                Cargo.toml|Cargo.lock|build.rs|crates/*|src/*|tests/*|e2e/*|examples/*|plugins/*)
+                  rust_related=true
+                  ;;
+              esac
+
+              case "$file" in
+                .github/workflows/*|.github/codex/*)
+                  workflow_related=true
+                  ;;
+              esac
+            done <<< "$diff_output"
+          else
+            rust_related=true
+            workflow_related=true
+          fi
+
+          echo "rust_related=$rust_related" >> "$GITHUB_OUTPUT"
+          echo "workflow_related=$workflow_related" >> "$GITHUB_OUTPUT"
+
+  rust_checks:
+    name: rust checks
+    needs: changed
+    if: ${{ needs.changed.outputs.rust_related == 'true' || needs.changed.outputs.workflow_related == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -40,3 +92,78 @@ jobs:
 
       - name: cargo check
         run: cargo check --workspace
+
+  pr_body_lint:
+    name: pr body lint
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate pull request body sections
+        run: python3 .github/scripts/lint_pr_body.py
+        env:
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+
+  checks:
+    name: checks
+    needs:
+      - changed
+      - rust_checks
+      - pr_body_lint
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate required checks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          event_name='${{ github.event_name }}'
+          changed_result='${{ needs.changed.result }}'
+          rust_related='${{ needs.changed.outputs.rust_related }}'
+          workflow_related='${{ needs.changed.outputs.workflow_related }}'
+          rust_result='${{ needs.rust_checks.result }}'
+          pr_body_lint_result='${{ needs.pr_body_lint.result }}'
+
+          echo "event_name: $event_name"
+          echo "changed: $changed_result"
+          echo "rust_related: $rust_related"
+          echo "workflow_related: $workflow_related"
+          echo "rust_checks: $rust_result"
+          echo "pr_body_lint: $pr_body_lint_result"
+
+          [[ "$changed_result" == "success" ]] || {
+            echo "::error::changed job failed ($changed_result)"
+            exit 1
+          }
+
+          if [[ "$event_name" == "pull_request" ]]; then
+            [[ "$pr_body_lint_result" == "success" ]] || {
+              echo "::error::pr_body_lint must succeed for pull requests."
+              exit 1
+            }
+
+            if [[ "$rust_related" == "true" || "$workflow_related" == "true" ]]; then
+              [[ "$rust_result" == "success" ]] || {
+                echo "::error::rust_checks must succeed when Rust or workflow files are changed."
+                exit 1
+              }
+            else
+              [[ "$rust_result" == "skipped" || "$rust_result" == "success" ]] || {
+                echo "::error::rust_checks must be skipped or succeed for non-Rust pull requests."
+                exit 1
+              }
+            fi
+          else
+            [[ "$rust_result" == "success" ]] || {
+              echo "::error::rust_checks must succeed on push and workflow_dispatch events."
+              exit 1
+            }
+
+            [[ "$pr_body_lint_result" == "skipped" || "$pr_body_lint_result" == "success" ]] || {
+              echo "::error::pr_body_lint must be skipped or succeed outside pull requests."
+              exit 1
+            }
+          fi
