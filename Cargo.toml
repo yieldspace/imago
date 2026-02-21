@@ -74,7 +74,7 @@ wasmtime-wasi-http = "41.0.3"
 wat = "1.244.0"
 wit-component = "0.244.0"
 wit-parser = "0.244.0"
-web-transport-quinn = "0.11.1"
+web-transport-quinn = "0.11.6"
 syn = "2.0.111"
 
 imago-plugin-imago-admin = { path = "plugins/imago-admin" }
