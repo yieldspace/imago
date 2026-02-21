@@ -98,6 +98,7 @@ flowchart TD
 - request envelope は 1 stream につき 1 件のみ許可。複数 request は `E_BAD_REQUEST`。
 - `MessageType::CommandStart` は `handle_command_start` へ分岐し、同一 stream へ `command.start response` + `command.event*` を連続送信。
 - `MessageType::LogsRequest` は stream で ACK を返した後、`Session::send_datagram` で `logs.chunk*` / `logs.end` を送信する。
+- `MessageType::ServicesList` は `handle_single` 経由で service 状態一覧（`running` / `stopping` / `stopped`）を返す。
 - それ以外は `handle_single` で 1 request -> 1 response。
 
 ```mermaid
@@ -116,6 +117,9 @@ sequenceDiagram
     S->>D: handle_logs_request
     D-->>C: logs.request response (stream ACK)
     D-->>C: logs.chunk* / logs.end (DATAGRAM)
+  else message_type == services.list
+    S->>D: handle_single
+    D-->>C: services.list response
   else other message
     S->>D: handle_single
     D-->>C: single response

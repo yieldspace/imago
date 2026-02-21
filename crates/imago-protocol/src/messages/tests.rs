@@ -418,4 +418,54 @@ mod tests {
         let decoded = from_cbor::<LogEnd>(&encoded).expect("decoding should succeed");
         assert_eq!(decoded, end);
     }
+
+    #[test]
+    fn service_list_round_trip_and_validate() {
+        let request = ServiceListRequest {
+            names: Some(vec!["svc-a".to_string(), "svc-b".to_string()]),
+        };
+        request.validate().expect("request should be valid");
+        let encoded = to_cbor(&request).expect("encoding should succeed");
+        let decoded = from_cbor::<ServiceListRequest>(&encoded).expect("decoding should succeed");
+        assert_eq!(decoded, request);
+
+        let response = ServiceListResponse {
+            services: vec![ServiceStatusEntry {
+                name: "svc-a".to_string(),
+                release_hash: "release-a".to_string(),
+                started_at: "1735689600".to_string(),
+                state: ServiceState::Running,
+            }],
+        };
+        response.validate().expect("response should be valid");
+        let encoded = to_cbor(&response).expect("encoding should succeed");
+        let decoded = from_cbor::<ServiceListResponse>(&encoded).expect("decoding should succeed");
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn service_list_request_rejects_empty_or_duplicate_names() {
+        let empty_name = ServiceListRequest {
+            names: Some(vec!["svc-a".to_string(), "".to_string()]),
+        };
+        assert!(empty_name.validate().is_err());
+
+        let duplicate_name = ServiceListRequest {
+            names: Some(vec!["svc-a".to_string(), "svc-a".to_string()]),
+        };
+        assert!(duplicate_name.validate().is_err());
+    }
+
+    #[test]
+    fn service_list_response_rejects_empty_required_fields() {
+        let invalid = ServiceListResponse {
+            services: vec![ServiceStatusEntry {
+                name: "svc-a".to_string(),
+                release_hash: "".to_string(),
+                started_at: "1735689600".to_string(),
+                state: ServiceState::Stopped,
+            }],
+        };
+        assert!(invalid.validate().is_err());
+    }
 }

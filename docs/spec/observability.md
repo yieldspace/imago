@@ -61,6 +61,7 @@
 ## 5. 状態照会契約
 
 `state.request` / `state.response` は「実行中状態の一点照会」に限定する。
+`services.list` は service 一覧照会に使う。
 
 ### 5.1 `state.request`
 
@@ -76,6 +77,22 @@ operation が存在しない場合の扱い:
 
 - `state.request`: `E_NOT_FOUND`
 - `state.request` のエラー応答 envelope `type` は `state.response`
+
+### 5.3 `services.list`
+
+- 入力: `names: Option<Vec<String>>`
+
+### 5.4 応答
+
+- 出力: `services[]`（`name`, `state`, `release_hash`, `started_at`）
+- `state` は `running` / `stopping` / `stopped`
+
+### 5.5 `names` フィルタ運用
+
+- `names=None` は service 一覧を返す。
+- `names=Some([...])` は指定名の一致集合のみ返す。
+- `names` に unknown service 名が含まれていてもエラーにしない。
+- 指定名がすべて unknown の場合は `services=[]` を返す。
 
 ## 6. cancel 契約
 
@@ -182,3 +199,9 @@ operation が存在しない場合の扱い:
 - `logs.request.name=None` の対象を running に加えて retained logs が残る停止済みサービスまで拡張した。
 - retained logs は imagod プロセス寿命内メモリの global ring に保持し、eviction またはプロセス再起動後は参照不可とした。
 - 停止済みサービスへの `follow=true` は snapshot 後に `logs.end` を返して即終了する。
+
+## 実装反映ノート（services.list / ps 観測契約 / 2026-02-21）
+
+- `services.list` による service 一覧照会契約を追加した。
+- 一覧の `state` は `running` / `stopping` / `stopped` を許可する方針を明示した。
+- `names` フィルタで unknown service を指定してもエラーにせず、該当なしは `services=[]` を返す契約を追加した。

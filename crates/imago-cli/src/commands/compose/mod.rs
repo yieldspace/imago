@@ -10,11 +10,11 @@ use serde::Deserialize;
 
 use crate::{
     cli::{
-        ComposeBuildArgs, ComposeCommands, ComposeDeployArgs, ComposeLogsArgs,
-        ComposeSubcommandArgs, ComposeUpdateArgs, DeployArgs, LogsArgs, UpdateArgs,
+        ComposeBuildArgs, ComposeCommands, ComposeDeployArgs, ComposeLogsArgs, ComposePsArgs,
+        ComposeSubcommandArgs, ComposeUpdateArgs, DeployArgs, LogsArgs, PsArgs, UpdateArgs,
     },
     commands::{
-        CommandResult, build, deploy, error_diagnostics::format_command_error, logs, ui, update,
+        CommandResult, build, deploy, error_diagnostics::format_command_error, logs, ps, ui, update,
     },
 };
 
@@ -68,6 +68,7 @@ enum ComposeRunKind {
     Update,
     Deploy,
     Logs,
+    Ps,
 }
 
 impl ComposeRunKind {
@@ -77,6 +78,7 @@ impl ComposeRunKind {
             ComposeCommands::Update(_) => Self::Update,
             ComposeCommands::Deploy(_) => Self::Deploy,
             ComposeCommands::Logs(_) => Self::Logs,
+            ComposeCommands::Ps(_) => Self::Ps,
         }
     }
 }
@@ -105,17 +107,17 @@ fn should_suppress_json_summary_for_compose_success(
     run_kind: ComposeRunKind,
     ui_mode: ui::UiMode,
 ) -> bool {
-    run_kind == ComposeRunKind::Logs && ui_mode == ui::UiMode::Json
+    matches!(run_kind, ComposeRunKind::Logs | ComposeRunKind::Ps) && ui_mode == ui::UiMode::Json
 }
 
-fn delegated_logs_failure_already_emitted_json_error(
-    logs_result: &CommandResult,
+fn delegated_command_failure_already_emitted_json_error(
+    delegated_result: &CommandResult,
     ui_mode: ui::UiMode,
 ) -> bool {
     ui_mode == ui::UiMode::Json
-        && logs_result.exit_code != 0
-        && logs_result.skip_json_summary
-        && logs_result.stderr.is_none()
+        && delegated_result.exit_code != 0
+        && delegated_result.skip_json_summary
+        && delegated_result.stderr.is_none()
 }
 
 fn compose_logs_failure_error(
@@ -128,9 +130,22 @@ fn compose_logs_failure_error(
         .unwrap_or_else(|| format!("exit code {}", logs_result.exit_code));
     ComposeCommandError {
         message: format!("compose logs failed: {detail}"),
-        suppress_json_summary: delegated_logs_failure_already_emitted_json_error(
+        suppress_json_summary: delegated_command_failure_already_emitted_json_error(
             logs_result,
             ui_mode,
+        ),
+    }
+}
+
+fn compose_ps_failure_error(ps_result: &CommandResult, ui_mode: ui::UiMode) -> ComposeCommandError {
+    let detail = ps_result
+        .stderr
+        .clone()
+        .unwrap_or_else(|| format!("exit code {}", ps_result.exit_code));
+    ComposeCommandError {
+        message: format!("compose ps failed: {detail}"),
+        suppress_json_summary: delegated_command_failure_already_emitted_json_error(
+            ps_result, ui_mode,
         ),
     }
 }
@@ -184,6 +199,7 @@ async fn run_async(args: ComposeSubcommandArgs, project_root: &Path) -> anyhow::
         ComposeCommands::Update(args) => run_compose_update(args, project_root).await,
         ComposeCommands::Deploy(args) => run_compose_deploy(args, project_root).await,
         ComposeCommands::Logs(args) => run_compose_logs(args, project_root).await,
+        ComposeCommands::Ps(args) => run_compose_ps(args, project_root).await,
     }
 }
 
@@ -476,6 +492,67 @@ async fn run_compose_logs(args: ComposeLogsArgs, project_root: &Path) -> anyhow:
     Ok(())
 }
 
+async fn run_compose_ps(args: ComposePsArgs, project_root: &Path) -> anyhow::Result<()> {
+    ui::command_stage("compose", "load-config", "loading compose ps profile");
+    let compose_file = load_compose_file(project_root)?;
+    let resolved = resolve_compose_config(&compose_file, &args.profile)?;
+    ensure_compose_services_non_empty(resolved.config, &args.profile)?;
+    let names = resolve_compose_service_names(resolved, project_root)?;
+    let target = resolve_compose_target(&compose_file, &args.target, project_root)?;
+
+    let ps_result = ps::run_with_project_root_and_target_override(
+        PsArgs {
+            target: args.target.clone(),
+        },
+        project_root,
+        Some(&target),
+        Some(names),
+    )
+    .await;
+    if ps_result.exit_code != 0 {
+        return Err(compose_ps_failure_error(&ps_result, ui::current_mode()).into());
+    }
+
+    Ok(())
+}
+
+fn resolve_compose_service_names(
+    resolved: ResolvedComposeConfig<'_>,
+    project_root: &Path,
+) -> anyhow::Result<Vec<String>> {
+    let mut names = Vec::with_capacity(resolved.config.services.len());
+    let mut seen_indices = BTreeMap::<String, usize>::new();
+
+    for (index, service) in resolved.config.services.iter().enumerate() {
+        let service_project_root = resolve_service_project_root(project_root, &service.imago)
+            .with_context(|| {
+                format!(
+                    "failed to resolve compose.{}.services[{index}].imago",
+                    resolved.config_name
+                )
+            })?;
+        let service_name = build::load_service_name(&service_project_root).with_context(|| {
+            format!(
+                "failed to resolve compose.{}.services[{index}] service name",
+                resolved.config_name
+            )
+        })?;
+
+        if let Some(previous_index) = seen_indices.insert(service_name.clone(), index) {
+            return Err(anyhow!(
+                "duplicate service name '{}' in compose.{}.services[{previous_index}] and compose.{}.services[{index}]",
+                service_name,
+                resolved.config_name,
+                resolved.config_name,
+            ));
+        }
+
+        names.push(service_name);
+    }
+
+    Ok(names)
+}
+
 fn load_compose_file(project_root: &Path) -> anyhow::Result<ComposeFile> {
     let compose_path = project_root.join(COMPOSE_FILE_NAME);
     let body = fs::read_to_string(&compose_path)
@@ -655,6 +732,10 @@ mod tests {
             ComposeRunKind::Logs,
             ui::UiMode::Json
         ));
+        assert!(should_suppress_json_summary_for_compose_success(
+            ComposeRunKind::Ps,
+            ui::UiMode::Json
+        ));
         assert!(!should_suppress_json_summary_for_compose_success(
             ComposeRunKind::Logs,
             ui::UiMode::Plain
@@ -693,6 +774,21 @@ mod tests {
 
         let err: anyhow::Error = compose_logs_failure_error(&logs_result, ui::UiMode::Plain).into();
         assert!(!should_suppress_json_summary_for_compose_error(&err));
+    }
+
+    #[test]
+    fn compose_ps_json_delegate_failure_marks_outer_summary_suppressed() {
+        let ps_result = CommandResult {
+            command: "ps".to_string(),
+            exit_code: 2,
+            stderr: None,
+            duration_ms: 0,
+            meta: BTreeMap::new(),
+            skip_json_summary: true,
+        };
+
+        let err: anyhow::Error = compose_ps_failure_error(&ps_result, ui::UiMode::Json).into();
+        assert!(should_suppress_json_summary_for_compose_error(&err));
     }
 
     #[tokio::test]
@@ -885,6 +981,65 @@ type = "cli"
                 .as_deref()
                 .expect("stderr should be present")
                 .contains("target 'default' is not defined")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn compose_ps_rejects_duplicate_service_names_in_profile() {
+        let root = new_temp_dir("ps-duplicate-service-names");
+        write_file(
+            &root.join(COMPOSE_FILE_NAME),
+            br#"
+[[compose.stack.services]]
+imago = "services/svc-a/imago.toml"
+
+[[compose.stack.services]]
+imago = "services/svc-b/imago.toml"
+
+[profile.dev]
+config = "stack"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(
+            &root.join("services/svc-a/imago.toml"),
+            br#"
+name = "svc-dup"
+main = "build/app.wasm"
+type = "cli"
+"#,
+        );
+        write_file(
+            &root.join("services/svc-b/imago.toml"),
+            br#"
+name = "svc-dup"
+main = "build/app.wasm"
+type = "cli"
+"#,
+        );
+
+        let result = run_with_project_root(
+            ComposeSubcommandArgs {
+                command: ComposeCommands::Ps(ComposePsArgs {
+                    profile: "dev".to_string(),
+                    target: "default".to_string(),
+                }),
+            },
+            &root,
+        )
+        .await;
+
+        assert_eq!(result.exit_code, 2);
+        assert!(
+            result
+                .stderr
+                .as_deref()
+                .expect("stderr should be present")
+                .contains("duplicate service name")
         );
 
         let _ = fs::remove_dir_all(root);

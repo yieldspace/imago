@@ -16,6 +16,7 @@ async fn dispatch_async(cli: Cli) -> CommandResult {
         Commands::Compose(args) => commands::compose::run(args).await,
         Commands::Run(args) => commands::run::run(args).await,
         Commands::Stop(args) => commands::stop::run(args).await,
+        Commands::Ps(args) => commands::ps::run(args).await,
         Commands::Logs(args) => commands::logs::run(args).await,
         Commands::Bindings(BindingsSubcommandArgs { command }) => match command {
             BindingsCommands::Cert(BindingsCertSubcommandArgs { command }) => match command {
@@ -47,6 +48,7 @@ async fn dispatch_with_project_root_async(
         }
         Commands::Run(args) => commands::run::run_with_project_root(args, project_root).await,
         Commands::Stop(args) => commands::stop::run_with_project_root(args, project_root).await,
+        Commands::Ps(args) => commands::ps::run_with_project_root(args, project_root).await,
         Commands::Logs(args) => commands::logs::run_with_project_root(args, project_root).await,
         Commands::Bindings(BindingsSubcommandArgs { command }) => match command {
             BindingsCommands::Cert(BindingsCertSubcommandArgs { command }) => match command {
@@ -97,8 +99,8 @@ mod tests {
     use crate::cli::{
         BindingsCertCommands, BindingsCertDeployArgs, BindingsCertSubcommandArgs,
         BindingsCertUploadArgs, BindingsCommands, BindingsSubcommandArgs, BuildArgs,
-        ComposeBuildArgs, ComposeCommands, ComposeDeployArgs, ComposeLogsArgs,
-        ComposeSubcommandArgs, ComposeUpdateArgs, DeployArgs, RunArgs, StopArgs,
+        ComposeBuildArgs, ComposeCommands, ComposeDeployArgs, ComposeLogsArgs, ComposePsArgs,
+        ComposeSubcommandArgs, ComposeUpdateArgs, DeployArgs, PsArgs, RunArgs, StopArgs,
     };
     use std::path::PathBuf;
 
@@ -195,6 +197,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatches_ps_and_returns_non_zero_without_imago_toml() {
+        let root = new_temp_dir("dispatch-ps");
+        let result = dispatch_with_project_root_async(
+            Cli {
+                json: false,
+                command: Commands::Ps(PsArgs {
+                    target: "default".to_string(),
+                }),
+            },
+            &root,
+        )
+        .await;
+
+        assert_eq!(result.exit_code, 2);
+        assert!(result.stderr.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn dispatches_compose_deploy_and_returns_non_zero_without_imago_compose_toml() {
         let root = new_temp_dir("dispatch-compose");
         let result = dispatch_with_project_root_async(
@@ -273,6 +294,28 @@ mod tests {
                         name: None,
                         follow: false,
                         tail: 200,
+                    }),
+                }),
+            },
+            &root,
+        )
+        .await;
+
+        assert_eq!(result.exit_code, 2);
+        assert!(result.stderr.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dispatches_compose_ps_and_returns_non_zero_without_imago_compose_toml() {
+        let root = new_temp_dir("dispatch-compose-ps");
+        let result = dispatch_with_project_root_async(
+            Cli {
+                json: false,
+                command: Commands::Compose(ComposeSubcommandArgs {
+                    command: ComposeCommands::Ps(ComposePsArgs {
+                        profile: "mini".to_string(),
+                        target: "default".to_string(),
                     }),
                 }),
             },

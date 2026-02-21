@@ -96,6 +96,15 @@ pub enum RunningStatus {
     Stopping,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Runtime metadata snapshot for one supervised service.
+pub struct RuntimeServiceState {
+    pub name: String,
+    pub release_hash: String,
+    pub started_at: String,
+    pub status: RunningStatus,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Logical stream of one emitted log event.
 pub enum ServiceLogStream {
@@ -731,6 +740,20 @@ impl ServiceSupervisor {
                 } else {
                     None
                 }
+            })
+            .collect()
+    }
+
+    /// Returns runtime state snapshots for all tracked services.
+    pub async fn runtime_service_states(&self) -> Vec<RuntimeServiceState> {
+        let inner = self.inner.read().await;
+        inner
+            .iter()
+            .map(|(name, service)| RuntimeServiceState {
+                name: name.clone(),
+                release_hash: service.release_hash.clone(),
+                started_at: service.started_at.clone(),
+                status: service.status,
             })
             .collect()
     }
@@ -1804,6 +1827,67 @@ mod tests {
 
         stop_running_service_best_effort(&supervisor.inner, "svc-running-a").await;
         stop_running_service_best_effort(&supervisor.inner, "svc-running-b").await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn runtime_service_states_returns_running_and_stopping_states() {
+        let root = new_test_root("runtime-states");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
+
+        let endpoint_a = root.join("runtime").join("ipc").join("runtime-a.sock");
+        let endpoint_b = root.join("runtime").join("ipc").join("runtime-b.sock");
+        let child_a = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("child A should spawn");
+        let child_b = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("child B should spawn");
+
+        let mut service_a = new_running_service(child_a, "runner-runtime-a", endpoint_a);
+        service_a.release_hash = "release-runtime-a".to_string();
+        service_a.started_at = "111".to_string();
+        let mut service_b = new_running_service(child_b, "runner-runtime-b", endpoint_b);
+        service_b.release_hash = "release-runtime-b".to_string();
+        service_b.started_at = "222".to_string();
+        service_b.status = RunningStatus::Stopping;
+
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert("svc-runtime-a".to_string(), service_a);
+            inner.insert("svc-runtime-b".to_string(), service_b);
+        }
+
+        let states = supervisor.runtime_service_states().await;
+        assert_eq!(
+            states,
+            vec![
+                RuntimeServiceState {
+                    name: "svc-runtime-a".to_string(),
+                    release_hash: "release-runtime-a".to_string(),
+                    started_at: "111".to_string(),
+                    status: RunningStatus::Running,
+                },
+                RuntimeServiceState {
+                    name: "svc-runtime-b".to_string(),
+                    release_hash: "release-runtime-b".to_string(),
+                    started_at: "222".to_string(),
+                    status: RunningStatus::Stopping,
+                }
+            ]
+        );
+
+        stop_running_service_best_effort(&supervisor.inner, "svc-runtime-a").await;
+        stop_running_service_best_effort(&supervisor.inner, "svc-runtime-b").await;
         let _ = std::fs::remove_dir_all(&root);
     }
 

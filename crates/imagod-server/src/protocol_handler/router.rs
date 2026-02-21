@@ -12,7 +12,7 @@ use imago_protocol::messages::{
 use imago_protocol::{
     ArtifactPushRequest, CommandCancelRequest, CommandEventType, CommandPayload,
     CommandStartRequest, CommandStartResponse, CommandState, CommandType, DeployPrepareRequest,
-    MessageType, StateRequest, Validate,
+    MessageType, ServiceListRequest, ServiceListResponse, StateRequest, Validate,
 };
 use imagod_common::ImagodError;
 use imagod_config::upsert_tls_known_client_key;
@@ -37,6 +37,7 @@ impl ProtocolHandler {
             MessageType::ArtifactPush => self.handle_push(request).await,
             MessageType::ArtifactCommit => self.handle_commit(request).await,
             MessageType::StateRequest => self.handle_state_request(request).await,
+            MessageType::ServicesList => self.handle_services_list(request).await,
             MessageType::CommandCancel => self.handle_command_cancel(request).await,
             MessageType::RpcInvoke => self.handle_rpc_invoke(request).await,
             MessageType::BindingsCertUpload => self.handle_bindings_cert_upload(request),
@@ -93,6 +94,7 @@ impl ProtocolHandler {
                     "command.start".to_string(),
                     "command.event".to_string(),
                     "state.request".to_string(),
+                    "services.list".to_string(),
                     "command.cancel".to_string(),
                     "logs.request".to_string(),
                     "logs.chunk".to_string(),
@@ -160,6 +162,29 @@ impl ProtocolHandler {
             .await?;
         response_envelope(
             MessageType::StateResponse,
+            request.request_id,
+            request.correlation_id,
+            &response,
+        )
+    }
+
+    async fn handle_services_list(&self, request: Envelope) -> Result<Envelope, ImagodError> {
+        let payload: ServiceListRequest = payload_as(&request)?;
+        payload
+            .validate()
+            .map_err(|e| bad_request("services.list", e.to_string()))?;
+
+        let response = ServiceListResponse {
+            services: self
+                .orchestrator
+                .list_service_states(payload.names.as_deref())
+                .await?,
+        };
+        response
+            .validate()
+            .map_err(|e| bad_request("services.list", e.to_string()))?;
+        response_envelope(
+            MessageType::ServicesList,
             request.request_id,
             request.correlation_id,
             &response,

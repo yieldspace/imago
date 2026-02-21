@@ -15,6 +15,7 @@ pub use messages::{
     DeployCommandPayload, DeployPrepareRequest, DeployPrepareResponse, HelloNegotiateRequest,
     HelloNegotiateResponse, LogChunk, LogEnd, LogError, LogErrorCode, LogRequest, LogStreamKind,
     MessageType, RpcInvokeError, RpcInvokeRequest, RpcInvokeResponse, RpcInvokeTargetService,
-    RunCommandPayload, StateRequest, StateResponse, StopCommandPayload,
+    RunCommandPayload, ServiceListRequest, ServiceListResponse, ServiceState, ServiceStatusEntry,
+    StateRequest, StateResponse, StopCommandPayload,
 };
 pub use validate::{Validate, ValidationError};

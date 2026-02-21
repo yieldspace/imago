@@ -78,12 +78,33 @@ CLI は起動時に 1 つの出力モードを選ぶ。
 - `timestamp`: Unix time（秒）の文字列
 - `log`: 1 行のログ本文（改行なし）
 
-## 5. 実装反映ノート（CLI UI mode/summary 契約 / 2026-02-20）
+## 5. `ps --json` 契約
+
+`ps` コマンドの `Json` モードは line-only 出力を行う。
+
+- 成功時:
+  - `type="service.state"` の行のみを出力する
+  - `command.summary` は出力しない
+- 0 件時:
+  - 行を出力せず正常終了する（`command.summary` も出力しない）
+- 失敗時:
+  - 失敗時のみ `command.error` を 1 行出力する
+  - `command.summary` は出力しない
+
+`service.state` のフィールドは以下とする。
+
+- `type`: `"service.state"`
+- `name`: サービス名
+- `state`: `"running"` / `"stopping"` / `"stopped"`
+- `release`: リリース識別子
+- `started_at`: 起動時刻（protocol の Unix 秒文字列を CLI 実行マシンのローカル時刻文字列へ変換した値。変換不可時は入力文字列をそのまま出力）
+
+## 6. 実装反映ノート（CLI UI mode/summary 契約 / 2026-02-20）
 
 - 出力モード判定優先順位を `--json > CI=true > Rich` に固定した。
 - JSON 契約を `command.summary` と `command.error` に分離し、`logs --json` は `log.line` + 失敗時 `command.error` のみとした。
 
-## 6. 実装反映ノート（接続コンテキスト統合表示 / 2026-02-20）
+## 7. 実装反映ノート（接続コンテキスト統合表示 / 2026-02-20）
 
 - 対象コマンド（`deploy` / `run` / `stop` / `logs` / `bindings cert upload` / `bindings cert deploy`）は、接続前に以下キーを `Rich` / `Plain` のみで表示する。  
   `cli`, `project`, `service`, `target`, `remote`, `server_name`
@@ -93,15 +114,21 @@ CLI は起動時に 1 つの出力モードを選ぶ。
 - `Json` モードは追加の情報行を出さず、既存 JSON line 契約を維持する。
 - `compose deploy` / `compose logs` はサービス個別処理の前に `profile`, `target`, `services` の全体サマリを 1 行表示する。
 
-## 7. 実装反映ノート（起動ヘッダー表示 / 2026-02-20）
+## 8. 実装反映ノート（起動ヘッダー表示 / 2026-02-20）
 
 - CLI 起動時に `Rich` / `Plain` モードのみ先頭へ 2 行のヘッダーを表示する。  
   1 行目は `imago <version>`、2 行目は同じ文字幅の横線（`─`）とする。
 - `Json` モードでは起動ヘッダーを表示せず、既存 JSON line 契約（`command.summary` / `log.line` / `command.error`）を維持する。
 
-## 8. 実装反映ノート（失敗診断メッセージ拡張 / 2026-02-21）
+## 9. 実装反映ノート（失敗診断メッセージ拡張 / 2026-02-21）
 
 - `build` / `deploy` / `run` / `stop` / `compose` / `logs` / `certs` / `update` は失敗時に詳細診断メッセージを `CommandResult` へ格納する。
 - 詳細診断メッセージは複数行で、`causes:` と `hints:` を含みうる。
 - 進行表示用の `command_finish(..., false, detail)` は短文サマリ（`err.to_string()`）を維持し、終端要約/JSON エラー側で詳細診断を扱う。
 - `logs --json` の特例（`command.summary` 非出力）は維持しつつ、失敗時 `command.error.message` は詳細診断文を出力する。
+
+## 10. 実装反映ノート（`ps --json` line 契約 / 2026-02-21）
+
+- `ps --json` は `type="service.state"` の JSON Lines を出力する契約を追加した。
+- `service.state` は `name` / `state` / `release` / `started_at` を含み、`state` は `running` / `stopping` / `stopped` を許可する。
+- `ps --json` は `command.summary` を出力せず、失敗時のみ `command.error` を 1 行出力する。

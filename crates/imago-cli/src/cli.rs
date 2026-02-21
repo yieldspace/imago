@@ -29,6 +29,8 @@ pub enum Commands {
     Run(RunArgs),
     /// Stop a running service instance.
     Stop(StopArgs),
+    /// List deployed service states.
+    Ps(PsArgs),
     /// Stream or tail service logs.
     Logs(LogsArgs),
     /// Manage binding certificates and trust data.
@@ -85,6 +87,14 @@ pub struct StopArgs {
     pub target: Option<String>,
 }
 
+/// List deployed service states.
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct PsArgs {
+    /// Target name defined in imago.toml [target.<name>].
+    #[arg(long, value_name = "TARGET_NAME", default_value = "default")]
+    pub target: String,
+}
+
 /// Compose profile subcommands.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct ComposeSubcommandArgs {
@@ -103,6 +113,8 @@ pub enum ComposeCommands {
     Deploy(ComposeDeployArgs),
     /// Stream or tail logs for services in a compose profile.
     Logs(ComposeLogsArgs),
+    /// List deployed service states in a compose profile.
+    Ps(ComposePsArgs),
 }
 
 /// Build services for a compose profile.
@@ -159,6 +171,18 @@ pub struct ComposeLogsArgs {
     /// Number of recent log lines to fetch before streaming.
     #[arg(long, value_name = "N", default_value_t = 200)]
     pub tail: u32,
+}
+
+/// List deployed service states in a compose profile.
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct ComposePsArgs {
+    /// Compose profile name.
+    #[arg(value_name = "PROFILE_NAME")]
+    pub profile: String,
+
+    /// Target name used for all services in this profile.
+    #[arg(long, value_name = "TARGET_NAME")]
+    pub target: String,
 }
 
 /// Stream or tail service logs.
@@ -488,6 +512,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_compose_ps_with_profile_and_target() {
+        let cli = Cli::try_parse_from([
+            "imago",
+            "compose",
+            "ps",
+            "nanokvm-mini",
+            "--target",
+            "nanokvm-cube",
+        ])
+        .expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                json: false,
+                command: Commands::Compose(ComposeSubcommandArgs {
+                    command: ComposeCommands::Ps(ComposePsArgs {
+                        profile: "nanokvm-mini".to_string(),
+                        target: "nanokvm-cube".to_string(),
+                    }),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn compose_ps_requires_target() {
+        let err = Cli::try_parse_from(["imago", "compose", "ps", "nanokvm-mini"])
+            .expect_err("parse should fail");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
     fn parses_logs_with_defaults() {
         let cli = Cli::try_parse_from(["imago", "logs"]).expect("parse should succeed");
 
@@ -584,6 +641,37 @@ mod tests {
         let err =
             Cli::try_parse_from(["imago", "stop", "--env", "prod"]).expect_err("parse should fail");
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn parses_ps_with_default_target() {
+        let cli = Cli::try_parse_from(["imago", "ps"]).expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                json: false,
+                command: Commands::Ps(PsArgs {
+                    target: "default".to_string(),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_ps_with_target() {
+        let cli =
+            Cli::try_parse_from(["imago", "ps", "--target", "edge"]).expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                json: false,
+                command: Commands::Ps(PsArgs {
+                    target: "edge".to_string(),
+                }),
+            }
+        );
     }
 
     #[test]

@@ -99,6 +99,7 @@
   - `command.event`
   - `state.request`
   - `state.response`
+  - `services.list`
   - `command.cancel`
   - `logs.request`
   - `logs.chunk`
@@ -360,6 +361,24 @@
 - `request_id: Uuid`
 - `seq: u64`
 - `error: Option<LogError>`
+
+### 6.7 services.list
+
+`ServiceListRequest`:
+
+- `names: Option<Vec<String>>`
+- `names` は `Some` のとき空文字・重複を拒否する
+
+`ServiceListResponse`:
+
+- `services: Vec<ServiceStatusEntry>`
+
+`ServiceStatusEntry`:
+
+- `name: String`
+- `state: ServiceState`（`running` / `stopping` / `stopped`）
+- `release_hash: String`
+- `started_at: String`
 
 `Validate`:
 

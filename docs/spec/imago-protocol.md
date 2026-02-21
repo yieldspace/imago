@@ -11,7 +11,7 @@
 
 - CBOR エンコード/デコード API（`to_cbor` / `from_cbor`）
 - 共通封筒型 `ProtocolEnvelope<T>`
-- deploy/command/state/cancel/logs 各メッセージの型定義
+- deploy/command/state/cancel/logs/services.list 各メッセージの型定義
 - 構造化エラー `StructuredError` と `ErrorCode`
 - バリデーション契約 `Validate`
 
@@ -48,9 +48,13 @@
 ## 重要なメッセージ契約
 
 - `deploy.prepare` は `app_type` フィールドを持ち、wire key は `"type"`。
+- `imago ps` / `imago compose ps` は `hello.negotiate.required_features` に `services.list` を含める。
 - `command.start` は `command_type` と `payload` の組み合わせ一致を必須とする。
 - `state.request` の応答メッセージ種別は `state.response`。
 - `state.response.state` は `accepted`/`running` のみ許可し、terminal state を禁止する。
+- `services.list` は `names: Option<Vec<String>>` を持ち、応答で `services[]`（`name`, `state`, `release_hash`, `started_at`）を返す。
+- `services.list.state` は `running` / `stopping` / `stopped` を許可する。
+- `services.list.names` に unknown service 名が含まれる場合もエラーにせず、該当なしは `services=[]` を返す。
 - `logs.request` は `name: Option<String>` を持ち、`None` は「現在稼働中のサービス + retained logs が残る停止済みサービス」を意味する。
 - `logs.chunk` は DATAGRAM 用 payload であり、`seq` は欠損検知用（再送制御なし）として扱う。
 - `logs.end` はログ購読の終端メッセージで、配信開始後の異常は `error` に格納する。
@@ -88,3 +92,9 @@
 - `LogRequest.name=None` は running サービスに加えて retained logs が残る停止済みサービスも含む対象選択へ更新した。
 - retained logs の可視範囲は imagod プロセス寿命内メモリに限定し、eviction 後の再参照は不可とした。
 - 停止済みサービスへの `follow=true` は snapshot 後に `logs.end` で即終端する契約へ更新した。
+
+## 実装反映ノート（services.list / ps feature gate / 2026-02-21）
+
+- `MessageType` に `services.list` を追加する契約を明示した。
+- `services.list.names` の unknown 指定はエラーにせず、0件応答（`services=[]`）を許可する方針を追加した。
+- `imago ps` / `imago compose ps` は `hello.negotiate.required_features` に `services.list` を必須化する方針を追加した。
