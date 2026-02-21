@@ -42,7 +42,7 @@ use web_transport_quinn::{Session, proto::ConnectRequest};
 use crate::{
     cli::DeployArgs,
     commands::{
-        CommandResult, build, command_common,
+        CommandResult, build, command_common, error_diagnostics,
         shared::dependency::{DependencyResolver, StandardDependencyResolver},
         ui,
     },
@@ -386,8 +386,9 @@ pub(crate) async fn run_with_project_root_and_target_override(
             CommandResult::success("deploy", started_at)
         }
         Err(err) => {
-            let message = err.to_string();
-            ui::command_finish("deploy", false, &message);
+            let summary = err.to_string();
+            ui::command_finish("deploy", false, &summary);
+            let message = error_diagnostics::format_command_error("deploy", &err);
             CommandResult::failure("deploy", started_at, message)
         }
     }
@@ -2185,6 +2186,8 @@ mod tests {
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.expect("stderr should be present");
         assert!(stderr.contains("failed to run build before deploy"));
+        assert!(stderr.contains("causes:"));
+        assert!(stderr.contains("hints:"));
 
         let _ = fs::remove_dir_all(root);
     }

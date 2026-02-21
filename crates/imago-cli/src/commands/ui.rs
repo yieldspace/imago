@@ -72,6 +72,22 @@ fn rich_warn_message(command: &str, message: &str) -> String {
     format!("[warn] {command} {message}")
 }
 
+fn compose_build_service_stage_message(service: &str, stage: &str, detail: &str) -> String {
+    format!("compose build [{service}] [{stage}] {detail}")
+}
+
+fn compose_build_service_waiting_log_message(service: &str) -> String {
+    format!("{ANSI_DIM}  > {service}: waiting for build output{ANSI_RESET}")
+}
+
+fn compose_build_service_log_message(service: &str, stream: &str, line: &str) -> String {
+    format!("{ANSI_DIM}  > {service}: [{stream}] {line}{ANSI_RESET}")
+}
+
+fn compose_build_service_failure_message(service: &str, detail: &str) -> String {
+    rich_failure_message("compose build", &format!("service={service} {detail}"))
+}
+
 fn plain_warn_message(command: &str, message: &str) -> String {
     format!("[warn] {command} {message}")
 }
@@ -103,11 +119,18 @@ impl UiRuntime {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ComposeServiceLines {
+    stage: ProgressBar,
+    log: ProgressBar,
+}
+
 #[derive(Debug)]
 struct RichState {
     multi: MultiProgress,
     spinners: BTreeMap<String, ProgressBar>,
     byte_bars: BTreeMap<String, ProgressBar>,
+    compose_service_lines: BTreeMap<String, ComposeServiceLines>,
 }
 
 impl RichState {
@@ -116,6 +139,7 @@ impl RichState {
             multi: MultiProgress::with_draw_target(ProgressDrawTarget::stdout()),
             spinners: BTreeMap::new(),
             byte_bars: BTreeMap::new(),
+            compose_service_lines: BTreeMap::new(),
         }
     }
 
@@ -130,6 +154,62 @@ impl RichState {
         spinner.set_message(rich_start_message(command, detail));
         self.spinners.insert(command.to_string(), spinner.clone());
         spinner
+    }
+
+    fn ensure_compose_service_lines(&mut self, service: &str) -> ComposeServiceLines {
+        if let Some(lines) = self.compose_service_lines.get(service) {
+            return lines.clone();
+        }
+
+        let stage = self.multi.add(ProgressBar::new_spinner());
+        stage.set_style(spinner_progress_style());
+        stage.enable_steady_tick(Duration::from_millis(100));
+        stage.set_message(compose_build_service_stage_message(
+            service, "waiting", "queued",
+        ));
+
+        let log = self.multi.add(ProgressBar::new_spinner());
+        log.set_style(finished_progress_style());
+        log.set_message(compose_build_service_waiting_log_message(service));
+
+        let lines = ComposeServiceLines { stage, log };
+        self.compose_service_lines
+            .insert(service.to_string(), lines.clone());
+        lines
+    }
+
+    fn compose_build_service_stage(&mut self, service: &str, stage: &str, detail: &str) {
+        let lines = self.ensure_compose_service_lines(service);
+        lines
+            .stage
+            .set_message(compose_build_service_stage_message(service, stage, detail));
+        lines.stage.tick();
+    }
+
+    fn compose_build_service_log(&mut self, service: &str, stream: &str, line: &str) {
+        let lines = self.ensure_compose_service_lines(service);
+        lines
+            .log
+            .set_message(compose_build_service_log_message(service, stream, line));
+        lines.log.tick();
+    }
+
+    fn compose_build_service_finish(&mut self, service: &str, succeeded: bool, detail: &str) {
+        let Some(lines) = self.compose_service_lines.remove(service) else {
+            return;
+        };
+
+        if succeeded {
+            lines.stage.finish_and_clear();
+            lines.log.finish_and_clear();
+            return;
+        }
+
+        lines.stage.set_style(finished_progress_style());
+        lines
+            .stage
+            .finish_with_message(compose_build_service_failure_message(service, detail));
+        lines.log.finish();
     }
 }
 
@@ -372,6 +452,42 @@ pub fn command_finish(command: &str, succeeded: bool, detail: &str) {
     }
 }
 
+pub(crate) fn ensure_compose_service_lines(service: &str) {
+    if current_mode() != UiMode::Rich {
+        return;
+    }
+    let _ = with_rich_state(|state| {
+        state.ensure_compose_service_lines(service);
+    });
+}
+
+pub(crate) fn compose_build_service_stage(service: &str, stage: &str, detail: &str) {
+    if current_mode() != UiMode::Rich {
+        return;
+    }
+    let _ = with_rich_state(|state| {
+        state.compose_build_service_stage(service, stage, detail);
+    });
+}
+
+pub(crate) fn compose_build_service_log(service: &str, stream: &str, line: &str) {
+    if current_mode() != UiMode::Rich {
+        return;
+    }
+    let _ = with_rich_state(|state| {
+        state.compose_build_service_log(service, stream, line);
+    });
+}
+
+pub(crate) fn compose_build_service_finish(service: &str, succeeded: bool, detail: &str) {
+    if current_mode() != UiMode::Rich {
+        return;
+    }
+    let _ = with_rich_state(|state| {
+        state.compose_build_service_finish(service, succeeded, detail);
+    });
+}
+
 #[derive(Debug, Serialize)]
 struct JsonCommandSummary<'a> {
     #[serde(rename = "type")]
@@ -583,5 +699,74 @@ mod tests {
             skip_json_summary: false,
         };
         assert_eq!(finalize_error_output_line(&result), None);
+    }
+
+    #[test]
+    fn ensure_compose_service_lines_initializes_waiting_log() {
+        let mut state = RichState::new();
+        let lines = state.ensure_compose_service_lines("api");
+
+        assert_eq!(
+            lines.log.message(),
+            compose_build_service_waiting_log_message("api")
+        );
+    }
+
+    #[test]
+    fn compose_build_service_log_overwrites_latest_message() {
+        let mut state = RichState::new();
+        let lines = state.ensure_compose_service_lines("api");
+
+        state.compose_build_service_log("api", "stdout", "step1");
+        state.compose_build_service_log("api", "stderr", "step2");
+
+        assert_eq!(
+            lines.log.message(),
+            compose_build_service_log_message("api", "stderr", "step2")
+        );
+    }
+
+    #[test]
+    fn compose_build_service_stage_updates_progress_line() {
+        let mut state = RichState::new();
+        let lines = state.ensure_compose_service_lines("api");
+
+        state.compose_build_service_stage("api", "build", "compiling");
+
+        assert_eq!(
+            lines.stage.message(),
+            compose_build_service_stage_message("api", "build", "compiling")
+        );
+    }
+
+    #[test]
+    fn compose_build_service_finish_success_removes_service_lines() {
+        let mut state = RichState::new();
+        state.ensure_compose_service_lines("api");
+
+        state.compose_build_service_finish("api", true, "completed");
+
+        assert!(!state.compose_service_lines.contains_key("api"));
+    }
+
+    #[test]
+    fn compose_build_service_finish_failure_keeps_latest_log_line() {
+        let mut state = RichState::new();
+        let lines = state.ensure_compose_service_lines("api");
+        state.compose_build_service_log("api", "stderr", "compile failed");
+
+        state.compose_build_service_finish("api", false, "build failed");
+
+        assert!(!state.compose_service_lines.contains_key("api"));
+        assert!(lines.stage.is_finished());
+        assert_eq!(
+            lines.stage.message(),
+            compose_build_service_failure_message("api", "build failed")
+        );
+        assert!(lines.log.is_finished());
+        assert_eq!(
+            lines.log.message(),
+            compose_build_service_log_message("api", "stderr", "compile failed")
+        );
     }
 }

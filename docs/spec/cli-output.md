@@ -42,6 +42,8 @@ CLI は起動時に 1 つの出力モードを選ぶ。
 - `timestamp`: RFC 3339 UTC 文字列（例: `2026-02-20T12:34:56Z`）
 - `meta`: 補助メタデータ（`map<string,string>`）
 - `error`: 失敗時メッセージ（成功時は `null`）
+  - 複数行文字列を許容する。
+  - 実装は `causes:` / `hints:` セクションを含む診断文を設定しうる。
 
 ### 3.3 `command.error`
 
@@ -50,6 +52,8 @@ CLI は起動時に 1 つの出力モードを選ぶ。
 - `type`: `"command.error"`
 - `command`: コマンド名
 - `message`: エラーメッセージ
+  - 複数行文字列を許容する。
+  - 実装は `causes:` / `hints:` セクションを含む診断文を設定しうる。
 - `stage`: 失敗ステージ
 - `code`: エラーコード
 
@@ -94,3 +98,10 @@ CLI は起動時に 1 つの出力モードを選ぶ。
 - CLI 起動時に `Rich` / `Plain` モードのみ先頭へ 2 行のヘッダーを表示する。  
   1 行目は `imago <version>`、2 行目は同じ文字幅の横線（`─`）とする。
 - `Json` モードでは起動ヘッダーを表示せず、既存 JSON line 契約（`command.summary` / `log.line` / `command.error`）を維持する。
+
+## 8. 実装反映ノート（失敗診断メッセージ拡張 / 2026-02-21）
+
+- `build` / `deploy` / `run` / `stop` / `compose` / `logs` / `certs` / `update` は失敗時に詳細診断メッセージを `CommandResult` へ格納する。
+- 詳細診断メッセージは複数行で、`causes:` と `hints:` を含みうる。
+- 進行表示用の `command_finish(..., false, detail)` は短文サマリ（`err.to_string()`）を維持し、終端要約/JSON エラー側で詳細診断を扱う。
+- `logs --json` の特例（`command.summary` 非出力）は維持しつつ、失敗時 `command.error.message` は詳細診断文を出力する。

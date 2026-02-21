@@ -19,6 +19,7 @@ use crate::{
         CommandResult,
         build::{self},
         dependency_cache::{self},
+        error_diagnostics::format_command_error,
         plugin_sources,
         shared::dependency::StandardDependencyResolver,
         ui,
@@ -53,9 +54,10 @@ pub(crate) async fn run_with_project_root(_args: UpdateArgs, project_root: &Path
             CommandResult::success("update", started_at)
         }
         Err(err) => {
-            let message = format!("{err:#}");
-            ui::command_finish("update", false, &message);
-            CommandResult::failure("update", started_at, message)
+            let summary_message = err.to_string();
+            let diagnostic_message = format_command_error("update", &err);
+            ui::command_finish("update", false, &summary_message);
+            CommandResult::failure("update", started_at, diagnostic_message)
         }
     }
 }

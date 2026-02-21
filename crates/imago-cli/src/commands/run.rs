@@ -12,7 +12,7 @@ use crate::{
             format_local_context_line, format_peer_context_line, handle_terminal_event,
             negotiate_hello, resolve_service_name,
         },
-        deploy, ui,
+        deploy, error_diagnostics, ui,
     },
 };
 
@@ -29,8 +29,9 @@ pub(crate) async fn run_with_project_root(args: RunArgs, project_root: &Path) ->
             CommandResult::success("run", started_at)
         }
         Err(err) => {
-            let message = err.to_string();
-            ui::command_finish("run", false, &message);
+            let summary = err.to_string();
+            ui::command_finish("run", false, &summary);
+            let message = error_diagnostics::format_command_error("run", &err);
             CommandResult::failure("run", started_at, message)
         }
     }

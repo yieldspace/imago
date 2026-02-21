@@ -23,7 +23,9 @@ use crate::{
         command_common::{
             format_local_context_line, format_peer_context_line, negotiate_hello_with_features,
         },
-        deploy, ui,
+        deploy,
+        error_diagnostics::format_command_error,
+        ui,
     },
 };
 
@@ -187,17 +189,22 @@ pub(crate) async fn run_with_project_root_and_target_override(
             CommandResult::success("logs", started_at).without_json_summary()
         }
         Err(err) => {
-            let message = err.to_string();
-            ui::command_finish("logs", false, &message);
-            let mut result =
-                CommandResult::failure("logs", started_at, message.clone()).without_json_summary();
+            let summary_message = err.to_string();
+            let diagnostic_message = format_logs_error_message(&err);
+            ui::command_finish("logs", false, &summary_message);
+            let mut result = CommandResult::failure("logs", started_at, diagnostic_message.clone())
+                .without_json_summary();
             if ui::current_mode() == ui::UiMode::Json {
-                ui::emit_command_error_json("logs", &message, "logs", "E_UNKNOWN");
+                ui::emit_command_error_json("logs", &diagnostic_message, "logs", "E_UNKNOWN");
                 result.stderr = None;
             }
             result
         }
     }
+}
+
+fn format_logs_error_message(err: &anyhow::Error) -> String {
+    format_command_error("logs", err)
 }
 
 async fn run_async_with_target_override(
@@ -1207,5 +1214,14 @@ mod tests {
     fn logs_service_for_context_uses_all_running_placeholder() {
         assert_eq!(logs_service_for_context(None), "<all-running>");
         assert_eq!(logs_service_for_context(Some("svc-a")), "svc-a");
+    }
+
+    #[test]
+    fn logs_json_error_message_uses_diagnostics_sections() {
+        let err = anyhow!("failed to load target configuration");
+        let message = format_logs_error_message(&err);
+        assert!(message.contains("causes:"));
+        assert!(message.contains("hints:"));
+        assert!(message.contains("target settings"));
     }
 }

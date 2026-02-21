@@ -234,7 +234,8 @@ mod tests {
         .await;
 
         assert_eq!(result.exit_code, 2);
-        assert!(result.stderr.is_some());
+        let stderr = result.stderr.expect("stderr should be present");
+        assert!(stderr.contains("hints:"));
         let _ = std::fs::remove_dir_all(root);
     }
 

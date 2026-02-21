@@ -20,7 +20,7 @@ use toml::Value as TomlValue;
 use crate::{
     cli::BuildArgs,
     commands::{
-        CommandResult, dependency_cache, plugin_sources,
+        CommandResult, dependency_cache, error_diagnostics, plugin_sources,
         shared::dependency::{DependencyResolver, StandardDependencyResolver},
         ui,
     },
@@ -353,8 +353,9 @@ pub(crate) fn run_with_project_root_and_target_override(
             CommandResult::success("build", started_at)
         }
         Err(err) => {
-            let message = err.to_string();
-            ui::command_finish("build", false, &message);
+            let summary = err.to_string();
+            ui::command_finish("build", false, &summary);
+            let message = error_diagnostics::format_command_error("build", &err);
             CommandResult::failure("build", started_at, message)
         }
     }
@@ -398,6 +399,21 @@ pub(crate) fn build_project_with_target_override(
     target_override: Option<&TargetConfig>,
 ) -> anyhow::Result<BuildOutput> {
     build_project_with_target_override_inner(target_name, project_root, target_override, true, None)
+}
+
+pub(crate) fn build_project_with_target_override_for_compose(
+    target_name: &str,
+    project_root: &Path,
+    target_override: Option<&TargetConfig>,
+    on_build_line: Option<&mut BuildCommandLineCallback<'_>>,
+) -> anyhow::Result<BuildOutput> {
+    build_project_with_target_override_inner(
+        target_name,
+        project_root,
+        target_override,
+        false,
+        on_build_line,
+    )
 }
 
 pub(crate) fn build_project_with_target_override_for_deploy(
@@ -2846,6 +2862,45 @@ remote = "127.0.0.1:4443"
                 line.stream == BuildCommandLogStream::Stderr && line.line == "err-a"
             })
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compose_build_streams_build_command_lines_when_callback_is_set() {
+        let root = new_temp_dir("compose-capture-lines");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[build]
+command = ["sh", "-c", "mkdir -p build && printf 'compose-out\n' && printf 'compose-err\n' >&2 && printf wasm > build/app.wasm"]
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+
+        let mut streamed = Vec::new();
+        let mut on_line = |line: &BuildCommandLogLine| streamed.push(line.clone());
+
+        let output = build_project_with_target_override_for_compose(
+            "default",
+            &root,
+            None,
+            Some(&mut on_line),
+        )
+        .expect("compose build with callback should succeed");
+        assert_eq!(output.manifest_path, PathBuf::from("build/manifest.json"));
+        assert!(streamed.iter().any(|line| {
+            line.stream == BuildCommandLogStream::Stdout && line.line == "compose-out"
+        }));
+        assert!(streamed.iter().any(|line| {
+            line.stream == BuildCommandLogStream::Stderr && line.line == "compose-err"
+        }));
 
         let _ = fs::remove_dir_all(root);
     }

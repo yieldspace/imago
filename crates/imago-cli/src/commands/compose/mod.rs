@@ -10,10 +10,12 @@ use serde::Deserialize;
 
 use crate::{
     cli::{
-        BuildArgs, ComposeBuildArgs, ComposeCommands, ComposeDeployArgs, ComposeLogsArgs,
+        ComposeBuildArgs, ComposeCommands, ComposeDeployArgs, ComposeLogsArgs,
         ComposeSubcommandArgs, ComposeUpdateArgs, DeployArgs, LogsArgs, UpdateArgs,
     },
-    commands::{CommandResult, build, deploy, logs, ui, update},
+    commands::{
+        CommandResult, build, deploy, error_diagnostics::format_command_error, logs, ui, update,
+    },
 };
 
 const COMPOSE_FILE_NAME: &str = "imago-compose.toml";
@@ -164,9 +166,10 @@ pub(crate) async fn run_with_project_root(
             result
         }
         Err(err) => {
-            let message = err.to_string();
-            ui::command_finish("compose", false, &message);
-            let mut result = CommandResult::failure("compose", started_at, message);
+            let summary_message = err.to_string();
+            let diagnostic_message = format_command_error("compose", &err);
+            ui::command_finish("compose", false, &summary_message);
+            let mut result = CommandResult::failure("compose", started_at, diagnostic_message);
             if should_suppress_json_summary_for_compose_error(&err) {
                 result = result.without_json_summary();
             }
@@ -185,6 +188,15 @@ async fn run_async(args: ComposeSubcommandArgs, project_root: &Path) -> anyhow::
 }
 
 async fn run_compose_build(args: ComposeBuildArgs, project_root: &Path) -> anyhow::Result<()> {
+    let rich_mode = ui::current_mode() == ui::UiMode::Rich;
+    run_compose_build_inner(args, project_root, rich_mode).await
+}
+
+async fn run_compose_build_inner(
+    args: ComposeBuildArgs,
+    project_root: &Path,
+    rich_mode: bool,
+) -> anyhow::Result<()> {
     ui::command_stage("compose", "load-config", "loading compose build profile");
     let compose_file = load_compose_file(project_root)?;
     let resolved = resolve_compose_config(&compose_file, &args.profile)?;
@@ -200,41 +212,141 @@ async fn run_compose_build(args: ComposeBuildArgs, project_root: &Path) -> anyho
     );
 
     for (index, service) in resolved.config.services.iter().enumerate() {
-        ui::command_stage(
-            "compose",
-            "service",
-            &format!("build {}/{} {}", index + 1, total, service.imago),
-        );
-        let service_project_root = resolve_service_project_root(project_root, &service.imago)
+        let service_name = service.imago.as_str();
+        if rich_mode {
+            compose_build_service_stage(index + 1, total, service_name);
+        } else {
+            ui::command_stage(
+                "compose",
+                "service",
+                &format!("build {}/{} {}", index + 1, total, service_name),
+            );
+        }
+        let service_project_root = match resolve_service_project_root(project_root, &service.imago)
             .with_context(|| {
                 format!(
                     "failed to resolve compose.{}.services[{index}].imago",
                     resolved.config_name
                 )
-            })?;
+            }) {
+            Ok(path) => path,
+            Err(err) => {
+                if rich_mode {
+                    compose_build_service_finish(service_name, false, &err.to_string());
+                }
+                return Err(err);
+            }
+        };
 
-        let build_result = build::run_with_project_root_and_target_override(
-            BuildArgs {
-                target: args.target.clone(),
-            },
-            &service_project_root,
-            Some(&target),
-        );
+        let build_result = if rich_mode {
+            let mut on_build_line = |line: &build::BuildCommandLogLine| {
+                compose_build_service_log(service_name, line);
+            };
+            build::build_project_with_target_override_for_compose(
+                &args.target,
+                &service_project_root,
+                Some(&target),
+                Some(&mut on_build_line),
+            )
+        } else {
+            build::build_project_with_target_override_for_compose(
+                &args.target,
+                &service_project_root,
+                Some(&target),
+                None,
+            )
+        };
 
-        if build_result.exit_code != 0 {
-            let detail = build_result
-                .stderr
-                .unwrap_or_else(|| format!("exit code {}", build_result.exit_code));
-            return Err(anyhow!(
-                "compose build failed for compose.{}.services[{index}] ({}): {}",
-                resolved.config_name,
-                service.imago,
-                detail
-            ));
+        match build_result {
+            Ok(_) => {
+                if rich_mode {
+                    compose_build_service_finish(service_name, true, "completed");
+                }
+            }
+            Err(err) => {
+                let summary = err.to_string();
+                if rich_mode {
+                    compose_build_service_finish(service_name, false, &summary);
+                }
+                let detail = format_command_error("build", &err);
+                return Err(anyhow!(
+                    "compose build failed for compose.{}.services[{index}] ({}): {}",
+                    resolved.config_name,
+                    service_name,
+                    detail
+                ));
+            }
         }
     }
 
     Ok(())
+}
+
+fn compose_build_service_stage(index: usize, total: usize, service: &str) {
+    #[cfg(test)]
+    record_compose_build_ui_event(ComposeBuildUiEvent::Stage {
+        service: service.to_string(),
+    });
+    ui::ensure_compose_service_lines(service);
+    ui::compose_build_service_stage(service, "build", &format!("{index}/{total}"));
+}
+
+fn compose_build_service_log(service: &str, line: &build::BuildCommandLogLine) {
+    #[cfg(test)]
+    record_compose_build_ui_event(ComposeBuildUiEvent::Log {
+        service: service.to_string(),
+        stream: line.stream,
+        line: line.line.clone(),
+    });
+    ui::compose_build_service_log(service, line.stream.as_str(), &line.line);
+}
+
+fn compose_build_service_finish(service: &str, succeeded: bool, detail: &str) {
+    #[cfg(test)]
+    record_compose_build_ui_event(ComposeBuildUiEvent::Finish {
+        service: service.to_string(),
+        succeeded,
+    });
+    ui::compose_build_service_finish(service, succeeded, detail);
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ComposeBuildUiEvent {
+    Stage {
+        service: String,
+    },
+    Log {
+        service: String,
+        stream: build::BuildCommandLogStream,
+        line: String,
+    },
+    Finish {
+        service: String,
+        succeeded: bool,
+    },
+}
+
+#[cfg(test)]
+fn compose_build_ui_events() -> &'static std::sync::Mutex<Vec<ComposeBuildUiEvent>> {
+    static EVENTS: std::sync::OnceLock<std::sync::Mutex<Vec<ComposeBuildUiEvent>>> =
+        std::sync::OnceLock::new();
+    EVENTS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+#[cfg(test)]
+fn record_compose_build_ui_event(event: ComposeBuildUiEvent) {
+    if let Ok(mut events) = compose_build_ui_events().lock() {
+        events.push(event);
+    }
+}
+
+#[cfg(test)]
+fn take_compose_build_ui_events() -> Vec<ComposeBuildUiEvent> {
+    if let Ok(mut events) = compose_build_ui_events().lock() {
+        return std::mem::take(&mut *events);
+    }
+    Vec::new()
 }
 
 async fn run_compose_update(args: ComposeUpdateArgs, project_root: &Path) -> anyhow::Result<()> {
@@ -861,6 +973,96 @@ type = "cli"
         .await;
 
         assert_eq!(result.exit_code, 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn compose_build_uses_build_line_capture_only_in_rich_mode() {
+        let root = new_temp_dir("build-callback-rich-only");
+        let _ = take_compose_build_ui_events();
+        write_file(
+            &root.join(COMPOSE_FILE_NAME),
+            br#"
+[[compose.stack.services]]
+imago = "services/svc-a/imago.toml"
+
+[profile.dev]
+config = "stack"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(
+            &root.join("services/svc-a/imago.toml"),
+            br#"
+name = "svc-a"
+main = "build/app.wasm"
+type = "cli"
+
+[build]
+command = ["sh", "-c", "printf 'before-fail\n'; printf 'err-before-fail\n' >&2; exit 7"]
+"#,
+        );
+
+        run_compose_build_inner(
+            ComposeBuildArgs {
+                profile: "dev".to_string(),
+                target: "default".to_string(),
+            },
+            &root,
+            true,
+        )
+        .await
+        .expect_err("rich mode compose build should fail");
+        let rich_events = take_compose_build_ui_events();
+        assert!(
+            rich_events
+                .iter()
+                .any(|event| matches!(event, ComposeBuildUiEvent::Stage { .. }))
+        );
+        assert!(rich_events.iter().any(|event| {
+            matches!(
+                event,
+                ComposeBuildUiEvent::Log {
+                    stream: build::BuildCommandLogStream::Stdout,
+                    line,
+                    ..
+                } if line == "before-fail"
+            )
+        }));
+        assert!(rich_events.iter().any(|event| {
+            matches!(
+                event,
+                ComposeBuildUiEvent::Log {
+                    stream: build::BuildCommandLogStream::Stderr,
+                    line,
+                    ..
+                } if line == "err-before-fail"
+            )
+        }));
+        assert!(rich_events.iter().any(|event| {
+            matches!(
+                event,
+                ComposeBuildUiEvent::Finish {
+                    succeeded: false,
+                    ..
+                }
+            )
+        }));
+
+        run_compose_build_inner(
+            ComposeBuildArgs {
+                profile: "dev".to_string(),
+                target: "default".to_string(),
+            },
+            &root,
+            false,
+        )
+        .await
+        .expect_err("plain mode compose build should fail");
+        assert!(take_compose_build_ui_events().is_empty());
 
         let _ = fs::remove_dir_all(root);
     }

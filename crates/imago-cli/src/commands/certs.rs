@@ -19,7 +19,9 @@ use crate::{
         command_common::{
             format_local_context_line, format_peer_context_line, negotiate_hello_with_features,
         },
-        deploy, ui,
+        deploy,
+        error_diagnostics::format_command_error,
+        ui,
     },
 };
 
@@ -61,9 +63,10 @@ pub fn run_generate(args: CertsGenerateArgs) -> CommandResult {
             CommandResult::success("certs.generate", started_at)
         }
         Err(err) => {
-            let message = err.to_string();
-            ui::command_finish("certs.generate", false, &message);
-            CommandResult::failure("certs.generate", started_at, message)
+            let summary_message = err.to_string();
+            let diagnostic_message = format_command_error("certs.generate", &err);
+            ui::command_finish("certs.generate", false, &summary_message);
+            CommandResult::failure("certs.generate", started_at, diagnostic_message)
         }
     }
 }
@@ -84,9 +87,10 @@ pub(crate) async fn run_bindings_cert_upload_with_project_root(
             CommandResult::success("bindings.cert.upload", started_at)
         }
         Err(err) => {
-            let message = err.to_string();
-            ui::command_finish("bindings.cert.upload", false, &message);
-            CommandResult::failure("bindings.cert.upload", started_at, message)
+            let summary_message = err.to_string();
+            let diagnostic_message = format_command_error("bindings.cert.upload", &err);
+            ui::command_finish("bindings.cert.upload", false, &summary_message);
+            CommandResult::failure("bindings.cert.upload", started_at, diagnostic_message)
         }
     }
 }
@@ -107,9 +111,10 @@ pub(crate) async fn run_bindings_cert_deploy_with_project_root(
             CommandResult::success("bindings.cert.deploy", started_at)
         }
         Err(err) => {
-            let message = err.to_string();
-            ui::command_finish("bindings.cert.deploy", false, &message);
-            CommandResult::failure("bindings.cert.deploy", started_at, message)
+            let summary_message = err.to_string();
+            let diagnostic_message = format_command_error("bindings.cert.deploy", &err);
+            ui::command_finish("bindings.cert.deploy", false, &summary_message);
+            CommandResult::failure("bindings.cert.deploy", started_at, diagnostic_message)
         }
     }
 }
