@@ -86,13 +86,13 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
     ensure_success("cli-client deploy", &deploy_client)?;
     assert_command_completed("cli-client deploy", &deploy_client)?;
 
-    let pre_fail_logs = wait_logs(&workspace_root, &client_dir, &control_home, 40)?;
-    assert!(
-        PRE_FAIL_MARKERS
-            .iter()
-            .any(|marker| pre_fail_logs.contains(marker)),
-        "pre-cert failure marker was not found: {pre_fail_logs}"
-    );
+    let _pre_fail_logs = wait_logs_with_any_marker(
+        &workspace_root,
+        &client_dir,
+        &control_home,
+        &PRE_FAIL_MARKERS,
+        40,
+    )?;
 
     let invalid_to_authority = "rpc://[::1";
     let deploy_cert_partial_fail = run_imago_cli(
@@ -237,6 +237,26 @@ fn wait_logs_with_marker(
         thread::sleep(Duration::from_secs(1));
     }
     Err(anyhow::anyhow!("timed out waiting for marker '{marker}'"))
+}
+
+fn wait_logs_with_any_marker(
+    workspace_root: &Path,
+    project_dir: &Path,
+    home: &Path,
+    markers: &[&str],
+    retries: usize,
+) -> TestResult<String> {
+    for _ in 0..retries {
+        let logs = wait_logs(workspace_root, project_dir, home, 1)?;
+        if markers.iter().any(|marker| logs.contains(marker)) {
+            return Ok(logs);
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    Err(anyhow::anyhow!(
+        "timed out waiting for any marker: {}",
+        markers.join(", ")
+    ))
 }
 
 fn extract_returned_value(logs: &str) -> TestResult<u64> {

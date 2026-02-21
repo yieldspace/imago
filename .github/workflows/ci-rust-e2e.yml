@@ -1,0 +1,83 @@
+name: ci-rust-e2e
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-rust-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-ignored:
+    name: e2e-ignored (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Guard ignored e2e tests in root package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -d tests ]; then
+            echo "Error: root package tests/ directory not found." >&2
+            exit 1
+          fi
+
+          test_file_count="$(find tests -type f -name '*.rs' | wc -l | tr -d '[:space:]')"
+          if [ "$test_file_count" -eq 0 ]; then
+            echo "Error: no Rust test files found under root package tests/." >&2
+            exit 1
+          fi
+
+          ignore_count="$(find tests -type f -name '*.rs' -exec grep -hE '^[[:space:]]*#\[ignore([[:space:]]*=[[:space:]]*\"[^\"]*\")?[[:space:]]*\]' {} + | wc -l | tr -d '[:space:]' || true)"
+          if [ "$ignore_count" -eq 0 ]; then
+            echo "Error: expected at least one #[ignore] in root package tests/ Rust files." >&2
+            exit 1
+          fi
+
+          echo "Found $ignore_count #[ignore] annotation(s) in root package tests/."
+
+      - name: Prebuild imagod
+        run: cargo build -p imagod
+
+      - name: Run ignored e2e tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for attempt in 1 2; do
+            echo "Running ignored e2e tests (attempt ${attempt}/2)..."
+            if cargo test -p imago --features e2e -- --ignored --test-threads=1; then
+              exit 0
+            fi
+
+            if [ "$attempt" -eq 1 ]; then
+              echo "Attempt 1 failed. Retrying shortly..."
+              sleep 5
+            fi
+          done
+
+          echo "Ignored e2e tests failed after 2 attempts." >&2
+          exit 1
