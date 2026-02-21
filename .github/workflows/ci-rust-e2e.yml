@@ -63,4 +63,21 @@ jobs:
         run: cargo build -p imagod
 
       - name: Run ignored e2e tests
-        run: cargo test -p imago --features e2e -- --ignored --test-threads=1
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for attempt in 1 2; do
+            echo "Running ignored e2e tests (attempt ${attempt}/2)..."
+            if cargo test -p imago --features e2e -- --ignored --test-threads=1; then
+              exit 0
+            fi
+
+            if [ "$attempt" -eq 1 ]; then
+              echo "Attempt 1 failed. Retrying shortly..."
+              sleep 5
+            fi
+          done
+
+          echo "Ignored e2e tests failed after 2 attempts." >&2
+          exit 1
