@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Scope & Coverage
-This file applies to all paths under `/Users/sizumita/.codex/worktrees/dced/imago`.
+This file applies to all paths in this repository.
 If a deeper `AGENTS.md` exists in a subdirectory, that file overrides this one for its scope.
 
 ## Workspace Reality
