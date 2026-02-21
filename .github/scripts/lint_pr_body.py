@@ -12,6 +12,7 @@ REQUIRED_HEADINGS = ("Motivation", "Summary", "Validation")
 SECTION_PATTERN = re.compile(
     r"(?ms)^##[ \t]+(?P<title>[^\n]+)\s*\n(?P<body>.*?)(?=^##[ \t]+|\Z)"
 )
+REQUIRED_MARKER_PATTERN = re.compile(r"\s*\(\s*required\s*\)\s*$", re.IGNORECASE)
 
 
 def emit_error(message: str) -> None:
@@ -38,10 +39,16 @@ def load_event(event_path: str) -> dict:
 def parse_sections(pr_body: str) -> dict[str, str]:
     sections: dict[str, str] = {}
     for match in SECTION_PATTERN.finditer(pr_body):
-        title = match.group("title").strip()
+        title = normalize_section_title(match.group("title"))
         body = match.group("body").strip()
         sections.setdefault(title, body)
     return sections
+
+
+def normalize_section_title(title: str) -> str:
+    normalized = title.strip()
+    normalized = REQUIRED_MARKER_PATTERN.sub("", normalized)
+    return normalized.strip()
 
 
 def validate_pr_body(pr_body: str) -> list[str]:
