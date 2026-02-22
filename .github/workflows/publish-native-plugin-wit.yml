@@ -100,12 +100,18 @@ jobs:
             exit 1
           fi
 
+          if [[ "$wit_package" != *:* ]]; then
+            echo "::error::WIT package must be in namespace:package format: $wit_package"
+            exit 1
+          fi
+
           wit_package_oci="${wit_package//:/\/}"
-          reference="ghcr.io/${GITHUB_REPOSITORY_OWNER}/${wit_package_oci}:${tag_version}"
           if [[ -z "${wit_package_oci}" ]]; then
             echo "::error::failed to build OCI package name from WIT package: ${wit_package}"
             exit 1
           fi
+          owner_lc="${GITHUB_REPOSITORY_OWNER,,}"
+          reference="ghcr.io/${owner_lc}/${wit_package_oci}:${tag_version}"
 
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "plugin_dir=${plugin_dir}" >> "$GITHUB_OUTPUT"
