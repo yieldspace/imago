@@ -66,3 +66,8 @@
 - [BREAKING] `imago` CLI から `--env` を廃止し、`[env.*]` と `.env.<name>` の解決を削除した。
 - [BREAKING] manifest/config の `bindings` は `target` から `name` へ移行した。
 - `rpc.invoke` を protocol に追加し、local/remote RPC の payload を CBOR で統一した。
+
+## 実装反映ノート（env 統合 / 2026-02-22）
+
+- [BREAKING] `manifest` の `vars` / `secrets` を削除し、環境変数は `manifest.wasi.env` に統一した。
+- `imago build` は `project_root/.env` を `manifest.wasi.env` へ統合し、同名キーは `.env` を優先する。

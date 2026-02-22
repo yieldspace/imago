@@ -11,13 +11,14 @@
   "target": {
     "host": "n1"
   },
-  "vars": {},
-  "secrets": [
-    {
-      "key": "S",
-      "value": "x"
-    }
-  ],
+  "wasi": {
+    "env": [
+      {
+        "key": "S",
+        "value": "x"
+      }
+    ]
+  },
   "assets": [],
   "dependencies": [],
   "hash": {

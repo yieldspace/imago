@@ -45,20 +45,20 @@ type = "http"
 # [build]
 # command = "cargo component build --release"
 
-# [vars]
+# [vars] (legacy; accepted but ignored)
 # key: vars.<KEY>
 # required: optional
 # type: string
-# constraints: table values must be strings
+# constraints: table values must be strings; values are not emitted to manifest
 # default: empty table
 # [vars]
 # APP_MODE = "prod"
 
-# [secrets]
+# [secrets] (legacy; accepted but ignored)
 # key: secrets.<KEY>
 # required: optional
 # type: string
-# constraints: table values must be strings
+# constraints: table values must be strings; values are not emitted to manifest
 # default: empty table
 # [secrets]
 # SECRET_TOKEN = "change-me"
@@ -152,7 +152,7 @@ port = 8080
 # key: wasi.env.<KEY>
 # required: optional
 # type: string
-# constraints: must not duplicate keys already defined in [vars] or [secrets]
+# constraints: key/value must be strings; values in project_root/.env override the same keys
 # default: empty
 # key: wasi.mounts[] / wasi.read_only_mounts[]
 # required: optional

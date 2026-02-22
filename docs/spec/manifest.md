@@ -22,8 +22,6 @@
 | `main` | string | Wasm エントリパス |
 | `type` | string | `cli` / `http` / `socket` / `rpc` |
 | `target` | object | 解決済みターゲット設定 |
-| `vars` | object | env 反映後の公開変数 |
-| `secrets` | object | env 反映後の secret 値 |
 | `assets` | array | 同梱アセット一覧 |
 | `bindings` | array | service 間呼び出し許可一覧（省略時は `[]`） |
 | `http` | object | `type=http` 時の HTTP 実行設定（`port` 必須） |
@@ -52,12 +50,12 @@
 
 `hash.targets` に `wasm` / `manifest` / `assets` が揃っていない場合は不正 manifest とみなす。
 
-<a id="secret-bundling"></a>
-## secret 同梱方針
+<a id="wasi-env-bundling"></a>
+## `wasi.env` 同梱方針
 
-- `secrets` は manifest に同梱してデプロイ時に送信する。
-- runtime 側は `secrets` をログへ出力してはいけない。
-- CLI 側は `--dry-run` を除き `secrets` の実値を表示してはいけない。
+- 環境変数は `manifest.wasi.env` に同梱してデプロイ時に送信する。
+- runtime 側は `wasi.env` の実値をログへ出力してはいけない。
+- CLI 側は `--dry-run` を除き `wasi.env` の実値を表示してはいけない。
 
 ## `bindings` フィールド
 
@@ -129,7 +127,7 @@
 - 異常例（必須欠落）: [`examples/manifest.invalid.missing-required.json`](./examples/manifest.invalid.missing-required.json)
 - 異常例（型不正）: [`examples/manifest.invalid.bad-type.json`](./examples/manifest.invalid.bad-type.json)
 - 異常例（hash 検証不一致）: [`examples/manifest.invalid.hash-mismatch.json`](./examples/manifest.invalid.hash-mismatch.json)
-- 異常例（secret 形式不正）: [`examples/manifest.invalid.secret-shape.json`](./examples/manifest.invalid.secret-shape.json)
+- 異常例（`wasi.env` 形式不正）: [`examples/manifest.invalid.wasi-env-shape.json`](./examples/manifest.invalid.wasi-env-shape.json)
 
 ## バリデーション要件
 
@@ -145,7 +143,6 @@
 - `type!=socket` かつ `socket` 指定は拒否。
 - `hash.algorithm != "sha256"` は拒否。
 - `hash.targets` が不足または重複なら拒否。
-- `secrets` は key-value オブジェクトのみ許可。
 - `bindings` 指定時は配列のみ許可し、各要素は `name` / `wit` の非空文字列を必須とする。
 - `bindings[].wit` は `<package>/<interface>` 形式のみ許可する。
 - `dependencies` 指定時は typed 構造のみ許可し、`kind=wasm` は `component.path` / `component.sha256` を必須とする（`imago build` 生成物として）。
@@ -178,7 +175,8 @@
 - CLI は `capabilities.wasi` に `bool` / table の両形式を受理し、`true` は全許可、`false` は空ルールとして正規化する。
 - CLI は `type=http` 時のみ `imago.toml` の `[http].port` / `[http].max_body_bytes` を `manifest.http.port` / `manifest.http.max_body_bytes` へ正規化して出力する。
 - CLI は `type=socket` 時のみ `imago.toml` の `[socket].protocol` / `[socket].direction` / `[socket].listen_addr` / `[socket].listen_port` を `manifest.socket.*` へ正規化して出力する。
-- CLI は `[wasi]` を `manifest.wasi`（`args` / `env` / `mounts` / `read_only_mounts`）へ正規化して出力する。
+- CLI は `[wasi]` を `manifest.wasi`（`args` / `env` / `mounts` / `read_only_mounts`）へ正規化して出力し、`project_root/.env` のキーを `manifest.wasi.env` へ追加・上書きする（`.env` 優先）。
+- CLI は `imago.toml` の legacy `[vars]` / `[secrets]` を受理するが、manifest には出力しない。
 - runtime は `wasi.mounts[]` を `DirPerms::all` / `FilePerms::all`、`wasi.read_only_mounts[]` を `DirPerms::READ` / `FilePerms::READ` として適用する。
 
 ## 実装反映ノート（Network RPC / 2026-02-18）

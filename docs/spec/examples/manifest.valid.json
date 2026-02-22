@@ -11,11 +11,14 @@
   "target": {
     "host": "n1"
   },
-  "vars": {
-    "V": "1"
-  },
-  "secrets": {
-    "S": "x"
+  "wasi": {
+    "args": [
+      "--serve"
+    ],
+    "env": {
+      "V": "1",
+      "S": "x"
+    }
   },
   "assets": [
     {
