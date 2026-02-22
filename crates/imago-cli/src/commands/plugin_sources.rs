@@ -287,15 +287,18 @@ pub(crate) async fn materialize_wit_source(
             let mut reader = std::io::Cursor::new(bytes.as_slice());
             match wit_component::decode_reader(&mut reader) {
                 Ok(DecodedWasm::WitPackage(resolve, top_package)) => {
+                    let source_desc = format!("file source '{}'", path.display());
                     let transitive_packages = materialize_wit_package_resolve(
                         destination_dir,
                         &resolve,
                         top_package,
-                        None,
-                        None,
-                        None,
-                        namespace_registries,
-                        &format!("file source '{}'", path.display()),
+                        WitPackageResolveOptions {
+                            expected_package: None,
+                            expected_version: None,
+                            source_detail: None,
+                            namespace_registries,
+                            source_desc: &source_desc,
+                        },
                     )?;
                     Ok(MaterializedWitSource {
                         derived_component: None,
@@ -308,15 +311,18 @@ pub(crate) async fn materialize_wit_source(
                         world,
                         &format!("file source '{}'", path.display()),
                     )?;
+                    let source_desc = format!("file source '{}'", path.display());
                     let transitive_packages = materialize_wit_package_resolve(
                         destination_dir,
                         &resolve,
                         top_package,
-                        None,
-                        None,
-                        None,
-                        namespace_registries,
-                        &format!("file source '{}'", path.display()),
+                        WitPackageResolveOptions {
+                            expected_package: None,
+                            expected_version: None,
+                            source_detail: None,
+                            namespace_registries,
+                            source_desc: &source_desc,
+                        },
                     )?;
                     Ok(MaterializedWitSource {
                         derived_component: Some(MaterializedWitComponent {
@@ -352,12 +358,14 @@ pub(crate) async fn materialize_wit_source(
             materialize_remote_wit_bytes(
                 destination_dir,
                 &bytes,
-                protocol,
-                &source,
-                &package,
-                &version,
-                &registry,
-                namespace_registries,
+                MaterializeRemoteWitBytesRequest {
+                    protocol,
+                    canonical_source: &source,
+                    package: &package,
+                    version: &version,
+                    registry: &registry,
+                    namespace_registries,
+                },
             )
         }
     }
@@ -804,18 +812,38 @@ struct MaterializeSourceDetail<'a> {
     registry: &'a str,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct MaterializeRemoteWitBytesRequest<'a> {
+    protocol: RemoteSourceProtocol,
+    canonical_source: &'a str,
+    package: &'a str,
+    version: &'a str,
+    registry: &'a str,
+    namespace_registries: Option<&'a NamespaceRegistries>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WitPackageResolveOptions<'a> {
+    expected_package: Option<&'a str>,
+    expected_version: Option<&'a str>,
+    source_detail: Option<MaterializeSourceDetail<'a>>,
+    namespace_registries: Option<&'a NamespaceRegistries>,
+    source_desc: &'a str,
+}
+
 fn materialize_remote_wit_bytes(
     destination_dir: &Path,
     bytes: &[u8],
-    protocol: RemoteSourceProtocol,
-    canonical_source: &str,
-    package: &str,
-    version: &str,
-    registry: &str,
-    namespace_registries: Option<&NamespaceRegistries>,
+    request: MaterializeRemoteWitBytesRequest<'_>,
 ) -> anyhow::Result<MaterializedWitSource> {
-    let source_desc = format!("{canonical_source} (registry={registry})");
-    let source_detail = MaterializeSourceDetail { protocol, registry };
+    let source_desc = format!(
+        "{} (registry={})",
+        request.canonical_source, request.registry
+    );
+    let source_detail = MaterializeSourceDetail {
+        protocol: request.protocol,
+        registry: request.registry,
+    };
     let mut reader = std::io::Cursor::new(bytes);
     match wit_component::decode_reader(&mut reader) {
         Ok(DecodedWasm::WitPackage(resolve, top_package)) => {
@@ -823,11 +851,13 @@ fn materialize_remote_wit_bytes(
                 destination_dir,
                 &resolve,
                 top_package,
-                Some(package),
-                Some(version),
-                Some(source_detail),
-                namespace_registries,
-                &source_desc,
+                WitPackageResolveOptions {
+                    expected_package: Some(request.package),
+                    expected_version: Some(request.version),
+                    source_detail: Some(source_detail),
+                    namespace_registries: request.namespace_registries,
+                    source_desc: &source_desc,
+                },
             )?;
             Ok(MaterializedWitSource {
                 derived_component: None,
@@ -836,22 +866,24 @@ fn materialize_remote_wit_bytes(
         }
         Ok(DecodedWasm::Component(resolve, world)) => {
             let top_package =
-                select_top_package_for_component(&resolve, world, package, &source_desc)?;
+                select_top_package_for_component(&resolve, world, request.package, &source_desc)?;
             let transitive_packages = materialize_wit_package_resolve(
                 destination_dir,
                 &resolve,
                 top_package,
-                Some(package),
-                Some(version),
-                Some(source_detail),
-                namespace_registries,
-                &source_desc,
+                WitPackageResolveOptions {
+                    expected_package: Some(request.package),
+                    expected_version: Some(request.version),
+                    source_detail: Some(source_detail),
+                    namespace_registries: request.namespace_registries,
+                    source_desc: &source_desc,
+                },
             )?;
             Ok(MaterializedWitSource {
                 derived_component: Some(MaterializedWitComponent {
-                    source: canonical_source.to_string(),
-                    registry: (protocol == RemoteSourceProtocol::Warg)
-                        .then(|| registry.to_string()),
+                    source: request.canonical_source.to_string(),
+                    registry: (request.protocol == RemoteSourceProtocol::Warg)
+                        .then(|| request.registry.to_string()),
                     sha256: hex::encode(Sha256::digest(bytes)),
                 }),
                 transitive_packages,
@@ -861,10 +893,10 @@ fn materialize_remote_wit_bytes(
             materialize_plain_wit_text(
                 destination_dir,
                 bytes,
-                protocol,
-                package,
-                version,
-                registry,
+                request.protocol,
+                request.package,
+                request.version,
+                request.registry,
             )?;
             Ok(MaterializedWitSource::default())
         }
@@ -921,11 +953,7 @@ fn materialize_wit_package_resolve(
     destination_dir: &Path,
     resolve: &wit_parser::Resolve,
     top_package: wit_parser::PackageId,
-    expected_package: Option<&str>,
-    expected_version: Option<&str>,
-    source_detail: Option<MaterializeSourceDetail<'_>>,
-    namespace_registries: Option<&NamespaceRegistries>,
-    source_desc: &str,
+    options: WitPackageResolveOptions<'_>,
 ) -> anyhow::Result<Vec<MaterializedTransitiveWitPackage>> {
     let deps_root = destination_dir.parent().ok_or_else(|| {
         anyhow!(
@@ -936,9 +964,9 @@ fn materialize_wit_package_resolve(
     validate_top_package_version(
         resolve,
         top_package,
-        expected_package,
-        expected_version,
-        source_desc,
+        options.expected_package,
+        options.expected_version,
+        options.source_desc,
     )?;
     let top_text = render_wit_package(resolve, top_package)?;
     let top_path = destination_dir.join("package.wit");
@@ -991,13 +1019,13 @@ fn materialize_wit_package_resolve(
             None => "*".to_string(),
         };
         let package_ref = format!("{}:{}", package_name.namespace, package_name.name);
-        let (resolved_registry, source) = match (source_detail, version.as_deref()) {
+        let (resolved_registry, source) = match (options.source_detail, version.as_deref()) {
             (Some(detail), Some(version)) => match detail.protocol {
                 RemoteSourceProtocol::Warg => {
                     let transitive_registry = resolve_warg_registry_for_package_with_fallback(
                         &package_ref,
                         None,
-                        namespace_registries,
+                        options.namespace_registries,
                         Some(detail.registry),
                     )?;
                     (
