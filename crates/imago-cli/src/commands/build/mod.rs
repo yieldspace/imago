@@ -441,6 +441,7 @@ fn build_project_with_target_override_inner(
         ui::command_stage("build", "load-config", "loading imago.toml");
     }
     let root = load_resolved_toml(project_root)?;
+    let namespace_registries = parse_namespace_registries(root.get("namespace_registries"))?;
 
     let command = parse_build_command(&root)?;
 
@@ -456,16 +457,26 @@ fn build_project_with_target_override_inner(
     let socket = parse_socket_section(&root, &app_type)?;
     let restart_policy = parse_restart_policy(&root)?;
 
-    let project_bindings = parse_project_binding_sources(root.get("bindings"))?;
-    let project_dependencies = parse_project_dependencies(root.get("dependencies"))?;
+    let project_bindings =
+        parse_project_binding_sources(root.get("bindings"), Some(&namespace_registries))?;
+    let project_dependencies =
+        parse_project_dependencies(root.get("dependencies"), Some(&namespace_registries))?;
     if !project_dependencies.is_empty() {
         let wit_deps_root = project_root.join("wit").join("deps");
         if !wit_deps_root.exists() {
-            dependency_cache::hydrate_project_wit_deps(project_root, &project_dependencies)
-                .context("failed to hydrate dependency cache")?;
+            dependency_cache::hydrate_project_wit_deps(
+                project_root,
+                &project_dependencies,
+                Some(&namespace_registries),
+            )
+            .context("failed to hydrate dependency cache")?;
         } else {
-            dependency_cache::verify_project_dependency_cache(project_root, &project_dependencies)
-                .context("failed to validate dependency cache")?;
+            dependency_cache::verify_project_dependency_cache(
+                project_root,
+                &project_dependencies,
+                Some(&namespace_registries),
+            )
+            .context("failed to validate dependency cache")?;
         }
     }
     let capabilities = parse_root_capabilities(&root)?;
@@ -1047,21 +1058,59 @@ fn parse_string_table(
     Ok(map)
 }
 
-pub(crate) fn load_project_dependencies(
+pub(crate) fn parse_namespace_registries(
+    value: Option<&TomlValue>,
+) -> anyhow::Result<plugin_sources::NamespaceRegistries> {
+    let raw = parse_string_table(value, "namespace_registries")?;
+    let mut registries = plugin_sources::NamespaceRegistries::new();
+    for (namespace, registry) in raw {
+        let normalized_namespace = namespace.trim();
+        if normalized_namespace.is_empty() {
+            return Err(anyhow!(
+                "namespace_registries contains an empty namespace key"
+            ));
+        }
+        let normalized_registry = plugin_sources::normalize_registry_name(&registry)
+            .with_context(|| format!("namespace_registries.{namespace}"))?;
+        if registries
+            .insert(normalized_namespace.to_string(), normalized_registry)
+            .is_some()
+        {
+            return Err(anyhow!(
+                "namespace_registries contains duplicate namespace key after trimming: {normalized_namespace}"
+            ));
+        }
+    }
+    Ok(registries)
+}
+
+pub(crate) fn load_namespace_registries(
     project_root: &Path,
+) -> anyhow::Result<plugin_sources::NamespaceRegistries> {
+    let root = load_resolved_toml(project_root)?;
+    parse_namespace_registries(root.get("namespace_registries"))
+}
+
+pub(crate) fn load_project_dependencies_with_namespace_registries(
+    project_root: &Path,
+    namespace_registries: &plugin_sources::NamespaceRegistries,
 ) -> anyhow::Result<Vec<ProjectDependency>> {
     let root = load_resolved_toml(project_root)?;
-    parse_project_dependencies(root.get("dependencies"))
+    parse_project_dependencies(root.get("dependencies"), Some(namespace_registries))
 }
 
-pub(crate) fn load_project_binding_sources(
+pub(crate) fn load_project_binding_sources_with_namespace_registries(
     project_root: &Path,
+    namespace_registries: &plugin_sources::NamespaceRegistries,
 ) -> anyhow::Result<Vec<ProjectBindingSource>> {
     let root = load_resolved_toml(project_root)?;
-    parse_project_binding_sources(root.get("bindings"))
+    parse_project_binding_sources(root.get("bindings"), Some(namespace_registries))
 }
 
-fn parse_project_dependencies(value: Option<&TomlValue>) -> anyhow::Result<Vec<ProjectDependency>> {
+fn parse_project_dependencies(
+    value: Option<&TomlValue>,
+    namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
+) -> anyhow::Result<Vec<ProjectDependency>> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
@@ -1116,10 +1165,16 @@ fn parse_project_dependencies(value: Option<&TomlValue>) -> anyhow::Result<Vec<P
             }
         };
 
-        let wit = parse_dependency_wit_source(table.get("wit"), index, &name, &version)
-            .with_context(|| {
-                format!("failed to parse dependencies[{index}].wit source configuration")
-            })?;
+        let wit = parse_dependency_wit_source(
+            table.get("wit"),
+            index,
+            &name,
+            &version,
+            namespace_registries,
+        )
+        .with_context(|| {
+            format!("failed to parse dependencies[{index}].wit source configuration")
+        })?;
 
         let requires = match table.get("requires") {
             None => Vec::new(),
@@ -1207,6 +1262,7 @@ fn parse_project_dependencies(value: Option<&TomlValue>) -> anyhow::Result<Vec<P
                 let registry = plugin_sources::normalize_registry_for_source(
                     &source,
                     registry.as_deref(),
+                    namespace_registries,
                     &format!("dependencies[{index}].component"),
                 )?;
 
@@ -1271,9 +1327,14 @@ fn parse_dependency_wit_source(
     index: usize,
     name: &str,
     version: &str,
+    namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
 ) -> anyhow::Result<ProjectDependencySource> {
     let default_source = format!("warg://{name}@{version}");
-    let default_registry = Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string());
+    let default_registry = Some(plugin_sources::resolve_warg_registry_for_package(
+        name,
+        None,
+        namespace_registries,
+    )?);
 
     let (source, registry) = match value {
         None => (default_source, default_registry),
@@ -1286,6 +1347,7 @@ fn parse_dependency_wit_source(
             let registry = plugin_sources::normalize_registry_for_source(
                 &source,
                 None,
+                namespace_registries,
                 &format!("dependencies[{index}].wit"),
             )?;
             (source, registry)
@@ -1328,6 +1390,7 @@ fn parse_dependency_wit_source(
             let registry = plugin_sources::normalize_registry_for_source(
                 &source,
                 registry.as_deref(),
+                namespace_registries,
                 &format!("dependencies[{index}].wit"),
             )?;
             (source, registry)
@@ -1461,6 +1524,7 @@ fn validate_dependency_package_name(name: &str) -> anyhow::Result<()> {
 
 fn parse_project_binding_sources(
     value: Option<&TomlValue>,
+    namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
 ) -> anyhow::Result<Vec<ProjectBindingSource>> {
     let Some(value) = value else {
         return Ok(Vec::new());
@@ -1515,15 +1579,17 @@ fn parse_project_binding_sources(
             && wit_source.contains('/')
             && !wit_source.starts_with("file://")
             && !wit_source.starts_with("warg://")
+            && !wit_source.starts_with("oci://")
         {
             return Err(anyhow!(
-                "bindings[{index}].wit no longer accepts '<package>/<interface>'; use file://... or warg://..."
+                "bindings[{index}].wit no longer accepts '<package>/<interface>'; use file://..., warg://..., or oci://..."
             ));
         }
         plugin_sources::validate_wit_source(&wit_source, &format!("bindings[{index}].wit"))?;
         let wit_registry = plugin_sources::normalize_registry_for_source(
             &wit_source,
             None,
+            namespace_registries,
             &format!("bindings[{index}].wit"),
         )?;
 
@@ -3238,7 +3304,7 @@ remote = "127.0.0.1:4443"
             .expect_err("build must fail when bindings.wit scheme is unsupported");
         assert!(
             err.to_string()
-                .contains("must start with one of: file://, warg://")
+                .contains("must start with one of: file://, warg://, oci://")
         );
 
         let _ = fs::remove_dir_all(root);

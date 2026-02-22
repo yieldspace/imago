@@ -196,6 +196,20 @@ port = 8080
 # [capabilities.wasi]
 # "filesystem" = ["/app/assets"]
 
+# [namespace_registries]
+# key: namespace_registries.<namespace>
+# required: optional
+# type: string
+# constraints: registry host string; applied only when a warg:// source omits its registry
+# default resolution order when warg registry is omitted:
+# - explicit *.registry
+# - namespace_registries.<namespace>
+# - built-in: namespace "wasi" -> "wasi.dev"
+# - global default: "wa.dev"
+# note: transitive WARG package は package ごとに registry を解決し、未指定 namespace は親 dependency の解決 registry を継承
+# [namespace_registries]
+# wasi = "wasi.dev"
+
 # [[bindings]]
 # key: bindings[].name
 # required: optional (array entry required field)
@@ -205,7 +219,7 @@ port = 8080
 # key: bindings[].wit
 # required: optional (array entry required field)
 # type: string
-# constraints: non-empty; must start with file:// or warg://; legacy "<package>/<interface>" format is rejected
+# constraints: non-empty; must start with file:// or warg:// or oci://; legacy "<package>/<interface>" format is rejected
 # default: none
 # [[bindings]]
 # name = "example-service"
@@ -237,19 +251,20 @@ port = 8080
 # version = "1.0.0"
 # kind = "wasm"
 # requires = ["yieldspace:plugin/base"]
+# note: oci:// source の認証が必要な場合は IMAGO_OCI_USERNAME / IMAGO_OCI_PASSWORD を使用
 
 # [dependencies.wit]
 # key: dependencies[].wit
 # required: optional
 # type: string OR table
 # constraints:
-# - string: non-empty; must start with file:// or warg://
+# - string: non-empty; must start with file:// or warg:// or oci://
 # - table keys: source, registry
-# - source: required string with file:// or warg://
-# - registry: optional string; allowed only for warg source
+# - source: required string with file:// or warg:// or oci://
+# - registry: optional string; allowed only for warg source (oci:// uses registry embedded in source)
 # default when omitted:
 # - source = "warg://<dependencies[].name>@<dependencies[].version>"
-# - registry = "wa.dev"
+# - registry = resolved from explicit > namespace_registries > (wasi->wasi.dev) > wa.dev
 # [dependencies.wit]
 # source = "warg://yieldspace:plugin/example@1.0.0"
 # registry = "wa.dev"
@@ -260,8 +275,8 @@ port = 8080
 # type: table (allowed only when dependencies[].kind="wasm")
 # constraints:
 # - supported keys: source, registry, sha256
-# - source: required string; file:// or warg://
-# - registry: optional string; allowed only for warg source
+# - source: required string; file:// or warg:// or oci://
+# - registry: optional string; allowed only for warg source (oci:// uses registry embedded in source)
 # - sha256: optional 64-char hex string
 # default: none
 # [dependencies.component]

@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, anyhow};
 use futures_util::TryStreamExt as _;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use wasm_pkg_client::Client;
 use wasm_pkg_common::{
@@ -18,6 +19,9 @@ use wit_component::DecodedWasm;
 use wit_parser::UnresolvedPackageGroup;
 
 pub(crate) const DEFAULT_WARG_REGISTRY: &str = "wa.dev";
+pub(crate) const DEFAULT_WASI_WARG_REGISTRY: &str = "wasi.dev";
+
+pub(crate) type NamespaceRegistries = BTreeMap<String, String>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MaterializedWitComponent {
@@ -49,21 +53,47 @@ enum ParsedWitSource {
         path: PathBuf,
         source: String,
     },
-    Warg {
+    Remote {
+        protocol: RemoteSourceProtocol,
         package: String,
         version: String,
         registry: String,
+        source: String,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ParsedComponentSource {
     File(PathBuf),
-    Warg {
+    Remote {
+        protocol: RemoteSourceProtocol,
         package: String,
         version: String,
         registry: String,
+        source: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteSourceProtocol {
+    Warg,
+    Oci,
+}
+
+impl RemoteSourceProtocol {
+    fn scheme(self) -> &'static str {
+        match self {
+            Self::Warg => "warg",
+            Self::Oci => "oci",
+        }
+    }
+
+    fn default_backend(self) -> &'static str {
+        match self {
+            Self::Warg => "warg",
+            Self::Oci => "oci",
+        }
+    }
 }
 
 pub(crate) fn sanitize_wit_deps_name(name: &str) -> String {
@@ -73,6 +103,13 @@ pub(crate) fn sanitize_wit_deps_name(name: &str) -> String {
 
 pub(crate) fn warg_local_package_key(package: &str) -> String {
     format!("pkg-{}", hex::encode(package.as_bytes()))
+}
+
+fn oci_local_package_key(registry: &str, package: &str) -> String {
+    format!(
+        "pkg-{}",
+        hex::encode(format!("{registry}/{package}").as_bytes())
+    )
 }
 
 pub(crate) fn path_to_manifest_string(path: &Path) -> String {
@@ -85,6 +122,7 @@ pub(crate) fn path_to_manifest_string(path: &Path) -> String {
 pub(crate) fn normalize_registry_for_source(
     source: &str,
     registry: Option<&str>,
+    namespace_registries: Option<&NamespaceRegistries>,
     field_name: &str,
 ) -> anyhow::Result<Option<String>> {
     if source.starts_with("file://") {
@@ -96,23 +134,32 @@ pub(crate) fn normalize_registry_for_source(
         return Ok(None);
     }
 
-    if source.starts_with("warg://") {
-        let normalized = normalize_registry_name(
-            registry
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(DEFAULT_WARG_REGISTRY),
-        )?;
+    if let Some(spec) = source.strip_prefix("warg://") {
+        let (package, _) = parse_warg_spec(spec)?;
+        let normalized =
+            resolve_warg_registry_for_package(package, registry, namespace_registries)?;
         return Ok(Some(normalized));
     }
 
+    if source.starts_with("oci://") {
+        if registry.is_some() {
+            return Err(anyhow!(
+                "{field_name}.registry is not allowed when source is oci://"
+            ));
+        }
+        return Ok(None);
+    }
+
     Err(anyhow!(
-        "{field_name}.source must start with one of: file://, warg://"
+        "{field_name}.source must start with one of: file://, warg://, oci://"
     ))
 }
 
 pub(crate) fn validate_wit_source(source: &str, field_name: &str) -> anyhow::Result<()> {
-    if source.starts_with("file://") || source.starts_with("warg://") {
+    if source.starts_with("file://")
+        || source.starts_with("warg://")
+        || source.starts_with("oci://")
+    {
         return Ok(());
     }
     if source.starts_with("https://wa.dev/") {
@@ -121,17 +168,62 @@ pub(crate) fn validate_wit_source(source: &str, field_name: &str) -> anyhow::Res
         ));
     }
     Err(anyhow!(
-        "{field_name} must start with one of: file://, warg://"
+        "{field_name} must start with one of: file://, warg://, oci://"
     ))
 }
 
 pub(crate) fn validate_component_source(source: &str, field_name: &str) -> anyhow::Result<()> {
-    if source.starts_with("file://") || source.starts_with("warg://") {
+    if source.starts_with("file://")
+        || source.starts_with("warg://")
+        || source.starts_with("oci://")
+    {
         return Ok(());
     }
     Err(anyhow!(
-        "{field_name} must start with one of: file://, warg://"
+        "{field_name} must start with one of: file://, warg://, oci://"
     ))
+}
+
+pub(crate) fn resolve_warg_registry_for_package(
+    package: &str,
+    explicit_registry: Option<&str>,
+    namespace_registries: Option<&NamespaceRegistries>,
+) -> anyhow::Result<String> {
+    resolve_warg_registry_for_package_with_fallback(
+        package,
+        explicit_registry,
+        namespace_registries,
+        None,
+    )
+}
+
+pub(crate) fn resolve_warg_registry_for_package_with_fallback(
+    package: &str,
+    explicit_registry: Option<&str>,
+    namespace_registries: Option<&NamespaceRegistries>,
+    fallback_default_registry: Option<&str>,
+) -> anyhow::Result<String> {
+    if let Some(value) = explicit_registry
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return normalize_registry_name(value);
+    }
+    if let Some(namespace) = extract_package_namespace(package)
+        && let Some(registry) = namespace_registries.and_then(|map| map.get(namespace))
+    {
+        return normalize_registry_name(registry);
+    }
+    if extract_package_namespace(package) == Some("wasi") {
+        return Ok(DEFAULT_WASI_WARG_REGISTRY.to_string());
+    }
+    if let Some(fallback_registry) = fallback_default_registry
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return normalize_registry_name(fallback_registry);
+    }
+    Ok(DEFAULT_WARG_REGISTRY.to_string())
 }
 
 pub(crate) fn expected_component_identity_from_wit_source(
@@ -143,8 +235,17 @@ pub(crate) fn expected_component_identity_from_wit_source(
     }
     if let Some(spec) = source.strip_prefix("warg://") {
         let (package, version) = parse_warg_spec(spec)?;
-        let registry = normalize_registry_name(registry.unwrap_or(DEFAULT_WARG_REGISTRY))?;
+        let registry = resolve_warg_registry_for_package(package, registry, None)?;
         return Ok((canonical_warg_source(package, version), Some(registry)));
+    }
+    if let Some(spec) = source.strip_prefix("oci://") {
+        if registry.is_some() {
+            return Err(anyhow!(
+                "wit registry is not allowed when wit source is oci://"
+            ));
+        }
+        let parsed = parse_oci_spec(spec)?;
+        return Ok((parsed.source, None));
     }
     if source.starts_with("https://wa.dev/") {
         return Err(anyhow!(
@@ -152,7 +253,7 @@ pub(crate) fn expected_component_identity_from_wit_source(
         ));
     }
     Err(anyhow!(
-        "wit source must start with one of: file://, warg://"
+        "wit source must start with one of: file://, warg://, oci://"
     ))
 }
 
@@ -167,10 +268,11 @@ pub(crate) async fn materialize_wit_source(
     project_root: &Path,
     source: &str,
     registry: Option<&str>,
+    namespace_registries: Option<&NamespaceRegistries>,
     _dependency_version: &str,
     destination_dir: &Path,
 ) -> anyhow::Result<MaterializedWitSource> {
-    let parsed = parse_wit_source(project_root, source, registry)?;
+    let parsed = parse_wit_source(project_root, source, registry, namespace_registries)?;
     match parsed {
         ParsedWitSource::File { path, source } => {
             let metadata = fs::metadata(&path)
@@ -185,14 +287,18 @@ pub(crate) async fn materialize_wit_source(
             let mut reader = std::io::Cursor::new(bytes.as_slice());
             match wit_component::decode_reader(&mut reader) {
                 Ok(DecodedWasm::WitPackage(resolve, top_package)) => {
+                    let source_desc = format!("file source '{}'", path.display());
                     let transitive_packages = materialize_wit_package_resolve(
                         destination_dir,
                         &resolve,
                         top_package,
-                        None,
-                        None,
-                        None,
-                        &format!("file source '{}'", path.display()),
+                        WitPackageResolveOptions {
+                            expected_package: None,
+                            expected_version: None,
+                            source_detail: None,
+                            namespace_registries,
+                            source_desc: &source_desc,
+                        },
                     )?;
                     Ok(MaterializedWitSource {
                         derived_component: None,
@@ -205,14 +311,18 @@ pub(crate) async fn materialize_wit_source(
                         world,
                         &format!("file source '{}'", path.display()),
                     )?;
+                    let source_desc = format!("file source '{}'", path.display());
                     let transitive_packages = materialize_wit_package_resolve(
                         destination_dir,
                         &resolve,
                         top_package,
-                        None,
-                        None,
-                        None,
-                        &format!("file source '{}'", path.display()),
+                        WitPackageResolveOptions {
+                            expected_package: None,
+                            expected_version: None,
+                            source_detail: None,
+                            namespace_registries,
+                            source_desc: &source_desc,
+                        },
                     )?;
                     Ok(MaterializedWitSource {
                         derived_component: Some(MaterializedWitComponent {
@@ -229,19 +339,34 @@ pub(crate) async fn materialize_wit_source(
                 }
             }
         }
-        ParsedWitSource::Warg {
+        ParsedWitSource::Remote {
+            protocol,
             package,
             version,
             registry,
+            source,
         } => {
-            let bytes = fetch_warg_wit_bytes_with_local_fallback(
+            let bytes = fetch_wit_bytes_with_local_fallback(
                 project_root,
+                protocol,
                 &package,
                 &version,
                 &registry,
+                namespace_registries,
             )
             .await?;
-            materialize_warg_wit_bytes(destination_dir, &bytes, &package, &version, &registry)
+            materialize_remote_wit_bytes(
+                destination_dir,
+                &bytes,
+                MaterializeRemoteWitBytesRequest {
+                    protocol,
+                    canonical_source: &source,
+                    package: &package,
+                    version: &version,
+                    registry: &registry,
+                    namespace_registries,
+                },
+            )
         }
     }
 }
@@ -255,17 +380,24 @@ pub(crate) async fn resolve_component_sha256(
     let parsed = parse_component_source(project_root, source, registry)?;
     let digest = match parsed {
         ParsedComponentSource::File(path) => compute_sha256_hex(&path)?,
-        ParsedComponentSource::Warg {
+        ParsedComponentSource::Remote {
+            protocol,
             package,
             version,
             registry,
+            ..
         } => {
-            if let Some(local_path) =
-                find_local_warg_component_candidate(project_root, &package, &version)
-            {
+            if let Some(local_path) = find_local_component_candidate(
+                project_root,
+                protocol,
+                &package,
+                &version,
+                &registry,
+            ) {
                 compute_sha256_hex(&local_path)?
             } else {
-                let bytes = fetch_warg_release_bytes(&package, &version, &registry).await?;
+                let bytes =
+                    fetch_release_bytes(protocol, &package, &version, &registry, None).await?;
                 hex::encode(Sha256::digest(&bytes))
             }
         }
@@ -305,14 +437,20 @@ pub(crate) async fn materialize_component_file(
                 destination_label,
             )?;
         }
-        ParsedComponentSource::Warg {
+        ParsedComponentSource::Remote {
+            protocol,
             package,
             version,
             registry,
+            ..
         } => {
-            if let Some(local_path) =
-                find_local_warg_component_candidate(project_root, &package, &version)
-            {
+            if let Some(local_path) = find_local_component_candidate(
+                project_root,
+                protocol,
+                &package,
+                &version,
+                &registry,
+            ) {
                 copy_component_source_to_destination(
                     &local_path,
                     destination_path,
@@ -320,7 +458,8 @@ pub(crate) async fn materialize_component_file(
                     destination_label,
                 )?;
             } else {
-                let bytes = fetch_warg_release_bytes(&package, &version, &registry).await?;
+                let bytes =
+                    fetch_release_bytes(protocol, &package, &version, &registry, None).await?;
                 let digest = hex::encode(Sha256::digest(&bytes));
                 if digest != sha256 {
                     return Err(anyhow!(
@@ -406,6 +545,7 @@ fn parse_wit_source(
     project_root: &Path,
     source: &str,
     registry: Option<&str>,
+    namespace_registries: Option<&NamespaceRegistries>,
 ) -> anyhow::Result<ParsedWitSource> {
     if let Some(raw_path) = source.strip_prefix("file://") {
         let path = resolve_file_source_path(project_root, raw_path)?;
@@ -417,16 +557,35 @@ fn parse_wit_source(
 
     if let Some(spec) = source.strip_prefix("warg://") {
         let (package, version) = parse_warg_spec(spec)?;
-        let registry = normalize_registry_name(registry.unwrap_or(DEFAULT_WARG_REGISTRY))?;
-        return Ok(ParsedWitSource::Warg {
+        let registry = resolve_warg_registry_for_package(package, registry, namespace_registries)?;
+        let source = canonical_warg_source(package, version);
+        return Ok(ParsedWitSource::Remote {
+            protocol: RemoteSourceProtocol::Warg,
             package: package.to_string(),
             version: version.to_string(),
             registry,
+            source,
+        });
+    }
+
+    if let Some(spec) = source.strip_prefix("oci://") {
+        if registry.is_some() {
+            return Err(anyhow!(
+                "wit registry is not allowed when wit source is oci://"
+            ));
+        }
+        let parsed = parse_oci_spec(spec)?;
+        return Ok(ParsedWitSource::Remote {
+            protocol: RemoteSourceProtocol::Oci,
+            package: parsed.package,
+            version: parsed.version,
+            registry: parsed.registry,
+            source: parsed.source,
         });
     }
 
     Err(anyhow!(
-        "wit source must start with one of: file://, warg://"
+        "wit source must start with one of: file://, warg://, oci://"
     ))
 }
 
@@ -450,16 +609,35 @@ fn parse_component_source(
 
     if let Some(spec) = source.strip_prefix("warg://") {
         let (package, version) = parse_warg_spec(spec)?;
-        let registry = normalize_registry_name(registry.unwrap_or(DEFAULT_WARG_REGISTRY))?;
-        return Ok(ParsedComponentSource::Warg {
+        let registry = resolve_warg_registry_for_package(package, registry, None)?;
+        let source = canonical_warg_source(package, version);
+        return Ok(ParsedComponentSource::Remote {
+            protocol: RemoteSourceProtocol::Warg,
             package: package.to_string(),
             version: version.to_string(),
             registry,
+            source,
+        });
+    }
+
+    if let Some(spec) = source.strip_prefix("oci://") {
+        if registry.is_some() {
+            return Err(anyhow!(
+                "component registry is not allowed when component source is oci://"
+            ));
+        }
+        let parsed = parse_oci_spec(spec)?;
+        return Ok(ParsedComponentSource::Remote {
+            protocol: RemoteSourceProtocol::Oci,
+            package: parsed.package,
+            version: parsed.version,
+            registry: parsed.registry,
+            source: parsed.source,
         });
     }
 
     Err(anyhow!(
-        "component source must start with one of: file://, warg://"
+        "component source must start with one of: file://, warg://, oci://"
     ))
 }
 
@@ -486,6 +664,68 @@ fn resolve_file_source_path(project_root: &Path, raw_path: &str) -> anyhow::Resu
         ));
     }
     Ok(resolved)
+}
+
+#[derive(Debug, Clone)]
+struct ParsedOciSpec {
+    package: String,
+    version: String,
+    registry: String,
+    source: String,
+}
+
+fn parse_oci_spec(spec: &str) -> anyhow::Result<ParsedOciSpec> {
+    let (registry_and_package, version) = spec.rsplit_once('@').ok_or_else(|| {
+        anyhow!("oci source must be in form oci://<registry>/<namespace>/<name>@<version>")
+    })?;
+    let registry_and_package = registry_and_package.trim();
+    let version = version.trim();
+    if registry_and_package.is_empty() || version.is_empty() {
+        return Err(anyhow!(
+            "oci source must include registry, package, and version (oci://<registry>/<namespace>/<name>@<version>)"
+        ));
+    }
+    validate_warg_version_for_local_path(version)?;
+    let (registry_raw, package_path) = registry_and_package.split_once('/').ok_or_else(|| {
+        anyhow!(
+            "oci source must include package path (oci://<registry>/<namespace>/<name>@<version>)"
+        )
+    })?;
+    let registry = normalize_registry_name(registry_raw)?;
+    if package_path.contains('\\') {
+        return Err(anyhow!(
+            "oci source package contains invalid path components: {package_path}"
+        ));
+    }
+    let mut segments = package_path.split('/');
+    let namespace = segments.next().unwrap_or_default().trim();
+    let name = segments.next().unwrap_or_default().trim();
+    if namespace.is_empty()
+        || name.is_empty()
+        || segments.next().is_some()
+        || namespace == "."
+        || namespace == ".."
+        || name == "."
+        || name == ".."
+    {
+        return Err(anyhow!(
+            "oci source package must be '<namespace>/<name>': {package_path}"
+        ));
+    }
+    let package = format!("{namespace}:{name}");
+    let _: PackageRef = package
+        .parse()
+        .with_context(|| format!("invalid package name in oci source: {package}"))?;
+    let _: Version = version
+        .parse()
+        .with_context(|| format!("invalid package version in oci source: {version}"))?;
+    let source = canonical_oci_source(&registry, &package, version)?;
+    Ok(ParsedOciSpec {
+        package,
+        version: version.to_string(),
+        registry,
+        source,
+    })
 }
 
 fn parse_warg_spec(spec: &str) -> anyhow::Result<(&str, &str)> {
@@ -543,7 +783,18 @@ fn canonical_warg_source(package: &str, version: &str) -> String {
     format!("warg://{package}@{version}")
 }
 
-fn normalize_registry_name(raw: &str) -> anyhow::Result<String> {
+fn canonical_oci_source(registry: &str, package: &str, version: &str) -> anyhow::Result<String> {
+    let (namespace, name) = package
+        .split_once(':')
+        .ok_or_else(|| anyhow!("invalid package name for oci source: {package}"))?;
+    Ok(format!("oci://{registry}/{namespace}/{name}@{version}"))
+}
+
+fn extract_package_namespace(package: &str) -> Option<&str> {
+    package.split_once(':').map(|(namespace, _)| namespace)
+}
+
+pub(crate) fn normalize_registry_name(raw: &str) -> anyhow::Result<String> {
     let trimmed = raw.trim().trim_end_matches('/');
     let no_scheme = trimmed
         .strip_prefix("https://")
@@ -555,14 +806,44 @@ fn normalize_registry_name(raw: &str) -> anyhow::Result<String> {
     Ok(no_scheme.to_string())
 }
 
-fn materialize_warg_wit_bytes(
+#[derive(Debug, Clone, Copy)]
+struct MaterializeSourceDetail<'a> {
+    protocol: RemoteSourceProtocol,
+    registry: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MaterializeRemoteWitBytesRequest<'a> {
+    protocol: RemoteSourceProtocol,
+    canonical_source: &'a str,
+    package: &'a str,
+    version: &'a str,
+    registry: &'a str,
+    namespace_registries: Option<&'a NamespaceRegistries>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WitPackageResolveOptions<'a> {
+    expected_package: Option<&'a str>,
+    expected_version: Option<&'a str>,
+    source_detail: Option<MaterializeSourceDetail<'a>>,
+    namespace_registries: Option<&'a NamespaceRegistries>,
+    source_desc: &'a str,
+}
+
+fn materialize_remote_wit_bytes(
     destination_dir: &Path,
     bytes: &[u8],
-    package: &str,
-    version: &str,
-    registry: &str,
+    request: MaterializeRemoteWitBytesRequest<'_>,
 ) -> anyhow::Result<MaterializedWitSource> {
-    let source_desc = format!("warg://{package}@{version} (registry={registry})");
+    let source_desc = format!(
+        "{} (registry={})",
+        request.canonical_source, request.registry
+    );
+    let source_detail = MaterializeSourceDetail {
+        protocol: request.protocol,
+        registry: request.registry,
+    };
     let mut reader = std::io::Cursor::new(bytes);
     match wit_component::decode_reader(&mut reader) {
         Ok(DecodedWasm::WitPackage(resolve, top_package)) => {
@@ -570,10 +851,13 @@ fn materialize_warg_wit_bytes(
                 destination_dir,
                 &resolve,
                 top_package,
-                Some(package),
-                Some(version),
-                Some(registry),
-                &source_desc,
+                WitPackageResolveOptions {
+                    expected_package: Some(request.package),
+                    expected_version: Some(request.version),
+                    source_detail: Some(source_detail),
+                    namespace_registries: request.namespace_registries,
+                    source_desc: &source_desc,
+                },
             )?;
             Ok(MaterializedWitSource {
                 derived_component: None,
@@ -582,27 +866,38 @@ fn materialize_warg_wit_bytes(
         }
         Ok(DecodedWasm::Component(resolve, world)) => {
             let top_package =
-                select_top_package_for_component(&resolve, world, package, &source_desc)?;
+                select_top_package_for_component(&resolve, world, request.package, &source_desc)?;
             let transitive_packages = materialize_wit_package_resolve(
                 destination_dir,
                 &resolve,
                 top_package,
-                Some(package),
-                Some(version),
-                Some(registry),
-                &source_desc,
+                WitPackageResolveOptions {
+                    expected_package: Some(request.package),
+                    expected_version: Some(request.version),
+                    source_detail: Some(source_detail),
+                    namespace_registries: request.namespace_registries,
+                    source_desc: &source_desc,
+                },
             )?;
             Ok(MaterializedWitSource {
                 derived_component: Some(MaterializedWitComponent {
-                    source: canonical_warg_source(package, version),
-                    registry: Some(registry.to_string()),
+                    source: request.canonical_source.to_string(),
+                    registry: (request.protocol == RemoteSourceProtocol::Warg)
+                        .then(|| request.registry.to_string()),
                     sha256: hex::encode(Sha256::digest(bytes)),
                 }),
                 transitive_packages,
             })
         }
         Err(_) => {
-            materialize_plain_wit_text(destination_dir, bytes, package, version, registry)?;
+            materialize_plain_wit_text(
+                destination_dir,
+                bytes,
+                request.protocol,
+                request.package,
+                request.version,
+                request.registry,
+            )?;
             Ok(MaterializedWitSource::default())
         }
     }
@@ -611,10 +906,15 @@ fn materialize_warg_wit_bytes(
 fn materialize_plain_wit_text(
     destination_dir: &Path,
     bytes: &[u8],
+    protocol: RemoteSourceProtocol,
     package: &str,
     version: &str,
     registry: &str,
 ) -> anyhow::Result<()> {
+    let scheme = match protocol {
+        RemoteSourceProtocol::Warg => "warg",
+        RemoteSourceProtocol::Oci => "oci",
+    };
     let text = String::from_utf8(bytes.to_vec()).with_context(|| {
         format!(
             "failed to decode wit source for package '{}@{}' from registry '{}': payload is not UTF-8",
@@ -634,7 +934,8 @@ fn materialize_plain_wit_text(
             .any(|nested| !nested.foreign_deps.is_empty());
     if has_foreign_deps {
         return Err(anyhow!(
-            "warg source '{}@{}' contains foreign imports in plain .wit form; publish/use a WIT package so `imago update` can resolve transitive dependencies",
+            "{} source '{}@{}' contains foreign imports in plain .wit form; publish/use a WIT package so `imago update` can resolve transitive dependencies",
+            scheme,
             package,
             version
         ));
@@ -652,10 +953,7 @@ fn materialize_wit_package_resolve(
     destination_dir: &Path,
     resolve: &wit_parser::Resolve,
     top_package: wit_parser::PackageId,
-    expected_package: Option<&str>,
-    expected_version: Option<&str>,
-    registry: Option<&str>,
-    source_desc: &str,
+    options: WitPackageResolveOptions<'_>,
 ) -> anyhow::Result<Vec<MaterializedTransitiveWitPackage>> {
     let deps_root = destination_dir.parent().ok_or_else(|| {
         anyhow!(
@@ -666,9 +964,9 @@ fn materialize_wit_package_resolve(
     validate_top_package_version(
         resolve,
         top_package,
-        expected_package,
-        expected_version,
-        source_desc,
+        options.expected_package,
+        options.expected_version,
+        options.source_desc,
     )?;
     let top_text = render_wit_package(resolve, top_package)?;
     let top_path = destination_dir.join("package.wit");
@@ -720,12 +1018,31 @@ fn materialize_wit_package_resolve(
             Some(value) => format!("={value}"),
             None => "*".to_string(),
         };
-        let source = match (registry, version.as_deref()) {
-            (Some(_), Some(version)) => Some(canonical_warg_source(
-                &format!("{}:{}", package_name.namespace, package_name.name),
-                version,
-            )),
-            _ => None,
+        let package_ref = format!("{}:{}", package_name.namespace, package_name.name);
+        let (resolved_registry, source) = match (options.source_detail, version.as_deref()) {
+            (Some(detail), Some(version)) => match detail.protocol {
+                RemoteSourceProtocol::Warg => {
+                    let transitive_registry = resolve_warg_registry_for_package_with_fallback(
+                        &package_ref,
+                        None,
+                        options.namespace_registries,
+                        Some(detail.registry),
+                    )?;
+                    (
+                        Some(transitive_registry),
+                        Some(canonical_warg_source(&package_ref, version)),
+                    )
+                }
+                RemoteSourceProtocol::Oci => (
+                    None,
+                    Some(canonical_oci_source(
+                        detail.registry,
+                        &package_ref,
+                        version,
+                    )?),
+                ),
+            },
+            _ => (None, None),
         };
         let digest = format!(
             "sha256:{}",
@@ -738,8 +1055,8 @@ fn materialize_wit_package_resolve(
         );
 
         materialized.push(MaterializedTransitiveWitPackage {
-            name: format!("{}:{}", package_name.namespace, package_name.name),
-            registry: registry.map(str::to_string),
+            name: package_ref,
+            registry: resolved_registry,
             requirement,
             version,
             digest,
@@ -850,30 +1167,42 @@ fn write_or_verify_identical_wit_file(path: &Path, contents: &str) -> anyhow::Re
     Ok(())
 }
 
-async fn fetch_warg_release_bytes(
+async fn fetch_release_bytes(
+    protocol: RemoteSourceProtocol,
     package: &str,
     version: &str,
     registry: &str,
+    namespace_registries: Option<&NamespaceRegistries>,
 ) -> anyhow::Result<Vec<u8>> {
+    let source_scheme = protocol.scheme();
     let package_ref: PackageRef = package
         .parse()
-        .with_context(|| format!("invalid package name in warg source: {package}"))?;
+        .with_context(|| format!("invalid package name in {source_scheme} source: {package}"))?;
     let version: Version = version
         .parse()
-        .with_context(|| format!("invalid package version in warg source: {version}"))?;
+        .with_context(|| format!("invalid package version in {source_scheme} source: {version}"))?;
     let registry: Registry = registry
         .parse()
         .with_context(|| format!("invalid registry value: {registry}"))?;
 
     let mut config = Config::empty();
     config.set_default_registry(Some(registry.clone()));
-    config.set_package_registry_override(package_ref.clone(), RegistryMapping::Registry(registry));
+    config.set_package_registry_override(
+        package_ref.clone(),
+        RegistryMapping::Registry(registry.clone()),
+    );
+    if protocol == RemoteSourceProtocol::Warg {
+        configure_warg_namespace_registry_mappings(&mut config, namespace_registries)?;
+    }
+    configure_backend_for_registry(&mut config, protocol, &registry)?;
 
     let client = Client::new(config);
     let release = client
         .get_release(&package_ref, &version)
         .await
-        .map_err(|err| anyhow!("failed to get release for {package_ref}@{version}: {err:#}"))?;
+        .map_err(|err| {
+            anyhow!("failed to get {source_scheme} release for {package_ref}@{version}: {err:#}")
+        })?;
     let mut stream = client
         .stream_content(&package_ref, &release)
         .await
@@ -885,17 +1214,130 @@ async fn fetch_warg_release_bytes(
     Ok(bytes)
 }
 
-async fn fetch_warg_wit_bytes_with_local_fallback(
+fn configure_warg_namespace_registry_mappings(
+    config: &mut Config,
+    namespace_registries: Option<&NamespaceRegistries>,
+) -> anyhow::Result<()> {
+    let Some(namespace_registries) = namespace_registries else {
+        return Ok(());
+    };
+
+    for (namespace, registry) in namespace_registries {
+        let label = namespace
+            .parse()
+            .with_context(|| format!("invalid namespace registry key: {namespace}"))?;
+        let normalized_registry = normalize_registry_name(registry)
+            .with_context(|| format!("invalid namespace registry for '{namespace}'"))?;
+        let resolved_registry: Registry = normalized_registry
+            .parse()
+            .with_context(|| format!("invalid namespace registry value: {normalized_registry}"))?;
+        config.set_namespace_registry(label, RegistryMapping::Registry(resolved_registry));
+    }
+    Ok(())
+}
+
+fn configure_backend_for_registry(
+    config: &mut Config,
+    protocol: RemoteSourceProtocol,
+    registry: &Registry,
+) -> anyhow::Result<()> {
+    let registry_config = config.get_or_insert_registry_config_mut(registry);
+    registry_config.set_default_backend(Some(protocol.default_backend().to_string()));
+    if protocol == RemoteSourceProtocol::Oci
+        && let Some(auth_config) = oci_backend_auth_config_from_env()
+    {
+        registry_config
+            .set_backend_config("oci", &auth_config)
+            .map_err(|err| anyhow!("failed to configure oci auth from environment: {err:#}"))?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OciBackendAuthConfig {
+    auth: OciBasicAuth,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OciBasicAuth {
+    username: String,
+    password: String,
+}
+
+fn oci_backend_auth_config_from_env() -> Option<OciBackendAuthConfig> {
+    oci_backend_auth_config(
+        std::env::var("IMAGO_OCI_USERNAME").ok(),
+        std::env::var("IMAGO_OCI_PASSWORD").ok(),
+    )
+}
+
+fn oci_backend_auth_config(
+    username: Option<String>,
+    password: Option<String>,
+) -> Option<OciBackendAuthConfig> {
+    if username.is_none() && password.is_none() {
+        return None;
+    }
+    Some(OciBackendAuthConfig {
+        auth: OciBasicAuth {
+            username: username.unwrap_or_default(),
+            password: password.unwrap_or_default(),
+        },
+    })
+}
+
+async fn fetch_wit_bytes_with_local_fallback(
     project_root: &Path,
+    protocol: RemoteSourceProtocol,
     package: &str,
     version: &str,
     registry: &str,
+    namespace_registries: Option<&NamespaceRegistries>,
 ) -> anyhow::Result<Vec<u8>> {
-    if let Some(local) = find_local_warg_wit_candidate(project_root, package, version) {
-        return fs::read(&local)
-            .with_context(|| format!("failed to read local warg wit source {}", local.display()));
+    if let Some(local) =
+        find_local_wit_candidate(project_root, protocol, package, version, registry)
+    {
+        return fs::read(&local).with_context(|| {
+            format!(
+                "failed to read local {} wit source {}",
+                protocol.scheme(),
+                local.display()
+            )
+        });
     }
-    fetch_warg_release_bytes(package, version, registry).await
+    fetch_release_bytes(protocol, package, version, registry, namespace_registries).await
+}
+
+fn find_local_wit_candidate(
+    project_root: &Path,
+    protocol: RemoteSourceProtocol,
+    package: &str,
+    version: &str,
+    registry: &str,
+) -> Option<PathBuf> {
+    match protocol {
+        RemoteSourceProtocol::Warg => find_local_warg_wit_candidate(project_root, package, version),
+        RemoteSourceProtocol::Oci => {
+            find_local_oci_wit_candidate(project_root, package, version, registry)
+        }
+    }
+}
+
+fn find_local_component_candidate(
+    project_root: &Path,
+    protocol: RemoteSourceProtocol,
+    package: &str,
+    version: &str,
+    registry: &str,
+) -> Option<PathBuf> {
+    match protocol {
+        RemoteSourceProtocol::Warg => {
+            find_local_warg_component_candidate(project_root, package, version)
+        }
+        RemoteSourceProtocol::Oci => {
+            find_local_oci_component_candidate(project_root, package, version, registry)
+        }
+    }
 }
 
 fn find_local_warg_wit_candidate(
@@ -923,6 +1365,31 @@ fn find_local_warg_wit_candidate(
     .find(|candidate| candidate.is_file())
 }
 
+fn find_local_oci_wit_candidate(
+    project_root: &Path,
+    package: &str,
+    version: &str,
+    registry: &str,
+) -> Option<PathBuf> {
+    let package_dir = oci_local_package_key(registry, package);
+    let base = project_root
+        .join(".imago")
+        .join("oci")
+        .join(package_dir.clone())
+        .join(version);
+    [
+        base.join("wit.wasm"),
+        base.join("wit"),
+        base.join("wit.wit"),
+        project_root
+            .join(".imago")
+            .join("oci")
+            .join(format!("{package_dir}@{version}.wit")),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
+}
+
 fn find_local_warg_component_candidate(
     project_root: &Path,
     package: &str,
@@ -944,6 +1411,32 @@ fn find_local_warg_component_candidate(
             warg_local_package_key(package),
             version
         )),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
+}
+
+fn find_local_oci_component_candidate(
+    project_root: &Path,
+    package: &str,
+    version: &str,
+    registry: &str,
+) -> Option<PathBuf> {
+    let package_dir = oci_local_package_key(registry, package);
+    let base = project_root
+        .join(".imago")
+        .join("oci")
+        .join(package_dir.clone())
+        .join(version);
+    [
+        base.join("wit.wasm"),
+        base.join("wit"),
+        base.join("component.wasm"),
+        base.join("component").join("component.wasm"),
+        project_root
+            .join(".imago")
+            .join("oci")
+            .join(format!("{package_dir}@{version}.wasm")),
     ]
     .into_iter()
     .find(|candidate| candidate.is_file())
@@ -1044,10 +1537,16 @@ fn copy_dir_contents(source_dir: &Path, destination_dir: &Path) -> anyhow::Resul
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_wit_tree, parse_warg_spec, sanitize_wit_deps_name, warg_local_package_key};
+    use super::{
+        DEFAULT_WARG_REGISTRY, DEFAULT_WASI_WARG_REGISTRY, copy_wit_tree,
+        normalize_registry_for_source, oci_backend_auth_config, parse_oci_spec, parse_warg_spec,
+        resolve_warg_registry_for_package, resolve_warg_registry_for_package_with_fallback,
+        sanitize_wit_deps_name, warg_local_package_key,
+    };
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
     use std::{
+        collections::BTreeMap,
         fs,
         path::{Path, PathBuf},
     };
@@ -1109,6 +1608,95 @@ mod tests {
             err.to_string()
                 .contains("warg source version contains invalid path components")
         );
+    }
+
+    #[test]
+    fn parse_oci_spec_accepts_registry_namespace_name_and_version() {
+        let parsed =
+            parse_oci_spec("ghcr.io/chikoski/advent-of-spin@0.2.0").expect("must parse oci spec");
+        assert_eq!(parsed.registry, "ghcr.io");
+        assert_eq!(parsed.package, "chikoski:advent-of-spin");
+        assert_eq!(parsed.version, "0.2.0");
+        assert_eq!(parsed.source, "oci://ghcr.io/chikoski/advent-of-spin@0.2.0");
+    }
+
+    #[test]
+    fn resolve_warg_registry_defaults_non_wasi_namespace_to_wa_dev() {
+        let registry = resolve_warg_registry_for_package("yieldspace:plugin/example", None, None)
+            .expect("default registry should resolve");
+        assert_eq!(registry, DEFAULT_WARG_REGISTRY);
+    }
+
+    #[test]
+    fn resolve_warg_registry_defaults_wasi_namespace_to_wasi_dev() {
+        let registry = resolve_warg_registry_for_package("wasi:cli", None, None)
+            .expect("wasi default registry should resolve");
+        assert_eq!(registry, DEFAULT_WASI_WARG_REGISTRY);
+    }
+
+    #[test]
+    fn resolve_warg_registry_prefers_namespace_override_over_wasi_default() {
+        let namespace_registries =
+            BTreeMap::from([("wasi".to_string(), "example.registry".to_string())]);
+        let registry =
+            resolve_warg_registry_for_package("wasi:io", None, Some(&namespace_registries))
+                .expect("namespace override should resolve");
+        assert_eq!(registry, "example.registry");
+    }
+
+    #[test]
+    fn resolve_warg_registry_for_transitive_falls_back_to_parent_registry_for_non_wasi() {
+        let registry = resolve_warg_registry_for_package_with_fallback(
+            "chikoski:name",
+            None,
+            None,
+            Some("custom-root.example"),
+        )
+        .expect("transitive fallback registry should resolve");
+        assert_eq!(registry, "custom-root.example");
+    }
+
+    #[test]
+    fn resolve_warg_registry_for_transitive_prefers_namespace_override_over_parent_registry() {
+        let namespace_registries =
+            BTreeMap::from([("chikoski".to_string(), "override.example".to_string())]);
+        let registry = resolve_warg_registry_for_package_with_fallback(
+            "chikoski:name",
+            None,
+            Some(&namespace_registries),
+            Some("custom-root.example"),
+        )
+        .expect("namespace override should resolve");
+        assert_eq!(registry, "override.example");
+    }
+
+    #[test]
+    fn normalize_registry_for_source_rejects_registry_override_for_oci() {
+        let err = normalize_registry_for_source(
+            "oci://ghcr.io/chikoski/advent-of-spin@0.2.0",
+            Some("wa.dev"),
+            None,
+            "dependencies[0].wit",
+        )
+        .expect_err("oci source must reject explicit registry");
+        assert!(
+            err.to_string()
+                .contains(".registry is not allowed when source is oci://"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn oci_backend_auth_config_is_none_without_injected_credentials() {
+        assert!(oci_backend_auth_config(None, None).is_none());
+    }
+
+    #[test]
+    fn oci_backend_auth_config_uses_injected_credentials() {
+        let auth = oci_backend_auth_config(Some("user-a".to_string()), Some("pass-b".to_string()))
+            .expect("auth config should be created");
+        assert_eq!(auth.auth.username, "user-a");
+        assert_eq!(auth.auth.password, "pass-b");
     }
 
     #[test]

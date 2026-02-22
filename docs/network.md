@@ -77,7 +77,8 @@ name = "..."
 wit = "warg://sizumita:ferris@0.1.0"
 ```
 
-のように `wit` へ source を登録する（`file://...` / `warg://...`）。
+のように `wit` へ source を登録する（`file://...` / `warg://...` / `oci://...`）。
+`oci://...` の例: `oci://ghcr.io/chikoski/advent-of-spin@0.2.0`。
 
 imagoは、`imago update`コマンドが実行された時にこの `wit` source を読み、
 WIT package 内の全 interface を `manifest.bindings` の `<package>/<interface>` 形式へ展開する。

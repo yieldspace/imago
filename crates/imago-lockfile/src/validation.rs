@@ -35,7 +35,10 @@ impl PathVerifier for StrictPathVerifier {
 }
 
 pub(crate) fn validate_wit_source(source: &str, field_name: &str) -> anyhow::Result<()> {
-    if source.starts_with("file://") || source.starts_with("warg://") {
+    if source.starts_with("file://")
+        || source.starts_with("warg://")
+        || source.starts_with("oci://")
+    {
         return Ok(());
     }
     if source.starts_with("https://wa.dev/") {
@@ -44,7 +47,7 @@ pub(crate) fn validate_wit_source(source: &str, field_name: &str) -> anyhow::Res
         ));
     }
     Err(anyhow!(
-        "{field_name} must start with one of: file://, warg://"
+        "{field_name} must start with one of: file://, warg://, oci://"
     ))
 }
 

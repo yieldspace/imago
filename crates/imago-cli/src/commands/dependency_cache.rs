@@ -58,6 +58,7 @@ impl DependencyCacheEntry {
     pub(crate) fn validate_for_dependency(
         &self,
         dependency: &ProjectDependency,
+        namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
     ) -> anyhow::Result<()> {
         if self.name != dependency.name {
             return Err(anyhow!(
@@ -113,6 +114,29 @@ impl DependencyCacheEntry {
                 ));
             }
             parse_prefixed_sha256(&transitive.digest, "transitive_packages[].digest")?;
+            if dependency.wit.source.starts_with("warg://")
+                && transitive.version.is_some()
+                && transitive
+                    .source
+                    .as_deref()
+                    .is_some_and(|source| source.starts_with("warg://"))
+            {
+                let expected_registry =
+                    plugin_sources::resolve_warg_registry_for_package_with_fallback(
+                        &transitive.name,
+                        None,
+                        namespace_registries,
+                        dependency.wit.registry.as_deref(),
+                    )?;
+                if transitive.registry.as_deref() != Some(expected_registry.as_str()) {
+                    return Err(anyhow!(
+                        "cache transitive registry mismatch for '{}' (cache='{}', expected='{}')",
+                        transitive.name,
+                        transitive.registry.as_deref().unwrap_or(""),
+                        expected_registry
+                    ));
+                }
+            }
         }
 
         match dependency.kind {
@@ -243,12 +267,16 @@ pub(crate) fn save_entry(project_root: &Path, entry: &DependencyCacheEntry) -> a
 pub(crate) fn is_cache_hit(
     project_root: &Path,
     dependency: &ProjectDependency,
+    namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
 ) -> anyhow::Result<bool> {
     let entry = match load_entry(project_root, &dependency.name) {
         Ok(entry) => entry,
         Err(_) => return Ok(false),
     };
-    if entry.validate_for_dependency(dependency).is_err() {
+    if entry
+        .validate_for_dependency(dependency, namespace_registries)
+        .is_err()
+    {
         return Ok(false);
     }
     if !entry_files_are_complete(project_root, &entry)? {
@@ -276,6 +304,7 @@ pub(crate) fn is_cache_hit(
 pub(crate) fn hydrate_project_wit_deps(
     project_root: &Path,
     dependencies: &[ProjectDependency],
+    namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
 ) -> anyhow::Result<()> {
     let wit_root = project_root.join("wit").join("deps");
     if wit_root.exists() {
@@ -287,14 +316,16 @@ pub(crate) fn hydrate_project_wit_deps(
 
     for dependency in dependencies {
         let entry = load_entry(project_root, &dependency.name)?;
-        entry.validate_for_dependency(dependency).map_err(|err| {
-            anyhow!(
-                "dependency '{}' cache is stale under {}; {}: {err}",
-                dependency.name,
-                CACHE_ROOT_REL,
-                MISSING_CACHE_HINT
-            )
-        })?;
+        entry
+            .validate_for_dependency(dependency, namespace_registries)
+            .map_err(|err| {
+                anyhow!(
+                    "dependency '{}' cache is stale under {}; {}: {err}",
+                    dependency.name,
+                    CACHE_ROOT_REL,
+                    MISSING_CACHE_HINT
+                )
+            })?;
 
         if !entry_files_are_complete(project_root, &entry)? {
             return Err(anyhow!(
@@ -337,17 +368,20 @@ pub(crate) fn hydrate_project_wit_deps(
 pub(crate) fn verify_project_dependency_cache(
     project_root: &Path,
     dependencies: &[ProjectDependency],
+    namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
 ) -> anyhow::Result<()> {
     for dependency in dependencies {
         let entry = load_entry(project_root, &dependency.name)?;
-        entry.validate_for_dependency(dependency).map_err(|err| {
-            anyhow!(
-                "dependency '{}' cache is stale under {}; {}: {err}",
-                dependency.name,
-                CACHE_ROOT_REL,
-                MISSING_CACHE_HINT
-            )
-        })?;
+        entry
+            .validate_for_dependency(dependency, namespace_registries)
+            .map_err(|err| {
+                anyhow!(
+                    "dependency '{}' cache is stale under {}; {}: {err}",
+                    dependency.name,
+                    CACHE_ROOT_REL,
+                    MISSING_CACHE_HINT
+                )
+            })?;
         if !entry_files_are_complete(project_root, &entry)? {
             return Err(anyhow!(
                 "dependency '{}' cache is stale under {}; {}",

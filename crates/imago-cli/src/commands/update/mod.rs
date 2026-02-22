@@ -251,6 +251,7 @@ fn validate_binding_dependency_collision(
 async fn materialize_binding_wit_source(
     project_root: &Path,
     binding: &build::ProjectBindingSource,
+    namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
     destination_root: &Path,
 ) -> anyhow::Result<()> {
     fs::create_dir_all(destination_root).with_context(|| {
@@ -263,6 +264,7 @@ async fn materialize_binding_wit_source(
         project_root,
         &binding.wit_source,
         binding.wit_registry.as_deref(),
+        namespace_registries,
         "",
         destination_root,
     )
@@ -281,6 +283,7 @@ async fn resolve_binding_wits(
     dependencies: &[build::ProjectDependency],
     lock_entries: &[ImagoLockDependency],
     bindings: &[build::ProjectBindingSource],
+    namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
 ) -> anyhow::Result<Vec<ResolvedBindingWit>> {
     if bindings.is_empty() {
         return Ok(Vec::new());
@@ -318,7 +321,13 @@ async fn resolve_binding_wits(
         fs::create_dir_all(&temp_root)
             .with_context(|| format!("failed to create temp dir {}", temp_root.display()))?;
         let resolve_result = async {
-            materialize_binding_wit_source(project_root, binding, &temp_top).await?;
+            materialize_binding_wit_source(
+                project_root,
+                binding,
+                namespace_registries,
+                &temp_top,
+            )
+            .await?;
             let (temp_resolve, temp_package_id) = parse_dependency_wit_with_deps(&temp_top, &temp_root)
                 .with_context(|| {
                     format!(
@@ -436,7 +445,13 @@ async fn resolve_binding_wits(
             path_to_package.insert(wit_path.clone(), package_name.clone());
 
             let project_wit_root = project_root.join(&wit_path);
-            materialize_binding_wit_source(project_root, binding, &project_wit_root).await?;
+            materialize_binding_wit_source(
+                project_root,
+                binding,
+                namespace_registries,
+                &project_wit_root,
+            )
+            .await?;
             let (project_resolve, project_package_id) =
                 parse_dependency_wit_with_deps(&project_wit_root, &deps_root).with_context(|| {
                     format!(
@@ -986,9 +1001,16 @@ fn remove_other_wit_files(root: &Path, keep: &Path) -> anyhow::Result<()> {
 
 async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
     ui::command_stage("update", "load-input", "loading dependencies and bindings");
+    let namespace_registries = build::load_namespace_registries(project_root)?;
     let dependency_resolver = StandardDependencyResolver;
-    let dependencies = build::load_project_dependencies(project_root)?;
-    let bindings = build::load_project_binding_sources(project_root)?;
+    let dependencies = build::load_project_dependencies_with_namespace_registries(
+        project_root,
+        &namespace_registries,
+    )?;
+    let bindings = build::load_project_binding_sources_with_namespace_registries(
+        project_root,
+        &namespace_registries,
+    )?;
     validate_wit_sources_outside_wit_deps(project_root, &dependencies, &bindings)?;
     validate_wit_output_path_collisions(&dependencies)?;
 
@@ -998,9 +1020,13 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
 
     ui::command_stage("update", "refresh-cache", "refreshing dependency cache");
     for dependency in &dependencies {
-        let cache_entry =
-            cache::load_or_refresh_cache_entry(&dependency_resolver, project_root, dependency)
-                .await?;
+        let cache_entry = cache::load_or_refresh_cache_entry(
+            &dependency_resolver,
+            project_root,
+            dependency,
+            Some(&namespace_registries),
+        )
+        .await?;
         transitive_records.extend(cache_entry.transitive_packages.iter().map(|transitive| {
             TransitivePackageRecord {
                 name: transitive.name.clone(),
@@ -1028,9 +1054,19 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
     }
 
     ui::command_stage("update", "hydrate-wit", "hydrating wit/deps");
-    dependency_cache::hydrate_project_wit_deps(project_root, &dependencies)?;
-    let resolved_binding_wits =
-        resolve_binding_wits(project_root, &dependencies, &lock_entries, &bindings).await?;
+    dependency_cache::hydrate_project_wit_deps(
+        project_root,
+        &dependencies,
+        Some(&namespace_registries),
+    )?;
+    let resolved_binding_wits = resolve_binding_wits(
+        project_root,
+        &dependencies,
+        &lock_entries,
+        &bindings,
+        Some(&namespace_registries),
+    )
+    .await?;
     rewrite_bound_wit_packages(project_root, &resolved_binding_wits)?;
     for entry in &mut lock_entries {
         let hydrated_path = project_root.join(&entry.wit_path);
@@ -1147,6 +1183,35 @@ mod tests {
 
     fn local_warg_file_path(root: &Path, package: &str, version: &str, file_name: &str) -> PathBuf {
         local_warg_package_root(root, package, version).join(file_name)
+    }
+
+    fn local_oci_package_key(registry: &str, package: &str) -> String {
+        format!(
+            "pkg-{}",
+            hex::encode(format!("{registry}/{package}").as_bytes())
+        )
+    }
+
+    fn local_oci_package_root(
+        root: &Path,
+        registry: &str,
+        package: &str,
+        version: &str,
+    ) -> PathBuf {
+        root.join(".imago")
+            .join("oci")
+            .join(local_oci_package_key(registry, package))
+            .join(version)
+    }
+
+    fn local_oci_file_path(
+        root: &Path,
+        registry: &str,
+        package: &str,
+        version: &str,
+        file_name: &str,
+    ) -> PathBuf {
+        local_oci_package_root(root, registry, package, version).join(file_name)
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {
@@ -1288,6 +1353,225 @@ remote = "127.0.0.1:4443"
             "wit/deps/yieldspace-plugin/example"
         );
         assert!(root.join(&lock.dependencies[0].wit_path).exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_uses_wasi_default_registry_when_wit_is_omitted() {
+        let root = new_temp_dir("warg-default-wasi-namespace");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "wasi:cli"
+version = "0.2.6"
+kind = "native"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &local_warg_file_path(&root, "wasi:cli", "0.2.6", "wit.wit"),
+            b"package wasi:cli@0.2.6;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        assert_eq!(lock.dependencies.len(), 1);
+        assert_eq!(lock.dependencies[0].wit_source, "warg://wasi:cli@0.2.6");
+        assert_eq!(
+            lock.dependencies[0].wit_registry.as_deref(),
+            Some(plugin_sources::DEFAULT_WASI_WARG_REGISTRY)
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_namespace_registry_overrides_wasi_default_when_wit_is_omitted() {
+        let root = new_temp_dir("warg-default-wasi-overridden");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[namespace_registries]
+wasi = "custom-wasi.example"
+
+[[dependencies]]
+name = "wasi:io"
+version = "0.2.6"
+kind = "native"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &local_warg_file_path(&root, "wasi:io", "0.2.6", "wit.wit"),
+            b"package wasi:io@0.2.6;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        assert_eq!(lock.dependencies.len(), 1);
+        assert_eq!(lock.dependencies[0].wit_source, "warg://wasi:io@0.2.6");
+        assert_eq!(
+            lock.dependencies[0].wit_registry.as_deref(),
+            Some("custom-wasi.example")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_resolves_oci_wit_source_from_local_cache() {
+        let root = new_temp_dir("oci-wit-local-cache");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:advent-of-spin"
+version = "0.2.0"
+kind = "native"
+wit = "oci://ghcr.io/chikoski/advent-of-spin@0.2.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &local_oci_file_path(
+                &root,
+                "ghcr.io",
+                "chikoski:advent-of-spin",
+                "0.2.0",
+                "wit.wit",
+            ),
+            b"package chikoski:advent-of-spin@0.2.0;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        assert_eq!(lock.dependencies.len(), 1);
+        let entry = &lock.dependencies[0];
+        assert_eq!(
+            entry.wit_source,
+            "oci://ghcr.io/chikoski/advent-of-spin@0.2.0"
+        );
+        assert_eq!(entry.wit_registry, None);
+        assert_eq!(entry.wit_path, "wit/deps/chikoski-advent-of-spin");
+        assert!(root.join(&entry.wit_path).exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_oci_wit_source_with_registry_key() {
+        let root = new_temp_dir("oci-wit-registry-rejected");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:advent-of-spin"
+version = "0.2.0"
+kind = "native"
+
+[dependencies.wit]
+source = "oci://ghcr.io/chikoski/advent-of-spin@0.2.0"
+registry = "wa.dev"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("dependencies[0].wit.registry is not allowed when source is oci://"),
+            "unexpected stderr: {stderr}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_oci_component_source_with_registry_key() {
+        let root = new_temp_dir("oci-component-registry-rejected");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:advent-of-spin"
+version = "0.2.0"
+kind = "wasm"
+wit = "file://registry/example.wit"
+
+[dependencies.component]
+source = "oci://ghcr.io/chikoski/advent-of-spin@0.2.0"
+registry = "wa.dev"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("registry/example.wit"),
+            b"package test:example@0.1.0;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains(
+                "dependencies[0].component.registry is not allowed when source is oci://"
+            ),
+            "unexpected stderr: {stderr}"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1903,6 +2187,227 @@ interface name-provider {
         assert_eq!(version.path, "wit/deps/chikoski-name");
         assert_eq!(version.via, vec!["chikoski:hello".to_string()]);
         assert!(version.digest.starts_with("sha256:"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_materializes_warg_transitive_wasi_packages_with_wasi_default_registry() {
+        let root = new_temp_dir("warg-transitive-wasi-default");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "native"
+wit = "warg://chikoski:hello@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+
+        let fixture_wit_root = root.join("fixture-wit-wasi");
+        write(
+            &fixture_wit_root.join("greet.wit"),
+            br#"
+package chikoski:hello@0.1.0;
+
+interface greet {
+  hello: func() -> string;
+}
+
+world example {
+  import wasi:io/streams@0.2.6;
+}
+"#,
+        );
+        write(
+            &fixture_wit_root.join("deps/wasi-io/package.wit"),
+            br#"
+package wasi:io@0.2.6;
+
+interface streams {
+  read: func();
+}
+"#,
+        );
+        let wit_package_bytes = encode_wit_package(&fixture_wit_root);
+        write(
+            &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wasm"),
+            &wit_package_bytes,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        let wasi_io = lock
+            .wit_packages
+            .iter()
+            .find(|pkg| pkg.name == "wasi:io")
+            .expect("wasi:io transitive package should be materialized");
+        assert_eq!(
+            wasi_io.registry.as_deref(),
+            Some(plugin_sources::DEFAULT_WASI_WARG_REGISTRY)
+        );
+        let version = &wasi_io.versions[0];
+        assert_eq!(version.source.as_deref(), Some("warg://wasi:io@0.2.6"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_materializes_warg_transitive_wasi_packages_with_namespace_override() {
+        let root = new_temp_dir("warg-transitive-wasi-namespace-override");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[namespace_registries]
+wasi = "custom-wasi.example"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "native"
+wit = "warg://chikoski:hello@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+
+        let fixture_wit_root = root.join("fixture-wit-wasi-override");
+        write(
+            &fixture_wit_root.join("greet.wit"),
+            br#"
+package chikoski:hello@0.1.0;
+
+interface greet {
+  hello: func() -> string;
+}
+
+world example {
+  import wasi:io/streams@0.2.6;
+}
+"#,
+        );
+        write(
+            &fixture_wit_root.join("deps/wasi-io/package.wit"),
+            br#"
+package wasi:io@0.2.6;
+
+interface streams {
+  read: func();
+}
+"#,
+        );
+        let wit_package_bytes = encode_wit_package(&fixture_wit_root);
+        write(
+            &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wasm"),
+            &wit_package_bytes,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        let wasi_io = lock
+            .wit_packages
+            .iter()
+            .find(|pkg| pkg.name == "wasi:io")
+            .expect("wasi:io transitive package should be materialized");
+        assert_eq!(wasi_io.registry.as_deref(), Some("custom-wasi.example"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_materializes_non_wasi_transitive_with_parent_registry_fallback() {
+        let root = new_temp_dir("warg-transitive-parent-registry-fallback");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:hello"
+version = "0.1.0"
+kind = "native"
+wit = { source = "warg://chikoski:hello@0.1.0", registry = "custom-root.example" }
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+
+        let fixture_wit_root = root.join("fixture-wit-parent-registry");
+        write(
+            &fixture_wit_root.join("greet.wit"),
+            br#"
+package chikoski:hello@0.1.0;
+
+interface greet {
+  hello: func() -> string;
+}
+
+world example {
+  import chikoski:name/name-provider@0.1.0;
+}
+"#,
+        );
+        write(
+            &fixture_wit_root.join("deps/chikoski-name/package.wit"),
+            br#"
+package chikoski:name@0.1.0;
+
+interface name-provider {
+  get-name: func() -> string;
+}
+"#,
+        );
+        let wit_package_bytes = encode_wit_package(&fixture_wit_root);
+        write(
+            &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wasm"),
+            &wit_package_bytes,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        let transitive = lock
+            .wit_packages
+            .iter()
+            .find(|pkg| pkg.name == "chikoski:name")
+            .expect("chikoski:name transitive package should be materialized");
+        assert_eq!(transitive.registry.as_deref(), Some("custom-root.example"));
 
         let _ = fs::remove_dir_all(root);
     }

@@ -10,11 +10,10 @@ wit_path = "wit/deps/sizumita-ferris"
 component_source = "warg://sizumita:ferris@0.1.0"
 component_registry = "wa.dev"
 component_sha256 = "040ba9bf6aec60ae0667b34f41890df8c0597a323fe76a8e6588666f2b8c8b41"
-resolved_at = "1771340377"
+resolved_at = "1771768401"
 
 [[wit_packages]]
 name = "root:component"
-registry = "wa.dev"
 
 [[wit_packages.versions]]
 requirement = "*"
@@ -24,7 +23,7 @@ via = ["sizumita:ferris"]
 
 [[wit_packages]]
 name = "wasi:cli"
-registry = "wa.dev"
+registry = "wasi.dev"
 
 [[wit_packages.versions]]
 requirement = "=0.2.6"
@@ -36,7 +35,7 @@ via = ["sizumita:ferris"]
 
 [[wit_packages]]
 name = "wasi:io"
-registry = "wa.dev"
+registry = "wasi.dev"
 
 [[wit_packages.versions]]
 requirement = "=0.2.6"
@@ -48,7 +47,7 @@ via = ["sizumita:ferris"]
 
 [[wit_packages]]
 name = "wasi:random"
-registry = "wa.dev"
+registry = "wasi.dev"
 
 [[wit_packages.versions]]
 requirement = "=0.2.6"
