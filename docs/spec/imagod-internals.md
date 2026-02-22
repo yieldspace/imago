@@ -356,6 +356,7 @@ WASI 設定伝播（manager -> runner -> runtime）:
 - native plugin は `NativePlugin` trait と `NativePluginRegistryBuilder` で明示登録する。
   - `dispatch_from_env()` は built-in registry（`imago:admin`, `imago:node`）を使う。
   - `dispatch_from_env_with_registry(...)` は呼び出し側で構築した registry を使うため、built-in に追加 plugin を上乗せできる。
+  - `custom-daemons/nanokvm-imagod` はこの API で built-in + `imago:nanokvm` を登録し、manager が起動する `--runner` 子プロセスにも同じ registry を伝播させる。
   - descriptor（package/import/symbol/add_to_linker）は `imago-plugin-macros` が WIT から生成する。
   - plugin 実装本体は workspace 直下 `plugins/*` crate で管理する（初期実装は `plugins/imago-admin`）。
   - `kind=native` dependency が registry 未登録なら起動時に明示エラーで停止する。
@@ -364,6 +365,13 @@ WASI 設定伝播（manager -> runner -> runtime）:
   - 提供関数は `service-name` / `release-hash` / `runner-id` / `app-type` の 4 つ。
   - 値は `RunnerBootstrap`（`service_name` / `release_hash` / `runner_id` / `app_type`）から供給する。
   - 関数呼び出し前の capability 判定は既存 `capabilities.deps` を利用する。
+- native plugin `imago:nanokvm@0.1.0` は手書き `NativePlugin` 実装で登録する。
+  - import 名は `imago:nanokvm/capture@0.1.0` / `stream-config@0.1.0` / `device-status@0.1.0` / `runtime-control@0.1.0` / `hid-control@0.1.0` / `io-control@0.1.0`。
+  - `capture` は `local(auth)`（`http://127.0.0.1:80`）と `connect(endpoint, auth)`（`http://host[:port]`）を提供する。
+  - `session.capture-jpeg()` は `GET /api/stream/mjpeg` の先頭 frame を抽出し、`wasi:io/streams.input-stream` resource を返す。
+  - `device-status` の status 値は enum で返し、未知値は `unknown` へ丸めず `result::err` を返す。
+  - `stream-config` / `device-status` / `runtime-control` / `hid-control` / `io-control` は NanoKVM ローカル環境（`/kvmapp`, `/etc/kvm`, `/sys`, `/dev/hidg*`）を前提とし、非対応環境では `unsupported` で失敗する。
+  - `hid-control` は 4 モード enum を公開するが、`hid-and-touchpad` / `hid-and-absolute-mouse` は実装未確定のため `unsupported` を返す。
 - `Store::set_epoch_deadline(1)`
 - `Store::epoch_deadline_async_yield_and_update(1)`
 

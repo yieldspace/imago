@@ -172,3 +172,16 @@ epoch_tick_interval_ms = 50
 - `crates/imagod/src/main.rs` は `imagod::dispatch_from_env()` へ委譲する thin entrypoint に変更した。
 - `imagod` library は `register_builtin_native_plugins(...)` / `builtin_native_plugin_registry()` を公開し、built-in（`imago:admin`, `imago:node`）へ追加 native plugin を静的登録で上乗せできる。
 - manager 側の process model（`current_exe --runner`）は維持し、未登録 `kind=native` dependency の起動時エラー契約は変更しない。
+
+## 実装反映ノート（NanoKVM Custom Daemon + Native Plugin / 2026-02-21）
+
+- `custom-daemons/nanokvm-imagod` を追加し、built-in plugin（`imago:admin`, `imago:node`）に `imago:nanokvm` を静的登録する構成を追加した。
+- `nanokvm-imagod` は `imagod::dispatch_from_env_with_registry(...)` を使い、manager/runner の両モードで同一 registry を適用する。
+- `imago:nanokvm@0.1.0` は `capture` に加えて `stream-config` / `device-status` / `runtime-control` / `hid-control` / `io-control` を提供する。
+- `capture` は `local(auth)` と `connect(endpoint, auth)` の 2 経路を提供する。
+  - `local` は `http://127.0.0.1:80` を既定接続先として利用する。
+  - `connect` は `http://host[:port]` のみ受理する。
+- `session.capture-jpeg()` は NanoKVM の `GET /api/stream/mjpeg` から最初の JPEG frame を抽出し、`wasi:io/streams.input-stream` で返す。
+- 認証は `auth` variant（`none` / `token` / `login`）を提供し、`token` と `login` は `nano-kvm-token` cookie を利用する。
+- status 系 API（`device-status`）は enum を返し、未知値は丸めず `result::err` で失敗する。
+- `stream-config` / `device-status` / `runtime-control` / `hid-control` / `io-control` は NanoKVM ローカル環境（`/kvmapp`, `/etc/kvm`, `/sys`, `/dev/hidg*`）前提で、非対応環境では `unsupported` を返す。

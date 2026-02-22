@@ -1,0 +1,300 @@
+package imago:nanokvm@0.1.0;
+
+/// Capture interface for NanoKVM MJPEG still-image extraction.
+///
+/// `local` uses the default local endpoint (`http://127.0.0.1:80`).
+/// `connect` accepts an explicit endpoint (`http://host[:port]`).
+/// `session.capture-jpeg` returns the first JPEG frame as `wasi:io/streams.input-stream`.
+@since(version = 0.1.0)
+interface capture {
+    use wasi:io/streams@0.2.0.{input-stream};
+
+    /// Credentials used by `auth.login`.
+    @since(version = 0.1.0)
+    record login-credentials {
+        /// Login username.
+        username: string,
+        /// Login password.
+        password: string,
+    }
+
+    /// Authentication mode for capture sessions.
+    @since(version = 0.1.0)
+    variant auth {
+        /// No authentication.
+        none,
+        /// Use an existing token.
+        token(string),
+        /// Login and acquire a token.
+        login(login-credentials),
+    }
+
+    /// Capture session resource.
+    @since(version = 0.1.0)
+    resource session {
+        /// Capture one JPEG frame and return it as an input stream.
+        @since(version = 0.1.0)
+        capture-jpeg: func() -> result<input-stream, string>;
+        /// Close the capture session.
+        @since(version = 0.1.0)
+        disconnect: func();
+    }
+
+    /// Connect to a specific endpoint.
+    @since(version = 0.1.0)
+    connect: func(endpoint: string, auth: auth) -> result<session, string>;
+    /// Connect to the default local NanoKVM endpoint.
+    @since(version = 0.1.0)
+    local: func(auth: auth) -> result<session, string>;
+}
+
+/// Stream configuration interface backed by local NanoKVM files.
+@since(version = 0.1.0)
+interface stream-config {
+    /// Stream codec type.
+    @since(version = 0.1.0)
+    enum stream-type {
+        mjpeg,
+        h264,
+    }
+
+    /// Stream resolution preset.
+    @since(version = 0.1.0)
+    enum resolution {
+        r1080p,
+        r720p,
+        r600p,
+        r480p,
+    }
+
+    /// NanoKVM hardware version.
+    @since(version = 0.1.0)
+    enum hardware-version {
+        alpha,
+        beta,
+        pcie,
+    }
+
+    /// Current stream settings snapshot.
+    @since(version = 0.1.0)
+    record stream-settings {
+        stream-type: stream-type,
+        resolution: resolution,
+        width: u16,
+        height: u16,
+        fps: u8,
+        quality: u16,
+        now-fps: u8,
+        hardware-version: hardware-version,
+    }
+
+    /// Read current stream settings.
+    @since(version = 0.1.0)
+    get-settings: func() -> result<stream-settings, string>;
+    /// Set stream type.
+    @since(version = 0.1.0)
+    set-stream-type: func(stream-type: stream-type) -> result<_, string>;
+    /// Set resolution preset.
+    @since(version = 0.1.0)
+    set-resolution: func(resolution: resolution) -> result<_, string>;
+    /// Set FPS.
+    @since(version = 0.1.0)
+    set-fps: func(fps: u8) -> result<_, string>;
+    /// Set image quality.
+    @since(version = 0.1.0)
+    set-quality: func(quality: u16) -> result<_, string>;
+    /// Read `/etc/kvm/server.yaml` as plain text (read-only).
+    @since(version = 0.1.0)
+    get-server-config-yaml: func() -> result<string, string>;
+}
+
+/// Device status interface.
+///
+/// All status values are strict: unknown backend values should be returned as errors.
+@since(version = 0.1.0)
+interface device-status {
+    /// USB gadget mode.
+    @since(version = 0.1.0)
+    enum usb-mode {
+        normal,
+        hid-only,
+    }
+
+    /// HDMI status.
+    @since(version = 0.1.0)
+    enum hdmi-status {
+        normal,
+        abnormal,
+    }
+
+    /// Link status for network interfaces.
+    @since(version = 0.1.0)
+    enum link-status {
+        connected,
+        disconnected,
+    }
+
+    /// Generic enabled/disabled status.
+    @since(version = 0.1.0)
+    enum feature-status {
+        enabled,
+        disabled,
+    }
+
+    /// LED status.
+    @since(version = 0.1.0)
+    enum led-status {
+        on,
+        off,
+    }
+
+    /// Power/HDD LED states.
+    @since(version = 0.1.0)
+    record led-states {
+        power: led-status,
+        hdd: option<led-status>,
+    }
+
+    /// Get USB mode.
+    @since(version = 0.1.0)
+    get-usb-mode: func() -> result<usb-mode, string>;
+    /// Get HDMI status.
+    @since(version = 0.1.0)
+    get-hdmi-status: func() -> result<hdmi-status, string>;
+    /// Get Ethernet link status.
+    @since(version = 0.1.0)
+    get-ethernet-status: func() -> result<link-status, string>;
+    /// Get Wi-Fi link status.
+    @since(version = 0.1.0)
+    get-wifi-status: func() -> result<link-status, string>;
+    /// Check whether Wi-Fi is supported.
+    @since(version = 0.1.0)
+    get-wifi-supported: func() -> result<feature-status, string>;
+    /// Get LED states.
+    @since(version = 0.1.0)
+    get-led-states: func() -> result<led-states, string>;
+}
+
+/// Runtime control interface.
+@since(version = 0.1.0)
+interface runtime-control {
+    /// Toggle state used by runtime controls.
+    @since(version = 0.1.0)
+    enum toggle-state {
+        enabled,
+        disabled,
+    }
+
+    /// Read watchdog state.
+    @since(version = 0.1.0)
+    get-watchdog: func() -> result<toggle-state, string>;
+    /// Update watchdog state.
+    @since(version = 0.1.0)
+    set-watchdog: func(state: toggle-state) -> result<_, string>;
+    /// Read stop-ping state.
+    @since(version = 0.1.0)
+    get-stop-ping: func() -> result<toggle-state, string>;
+    /// Update stop-ping state.
+    @since(version = 0.1.0)
+    set-stop-ping: func(state: toggle-state) -> result<_, string>;
+}
+
+/// HID control interface.
+@since(version = 0.1.0)
+interface hid-control {
+    /// HID mode selector.
+    @since(version = 0.1.0)
+    enum hid-mode {
+        hid,
+        hid-and-mouse,
+        hid-and-touchpad,
+        hid-and-absolute-mouse,
+    }
+
+    /// Keyboard layout used by `paste`.
+    @since(version = 0.1.0)
+    enum keyboard-layout {
+        us,
+        de,
+    }
+
+    /// Keyboard report payload (`keycodes` max: 6).
+    @since(version = 0.1.0)
+    record keyboard-event {
+        modifiers: u8,
+        keycodes: list<u8>,
+    }
+
+    /// Relative mouse report payload.
+    @since(version = 0.1.0)
+    record relative-mouse-event {
+        buttons: u8,
+        dx: s16,
+        dy: s16,
+        wheel: s16,
+    }
+
+    /// Absolute mouse report payload.
+    @since(version = 0.1.0)
+    record absolute-mouse-event {
+        buttons: u8,
+        x: u16,
+        y: u16,
+        wheel: s16,
+    }
+
+    /// Touch report payload.
+    @since(version = 0.1.0)
+    record touch-event {
+        pressed: bool,
+        x: u16,
+        y: u16,
+    }
+
+    /// Get current HID mode.
+    @since(version = 0.1.0)
+    get-hid-mode: func() -> result<hid-mode, string>;
+    /// Set HID mode.
+    @since(version = 0.1.0)
+    set-hid-mode: func(mode: hid-mode) -> result<_, string>;
+    /// Send one keyboard report.
+    @since(version = 0.1.0)
+    send-keyboard: func(event: keyboard-event) -> result<_, string>;
+    /// Send one relative mouse report.
+    @since(version = 0.1.0)
+    send-mouse-relative: func(event: relative-mouse-event) -> result<_, string>;
+    /// Send one absolute mouse report.
+    @since(version = 0.1.0)
+    send-mouse-absolute: func(event: absolute-mouse-event) -> result<_, string>;
+    /// Send one touch report.
+    @since(version = 0.1.0)
+    send-touch: func(event: touch-event) -> result<_, string>;
+    /// Paste text using keyboard events.
+    @since(version = 0.1.0)
+    paste: func(content: string, layout: option<keyboard-layout>) -> result<u32, string>;
+    /// Reset HID gadget.
+    @since(version = 0.1.0)
+    reset-hid: func() -> result<_, string>;
+}
+
+/// GPIO-based power/reset controls.
+@since(version = 0.1.0)
+interface io-control {
+    /// Trigger a power pulse (`duration-ms` default: 800ms).
+    @since(version = 0.1.0)
+    power-pulse: func(duration-ms: option<u32>) -> result<_, string>;
+    /// Trigger a reset pulse (`duration-ms` default: 800ms).
+    @since(version = 0.1.0)
+    reset-pulse: func(duration-ms: option<u32>) -> result<_, string>;
+}
+
+/// Host world for NanoKVM native plugin imports.
+@since(version = 0.1.0)
+world host {
+    import capture;
+    import stream-config;
+    import device-status;
+    import runtime-control;
+    import hid-control;
+    import io-control;
+}
