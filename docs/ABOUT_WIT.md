@@ -46,6 +46,22 @@ privileged = false
 - wasm plugin の component 本体は `imago update` 時点で `.imago/deps/<dependency>/components/<sha256>.wasm` に保存します。
 - `imago build` / `imago deploy` は source ではなく `.imago/deps/` を参照し、キャッシュ不足時は `imago update` を要求して失敗します。
 
+## native plugin WIT の `wkg.lock` / publish 運用
+
+- `plugins/*` 配下で `wit/package.wit` を持つ native plugin は、同じディレクトリに `wkg.lock` を必ずコミットします。
+- WIT を変更したら plugin ディレクトリで `wkg wit build` を実行し、`wkg.lock` を更新します。
+  - 例: `(cd plugins/imago-admin && wkg wit build)`
+- CI (`ci-rust-checks`) は `./.github/scripts/verify_plugin_wkg_locks.sh` で `wkg.lock` の整合性を検証し、不整合を失敗として扱います。
+- native plugin WIT の publish は Git tag を `<plugin-dir>@<version>` 形式で push して行います。
+  - 例: `imago-admin@0.1.0`
+  - `<version>` は必ず `plugins/<plugin-dir>/wit/package.wit` の `package ...@<version>;` と一致している必要があります。
+- publish workflow は GHCR (`ghcr.io`) に `wkg oci push` で publish します。
+  - OCI reference: `ghcr.io/<owner>/<wit-package-oci>:<version>`
+  - `wit-package-oci` は WIT package 名の `:` を `/` に変換した文字列（例: `imago:node` -> `imago/node`）
+- 同一 OCI reference が既に存在する場合は publish を失敗させます（再公開不可）。
+- 認証は `github.actor` + `secrets.GITHUB_TOKEN` を `WKG_OCI_USERNAME` / `WKG_OCI_PASSWORD` に設定して実行します。
+- workflow 権限として `packages: write` が必須です。
+
 ## 組み込み native plugin（`imago:admin@0.1.0`）
 
 `imagod` には read-only の組み込み native plugin として `imago:admin@0.1.0` が含まれます。

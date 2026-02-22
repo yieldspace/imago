@@ -1,0 +1,178 @@
+name: publish-native-plugin-wit
+
+on:
+  push:
+    tags:
+      - "*@*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag in <plugin-dir>@<version> format"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-native-plugin-wit-${{ github.ref_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish native plugin WIT
+    runs-on: ubuntu-latest
+    env:
+      WKG_OCI_USERNAME: ${{ github.actor }}
+      WKG_OCI_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install wkg
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wkg
+
+      - name: Resolve publish target
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag='${{ inputs.tag }}'
+          else
+            tag='${{ github.ref_name }}'
+          fi
+
+          if [[ "$tag" != *@* ]]; then
+            echo "::error::tag must match <plugin-dir>@<version> (got: $tag)"
+            exit 1
+          fi
+
+          plugin_dir="${tag%@*}"
+          tag_version="${tag##*@}"
+          if [[ -z "$plugin_dir" || -z "$tag_version" ]]; then
+            echo "::error::tag must include both plugin dir and version (got: $tag)"
+            exit 1
+          fi
+
+          if [[ "$plugin_dir" == *"/"* || "$plugin_dir" == "." || "$plugin_dir" == ".." ]]; then
+            echo "::error::invalid plugin dir in tag: $plugin_dir"
+            exit 1
+          fi
+
+          plugin_path="plugins/${plugin_dir}"
+          wit_file="${plugin_path}/wit/package.wit"
+
+          if [[ ! -d "$plugin_path" ]]; then
+            echo "::error::plugin directory was not found: $plugin_path"
+            exit 1
+          fi
+          if [[ ! -f "$wit_file" ]]; then
+            echo "::error::WIT package file was not found: $wit_file"
+            exit 1
+          fi
+
+          package_decl="$(sed -nE 's/^[[:space:]]*package[[:space:]]+([^;]+);[[:space:]]*$/\1/p' "$wit_file" | head -n1)"
+          if [[ -z "$package_decl" ]]; then
+            echo "::error::failed to parse package declaration from $wit_file"
+            exit 1
+          fi
+          if [[ "$package_decl" != *@* ]]; then
+            echo "::error::WIT package declaration must include version: $package_decl"
+            exit 1
+          fi
+
+          wit_package="${package_decl%@*}"
+          wit_version="${package_decl##*@}"
+          if [[ "$tag_version" != "$wit_version" ]]; then
+            echo "::error::tag version '$tag_version' does not match WIT version '$wit_version' in $wit_file"
+            exit 1
+          fi
+
+          wit_package_oci="${wit_package//:/\/}"
+          reference="ghcr.io/${GITHUB_REPOSITORY_OWNER}/${wit_package_oci}:${tag_version}"
+          if [[ -z "${wit_package_oci}" ]]; then
+            echo "::error::failed to build OCI package name from WIT package: ${wit_package}"
+            exit 1
+          fi
+
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "plugin_dir=${plugin_dir}" >> "$GITHUB_OUTPUT"
+          echo "tag_version=${tag_version}" >> "$GITHUB_OUTPUT"
+          echo "wit_package=${wit_package}" >> "$GITHUB_OUTPUT"
+          echo "wit_package_oci=${wit_package_oci}" >> "$GITHUB_OUTPUT"
+          echo "reference=${reference}" >> "$GITHUB_OUTPUT"
+          echo "Resolved publish target: ${plugin_dir} -> ${reference}"
+
+      - name: Verify plugin wkg.lock
+        run: ./.github/scripts/verify_plugin_wkg_locks.sh "${{ steps.target.outputs.plugin_dir }}"
+
+      - name: Build WIT package artifact
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          plugin_dir='${{ steps.target.outputs.plugin_dir }}'
+          temp_root="$(mktemp -d)"
+          cp -R "plugins/${plugin_dir}/wit" "${temp_root}/wit"
+
+          (
+            cd "${temp_root}"
+            wkg wit build
+          )
+
+          wasm_file="$(find "${temp_root}" -maxdepth 1 -type f -name '*.wasm' | head -n1)"
+          if [[ -z "${wasm_file}" ]]; then
+            echo "::error::wkg wit build did not produce a wasm package"
+            exit 1
+          fi
+
+          echo "wasm_file=${wasm_file}" >> "$GITHUB_OUTPUT"
+
+      - name: Check duplicate GHCR tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          reference='${{ steps.target.outputs.reference }}'
+          pull_file="$(mktemp)"
+          pull_log="$(mktemp)"
+
+          set +e
+          wkg oci pull "${reference}" -o "${pull_file}" >"${pull_log}" 2>&1
+          rc=$?
+          set -e
+
+          if [[ $rc -eq 0 ]]; then
+            echo "::error::OCI reference already exists: ${reference}"
+            exit 1
+          fi
+
+          if grep -Eiq "manifest unknown|name unknown|not found|404" "${pull_log}"; then
+            echo "No existing OCI reference found: ${reference}"
+            exit 0
+          fi
+
+          echo "::error::failed to check existing OCI reference: ${reference}"
+          sed -n '1,120p' "${pull_log}"
+          exit 1
+
+      - name: Publish WIT package to GHCR
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          reference='${{ steps.target.outputs.reference }}'
+          wasm_file='${{ steps.build.outputs.wasm_file }}'
+          if [[ ! -f "${wasm_file}" ]]; then
+            echo "::error::built wasm file was not found: ${wasm_file}"
+            exit 1
+          fi
+
+          wkg oci push "${reference}" "${wasm_file}"
+          echo "Published ${reference}"
