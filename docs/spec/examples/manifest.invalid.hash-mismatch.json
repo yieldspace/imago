@@ -11,8 +11,6 @@
   "target": {
     "host": "n1"
   },
-  "vars": {},
-  "secrets": {},
   "assets": [],
   "dependencies": [],
   "hash": {

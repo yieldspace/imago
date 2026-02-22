@@ -58,10 +58,6 @@ struct Manifest {
     #[serde(default)]
     wasi: Option<ManifestWasiConfig>,
     #[serde(default)]
-    vars: BTreeMap<String, String>,
-    #[serde(default)]
-    secrets: BTreeMap<String, String>,
-    #[serde(default)]
     assets: Vec<ManifestAsset>,
     #[serde(default)]
     bindings: Vec<ManifestBinding>,
@@ -1157,8 +1153,6 @@ mod tests {
             http: None,
             socket: None,
             wasi: None,
-            vars: BTreeMap::new(),
-            secrets: BTreeMap::new(),
             assets: Vec::<ManifestAsset>::new(),
             bindings: Vec::new(),
             dependencies: Vec::<PluginDependency>::new(),
@@ -1393,10 +1387,6 @@ mod tests {
         fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
 
         let mut manifest = valid_manifest();
-        manifest.vars.insert("VAR_A".to_string(), "1".to_string());
-        manifest
-            .secrets
-            .insert("SECRET_B".to_string(), "2".to_string());
         manifest.assets = vec![
             ManifestAsset {
                 path: "assets/rw/input.txt".to_string(),
@@ -1407,7 +1397,11 @@ mod tests {
         ];
         manifest.wasi = Some(ManifestWasiConfig {
             args: vec!["--serve".to_string()],
-            env: BTreeMap::from([("WASI_ONLY".to_string(), "1".to_string())]),
+            env: BTreeMap::from([
+                ("VAR_A".to_string(), "1".to_string()),
+                ("SECRET_B".to_string(), "2".to_string()),
+                ("WASI_ONLY".to_string(), "1".to_string()),
+            ]),
             mounts: vec![ManifestWasiMount {
                 asset_dir: "assets/rw".to_string(),
                 guest_path: "/guest/rw".to_string(),
@@ -1480,30 +1474,6 @@ mod tests {
             .expect_err("duplicate guest path must be rejected");
         assert_eq!(err.code, ErrorCode::BadManifest);
         assert!(err.message.contains("guest_path"));
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn build_launch_rejects_wasi_env_duplicate_with_vars_or_secrets() {
-        let root = temp_dir_path("orchestrator-wasi-env-duplicate");
-        fs::create_dir_all(&root).expect("release dir should exist");
-        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
-
-        let mut manifest = valid_manifest();
-        manifest.vars.insert("DUP".to_string(), "1".to_string());
-        manifest.wasi = Some(ManifestWasiConfig {
-            args: Vec::new(),
-            env: BTreeMap::from([("DUP".to_string(), "2".to_string())]),
-            mounts: Vec::new(),
-            read_only_mounts: Vec::new(),
-        });
-
-        let err = build_launch_from_release(&root, "release-a", &root, &manifest)
-            .await
-            .expect_err("duplicate env key must be rejected");
-        assert_eq!(err.code, ErrorCode::BadManifest);
-        assert!(err.message.contains("duplicate key"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1773,8 +1743,6 @@ mod tests {
   "http": {
     "port": 18080
   },
-  "vars": {},
-  "secrets": {},
   "assets": [],
   "bindings": [],
   "hash": {
@@ -1821,8 +1789,6 @@ mod tests {
   "name": "svc-a",
   "main": "component.wasm",
   "type": "worker",
-  "vars": {},
-  "secrets": {},
   "assets": [],
   "bindings": [],
   "hash": {

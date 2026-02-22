@@ -11,6 +11,7 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
+use dotenvy::from_path_iter;
 use imago_lockfile::BindingWitExpectation;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -89,8 +90,6 @@ struct Manifest {
     #[serde(rename = "type")]
     app_type: String,
     target: BTreeMap<String, String>,
-    vars: BTreeMap<String, String>,
-    secrets: BTreeMap<String, String>,
     assets: Vec<ManifestAsset>,
     #[serde(default)]
     bindings: Vec<ManifestBinding>,
@@ -442,7 +441,6 @@ fn build_project_with_target_override_inner(
         ui::command_stage("build", "load-config", "loading imago.toml");
     }
     let root = load_resolved_toml(project_root)?;
-    let secrets = parse_string_table(root.get("secrets"), "secrets")?;
 
     let command = parse_build_command(&root)?;
 
@@ -458,7 +456,6 @@ fn build_project_with_target_override_inner(
     let socket = parse_socket_section(&root, &app_type)?;
     let restart_policy = parse_restart_policy(&root)?;
 
-    let vars = parse_string_table(root.get("vars"), "vars")?;
     let project_bindings = parse_project_binding_sources(root.get("bindings"))?;
     let project_dependencies = parse_project_dependencies(root.get("dependencies"))?;
     if !project_dependencies.is_empty() {
@@ -500,15 +497,20 @@ fn build_project_with_target_override_inner(
         .to_os_string();
 
     let assets = parse_assets(root.get("assets"), project_root)?;
-    let wasi = parse_wasi_section(&root, &assets, &vars, &secrets)?;
+    let mut wasi = parse_wasi_section(&root, &assets)?;
+    let dotenv_wasi_env = load_dotenv_wasi_env(project_root)?;
+    if !dotenv_wasi_env.is_empty() {
+        let resolved = wasi.get_or_insert_with(ManifestWasiConfig::default);
+        for (key, value) in dotenv_wasi_env {
+            resolved.env.insert(key, value);
+        }
+    }
 
     let mut manifest = Manifest {
         name,
         main: normalized_path_to_string(Path::new(&manifest_main)),
         app_type,
         target: target.as_manifest_target_map(),
-        vars,
-        secrets,
         assets: assets
             .iter()
             .map(|entry| entry.manifest_asset.clone())
@@ -1774,8 +1776,6 @@ fn parse_assets(
 fn parse_wasi_section(
     root: &toml::Table,
     assets: &[AssetSource],
-    vars: &BTreeMap<String, String>,
-    secrets: &BTreeMap<String, String>,
 ) -> anyhow::Result<Option<ManifestWasiConfig>> {
     let Some(value) = root.get("wasi") else {
         return Ok(None);
@@ -1791,13 +1791,6 @@ fn parse_wasi_section(
 
     let args = parse_wasi_args(table.get("args"))?;
     let env = parse_string_table(table.get("env"), "wasi.env")?;
-    for key in env.keys() {
-        if vars.contains_key(key) || secrets.contains_key(key) {
-            return Err(anyhow!(
-                "wasi.env.{key} duplicates key defined in vars or secrets"
-            ));
-        }
-    }
 
     let allowed_asset_dirs = collect_allowed_wasi_asset_dirs(assets);
     let mounts = parse_wasi_mount_entries(table.get("mounts"), "wasi.mounts", &allowed_asset_dirs)?;
@@ -1841,6 +1834,22 @@ fn parse_wasi_args(value: Option<&TomlValue>) -> anyhow::Result<Vec<String>> {
         args.push(arg);
     }
     Ok(args)
+}
+
+fn load_dotenv_wasi_env(project_root: &Path) -> anyhow::Result<BTreeMap<String, String>> {
+    let path = project_root.join(".env");
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let iter =
+        from_path_iter(&path).with_context(|| format!("failed to parse {}", path.display()))?;
+
+    let mut env = BTreeMap::new();
+    for entry in iter {
+        let (key, value) = entry.with_context(|| format!("failed to parse {}", path.display()))?;
+        env.insert(key, value);
+    }
+    Ok(env)
 }
 
 fn collect_allowed_wasi_asset_dirs(assets: &[AssetSource]) -> BTreeSet<PathBuf> {
@@ -2229,6 +2238,11 @@ mod tests {
         serde_json::from_slice(&bytes).expect("manifest json should parse")
     }
 
+    fn read_manifest_json(root: &Path, relative_path: &Path) -> serde_json::Value {
+        let bytes = fs::read(root.join(relative_path)).expect("manifest should exist");
+        serde_json::from_slice(&bytes).expect("manifest json value should parse")
+    }
+
     fn run_update(root: &Path) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -2311,8 +2325,8 @@ mod tests {
     }
 
     #[test]
-    fn build_generates_default_manifest_and_reads_top_level_secrets() {
-        let root = new_temp_dir("default-manifest-and-secrets");
+    fn build_generates_default_manifest_and_ignores_legacy_vars_and_secrets() {
+        let root = new_temp_dir("default-manifest-legacy-env");
         write_imago_toml(
             &root,
             r#"
@@ -2322,6 +2336,9 @@ type = "http"
 
 [http]
 port = 18080
+
+[vars]
+VISIBLE = "1"
 
 [secrets]
 SECRET_TOKEN = "abc"
@@ -2337,16 +2354,18 @@ remote = "127.0.0.1:4443"
         assert!(root.join("build/manifest.json").exists());
 
         let manifest = read_manifest(&root, &output.manifest_path);
+        let manifest_json = read_manifest_json(&root, &output.manifest_path);
+        let object = manifest_json
+            .as_object()
+            .expect("manifest json root should be object");
         assert_eq!(manifest.app_type, "http");
         assert_eq!(manifest.http.as_ref().map(|v| v.port), Some(18080));
         assert_eq!(
             manifest.http.as_ref().map(|v| v.max_body_bytes),
             Some(DEFAULT_HTTP_MAX_BODY_BYTES)
         );
-        assert_eq!(
-            manifest.secrets.get("SECRET_TOKEN"),
-            Some(&"abc".to_string())
-        );
+        assert!(!object.contains_key("vars"));
+        assert!(!object.contains_key("secrets"));
         let hashed_main = assert_hashed_main_path(&manifest, "svc");
         assert!(root.join(&hashed_main).exists());
 
@@ -2744,9 +2763,13 @@ C = "3"
 
         let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
+        let manifest_json = read_manifest_json(&root, &output.manifest_path);
+        let object = manifest_json
+            .as_object()
+            .expect("manifest json root should be object");
         assert_eq!(manifest.app_type, "cli");
-        assert_eq!(manifest.vars.get("A"), Some(&"1".to_string()));
-        assert_eq!(manifest.vars.len(), 1);
+        assert!(!object.contains_key("vars"));
+        assert!(!object.contains_key("secrets"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3363,7 +3386,7 @@ remote = "127.0.0.1:4443"
     }
 
     #[test]
-    fn build_rejects_wasi_env_duplicate_with_vars() {
+    fn build_ignores_legacy_vars_and_keeps_wasi_env() {
         let root = new_temp_dir("wasi-env-duplicate");
         write_imago_toml(
             &root,
@@ -3384,11 +3407,125 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let err = build_project("default", &root).expect_err("duplicate env key must be rejected");
-        assert!(
-            err.to_string()
-                .contains("duplicates key defined in vars or secrets")
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        let wasi = manifest.wasi.expect("wasi section should exist");
+        assert_eq!(wasi.env.get("SHARED"), Some(&"b".to_string()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_merges_dotenv_into_wasi_env_with_dotenv_precedence() {
+        let root = new_temp_dir("dotenv-merge-wasi-env");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[wasi.env]
+FROM_TOML = "toml"
+SHARED = "toml"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
         );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join(".env"),
+            b"SHARED=dotenv\nFROM_DOTENV=dotenv-value\nQUOTED=\"hello world\"\n",
+        );
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        let wasi = manifest.wasi.expect("wasi section should exist");
+
+        assert_eq!(wasi.env.get("FROM_TOML"), Some(&"toml".to_string()));
+        assert_eq!(wasi.env.get("SHARED"), Some(&"dotenv".to_string()));
+        assert_eq!(
+            wasi.env.get("FROM_DOTENV"),
+            Some(&"dotenv-value".to_string())
+        );
+        assert_eq!(wasi.env.get("QUOTED"), Some(&"hello world".to_string()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_creates_wasi_env_from_dotenv_without_wasi_section() {
+        let root = new_temp_dir("dotenv-only-wasi-env");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(&root.join(".env"), b"DOTENV_ONLY=1\n");
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        let wasi = manifest.wasi.expect("wasi section should exist");
+
+        assert_eq!(wasi.env.get("DOTENV_ONLY"), Some(&"1".to_string()));
+        assert!(wasi.args.is_empty());
+        assert!(wasi.mounts.is_empty());
+        assert!(wasi.read_only_mounts.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_malformed_dotenv() {
+        let root = new_temp_dir("dotenv-invalid");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(&root.join(".env"), b"INVALID_LINE\n");
+
+        let err = build_project("default", &root).expect_err("build should fail");
+        assert!(err.to_string().contains("failed to parse"));
+        assert!(err.to_string().contains(".env"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_succeeds_when_dotenv_is_missing() {
+        let root = new_temp_dir("dotenv-missing");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        assert!(manifest.wasi.is_none());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -4565,7 +4702,7 @@ known_hosts = "certs/known_hosts"
     }
 
     #[test]
-    fn secrets_are_loaded_from_toml_table() {
+    fn build_ignores_legacy_secrets_table() {
         let root = new_temp_dir("secrets-source");
         write_imago_toml(
             &root,
@@ -4584,10 +4721,11 @@ remote = "127.0.0.1:4443"
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
         let output = build_project("default", &root).expect("build should succeed");
-        let manifest = read_manifest(&root, &output.manifest_path);
-
-        assert_eq!(manifest.secrets.get("FROM_TOML"), Some(&"nope".to_string()));
-        assert_eq!(manifest.secrets.len(), 1);
+        let manifest_json = read_manifest_json(&root, &output.manifest_path);
+        let object = manifest_json
+            .as_object()
+            .expect("manifest json root should be object");
+        assert!(!object.contains_key("secrets"));
 
         let _ = fs::remove_dir_all(root);
     }

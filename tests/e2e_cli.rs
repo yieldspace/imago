@@ -2,6 +2,8 @@
 mod e2e_helper;
 
 use e2e_helper::{AppKind, CmdOutput, Scenario, TestResult, WasmArtifact};
+use std::thread;
+use std::time::Duration;
 
 #[test]
 #[ignore]
@@ -85,6 +87,89 @@ fn e2e_cli_unknown_target_fails_via_run_service_cli() -> TestResult {
     assert_unknown_target_failure("stop unknown target", &stop_unknown)?;
 
     Ok(())
+}
+
+#[test]
+#[ignore]
+fn e2e_cli_reads_dotenv_and_overrides_wasi_env() -> TestResult {
+    let mut scenario = Scenario::new("e2e-clid")?;
+    let _default = scenario.cluster().add_node("default")?;
+    scenario.cluster().start_all()?;
+
+    let service = scenario.add_service(
+        "e2e-cli-dotenv-svc",
+        AppKind::Cli,
+        "default",
+        WasmArtifact::CliBase,
+    )?;
+
+    service.append_imago_toml(
+        &scenario,
+        r#"
+[wasi.env]
+IMAGO_E2E_ENV_OVERRIDE = "from-wasi"
+IMAGO_E2E_ENV_TOML_ONLY = "from-wasi-only"
+"#,
+    )?;
+    service.write_dotenv(
+        &scenario,
+        "IMAGO_E2E_ENV_OVERRIDE=from-dotenv\nIMAGO_E2E_ENV_ONLY=from-dotenv-only\n",
+    )?;
+
+    let deploy = service.deploy(&scenario, "default")?;
+    assert_command_completed("dotenv deploy", &deploy)?;
+
+    let logs = wait_logs_with_markers(
+        &service,
+        &scenario,
+        "default",
+        200,
+        &[
+            "IMAGO_E2E_ENV_OVERRIDE=from-dotenv",
+            "IMAGO_E2E_ENV_ONLY=from-dotenv-only",
+            "IMAGO_E2E_ENV_TOML_ONLY=from-wasi-only",
+        ],
+        40,
+    )?;
+
+    assert!(
+        !logs.contains("IMAGO_E2E_ENV_OVERRIDE=from-wasi"),
+        "override key must not remain wasi value: {logs}"
+    );
+
+    if let Err(err) = service.stop(&scenario, "default") {
+        if !err.to_string().contains("is not running") {
+            return Err(err);
+        }
+    }
+
+    Ok(())
+}
+
+fn wait_logs_with_markers(
+    service: &e2e_helper::ServiceHandle,
+    scenario: &Scenario,
+    target: &str,
+    tail: u32,
+    markers: &[&str],
+    retries: usize,
+) -> TestResult<String> {
+    let mut last_logs = String::new();
+
+    for _ in 0..retries {
+        let output = service.logs(scenario, target, tail)?;
+        let logs = output.log_messages().join("\n");
+        if markers.iter().all(|marker| logs.contains(marker)) {
+            return Ok(logs);
+        }
+        last_logs = logs;
+        thread::sleep(Duration::from_secs(1));
+    }
+
+    Err(anyhow::anyhow!(
+        "timed out waiting for all markers [{}], last logs: {last_logs}",
+        markers.join(", ")
+    ))
 }
 
 fn assert_command_completed(label: &str, output: &CmdOutput) -> TestResult {

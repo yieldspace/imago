@@ -32,20 +32,8 @@ pub(super) async fn build_launch_from_release(
         )));
     }
 
-    let wasi = resolve_wasi_config(release_dir, manifest, manifest_validator).await?;
-
-    let mut envs: BTreeMap<String, String> = manifest.vars.clone();
-    for (k, v) in &manifest.secrets {
-        envs.insert(k.clone(), v.clone());
-    }
-    for (k, v) in &wasi.env {
-        if envs.contains_key(k) {
-            return Err(super::map_bad_manifest(format!(
-                "manifest.wasi.env contains duplicate key with vars/secrets: {k}"
-            )));
-        }
-        envs.insert(k.clone(), v.clone());
-    }
+    let ResolvedWasiConfig { args, env, mounts } =
+        resolve_wasi_config(release_dir, manifest, manifest_validator).await?;
 
     let bindings = manifest_validator.validate_bindings(&manifest.bindings)?;
     let (http_port, http_max_body_bytes) = manifest_validator.validate_http(manifest)?;
@@ -62,9 +50,9 @@ pub(super) async fn build_launch_from_release(
         http_max_body_bytes,
         socket,
         component_path,
-        args: wasi.args,
-        envs,
-        wasi_mounts: wasi.mounts,
+        args,
+        envs: env,
+        wasi_mounts: mounts,
         bindings,
         plugin_dependencies,
         capabilities: manifest_validator.normalize_capability_policy(&manifest.capabilities),

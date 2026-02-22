@@ -1,8 +1,6 @@
 {
   "name": "svc",
   "main": "app.wasm",
-  "vars": {},
-  "secrets": {},
   "assets": [],
   "dependencies": [],
   "hash": {

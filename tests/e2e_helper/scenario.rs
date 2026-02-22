@@ -7,6 +7,7 @@ use super::wasm_assets::{WasmArtifact, wasm_file_name, wasm_path};
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::{Builder as TempDirBuilder, TempDir};
@@ -46,6 +47,14 @@ impl ServiceHandle {
 
     pub fn logs(&self, scenario: &Scenario, target: &str, tail: u32) -> TestResult<CmdOutput> {
         scenario.logs(&self.service_name, target, tail)
+    }
+
+    pub fn append_imago_toml(&self, scenario: &Scenario, body: &str) -> TestResult<()> {
+        scenario.append_service_imago_toml(&self.service_name, body)
+    }
+
+    pub fn write_dotenv(&self, scenario: &Scenario, body: &str) -> TestResult<()> {
+        scenario.write_service_dotenv(&self.service_name, body)
     }
 }
 
@@ -234,6 +243,26 @@ impl Scenario {
             &default_target,
             &service.targets,
         )?;
+        Ok(())
+    }
+
+    fn append_service_imago_toml(&self, service_name: &str, body: &str) -> TestResult<()> {
+        let service = self.service(service_name)?;
+        let imago_toml_path = service.project.project_dir.join("imago.toml");
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&imago_toml_path)
+            .with_context(|| format!("failed to open {}", imago_toml_path.display()))?;
+        file.write_all(body.as_bytes())
+            .with_context(|| format!("failed to append {}", imago_toml_path.display()))?;
+        Ok(())
+    }
+
+    fn write_service_dotenv(&self, service_name: &str, body: &str) -> TestResult<()> {
+        let service = self.service(service_name)?;
+        let dotenv_path = service.project.project_dir.join(".env");
+        fs::write(&dotenv_path, body)
+            .with_context(|| format!("failed to write {}", dotenv_path.display()))?;
         Ok(())
     }
 

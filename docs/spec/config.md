@@ -35,19 +35,25 @@
 - `wasi`
 - `limits`
 - `restart`
-- `vars`
 - `assets`
 - `dependencies`
 - `bindings`
 
 <a id="env-override"></a>
-## `--env` 廃止規則
+## `--env` 廃止と `.env` ルール
 
 [BREAKING] `--env` は廃止した。現行実装では次を行わない。
 
 - `[env.<name>]` のマージ
 - `.env.<name>` の読み込み
 - env 名バリデーション
+
+`.env`（`project_root/.env`）は `imago build` 時に読み込み、`manifest.wasi.env` へ統合する。
+
+- 競合時の優先順位は `.env` > `[wasi.env]`。
+- `.env` が存在しない場合は no-op。
+- `.env` の構文不正は build エラー。
+- legacy `[vars]` / `[secrets]` は受理するが無視する（warning/error なし）。
 
 ## build コマンド設定
 
@@ -56,7 +62,7 @@
   - string: `sh -c "<command>"` として実行
   - array: `["cmd", "arg1", ...]` として直接実行
 - `build.command` 未指定時はビルドコマンドを実行せず、`main` の存在検証のみ行う。
-- `--env` および `.env.<name>` 注入は廃止した（network RPC 導入時の breaking 変更）。
+- `.env` の値は `build.command` 実行プロセスには注入しない（`manifest.wasi.env` 生成にのみ使用する）。
 
 ## `[[bindings]]`（service 間呼び出し許可）
 
@@ -127,6 +133,8 @@
 - `[wasi]` は任意指定とし、`imago build` は `manifest.wasi` に正規化して出力する。
 - `wasi.args` は string 配列を受理する。
 - `wasi.env` は `key -> value` がともに string の table を受理する。
+- `.env` の `key=value` は `manifest.wasi.env` へマージし、同名キーは `.env` で上書きする。
+- `[wasi]` 未指定でも `.env` が非空なら `manifest.wasi.env` を出力する。
 - `[[wasi.mounts]]` は read/write mount を定義する。
 - `[[wasi.read_only_mounts]]` は read-only mount を定義する。
 - `wasi.mounts[]` / `wasi.read_only_mounts[]` の各要素は `asset_dir` と `guest_path` を必須とする。
@@ -194,6 +202,7 @@
 - `type!="socket"` かつ `[socket]` 指定はエラー。
 - `wasi.args` が string 配列以外ならエラー。
 - `wasi.env` が string 値の table 以外ならエラー。
+- `.env` が dotenv 記法として解釈できない場合はエラー。
 - `wasi.mounts[]` / `wasi.read_only_mounts[]` の要素に `asset_dir` または `guest_path` 欠落がある場合はエラー。
 - `wasi.mounts[]` / `wasi.read_only_mounts[]` の `asset_dir` が `assets` 由来ディレクトリ以外、またはファイル単位の場合はエラー。
 - `wasi.mounts[]` / `wasi.read_only_mounts[]` の `guest_path` が絶対パスでない場合はエラー。
@@ -225,7 +234,10 @@
 ## 実装反映ノート
 
 - `build.command` は string / array の両形式を受理する。
-- `build.command` は必須キー (`name`/`main`/`type`/`target`) と `vars`/`dependencies` の検証完了後に実行する。不正設定時は実行しない。
+- `build.command` は必須キー (`name`/`main`/`type`/`target`) と `dependencies` の検証完了後に実行する。不正設定時は実行しない。
+- `imago build` は `project_root/.env` を dotenv 記法で読み込み、`manifest.wasi.env` へマージする（`.env` 優先）。
+- `imago build` は legacy `[vars]` / `[secrets]` を受理するが、manifest には出力しない。
+- `.env` の値は `build.command` 実行環境には注入しない。
 - `imago update` は `warg://` / `file://` を受理し、依存WIT/Componentを `.imago/deps/` に保存した上で `wit/deps/` を再生成する。
 - `imago update` の dependency path サニタイズは wkg 準拠 (`:` / `@` を `-`) を使い、`wit/deps` と `.imago/warg` の両方で同じ命名規則を使う。
 - `imago update` は `dependencies[].wit.source=file://...` が `wit/deps` 配下を指す場合と、dependency 同士で `wit/deps` 出力先が衝突する場合に、`wit/deps` を削除する前に失敗させる。
@@ -348,6 +360,12 @@
 - `imago compose update` / `imago compose build` / `imago compose logs` を追加した。
 - `imago-compose.toml` は `[target.<name>]` を受理し、`compose build/deploy/logs` は service `imago.toml` の `target` ではなく compose 側 target を優先して解決する。
 - 単体コマンド (`imago build/deploy/logs`) は従来どおり service `imago.toml` の `target.<name>` を必須とする（compose target への自動フォールバックなし）。
+
+## 実装反映ノート（env 統合 / 2026-02-22）
+
+- [BREAKING] `manifest` から `vars` / `secrets` を削除し、環境変数の出力先を `manifest.wasi.env` に統一した。
+- `imago build` は `project_root/.env` を `manifest.wasi.env` に統合し、同名キーは `.env` を優先する。
+- `imago.toml` の `[vars]` / `[secrets]` は受理するが無視する。
 
 ## 実装反映ノート（Retained logs 契約 / 2026-02-20）
 
