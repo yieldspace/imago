@@ -116,7 +116,10 @@ impl DependencyCacheEntry {
             parse_prefixed_sha256(&transitive.digest, "transitive_packages[].digest")?;
             if dependency.wit.source.starts_with("warg://")
                 && transitive.version.is_some()
-                && transitive.source.as_deref().is_some_and(|source| source.starts_with("warg://"))
+                && transitive
+                    .source
+                    .as_deref()
+                    .is_some_and(|source| source.starts_with("warg://"))
             {
                 let expected_registry =
                     plugin_sources::resolve_warg_registry_for_package_with_fallback(
@@ -316,13 +319,13 @@ pub(crate) fn hydrate_project_wit_deps(
         entry
             .validate_for_dependency(dependency, namespace_registries)
             .map_err(|err| {
-            anyhow!(
-                "dependency '{}' cache is stale under {}; {}: {err}",
-                dependency.name,
-                CACHE_ROOT_REL,
-                MISSING_CACHE_HINT
-            )
-        })?;
+                anyhow!(
+                    "dependency '{}' cache is stale under {}; {}: {err}",
+                    dependency.name,
+                    CACHE_ROOT_REL,
+                    MISSING_CACHE_HINT
+                )
+            })?;
 
         if !entry_files_are_complete(project_root, &entry)? {
             return Err(anyhow!(
@@ -372,13 +375,13 @@ pub(crate) fn verify_project_dependency_cache(
         entry
             .validate_for_dependency(dependency, namespace_registries)
             .map_err(|err| {
-            anyhow!(
-                "dependency '{}' cache is stale under {}; {}: {err}",
-                dependency.name,
-                CACHE_ROOT_REL,
-                MISSING_CACHE_HINT
-            )
-        })?;
+                anyhow!(
+                    "dependency '{}' cache is stale under {}; {}: {err}",
+                    dependency.name,
+                    CACHE_ROOT_REL,
+                    MISSING_CACHE_HINT
+                )
+            })?;
         if !entry_files_are_complete(project_root, &entry)? {
             return Err(anyhow!(
                 "dependency '{}' cache is stale under {}; {}",
