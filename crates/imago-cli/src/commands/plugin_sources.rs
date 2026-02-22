@@ -825,6 +825,17 @@ struct MaterializeRemoteWitBytesRequest<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct MaterializePlainWitTextRequest<'a> {
+    protocol: RemoteSourceProtocol,
+    package: &'a str,
+    version: &'a str,
+    registry: &'a str,
+    expected_package: Option<&'a str>,
+    expected_version: Option<&'a str>,
+    source_desc: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct WitPackageResolveOptions<'a> {
     expected_package: Option<&'a str>,
     expected_version: Option<&'a str>,
@@ -899,13 +910,15 @@ fn materialize_remote_wit_bytes(
             materialize_plain_wit_text(
                 destination_dir,
                 bytes,
-                request.protocol,
-                request.package,
-                request.version,
-                request.registry,
-                request.expected_package,
-                Some(request.version),
-                &source_desc,
+                MaterializePlainWitTextRequest {
+                    protocol: request.protocol,
+                    package: request.package,
+                    version: request.version,
+                    registry: request.registry,
+                    expected_package: request.expected_package,
+                    expected_version: Some(request.version),
+                    source_desc: &source_desc,
+                },
             )?;
             Ok(MaterializedWitSource::default())
         }
@@ -915,52 +928,49 @@ fn materialize_remote_wit_bytes(
 fn materialize_plain_wit_text(
     destination_dir: &Path,
     bytes: &[u8],
-    protocol: RemoteSourceProtocol,
-    package: &str,
-    version: &str,
-    registry: &str,
-    expected_package: Option<&str>,
-    expected_version: Option<&str>,
-    source_desc: &str,
+    request: MaterializePlainWitTextRequest<'_>,
 ) -> anyhow::Result<()> {
-    let scheme = match protocol {
+    let scheme = match request.protocol {
         RemoteSourceProtocol::Warg => "warg",
         RemoteSourceProtocol::Oci => "oci",
     };
     let text = String::from_utf8(bytes.to_vec()).with_context(|| {
         format!(
             "failed to decode wit source for package '{}@{}' from registry '{}': payload is not UTF-8",
-            package, version, registry
+            request.package, request.version, request.registry
         )
     })?;
     let unresolved = UnresolvedPackageGroup::parse("dependency.wit", &text).with_context(|| {
         format!(
             "failed to parse plain WIT source for package '{}@{}' from registry '{}'",
-            package, version, registry
+            request.package, request.version, request.registry
         )
     })?;
     let actual_package = format!(
         "{}:{}",
         unresolved.main.name.namespace, unresolved.main.name.name
     );
-    if let Some(expected_package) = expected_package
+    if let Some(expected_package) = request.expected_package
         && actual_package != expected_package
     {
         return Err(anyhow!(
-            "top-level WIT package mismatch for {source_desc}: expected package '{}', actual '{}'",
+            "top-level WIT package mismatch for {}: expected package '{}', actual '{}'",
+            request.source_desc,
             expected_package,
             actual_package
         ));
     }
-    if let (Some(expected_version), Some(actual_version)) =
-        (expected_version, unresolved.main.name.version.as_ref())
-    {
+    if let (Some(expected_version), Some(actual_version)) = (
+        request.expected_version,
+        unresolved.main.name.version.as_ref(),
+    ) {
         let actual_version = actual_version.to_string();
         if actual_version != expected_version {
             return Err(anyhow!(
-                "top-level WIT package '{}:{}' version mismatch for {source_desc}: expected '{}', actual '{}'",
+                "top-level WIT package '{}:{}' version mismatch for {}: expected '{}', actual '{}'",
                 unresolved.main.name.namespace,
                 unresolved.main.name.name,
+                request.source_desc,
                 expected_version,
                 actual_version
             ));
@@ -975,8 +985,8 @@ fn materialize_plain_wit_text(
         return Err(anyhow!(
             "{} source '{}@{}' contains foreign imports in plain .wit form; publish/use a WIT package so `imago update` can resolve transitive dependencies",
             scheme,
-            package,
-            version
+            request.package,
+            request.version
         ));
     }
     fs::write(destination_dir.join("dependency.wit"), text).with_context(|| {
