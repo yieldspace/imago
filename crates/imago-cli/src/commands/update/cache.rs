@@ -8,8 +8,9 @@ pub(crate) async fn load_or_refresh_cache_entry<R: DependencyResolver>(
     resolver: &R,
     project_root: &Path,
     dependency: &build::ProjectDependency,
+    namespace_registries: Option<&crate::commands::plugin_sources::NamespaceRegistries>,
 ) -> anyhow::Result<DependencyCacheEntry> {
     resolver
-        .load_or_refresh_cache_entry(project_root, dependency)
+        .load_or_refresh_cache_entry(project_root, dependency, namespace_registries)
         .await
 }

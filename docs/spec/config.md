@@ -38,6 +38,7 @@
 - `assets`
 - `dependencies`
 - `bindings`
+- `namespace_registries`
 
 <a id="env-override"></a>
 ## `--env` 廃止と `.env` ルール
@@ -64,12 +65,22 @@
 - `build.command` 未指定時はビルドコマンドを実行せず、`main` の存在検証のみ行う。
 - `.env` の値は `build.command` 実行プロセスには注入しない（`manifest.wasi.env` 生成にのみ使用する）。
 
+## `[namespace_registries]`（WARG namespace ごとの registry 上書き）
+
+- top-level の `[namespace_registries]` は `namespace = "registry-host"` の table を受理する。
+- この設定は `warg://` source の `registry` 未指定時のみ適用する。
+- WARG の registry 解決順は次の通り。
+  - 明示 `*.registry`
+  - `[namespace_registries]`
+  - built-in 既定（`wasi` namespace は `wasi.dev`）
+  - グローバル既定（`wa.dev`）
+
 ## `[[bindings]]`（service 間呼び出し許可）
 
 - `[[bindings]]` は service 間関数呼び出しの許可ルールを定義する。
 - 各要素は以下を必須とする。
   - `name`: 呼び出し先 service 名（`name` と同じ文字制約）
-  - `wit`: string（`file://...` / `warg://...`）
+  - `wit`: string（`file://...` / `warg://...` / `oci://...`）
 - [BREAKING] 旧 `wit = "<package>/<interface>"` 形式は受理しない。
 - `imago update` は `wit` で指定した source から解決した WIT package 内の全 interface を展開し、`manifest.bindings[]` へ `{"name":"<service>","wit":"<package>/<interface>"}` の形式で正規化して出力する。
 - 未指定時は `manifest.bindings=[]` として扱い、runtime は deny-by-default で拒否する。
@@ -84,19 +95,21 @@
   - `version` (必須): version 文字列
   - `kind` (必須): `native` / `wasm`
   - `wit` (任意): string または table
-    - string は `file://...` / `warg://...` を受理
+    - string は `file://...` / `warg://...` / `oci://...` を受理
     - table は `wit.source`（必須）+ `wit.registry`（任意）を受理
-    - 未指定時は `wit.source = "warg://{name}@{version}"` / `wit.registry = "wa.dev"`
+    - `wit.registry` は `warg://` source のみ指定可能（`oci://` では禁止）
+    - 未指定時は `wit.source = "warg://{name}@{version}"`。`wit.registry` は WARG 解決規則で自動決定される。
   - `requires` (任意): 依存 plugin package 名配列（明示依存の宣言）
     - 各要素のバリデーションは `name` と同一。
-  - `component.source` (任意, `kind=wasm` の場合): `file://...` / `warg://...`
+  - `component.source` (任意, `kind=wasm` の場合): `file://...` / `warg://...` / `oci://...`
     - `wit` source が component ではない場合は指定が必要
-  - `component.registry` (任意, `kind=wasm` の場合): `warg://` の registry（省略時 `wa.dev`）
+  - `component.registry` (任意, `kind=wasm` の場合): `warg://` の registry（省略時は WARG 解決規則。`oci://` では禁止）
   - `component.sha256` (任意, `kind=wasm` の場合): 指定時は `imago update` で照合
   - `capabilities` (任意): この plugin が caller になる場合の認可ルール
 - `imago update` は依存の WIT/Component を `.imago/deps/<sanitized dependency>/` に保存し、そこから `wit/deps/` を再生成する。`imago.lock (version=1)` には `wit_source` / `wit_registry` / `wit_digest` / `wit_path` / `resolved_at` を固定する。`wit_path` の依存名サニタイズは wkg 準拠で `:` / `@` を `-` に置換する。
 - `warg://` の direct dependency で WIT 側に version が書かれている場合は、`warg://...@version` と一致している必要がある。
 - `warg://` の WIT package が transitive import を含む場合、依存パッケージも `wit/deps/<package>/package.wit` に展開し、`imago.lock.[[wit_packages]]` に `name` / `registry` / `[[versions]]` (`requirement` / `version` / `digest` / `source` / `path` / `via`) を固定する。
+  - transitive package の `registry` は `namespace_registries > (wasi は wasi.dev) > 親 dependency の解決 registry` で決定する。
 - `dependencies[].wit.source` が `file://...` の場合、`wit/deps` 配下を指す source は禁止する（`imago update` が `wit/deps` を再生成するため）。
 - 複数 dependency が同一 `wit/deps` 出力先へ解決される場合、`imago update` は衝突として失敗する。
 - `warg://` source が plain `.wit` 形式で foreign import を含む場合は `imago update` を失敗させる（WIT package 形式が必要）。
@@ -210,8 +223,9 @@
 - `restart` が許可値（`never` / `on-failure` / `always` / `unless-stopped`）以外ならエラー。
 - `runtime.restart_policy` を指定した場合はエラー（互換受理なし）。
 - `dependencies[].wit` に `https://wa.dev/...` shorthand を指定した場合はエラー（`warg://<package>@<version>` を使用）。
-- `bindings[].wit` に `file://...` / `warg://...` 以外を指定した場合はエラー。
+- `bindings[].wit` に `file://...` / `warg://...` / `oci://...` 以外を指定した場合はエラー。
 - `bindings[].wit` に旧 `"<package>/<interface>"` 文字列を指定した場合はエラー。
+- `dependencies[].wit.registry` または `dependencies[].component.registry` を `oci://` source と併用した場合はエラー。
 - `dependencies[].wit.source` に `file://wit/deps/...`（または同等の `wit/deps` 配下パス）を指定した場合はエラー。
 - 複数 dependency が同一 `wit/deps` 出力パスへ解決される場合はエラー。
 - `dependencies[].name` と `dependencies[].requires[]` に、絶対パス・drive prefix・`./`・`../` を含む path component を指定した場合はエラー。
@@ -238,11 +252,13 @@
 - `imago build` は `project_root/.env` を dotenv 記法で読み込み、`manifest.wasi.env` へマージする（`.env` 優先）。
 - `imago build` は legacy `[vars]` / `[secrets]` を受理するが、manifest には出力しない。
 - `.env` の値は `build.command` 実行環境には注入しない。
-- `imago update` は `warg://` / `file://` を受理し、依存WIT/Componentを `.imago/deps/` に保存した上で `wit/deps/` を再生成する。
+- `imago update` は `warg://` / `oci://` / `file://` を受理し、依存WIT/Componentを `.imago/deps/` に保存した上で `wit/deps/` を再生成する。
 - `imago update` の dependency path サニタイズは wkg 準拠 (`:` / `@` を `-`) を使い、`wit/deps` と `.imago/warg` の両方で同じ命名規則を使う。
 - `imago update` は `dependencies[].wit.source=file://...` が `wit/deps` 配下を指す場合と、dependency 同士で `wit/deps` 出力先が衝突する場合に、`wit/deps` を削除する前に失敗させる。
 - dependency package 名の path バリデーションは `/` を許可しつつ、`Path` component が `Normal` 以外（`RootDir`、`Prefix`、`CurDir`、`ParentDir`）を拒否する。
-- `warg://` は Rust-native client で解決し、`registry` 未指定時は `wa.dev` を使う。
+- `warg://` は Rust-native client で解決し、`registry` 未指定時は `明示 registry > [namespace_registries] > (wasi は wasi.dev) > wa.dev` で決定する。
+- transitive WARG package は lock 出力時に package ごとに registry を解決し、未指定 namespace では親 dependency の解決 registry を継承する。
+- `oci://` は Rust-native client の OCI backend で解決し、`IMAGO_OCI_USERNAME` / `IMAGO_OCI_PASSWORD` が設定されていれば認証情報として注入する。
 - `imago update` は `kind=wasm` かつ `component` 未指定で `wit` source が component の場合、component hash/source を lock へ自動固定する。
 - `imago update` は `file://` source が存在する場合のみ hash 差分を監視し、差分があればキャッシュを再解決する。source が消えている場合は既存キャッシュを優先する。
 - `imago build` は `capabilities` を正規化して manifest に出力し、`capabilirties` キーは設定エラーとして拒否する。
@@ -353,7 +369,7 @@
 ## 実装反映ノート（Network RPC / 2026-02-18）
 
 - [BREAKING] `imago build/deploy/run/stop` の `--env` は廃止した。`[env.*]` と `.env.<name>` の解決も行わない。
-- [BREAKING] `[[bindings]]` は `name` + `wit`（`file://...` / `warg://...`）のみ受理し、`target` と旧 `wit="<package>/<interface>"` 形式は設定エラーとして拒否する。
+- [BREAKING] `[[bindings]]` は `name` + `wit`（`file://...` / `warg://...` / `oci://...`）のみ受理し、`target` と旧 `wit="<package>/<interface>"` 形式は設定エラーとして拒否する。
 - `type = "rpc"` を追加し、`imago build` / manifest 正規化で受理する。
 - `type = "rpc"` は `main` を必須キーとして維持しつつ、runner 起動時に `main` を自動実行しない（実行契機は `rpc.invoke` のみ）。
 - `imago bindings cert upload` / `imago bindings cert deploy` サブコマンドを追加した。

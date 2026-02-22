@@ -32,6 +32,7 @@ pub(crate) trait DependencyResolver {
         &self,
         project_root: &Path,
         dependency: &build::ProjectDependency,
+        namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
     ) -> anyhow::Result<DependencyCacheEntry>;
 }
 
@@ -60,8 +61,9 @@ impl DependencyResolver for StandardDependencyResolver {
         &self,
         project_root: &Path,
         dependency: &build::ProjectDependency,
+        namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
     ) -> anyhow::Result<DependencyCacheEntry> {
-        load_or_refresh_cache_entry(project_root, dependency).await
+        load_or_refresh_cache_entry(project_root, dependency, namespace_registries).await
     }
 }
 
@@ -231,8 +233,9 @@ pub(crate) fn resolve_dependency_component_sources(
 pub(crate) async fn load_or_refresh_cache_entry(
     project_root: &Path,
     dependency: &build::ProjectDependency,
+    namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
 ) -> anyhow::Result<DependencyCacheEntry> {
-    if dependency_cache::is_cache_hit(project_root, dependency)? {
+    if dependency_cache::is_cache_hit(project_root, dependency, namespace_registries)? {
         return dependency_cache::load_entry(project_root, &dependency.name)
             .with_context(|| format!("failed to load dependency cache for '{}'", dependency.name));
     }
@@ -260,6 +263,7 @@ pub(crate) async fn load_or_refresh_cache_entry(
         project_root,
         &dependency.wit.source,
         dependency.wit.registry.as_deref(),
+        namespace_registries,
         &dependency.version,
         &cache_wit_target,
     )
