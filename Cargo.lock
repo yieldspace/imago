@@ -2241,7 +2241,7 @@ dependencies = [
  "tar",
  "time",
  "tokio",
- "toml 0.8.23",
+ "toml 0.9.12+spec-1.1.0",
  "url",
  "uuid",
  "wasm-pkg-client",
@@ -2258,7 +2258,7 @@ dependencies = [
  "anyhow",
  "serde",
  "sha2",
- "toml 0.8.23",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]
@@ -2347,7 +2347,7 @@ dependencies = [
  "imagod-common",
  "rcgen",
  "serde",
- "toml 0.8.23",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]
