@@ -1,15 +1,29 @@
 package imago:node@0.1.0;
 
+/// RPC interface used by the node native plugin.
+@since(version = 0.1.0)
 interface rpc {
+    /// Connection resource for RPC requests.
+    @since(version = 0.1.0)
     resource connection {
+        /// Invoke a function on a target service interface with CBOR arguments.
+        @since(version = 0.1.0)
         invoke: func(target-service: string, interface-id: string, function: string, args-cbor: list<u8>) -> result<list<u8>, string>;
+        /// Close this RPC connection.
+        @since(version = 0.1.0)
         disconnect: func();
     }
 
+    /// Connect to a remote RPC endpoint.
+    @since(version = 0.1.0)
     connect: func(addr: string) -> result<connection, string>;
+    /// Connect to the local RPC endpoint.
+    @since(version = 0.1.0)
     local: func() -> result<connection, string>;
 }
 
+/// Host world for node plugin imports.
+@since(version = 0.1.0)
 world host {
     import rpc;
 }

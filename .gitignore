@@ -25,3 +25,4 @@ target
 examples/**/build/
 
 *.log
+*.wasm

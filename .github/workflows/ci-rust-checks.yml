@@ -27,6 +27,7 @@ jobs:
     outputs:
       rust_related: ${{ steps.detect.outputs.rust_related }}
       workflow_related: ${{ steps.detect.outputs.workflow_related }}
+      plugin_wit_related: ${{ steps.detect.outputs.plugin_wit_related }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -41,6 +42,7 @@ jobs:
 
           rust_related=false
           workflow_related=false
+          plugin_wit_related=false
 
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             base_sha='${{ github.event.pull_request.base.sha }}'
@@ -61,19 +63,31 @@ jobs:
                   workflow_related=true
                   ;;
               esac
+
+              if [[ "$file" =~ ^plugins/[^/]+/wit/ ]]; then
+                plugin_wit_related=true
+              fi
+
+              case "$file" in
+                plugins/*/wkg.lock|.github/scripts/verify_plugin_wkg_locks.sh)
+                  plugin_wit_related=true
+                  ;;
+              esac
             done <<< "$diff_output"
           else
             rust_related=true
             workflow_related=true
+            plugin_wit_related=true
           fi
 
           echo "rust_related=$rust_related" >> "$GITHUB_OUTPUT"
           echo "workflow_related=$workflow_related" >> "$GITHUB_OUTPUT"
+          echo "plugin_wit_related=$plugin_wit_related" >> "$GITHUB_OUTPUT"
 
   rust_checks:
     name: rust checks
     needs: changed
-    if: ${{ needs.changed.outputs.rust_related == 'true' || needs.changed.outputs.workflow_related == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ needs.changed.outputs.rust_related == 'true' || needs.changed.outputs.workflow_related == 'true' || needs.changed.outputs.plugin_wit_related == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -86,6 +100,15 @@ jobs:
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
+
+      - name: Install wkg
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wkg
+
+      - name: Verify plugin wkg locks
+        if: ${{ needs.changed.outputs.plugin_wit_related == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+        run: ./.github/scripts/verify_plugin_wkg_locks.sh
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
@@ -131,6 +154,7 @@ jobs:
           changed_result='${{ needs.changed.result }}'
           rust_related='${{ needs.changed.outputs.rust_related }}'
           workflow_related='${{ needs.changed.outputs.workflow_related }}'
+          plugin_wit_related='${{ needs.changed.outputs.plugin_wit_related }}'
           rust_result='${{ needs.rust_checks.result }}'
           pr_body_lint_result='${{ needs.pr_body_lint.result }}'
 
@@ -138,6 +162,7 @@ jobs:
           echo "changed: $changed_result"
           echo "rust_related: $rust_related"
           echo "workflow_related: $workflow_related"
+          echo "plugin_wit_related: $plugin_wit_related"
           echo "rust_checks: $rust_result"
           echo "pr_body_lint: $pr_body_lint_result"
 
@@ -152,9 +177,9 @@ jobs:
               exit 1
             }
 
-            if [[ "$rust_related" == "true" || "$workflow_related" == "true" ]]; then
+            if [[ "$rust_related" == "true" || "$workflow_related" == "true" || "$plugin_wit_related" == "true" ]]; then
               [[ "$rust_result" == "success" ]] || {
-                echo "::error::rust_checks must succeed when Rust or workflow files are changed."
+                echo "::error::rust_checks must succeed when Rust/workflow/plugin WIT files are changed."
                 exit 1
               }
             else

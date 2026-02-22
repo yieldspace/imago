@@ -7,7 +7,7 @@ package imago:nanokvm@0.1.0;
 /// `session.capture-jpeg` returns the first JPEG frame as `wasi:io/streams.input-stream`.
 @since(version = 0.1.0)
 interface capture {
-    use wasi:io/streams@0.2.0.{input-stream};
+    use wasi:io/streams@0.2.6.{input-stream};
 
     /// Credentials used by `auth.login`.
     @since(version = 0.1.0)

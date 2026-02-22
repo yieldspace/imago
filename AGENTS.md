@@ -24,6 +24,15 @@ Do not add backward-compat shims or fallback paths unless they come for free wit
 Keep modules focused and explicit.
 When behavior changes, update related `docs/spec/` files in the same PR so implementation and documentation stay aligned.
 
+## WIT Writing Conventions
+These rules apply to `plugins/*/wit/package.wit`.
+- Every public WIT declaration must include a `///` docstring (`world`, `interface`, `resource`, `record`, `enum`, `variant`, `flags`, and function declarations).
+- Every public WIT declaration must include `@since(version = <semver>)` immediately before the declaration.
+- Keep declaration order consistent as `///` docstring, then `@since(...)`, then the declaration body.
+- Preserve existing `@since` values as the first package version that introduced the declaration.
+- For new declarations, set `@since` to the package version where the declaration is introduced.
+- Keep docstrings short and concrete; include units, defaults, and error behavior when relevant.
+
 ## Build/Test Commands
 - `cargo check --workspace`: fast compile-time validation without producing full build artifacts.
 - `cargo build --workspace`: build all workspace crates in debug mode.

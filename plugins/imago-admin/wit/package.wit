@@ -1,12 +1,24 @@
 package imago:admin@0.1.0;
 
+/// Runtime metadata interface for the built-in admin native plugin.
+@since(version = 0.1.0)
 interface runtime {
+    /// Get the current service name.
+    @since(version = 0.1.0)
     service-name: func() -> string;
+    /// Get the currently active release hash.
+    @since(version = 0.1.0)
     release-hash: func() -> string;
+    /// Get the runtime runner identifier.
+    @since(version = 0.1.0)
     runner-id: func() -> string;
+    /// Get the runtime app type (`cli`, `http`, or `socket`).
+    @since(version = 0.1.0)
     app-type: func() -> string;
 }
 
+/// Host world for admin plugin imports.
+@since(version = 0.1.0)
 world host {
     import runtime;
 }
