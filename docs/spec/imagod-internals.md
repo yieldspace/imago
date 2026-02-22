@@ -23,33 +23,35 @@
 
 対象読者: 実装者, 運用者
 
-実行起点は `crates/imagod/src/main.rs` の `main` / `dispatch`。
+実行起点は `crates/imagod/src/main.rs` の `main`（thin entrypoint）から呼ばれる
+`crates/imagod/src/lib.rs` の `dispatch_from_env` / `dispatch_from_env_with_registry`。
 
 初期化順序:
 
-1. `install_rustls_provider`
-2. CLI 解析（`manager` / `--runner`）
-3. manager モード:
-4. `resolve_config_path`
-5. `imagod.toml` の存在確認（未存在時は英語コメント付き最小有効構成を自動生成して起動ログで通知。既存ファイルは非上書き。`server.key` 実体も同時生成）
-6. `ImagodConfig::load`
-7. `ArtifactStore::new`
-8. `OperationManager::new`
-9. `ServiceSupervisor::new`（manager control socket 起動）
-10. `Orchestrator::new`
-11. `build_server` で WebTransport サーバ構築
-12. `Orchestrator::gc_unused_plugin_components_on_boot`（active release 未参照の plugin component cache を削除）
-13. `Orchestrator::restore_active_services_on_boot`（`restart_policy=always` かつ `active_release` を持つ service を best-effort で自動復元）
-14. `ProtocolHandler::new`
-15. maintenance loop 起動
-16. `accept` ループで session task を `tokio::spawn`
-17. runner モード:
-18. stdin から `RunnerBootstrap` を読込
-19. `create_runtime_backend`（`runtime-wasmtime` 有効時は `WasmRuntime::new_with_native_plugins`） + component 実行
+1. `dispatch_from_env`（built-in registry 生成）または `dispatch_from_env_with_registry`（呼び出し側 registry 受理）
+2. `install_rustls_provider`
+3. CLI 解析（`manager` / `--runner`）
+4. manager モード:
+5. `resolve_config_path`
+6. `imagod.toml` の存在確認（未存在時は英語コメント付き最小有効構成を自動生成して起動ログで通知。既存ファイルは非上書き。`server.key` 実体も同時生成）
+7. `ImagodConfig::load`
+8. `ArtifactStore::new`
+9. `OperationManager::new`
+10. `ServiceSupervisor::new`（manager control socket 起動）
+11. `Orchestrator::new`
+12. `build_server` で WebTransport サーバ構築
+13. `Orchestrator::gc_unused_plugin_components_on_boot`（active release 未参照の plugin component cache を削除）
+14. `Orchestrator::restore_active_services_on_boot`（`restart_policy=always` かつ `active_release` を持つ service を best-effort で自動復元）
+15. `ProtocolHandler::new`
+16. maintenance loop 起動
+17. `accept` ループで session task を `tokio::spawn`
+18. runner モード:
+19. stdin から `RunnerBootstrap` を読込
+20. `create_runtime_backend`（`runtime-wasmtime` 有効時は `WasmRuntime::new_with_native_plugins`） + component 実行
 
 ```mermaid
 flowchart TD
-  A["main"] --> B["dispatch"]
+  A["main"] --> B["dispatch_from_env / dispatch_from_env_with_registry"]
   B --> C["install_rustls_provider"]
   B --> D{"mode"}
   D -->|manager| E["resolve_config_path"]
@@ -86,7 +88,8 @@ flowchart TD
 | `imagod-ipc::ipc/*` | manager-runner/runner-runner IPC 抽象 + 実装 | control/invoke message | response/token | `imagod-common` |
 | `imagod-control::operation_state` | 短命 operation 状態管理 | UUID + state | `StateResponse`, cancel 判定 | `imagod-common` |
 | `imagod-common (lib.rs)` | 内部エラーの構造化 | stage, message, code | `StructuredError` | `imago-protocol` |
-| `imagod (main.rs)` | wiring と maintenance 制御 | config | process lifecycle | 全 internal crate |
+| `imagod (lib.rs)` | dispatch API、built-in plugin registry 構築、mode 分岐 | process args, optional native plugin registry | manager/runner 起動 | `imagod-runtime`, `imagod-config`, `imagod-control`, `imagod-server` |
+| `imagod (main.rs)` | thin entrypoint（lib dispatch 呼び出し） | process args | process exit code | `imagod(lib)` |
 
 ## 4. 通信処理モデル
 
@@ -351,6 +354,9 @@ WASI 設定伝播（manager -> runner -> runtime）:
 - `cli` 分岐では `wasmtime_wasi::p2::add_to_linker_async` を利用する
 - `http` 分岐では `wasmtime_wasi_http::add_only_http_to_linker_async` を併用する
 - native plugin は `NativePlugin` trait と `NativePluginRegistryBuilder` で明示登録する。
+  - `dispatch_from_env()` は built-in registry（`imago:admin`, `imago:node`）を使う。
+  - `dispatch_from_env_with_registry(...)` は呼び出し側で構築した registry を使うため、built-in に追加 plugin を上乗せできる。
+  - `custom-daemons/nanokvm-imagod` はこの API で built-in + `imago:nanokvm` を登録し、manager が起動する `--runner` 子プロセスにも同じ registry を伝播させる。
   - descriptor（package/import/symbol/add_to_linker）は `imago-plugin-macros` が WIT から生成する。
   - plugin 実装本体は workspace 直下 `plugins/*` crate で管理する（初期実装は `plugins/imago-admin`）。
   - `kind=native` dependency が registry 未登録なら起動時に明示エラーで停止する。
@@ -359,6 +365,13 @@ WASI 設定伝播（manager -> runner -> runtime）:
   - 提供関数は `service-name` / `release-hash` / `runner-id` / `app-type` の 4 つ。
   - 値は `RunnerBootstrap`（`service_name` / `release_hash` / `runner_id` / `app_type`）から供給する。
   - 関数呼び出し前の capability 判定は既存 `capabilities.deps` を利用する。
+- native plugin `imago:nanokvm@0.1.0` は手書き `NativePlugin` 実装で登録する。
+  - import 名は `imago:nanokvm/capture@0.1.0` / `stream-config@0.1.0` / `device-status@0.1.0` / `runtime-control@0.1.0` / `hid-control@0.1.0` / `io-control@0.1.0`。
+  - `capture` は `local(auth)`（`http://127.0.0.1:80`）と `connect(endpoint, auth)`（`http://host[:port]`）を提供する。
+  - `session.capture-jpeg()` は `GET /api/stream/mjpeg` の先頭 frame を抽出し、`wasi:io/streams.input-stream` resource を返す。
+  - `device-status` の status 値は enum で返し、未知値は `unknown` へ丸めず `result::err` を返す。
+  - `stream-config` / `device-status` / `runtime-control` / `hid-control` / `io-control` は NanoKVM ローカル環境（`/kvmapp`, `/etc/kvm`, `/sys`, `/dev/hidg*`）を前提とし、非対応環境では `unsupported` で失敗する。
+  - `hid-control` は 4 モード enum を公開するが、`hid-and-touchpad` / `hid-and-absolute-mouse` は実装未確定のため `unsupported` を返す。
 - `Store::set_epoch_deadline(1)`
 - `Store::epoch_deadline_async_yield_and_update(1)`
 

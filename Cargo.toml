@@ -27,12 +27,14 @@ codegen-units = 1
 resolver = "3"
 members = [
     "crates/*",
+    "custom-daemons/*",
     "examples/local-imagod",
     "examples/local-imagod-http",
     "examples/local-imagod-plugin-native-admin",
     "examples/local-imagod-plugin-hello",
     "examples/local-imagod-socket",
-    "plugins/*", "e2e",
+    "plugins/*",
+    "e2e",
 ]
 
 [workspace.package]
@@ -71,6 +73,7 @@ time = "0.3.36"
 tempfile = "3.17.1"
 tokio = "1.49.0"
 toml = "0.8.23"
+ureq = { version = "2.12.1", default-features = false }
 proc-macro2 = "1.0.103"
 url = "2.5.4"
 uuid = "1.21.0"
@@ -87,9 +90,11 @@ syn = "2.0.111"
 
 imago-plugin-imago-admin = { path = "plugins/imago-admin", version = "0.1.0" }
 imago-plugin-imago-node = { path = "plugins/imago-node", version = "0.1.0" }
+imago-plugin-nanokvm-plugin = { path = "plugins/imago-plugin-nanokvm-plugin", version = "0.1.0" }
 imago-lockfile = { path = "crates/imago-lockfile", version = "0.1.0" }
 imago-plugin-macros = { path = "crates/imago-plugin-macros", version = "0.1.0" }
 imago-protocol = { path = "crates/imago-protocol", version = "0.1.0" }
+imagod = { path = "crates/imagod", version = "0.1.0" }
 imagod-common = { path = "crates/imagod-common", version = "0.1.0" }
 imagod-config = { path = "crates/imagod-config", version = "0.1.0" }
 imagod-control = { path = "crates/imagod-control", version = "0.1.0" }

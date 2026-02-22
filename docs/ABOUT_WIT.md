@@ -73,6 +73,91 @@ wit = "file://../../plugins/imago-admin/wit"
 `examples/local-imagod-plugin-native-admin` はこの native plugin を使って
 runner メタデータを取得する最小例です。
 
+### built-in + 追加 native plugin を使う専用 daemon 例
+
+`imagod` crate は built-in plugin を維持したまま追加 plugin を登録できます。
+方式は静的登録（再ビルド前提）です。
+
+```rust
+use std::sync::Arc;
+
+use imagod::{
+    NativePluginRegistryBuilder, dispatch_from_env_with_registry, register_builtin_native_plugins,
+};
+use my_plugin::MyNativePlugin;
+
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    let mut builder = NativePluginRegistryBuilder::new();
+    register_builtin_native_plugins(&mut builder)?;
+    builder
+        .register_plugin(Arc::new(MyNativePlugin))
+        .map_err(anyhow::Error::new)?;
+
+    dispatch_from_env_with_registry(builder.build()).await
+}
+```
+
+この daemon は manager モードでも runner モードでも同じバイナリを使うため、
+`--runner` で起動された子プロセスにも同じ plugin 構成が適用されます。
+
+### NanoKVM 向け native plugin（`imago:nanokvm@0.1.0`）
+
+`plugins/imago-plugin-nanokvm-plugin` は NanoKVM 向け native plugin です。
+`capture` に加えて development API を 5 つの interface へ分割して提供します。
+
+依存定義例:
+
+```toml
+[[dependencies]]
+name = "imago:nanokvm"
+version = "0.1.0"
+kind = "native"
+wit = "file://../../plugins/imago-plugin-nanokvm-plugin/wit"
+
+[capabilities.deps]
+"imago:nanokvm" = ["*"]
+```
+
+WIT import 例:
+
+```wit
+world plugin-imports {
+    import imago:nanokvm/capture@0.1.0;
+    import imago:nanokvm/stream-config@0.1.0;
+    import imago:nanokvm/device-status@0.1.0;
+    import imago:nanokvm/runtime-control@0.1.0;
+    import imago:nanokvm/hid-control@0.1.0;
+    import imago:nanokvm/io-control@0.1.0;
+}
+```
+
+`imago:nanokvm` が提供する interface:
+
+- `capture`
+- `local(auth)`（`http://127.0.0.1:80`）/ `connect(endpoint, auth)`（`http://host[:port]`）/ `session.capture-jpeg()`
+  - `capture-jpeg` は `GET /api/stream/mjpeg` の先頭 JPEG frame を抽出し、`wasi:io/streams.input-stream` で返す。
+- `stream-config`
+  - `get-settings`, `set-stream-type`, `set-resolution`, `set-fps`, `set-quality`, `get-server-config-yaml`
+  - `server.yaml` は read-only（取得 API のみ）。
+- `device-status`
+  - `usb-mode`, `hdmi-status`, `link-status`, `feature-status`, `led-status` を enum で返す。
+  - ステータス値が未知だった場合は `unknown` へ丸めず `result::err` を返す。
+- `runtime-control`
+  - `watchdog` / `stop-ping` の get/set。
+- `hid-control`
+  - `send-keyboard`, `send-mouse-relative`, `send-mouse-absolute`, `send-touch`, `paste`, `reset-hid`, `get/set-hid-mode`
+  - `hid-and-touchpad` / `hid-and-absolute-mouse` は API として公開するが実装は `unsupported` を返す。
+- `io-control`
+  - `power-pulse`, `reset-pulse`（既定 800ms）。
+
+`auth` は `none` / `token(string)` / `login({username, password})` の 3 方式です。
+`token` と `login` はどちらも `nano-kvm-token` cookie を使って認証します。
+
+`stream-config` / `device-status` / `runtime-control` / `hid-control` / `io-control` は
+NanoKVM ローカル実行前提（`/kvmapp`, `/etc/kvm`, `/sys`, `/dev/hidg*`）です。
+非 NanoKVM 環境では `unsupported` エラーを返します。
+
 `warg://sizumita:ferris@0.1.0` の wasm plugin を使って
 `sizumita:ferris/says.say` を呼び出す実行例は
 `examples/local-imagod-plugin-hello` を参照してください。

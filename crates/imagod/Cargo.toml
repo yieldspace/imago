@@ -8,6 +8,10 @@ publish.workspace = true
 default = ["runtime-wasmtime"]
 runtime-wasmtime = ["imagod-runtime/runtime-wasmtime"]
 
+[lib]
+name = "imagod"
+path = "src/lib.rs"
+
 [[bin]]
 name = "imagod"
 path = "src/main.rs"

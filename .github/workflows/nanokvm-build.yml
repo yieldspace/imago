@@ -45,7 +45,7 @@ jobs:
           command -v "$CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER"
 
       - name: Build
-        run: cargo build -p imagod --locked --release --bin imagod --target riscv64gc-unknown-linux-musl
+        run: cargo build -p nanokvm-imagod --locked --release --bin imagod --target riscv64gc-unknown-linux-musl
 
       - name: Upload Imago
         uses: actions/upload-artifact@v6
