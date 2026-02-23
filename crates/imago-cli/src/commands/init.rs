@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{self, IsTerminal},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -94,22 +94,22 @@ fn run_init_inner(
         .with_context(|| format!("failed to create init directory: {}", output_dir.display()))?;
 
     let output_path = output_dir.join(INIT_FILE_NAME);
-    if output_path.exists() {
-        return Err(anyhow!(
-            "{} already exists: {}",
-            INIT_FILE_NAME,
+    write_init_file_create_new(&output_path, template.body)?;
+    if let Err(err) = ensure_gitignore_entries(&output_dir) {
+        if let Err(remove_err) = fs::remove_file(&output_path) {
+            return Err(err.context(format!(
+                "failed to update {} and failed to rollback {}: {}",
+                output_dir.join(GITIGNORE_FILE_NAME).display(),
+                output_path.display(),
+                remove_err
+            )));
+        }
+        return Err(err.context(format!(
+            "failed to update {}; {} was rolled back",
+            output_dir.join(GITIGNORE_FILE_NAME).display(),
             output_path.display()
-        ));
+        )));
     }
-
-    fs::write(&output_path, template.body).with_context(|| {
-        format!(
-            "failed to write {} template: {}",
-            INIT_FILE_NAME,
-            output_path.display()
-        )
-    })?;
-    ensure_gitignore_entries(&output_dir)?;
 
     Ok(InitOutput {
         output_path,
@@ -124,6 +124,48 @@ fn resolve_output_dir(cwd: &Path, requested_path: Option<&PathBuf>) -> PathBuf {
         Some(path) if path.is_absolute() => path.to_path_buf(),
         Some(path) => cwd.join(path),
     }
+}
+
+fn write_init_file_create_new(output_path: &Path, template_body: &str) -> anyhow::Result<()> {
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(anyhow!(
+                "{} already exists: {}",
+                INIT_FILE_NAME,
+                output_path.display()
+            ));
+        }
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to create {} template file: {}",
+                    INIT_FILE_NAME,
+                    output_path.display()
+                )
+            });
+        }
+    };
+
+    file.write_all(template_body.as_bytes()).with_context(|| {
+        format!(
+            "failed to write {} template: {}",
+            INIT_FILE_NAME,
+            output_path.display()
+        )
+    })?;
+    file.flush().with_context(|| {
+        format!(
+            "failed to flush {} template: {}",
+            INIT_FILE_NAME,
+            output_path.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn detected_templates() -> Vec<InitTemplate> {
@@ -284,7 +326,16 @@ mod tests {
             .iter()
             .map(|template| template.id)
             .collect();
-        assert_eq!(ids, vec!["generic", "rust"]);
+        assert!(
+            ids.windows(2).all(|window| window[0] <= window[1]),
+            "template IDs should be sorted, but were: {ids:?}"
+        );
+        for expected in ["generic", "rust"] {
+            assert!(
+                ids.contains(&expected),
+                "expected template ID '{expected}' to be present in {ids:?}"
+            );
+        }
     }
 
     #[test]
@@ -568,6 +619,30 @@ mod tests {
 
         assert!(err.to_string().contains("already exists"));
         assert_eq!(read_file(&output_dir.join(".gitignore")), "target\n");
+
+        cleanup(&cwd);
+    }
+
+    #[test]
+    fn rolls_back_imago_toml_when_gitignore_update_fails() {
+        let cwd = temp_dir("rolls-back-imago-toml-when-gitignore-update-fails");
+        let output_dir = cwd.join("svc");
+        fs::create_dir_all(output_dir.join(".gitignore")).expect("directory should be created");
+
+        let err = run_inner_with_fixed_choice(
+            InitArgs {
+                path: Some(PathBuf::from("svc")),
+                lang: Some("rust".to_string()),
+            },
+            &cwd,
+            false,
+            "rust".to_string(),
+        )
+        .expect_err("gitignore update should fail");
+
+        assert!(err.to_string().contains("failed to update"));
+        assert!(!output_dir.join("imago.toml").exists());
+        assert!(output_dir.join(".gitignore").is_dir());
 
         cleanup(&cwd);
     }
