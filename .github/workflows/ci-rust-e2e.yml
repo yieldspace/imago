@@ -22,7 +22,7 @@ jobs:
       matrix:
         include:
           - name: ubuntu
-            runs_on: imago-nanokvm-runner-set
+            runs_on: imago-default-runner-set
           - name: macos
             runs_on: macos-latest
     steps:

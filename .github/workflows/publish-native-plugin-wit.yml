@@ -22,7 +22,7 @@ concurrency:
 jobs:
   publish:
     name: publish native plugin WIT
-    runs-on: ubuntu-latest
+    runs-on: imago-default-runner-set
     env:
       WKG_OCI_USERNAME: ${{ github.actor }}
       WKG_OCI_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
