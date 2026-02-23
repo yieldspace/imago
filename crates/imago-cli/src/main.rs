@@ -346,9 +346,6 @@ mod tests {
             command: Commands::Certs(CertsSubcommandArgs {
                 command: CertsCommands::Generate(crate::cli::CertsGenerateArgs {
                     out_dir: temp.clone(),
-                    server_name: "localhost".to_string(),
-                    server_ip: "127.0.0.1".to_string(),
-                    days: 1,
                     force: true,
                 }),
             }),

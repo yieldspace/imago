@@ -265,28 +265,16 @@ pub struct CertsSubcommandArgs {
 
 #[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
 pub enum CertsCommands {
-    /// Generate local development certificates.
+    /// Generate a local client key for imago-cli authentication.
     Generate(CertsGenerateArgs),
 }
 
-/// Generate local certificates for imagod and client auth.
+/// Generate a local client key for imago-cli authentication.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct CertsGenerateArgs {
-    /// Output directory for generated certificate and key files.
+    /// Output directory for generated key files.
     #[arg(long, value_name = "PATH", default_value = "certs")]
     pub out_dir: PathBuf,
-
-    /// DNS subject name for the server certificate.
-    #[arg(long, value_name = "DNS_NAME", default_value = "localhost")]
-    pub server_name: String,
-
-    /// IP subject alternative name for the server certificate.
-    #[arg(long, value_name = "IP_ADDR", default_value = "127.0.0.1")]
-    pub server_ip: String,
-
-    /// Certificate validity period in days.
-    #[arg(long, value_name = "DAYS", default_value_t = 3650)]
-    pub days: u32,
 
     /// Overwrite existing files in the output directory.
     #[arg(long)]
@@ -789,9 +777,6 @@ mod tests {
                 command: Commands::Certs(CertsSubcommandArgs {
                     command: CertsCommands::Generate(CertsGenerateArgs {
                         out_dir: PathBuf::from("certs"),
-                        server_name: "localhost".to_string(),
-                        server_ip: "127.0.0.1".to_string(),
-                        days: 3650,
                         force: false,
                     }),
                 }),
@@ -807,12 +792,6 @@ mod tests {
             "generate",
             "--out-dir",
             "tmp-certs",
-            "--server-name",
-            "imagod.local",
-            "--server-ip",
-            "192.168.10.2",
-            "--days",
-            "30",
             "--force",
         ])
         .expect("parse should succeed");
@@ -824,14 +803,39 @@ mod tests {
                 command: Commands::Certs(CertsSubcommandArgs {
                     command: CertsCommands::Generate(CertsGenerateArgs {
                         out_dir: PathBuf::from("tmp-certs"),
-                        server_name: "imagod.local".to_string(),
-                        server_ip: "192.168.10.2".to_string(),
-                        days: 30,
                         force: true,
                     }),
                 }),
             }
         );
+    }
+
+    #[test]
+    fn rejects_certs_generate_server_name_option() {
+        let err = Cli::try_parse_from([
+            "imago",
+            "certs",
+            "generate",
+            "--server-name",
+            "imagod.local",
+        ])
+        .expect_err("parse should fail");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn rejects_certs_generate_server_ip_option() {
+        let err =
+            Cli::try_parse_from(["imago", "certs", "generate", "--server-ip", "192.168.10.2"])
+                .expect_err("parse should fail");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn rejects_certs_generate_days_option() {
+        let err = Cli::try_parse_from(["imago", "certs", "generate", "--days", "30"])
+            .expect_err("parse should fail");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
