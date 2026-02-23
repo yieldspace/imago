@@ -150,6 +150,7 @@ sequenceDiagram
 6. `set_state(running, "starting")`
 7. `progress(stage="starting")` 送信
 8. `mark_spawned_if_not_canceled` で cancel フラグ確認と phase 遷移を原子的に実行
+9. `deploy/run/stop` は command 実行前に service 単位 gate を取得し、同一 service で in-flight command がある場合は `E_BUSY` (`stage=orchestration`, `message=\"service '<name>' command is already in progress\"`) を即時返却する（待機しない）
 
 コマンド分岐:
 
@@ -234,6 +235,7 @@ spawn 遷移前 cancel 成立時:
 主要経路:
 
 - `deploy(payload)`
+  - `deploy_id` から service 名を解決し command gate を取得（fail-fast）
   - `prepare_release`
   - `supervisor.replace`
   - 成功時 `active_release` 更新
@@ -242,6 +244,7 @@ spawn 遷移前 cancel 成立時:
     - rollback 成功時の失敗通知メッセージは「元の起動失敗 + rollback 結果（復旧済み）」を連結する
     - rollback 失敗時は `E_ROLLBACK_FAILED` を維持し、失敗通知メッセージは「元の起動失敗 + rollback 失敗」を連結する
 - `run(payload)`
+  - command gate を取得（fail-fast）
   - `active_release` 読込
   - release の `manifest.json` 再読込
   - `supervisor.start`
@@ -251,6 +254,7 @@ spawn 遷移前 cancel 成立時:
   - service 名昇順で逐次起動
   - service 単位の失敗を集計し、他 service の復元を継続（best-effort）
 - `stop(payload)`
+  - command gate を取得（fail-fast）
   - `supervisor.stop`
 
 deploy 経路の要点:
@@ -264,6 +268,8 @@ deploy 経路の要点:
 - `expected_current_release` は CAS で検証（`any` は比較スキップ、不一致は `E_PRECONDITION_FAILED`）
 - `restart_policy` は `never` / `on-failure` / `always` / `unless-stopped` を受理し、未知値は `E_BAD_REQUEST`
 - deploy 成功時に `services/<name>/restart_policy` を更新する
+- deploy/run/stop は service 単位で同時実行不可（同名 service の並行 command は `E_BUSY` fail-fast）
+- 上記直列化により rollback Busy 回復（`force stop`）が他 command の正常起動を巻き込む経路を遮断する
 - manager 起動時の復元対象は `restart_policy=always` の service のみ
 - manager 起動時に active release 参照集合を元に plugin component cache GC を実行
 - `services/<name>/<release_hash>/` 配置

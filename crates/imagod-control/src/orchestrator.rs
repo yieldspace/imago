@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex as StdMutex},
 };
 
 use imago_protocol::{
@@ -185,6 +186,7 @@ pub struct Orchestrator {
     supervisor: ServiceSupervisor,
     manifest_validator: DefaultManifestValidator,
     plugin_cache: FilesystemPluginCache,
+    command_gate: ServiceCommandGate,
 }
 
 /// Prepared release context passed from deploy preparation into final activation.
@@ -206,6 +208,44 @@ enum RollbackOutcome {
     RecoveredByForceStop,
 }
 
+#[derive(Clone, Default)]
+struct ServiceCommandGate {
+    inflight_services: Arc<StdMutex<BTreeSet<String>>>,
+}
+
+impl ServiceCommandGate {
+    fn acquire(&self, service_name: &str) -> Result<ServiceCommandGuard, ImagodError> {
+        let mut inflight_services = match self.inflight_services.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if inflight_services.contains(service_name) {
+            return Err(service_command_busy_error(service_name));
+        }
+        inflight_services.insert(service_name.to_string());
+        Ok(ServiceCommandGuard {
+            service_name: service_name.to_string(),
+            inflight_services: self.inflight_services.clone(),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ServiceCommandGuard {
+    service_name: String,
+    inflight_services: Arc<StdMutex<BTreeSet<String>>>,
+}
+
+impl Drop for ServiceCommandGuard {
+    fn drop(&mut self) {
+        let mut inflight_services = match self.inflight_services.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inflight_services.remove(&self.service_name);
+    }
+}
+
 impl Orchestrator {
     /// Creates an orchestrator with shared storage and supervisor handles.
     pub fn new(
@@ -220,6 +260,7 @@ impl Orchestrator {
             supervisor,
             manifest_validator: DefaultManifestValidator,
             plugin_cache: FilesystemPluginCache::new(storage_root),
+            command_gate: ServiceCommandGate::default(),
         }
     }
 
@@ -228,6 +269,12 @@ impl Orchestrator {
         &self,
         payload: &DeployCommandPayload,
     ) -> Result<DeploySummary, ImagodError> {
+        let service_name = self
+            .artifact_store
+            .service_name_for_deploy(&payload.deploy_id)
+            .await?;
+        let _service_command_guard = self.command_gate.acquire(&service_name)?;
+
         let prepared = self.prepare_release(payload).await?;
 
         let launch = prepared.launch.clone();
@@ -264,6 +311,8 @@ impl Orchestrator {
 
     /// Starts a service from its currently active release.
     pub async fn run(&self, payload: &RunCommandPayload) -> Result<RunSummary, ImagodError> {
+        let _service_command_guard = self.command_gate.acquire(&payload.name)?;
+
         let service_root = self.storage_root.join("services").join(&payload.name);
         let active_file = service_root.join("active_release");
         let active_release = read_active_release(&active_file).await?.ok_or_else(|| {
@@ -314,6 +363,8 @@ impl Orchestrator {
 
     /// Stops a running service.
     pub async fn stop(&self, payload: &StopCommandPayload) -> Result<StopSummary, ImagodError> {
+        let _service_command_guard = self.command_gate.acquire(&payload.name)?;
+
         self.supervisor.stop(&payload.name, payload.force).await?;
         Ok(StopSummary {
             service_name: payload.name.clone(),
@@ -1128,6 +1179,14 @@ fn map_bad_manifest(message: String) -> ImagodError {
     ImagodError::new(ErrorCode::BadManifest, STAGE_ORCHESTRATE, message)
 }
 
+fn service_command_busy_error(service_name: &str) -> ImagodError {
+    ImagodError::new(
+        ErrorCode::Busy,
+        STAGE_ORCHESTRATE,
+        format!("service '{service_name}' command is already in progress"),
+    )
+}
+
 fn map_rollback_error(err: ImagodError) -> ImagodError {
     let mut mapped = ImagodError::new(ErrorCode::RollbackFailed, STAGE_ORCHESTRATE, err.message)
         .with_retryable(err.retryable);
@@ -1209,7 +1268,7 @@ mod tests {
         DEFAULT_HTTP_MAX_BODY_BYTES, HashTarget, MAX_HTTP_MAX_BODY_BYTES, Manifest, ManifestAsset,
         ManifestBinding, ManifestHash, ManifestHttp, ManifestWasiConfig, ManifestWasiMount,
         RESTART_POLICY_ALWAYS, RESTART_POLICY_FILE_NAME, RollbackOutcome, RunnerAppType,
-        RunningStatus, RuntimeServiceState, STOPPED_SERVICE_STARTED_AT,
+        RunningStatus, RuntimeServiceState, STOPPED_SERVICE_STARTED_AT, ServiceCommandGate,
         append_rollback_success_message, build_launch_from_release, classify_boot_restore_entry,
         collect_boot_restore_candidates, collect_deployed_service_releases,
         compose_rollback_failure_error, extract_tar, gc_unused_plugin_components_on_boot,
@@ -1331,6 +1390,49 @@ mod tests {
         let bad_policy = validate_deploy_preconditions(&bad_policy_payload, None)
             .expect_err("unsupported restart policy should be rejected");
         assert_eq!(bad_policy.code, imago_protocol::ErrorCode::BadRequest);
+    }
+
+    #[test]
+    fn command_gate_rejects_duplicate_service_with_busy() {
+        let gate = ServiceCommandGate::default();
+        let _guard = gate
+            .acquire("svc-a")
+            .expect("first service command should be accepted");
+
+        let err = gate
+            .acquire("svc-a")
+            .expect_err("same service command should be rejected while inflight");
+        assert_eq!(err.code, ErrorCode::Busy);
+        assert_eq!(err.stage, "orchestration");
+        assert_eq!(
+            err.message,
+            "service 'svc-a' command is already in progress"
+        );
+    }
+
+    #[test]
+    fn command_gate_allows_reacquire_after_guard_drop() {
+        let gate = ServiceCommandGate::default();
+        {
+            let _guard = gate
+                .acquire("svc-a")
+                .expect("first service command should be accepted");
+        }
+
+        let _guard = gate
+            .acquire("svc-a")
+            .expect("service should be available again after previous command is dropped");
+    }
+
+    #[test]
+    fn command_gate_allows_different_services_in_parallel() {
+        let gate = ServiceCommandGate::default();
+        let _first = gate
+            .acquire("svc-a")
+            .expect("first service command should be accepted");
+        let _second = gate
+            .acquire("svc-b")
+            .expect("different service command should be accepted");
     }
 
     #[tokio::test]
