@@ -151,7 +151,10 @@ mod tests {
             "example:api/ops",
             "invoke",
         );
-        assert!(allowed, "wildcard dependency key should allow dependency function");
+        assert!(
+            allowed,
+            "wildcard dependency key should allow dependency function"
+        );
     }
 
     #[test]
