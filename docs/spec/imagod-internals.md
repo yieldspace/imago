@@ -238,6 +238,9 @@ spawn 遷移前 cancel 成立時:
   - `supervisor.replace`
   - 成功時 `active_release` 更新
   - 失敗時 `auto_rollback=true` なら rollback 実行
+    - rollback の前リリース起動で `E_BUSY` が返った場合は `stop(force=true)` を 1 回実行し、前リリース起動を 1 回だけ再試行する
+    - rollback 成功時の失敗通知メッセージは「元の起動失敗 + rollback 結果（復旧済み）」を連結する
+    - rollback 失敗時は `E_ROLLBACK_FAILED` を維持し、失敗通知メッセージは「元の起動失敗 + rollback 失敗」を連結する
 - `run(payload)`
   - `active_release` 読込
   - release の `manifest.json` 再読込

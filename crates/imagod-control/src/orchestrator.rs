@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
     path::{Path, PathBuf},
 };
 
@@ -198,6 +199,13 @@ struct PreparedRelease {
     launch: ServiceLaunch,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RollbackOutcome {
+    SkippedNoPreviousRelease,
+    RestoredPreviousRelease,
+    RecoveredByForceStop,
+}
+
 impl Orchestrator {
     /// Creates an orchestrator with shared storage and supervisor handles.
     pub fn new(
@@ -225,7 +233,20 @@ impl Orchestrator {
         let launch = prepared.launch.clone();
         if let Err(start_error) = self.supervisor.replace(launch).await {
             if payload.auto_rollback {
-                self.rollback_previous_release(&prepared).await?;
+                match self.rollback_previous_release(&prepared).await {
+                    Ok(rollback_outcome) => {
+                        return Err(append_rollback_success_message(
+                            start_error,
+                            rollback_outcome,
+                        ));
+                    }
+                    Err(rollback_error) => {
+                        return Err(compose_rollback_failure_error(
+                            &start_error,
+                            &rollback_error,
+                        ));
+                    }
+                }
             }
             return Err(start_error);
         }
@@ -446,9 +467,9 @@ impl Orchestrator {
     async fn rollback_previous_release(
         &self,
         prepared: &PreparedRelease,
-    ) -> Result<(), ImagodError> {
+    ) -> Result<RollbackOutcome, ImagodError> {
         let Some(previous_release) = prepared.previous_release.as_deref() else {
-            return Ok(());
+            return Ok(RollbackOutcome::SkippedNoPreviousRelease);
         };
 
         fs::write(&prepared.active_file, previous_release.as_bytes())
@@ -475,12 +496,13 @@ impl Orchestrator {
             )
             .await
             .map_err(map_rollback_error)?;
-        self.supervisor
-            .start(previous_launch)
-            .await
-            .map_err(map_rollback_error)?;
+        let rollback_outcome = start_previous_release_with_busy_recovery(
+            || self.supervisor.start(previous_launch.clone()),
+            || self.supervisor.stop(&prepared.service_name, true),
+        )
+        .await?;
 
-        Ok(())
+        Ok(rollback_outcome)
     }
 
     /// Loads launch information from an existing promoted release.
@@ -1107,11 +1129,67 @@ fn map_bad_manifest(message: String) -> ImagodError {
 }
 
 fn map_rollback_error(err: ImagodError) -> ImagodError {
+    let mut mapped = ImagodError::new(ErrorCode::RollbackFailed, STAGE_ORCHESTRATE, err.message)
+        .with_retryable(err.retryable);
+    for (key, value) in err.details {
+        mapped = mapped.with_detail(key, value);
+    }
+    mapped
+}
+
+fn append_rollback_success_message(
+    mut start_error: ImagodError,
+    rollback_outcome: RollbackOutcome,
+) -> ImagodError {
+    let rollback_note = match rollback_outcome {
+        RollbackOutcome::SkippedNoPreviousRelease => return start_error,
+        RollbackOutcome::RestoredPreviousRelease => "rollback: restored previous release",
+        RollbackOutcome::RecoveredByForceStop => {
+            "rollback: recovered by force-stop and restored previous release"
+        }
+    };
+    start_error.message = format!("{}; {}", start_error.message, rollback_note);
+    start_error
+}
+
+fn compose_rollback_failure_error(
+    start_error: &ImagodError,
+    rollback_error: &ImagodError,
+) -> ImagodError {
     ImagodError::new(
         ErrorCode::RollbackFailed,
         STAGE_ORCHESTRATE,
-        format!("rollback failed: {}", err.message),
+        format!(
+            "{}; rollback failed: {}",
+            start_error.message, rollback_error.message
+        ),
     )
+    .with_retryable(rollback_error.retryable)
+}
+
+async fn start_previous_release_with_busy_recovery<StartFn, StartFut, StopFn, StopFut>(
+    mut start_previous_release: StartFn,
+    mut stop_current_service_force: StopFn,
+) -> Result<RollbackOutcome, ImagodError>
+where
+    StartFn: FnMut() -> StartFut,
+    StartFut: Future<Output = Result<(), ImagodError>>,
+    StopFn: FnMut() -> StopFut,
+    StopFut: Future<Output = Result<(), ImagodError>>,
+{
+    match start_previous_release().await {
+        Ok(()) => Ok(RollbackOutcome::RestoredPreviousRelease),
+        Err(start_error) if start_error.code == ErrorCode::Busy => {
+            match stop_current_service_force().await {
+                Ok(()) => {}
+                Err(stop_error) if stop_error.code == ErrorCode::NotFound => {}
+                Err(stop_error) => return Err(map_rollback_error(stop_error)),
+            }
+            start_previous_release().await.map_err(map_rollback_error)?;
+            Ok(RollbackOutcome::RecoveredByForceStop)
+        }
+        Err(start_error) => Err(map_rollback_error(start_error)),
+    }
 }
 
 #[cfg(test)]
@@ -1119,22 +1197,25 @@ mod tests {
     use super::{
         DEFAULT_HTTP_MAX_BODY_BYTES, HashTarget, MAX_HTTP_MAX_BODY_BYTES, Manifest, ManifestAsset,
         ManifestBinding, ManifestHash, ManifestHttp, ManifestWasiConfig, ManifestWasiMount,
-        RESTART_POLICY_ALWAYS, RESTART_POLICY_FILE_NAME, RunnerAppType, RunningStatus,
-        RuntimeServiceState, STOPPED_SERVICE_STARTED_AT, build_launch_from_release,
-        classify_boot_restore_entry, collect_boot_restore_candidates,
-        collect_deployed_service_releases, extract_tar, gc_unused_plugin_components_on_boot,
+        RESTART_POLICY_ALWAYS, RESTART_POLICY_FILE_NAME, RollbackOutcome, RunnerAppType,
+        RunningStatus, RuntimeServiceState, STOPPED_SERVICE_STARTED_AT,
+        append_rollback_success_message, build_launch_from_release, classify_boot_restore_entry,
+        collect_boot_restore_candidates, collect_deployed_service_releases,
+        compose_rollback_failure_error, extract_tar, gc_unused_plugin_components_on_boot,
         merge_deployed_and_runtime_service_states, normalize_archive_entry_path,
         normalize_manifest_main_path, promote_staging_release, release_id_from_artifact_digest,
-        validate_deploy_preconditions, validate_service_name,
+        start_previous_release_with_busy_recovery, validate_deploy_preconditions,
+        validate_service_name,
     };
     use imago_protocol::{DeployCommandPayload, ErrorCode, ServiceState, ServiceStatusEntry};
+    use imagod_common::ImagodError;
     use imagod_ipc::{
         CapabilityPolicy, PluginComponent, PluginDependency, PluginKind, RunnerSocketConfig,
         RunnerSocketDirection, RunnerSocketProtocol, RunnerWasiMount,
     };
     use sha2::{Digest, Sha256};
     use std::{
-        collections::{BTreeMap, BTreeSet},
+        collections::{BTreeMap, BTreeSet, VecDeque},
         fs,
         path::{Path, PathBuf},
     };
@@ -1239,6 +1320,153 @@ mod tests {
         let bad_policy = validate_deploy_preconditions(&bad_policy_payload, None)
             .expect_err("unsupported restart policy should be rejected");
         assert_eq!(bad_policy.code, imago_protocol::ErrorCode::BadRequest);
+    }
+
+    #[tokio::test]
+    async fn rollback_busy_uses_force_stop_and_retries_start_once() {
+        let mut start_results = VecDeque::from(vec![
+            Err(ImagodError::new(
+                ErrorCode::Busy,
+                "service.start",
+                "service 'svc-a' is already running",
+            )),
+            Ok(()),
+        ]);
+        let mut stop_results = VecDeque::from(vec![Ok(())]);
+        let mut start_calls = 0usize;
+        let mut stop_calls = 0usize;
+
+        let outcome = start_previous_release_with_busy_recovery(
+            || {
+                start_calls = start_calls.saturating_add(1);
+                let result = start_results
+                    .pop_front()
+                    .expect("start result should exist for each call");
+                async move { result }
+            },
+            || {
+                stop_calls = stop_calls.saturating_add(1);
+                let result = stop_results
+                    .pop_front()
+                    .expect("stop result should exist for each call");
+                async move { result }
+            },
+        )
+        .await
+        .expect("busy rollback should recover via force stop");
+
+        assert_eq!(outcome, RollbackOutcome::RecoveredByForceStop);
+        assert_eq!(
+            start_calls, 2,
+            "start should be retried once after force stop"
+        );
+        assert_eq!(stop_calls, 1, "force stop should run exactly once");
+    }
+
+    #[tokio::test]
+    async fn rollback_busy_continues_when_force_stop_reports_not_found() {
+        let mut start_results = VecDeque::from(vec![
+            Err(ImagodError::new(
+                ErrorCode::Busy,
+                "service.start",
+                "service 'svc-a' is already running",
+            )),
+            Ok(()),
+        ]);
+        let mut stop_results = VecDeque::from(vec![Err(ImagodError::new(
+            ErrorCode::NotFound,
+            "service.stop",
+            "service 'svc-a' is not running",
+        ))]);
+        let mut start_calls = 0usize;
+        let mut stop_calls = 0usize;
+
+        let outcome = start_previous_release_with_busy_recovery(
+            || {
+                start_calls = start_calls.saturating_add(1);
+                let result = start_results
+                    .pop_front()
+                    .expect("start result should exist for each call");
+                async move { result }
+            },
+            || {
+                stop_calls = stop_calls.saturating_add(1);
+                let result = stop_results
+                    .pop_front()
+                    .expect("stop result should exist for each call");
+                async move { result }
+            },
+        )
+        .await
+        .expect("NotFound from force stop should be treated as already stopped");
+
+        assert_eq!(outcome, RollbackOutcome::RecoveredByForceStop);
+        assert_eq!(start_calls, 2, "start should still retry after NotFound");
+        assert_eq!(stop_calls, 1, "force stop should run exactly once");
+    }
+
+    #[test]
+    fn rollback_success_message_appends_expected_suffix() {
+        let start_error = ImagodError::new(
+            ErrorCode::Internal,
+            "runtime.start",
+            "wasmtime instantiation failed",
+        )
+        .with_retryable(true)
+        .with_detail("component", "svc-a.wasm");
+        let expected_code = start_error.code;
+        let expected_stage = start_error.stage.clone();
+        let expected_retryable = start_error.retryable;
+        let expected_details = start_error.details.clone();
+
+        let appended =
+            append_rollback_success_message(start_error, RollbackOutcome::RestoredPreviousRelease);
+        assert_eq!(
+            appended.message,
+            "wasmtime instantiation failed; rollback: restored previous release"
+        );
+        assert_eq!(appended.code, expected_code);
+        assert_eq!(appended.stage, expected_stage);
+        assert_eq!(appended.retryable, expected_retryable);
+        assert_eq!(appended.details, expected_details);
+
+        let busy_start_error = ImagodError::new(
+            ErrorCode::Internal,
+            "runtime.start",
+            "wasmtime instantiation failed",
+        )
+        .with_retryable(true)
+        .with_detail("component", "svc-a.wasm");
+        let busy_recovered = append_rollback_success_message(
+            busy_start_error,
+            RollbackOutcome::RecoveredByForceStop,
+        );
+        assert_eq!(
+            busy_recovered.message,
+            "wasmtime instantiation failed; rollback: recovered by force-stop and restored previous release"
+        );
+    }
+
+    #[test]
+    fn rollback_failure_message_combines_start_and_rollback_errors() {
+        let start_error = ImagodError::new(
+            ErrorCode::Internal,
+            "runtime.start",
+            "wasmtime instantiation failed",
+        );
+        let rollback_error = ImagodError::new(
+            ErrorCode::RollbackFailed,
+            "orchestration",
+            "service 'svc-a' is already running",
+        );
+
+        let composed = compose_rollback_failure_error(&start_error, &rollback_error);
+        assert_eq!(composed.code, ErrorCode::RollbackFailed);
+        assert_eq!(composed.stage, "orchestration");
+        assert_eq!(
+            composed.message,
+            "wasmtime instantiation failed; rollback failed: service 'svc-a' is already running"
+        );
     }
 
     #[tokio::test]
