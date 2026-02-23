@@ -73,7 +73,7 @@ thiserror = "2.0.18"
 time = "0.3.36"
 tempfile = "3.17.1"
 tokio = "1.49.0"
-toml = "0.8.23"
+toml = "0.9.12"
 ureq = { version = "2.12.1", default-features = false }
 proc-macro2 = "1.0.103"
 url = "2.5.4"
