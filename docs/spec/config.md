@@ -180,7 +180,8 @@
   - 許可値は `"*"` または table。
   - `"*"` は全 dependency の全関数呼び出しを許可する。
   - table 指定時は `capabilities.deps.<package>` ごとに許可関数を定義する。
-  - `capabilities.deps.<package>` の許可値は `"*"` または関数名文字列配列。
+  - `capabilities.deps.<package>` の許可値は関数名文字列配列。
+  - 配列要素に `"*"` を含めると、その dependency の全関数呼び出しを許可する。
   - table で `capabilities.deps."*"` を指定すると wildcard dependency として扱う。
   - self 解決（caller 自身の component export）には適用しない。
   - 明示 dependency への中継時のみ適用する。

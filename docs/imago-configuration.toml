@@ -185,7 +185,9 @@ port = 8080
 # constraints:
 # - string must be "*" (allow all dependency functions)
 # - table keys are dependency package names or wildcard "*"
-# - table values are non-empty string arrays; duplicates normalized
+# - table values are string arrays; items must be non-empty strings
+# - empty arrays are allowed (treated as unspecified)
+# - "*" item means wildcard allow; duplicates normalized
 # default: empty table
 # key: capabilities.wasi
 # required: optional
