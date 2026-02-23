@@ -1156,7 +1156,7 @@ fn compose_rollback_failure_error(
     start_error: &ImagodError,
     rollback_error: &ImagodError,
 ) -> ImagodError {
-    ImagodError::new(
+    let mut composed = ImagodError::new(
         ErrorCode::RollbackFailed,
         STAGE_ORCHESTRATE,
         format!(
@@ -1164,7 +1164,18 @@ fn compose_rollback_failure_error(
             start_error.message, rollback_error.message
         ),
     )
-    .with_retryable(rollback_error.retryable)
+    .with_retryable(rollback_error.retryable);
+    for (key, value) in &start_error.details {
+        composed = composed.with_detail(key.clone(), value.clone());
+    }
+    for (key, value) in &rollback_error.details {
+        if start_error.details.contains_key(key) {
+            composed = composed.with_detail(format!("rollback.{key}"), value.clone());
+        } else {
+            composed = composed.with_detail(key.clone(), value.clone());
+        }
+    }
+    composed
 }
 
 async fn start_previous_release_with_busy_recovery<StartFn, StartFut, StopFn, StopFut>(
@@ -1405,6 +1416,53 @@ mod tests {
         assert_eq!(stop_calls, 1, "force stop should run exactly once");
     }
 
+    #[tokio::test]
+    async fn rollback_busy_returns_rollback_failed_when_retry_start_also_fails() {
+        let mut start_results = VecDeque::from(vec![
+            Err(ImagodError::new(
+                ErrorCode::Busy,
+                "service.start",
+                "service 'svc-a' is already running",
+            )),
+            Err(ImagodError::new(
+                ErrorCode::Internal,
+                "service.start",
+                "runner crashed while starting previous release",
+            )),
+        ]);
+        let mut stop_results = VecDeque::from(vec![Ok(())]);
+        let mut start_calls = 0usize;
+        let mut stop_calls = 0usize;
+
+        let err = start_previous_release_with_busy_recovery(
+            || {
+                start_calls = start_calls.saturating_add(1);
+                let result = start_results
+                    .pop_front()
+                    .expect("start result should exist for each call");
+                async move { result }
+            },
+            || {
+                stop_calls = stop_calls.saturating_add(1);
+                let result = stop_results
+                    .pop_front()
+                    .expect("stop result should exist for each call");
+                async move { result }
+            },
+        )
+        .await
+        .expect_err("retry start failure should surface rollback failure");
+
+        assert_eq!(err.code, ErrorCode::RollbackFailed);
+        assert_eq!(err.stage, "orchestration");
+        assert_eq!(
+            err.message,
+            "runner crashed while starting previous release"
+        );
+        assert_eq!(start_calls, 2, "start should be attempted exactly twice");
+        assert_eq!(stop_calls, 1, "force stop should run exactly once");
+    }
+
     #[test]
     fn rollback_success_message_appends_expected_suffix() {
         let start_error = ImagodError::new(
@@ -1453,12 +1511,16 @@ mod tests {
             ErrorCode::Internal,
             "runtime.start",
             "wasmtime instantiation failed",
-        );
+        )
+        .with_detail("component", "svc-a.wasm")
+        .with_detail("phase", "replace");
         let rollback_error = ImagodError::new(
             ErrorCode::RollbackFailed,
             "orchestration",
             "service 'svc-a' is already running",
-        );
+        )
+        .with_detail("phase", "rollback")
+        .with_detail("action", "force-stop");
 
         let composed = compose_rollback_failure_error(&start_error, &rollback_error);
         assert_eq!(composed.code, ErrorCode::RollbackFailed);
@@ -1466,6 +1528,22 @@ mod tests {
         assert_eq!(
             composed.message,
             "wasmtime instantiation failed; rollback failed: service 'svc-a' is already running"
+        );
+        assert_eq!(
+            composed.details.get("component").map(String::as_str),
+            Some("svc-a.wasm")
+        );
+        assert_eq!(
+            composed.details.get("phase").map(String::as_str),
+            Some("replace")
+        );
+        assert_eq!(
+            composed.details.get("rollback.phase").map(String::as_str),
+            Some("rollback")
+        );
+        assert_eq!(
+            composed.details.get("action").map(String::as_str),
+            Some("force-stop")
         );
     }
 
