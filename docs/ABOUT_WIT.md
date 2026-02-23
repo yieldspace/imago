@@ -40,7 +40,7 @@ privileged = false
 ```
 
 - `imago update` は依存WIT/Componentを `.imago/deps/` に保存し、そこから `wit/deps/` を再生成します。`imago.lock (version=1)` には `wit_source` / `wit_registry` / `wit_digest` / `wit_path` を固定します。
-- `wit` / `component` source は `file://...` / `warg://...` / `oci://<registry>/<namespace>/<name>@<version>` を受理します。`oci://` では `registry` キーは指定できません。
+- `wit` / `component` source は `file://...` / `warg://...` / `oci://<registry>/<namespace>/<name...>@<version>` を受理します。`oci://` では `registry` キーは指定できません。
 - `warg://` で `registry` 未指定の場合、既定は `wa.dev`、ただし `wasi:*` は `wasi.dev` を使います。`[namespace_registries]` を指定すると namespace 単位で上書きできます。
 - `oci://` は Rust-native OCI backend で解決し、`IMAGO_OCI_USERNAME` / `IMAGO_OCI_PASSWORD` が設定されていれば認証情報として注入します。
 - `kind="wasm"` で `dependencies.component` を省略した場合、`wit` source が component なら `imago update` が WIT 抽出と `component_source` / `component_registry` / `component_sha256` 固定を自動で行います。

@@ -8,10 +8,13 @@ use std::{
 use anyhow::{Context, anyhow};
 use futures_util::TryStreamExt as _;
 use serde::Serialize;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use wasm_pkg_client::Client;
 use wasm_pkg_common::{
-    config::{Config, RegistryMapping},
+    config::{Config, CustomConfig, RegistryMapping},
+    label::Label,
+    metadata::RegistryMetadata,
     package::{PackageRef, Version},
     registry::Registry,
 };
@@ -269,7 +272,7 @@ pub(crate) async fn materialize_wit_source(
     source: &str,
     registry: Option<&str>,
     namespace_registries: Option<&NamespaceRegistries>,
-    _dependency_version: &str,
+    expected_package: Option<&str>,
     destination_dir: &Path,
 ) -> anyhow::Result<MaterializedWitSource> {
     let parsed = parse_wit_source(project_root, source, registry, namespace_registries)?;
@@ -365,6 +368,7 @@ pub(crate) async fn materialize_wit_source(
                     version: &version,
                     registry: &registry,
                     namespace_registries,
+                    expected_package,
                 },
             )
         }
@@ -676,19 +680,19 @@ struct ParsedOciSpec {
 
 fn parse_oci_spec(spec: &str) -> anyhow::Result<ParsedOciSpec> {
     let (registry_and_package, version) = spec.rsplit_once('@').ok_or_else(|| {
-        anyhow!("oci source must be in form oci://<registry>/<namespace>/<name>@<version>")
+        anyhow!("oci source must be in form oci://<registry>/<namespace>/<name...>@<version>")
     })?;
     let registry_and_package = registry_and_package.trim();
     let version = version.trim();
     if registry_and_package.is_empty() || version.is_empty() {
         return Err(anyhow!(
-            "oci source must include registry, package, and version (oci://<registry>/<namespace>/<name>@<version>)"
+            "oci source must include registry, package, and version (oci://<registry>/<namespace>/<name...>@<version>)"
         ));
     }
     validate_warg_version_for_local_path(version)?;
     let (registry_raw, package_path) = registry_and_package.split_once('/').ok_or_else(|| {
         anyhow!(
-            "oci source must include package path (oci://<registry>/<namespace>/<name>@<version>)"
+            "oci source must include package path (oci://<registry>/<namespace>/<name...>@<version>)"
         )
     })?;
     let registry = normalize_registry_name(registry_raw)?;
@@ -697,25 +701,23 @@ fn parse_oci_spec(spec: &str) -> anyhow::Result<ParsedOciSpec> {
             "oci source package contains invalid path components: {package_path}"
         ));
     }
-    let mut segments = package_path.split('/');
-    let namespace = segments.next().unwrap_or_default().trim();
-    let name = segments.next().unwrap_or_default().trim();
+    let mut segments = package_path.split('/').map(str::trim);
+    let namespace = segments.next().unwrap_or_default();
+    let name_segments = segments.collect::<Vec<_>>();
     if namespace.is_empty()
-        || name.is_empty()
-        || segments.next().is_some()
+        || name_segments.is_empty()
+        || name_segments
+            .iter()
+            .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
         || namespace == "."
         || namespace == ".."
-        || name == "."
-        || name == ".."
     {
         return Err(anyhow!(
-            "oci source package must be '<namespace>/<name>': {package_path}"
+            "oci source package must be '<namespace>/<name...>': {package_path}"
         ));
     }
-    let package = format!("{namespace}:{name}");
-    let _: PackageRef = package
-        .parse()
-        .with_context(|| format!("invalid package name in oci source: {package}"))?;
+    let package = format!("{namespace}:{}", name_segments.join("/"));
+    let _ = resolve_oci_package_for_client(&package)?;
     let _: Version = version
         .parse()
         .with_context(|| format!("invalid package version in oci source: {version}"))?;
@@ -820,6 +822,18 @@ struct MaterializeRemoteWitBytesRequest<'a> {
     version: &'a str,
     registry: &'a str,
     namespace_registries: Option<&'a NamespaceRegistries>,
+    expected_package: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MaterializePlainWitTextRequest<'a> {
+    protocol: RemoteSourceProtocol,
+    package: &'a str,
+    version: &'a str,
+    registry: &'a str,
+    expected_package: Option<&'a str>,
+    expected_version: Option<&'a str>,
+    source_desc: &'a str,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -852,7 +866,7 @@ fn materialize_remote_wit_bytes(
                 &resolve,
                 top_package,
                 WitPackageResolveOptions {
-                    expected_package: Some(request.package),
+                    expected_package: request.expected_package,
                     expected_version: Some(request.version),
                     source_detail: Some(source_detail),
                     namespace_registries: request.namespace_registries,
@@ -865,14 +879,13 @@ fn materialize_remote_wit_bytes(
             })
         }
         Ok(DecodedWasm::Component(resolve, world)) => {
-            let top_package =
-                select_top_package_for_component(&resolve, world, request.package, &source_desc)?;
+            let top_package = select_top_package_for_component(&resolve, world, &source_desc)?;
             let transitive_packages = materialize_wit_package_resolve(
                 destination_dir,
                 &resolve,
                 top_package,
                 WitPackageResolveOptions {
-                    expected_package: Some(request.package),
+                    expected_package: request.expected_package,
                     expected_version: Some(request.version),
                     source_detail: Some(source_detail),
                     namespace_registries: request.namespace_registries,
@@ -893,10 +906,15 @@ fn materialize_remote_wit_bytes(
             materialize_plain_wit_text(
                 destination_dir,
                 bytes,
-                request.protocol,
-                request.package,
-                request.version,
-                request.registry,
+                MaterializePlainWitTextRequest {
+                    protocol: request.protocol,
+                    package: request.package,
+                    version: request.version,
+                    registry: request.registry,
+                    expected_package: request.expected_package,
+                    expected_version: Some(request.version),
+                    source_desc: &source_desc,
+                },
             )?;
             Ok(MaterializedWitSource::default())
         }
@@ -906,27 +924,54 @@ fn materialize_remote_wit_bytes(
 fn materialize_plain_wit_text(
     destination_dir: &Path,
     bytes: &[u8],
-    protocol: RemoteSourceProtocol,
-    package: &str,
-    version: &str,
-    registry: &str,
+    request: MaterializePlainWitTextRequest<'_>,
 ) -> anyhow::Result<()> {
-    let scheme = match protocol {
+    let scheme = match request.protocol {
         RemoteSourceProtocol::Warg => "warg",
         RemoteSourceProtocol::Oci => "oci",
     };
     let text = String::from_utf8(bytes.to_vec()).with_context(|| {
         format!(
             "failed to decode wit source for package '{}@{}' from registry '{}': payload is not UTF-8",
-            package, version, registry
+            request.package, request.version, request.registry
         )
     })?;
     let unresolved = UnresolvedPackageGroup::parse("dependency.wit", &text).with_context(|| {
         format!(
             "failed to parse plain WIT source for package '{}@{}' from registry '{}'",
-            package, version, registry
+            request.package, request.version, request.registry
         )
     })?;
+    let actual_package = format!(
+        "{}:{}",
+        unresolved.main.name.namespace, unresolved.main.name.name
+    );
+    if let Some(expected_package) = request.expected_package
+        && actual_package != expected_package
+    {
+        return Err(anyhow!(
+            "top-level WIT package mismatch for {}: expected package '{}', actual '{}'",
+            request.source_desc,
+            expected_package,
+            actual_package
+        ));
+    }
+    if let (Some(expected_version), Some(actual_version)) = (
+        request.expected_version,
+        unresolved.main.name.version.as_ref(),
+    ) {
+        let actual_version = actual_version.to_string();
+        if actual_version != expected_version {
+            return Err(anyhow!(
+                "top-level WIT package '{}:{}' version mismatch for {}: expected '{}', actual '{}'",
+                unresolved.main.name.namespace,
+                unresolved.main.name.name,
+                request.source_desc,
+                expected_version,
+                actual_version
+            ));
+        }
+    }
     let has_foreign_deps = !unresolved.main.foreign_deps.is_empty()
         || unresolved
             .nested
@@ -936,8 +981,8 @@ fn materialize_plain_wit_text(
         return Err(anyhow!(
             "{} source '{}@{}' contains foreign imports in plain .wit form; publish/use a WIT package so `imago update` can resolve transitive dependencies",
             scheme,
-            package,
-            version
+            request.package,
+            request.version
         ));
     }
     fs::write(destination_dir.join("dependency.wit"), text).with_context(|| {
@@ -1116,19 +1161,9 @@ fn component_world_package_id(
 fn select_top_package_for_component(
     resolve: &wit_parser::Resolve,
     world: wit_parser::WorldId,
-    expected_package: &str,
     source_desc: &str,
 ) -> anyhow::Result<wit_parser::PackageId> {
-    let world_package = component_world_package_id(resolve, world, source_desc)?;
-    let Some((expected_namespace, expected_name)) = expected_package.split_once(':') else {
-        return Ok(world_package);
-    };
-    for (pkg_id, pkg) in resolve.packages.iter() {
-        if pkg.name.namespace == expected_namespace && pkg.name.name == expected_name {
-            return Ok(pkg_id);
-        }
-    }
-    Ok(world_package)
+    component_world_package_id(resolve, world, source_desc)
 }
 
 fn render_wit_package(
@@ -1167,6 +1202,75 @@ fn write_or_verify_identical_wit_file(path: &Path, contents: &str) -> anyhow::Re
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedOciPackageForClient {
+    package_ref: PackageRef,
+    namespace_prefix: Option<String>,
+}
+
+fn resolve_oci_package_for_client(package: &str) -> anyhow::Result<ResolvedOciPackageForClient> {
+    let (namespace, name_path) = package
+        .split_once(':')
+        .ok_or_else(|| anyhow!("invalid package name in oci source: {package}"))?;
+    let mut repository_segments = Vec::with_capacity(2);
+    repository_segments.push(namespace.trim());
+    repository_segments.extend(name_path.split('/').map(str::trim));
+    if repository_segments.len() < 2
+        || repository_segments
+            .iter()
+            .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
+    {
+        return Err(anyhow!("invalid package name in oci source: {package}"));
+    }
+    for segment in &repository_segments {
+        let _: Label = segment
+            .parse()
+            .with_context(|| format!("invalid package name in oci source: {package}"))?;
+    }
+
+    let package_ref: PackageRef = format!(
+        "{}:{}",
+        repository_segments[repository_segments.len() - 2],
+        repository_segments[repository_segments.len() - 1]
+    )
+    .parse()
+    .with_context(|| format!("invalid package name in oci source: {package}"))?;
+
+    let namespace_prefix = if repository_segments.len() > 2 {
+        Some(format!(
+            "{}/",
+            repository_segments[..repository_segments.len() - 2].join("/")
+        ))
+    } else {
+        None
+    };
+
+    Ok(ResolvedOciPackageForClient {
+        package_ref,
+        namespace_prefix,
+    })
+}
+
+fn oci_registry_mapping(
+    registry: &Registry,
+    namespace_prefix: Option<&str>,
+) -> anyhow::Result<RegistryMapping> {
+    let Some(namespace_prefix) = namespace_prefix else {
+        return Ok(RegistryMapping::Registry(registry.clone()));
+    };
+    let metadata: RegistryMetadata = serde_json::from_value(json!({
+        "preferredProtocol": "oci",
+        "oci": {
+            "namespacePrefix": namespace_prefix,
+        },
+    }))
+    .context("failed to build OCI registry metadata override")?;
+    Ok(RegistryMapping::Custom(CustomConfig {
+        registry: registry.clone(),
+        metadata,
+    }))
+}
+
 async fn fetch_release_bytes(
     protocol: RemoteSourceProtocol,
     package: &str,
@@ -1175,9 +1279,18 @@ async fn fetch_release_bytes(
     namespace_registries: Option<&NamespaceRegistries>,
 ) -> anyhow::Result<Vec<u8>> {
     let source_scheme = protocol.scheme();
-    let package_ref: PackageRef = package
-        .parse()
-        .with_context(|| format!("invalid package name in {source_scheme} source: {package}"))?;
+    let (package_ref, oci_namespace_prefix) = match protocol {
+        RemoteSourceProtocol::Warg => {
+            let package_ref: PackageRef = package.parse().with_context(|| {
+                format!("invalid package name in {source_scheme} source: {package}")
+            })?;
+            (package_ref, None)
+        }
+        RemoteSourceProtocol::Oci => {
+            let resolved = resolve_oci_package_for_client(package)?;
+            (resolved.package_ref, resolved.namespace_prefix)
+        }
+    };
     let version: Version = version
         .parse()
         .with_context(|| format!("invalid package version in {source_scheme} source: {version}"))?;
@@ -1187,10 +1300,12 @@ async fn fetch_release_bytes(
 
     let mut config = Config::empty();
     config.set_default_registry(Some(registry.clone()));
-    config.set_package_registry_override(
-        package_ref.clone(),
-        RegistryMapping::Registry(registry.clone()),
-    );
+    let registry_mapping = if protocol == RemoteSourceProtocol::Oci {
+        oci_registry_mapping(&registry, oci_namespace_prefix.as_deref())?
+    } else {
+        RegistryMapping::Registry(registry.clone())
+    };
+    config.set_package_registry_override(package_ref.clone(), registry_mapping);
     if protocol == RemoteSourceProtocol::Warg {
         configure_warg_namespace_registry_mappings(&mut config, namespace_registries)?;
     }
@@ -1540,8 +1655,9 @@ mod tests {
     use super::{
         DEFAULT_WARG_REGISTRY, DEFAULT_WASI_WARG_REGISTRY, copy_wit_tree,
         normalize_registry_for_source, oci_backend_auth_config, parse_oci_spec, parse_warg_spec,
-        resolve_warg_registry_for_package, resolve_warg_registry_for_package_with_fallback,
-        sanitize_wit_deps_name, warg_local_package_key,
+        resolve_oci_package_for_client, resolve_warg_registry_for_package,
+        resolve_warg_registry_for_package_with_fallback, sanitize_wit_deps_name,
+        warg_local_package_key,
     };
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
@@ -1618,6 +1734,78 @@ mod tests {
         assert_eq!(parsed.package, "chikoski:advent-of-spin");
         assert_eq!(parsed.version, "0.2.0");
         assert_eq!(parsed.source, "oci://ghcr.io/chikoski/advent-of-spin@0.2.0");
+    }
+
+    #[test]
+    fn parse_oci_spec_accepts_nested_name_path() {
+        let parsed =
+            parse_oci_spec("ghcr.io/yieldspace/imago/nanokvm@1.2.3").expect("must parse oci spec");
+        assert_eq!(parsed.registry, "ghcr.io");
+        assert_eq!(parsed.package, "yieldspace:imago/nanokvm");
+        assert_eq!(parsed.version, "1.2.3");
+        assert_eq!(
+            parsed.source,
+            "oci://ghcr.io/yieldspace/imago/nanokvm@1.2.3"
+        );
+    }
+
+    #[test]
+    fn parse_oci_spec_rejects_invalid_nested_path_component() {
+        let err = parse_oci_spec("ghcr.io/yieldspace/imago/../nanokvm@1.2.3")
+            .expect_err("must reject traversal");
+        assert!(
+            err.to_string()
+                .contains("oci source package must be '<namespace>/<name...>'")
+        );
+    }
+
+    #[test]
+    fn parse_oci_spec_rejects_empty_nested_path_component() {
+        let err = parse_oci_spec("ghcr.io/yieldspace/imago//nanokvm@1.2.3")
+            .expect_err("must reject empty segment");
+        assert!(
+            err.to_string()
+                .contains("oci source package must be '<namespace>/<name...>'")
+        );
+    }
+
+    #[test]
+    fn parse_oci_spec_rejects_invalid_prefix_identifier_segment() {
+        let err = parse_oci_spec("ghcr.io/Yieldspace/imago/nanokvm@1.2.3")
+            .expect_err("must reject invalid identifier segment");
+        assert!(
+            err.to_string()
+                .contains("invalid package name in oci source")
+        );
+    }
+
+    #[test]
+    fn resolve_oci_package_for_client_maps_nested_path_to_namespace_prefix() {
+        let resolved = resolve_oci_package_for_client("yieldspace:imago/nanokvm")
+            .expect("nested package should resolve for oci client");
+        assert_eq!(resolved.package_ref.to_string(), "imago:nanokvm");
+        assert_eq!(resolved.namespace_prefix.as_deref(), Some("yieldspace/"));
+    }
+
+    #[test]
+    fn resolve_oci_package_for_client_maps_deep_nested_path_to_namespace_prefix() {
+        let resolved = resolve_oci_package_for_client("yieldspace:imago/plugins/nanokvm")
+            .expect("deep nested package should resolve for oci client");
+        assert_eq!(resolved.package_ref.to_string(), "plugins:nanokvm");
+        assert_eq!(
+            resolved.namespace_prefix.as_deref(),
+            Some("yieldspace/imago/")
+        );
+    }
+
+    #[test]
+    fn resolve_oci_package_for_client_rejects_invalid_prefix_identifier_segment() {
+        let err = resolve_oci_package_for_client("Yieldspace:imago/nanokvm")
+            .expect_err("invalid namespace segment must be rejected");
+        assert!(
+            err.to_string()
+                .contains("invalid package name in oci source")
+        );
     }
 
     #[test]

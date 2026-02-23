@@ -264,7 +264,7 @@ pub(crate) async fn load_or_refresh_cache_entry(
         &dependency.wit.source,
         dependency.wit.registry.as_deref(),
         namespace_registries,
-        &dependency.version,
+        Some(dependency.name.as_str()),
         &cache_wit_target,
     )
     .await

@@ -83,6 +83,7 @@
   - `wit`: string（`file://...` / `warg://...` / `oci://...`）
 - [BREAKING] 旧 `wit = "<package>/<interface>"` 形式は受理しない。
 - `imago update` は `wit` で指定した source から解決した WIT package 内の全 interface を展開し、`manifest.bindings[]` へ `{"name":"<service>","wit":"<package>/<interface>"}` の形式で正規化して出力する。
+- `[[bindings]].wit` が remote source（`warg://` / `oci://`）の場合、source URL 上の package 文字列とは照合せず、解決した top-level WIT package 名を正として扱う。
 - 未指定時は `manifest.bindings=[]` として扱い、runtime は deny-by-default で拒否する。
 
 ## `[[dependencies]]`（プラグイン依存）
@@ -96,6 +97,7 @@
   - `kind` (必須): `native` / `wasm`
   - `wit` (任意): string または table
     - string は `file://...` / `warg://...` / `oci://...` を受理
+      - `oci://` は `oci://<registry>/<namespace>/<name...>@<version>` 形式を受理する。
     - table は `wit.source`（必須）+ `wit.registry`（任意）を受理
     - `wit.registry` は `warg://` source のみ指定可能（`oci://` では禁止）
     - 未指定時は `wit.source = "warg://{name}@{version}"`。`wit.registry` は WARG 解決規則で自動決定される。
@@ -107,6 +109,7 @@
   - `component.sha256` (任意, `kind=wasm` の場合): 指定時は `imago update` で照合
   - `capabilities` (任意): この plugin が caller になる場合の認可ルール
 - `imago update` は依存の WIT/Component を `.imago/deps/<sanitized dependency>/` に保存し、そこから `wit/deps/` を再生成する。`imago.lock (version=1)` には `wit_source` / `wit_registry` / `wit_digest` / `wit_path` / `resolved_at` を固定する。`wit_path` の依存名サニタイズは wkg 準拠で `:` / `@` を `-` に置換する。
+- remote source（`warg://` / `oci://`）の dependency では、source URL 上の package 文字列ではなく、解決した top-level WIT package 名が `dependencies[].name` と一致することを要求する。
 - `warg://` の direct dependency で WIT 側に version が書かれている場合は、`warg://...@version` と一致している必要がある。
 - `warg://` の WIT package が transitive import を含む場合、依存パッケージも `wit/deps/<package>/package.wit` に展開し、`imago.lock.[[wit_packages]]` に `name` / `registry` / `[[versions]]` (`requirement` / `version` / `digest` / `source` / `path` / `via`) を固定する。
   - transitive package の `registry` は `namespace_registries > (wasi は wasi.dev) > 親 dependency の解決 registry` で決定する。

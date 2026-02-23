@@ -265,7 +265,7 @@ async fn materialize_binding_wit_source(
         &binding.wit_source,
         binding.wit_registry.as_deref(),
         namespace_registries,
-        "",
+        None,
         destination_root,
     )
     .await
@@ -1317,7 +1317,7 @@ main = "build/app.wasm"
 type = "cli"
 
 [[dependencies]]
-name = "yieldspace:plugin/example"
+name = "yieldspace:example"
 version = "1.2.3"
 kind = "native"
 
@@ -1326,8 +1326,8 @@ remote = "127.0.0.1:4443"
 "#,
         );
         write(
-            &local_warg_file_path(&root, "yieldspace:plugin/example", "1.2.3", "wit.wit"),
-            b"package test:example@1.2.3;\n",
+            &local_warg_file_path(&root, "yieldspace:example", "1.2.3", "wit.wit"),
+            b"package yieldspace:example@1.2.3;\n",
         );
 
         let result = run_with_project_root(UpdateArgs {}, &root).await;
@@ -1342,16 +1342,13 @@ remote = "127.0.0.1:4443"
         assert_eq!(lock.dependencies.len(), 1);
         assert_eq!(
             lock.dependencies[0].wit_source,
-            "warg://yieldspace:plugin/example@1.2.3"
+            "warg://yieldspace:example@1.2.3"
         );
         assert_eq!(
             lock.dependencies[0].wit_registry,
             Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string())
         );
-        assert_eq!(
-            lock.dependencies[0].wit_path,
-            "wit/deps/yieldspace-plugin/example"
-        );
+        assert_eq!(lock.dependencies[0].wit_path, "wit/deps/yieldspace-example");
         assert!(root.join(&lock.dependencies[0].wit_path).exists());
 
         let _ = fs::remove_dir_all(root);
@@ -1495,6 +1492,247 @@ remote = "127.0.0.1:4443"
         assert_eq!(entry.wit_registry, None);
         assert_eq!(entry.wit_path, "wit/deps/chikoski-advent-of-spin");
         assert!(root.join(&entry.wit_path).exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_accepts_warg_dependency_when_resolved_package_matches_dependency_name() {
+        let root = new_temp_dir("warg-dependency-name-matches-resolved-package");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:nanokvm"
+version = "1.2.3"
+kind = "native"
+wit = "warg://yieldspace:imago/nanokvm@1.2.3"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &local_warg_file_path(&root, "yieldspace:imago/nanokvm", "1.2.3", "wit.wit"),
+            b"package yieldspace:nanokvm@1.2.3;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        assert_eq!(lock.dependencies.len(), 1);
+        let entry = &lock.dependencies[0];
+        assert_eq!(
+            entry.wit_source,
+            "warg://yieldspace:imago/nanokvm@1.2.3".to_string()
+        );
+        assert_eq!(entry.wit_path, "wit/deps/yieldspace-nanokvm");
+        assert!(root.join(&entry.wit_path).exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_accepts_oci_dependency_when_resolved_package_matches_dependency_name() {
+        let root = new_temp_dir("oci-dependency-name-matches-resolved-package");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:nanokvm"
+version = "1.2.3"
+kind = "native"
+wit = "oci://ghcr.io/yieldspace/imago/nanokvm@1.2.3"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &local_oci_file_path(
+                &root,
+                "ghcr.io",
+                "yieldspace:imago/nanokvm",
+                "1.2.3",
+                "wit.wit",
+            ),
+            b"package yieldspace:nanokvm@1.2.3;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        assert_eq!(lock.dependencies.len(), 1);
+        let entry = &lock.dependencies[0];
+        assert_eq!(
+            entry.wit_source,
+            "oci://ghcr.io/yieldspace/imago/nanokvm@1.2.3".to_string()
+        );
+        assert_eq!(entry.wit_path, "wit/deps/yieldspace-nanokvm");
+        assert!(root.join(&entry.wit_path).exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_warg_dependency_when_resolved_package_mismatches_dependency_name() {
+        let root = new_temp_dir("warg-dependency-name-mismatch");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:nanokvm"
+version = "1.2.3"
+kind = "native"
+wit = "warg://yieldspace:imago/nanokvm@1.2.3"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &local_warg_file_path(&root, "yieldspace:imago/nanokvm", "1.2.3", "wit.wit"),
+            b"package yieldspace:other@1.2.3;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("top-level WIT package mismatch"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("yieldspace:nanokvm"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("yieldspace:other"),
+            "unexpected stderr: {stderr}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_oci_dependency_when_resolved_package_mismatches_dependency_name() {
+        let root = new_temp_dir("oci-dependency-name-mismatch");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:nanokvm"
+version = "1.2.3"
+kind = "native"
+wit = "oci://ghcr.io/yieldspace/imago/nanokvm@1.2.3"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &local_oci_file_path(
+                &root,
+                "ghcr.io",
+                "yieldspace:imago/nanokvm",
+                "1.2.3",
+                "wit.wit",
+            ),
+            b"package yieldspace:other@1.2.3;\n",
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("top-level WIT package mismatch"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("yieldspace:nanokvm"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("yieldspace:other"),
+            "unexpected stderr: {stderr}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_allows_binding_remote_source_with_source_package_mismatch() {
+        let root = new_temp_dir("binding-remote-source-package-mismatch");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[bindings]]
+name = "svc-target"
+wit = "warg://yieldspace:imago/nanokvm@1.2.3"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &local_warg_file_path(&root, "yieldspace:imago/nanokvm", "1.2.3", "wit.wit"),
+            br#"
+package yieldspace:nanokvm@1.2.3;
+
+interface greet {
+  hello: func() -> string;
+}
+"#,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        assert_eq!(lock.binding_wits.len(), 1);
+        assert_eq!(lock.binding_wits[0].name, "svc-target");
+        assert_eq!(
+            lock.binding_wits[0].interfaces,
+            vec!["yieldspace:nanokvm/greet".to_string()]
+        );
+        assert!(
+            root.join("wit/deps/yieldspace-nanokvm/package.wit")
+                .exists()
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1723,6 +1961,73 @@ world plugin {
             "derived component bytes must be stored in dependency cache"
         );
         assert!(root.join("wit/deps/root-component/package.wit").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_component_dependency_when_world_package_mismatches_dependency_name() {
+        let root = new_temp_dir("wit-component-world-package-mismatch");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:name"
+version = "0.1.0"
+kind = "native"
+wit = "warg://root:component@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+
+        let fixture_wit_root = root.join("fixture-wit-component-world-mismatch");
+        write(
+            &fixture_wit_root.join("package.wit"),
+            br#"
+package root:component@0.1.0;
+
+world plugin {
+  import chikoski:name/name-provider@0.1.0;
+}
+"#,
+        );
+        write(
+            &fixture_wit_root.join("deps/chikoski-name/package.wit"),
+            br#"
+package chikoski:name@0.1.0;
+
+interface name-provider {
+  get-name: func() -> string;
+}
+"#,
+        );
+        let component_bytes = encode_wit_component(&fixture_wit_root, "plugin");
+        write(
+            &local_warg_file_path(&root, "root:component", "0.1.0", "wit.wasm"),
+            &component_bytes,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("top-level WIT package mismatch"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("chikoski:name"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("root:component"),
+            "unexpected stderr: {stderr}"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
