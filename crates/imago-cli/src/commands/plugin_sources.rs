@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use wasm_pkg_client::Client;
 use wasm_pkg_common::{
     config::{Config, CustomConfig, RegistryMapping},
+    label::Label,
     metadata::RegistryMetadata,
     package::{PackageRef, Version},
     registry::Registry,
@@ -878,12 +879,7 @@ fn materialize_remote_wit_bytes(
             })
         }
         Ok(DecodedWasm::Component(resolve, world)) => {
-            let top_package = select_top_package_for_component(
-                &resolve,
-                world,
-                request.expected_package,
-                &source_desc,
-            )?;
+            let top_package = select_top_package_for_component(&resolve, world, &source_desc)?;
             let transitive_packages = materialize_wit_package_resolve(
                 destination_dir,
                 &resolve,
@@ -1165,22 +1161,9 @@ fn component_world_package_id(
 fn select_top_package_for_component(
     resolve: &wit_parser::Resolve,
     world: wit_parser::WorldId,
-    expected_package: Option<&str>,
     source_desc: &str,
 ) -> anyhow::Result<wit_parser::PackageId> {
-    let world_package = component_world_package_id(resolve, world, source_desc)?;
-    let Some(expected_package) = expected_package else {
-        return Ok(world_package);
-    };
-    let Some((expected_namespace, expected_name)) = expected_package.split_once(':') else {
-        return Ok(world_package);
-    };
-    for (pkg_id, pkg) in resolve.packages.iter() {
-        if pkg.name.namespace == expected_namespace && pkg.name.name == expected_name {
-            return Ok(pkg_id);
-        }
-    }
-    Ok(world_package)
+    component_world_package_id(resolve, world, source_desc)
 }
 
 fn render_wit_package(
@@ -1238,6 +1221,11 @@ fn resolve_oci_package_for_client(package: &str) -> anyhow::Result<ResolvedOciPa
             .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
     {
         return Err(anyhow!("invalid package name in oci source: {package}"));
+    }
+    for segment in &repository_segments {
+        let _: Label = segment
+            .parse()
+            .with_context(|| format!("invalid package name in oci source: {package}"))?;
     }
 
     let package_ref: PackageRef = format!(
@@ -1782,6 +1770,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_oci_spec_rejects_invalid_prefix_identifier_segment() {
+        let err = parse_oci_spec("ghcr.io/Yieldspace/imago/nanokvm@1.2.3")
+            .expect_err("must reject invalid identifier segment");
+        assert!(
+            err.to_string()
+                .contains("invalid package name in oci source")
+        );
+    }
+
+    #[test]
     fn resolve_oci_package_for_client_maps_nested_path_to_namespace_prefix() {
         let resolved = resolve_oci_package_for_client("yieldspace:imago/nanokvm")
             .expect("nested package should resolve for oci client");
@@ -1797,6 +1795,16 @@ mod tests {
         assert_eq!(
             resolved.namespace_prefix.as_deref(),
             Some("yieldspace/imago/")
+        );
+    }
+
+    #[test]
+    fn resolve_oci_package_for_client_rejects_invalid_prefix_identifier_segment() {
+        let err = resolve_oci_package_for_client("Yieldspace:imago/nanokvm")
+            .expect_err("invalid namespace segment must be rejected");
+        assert!(
+            err.to_string()
+                .contains("invalid package name in oci source")
         );
     }
 

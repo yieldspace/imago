@@ -1966,6 +1966,73 @@ world plugin {
     }
 
     #[tokio::test]
+    async fn update_rejects_component_dependency_when_world_package_mismatches_dependency_name() {
+        let root = new_temp_dir("wit-component-world-package-mismatch");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "chikoski:name"
+version = "0.1.0"
+kind = "native"
+wit = "warg://root:component@0.1.0"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+
+        let fixture_wit_root = root.join("fixture-wit-component-world-mismatch");
+        write(
+            &fixture_wit_root.join("package.wit"),
+            br#"
+package root:component@0.1.0;
+
+world plugin {
+  import chikoski:name/name-provider@0.1.0;
+}
+"#,
+        );
+        write(
+            &fixture_wit_root.join("deps/chikoski-name/package.wit"),
+            br#"
+package chikoski:name@0.1.0;
+
+interface name-provider {
+  get-name: func() -> string;
+}
+"#,
+        );
+        let component_bytes = encode_wit_component(&fixture_wit_root, "plugin");
+        write(
+            &local_warg_file_path(&root, "root:component", "0.1.0", "wit.wasm"),
+            &component_bytes,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("top-level WIT package mismatch"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("chikoski:name"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("root:component"),
+            "unexpected stderr: {stderr}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn update_rejects_wasm_dependency_without_component_when_wit_is_not_component() {
         let root = new_temp_dir("wit-not-component-for-wasm");
         write(
