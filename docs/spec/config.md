@@ -179,8 +179,13 @@
 
 ### `capabilities`
 
-- `capabilities.deps.<package>`: 依存 plugin の呼び出し許可関数。
-  - 許可値は `"*"` または関数名文字列配列。
+- `capabilities.deps`: 依存 plugin の呼び出し許可ルール。
+  - 許可値は `"*"` または table。
+  - `"*"` は全 dependency の全関数呼び出しを許可する。
+  - table 指定時は `capabilities.deps.<package>` ごとに許可関数を定義する。
+  - `capabilities.deps.<package>` の許可値は関数名文字列配列。
+  - 配列要素に `"*"` を含めると、その dependency の全関数呼び出しを許可する。
+  - table で `capabilities.deps."*"` を指定すると wildcard dependency として扱う。
   - self 解決（caller 自身の component export）には適用しない。
   - 明示 dependency への中継時のみ適用する。
 - `capabilities.wasi`: WASI 呼び出し許可ルール。
@@ -265,6 +270,7 @@
 - `imago update` は `kind=wasm` かつ `component` 未指定で `wit` source が component の場合、component hash/source を lock へ自動固定する。
 - `imago update` は `file://` source が存在する場合のみ hash 差分を監視し、差分があればキャッシュを再解決する。source が消えている場合は既存キャッシュを優先する。
 - `imago build` は `capabilities` を正規化して manifest に出力し、`capabilirties` キーは設定エラーとして拒否する。
+- `imago build` は `capabilities.deps` に `string("*")` / table の両形式を受理し、`"*"` は `{"*": ["*"]}` へ正規化する。
 - `imago build` は `capabilities.wasi` に `bool` / table の両形式を受理し、`true` は全許可、`false` は空ルールとして正規化する。
 - `imago build` は `[[dependencies]]` がある場合、`.imago/deps` から `wit/deps` を再構築してから `imago.lock(version=1)` の `wit_*` / `component_*` / `wit_packages` を検証し、不一致時は `imago update` を要求して失敗する（`kind=wasm` で `component` 未指定の場合は `wit` 由来の期待値と照合する）。
 - `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
