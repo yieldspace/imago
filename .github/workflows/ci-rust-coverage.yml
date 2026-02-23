@@ -19,7 +19,7 @@ concurrency:
 jobs:
   coverage:
     name: coverage
-    runs-on: ubuntu-latest
+    runs-on: imago-dind-runner-set
     steps:
       - name: Checkout
         uses: actions/checkout@v6

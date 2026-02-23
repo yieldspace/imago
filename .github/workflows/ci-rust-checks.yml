@@ -23,7 +23,7 @@ concurrency:
 jobs:
   changed:
     name: detect changes
-    runs-on: ubuntu-latest
+    runs-on: imago-dind-runner-set
     outputs:
       rust_related: ${{ steps.detect.outputs.rust_related }}
       workflow_related: ${{ steps.detect.outputs.workflow_related }}
@@ -88,7 +88,7 @@ jobs:
     name: rust checks
     needs: changed
     if: ${{ needs.changed.outputs.rust_related == 'true' || needs.changed.outputs.workflow_related == 'true' || needs.changed.outputs.plugin_wit_related == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    runs-on: imago-dind-runner-set
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -125,7 +125,7 @@ jobs:
   pr_body_lint:
     name: pr body lint
     if: ${{ github.event_name == 'pull_request' }}
-    runs-on: ubuntu-latest
+    runs-on: imago-dind-runner-set
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -143,7 +143,7 @@ jobs:
       - rust_checks
       - pr_body_lint
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: imago-dind-runner-set
     steps:
       - name: Evaluate required checks
         shell: bash
