@@ -27,8 +27,7 @@ use wasmtime::{
     component::{Component, Func, Linker},
 };
 use wasmtime_wasi::{
-    DirPerms, FilePerms, WasiCtxBuilder,
-    p2::{add_to_linker_async, bindings::Command},
+    DirPerms, FilePerms, WasiCtxBuilder, p2::add_to_linker_async, p2::bindings::Command,
     sockets::SocketAddrUse,
 };
 use wasmtime_wasi_http::{add_only_http_to_linker_async, bindings::Proxy};

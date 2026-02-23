@@ -222,7 +222,6 @@ where
                         dep.name
                     ))
                 })?;
-
                 let self_instance = Arc::new(tokio::sync::Mutex::new(None));
                 register_plugin_import_shims(
                     resolver,
@@ -286,7 +285,7 @@ pub(crate) fn register_plugin_import_shims(
     let component_ty = component.component_type();
     let self_export_interfaces = collect_component_instance_export_names(component, engine);
     let allow_self_provider = self_instance.is_some();
-    let mut linked_native_imports = BTreeSet::<String>::new();
+    let mut linked_native_plugin_packages = BTreeSet::<String>::new();
     let available_dependency_names = available_plugins.keys().cloned().collect::<BTreeSet<_>>();
     let binding_targets = build_binding_target_map(bindings)?;
 
@@ -370,8 +369,23 @@ pub(crate) fn register_plugin_import_shims(
                     )));
                 }
             }
-            if linked_native_imports.insert(import_name.to_string()) {
-                native_plugin.add_to_linker(linker)?;
+            if mark_native_plugin_linked(
+                &mut linked_native_plugin_packages,
+                native_plugin.package_name(),
+            ) {
+                linker.allow_shadowing(true);
+                let link_result = (|| -> Result<(), ImagodError> {
+                    native_plugin.add_to_linker(linker)?;
+                    add_to_linker_async(linker).map_err(|e| {
+                        map_runtime_error(format!(
+                            "failed to refresh WASI linker after native plugin '{}' link: {e}",
+                            native_plugin.package_name()
+                        ))
+                    })?;
+                    Ok(())
+                })();
+                linker.allow_shadowing(false);
+                link_result?;
             }
             continue;
         }
@@ -788,6 +802,13 @@ fn parse_import_package_name(import_name: &str) -> Option<&str> {
         .map(|(package_name, _)| package_name)
 }
 
+fn mark_native_plugin_linked(
+    linked_native_plugin_packages: &mut BTreeSet<String>,
+    package_name: &str,
+) -> bool {
+    linked_native_plugin_packages.insert(package_name.to_string())
+}
+
 fn ensure_component_signatures_match(
     import_ty: &types::ComponentFunc,
     callee_ty: &types::ComponentFunc,
@@ -1056,6 +1077,24 @@ mod tests {
             err.message.contains("maps to multiple services"),
             "unexpected message: {}",
             err.message
+        );
+    }
+
+    #[test]
+    fn mark_native_plugin_linked_is_package_scoped() {
+        let mut linked_native_plugin_packages = BTreeSet::new();
+
+        assert!(
+            mark_native_plugin_linked(&mut linked_native_plugin_packages, "imago:nanokvm"),
+            "first import from same package should link once"
+        );
+        assert!(
+            !mark_native_plugin_linked(&mut linked_native_plugin_packages, "imago:nanokvm"),
+            "second import from same package should not relink"
+        );
+        assert!(
+            mark_native_plugin_linked(&mut linked_native_plugin_packages, "imago:node"),
+            "another package should still link"
         );
     }
 }

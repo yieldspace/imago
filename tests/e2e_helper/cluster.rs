@@ -13,6 +13,7 @@ pub struct Cluster {
     workspace_root: PathBuf,
     base_dir: PathBuf,
     control_admin_public_hex: String,
+    daemon_package: String,
     nodes: Vec<Node>,
     running: Vec<NodeProcess>,
 }
@@ -50,12 +51,22 @@ impl Cluster {
         base_dir: PathBuf,
         control_admin_public_hex: String,
     ) -> Result<Self> {
+        Self::new_with_daemon_package(workspace_root, base_dir, control_admin_public_hex, "imagod")
+    }
+
+    pub fn new_with_daemon_package(
+        workspace_root: PathBuf,
+        base_dir: PathBuf,
+        control_admin_public_hex: String,
+        daemon_package: impl Into<String>,
+    ) -> Result<Self> {
         fs::create_dir_all(&base_dir)
             .with_context(|| format!("failed to create {}", base_dir.display()))?;
         Ok(Self {
             workspace_root,
             base_dir,
             control_admin_public_hex,
+            daemon_package: daemon_package.into(),
             nodes: Vec::new(),
             running: Vec::new(),
         })
@@ -127,7 +138,7 @@ impl Cluster {
                 .arg("--manifest-path")
                 .arg(self.workspace_root.join("Cargo.toml"))
                 .arg("-p")
-                .arg("imagod")
+                .arg(&self.daemon_package)
                 .arg("--")
                 .arg("--config")
                 .arg(&node.imagod_config_path)
