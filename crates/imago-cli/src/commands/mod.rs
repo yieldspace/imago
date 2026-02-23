@@ -7,6 +7,7 @@ pub mod compose;
 pub(crate) mod dependency_cache;
 pub mod deploy;
 pub(crate) mod error_diagnostics;
+pub mod init;
 pub mod logs;
 pub(crate) mod plugin_sources;
 pub mod ps;

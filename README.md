@@ -35,6 +35,23 @@ cargo install imago
 ```bash
 git clone https://github.com/yieldspace/imago
 cd imago
+```
+
+### Initialize `imago.toml`
+
+```bash
+# Interactive (TTY)
+imago init .
+
+# Non-interactive (CI/--json/no TTY): --lang is required
+imago init services/example --lang rust
+imago --json init services/example --lang generic
+```
+
+`imago init` は `imago.toml` を作成したディレクトリの `.gitignore` を整備し、
+`.imago` と `/build` を不足分だけ追記します（`.gitignore` が無ければ作成）。
+
+```bash
 cd examples/local-imagod
 # ターミナル1
 cargo run -p imagod -- --config imagod.toml

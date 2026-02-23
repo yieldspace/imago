@@ -400,3 +400,11 @@
 - 自動生成時は起動ログで通知する。
 - `tls.server_key` は自動生成した `imagod.toml` と同じディレクトリの `server.key`（絶対パス）を指し、該当ファイルが未存在なら `imagod.toml` 自動生成と同時に `server.key` 実体も生成する。
 - `tls.client_public_keys` は空配列 `[]` を許容する。
+
+## 実装反映ノート（`imago init` テンプレ生成 / 2026-02-23）
+
+- `imago init [PATH]` を追加し、`PATH` 未指定または `.` のときは current directory、それ以外は `cwd/PATH`（絶対パス指定時はそのまま）へ `imago.toml` を生成する。
+- 生成先ディレクトリは自動作成するが、既存 `imago.toml` は上書きせずエラーにする。
+- `imago init` 成功時は `imago.toml` 生成先ディレクトリの `.gitignore` を整備し、`.imago` と `/build` を不足分のみ追記する（`.gitignore` 未存在時は作成）。
+- テンプレートは `crates/imago-cli/templates/imago/*.toml` のファイル名を `LANG_ID` として自動検出し、ファイル名昇順で扱う。
+- `--lang` 未指定時は対話可能セッションのみ選択プロンプトを表示する。非対話（`--json` / CI / 非TTY）では `--lang` を必須にする。

@@ -26,6 +26,20 @@ git clone https://github.com/yieldspace/imago
 cd imago
 ```
 
+## `imago.toml` 初期化
+
+```bash
+# 対話実行（TTY）
+imago init .
+
+# 非対話実行（CI/--json/TTYなし）は --lang が必須
+imago init services/example --lang rust
+imago --json init services/example --lang generic
+```
+
+`imago init` は `imago.toml` 作成先の `.gitignore` を自動整備し、
+`.imago` と `/build` を不足分だけ追記します（`.gitignore` が無ければ作成）。
+
 ## 実行
 
 ```bash

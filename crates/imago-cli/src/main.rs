@@ -10,6 +10,7 @@ use commands::CommandResult;
 
 async fn dispatch_async(cli: Cli) -> CommandResult {
     match cli.command {
+        Commands::Init(args) => commands::init::run(args),
         Commands::Build(args) => commands::build::run(args),
         Commands::Update(args) => commands::update::run(args).await,
         Commands::Deploy(args) => commands::deploy::run(args).await,
@@ -40,6 +41,7 @@ async fn dispatch_with_project_root_async(
     project_root: &std::path::Path,
 ) -> CommandResult {
     match cli.command {
+        Commands::Init(args) => commands::init::run_with_cwd(args, project_root),
         Commands::Build(args) => commands::build::run_with_project_root(args, project_root),
         Commands::Update(args) => commands::update::run_with_project_root(args, project_root).await,
         Commands::Deploy(args) => commands::deploy::run_with_project_root(args, project_root).await,
@@ -100,7 +102,7 @@ mod tests {
         BindingsCertCommands, BindingsCertDeployArgs, BindingsCertSubcommandArgs,
         BindingsCertUploadArgs, BindingsCommands, BindingsSubcommandArgs, BuildArgs,
         ComposeBuildArgs, ComposeCommands, ComposeDeployArgs, ComposeLogsArgs, ComposePsArgs,
-        ComposeSubcommandArgs, ComposeUpdateArgs, DeployArgs, PsArgs, RunArgs, StopArgs,
+        ComposeSubcommandArgs, ComposeUpdateArgs, DeployArgs, InitArgs, PsArgs, RunArgs, StopArgs,
     };
     use std::path::PathBuf;
 
@@ -117,6 +119,53 @@ mod tests {
         let root = std::env::temp_dir().join(unique);
         std::fs::create_dir_all(&root).expect("temp dir should be created");
         root
+    }
+
+    #[tokio::test]
+    async fn dispatches_init_and_creates_imago_toml() {
+        let root = new_temp_dir("dispatch-init-success");
+        let result = dispatch_with_project_root_async(
+            Cli {
+                json: false,
+                command: Commands::Init(InitArgs {
+                    path: Some(PathBuf::from("svc-a")),
+                    lang: Some("rust".to_string()),
+                }),
+            },
+            &root,
+        )
+        .await;
+
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stderr.is_none());
+        assert!(root.join("svc-a").join("imago.toml").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dispatches_init_and_returns_non_zero_for_unknown_lang() {
+        let root = new_temp_dir("dispatch-init-failure");
+        let result = dispatch_with_project_root_async(
+            Cli {
+                json: false,
+                command: Commands::Init(InitArgs {
+                    path: Some(PathBuf::from("svc-a")),
+                    lang: Some("unknown".to_string()),
+                }),
+            },
+            &root,
+        )
+        .await;
+
+        assert_eq!(result.exit_code, 2);
+        assert!(
+            result
+                .stderr
+                .as_deref()
+                .expect("stderr should be present")
+                .contains("unknown template language")
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

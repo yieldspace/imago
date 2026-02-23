@@ -2232,6 +2232,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "dialoguer",
  "dotenvy",
  "futures-util",
  "hex",
