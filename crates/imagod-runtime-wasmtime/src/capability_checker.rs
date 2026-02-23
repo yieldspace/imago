@@ -19,7 +19,11 @@ impl CapabilityChecker for DefaultCapabilityChecker {
         if policy.privileged {
             return true;
         }
-        let Some(rules) = policy.deps.get(dependency_name) else {
+        let rules = policy
+            .deps
+            .get(dependency_name)
+            .or_else(|| policy.deps.get("*"));
+        let Some(rules) = rules else {
             return false;
         };
         rules
@@ -120,6 +124,61 @@ fn rule_matches(rule: &str, interface_name: &str, function_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependency_capability_denies_when_policy_is_empty() {
+        let checker = DefaultCapabilityChecker;
+        let allowed = checker.is_dependency_function_allowed(
+            &CapabilityPolicy::default(),
+            "yieldspace:plugin/example",
+            "example:api/ops",
+            "invoke",
+        );
+        assert!(!allowed, "empty policy should deny dependency function");
+    }
+
+    #[test]
+    fn dependency_capability_allows_when_dependency_wildcard_key_is_present() {
+        let checker = DefaultCapabilityChecker;
+        let policy = CapabilityPolicy {
+            privileged: false,
+            deps: std::collections::BTreeMap::from([("*".to_string(), vec!["*".to_string()])]),
+            wasi: std::collections::BTreeMap::new(),
+        };
+        let allowed = checker.is_dependency_function_allowed(
+            &policy,
+            "yieldspace:plugin/example",
+            "example:api/ops",
+            "invoke",
+        );
+        assert!(allowed, "wildcard dependency key should allow dependency function");
+    }
+
+    #[test]
+    fn dependency_capability_uses_exact_dependency_rules_before_wildcard_key() {
+        let checker = DefaultCapabilityChecker;
+        let policy = CapabilityPolicy {
+            privileged: false,
+            deps: std::collections::BTreeMap::from([
+                (
+                    "yieldspace:plugin/example".to_string(),
+                    vec!["allowed".to_string()],
+                ),
+                ("*".to_string(), vec!["*".to_string()]),
+            ]),
+            wasi: std::collections::BTreeMap::new(),
+        };
+        let allowed = checker.is_dependency_function_allowed(
+            &policy,
+            "yieldspace:plugin/example",
+            "example:api/ops",
+            "invoke",
+        );
+        assert!(
+            !allowed,
+            "explicit dependency rules should take precedence over wildcard key"
+        );
+    }
 
     #[test]
     fn wasi_capability_denies_when_policy_is_empty() {

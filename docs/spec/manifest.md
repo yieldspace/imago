@@ -83,6 +83,9 @@
 - ルート `manifest.capabilities` は app caller 用のルール。
 - `privileged=true` の場合は全許可。
 - それ以外は `deps` / `wasi` で明示許可された関数のみ許可（default deny）。
+- `deps` は dependency package 名（または wildcard `*`）をキーに、許可関数配列を定義する。
+  - wildcard key `deps."*"` は任意 dependency へ適用する。
+  - 同一 dependency に明示キーと wildcard が両方ある場合、明示キーを優先する。
 - `capabilities.wasi` は `true` / `false` または table を受理する。
   - `true`: 全 WASI を許可。
   - `false`: 空ルールとして扱い、WASI を許可しない。
@@ -172,6 +175,7 @@
 - CLI は `imago.toml` の `[[dependencies]]` を typed `manifest.dependencies[]` に正規化し、lock 検証済みの WIT/Component 参照情報を保持する。
   - `kind=wasm` で `component` 未指定の場合、`wit` source が component なら `imago update` が `component_*` を lock に自動固定し、`imago build` が manifest の `component.*` を補完する。
 - CLI は `imago.toml` の `capabilities` を正規化して `manifest.capabilities` に出力する（`capabilirties` は互換受理しない）。
+- CLI は `capabilities.deps` に `string("*")` / table の両形式を受理し、`"*"` は `{"*": ["*"]}` として正規化する。
 - CLI は `capabilities.wasi` に `bool` / table の両形式を受理し、`true` は全許可、`false` は空ルールとして正規化する。
 - CLI は `type=http` 時のみ `imago.toml` の `[http].port` / `[http].max_body_bytes` を `manifest.http.port` / `manifest.http.max_body_bytes` へ正規化して出力する。
 - CLI は `type=socket` 時のみ `imago.toml` の `[socket].protocol` / `[socket].direction` / `[socket].listen_addr` / `[socket].listen_port` を `manifest.socket.*` へ正規化して出力する。

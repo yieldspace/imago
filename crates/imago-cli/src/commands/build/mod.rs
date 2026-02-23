@@ -1436,7 +1436,7 @@ fn parse_capability_policy(
             .ok_or_else(|| anyhow!("{field_name}.privileged must be a boolean"))?,
     };
 
-    let deps = parse_capability_rule_table(table.get("deps"), &format!("{field_name}.deps"))?;
+    let deps = parse_deps_capability_rules(table.get("deps"), &format!("{field_name}.deps"))?;
     let wasi = parse_wasi_capability_rules(table.get("wasi"), &format!("{field_name}.wasi"))?;
 
     Ok(ManifestCapabilityPolicy {
@@ -1444,6 +1444,28 @@ fn parse_capability_policy(
         deps,
         wasi,
     })
+}
+
+fn parse_deps_capability_rules(
+    value: Option<&TomlValue>,
+    field_name: &str,
+) -> anyhow::Result<BTreeMap<String, Vec<String>>> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+
+    if let Some(rule) = value.as_str() {
+        if rule.trim() == "*" {
+            return Ok(BTreeMap::from([("*".to_string(), vec!["*".to_string()])]));
+        }
+        return Err(anyhow!("{field_name} must be \"*\" or a table"));
+    }
+
+    if value.as_table().is_none() {
+        return Err(anyhow!("{field_name} must be \"*\" or a table"));
+    }
+
+    parse_capability_rule_table(Some(value), field_name)
 }
 
 fn parse_wasi_capability_rules(
@@ -3336,6 +3358,65 @@ remote = "127.0.0.1:4443"
     }
 
     #[test]
+    fn build_accepts_capabilities_deps_wildcard_string() {
+        let root = new_temp_dir("capability-deps-wildcard");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[capabilities]
+deps = "*"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        assert_eq!(
+            manifest.capabilities.deps.get("*").cloned(),
+            Some(vec!["*".to_string()])
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_capabilities_deps_non_wildcard_string() {
+        let root = new_temp_dir("capability-deps-non-wildcard-string");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[capabilities]
+deps = "invoke"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project("default", &root)
+            .expect_err("capabilities.deps must reject non-wildcard string");
+        assert!(
+            err.to_string()
+                .contains("capabilities.deps must be \"*\" or a table"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn build_accepts_capabilities_wasi_true_as_wildcard() {
         let root = new_temp_dir("capability-wasi-bool-true");
         write_imago_toml(
@@ -4213,6 +4294,47 @@ remote = "127.0.0.1:4443"
                 .deps
                 .get("yieldspace:plugin/example")
                 .cloned(),
+            Some(vec!["*".to_string()])
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_accepts_dependency_capabilities_deps_wildcard_string() {
+        let root = new_temp_dir("dependencies-capabilities-deps-wildcard");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+name = "yieldspace:plugin/example"
+version = "0.1.0"
+kind = "native"
+wit = "file://registry/example.wit"
+
+[dependencies.capabilities]
+deps = "*"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("registry/example.wit"),
+            b"package test:example;\n",
+        );
+        run_update(&root);
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(
+            manifest.dependencies[0].capabilities.deps.get("*").cloned(),
             Some(vec!["*".to_string()])
         );
 
