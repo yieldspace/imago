@@ -71,6 +71,10 @@ pub struct Scenario {
 
 impl Scenario {
     pub fn new(test_name: &str) -> TestResult<Self> {
+        Self::new_with_daemon_package(test_name, "imagod")
+    }
+
+    pub fn new_with_daemon_package(test_name: &str, daemon_package: &str) -> TestResult<Self> {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let prefix = short_prefix(test_name);
         let temp_dir = TempDirBuilder::new().prefix(&prefix).tempdir()?;
@@ -83,10 +87,11 @@ impl Scenario {
         let control_home = root.join("h");
         fs::create_dir_all(&control_home)?;
 
-        let cluster = Cluster::new(
+        let cluster = Cluster::new_with_daemon_package(
             workspace_root.clone(),
             root.join("n"),
             control_keys.admin_public_hex,
+            daemon_package,
         )?;
         let projects_base_dir = root.join("p");
         fs::create_dir_all(&projects_base_dir)?;

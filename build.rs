@@ -58,6 +58,10 @@ fn main() {
         "IMAGO_E2E_WASM_RPC_CALLEE",
         &wasm_dir.join("e2e_rpc_callee.wasm"),
     );
+    export_artifact(
+        "IMAGO_E2E_WASM_NANOKVM_PROBE",
+        &wasm_dir.join("e2e_nanokvm_probe.wasm"),
+    );
 }
 
 fn export_artifact(key: &str, path: &Path) {
