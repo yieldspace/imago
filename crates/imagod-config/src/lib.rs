@@ -102,6 +102,12 @@ pub struct RuntimeConfig {
     #[serde(default = "default_deploy_stream_timeout_secs")]
     /// Timeout for deployment stream operations in seconds.
     pub deploy_stream_timeout_secs: u64,
+    #[serde(default = "default_boot_plugin_gc_enabled")]
+    /// Whether plugin cache GC runs at manager boot.
+    pub boot_plugin_gc_enabled: bool,
+    #[serde(default = "default_boot_restore_enabled")]
+    /// Whether restart-policy boot restore runs at manager boot.
+    pub boot_restore_enabled: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -120,6 +126,8 @@ impl Default for RuntimeConfig {
             manager_control_read_timeout_ms: default_manager_control_read_timeout_ms(),
             max_concurrent_sessions: default_max_concurrent_sessions(),
             deploy_stream_timeout_secs: default_deploy_stream_timeout_secs(),
+            boot_plugin_gc_enabled: default_boot_plugin_gc_enabled(),
+            boot_restore_enabled: default_boot_restore_enabled(),
         }
     }
 }
@@ -713,6 +721,14 @@ fn default_deploy_stream_timeout_secs() -> u64 {
     15
 }
 
+fn default_boot_plugin_gc_enabled() -> bool {
+    true
+}
+
+fn default_boot_restore_enabled() -> bool {
+    true
+}
+
 /// Parse a 32-byte Ed25519 raw public key from hex.
 pub fn parse_ed25519_raw_public_key_hex(value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64 {
@@ -814,6 +830,8 @@ client_public_keys = ["111111111111111111111111111111111111111111111111111111111
         assert_eq!(config.runtime.manager_control_read_timeout_ms, 500);
         assert_eq!(config.runtime.max_concurrent_sessions, 256);
         assert_eq!(config.runtime.deploy_stream_timeout_secs, 15);
+        assert!(config.runtime.boot_plugin_gc_enabled);
+        assert!(config.runtime.boot_restore_enabled);
 
         cleanup_temp_path(path);
     }
@@ -835,6 +853,33 @@ client_public_keys = ["111111111111111111111111111111111111111111111111111111111
 
         let config = ImagodConfig::load(&path).expect("config should load");
         assert_eq!(config.storage_root, PathBuf::from("/tmp/imago-explicit"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn loads_runtime_boot_toggles() {
+        let path = write_temp_config(
+            "loads_runtime_boot_toggles",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago-explicit"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+
+[runtime]
+boot_plugin_gc_enabled = false
+boot_restore_enabled = false
+"#,
+        );
+
+        let config = ImagodConfig::load(&path).expect("config should load");
+        assert!(!config.runtime.boot_plugin_gc_enabled);
+        assert!(!config.runtime.boot_restore_enabled);
 
         cleanup_temp_path(path);
     }

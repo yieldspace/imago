@@ -284,7 +284,7 @@
 - `target.<name>.client_key` は path traversal と不正区切りを拒否し、相対指定を `project_root` 基準の絶対パスへ解決する。
 - `known_hosts` は設定キーとして受理せず、CLI 既定パス `~/.imago/known_hosts` を常に使用する。
 - `imagod.storage_root` の既定値は OS 別（Linux=`/var/lib/imago`, macOS=`/usr/local/var/imago`, Windows=`C:\ProgramData\imago`, その他=`/var/lib/imago`）にし、ビルド時環境変数 `IMAGOD_STORAGE_ROOT_DEFAULT` で上書きできる。`imagod.toml` の明示値を最優先する。
-- `imagod.runtime` に `http_worker_count` / `http_worker_queue_capacity` / `manager_control_read_timeout_ms` / `max_concurrent_sessions` / `deploy_stream_timeout_secs` を追加し、load 時に範囲・正数検証を行う。`RunnerBootstrap` へは `http_worker_count` と `http_worker_queue_capacity` を必須値として伝播する。
+- `imagod.runtime` に `http_worker_count` / `http_worker_queue_capacity` / `manager_control_read_timeout_ms` / `max_concurrent_sessions` / `deploy_stream_timeout_secs` / `boot_plugin_gc_enabled` / `boot_restore_enabled` を追加し、load 時に範囲・正数検証を行う。`RunnerBootstrap` へは `http_worker_count` と `http_worker_queue_capacity` を必須値として伝播する。
 - `restart` はトップレベルキーのみ受理し、`runtime.restart_policy` は移行エラーにする。
 - `.imago_transitive` は廃止し、transitive WIT package の検証正本を `imago.lock.[[wit_packages]]` へ移行した。`imago build` / `imago deploy` は lock version 1 のみ受理する。
 
@@ -343,6 +343,8 @@
 - `runtime.manager_control_read_timeout_ms`（既定 `500`）
 - `runtime.max_concurrent_sessions`（既定 `256`）
 - `runtime.deploy_stream_timeout_secs`（既定 `15`）
+- `runtime.boot_plugin_gc_enabled`（既定 `true`。`false` で起動時 plugin component cache GC を skip）
+- `runtime.boot_restore_enabled`（既定 `true`。`false` で起動時 boot restore を skip）
 
 `storage_root` の既定値決定順序:
 
@@ -368,6 +370,8 @@
 - `runtime.manager_control_read_timeout_ms`: `1` 以上
 - `runtime.max_concurrent_sessions`: `1` 以上
 - `runtime.deploy_stream_timeout_secs`: `1` 以上
+- `runtime.boot_plugin_gc_enabled`: bool
+- `runtime.boot_restore_enabled`: bool
 
 ## 実装反映ノート（RPK + TOFU / 2026-02-18）
 

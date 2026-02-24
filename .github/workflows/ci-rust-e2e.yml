@@ -61,25 +61,13 @@ jobs:
 
           echo "Found $ignore_count #[ignore] annotation(s) in root package tests/."
 
-      - name: Prebuild imagod
-        run: cargo build -p imagod
-
-      - name: Run ignored e2e tests
+      - name: Prebuild imagod and imago-cli
         shell: bash
         run: |
           set -euo pipefail
+          cargo build -p imagod -p imago-cli
+          echo "IMAGO_E2E_IMAGOD_BIN=$PWD/target/debug/imagod" >> "$GITHUB_ENV"
+          echo "IMAGO_E2E_IMAGO_CLI_BIN=$PWD/target/debug/imago" >> "$GITHUB_ENV"
 
-          for attempt in 1 2; do
-            echo "Running ignored e2e tests (attempt ${attempt}/2)..."
-            if cargo test -p imago --features e2e -- --ignored --test-threads=1; then
-              exit 0
-            fi
-
-            if [ "$attempt" -eq 1 ]; then
-              echo "Attempt 1 failed. Retrying shortly..."
-              sleep 5
-            fi
-          done
-
-          echo "Ignored e2e tests failed after 2 attempts." >&2
-          exit 1
+      - name: Run ignored e2e tests
+        run: cargo test -p imago --features e2e -- --ignored
