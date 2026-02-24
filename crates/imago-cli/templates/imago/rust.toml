@@ -1,0 +1,6 @@
+name = "example-service"
+main = "target/release/wasm32-wasip2/example-service.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"

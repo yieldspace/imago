@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+build = "build.rs"
 [[bin]]
 name = "imago"
 path = "src/main.rs"
@@ -15,6 +16,7 @@ base64 = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 chrono = { workspace = true }
 dotenvy = { workspace = true }
+dialoguer = { workspace = true }
 futures-util = { workspace = true }
 hex = { workspace = true }
 indicatif = { workspace = true }

@@ -17,6 +17,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Commands {
+    /// Generate imago.toml from a template.
+    Init(InitArgs),
     /// Build project artifacts and manifest.
     Build(BuildArgs),
     /// Resolve dependencies and refresh lock/cache state.
@@ -37,6 +39,18 @@ pub enum Commands {
     Bindings(BindingsSubcommandArgs),
     /// Generate local development certificates.
     Certs(CertsSubcommandArgs),
+}
+
+/// Initialize a project with imago.toml.
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct InitArgs {
+    /// Destination directory. If omitted or ".", writes to current directory.
+    #[arg(value_name = "PATH")]
+    pub path: Option<PathBuf>,
+
+    /// Template language ID (for example: rust, generic).
+    #[arg(long, value_name = "LANG_ID")]
+    pub lang: Option<String>,
 }
 
 /// Build artifacts for a service project.
@@ -308,6 +322,56 @@ mod tests {
                 json: false,
                 command: Commands::Build(BuildArgs {
                     target: "default".to_string(),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_init_without_options() {
+        let cli = Cli::try_parse_from(["imago", "init"]).expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                json: false,
+                command: Commands::Init(InitArgs {
+                    path: None,
+                    lang: None,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_init_with_path_and_lang() {
+        let cli = Cli::try_parse_from(["imago", "init", "services/api", "--lang", "rust"])
+            .expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                json: false,
+                command: Commands::Init(InitArgs {
+                    path: Some(PathBuf::from("services/api")),
+                    lang: Some("rust".to_string()),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_init_with_dot_path() {
+        let cli = Cli::try_parse_from(["imago", "init", ".", "--lang", "generic"])
+            .expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                json: false,
+                command: Commands::Init(InitArgs {
+                    path: Some(PathBuf::from(".")),
+                    lang: Some("generic".to_string()),
                 }),
             }
         );
@@ -839,9 +903,21 @@ mod tests {
         let mut command = Cli::command();
         let help = command.render_long_help().to_string();
 
+        assert!(help.contains("Generate imago.toml from a template"));
         assert!(help.contains("Build project artifacts and manifest"));
         assert!(help.contains("Build and deploy the current service to imagod"));
         assert!(help.contains("Run compose profile operations across multiple services"));
+    }
+
+    #[test]
+    fn init_help_includes_lang_help_text() {
+        let err = Cli::try_parse_from(["imago", "init", "--help"]).expect_err("help should exit");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+
+        assert!(help.contains("[PATH]"));
+        assert!(help.contains("--lang <LANG_ID>"));
+        assert!(help.contains("Template language ID"));
     }
 
     #[test]
