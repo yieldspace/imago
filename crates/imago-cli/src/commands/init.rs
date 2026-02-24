@@ -339,21 +339,38 @@ mod tests {
     }
 
     #[test]
-    fn generic_template_matches_docs_template() {
-        let generic = detected_templates()
-            .into_iter()
-            .find(|template| template.id == "generic")
-            .expect("generic template should exist")
-            .body;
+    fn templates_are_valid_imago_config_toml() {
+        for template in detected_templates() {
+            let parsed: toml::Value = toml::from_str(template.body)
+                .unwrap_or_else(|err| panic!("template '{}' should be valid TOML: {err}", template.id));
+            let root = parsed
+                .as_table()
+                .unwrap_or_else(|| panic!("template '{}' root should be a TOML table", template.id));
 
-        let docs_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("docs")
-            .join("imago-configuration.toml");
-        let docs = fs::read_to_string(&docs_path).expect("docs template should be readable");
+            if let Some(app_type_value) = root.get("type") {
+                let app_type = app_type_value.as_str().unwrap_or_else(|| {
+                    panic!("template '{}' key 'type' should be string", template.id)
+                });
+                assert!(
+                    matches!(app_type, "cli" | "http" | "socket" | "rpc"),
+                    "template '{}' key 'type' has unsupported value: {}",
+                    template.id,
+                    app_type
+                );
+            }
 
-        assert_eq!(generic, docs);
+            if let Some(restart_value) = root.get("restart") {
+                let restart = restart_value.as_str().unwrap_or_else(|| {
+                    panic!("template '{}' key 'restart' should be string", template.id)
+                });
+                assert!(
+                    matches!(restart, "never" | "on-failure" | "always" | "unless-stopped"),
+                    "template '{}' key 'restart' has unsupported value: {}",
+                    template.id,
+                    restart
+                );
+            }
+        }
     }
 
     #[test]
