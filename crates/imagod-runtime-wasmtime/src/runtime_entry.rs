@@ -923,7 +923,7 @@ interface types {
 
         let mut resolve = Resolve::default();
         let (pkg, _) = resolve
-            .push_dir(&root)
+            .push_dir(root)
             .expect("fixture WIT directory should parse");
         let world = resolve
             .select_world(&[pkg], Some("app"))
