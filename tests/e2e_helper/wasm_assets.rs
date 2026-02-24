@@ -7,7 +7,6 @@ pub enum WasmArtifact {
     Http,
     RpcCaller,
     RpcCallee,
-    NanoKvmProbe,
 }
 
 pub fn wasm_path(artifact: WasmArtifact) -> Result<PathBuf> {
@@ -26,7 +25,6 @@ pub fn wasm_file_name(artifact: WasmArtifact) -> &'static str {
         WasmArtifact::Http => "e2e_http.wasm",
         WasmArtifact::RpcCaller => "e2e_rpc_caller.wasm",
         WasmArtifact::RpcCallee => "e2e_rpc_callee.wasm",
-        WasmArtifact::NanoKvmProbe => "e2e_nanokvm_probe.wasm",
     }
 }
 
@@ -36,6 +34,5 @@ fn artifact_env_key(artifact: WasmArtifact) -> &'static str {
         WasmArtifact::Http => "IMAGO_E2E_WASM_HTTP",
         WasmArtifact::RpcCaller => "IMAGO_E2E_WASM_RPC_CALLER",
         WasmArtifact::RpcCallee => "IMAGO_E2E_WASM_RPC_CALLEE",
-        WasmArtifact::NanoKvmProbe => "IMAGO_E2E_WASM_NANOKVM_PROBE",
     }
 }

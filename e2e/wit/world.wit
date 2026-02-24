@@ -3,8 +3,3 @@ package e2e:components;
 world rpc-caller {
   import acme:clock/api;
 }
-
-world nanokvm-probe {
-  import imago:nanokvm/stream-config@0.1.0;
-  import imago:nanokvm/device-status@0.1.0;
-}

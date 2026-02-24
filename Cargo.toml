@@ -133,8 +133,3 @@ required-features = ["e2e"]
 name = "e2e_rpc_single"
 path = "tests/e2e_rpc_single.rs"
 required-features = ["e2e"]
-
-[[test]]
-name = "e2e_nanokvm_native_plugin"
-path = "tests/e2e_nanokvm_native_plugin.rs"
-required-features = ["e2e"]

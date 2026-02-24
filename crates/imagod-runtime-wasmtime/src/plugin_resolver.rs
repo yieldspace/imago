@@ -932,6 +932,138 @@ fn resolve_wasm_export_from_instance(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native_plugins::{
+        HasSelf, NativePlugin, NativePluginLinker, NativePluginResult,
+        map_native_plugin_linker_error,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    mod test_multi_import_bindings {
+        wasmtime::component::bindgen!({
+            inline: r#"
+                package test:multi@0.1.0;
+
+                interface a {
+                    ping: func();
+                }
+
+                interface b {
+                    ping: func();
+                }
+
+                world host {
+                    import a;
+                    import b;
+                }
+            "#,
+            world: "host",
+        });
+    }
+
+    #[derive(Clone, Default)]
+    struct TestMultiImportPlugin {
+        link_calls: Arc<AtomicUsize>,
+    }
+
+    impl TestMultiImportPlugin {
+        const PACKAGE_NAME: &'static str = "test:multi";
+        const IMPORTS: [&'static str; 2] = ["test:multi/a@0.1.0", "test:multi/b@0.1.0"];
+        const SYMBOLS: [&'static str; 2] = ["test:multi/a@0.1.0.ping", "test:multi/b@0.1.0.ping"];
+
+        fn link_call_count(&self) -> usize {
+            self.link_calls.load(Ordering::Relaxed)
+        }
+    }
+
+    impl NativePlugin for TestMultiImportPlugin {
+        fn package_name(&self) -> &'static str {
+            Self::PACKAGE_NAME
+        }
+
+        fn supports_import(&self, import_name: &str) -> bool {
+            Self::IMPORTS.contains(&import_name)
+        }
+
+        fn symbols(&self) -> &'static [&'static str] {
+            &Self::SYMBOLS
+        }
+
+        fn add_to_linker(&self, linker: &mut NativePluginLinker) -> NativePluginResult<()> {
+            self.link_calls.fetch_add(1, Ordering::Relaxed);
+            test_multi_import_bindings::Host_::add_to_linker::<_, HasSelf<_>>(linker, |state| state)
+                .map_err(|err| map_native_plugin_linker_error(Self::PACKAGE_NAME, err))
+        }
+    }
+
+    impl test_multi_import_bindings::test::multi::a::Host for WasiState {
+        fn ping(&mut self) {}
+    }
+
+    impl test_multi_import_bindings::test::multi::b::Host for WasiState {
+        fn ping(&mut self) {}
+    }
+
+    #[test]
+    fn multi_import_plugin_link_twice_fails_with_duplicate_entry() {
+        let plugin = TestMultiImportPlugin::default();
+        let engine = Engine::default();
+        let mut linker = Linker::new(&engine);
+
+        plugin
+            .add_to_linker(&mut linker)
+            .expect("first linker registration should succeed");
+
+        let err = plugin
+            .add_to_linker(&mut linker)
+            .expect_err("second linker registration should fail");
+        assert!(
+            err.message.contains("defined twice")
+                || err.message.contains("already defined")
+                || err.message.contains("defined more than once"),
+            "unexpected error: {}",
+            err.message
+        );
+        assert_eq!(
+            plugin.link_call_count(),
+            2,
+            "duplicate test must invoke add_to_linker twice"
+        );
+    }
+
+    #[test]
+    fn package_scoped_guard_links_multi_import_plugin_once() {
+        let plugin = TestMultiImportPlugin::default();
+        let engine = Engine::default();
+        let mut linker = Linker::new(&engine);
+        let mut linked_native_plugin_packages = BTreeSet::new();
+
+        for import_name in TestMultiImportPlugin::IMPORTS {
+            assert!(
+                plugin.supports_import(import_name),
+                "test plugin must support import '{}'",
+                import_name
+            );
+            if mark_native_plugin_linked(&mut linked_native_plugin_packages, plugin.package_name())
+            {
+                plugin
+                    .add_to_linker(&mut linker)
+                    .expect("guarded linker registration should succeed");
+            }
+        }
+
+        assert_eq!(
+            plugin.link_call_count(),
+            1,
+            "package-scoped guard must prevent relinking for second import"
+        );
+        assert!(
+            linked_native_plugin_packages.contains(TestMultiImportPlugin::PACKAGE_NAME),
+            "linked package set should include test plugin package"
+        );
+    }
 
     #[test]
     fn resolve_import_provider_prefers_self_component() {
