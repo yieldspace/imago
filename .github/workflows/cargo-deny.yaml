@@ -41,7 +41,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Restore Rust cache
-        if: ${{ !contains(runner.labels, 'self-hosted') }}
+        if: ${{ runner.environment != 'self-hosted' }}
         uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-deny
