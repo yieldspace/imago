@@ -2,7 +2,9 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex as StdMutex},
 };
 
 use imago_protocol::{
@@ -17,7 +19,7 @@ use tokio::fs;
 use uuid::Uuid;
 
 use crate::{
-    artifact_store::ArtifactStore,
+    artifact_store::{ArtifactStore, CommittedArtifact},
     service_supervisor::{
         RunningStatus, RuntimeServiceState, ServiceLaunch, ServiceLogSubscription,
         ServiceSupervisor,
@@ -184,6 +186,7 @@ pub struct Orchestrator {
     supervisor: ServiceSupervisor,
     manifest_validator: DefaultManifestValidator,
     plugin_cache: FilesystemPluginCache,
+    command_gate: ServiceCommandGate,
 }
 
 /// Prepared release context passed from deploy preparation into final activation.
@@ -196,6 +199,59 @@ struct PreparedRelease {
     previous_release: Option<String>,
     previous_restart_policy: Option<String>,
     launch: ServiceLaunch,
+}
+
+/// Staged deploy context after artifact extraction and manifest verification.
+struct StagedRelease {
+    service_name: String,
+    staging_dir: PathBuf,
+    manifest: Manifest,
+    artifact_digest: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RollbackOutcome {
+    SkippedNoPreviousRelease,
+    RestoredPreviousRelease,
+    RecoveredByForceStop,
+}
+
+#[derive(Clone, Default)]
+struct ServiceCommandGate {
+    inflight_services: Arc<StdMutex<BTreeSet<String>>>,
+}
+
+impl ServiceCommandGate {
+    fn acquire(&self, service_name: &str) -> Result<ServiceCommandGuard, ImagodError> {
+        let mut inflight_services = match self.inflight_services.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if inflight_services.contains(service_name) {
+            return Err(service_command_busy_error(service_name));
+        }
+        inflight_services.insert(service_name.to_string());
+        Ok(ServiceCommandGuard {
+            service_name: service_name.to_string(),
+            inflight_services: self.inflight_services.clone(),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ServiceCommandGuard {
+    service_name: String,
+    inflight_services: Arc<StdMutex<BTreeSet<String>>>,
+}
+
+impl Drop for ServiceCommandGuard {
+    fn drop(&mut self) {
+        let mut inflight_services = match self.inflight_services.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inflight_services.remove(&self.service_name);
+    }
 }
 
 impl Orchestrator {
@@ -212,6 +268,7 @@ impl Orchestrator {
             supervisor,
             manifest_validator: DefaultManifestValidator,
             plugin_cache: FilesystemPluginCache::new(storage_root),
+            command_gate: ServiceCommandGate::default(),
         }
     }
 
@@ -220,12 +277,38 @@ impl Orchestrator {
         &self,
         payload: &DeployCommandPayload,
     ) -> Result<DeploySummary, ImagodError> {
-        let prepared = self.prepare_release(payload).await?;
+        let mut service_name = self
+            .artifact_store
+            .service_name_for_deploy(&payload.deploy_id)
+            .await?;
+        let mut service_command_guard = Some(self.command_gate.acquire(&service_name)?);
+
+        let staged = self.prepare_release_staging(payload).await?;
+        rebind_deploy_service_command_guard(
+            &self.command_gate,
+            &mut service_name,
+            &mut service_command_guard,
+            &staged.service_name,
+        )?;
+        let prepared = self.prepare_release_from_staged(payload, staged).await?;
 
         let launch = prepared.launch.clone();
         if let Err(start_error) = self.supervisor.replace(launch).await {
             if payload.auto_rollback {
-                self.rollback_previous_release(&prepared).await?;
+                match self.rollback_previous_release(&prepared).await {
+                    Ok(rollback_outcome) => {
+                        return Err(append_rollback_success_message(
+                            start_error,
+                            rollback_outcome,
+                        ));
+                    }
+                    Err(rollback_error) => {
+                        return Err(compose_rollback_failure_error(
+                            &start_error,
+                            &rollback_error,
+                        ));
+                    }
+                }
             }
             return Err(start_error);
         }
@@ -243,6 +326,8 @@ impl Orchestrator {
 
     /// Starts a service from its currently active release.
     pub async fn run(&self, payload: &RunCommandPayload) -> Result<RunSummary, ImagodError> {
+        let _service_command_guard = self.command_gate.acquire(&payload.name)?;
+
         let service_root = self.storage_root.join("services").join(&payload.name);
         let active_file = service_root.join("active_release");
         let active_release = read_active_release(&active_file).await?.ok_or_else(|| {
@@ -293,6 +378,8 @@ impl Orchestrator {
 
     /// Stops a running service.
     pub async fn stop(&self, payload: &StopCommandPayload) -> Result<StopSummary, ImagodError> {
+        let _service_command_guard = self.command_gate.acquire(&payload.name)?;
+
         self.supervisor.stop(&payload.name, payload.force).await?;
         Ok(StopSummary {
             service_name: payload.name.clone(),
@@ -377,78 +464,40 @@ impl Orchestrator {
     }
 
     /// Prepares a validated release and launch spec from committed artifact data.
-    async fn prepare_release(
+    async fn prepare_release_staging(
         &self,
         payload: &DeployCommandPayload,
-    ) -> Result<PreparedRelease, ImagodError> {
+    ) -> Result<StagedRelease, ImagodError> {
         let committed = self
             .artifact_store
             .committed_artifact(&payload.deploy_id)
             .await?;
-        let staging_dir = self.storage_root.join("staging").join(&committed.deploy_id);
+        stage_committed_release(&self.storage_root, &self.manifest_validator, &committed).await
+    }
 
-        clean_dir(&staging_dir).await?;
-        fs::create_dir_all(&staging_dir)
-            .await
-            .map_err(|e| map_internal(format!("failed to create staging dir: {e}")))?;
-
-        extract_tar(&committed.path, &staging_dir).await?;
-
-        let manifest_path = staging_dir.join("manifest.json");
-        let manifest_bytes = fs::read(&manifest_path)
-            .await
-            .map_err(|e| map_bad_manifest(format!("manifest read failed: {e}")))?;
-        let manifest = self.manifest_validator.parse_manifest(&manifest_bytes)?;
-        self.manifest_validator.validate_manifest_metadata(
-            &manifest,
-            &manifest_bytes,
-            Some(&committed.manifest_digest),
-        )?;
-
-        let release_hash = release_id_from_artifact_digest(&committed.artifact_digest);
-        let service_root = self.storage_root.join("services").join(&manifest.name);
-        let release_dir = service_root.join(&release_hash);
-        let active_file = service_root.join("active_release");
-        let restart_policy_file = service_root.join(RESTART_POLICY_FILE_NAME);
-        let previous_release = read_active_release(&active_file).await?;
-        let previous_restart_policy = read_restart_policy(&restart_policy_file).await?;
-        validate_deploy_preconditions(payload, previous_release.as_deref())?;
-
-        fs::create_dir_all(&service_root)
-            .await
-            .map_err(|e| map_internal(format!("service root creation failed: {e}")))?;
-        promote_staging_release(&staging_dir, &release_dir).await?;
-
-        cleanup_old_releases(&service_root, &release_hash, previous_release.as_deref()).await?;
-
-        let launch = launch_builder::build_launch_from_release(
-            &release_hash,
-            &release_dir,
-            &manifest,
+    /// Finalizes release promotion under an acquired command gate.
+    async fn prepare_release_from_staged(
+        &self,
+        payload: &DeployCommandPayload,
+        staged: StagedRelease,
+    ) -> Result<PreparedRelease, ImagodError> {
+        prepare_release_from_staged_inner(
+            &self.storage_root,
+            payload,
+            staged,
             &self.manifest_validator,
             &self.plugin_cache,
         )
-        .await?;
-
-        Ok(PreparedRelease {
-            service_name: manifest.name,
-            service_root,
-            release_hash,
-            active_file,
-            restart_policy_file,
-            previous_release,
-            previous_restart_policy,
-            launch,
-        })
+        .await
     }
 
     /// Attempts to roll back active release marker when replacement start fails.
     async fn rollback_previous_release(
         &self,
         prepared: &PreparedRelease,
-    ) -> Result<(), ImagodError> {
+    ) -> Result<RollbackOutcome, ImagodError> {
         let Some(previous_release) = prepared.previous_release.as_deref() else {
-            return Ok(());
+            return Ok(RollbackOutcome::SkippedNoPreviousRelease);
         };
 
         fs::write(&prepared.active_file, previous_release.as_bytes())
@@ -475,12 +524,13 @@ impl Orchestrator {
             )
             .await
             .map_err(map_rollback_error)?;
-        self.supervisor
-            .start(previous_launch)
-            .await
-            .map_err(map_rollback_error)?;
+        let rollback_outcome = start_previous_release_with_busy_recovery(
+            || self.supervisor.start(previous_launch.clone()),
+            || self.supervisor.stop(&prepared.service_name, true),
+        )
+        .await?;
 
-        Ok(())
+        Ok(rollback_outcome)
     }
 
     /// Loads launch information from an existing promoted release.
@@ -536,6 +586,90 @@ struct BootRestoreCandidate {
     service_name: String,
     service_root: PathBuf,
     release_hash: String,
+}
+
+async fn stage_committed_release(
+    storage_root: &Path,
+    manifest_validator: &DefaultManifestValidator,
+    committed: &CommittedArtifact,
+) -> Result<StagedRelease, ImagodError> {
+    let staging_dir = storage_root.join("staging").join(&committed.deploy_id);
+
+    clean_dir(&staging_dir).await?;
+    fs::create_dir_all(&staging_dir)
+        .await
+        .map_err(|e| map_internal(format!("failed to create staging dir: {e}")))?;
+
+    extract_tar(&committed.path, &staging_dir).await?;
+
+    let manifest_path = staging_dir.join("manifest.json");
+    let manifest_bytes = fs::read(&manifest_path)
+        .await
+        .map_err(|e| map_bad_manifest(format!("manifest read failed: {e}")))?;
+    let manifest = manifest_validator.parse_manifest(&manifest_bytes)?;
+    manifest_validator.validate_manifest_metadata(
+        &manifest,
+        &manifest_bytes,
+        Some(&committed.manifest_digest),
+    )?;
+
+    Ok(StagedRelease {
+        service_name: manifest.name.clone(),
+        staging_dir,
+        manifest,
+        artifact_digest: committed.artifact_digest.clone(),
+    })
+}
+
+async fn prepare_release_from_staged_inner(
+    storage_root: &Path,
+    payload: &DeployCommandPayload,
+    staged: StagedRelease,
+    manifest_validator: &DefaultManifestValidator,
+    plugin_cache: &FilesystemPluginCache,
+) -> Result<PreparedRelease, ImagodError> {
+    let StagedRelease {
+        service_name,
+        staging_dir,
+        manifest,
+        artifact_digest,
+    } = staged;
+
+    let release_hash = release_id_from_artifact_digest(&artifact_digest);
+    let service_root = storage_root.join("services").join(&service_name);
+    let release_dir = service_root.join(&release_hash);
+    let active_file = service_root.join("active_release");
+    let restart_policy_file = service_root.join(RESTART_POLICY_FILE_NAME);
+    let previous_release = read_active_release(&active_file).await?;
+    let previous_restart_policy = read_restart_policy(&restart_policy_file).await?;
+    validate_deploy_preconditions(payload, previous_release.as_deref())?;
+
+    fs::create_dir_all(&service_root)
+        .await
+        .map_err(|e| map_internal(format!("service root creation failed: {e}")))?;
+    promote_staging_release(&staging_dir, &release_dir).await?;
+
+    cleanup_old_releases(&service_root, &release_hash, previous_release.as_deref()).await?;
+
+    let launch = launch_builder::build_launch_from_release(
+        &release_hash,
+        &release_dir,
+        &manifest,
+        manifest_validator,
+        plugin_cache,
+    )
+    .await?;
+
+    Ok(PreparedRelease {
+        service_name,
+        service_root,
+        release_hash,
+        active_file,
+        restart_policy_file,
+        previous_release,
+        previous_restart_policy,
+        launch,
+    })
 }
 
 /// Builds launch metadata for supervisor from a promoted release directory.
@@ -1106,12 +1240,103 @@ fn map_bad_manifest(message: String) -> ImagodError {
     ImagodError::new(ErrorCode::BadManifest, STAGE_ORCHESTRATE, message)
 }
 
-fn map_rollback_error(err: ImagodError) -> ImagodError {
+fn service_command_busy_error(service_name: &str) -> ImagodError {
     ImagodError::new(
+        ErrorCode::Busy,
+        STAGE_ORCHESTRATE,
+        format!("service '{service_name}' command is already in progress"),
+    )
+}
+
+fn rebind_deploy_service_command_guard(
+    command_gate: &ServiceCommandGate,
+    current_service_name: &mut String,
+    current_guard: &mut Option<ServiceCommandGuard>,
+    manifest_service_name: &str,
+) -> Result<(), ImagodError> {
+    if current_service_name == manifest_service_name {
+        return Ok(());
+    }
+
+    let manifest_guard = command_gate.acquire(manifest_service_name)?;
+    *current_guard = Some(manifest_guard);
+    *current_service_name = manifest_service_name.to_string();
+    Ok(())
+}
+
+fn map_rollback_error(err: ImagodError) -> ImagodError {
+    let mut mapped = ImagodError::new(ErrorCode::RollbackFailed, STAGE_ORCHESTRATE, err.message)
+        .with_retryable(err.retryable);
+    for (key, value) in err.details {
+        mapped = mapped.with_detail(key, value);
+    }
+    mapped
+}
+
+fn append_rollback_success_message(
+    mut start_error: ImagodError,
+    rollback_outcome: RollbackOutcome,
+) -> ImagodError {
+    let rollback_note = match rollback_outcome {
+        RollbackOutcome::SkippedNoPreviousRelease => return start_error,
+        RollbackOutcome::RestoredPreviousRelease => "rollback: restored previous release",
+        RollbackOutcome::RecoveredByForceStop => {
+            "rollback: recovered by force-stop and restored previous release"
+        }
+    };
+    start_error.message = format!("{}; {}", start_error.message, rollback_note);
+    start_error
+}
+
+fn compose_rollback_failure_error(
+    start_error: &ImagodError,
+    rollback_error: &ImagodError,
+) -> ImagodError {
+    let mut composed = ImagodError::new(
         ErrorCode::RollbackFailed,
         STAGE_ORCHESTRATE,
-        format!("rollback failed: {}", err.message),
+        format!(
+            "{}; rollback failed: {}",
+            start_error.message, rollback_error.message
+        ),
     )
+    .with_retryable(rollback_error.retryable);
+    for (key, value) in &start_error.details {
+        composed = composed.with_detail(key.clone(), value.clone());
+    }
+    for (key, value) in &rollback_error.details {
+        if start_error.details.contains_key(key) {
+            composed = composed.with_detail(format!("rollback.{key}"), value.clone());
+        } else {
+            composed = composed.with_detail(key.clone(), value.clone());
+        }
+    }
+    composed
+}
+
+async fn start_previous_release_with_busy_recovery<StartFn, StartFut, StopFn, StopFut>(
+    mut start_previous_release: StartFn,
+    mut stop_current_service_force: StopFn,
+) -> Result<RollbackOutcome, ImagodError>
+where
+    StartFn: FnMut() -> StartFut,
+    StartFut: Future<Output = Result<(), ImagodError>>,
+    StopFn: FnMut() -> StopFut,
+    StopFut: Future<Output = Result<(), ImagodError>>,
+{
+    match start_previous_release().await {
+        Ok(()) => Ok(RollbackOutcome::RestoredPreviousRelease),
+        Err(start_error) if start_error.code == ErrorCode::Busy => {
+            match stop_current_service_force().await {
+                Ok(()) => {}
+                Err(stop_error) if stop_error.code == ErrorCode::NotFound => {}
+                Err(stop_error) => return Err(map_rollback_error(stop_error)),
+            }
+            start_previous_release().await.map_err(map_rollback_error)?;
+            Ok(RollbackOutcome::RecoveredByForceStop)
+        }
+        Err(start_error) => Err(map_rollback_error(start_error)),
+    }
 }
 
 #[cfg(test)]
@@ -1119,22 +1344,27 @@ mod tests {
     use super::{
         DEFAULT_HTTP_MAX_BODY_BYTES, HashTarget, MAX_HTTP_MAX_BODY_BYTES, Manifest, ManifestAsset,
         ManifestBinding, ManifestHash, ManifestHttp, ManifestWasiConfig, ManifestWasiMount,
-        RESTART_POLICY_ALWAYS, RESTART_POLICY_FILE_NAME, RunnerAppType, RunningStatus,
-        RuntimeServiceState, STOPPED_SERVICE_STARTED_AT, build_launch_from_release,
-        classify_boot_restore_entry, collect_boot_restore_candidates,
-        collect_deployed_service_releases, extract_tar, gc_unused_plugin_components_on_boot,
+        RESTART_POLICY_ALWAYS, RESTART_POLICY_FILE_NAME, RollbackOutcome, RunnerAppType,
+        RunningStatus, RuntimeServiceState, STOPPED_SERVICE_STARTED_AT, ServiceCommandGate,
+        append_rollback_success_message, build_launch_from_release, classify_boot_restore_entry,
+        collect_boot_restore_candidates, collect_deployed_service_releases,
+        compose_rollback_failure_error, extract_tar, gc_unused_plugin_components_on_boot,
         merge_deployed_and_runtime_service_states, normalize_archive_entry_path,
-        normalize_manifest_main_path, promote_staging_release, release_id_from_artifact_digest,
+        normalize_manifest_main_path, prepare_release_from_staged_inner, promote_staging_release,
+        rebind_deploy_service_command_guard, release_id_from_artifact_digest,
+        stage_committed_release, start_previous_release_with_busy_recovery,
         validate_deploy_preconditions, validate_service_name,
     };
+    use crate::artifact_store::CommittedArtifact;
     use imago_protocol::{DeployCommandPayload, ErrorCode, ServiceState, ServiceStatusEntry};
+    use imagod_common::ImagodError;
     use imagod_ipc::{
         CapabilityPolicy, PluginComponent, PluginDependency, PluginKind, RunnerSocketConfig,
         RunnerSocketDirection, RunnerSocketProtocol, RunnerWasiMount,
     };
     use sha2::{Digest, Sha256};
     use std::{
-        collections::{BTreeMap, BTreeSet},
+        collections::{BTreeMap, BTreeSet, VecDeque},
         fs,
         path::{Path, PathBuf},
     };
@@ -1161,6 +1391,40 @@ mod tests {
                 algorithm: "sha256".to_string(),
                 targets: vec![HashTarget::Wasm, HashTarget::Manifest, HashTarget::Assets],
             },
+        }
+    }
+
+    fn append_tar_file(builder: &mut Builder<fs::File>, name: &str, bytes: &[u8]) {
+        let mut header = Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, name, bytes)
+            .expect("tar entry should be appended");
+    }
+
+    fn committed_artifact_for_manifest(
+        root: &Path,
+        deploy_id: &str,
+        manifest: &Manifest,
+        component_bytes: &[u8],
+    ) -> CommittedArtifact {
+        let artifact_path = root.join(format!("{deploy_id}.artifact"));
+        let artifact_file = fs::File::create(&artifact_path).expect("artifact file should exist");
+        let mut builder = Builder::new(artifact_file);
+
+        let manifest_bytes =
+            serde_json::to_vec(manifest).expect("manifest should serialize to JSON");
+        append_tar_file(&mut builder, "manifest.json", &manifest_bytes);
+        append_tar_file(&mut builder, &manifest.main, component_bytes);
+        builder.finish().expect("artifact tar should finish");
+
+        CommittedArtifact {
+            deploy_id: deploy_id.to_string(),
+            path: artifact_path,
+            manifest_digest: hex::encode(Sha256::digest(&manifest_bytes)),
+            artifact_digest: hex::encode(Sha256::digest(component_bytes)),
         }
     }
 
@@ -1239,6 +1503,411 @@ mod tests {
         let bad_policy = validate_deploy_preconditions(&bad_policy_payload, None)
             .expect_err("unsupported restart policy should be rejected");
         assert_eq!(bad_policy.code, imago_protocol::ErrorCode::BadRequest);
+    }
+
+    #[test]
+    fn command_gate_rejects_duplicate_service_with_busy() {
+        let gate = ServiceCommandGate::default();
+        let _guard = gate
+            .acquire("svc-a")
+            .expect("first service command should be accepted");
+
+        let err = gate
+            .acquire("svc-a")
+            .expect_err("same service command should be rejected while inflight");
+        assert_eq!(err.code, ErrorCode::Busy);
+        assert_eq!(err.stage, "orchestration");
+        assert_eq!(
+            err.message,
+            "service 'svc-a' command is already in progress"
+        );
+    }
+
+    #[test]
+    fn command_gate_allows_reacquire_after_guard_drop() {
+        let gate = ServiceCommandGate::default();
+        {
+            let _guard = gate
+                .acquire("svc-a")
+                .expect("first service command should be accepted");
+        }
+
+        let _guard = gate
+            .acquire("svc-a")
+            .expect("service should be available again after previous command is dropped");
+    }
+
+    #[test]
+    fn command_gate_allows_different_services_in_parallel() {
+        let gate = ServiceCommandGate::default();
+        let _first = gate
+            .acquire("svc-a")
+            .expect("first service command should be accepted");
+        let _second = gate
+            .acquire("svc-b")
+            .expect("different service command should be accepted");
+    }
+
+    #[test]
+    fn rebind_deploy_gate_is_noop_when_service_name_matches() {
+        let gate = ServiceCommandGate::default();
+        let mut service_name = "svc-a".to_string();
+        let mut guard = Some(
+            gate.acquire("svc-a")
+                .expect("initial service command should be accepted"),
+        );
+
+        rebind_deploy_service_command_guard(&gate, &mut service_name, &mut guard, "svc-a")
+            .expect("same service name should not require rebind");
+        assert_eq!(service_name, "svc-a");
+
+        let err = gate
+            .acquire("svc-a")
+            .expect_err("current service should remain locked");
+        assert_eq!(err.code, ErrorCode::Busy);
+    }
+
+    #[test]
+    fn rebind_deploy_gate_switches_to_manifest_service_name() {
+        let gate = ServiceCommandGate::default();
+        let mut service_name = "svc-prepare".to_string();
+        let mut guard = Some(
+            gate.acquire("svc-prepare")
+                .expect("prepare service should be locked initially"),
+        );
+
+        rebind_deploy_service_command_guard(&gate, &mut service_name, &mut guard, "svc-manifest")
+            .expect("manifest service should be rebound when available");
+        assert_eq!(service_name, "svc-manifest");
+
+        let _prepare_guard = gate
+            .acquire("svc-prepare")
+            .expect("prepare service lock should be released after rebind");
+        let err = gate
+            .acquire("svc-manifest")
+            .expect_err("manifest service should stay locked after rebind");
+        assert_eq!(err.code, ErrorCode::Busy);
+    }
+
+    #[test]
+    fn rebind_deploy_gate_returns_busy_when_manifest_service_is_inflight() {
+        let gate = ServiceCommandGate::default();
+        let _manifest_inflight = gate
+            .acquire("svc-manifest")
+            .expect("manifest service should be held by another command");
+        let mut service_name = "svc-prepare".to_string();
+        let mut guard = Some(
+            gate.acquire("svc-prepare")
+                .expect("prepare service should be locked initially"),
+        );
+
+        let err = rebind_deploy_service_command_guard(
+            &gate,
+            &mut service_name,
+            &mut guard,
+            "svc-manifest",
+        )
+        .expect_err("rebind should fail when manifest service is already in-flight");
+        assert_eq!(err.code, ErrorCode::Busy);
+        assert_eq!(err.stage, "orchestration");
+        assert_eq!(
+            err.message,
+            "service 'svc-manifest' command is already in progress"
+        );
+
+        let prepare_err = gate
+            .acquire("svc-prepare")
+            .expect_err("prepare lock should remain held when rebind fails");
+        assert_eq!(prepare_err.code, ErrorCode::Busy);
+    }
+
+    #[tokio::test]
+    async fn stage_committed_release_does_not_write_services_tree() {
+        let root = temp_dir_path("orchestrator-stage-committed");
+        fs::create_dir_all(&root).expect("root should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.name = "svc-staged".to_string();
+        let committed =
+            committed_artifact_for_manifest(&root, "deploy-staged", &manifest, b"wasm-binary");
+
+        let staged = stage_committed_release(&root, &super::DefaultManifestValidator, &committed)
+            .await
+            .expect("staging should succeed");
+
+        assert_eq!(staged.service_name, "svc-staged");
+        assert!(
+            !root.join("services").exists(),
+            "staging phase must not touch services tree"
+        );
+        assert!(
+            staged.staging_dir.join("manifest.json").exists(),
+            "manifest should be extracted into staging"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn prepare_release_from_staged_writes_services_tree_in_second_phase() {
+        let root = temp_dir_path("orchestrator-finalize-from-staged");
+        fs::create_dir_all(&root).expect("root should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.name = "svc-finalize".to_string();
+        let committed = committed_artifact_for_manifest(
+            &root,
+            "deploy-finalize",
+            &manifest,
+            b"wasm-binary-finalize",
+        );
+        let staged = stage_committed_release(&root, &super::DefaultManifestValidator, &committed)
+            .await
+            .expect("staging should succeed");
+        let service_root = root.join("services").join("svc-finalize");
+        assert!(
+            !service_root.exists(),
+            "services tree should still be untouched before finalize phase"
+        );
+
+        let payload = DeployCommandPayload {
+            deploy_id: "deploy-finalize".to_string(),
+            expected_current_release: "any".to_string(),
+            restart_policy: "never".to_string(),
+            auto_rollback: true,
+        };
+        let plugin_cache = super::FilesystemPluginCache::new(root.clone());
+        let prepared = prepare_release_from_staged_inner(
+            &root,
+            &payload,
+            staged,
+            &super::DefaultManifestValidator,
+            &plugin_cache,
+        )
+        .await
+        .expect("finalize should promote release into services tree");
+
+        assert_eq!(prepared.service_name, "svc-finalize");
+        assert!(
+            service_root.join(&prepared.release_hash).exists(),
+            "finalize phase should create promoted release directory"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn rollback_busy_uses_force_stop_and_retries_start_once() {
+        let mut start_results = VecDeque::from(vec![
+            Err(ImagodError::new(
+                ErrorCode::Busy,
+                "service.start",
+                "service 'svc-a' is already running",
+            )),
+            Ok(()),
+        ]);
+        let mut stop_results = VecDeque::from(vec![Ok(())]);
+        let mut start_calls = 0usize;
+        let mut stop_calls = 0usize;
+
+        let outcome = start_previous_release_with_busy_recovery(
+            || {
+                start_calls = start_calls.saturating_add(1);
+                let result = start_results
+                    .pop_front()
+                    .expect("start result should exist for each call");
+                async move { result }
+            },
+            || {
+                stop_calls = stop_calls.saturating_add(1);
+                let result = stop_results
+                    .pop_front()
+                    .expect("stop result should exist for each call");
+                async move { result }
+            },
+        )
+        .await
+        .expect("busy rollback should recover via force stop");
+
+        assert_eq!(outcome, RollbackOutcome::RecoveredByForceStop);
+        assert_eq!(
+            start_calls, 2,
+            "start should be retried once after force stop"
+        );
+        assert_eq!(stop_calls, 1, "force stop should run exactly once");
+    }
+
+    #[tokio::test]
+    async fn rollback_busy_continues_when_force_stop_reports_not_found() {
+        let mut start_results = VecDeque::from(vec![
+            Err(ImagodError::new(
+                ErrorCode::Busy,
+                "service.start",
+                "service 'svc-a' is already running",
+            )),
+            Ok(()),
+        ]);
+        let mut stop_results = VecDeque::from(vec![Err(ImagodError::new(
+            ErrorCode::NotFound,
+            "service.stop",
+            "service 'svc-a' is not running",
+        ))]);
+        let mut start_calls = 0usize;
+        let mut stop_calls = 0usize;
+
+        let outcome = start_previous_release_with_busy_recovery(
+            || {
+                start_calls = start_calls.saturating_add(1);
+                let result = start_results
+                    .pop_front()
+                    .expect("start result should exist for each call");
+                async move { result }
+            },
+            || {
+                stop_calls = stop_calls.saturating_add(1);
+                let result = stop_results
+                    .pop_front()
+                    .expect("stop result should exist for each call");
+                async move { result }
+            },
+        )
+        .await
+        .expect("NotFound from force stop should be treated as already stopped");
+
+        assert_eq!(outcome, RollbackOutcome::RecoveredByForceStop);
+        assert_eq!(start_calls, 2, "start should still retry after NotFound");
+        assert_eq!(stop_calls, 1, "force stop should run exactly once");
+    }
+
+    #[tokio::test]
+    async fn rollback_busy_returns_rollback_failed_when_retry_start_also_fails() {
+        let mut start_results = VecDeque::from(vec![
+            Err(ImagodError::new(
+                ErrorCode::Busy,
+                "service.start",
+                "service 'svc-a' is already running",
+            )),
+            Err(ImagodError::new(
+                ErrorCode::Internal,
+                "service.start",
+                "runner crashed while starting previous release",
+            )),
+        ]);
+        let mut stop_results = VecDeque::from(vec![Ok(())]);
+        let mut start_calls = 0usize;
+        let mut stop_calls = 0usize;
+
+        let err = start_previous_release_with_busy_recovery(
+            || {
+                start_calls = start_calls.saturating_add(1);
+                let result = start_results
+                    .pop_front()
+                    .expect("start result should exist for each call");
+                async move { result }
+            },
+            || {
+                stop_calls = stop_calls.saturating_add(1);
+                let result = stop_results
+                    .pop_front()
+                    .expect("stop result should exist for each call");
+                async move { result }
+            },
+        )
+        .await
+        .expect_err("retry start failure should surface rollback failure");
+
+        assert_eq!(err.code, ErrorCode::RollbackFailed);
+        assert_eq!(err.stage, "orchestration");
+        assert_eq!(
+            err.message,
+            "runner crashed while starting previous release"
+        );
+        assert_eq!(start_calls, 2, "start should be attempted exactly twice");
+        assert_eq!(stop_calls, 1, "force stop should run exactly once");
+    }
+
+    #[test]
+    fn rollback_success_message_appends_expected_suffix() {
+        let start_error = ImagodError::new(
+            ErrorCode::Internal,
+            "runtime.start",
+            "wasmtime instantiation failed",
+        )
+        .with_retryable(true)
+        .with_detail("component", "svc-a.wasm");
+        let expected_code = start_error.code;
+        let expected_stage = start_error.stage.clone();
+        let expected_retryable = start_error.retryable;
+        let expected_details = start_error.details.clone();
+
+        let appended =
+            append_rollback_success_message(start_error, RollbackOutcome::RestoredPreviousRelease);
+        assert_eq!(
+            appended.message,
+            "wasmtime instantiation failed; rollback: restored previous release"
+        );
+        assert_eq!(appended.code, expected_code);
+        assert_eq!(appended.stage, expected_stage);
+        assert_eq!(appended.retryable, expected_retryable);
+        assert_eq!(appended.details, expected_details);
+
+        let busy_start_error = ImagodError::new(
+            ErrorCode::Internal,
+            "runtime.start",
+            "wasmtime instantiation failed",
+        )
+        .with_retryable(true)
+        .with_detail("component", "svc-a.wasm");
+        let busy_recovered = append_rollback_success_message(
+            busy_start_error,
+            RollbackOutcome::RecoveredByForceStop,
+        );
+        assert_eq!(
+            busy_recovered.message,
+            "wasmtime instantiation failed; rollback: recovered by force-stop and restored previous release"
+        );
+    }
+
+    #[test]
+    fn rollback_failure_message_combines_start_and_rollback_errors() {
+        let start_error = ImagodError::new(
+            ErrorCode::Internal,
+            "runtime.start",
+            "wasmtime instantiation failed",
+        )
+        .with_detail("component", "svc-a.wasm")
+        .with_detail("phase", "replace");
+        let rollback_error = ImagodError::new(
+            ErrorCode::RollbackFailed,
+            "orchestration",
+            "service 'svc-a' is already running",
+        )
+        .with_detail("phase", "rollback")
+        .with_detail("action", "force-stop");
+
+        let composed = compose_rollback_failure_error(&start_error, &rollback_error);
+        assert_eq!(composed.code, ErrorCode::RollbackFailed);
+        assert_eq!(composed.stage, "orchestration");
+        assert_eq!(
+            composed.message,
+            "wasmtime instantiation failed; rollback failed: service 'svc-a' is already running"
+        );
+        assert_eq!(
+            composed.details.get("component").map(String::as_str),
+            Some("svc-a.wasm")
+        );
+        assert_eq!(
+            composed.details.get("phase").map(String::as_str),
+            Some("replace")
+        );
+        assert_eq!(
+            composed.details.get("rollback.phase").map(String::as_str),
+            Some("rollback")
+        );
+        assert_eq!(
+            composed.details.get("action").map(String::as_str),
+            Some("force-stop")
+        );
     }
 
     #[tokio::test]

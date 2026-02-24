@@ -615,6 +615,44 @@ impl ArtifactStore {
         apply_cleanup_plan(cleanup_plan).await;
         result
     }
+
+    /// Resolves service name for a completed deploy id used by `command.start`.
+    pub async fn service_name_for_deploy(&self, deploy_id: &str) -> Result<String, ImagodError> {
+        let now = now_epoch_secs();
+        let mut cleanup_plan = CleanupPlan::default();
+
+        let result = {
+            let mut state = self.state.lock().await;
+            cleanup_plan.merge(self.session_store.collect_expired_sessions(
+                &mut state,
+                now,
+                self.upload_session_ttl_secs,
+            ));
+            self.session_store.cleanup_orphan_idempotency(&mut state);
+
+            let session = state.sessions.get_mut(deploy_id).ok_or_else(|| {
+                ImagodError::new(
+                    ErrorCode::NotFound,
+                    STAGE_ORCHESTRATE,
+                    "deploy_id is not found for command.start",
+                )
+            })?;
+
+            if !session.committed {
+                return Err(ImagodError::new(
+                    ErrorCode::ArtifactIncomplete,
+                    STAGE_ORCHESTRATE,
+                    "artifact.commit has not been completed",
+                ));
+            }
+
+            session.updated_at_epoch_secs = now;
+            Ok(session.service_name.clone())
+        };
+
+        apply_cleanup_plan(cleanup_plan).await;
+        result
+    }
 }
 
 /// Builds a prepare response from session progress and configured expiry.
@@ -787,6 +825,67 @@ mod tests {
             .await
             .expect("latest artifact should remain");
         assert_eq!(latest.deploy_id, second.deploy_id);
+
+        cleanup_root(root);
+    }
+
+    #[tokio::test]
+    async fn service_name_for_deploy_returns_committed_service_name() {
+        let (store, root) = new_store("service_name_for_deploy_committed", 60).await;
+        let commit = prepare_push_commit(&store, "svc-lookup", b"artifact-v1", "idem-lookup").await;
+
+        let service_name = store
+            .service_name_for_deploy(&commit.deploy_id)
+            .await
+            .expect("service_name_for_deploy should resolve committed service name");
+        assert_eq!(service_name, "svc-lookup");
+
+        cleanup_root(root);
+    }
+
+    #[tokio::test]
+    async fn service_name_for_deploy_rejects_uncommitted_deploy() {
+        let (store, root) = new_store("service_name_for_deploy_uncommitted", 60).await;
+        let artifact = b"artifact-uncommitted";
+        let artifact_digest = hex::encode(Sha256::digest(artifact));
+        let manifest_digest = hex::encode(Sha256::digest(b"manifest-uncommitted"));
+
+        let prepare = store
+            .prepare(DeployPrepareRequest {
+                name: "svc-uncommitted".to_string(),
+                app_type: "cli".to_string(),
+                target: BTreeMap::new(),
+                artifact_digest,
+                artifact_size: artifact.len() as u64,
+                manifest_digest,
+                idempotency_key: "idem-uncommitted".to_string(),
+                policy: BTreeMap::new(),
+            })
+            .await
+            .expect("prepare should succeed");
+
+        let err = store
+            .service_name_for_deploy(&prepare.deploy_id)
+            .await
+            .expect_err("uncommitted deploy should be rejected");
+        assert_eq!(err.code, ErrorCode::ArtifactIncomplete);
+        assert_eq!(err.stage, "orchestration");
+        assert_eq!(err.message, "artifact.commit has not been completed");
+
+        cleanup_root(root);
+    }
+
+    #[tokio::test]
+    async fn service_name_for_deploy_rejects_missing_deploy() {
+        let (store, root) = new_store("service_name_for_deploy_missing", 60).await;
+
+        let err = store
+            .service_name_for_deploy("deploy-missing")
+            .await
+            .expect_err("missing deploy_id should be rejected");
+        assert_eq!(err.code, ErrorCode::NotFound);
+        assert_eq!(err.stage, "orchestration");
+        assert_eq!(err.message, "deploy_id is not found for command.start");
 
         cleanup_root(root);
     }
