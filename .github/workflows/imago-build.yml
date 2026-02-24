@@ -17,7 +17,7 @@ concurrency:
 jobs:
   build_imago:
     name: Build Imago (${{ matrix.target }})
-    runs-on: imago-cross-build-image
+    runs-on: imago-cross-runner-set
     strategy:
       matrix:
         include:
