@@ -55,8 +55,8 @@ jobs:
           set -euo pipefail
           imago_cli_pkgid="$(cargo pkgid -p imago-cli)"
           imagod_pkgid="$(cargo pkgid -p imagod)"
-          echo "imago_version=${imago_cli_pkgid##*@}" >> "$GITHUB_OUTPUT"
-          echo "imagod_version=${imagod_pkgid##*@}" >> "$GITHUB_OUTPUT"
+          echo "imago_version=${imago_cli_pkgid##*#}" >> "$GITHUB_OUTPUT"
+          echo "imagod_version=${imagod_pkgid##*#}" >> "$GITHUB_OUTPUT"
 
       - name: Upload imago binary
         uses: actions/upload-artifact@v6
