@@ -87,6 +87,12 @@ const ED25519_SPKI_PREFIX: [u8; 12] = [
 pub(crate) type Envelope = ProtocolEnvelope<Value>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestStreamRetryPolicy {
+    Standard,
+    CommandStartNoRetry,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct UploadLimits {
     chunk_size: usize,
     max_inflight_chunks: usize,
@@ -525,7 +531,7 @@ async fn run_async_with_target_override(
         }),
     )?;
 
-    let responses = request_events_with_timeout(
+    let responses = request_command_start_events_with_timeout(
         &upload_result.session,
         &command,
         upload_result.deploy_stream_timeout,
@@ -1077,6 +1083,24 @@ fn parse_upload_limits(response: &HelloNegotiateResponse) -> anyhow::Result<Uplo
     })
 }
 
+fn command_stream_timeout_from_hello_limits(
+    limits: &BTreeMap<String, String>,
+    default_timeout: Duration,
+) -> Duration {
+    limits
+        .get("deploy_stream_timeout_secs")
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(default_timeout)
+}
+
+pub(crate) fn resolve_command_stream_timeout_from_hello_limits(
+    limits: &BTreeMap<String, String>,
+) -> Duration {
+    command_stream_timeout_from_hello_limits(limits, resolve_deploy_stream_timeout())
+}
+
 fn parse_positive_limit(
     limits: &BTreeMap<String, String>,
     key: &str,
@@ -1249,11 +1273,23 @@ pub(crate) async fn request_response_with_timeout(
         .ok_or_else(|| anyhow!("empty response stream"))
 }
 
-pub(crate) async fn request_events(
+pub(crate) async fn request_command_start_events_with_timeout(
     session: &web_transport_quinn::Session,
     envelope: &Envelope,
+    stream_timeout: Duration,
 ) -> anyhow::Result<Vec<Envelope>> {
-    request_events_with_timeout(session, envelope, resolve_deploy_stream_timeout()).await
+    request_events_with_retry_policy(
+        session,
+        envelope,
+        stream_timeout,
+        RequestStreamRetryPolicy::CommandStartNoRetry,
+    )
+    .await
+    .map_err(|err| {
+        err.context(
+            "command.start request stream failed; command may still be running on target. wait for in-flight operations to finish and inspect logs/state before retrying",
+        )
+    })
 }
 
 pub(crate) async fn request_events_with_timeout(
@@ -1261,21 +1297,48 @@ pub(crate) async fn request_events_with_timeout(
     envelope: &Envelope,
     stream_timeout: Duration,
 ) -> anyhow::Result<Vec<Envelope>> {
+    request_events_with_retry_policy(
+        session,
+        envelope,
+        stream_timeout,
+        RequestStreamRetryPolicy::Standard,
+    )
+    .await
+}
+
+async fn request_events_with_retry_policy(
+    session: &web_transport_quinn::Session,
+    envelope: &Envelope,
+    stream_timeout: Duration,
+    retry_policy: RequestStreamRetryPolicy,
+) -> anyhow::Result<Vec<Envelope>> {
     let payload = to_cbor(envelope)?;
     let framed = encode_frame(&payload);
     let mut attempt = 1usize;
+    let mut first_failure_reason: Option<String> = None;
     let response_bytes = loop {
         match request_events_once(session, &framed, stream_timeout).await {
             Ok(response_bytes) => break response_bytes,
             Err(err) => {
-                let Some(backoff) = deploy_stream_retry_backoff(attempt) else {
-                    return Err(err);
+                let reason = summarize_retry_error(&err);
+                if first_failure_reason.is_none() {
+                    first_failure_reason = Some(reason.clone());
+                }
+                let Some(backoff) = request_stream_retry_backoff(retry_policy, attempt) else {
+                    let detail = format_request_stream_failure_summary(
+                        attempt,
+                        first_failure_reason.as_deref(),
+                        &reason,
+                    );
+                    return Err(err.context(detail));
                 };
                 ui::command_warn(
                     "deploy",
-                    &format!(
-                        "request stream attempt {attempt}/{DEPLOY_STREAM_MAX_ATTEMPTS} failed, retrying in {}ms",
-                        backoff.as_millis()
+                    &format_request_stream_retry_log_message(
+                        attempt,
+                        request_stream_max_attempts(retry_policy),
+                        backoff,
+                        &reason,
                     ),
                 );
                 tokio::time::sleep(backoff).await;
@@ -1332,6 +1395,48 @@ fn deploy_stream_retry_backoff(attempt: usize) -> Option<Duration> {
         .get(attempt.saturating_sub(1))
         .copied()
         .map(Duration::from_millis)
+}
+
+fn request_stream_max_attempts(policy: RequestStreamRetryPolicy) -> usize {
+    match policy {
+        RequestStreamRetryPolicy::Standard => DEPLOY_STREAM_MAX_ATTEMPTS,
+        RequestStreamRetryPolicy::CommandStartNoRetry => 1,
+    }
+}
+
+fn request_stream_retry_backoff(
+    policy: RequestStreamRetryPolicy,
+    attempt: usize,
+) -> Option<Duration> {
+    match policy {
+        RequestStreamRetryPolicy::Standard => deploy_stream_retry_backoff(attempt),
+        RequestStreamRetryPolicy::CommandStartNoRetry => None,
+    }
+}
+
+fn format_request_stream_retry_log_message(
+    attempt: usize,
+    total_attempts: usize,
+    backoff: Duration,
+    reason: &str,
+) -> String {
+    format!(
+        "request stream attempt {attempt}/{total_attempts} failed, retrying in {}ms (reason={reason})",
+        backoff.as_millis()
+    )
+}
+
+fn format_request_stream_failure_summary(
+    attempt: usize,
+    first_failure: Option<&str>,
+    last_failure: &str,
+) -> String {
+    match first_failure {
+        Some(first) if first != last_failure => format!(
+            "request stream failed after {attempt} attempts (first_failure={first}; last_failure={last_failure})"
+        ),
+        _ => format!("request stream failed on attempt {attempt} (reason={last_failure})"),
+    }
 }
 
 fn resolve_deploy_stream_timeout() -> Duration {
@@ -2390,6 +2495,33 @@ mod tests {
         assert!(err.to_string().contains("chunk_size"));
     }
 
+    #[test]
+    fn command_stream_timeout_from_hello_limits_uses_valid_value() {
+        let limits = BTreeMap::from([("deploy_stream_timeout_secs".to_string(), "45".to_string())]);
+        let timeout = command_stream_timeout_from_hello_limits(&limits, Duration::from_secs(30));
+        assert_eq!(timeout, Duration::from_secs(45));
+    }
+
+    #[test]
+    fn command_stream_timeout_from_hello_limits_falls_back_when_missing() {
+        let timeout =
+            command_stream_timeout_from_hello_limits(&BTreeMap::new(), Duration::from_secs(30));
+        assert_eq!(timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn command_stream_timeout_from_hello_limits_falls_back_when_invalid_or_zero() {
+        let invalid =
+            BTreeMap::from([("deploy_stream_timeout_secs".to_string(), "abc".to_string())]);
+        let invalid_timeout =
+            command_stream_timeout_from_hello_limits(&invalid, Duration::from_secs(30));
+        assert_eq!(invalid_timeout, Duration::from_secs(30));
+
+        let zero = BTreeMap::from([("deploy_stream_timeout_secs".to_string(), "0".to_string())]);
+        let zero_timeout = command_stream_timeout_from_hello_limits(&zero, Duration::from_secs(30));
+        assert_eq!(zero_timeout, Duration::from_secs(30));
+    }
+
     fn sample_structured_error(code: ErrorCode, retryable: bool) -> StructuredError {
         StructuredError {
             code,
@@ -2584,6 +2716,30 @@ mod tests {
     }
 
     #[test]
+    fn command_start_retry_policy_never_retries_request_stream() {
+        assert_eq!(
+            request_stream_retry_backoff(RequestStreamRetryPolicy::CommandStartNoRetry, 1),
+            None
+        );
+        assert_eq!(
+            request_stream_max_attempts(RequestStreamRetryPolicy::CommandStartNoRetry),
+            1
+        );
+    }
+
+    #[test]
+    fn request_stream_retry_policy_uses_standard_backoff_for_non_command_start() {
+        assert_eq!(
+            request_stream_retry_backoff(RequestStreamRetryPolicy::Standard, 1),
+            Some(Duration::from_millis(100))
+        );
+        assert_eq!(
+            request_stream_retry_backoff(RequestStreamRetryPolicy::Standard, 2),
+            Some(Duration::from_millis(250))
+        );
+    }
+
+    #[test]
     fn retry_classification_does_not_retry_when_server_marks_non_retryable() {
         assert!(!should_retry_upload_error(&sample_server_error(
             ErrorCode::Internal,
@@ -2629,6 +2785,31 @@ mod tests {
         assert!(message.contains("upload attempt 1/4 failed"));
         assert!(message.contains("retrying in 250ms"));
         assert!(message.contains("reason=E_BUSY"));
+    }
+
+    #[test]
+    fn request_stream_retry_log_message_reports_reason() {
+        let message = format_request_stream_retry_log_message(
+            1,
+            3,
+            Duration::from_millis(100),
+            "request stream read timed out",
+        );
+        assert!(message.contains("request stream attempt 1/3 failed"));
+        assert!(message.contains("retrying in 100ms"));
+        assert!(message.contains("reason=request stream read timed out"));
+    }
+
+    #[test]
+    fn request_stream_failure_summary_includes_first_and_last_reason_when_different() {
+        let message = format_request_stream_failure_summary(
+            3,
+            Some("request stream read timed out"),
+            "connection reset by peer",
+        );
+        assert!(message.contains("after 3 attempts"));
+        assert!(message.contains("first_failure=request stream read timed out"));
+        assert!(message.contains("last_failure=connection reset by peer"));
     }
 
     #[test]
