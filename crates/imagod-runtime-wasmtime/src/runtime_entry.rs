@@ -187,6 +187,15 @@ impl WasmRuntime {
         (tick_stop_tx, tick_task)
     }
 
+    fn build_component_linker(&self) -> Result<Linker<WasiState>, ImagodError> {
+        let mut linker = Linker::new(&self.engine);
+        add_to_linker_async(&mut linker)
+            .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
+        add_only_http_to_linker_async(&mut linker)
+            .map_err(|e| map_runtime_error(format!("failed to add WASI HTTP linker: {e}")))?;
+        Ok(linker)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn run_cli_component_async(
         &self,
@@ -209,9 +218,7 @@ impl WasmRuntime {
             ))
         })?;
 
-        let mut linker = Linker::new(&self.engine);
-        add_to_linker_async(&mut linker)
-            .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
+        let mut linker = self.build_component_linker()?;
 
         let mut store = self.build_store(args, envs, wasi_mounts, socket, native_plugin_context)?;
         let available_plugins = instantiate_plugin_dependencies(
@@ -296,11 +303,7 @@ impl WasmRuntime {
             ))
         })?;
 
-        let mut linker = Linker::new(&self.engine);
-        add_to_linker_async(&mut linker)
-            .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
-        add_only_http_to_linker_async(&mut linker)
-            .map_err(|e| map_runtime_error(format!("failed to add WASI HTTP linker: {e}")))?;
+        let mut linker = self.build_component_linker()?;
 
         let mut store = self.build_store(args, envs, wasi_mounts, None, native_plugin_context)?;
         let available_plugins = instantiate_plugin_dependencies(
@@ -406,9 +409,7 @@ impl WasmRuntime {
             ))
         })?;
 
-        let mut linker = Linker::new(&self.engine);
-        add_to_linker_async(&mut linker)
-            .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
+        let mut linker = self.build_component_linker()?;
 
         let mut store = self.build_store(args, envs, wasi_mounts, None, native_plugin_context)?;
         let available_plugins = instantiate_plugin_dependencies(
@@ -846,9 +847,11 @@ mod tests {
         collections::BTreeMap,
         fs,
         net::SocketAddr,
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
+        path::{Path, PathBuf},
     };
+    use tempfile::{Builder as TempDirBuilder, TempDir};
+    use wit_component::{ComponentEncoder, StringEncoding, dummy_module};
+    use wit_parser::{ManglingAndAbi, Resolve};
 
     fn sample_socket_config() -> RunnerSocketConfig {
         RunnerSocketConfig {
@@ -868,12 +871,87 @@ mod tests {
         }
     }
 
-    fn temp_mount_root(prefix: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be after epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!("imago-runtime-wasi-mount-{prefix}-{nonce}"))
+    fn allow_all_wasi_capabilities() -> CapabilityPolicy {
+        CapabilityPolicy {
+            privileged: false,
+            deps: BTreeMap::new(),
+            wasi: BTreeMap::from([("*".to_string(), vec!["*".to_string()])]),
+        }
+    }
+
+    struct WasiHttpFixture {
+        _temp_dir: TempDir,
+        component_path: PathBuf,
+    }
+
+    fn write_wasi_http_component(prefix: &str) -> WasiHttpFixture {
+        let temp_dir = TempDirBuilder::new()
+            .prefix(&format!("imago-runtime-wasi-http-{prefix}-"))
+            .tempdir()
+            .expect("temp dir should be created");
+        let root = temp_dir.path();
+        let http_deps_dir = root.join("deps/http");
+        fs::create_dir_all(&http_deps_dir).expect("http deps directory should be created");
+        fs::write(
+            root.join("world.wit"),
+            r#"
+package test:wasi-http-import@0.1.0;
+
+world app {
+  import wasi:http/types@0.2.4;
+}
+"#,
+        )
+        .expect("wit source should be written");
+        fs::write(
+            http_deps_dir.join("package.wit"),
+            r#"
+package wasi:http@0.2.4;
+
+interface types {
+  type field-key = string;
+  type field-name = field-key;
+
+  resource fields {
+    constructor();
+    has: func(name: field-name) -> bool;
+  }
+}
+"#,
+        )
+        .expect("wasi:http fixture should be written");
+
+        let mut resolve = Resolve::default();
+        let (pkg, _) = resolve
+            .push_dir(root)
+            .expect("fixture WIT directory should parse");
+        let world = resolve
+            .select_world(&[pkg], Some("app"))
+            .expect("world 'app' should exist");
+        let mut module = dummy_module(&resolve, world, ManglingAndAbi::Standard32);
+        wit_component::embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8)
+            .expect("component metadata embedding should succeed");
+        let component = ComponentEncoder::default()
+            .module(&module)
+            .expect("component encoder should accept module")
+            .encode()
+            .expect("component encoding should succeed");
+        let component_path = root.join("component.wasm");
+        fs::write(&component_path, component).expect("component bytes should be written");
+        WasiHttpFixture {
+            _temp_dir: temp_dir,
+            component_path,
+        }
+    }
+
+    fn collect_component_import_names(runtime: &WasmRuntime, component_path: &Path) -> Vec<String> {
+        let component =
+            Component::from_file(&runtime.engine, component_path).expect("component should load");
+        component
+            .component_type()
+            .imports(&runtime.engine)
+            .map(|(name, _)| name.to_string())
+            .collect::<Vec<_>>()
     }
 
     #[tokio::test]
@@ -1003,6 +1081,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cli_type_with_wasi_http_import_does_not_fail_with_missing_http_linker() {
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let fixture = write_wasi_http_component("cli-http-linker");
+        let imports = collect_component_import_names(&runtime, &fixture.component_path);
+        assert!(
+            imports.iter().any(|name| name == "wasi:http/types@0.2.4"),
+            "component should import wasi:http/types@0.2.4, got: {imports:?}"
+        );
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let err = runtime
+            .run_component(RuntimeRunRequest {
+                app_type: RunnerAppType::Cli,
+                runner_id: "runner-test".to_string(),
+                service_name: "svc-test".to_string(),
+                release_hash: "release-test".to_string(),
+                component_path: fixture.component_path.clone(),
+                args: Vec::new(),
+                envs: BTreeMap::new(),
+                wasi_mounts: Vec::new(),
+                socket: None,
+                plugin_dependencies: Vec::new(),
+                capabilities: allow_all_wasi_capabilities(),
+                bindings: Vec::new(),
+                manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+                manager_auth_secret: "secret".to_string(),
+                shutdown: shutdown_rx,
+                epoch_tick_interval_ms: 50,
+                http_worker_count: 2,
+                http_worker_queue_capacity: 4,
+                http_ready_tx: None,
+            })
+            .await
+            .expect_err("component without wasi:cli/run export should fail");
+        let _ = shutdown_tx.send(true);
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(
+            !err.message
+                .contains("matching implementation was not found in the linker"),
+            "unexpected missing-linker error: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
     async fn rpc_type_returns_without_loading_component_when_shutdown_already_signaled() {
         let runtime = WasmRuntime::new().expect("runtime should initialize");
         let (_shutdown_tx, shutdown_rx) = watch::channel(true);
@@ -1073,6 +1196,94 @@ mod tests {
             .await
             .expect("rpc runner should stop promptly after shutdown")
             .expect("rpc run should stop without error");
+    }
+
+    #[tokio::test]
+    async fn rpc_invoke_with_wasi_http_import_does_not_fail_with_missing_http_linker() {
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let fixture = write_wasi_http_component("rpc-http-linker");
+        let imports = collect_component_import_names(&runtime, &fixture.component_path);
+        assert!(
+            imports.iter().any(|name| name == "wasi:http/types@0.2.4"),
+            "component should import wasi:http/types@0.2.4, got: {imports:?}"
+        );
+
+        let err = runtime
+            .invoke_component(RuntimeInvokeRequest {
+                app_type: RunnerAppType::Rpc,
+                runner_id: "runner-test".to_string(),
+                service_name: "svc-test".to_string(),
+                release_hash: "release-test".to_string(),
+                component_path: fixture.component_path.clone(),
+                args: Vec::new(),
+                envs: BTreeMap::new(),
+                wasi_mounts: Vec::new(),
+                plugin_dependencies: Vec::new(),
+                capabilities: allow_all_wasi_capabilities(),
+                bindings: Vec::new(),
+                manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+                manager_auth_secret: "secret".to_string(),
+                interface_id: "missing:iface/run@0.1.0".to_string(),
+                function: "invoke".to_string(),
+                payload_cbor: Vec::new(),
+            })
+            .await
+            .expect_err("component without rpc export should fail after instantiate");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(
+            err.message.contains("rpc export interface"),
+            "unexpected message: {}",
+            err.message
+        );
+        assert!(
+            !err.message
+                .contains("matching implementation was not found in the linker"),
+            "unexpected missing-linker error: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_type_with_wasi_http_import_stays_unauthorized_without_capability() {
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let fixture = write_wasi_http_component("cli-http-unauthorized");
+        let imports = collect_component_import_names(&runtime, &fixture.component_path);
+        assert!(
+            imports.iter().any(|name| name == "wasi:http/types@0.2.4"),
+            "component should import wasi:http/types@0.2.4, got: {imports:?}"
+        );
+
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let err = runtime
+            .run_component(RuntimeRunRequest {
+                app_type: RunnerAppType::Cli,
+                runner_id: "runner-test".to_string(),
+                service_name: "svc-test".to_string(),
+                release_hash: "release-test".to_string(),
+                component_path: fixture.component_path.clone(),
+                args: Vec::new(),
+                envs: BTreeMap::new(),
+                wasi_mounts: Vec::new(),
+                socket: None,
+                plugin_dependencies: Vec::new(),
+                capabilities: CapabilityPolicy::default(),
+                bindings: Vec::new(),
+                manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+                manager_auth_secret: "secret".to_string(),
+                shutdown: shutdown_rx,
+                epoch_tick_interval_ms: 50,
+                http_worker_count: 2,
+                http_worker_queue_capacity: 4,
+                http_ready_tx: None,
+            })
+            .await
+            .expect_err("missing capability should reject wasi:http import");
+        assert_eq!(err.code, ErrorCode::Unauthorized);
+        assert!(
+            err.message.contains("capability denied"),
+            "unexpected message: {}",
+            err.message
+        );
     }
 
     #[tokio::test]
@@ -1147,9 +1358,12 @@ mod tests {
 
     #[test]
     fn configure_wasi_mounts_accepts_read_write_and_read_only() {
-        let root = temp_mount_root("permissions");
-        let rw = root.join("rw");
-        let ro = root.join("ro");
+        let temp_dir = TempDirBuilder::new()
+            .prefix("imago-runtime-wasi-mount-permissions-")
+            .tempdir()
+            .expect("temp dir should be created");
+        let rw = temp_dir.path().join("rw");
+        let ro = temp_dir.path().join("ro");
         fs::create_dir_all(&rw).expect("rw dir should be created");
         fs::create_dir_all(&ro).expect("ro dir should be created");
 
@@ -1170,7 +1384,5 @@ mod tests {
             ],
         )
         .expect("mount configuration should succeed");
-
-        let _ = fs::remove_dir_all(root);
     }
 }

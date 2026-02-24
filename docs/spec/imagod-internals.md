@@ -364,8 +364,8 @@ WASI 設定伝播（manager -> runner -> runtime）:
   - `cli`: `wasmtime_wasi::p2::bindings::Command::instantiate_async` + `call_run(...).await`
   - `http`: `wasmtime_wasi_http::bindings::Proxy::instantiate_async`（`incoming-handler` instantiate）後、runner の外部 ingress から `call_handle(...)` を都度実行
   - `socket`: `cli` 分岐と同じ `wasi:cli/run` を実行しつつ、`socket` 設定に基づいて `WasiCtxBuilder` の socket policy を構成する
-- `cli` 分岐では `wasmtime_wasi::p2::add_to_linker_async` を利用する
-- `http` 分岐では `wasmtime_wasi_http::add_only_http_to_linker_async` を併用する
+- `rpc.invoke` は `linker.instantiate_async` 後に export 関数を解決して呼び出す（`type=rpc` の run 常駐経路は instantiate しない）。
+- component instantiate を行う経路（`cli` / `socket` / `http` / `rpc.invoke`）では `wasmtime_wasi::p2::add_to_linker_async` と `wasmtime_wasi_http::add_only_http_to_linker_async` を併用する。
 - native plugin は `NativePlugin` trait と `NativePluginRegistryBuilder` で明示登録する。
   - `dispatch_from_env()` は built-in registry（`imago:admin`, `imago:node`）を使う。
   - `dispatch_from_env_with_registry(...)` は呼び出し側で構築した registry を使うため、built-in に追加 plugin を上乗せできる。
