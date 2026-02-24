@@ -74,6 +74,8 @@ const DEPLOY_PHASE_COMMAND: u8 = 8;
 const ANSI_DIM: &str = "\x1b[2m";
 const ANSI_RESET: &str = "\x1b[0m";
 const DATAGRAM_BUFFER_BYTES: usize = 1024 * 1024;
+const TRANSPORT_KEEPALIVE_INTERVAL_SECS: u64 = 5;
+const TRANSPORT_MAX_IDLE_TIMEOUT_SECS: u64 = 180;
 const IMAGO_DIR_NAME: &str = ".imago";
 const KNOWN_HOSTS_FILE_NAME: &str = "known_hosts";
 #[cfg(unix)]
@@ -875,6 +877,11 @@ pub(crate) async fn connect_target(
     let mut transport = quinn::TransportConfig::default();
     transport.datagram_send_buffer_size(DATAGRAM_BUFFER_BYTES);
     transport.datagram_receive_buffer_size(Some(DATAGRAM_BUFFER_BYTES));
+    transport.keep_alive_interval(Some(Duration::from_secs(TRANSPORT_KEEPALIVE_INTERVAL_SECS)));
+    let idle_timeout =
+        quinn::IdleTimeout::try_from(Duration::from_secs(TRANSPORT_MAX_IDLE_TIMEOUT_SECS))
+            .expect("fixed transport max idle timeout must be representable");
+    transport.max_idle_timeout(Some(idle_timeout));
     quic_config.transport_config(Arc::new(transport));
     let endpoint = create_client_endpoint()?;
 
@@ -1316,8 +1323,9 @@ async fn request_events_with_retry_policy(
     let framed = encode_frame(&payload);
     let mut attempt = 1usize;
     let mut first_failure_reason: Option<String> = None;
+    let read_timeout = request_stream_read_timeout(retry_policy, stream_timeout);
     let response_bytes = loop {
-        match request_events_once(session, &framed, stream_timeout).await {
+        match request_events_once(session, &framed, stream_timeout, read_timeout).await {
             Ok(response_bytes) => break response_bytes,
             Err(err) => {
                 let reason = summarize_retry_error(&err);
@@ -1357,34 +1365,43 @@ async fn request_events_with_retry_policy(
 async fn request_events_once(
     session: &web_transport_quinn::Session,
     framed: &[u8],
-    timeout_duration: Duration,
+    open_write_timeout: Duration,
+    read_timeout: Option<Duration>,
 ) -> anyhow::Result<Vec<u8>> {
-    let (mut send, mut recv) = tokio::time::timeout(timeout_duration, session.open_bi())
+    let (mut send, mut recv) = tokio::time::timeout(open_write_timeout, session.open_bi())
         .await
         .map_err(|_| {
             anyhow!(
                 "request stream open timed out after {} ms",
-                timeout_duration.as_millis()
+                open_write_timeout.as_millis()
             )
         })??;
-    tokio::time::timeout(timeout_duration, send.write_all(framed))
+    tokio::time::timeout(open_write_timeout, send.write_all(framed))
         .await
         .map_err(|_| {
             anyhow!(
                 "request stream write timed out after {} ms",
-                timeout_duration.as_millis()
+                open_write_timeout.as_millis()
             )
         })??;
     send.finish()?;
-    tokio::time::timeout(timeout_duration, recv.read_to_end(MAX_STREAM_BYTES))
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "request stream read timed out after {} ms",
-                timeout_duration.as_millis()
-            )
-        })?
-        .map_err(anyhow::Error::from)
+    match read_timeout {
+        Some(read_timeout) => {
+            tokio::time::timeout(read_timeout, recv.read_to_end(MAX_STREAM_BYTES))
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "request stream read timed out after {} ms",
+                        read_timeout.as_millis()
+                    )
+                })?
+                .map_err(anyhow::Error::from)
+        }
+        None => recv
+            .read_to_end(MAX_STREAM_BYTES)
+            .await
+            .map_err(anyhow::Error::from),
+    }
 }
 
 fn deploy_stream_retry_backoff(attempt: usize) -> Option<Duration> {
@@ -1410,6 +1427,16 @@ fn request_stream_retry_backoff(
 ) -> Option<Duration> {
     match policy {
         RequestStreamRetryPolicy::Standard => deploy_stream_retry_backoff(attempt),
+        RequestStreamRetryPolicy::CommandStartNoRetry => None,
+    }
+}
+
+fn request_stream_read_timeout(
+    policy: RequestStreamRetryPolicy,
+    timeout: Duration,
+) -> Option<Duration> {
+    match policy {
+        RequestStreamRetryPolicy::Standard => Some(timeout),
         RequestStreamRetryPolicy::CommandStartNoRetry => None,
     }
 }
@@ -2736,6 +2763,28 @@ mod tests {
         assert_eq!(
             request_stream_retry_backoff(RequestStreamRetryPolicy::Standard, 2),
             Some(Duration::from_millis(250))
+        );
+    }
+
+    #[test]
+    fn command_start_retry_policy_disables_request_stream_read_timeout() {
+        assert_eq!(
+            request_stream_read_timeout(
+                RequestStreamRetryPolicy::CommandStartNoRetry,
+                Duration::from_secs(15)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn standard_retry_policy_keeps_request_stream_read_timeout() {
+        assert_eq!(
+            request_stream_read_timeout(
+                RequestStreamRetryPolicy::Standard,
+                Duration::from_secs(15)
+            ),
+            Some(Duration::from_secs(15))
         );
     }
 

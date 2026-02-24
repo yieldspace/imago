@@ -18,7 +18,7 @@ pub fn build_server(config: &ImagodConfig) -> Result<Server, ImagodError> {
     })?;
 
     let tls = build_tls_server_config(config)?;
-    let quic_server = build_quic_server_config(tls)?;
+    let quic_server = build_quic_server_config(tls, &config.runtime)?;
     let endpoint = quinn::Endpoint::server(quic_server, listen_addr).map_err(|e| {
         ImagodError::new(
             ErrorCode::Internal,

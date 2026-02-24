@@ -145,6 +145,32 @@ pub(crate) fn validate(config: &ImagodConfig) -> Result<(), ImagodError> {
         ));
     }
 
+    if config.runtime.transport_keepalive_interval_secs == 0 {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.load",
+            "runtime.transport_keepalive_interval_secs must be greater than 0",
+        ));
+    }
+
+    if config.runtime.transport_max_idle_timeout_secs == 0 {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.load",
+            "runtime.transport_max_idle_timeout_secs must be greater than 0",
+        ));
+    }
+
+    if config.runtime.transport_keepalive_interval_secs
+        >= config.runtime.transport_max_idle_timeout_secs
+    {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.load",
+            "runtime.transport_keepalive_interval_secs must be less than runtime.transport_max_idle_timeout_secs",
+        ));
+    }
+
     if config.runtime.max_artifact_size_bytes == 0 {
         return Err(ImagodError::new(
             ErrorCode::BadRequest,
