@@ -35,7 +35,7 @@ jobs:
         run: rustup target add riscv64gc-unknown-linux-musl
 
       - name: Cache
-        if: ${{ runner.environment != 'self-hosted' }}
+        if: ${{ !contains(runner.labels, 'self-hosted') }}
         uses: Swatinem/rust-cache@v2
 
       - name: Verify cross toolchain
