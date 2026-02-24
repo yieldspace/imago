@@ -15,14 +15,16 @@ concurrency:
 
 jobs:
   e2e-ignored:
-    name: e2e-ignored (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: e2e-ignored (${{ matrix.name }})
+    runs-on: ${{ matrix.runs_on }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
+        include:
+          - name: ubuntu
+            runs_on: imago-default-runner-set
+          - name: macos
+            runs_on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6

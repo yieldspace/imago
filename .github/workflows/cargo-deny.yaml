@@ -16,16 +16,10 @@ concurrency:
 jobs:
   checks:
     name: checks
-    runs-on: ubuntu-latest
+    runs-on: imago-dind-runner-set
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Restore Rust cache
-        uses: Swatinem/rust-cache@v2
 
       - name: cargo deny (blocking)
         uses: EmbarkStudios/cargo-deny-action@v2
@@ -37,7 +31,7 @@ jobs:
 
   advisories:
     name: advisories
-    runs-on: ubuntu-latest
+    runs-on: imago-default-runner-set
     continue-on-error: true
     steps:
       - name: Checkout
