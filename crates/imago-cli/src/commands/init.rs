@@ -349,28 +349,28 @@ mod tests {
                 panic!("template '{}' root should be a TOML table", template.id)
             });
 
-            let name_value = root
-                .get("name")
-                .unwrap_or_else(|| panic!("template '{}' is missing required key 'name'", template.id));
+            let name_value = root.get("name").unwrap_or_else(|| {
+                panic!("template '{}' is missing required key 'name'", template.id)
+            });
             name_value.as_str().unwrap_or_else(|| {
                 panic!("template '{}' key 'name' should be string", template.id)
             });
 
-            let main_value = root
-                .get("main")
-                .unwrap_or_else(|| panic!("template '{}' is missing required key 'main'", template.id));
+            let main_value = root.get("main").unwrap_or_else(|| {
+                panic!("template '{}' is missing required key 'main'", template.id)
+            });
             main_value.as_str().unwrap_or_else(|| {
                 panic!("template '{}' key 'main' should be string", template.id)
             });
 
-            let app_type_value = root
-                .get("type")
-                .unwrap_or_else(|| panic!("template '{}' is missing required key 'type'", template.id));
-            let app_type = app_type_value
-                .as_str()
-                .unwrap_or_else(|| panic!("template '{}' key 'type' should be string", template.id));
+            let app_type_value = root.get("type").unwrap_or_else(|| {
+                panic!("template '{}' is missing required key 'type'", template.id)
+            });
+            let app_type = app_type_value.as_str().unwrap_or_else(|| {
+                panic!("template '{}' key 'type' should be string", template.id)
+            });
             assert!(
-                build::is_supported_app_type(app_type),
+                build::validate_app_type(app_type).is_ok(),
                 "template '{}' key 'type' has unsupported value: {}",
                 template.id,
                 app_type

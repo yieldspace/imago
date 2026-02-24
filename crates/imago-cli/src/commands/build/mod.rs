@@ -826,12 +826,8 @@ pub(crate) fn validate_service_name(name: &str) -> anyhow::Result<()> {
     validation::validate_service_name(name)
 }
 
-fn validate_app_type(app_type: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_app_type(app_type: &str) -> anyhow::Result<()> {
     validation::validate_app_type(app_type)
-}
-
-pub(crate) fn is_supported_app_type(app_type: &str) -> bool {
-    validate_app_type(app_type).is_ok()
 }
 
 fn parse_http_section(root: &toml::Table, app_type: &str) -> anyhow::Result<Option<ManifestHttp>> {
