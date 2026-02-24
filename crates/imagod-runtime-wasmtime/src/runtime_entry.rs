@@ -848,8 +848,8 @@ mod tests {
         fs,
         net::SocketAddr,
         path::{Path, PathBuf},
-        time::{SystemTime, UNIX_EPOCH},
     };
+    use tempfile::{Builder as TempDirBuilder, TempDir};
     use wit_component::{ComponentEncoder, StringEncoding, dummy_module};
     use wit_parser::{ManglingAndAbi, Resolve};
 
@@ -871,14 +871,6 @@ mod tests {
         }
     }
 
-    fn temp_mount_root(prefix: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be after epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!("imago-runtime-wasi-mount-{prefix}-{nonce}"))
-    }
-
     fn allow_all_wasi_capabilities() -> CapabilityPolicy {
         CapabilityPolicy {
             privileged: false,
@@ -887,9 +879,17 @@ mod tests {
         }
     }
 
-    fn write_wasi_http_component(prefix: &str) -> PathBuf {
-        let root = temp_mount_root(prefix);
-        fs::create_dir_all(&root).expect("temp root should be created");
+    struct WasiHttpFixture {
+        _temp_dir: TempDir,
+        component_path: PathBuf,
+    }
+
+    fn write_wasi_http_component(prefix: &str) -> WasiHttpFixture {
+        let temp_dir = TempDirBuilder::new()
+            .prefix(&format!("imago-runtime-wasi-http-{prefix}-"))
+            .tempdir()
+            .expect("temp dir should be created");
+        let root = temp_dir.path();
         let http_deps_dir = root.join("deps/http");
         fs::create_dir_all(&http_deps_dir).expect("http deps directory should be created");
         fs::write(
@@ -938,7 +938,10 @@ interface types {
             .expect("component encoding should succeed");
         let component_path = root.join("component.wasm");
         fs::write(&component_path, component).expect("component bytes should be written");
-        component_path
+        WasiHttpFixture {
+            _temp_dir: temp_dir,
+            component_path,
+        }
     }
 
     fn collect_component_import_names(runtime: &WasmRuntime, component_path: &Path) -> Vec<String> {
@@ -1080,8 +1083,8 @@ interface types {
     #[tokio::test]
     async fn cli_type_with_wasi_http_import_does_not_fail_with_missing_http_linker() {
         let runtime = WasmRuntime::new().expect("runtime should initialize");
-        let component_path = write_wasi_http_component("cli-http-linker");
-        let imports = collect_component_import_names(&runtime, &component_path);
+        let fixture = write_wasi_http_component("cli-http-linker");
+        let imports = collect_component_import_names(&runtime, &fixture.component_path);
         assert!(
             imports.iter().any(|name| name == "wasi:http/types@0.2.4"),
             "component should import wasi:http/types@0.2.4, got: {imports:?}"
@@ -1094,7 +1097,7 @@ interface types {
                 runner_id: "runner-test".to_string(),
                 service_name: "svc-test".to_string(),
                 release_hash: "release-test".to_string(),
-                component_path: component_path.clone(),
+                component_path: fixture.component_path.clone(),
                 args: Vec::new(),
                 envs: BTreeMap::new(),
                 wasi_mounts: Vec::new(),
@@ -1119,12 +1122,6 @@ interface types {
                 .contains("matching implementation was not found in the linker"),
             "unexpected missing-linker error: {}",
             err.message
-        );
-
-        let _ = fs::remove_dir_all(
-            component_path
-                .parent()
-                .expect("component path should have parent"),
         );
     }
 
@@ -1204,8 +1201,8 @@ interface types {
     #[tokio::test]
     async fn rpc_invoke_with_wasi_http_import_does_not_fail_with_missing_http_linker() {
         let runtime = WasmRuntime::new().expect("runtime should initialize");
-        let component_path = write_wasi_http_component("rpc-http-linker");
-        let imports = collect_component_import_names(&runtime, &component_path);
+        let fixture = write_wasi_http_component("rpc-http-linker");
+        let imports = collect_component_import_names(&runtime, &fixture.component_path);
         assert!(
             imports.iter().any(|name| name == "wasi:http/types@0.2.4"),
             "component should import wasi:http/types@0.2.4, got: {imports:?}"
@@ -1217,7 +1214,7 @@ interface types {
                 runner_id: "runner-test".to_string(),
                 service_name: "svc-test".to_string(),
                 release_hash: "release-test".to_string(),
-                component_path: component_path.clone(),
+                component_path: fixture.component_path.clone(),
                 args: Vec::new(),
                 envs: BTreeMap::new(),
                 wasi_mounts: Vec::new(),
@@ -1244,19 +1241,13 @@ interface types {
             "unexpected missing-linker error: {}",
             err.message
         );
-
-        let _ = fs::remove_dir_all(
-            component_path
-                .parent()
-                .expect("component path should have parent"),
-        );
     }
 
     #[tokio::test]
     async fn cli_type_with_wasi_http_import_stays_unauthorized_without_capability() {
         let runtime = WasmRuntime::new().expect("runtime should initialize");
-        let component_path = write_wasi_http_component("cli-http-unauthorized");
-        let imports = collect_component_import_names(&runtime, &component_path);
+        let fixture = write_wasi_http_component("cli-http-unauthorized");
+        let imports = collect_component_import_names(&runtime, &fixture.component_path);
         assert!(
             imports.iter().any(|name| name == "wasi:http/types@0.2.4"),
             "component should import wasi:http/types@0.2.4, got: {imports:?}"
@@ -1269,7 +1260,7 @@ interface types {
                 runner_id: "runner-test".to_string(),
                 service_name: "svc-test".to_string(),
                 release_hash: "release-test".to_string(),
-                component_path: component_path.clone(),
+                component_path: fixture.component_path.clone(),
                 args: Vec::new(),
                 envs: BTreeMap::new(),
                 wasi_mounts: Vec::new(),
@@ -1292,12 +1283,6 @@ interface types {
             err.message.contains("capability denied"),
             "unexpected message: {}",
             err.message
-        );
-
-        let _ = fs::remove_dir_all(
-            component_path
-                .parent()
-                .expect("component path should have parent"),
         );
     }
 
@@ -1373,9 +1358,12 @@ interface types {
 
     #[test]
     fn configure_wasi_mounts_accepts_read_write_and_read_only() {
-        let root = temp_mount_root("permissions");
-        let rw = root.join("rw");
-        let ro = root.join("ro");
+        let temp_dir = TempDirBuilder::new()
+            .prefix("imago-runtime-wasi-mount-permissions-")
+            .tempdir()
+            .expect("temp dir should be created");
+        let rw = temp_dir.path().join("rw");
+        let ro = temp_dir.path().join("ro");
         fs::create_dir_all(&rw).expect("rw dir should be created");
         fs::create_dir_all(&ro).expect("ro dir should be created");
 
@@ -1396,7 +1384,5 @@ interface types {
             ],
         )
         .expect("mount configuration should succeed");
-
-        let _ = fs::remove_dir_all(root);
     }
 }

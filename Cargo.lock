@@ -2477,6 +2477,7 @@ dependencies = [
  "imagod-ipc",
  "imagod-runtime-internal",
  "serde",
+ "tempfile",
  "tokio",
  "wasmtime",
  "wasmtime-wasi",
