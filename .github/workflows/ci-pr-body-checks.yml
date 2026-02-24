@@ -1,0 +1,83 @@
+name: ci-pr-body-checks
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-pr-body-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr_body_lint:
+    name: pr body lint
+    if: ${{ github.event.pull_request.user.login != 'dependabot[bot]' }}
+    runs-on: imago-default-runner-set
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate pull request body sections
+        run: python3 .github/scripts/lint_pr_body.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+
+  allow_dependabot:
+    name: allow dependabot
+    if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
+    runs-on: imago-default-runner-set
+    steps:
+      - name: Allow dependabot pull request
+        run: echo "Dependabot pull request is exempt from PR body lint."
+
+  checks:
+    name: checks
+    needs:
+      - pr_body_lint
+      - allow_dependabot
+    if: always()
+    runs-on: imago-default-runner-set
+    steps:
+      - name: Evaluate required checks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          is_dependabot="${{ github.event.pull_request.user.login == 'dependabot[bot]' }}"
+          lint_result='${{ needs.pr_body_lint.result }}'
+          allow_result='${{ needs.allow_dependabot.result }}'
+
+          echo "is_dependabot: $is_dependabot"
+          echo "pr_body_lint: $lint_result"
+          echo "allow_dependabot: $allow_result"
+
+          if [[ "$is_dependabot" == "true" ]]; then
+            [[ "$allow_result" == "success" ]] || {
+              echo "::error::allow_dependabot must succeed for Dependabot pull requests."
+              exit 1
+            }
+
+            [[ "$lint_result" == "skipped" || "$lint_result" == "success" ]] || {
+              echo "::error::pr_body_lint must be skipped or succeed for Dependabot pull requests."
+              exit 1
+            }
+          else
+            [[ "$lint_result" == "success" ]] || {
+              echo "::error::pr_body_lint must succeed for non-Dependabot pull requests."
+              exit 1
+            }
+
+            [[ "$allow_result" == "skipped" || "$allow_result" == "success" ]] || {
+              echo "::error::allow_dependabot must be skipped or succeed for non-Dependabot pull requests."
+              exit 1
+            }
+          fi

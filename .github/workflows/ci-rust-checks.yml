@@ -14,7 +14,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
 
 concurrency:
   group: ci-rust-checks-${{ github.ref }}
@@ -122,26 +121,11 @@ jobs:
       - name: cargo check
         run: cargo check --workspace
 
-  pr_body_lint:
-    name: pr body lint
-    if: ${{ github.event_name == 'pull_request' }}
-    runs-on: imago-default-runner-set
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Validate pull request body sections
-        run: python3 .github/scripts/lint_pr_body.py
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_EVENT_PATH: ${{ github.event_path }}
-
   checks:
     name: checks
     needs:
       - changed
       - rust_checks
-      - pr_body_lint
     if: always()
     runs-on: imago-default-runner-set
     steps:
@@ -156,7 +140,6 @@ jobs:
           workflow_related='${{ needs.changed.outputs.workflow_related }}'
           plugin_wit_related='${{ needs.changed.outputs.plugin_wit_related }}'
           rust_result='${{ needs.rust_checks.result }}'
-          pr_body_lint_result='${{ needs.pr_body_lint.result }}'
 
           echo "event_name: $event_name"
           echo "changed: $changed_result"
@@ -164,7 +147,6 @@ jobs:
           echo "workflow_related: $workflow_related"
           echo "plugin_wit_related: $plugin_wit_related"
           echo "rust_checks: $rust_result"
-          echo "pr_body_lint: $pr_body_lint_result"
 
           [[ "$changed_result" == "success" ]] || {
             echo "::error::changed job failed ($changed_result)"
@@ -172,11 +154,6 @@ jobs:
           }
 
           if [[ "$event_name" == "pull_request" ]]; then
-            [[ "$pr_body_lint_result" == "success" ]] || {
-              echo "::error::pr_body_lint must succeed for pull requests."
-              exit 1
-            }
-
             if [[ "$rust_related" == "true" || "$workflow_related" == "true" || "$plugin_wit_related" == "true" ]]; then
               [[ "$rust_result" == "success" ]] || {
                 echo "::error::rust_checks must succeed when Rust/workflow/plugin WIT files are changed."
@@ -191,11 +168,6 @@ jobs:
           else
             [[ "$rust_result" == "success" ]] || {
               echo "::error::rust_checks must succeed on push and workflow_dispatch events."
-              exit 1
-            }
-
-            [[ "$pr_body_lint_result" == "skipped" || "$pr_body_lint_result" == "success" ]] || {
-              echo "::error::pr_body_lint must be skipped or succeed outside pull requests."
               exit 1
             }
           fi
