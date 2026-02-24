@@ -1079,42 +1079,8 @@ impl ServiceSupervisor {
             starting_services.insert(service_name.to_string());
         }
 
-        // Reap stale exited process for the same service to avoid false Busy during redeploy.
-        let finished = {
-            let mut inner = self.inner.write().await;
-            match inner.get_mut(service_name) {
-                Some(service) => match service.child.try_wait() {
-                    Ok(Some(status)) => inner
-                        .remove(service_name)
-                        .map(|running_service| (running_service, status)),
-                    Ok(None) => None,
-                    Err(err) => {
-                        eprintln!(
-                            "service try_wait failed name={} release={} error={}",
-                            service_name, service.release_hash, err
-                        );
-                        None
-                    }
-                },
-                None => None,
-            }
-        };
-        if let Some((service, exit_status)) = finished {
-            log_exit_outcome(
-                service_name,
-                &service.release_hash,
-                &service.started_at,
-                service.status,
-                exit_status,
-            );
-            remove_runner_endpoint_best_effort(&service.runner_endpoint);
-            self.retain_composite_snapshot(service_name, &service.composite_log)
-                .await;
-            self.pending_ready
-                .lock()
-                .await
-                .retain(|_, sender| !sender.is_closed());
-        }
+        // Keep exited-runner cleanup logic centralized to avoid divergence.
+        self.reap_finished_service(service_name).await;
 
         let already_running = {
             let inner = self.inner.read().await;
