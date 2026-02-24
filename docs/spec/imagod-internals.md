@@ -104,6 +104,7 @@ flowchart TD
 - stream 受信バイトは `decode_frames` でフレーム分解し、各 frame を `from_cbor::<ProtocolEnvelope<Value>>` で復号。
 - request envelope は 1 stream につき 1 件のみ許可。複数 request は `E_BAD_REQUEST`。
 - `MessageType::CommandStart` は `handle_command_start` へ分岐し、同一 stream へ `command.start response` + `command.event*` を連続送信。
+- `handle_command_start` が受理前エラーを返した場合は、`type=command.start` の error envelope を返して stream を閉じる（空レスポンスは禁止）。
 - `MessageType::LogsRequest` は stream で ACK を返した後、`Session::send_datagram` で `logs.chunk*` / `logs.end` を送信する。
 - `MessageType::ServicesList` は `handle_single` 経由で service 状態一覧（`running` / `stopping` / `stopped`）を返す。
 - それ以外は `handle_single` で 1 request -> 1 response。
@@ -152,6 +153,11 @@ sequenceDiagram
 8. `mark_spawned_if_not_canceled` で cancel フラグ確認と phase 遷移を原子的に実行
 9. `deploy/run/stop` は command 実行前に service 単位 gate を取得し、同一 service で in-flight command がある場合は `E_BUSY` (`stage=orchestration`, `message=\"service '<name>' command is already in progress\"`) を即時返却する（待機しない）
 10. `deploy` は service 配下を更新する前に staging 展開 + `manifest.json` 検証だけを先行し、`manifest.name` を実 service 名として確定してから gate を再バインドする
+
+受理前失敗時:
+
+- `CommandStartResponse` / `command.event` は送信しない。
+- `type=command.start` の error envelope を 1 件返して stream close する。
 
 コマンド分岐:
 

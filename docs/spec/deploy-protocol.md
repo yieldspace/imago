@@ -30,6 +30,7 @@
 
 - request は **1 stream あたり 1 envelope のみ**許可する。
 - `command.start` は同一 stream 上で `command.start response` と `command.event*` を返す（response/event は複数可）。
+- `command.start` が受理前に失敗した場合（payload 検証・認可・shutdown 判定など）は、`type=command.start` の error envelope を 1 件返して stream close する。
 - request envelope が複数ある stream は `E_BAD_REQUEST` で拒否する。
 
 ### 2.2 DATAGRAM 設定
@@ -222,6 +223,7 @@ request:
 response:
 
 - `accepted`（bool）
+- 受理前失敗時は `accepted` を返さず、`type=command.start` かつ `error` を持つ envelope を返す（`payload=null`）。
 
 ### 5.6 `command.event`
 

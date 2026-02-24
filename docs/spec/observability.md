@@ -37,6 +37,7 @@
 
 - クライアントは bi-stream を開き、先頭に `command.start` を送る。
 - サーバは同一 stream 上で `command.start response` と `command.event` を返す。
+- `command.start` が受理前に失敗した場合は、`type=command.start` の error envelope を返して stream を閉じる（空レスポンスで閉じない）。
 
 ### 4.2 `command.event` 必須条件
 

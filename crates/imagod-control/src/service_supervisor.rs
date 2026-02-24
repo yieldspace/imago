@@ -1079,6 +1079,9 @@ impl ServiceSupervisor {
             starting_services.insert(service_name.to_string());
         }
 
+        // Keep exited-runner cleanup logic centralized to avoid divergence.
+        self.reap_finished_service(service_name).await;
+
         let already_running = {
             let inner = self.inner.read().await;
             inner.contains_key(service_name)
@@ -1996,6 +1999,68 @@ mod tests {
         assert_eq!(err.code, ErrorCode::Busy);
 
         supervisor.release_start("svc-reserve").await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn reserve_start_reclaims_exited_service_before_busy_check() {
+        let root = new_test_root("start-reserve-reclaim-exited");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
+        let service_name = "svc-reserve-reclaim";
+        let runner_endpoint = root
+            .join("runtime")
+            .join("ipc")
+            .join("runners")
+            .join("reserve-reclaim.sock");
+        if let Some(parent) = runner_endpoint.parent() {
+            std::fs::create_dir_all(parent).expect("runner endpoint parent should be created");
+        }
+        std::fs::write(&runner_endpoint, b"stale")
+            .expect("runner endpoint fixture should be created");
+
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("child process should spawn");
+        let service = new_running_service(child, "runner-reserve-reclaim", runner_endpoint.clone());
+        {
+            let mut log = service.composite_log.lock().await;
+            log.push(b"reclaim-a\nreclaim-b\n");
+        }
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(service_name.to_string(), service);
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        supervisor
+            .reserve_start(service_name)
+            .await
+            .expect("stale exited service should be reclaimed before busy check");
+        assert!(
+            !runner_endpoint.exists(),
+            "stale runner endpoint should be removed after reclaim"
+        );
+        let inner = supervisor.inner.read().await;
+        assert!(
+            !inner.contains_key(service_name),
+            "exited service should be removed from running map"
+        );
+        drop(inner);
+
+        let retained = supervisor
+            .open_logs(service_name, 10, false)
+            .await
+            .expect("reclaimed service logs should be retained");
+        assert_eq!(retained.snapshot_bytes, b"reclaim-a\nreclaim-b\n");
+        assert!(retained.receiver.is_none());
+
+        supervisor.release_start(service_name).await;
         let _ = std::fs::remove_dir_all(&root);
     }
 
