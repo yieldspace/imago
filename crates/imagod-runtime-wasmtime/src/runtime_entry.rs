@@ -845,7 +845,7 @@ mod tests {
     use imagod_ipc::{RunnerSocketConfig, RunnerSocketProtocol, RunnerWasiMount};
     use std::{
         collections::BTreeMap,
-        env, fs,
+        fs,
         net::SocketAddr,
         path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
@@ -887,71 +887,11 @@ mod tests {
         }
     }
 
-    fn locate_wasi_0_2_4_deps_dir() -> PathBuf {
-        let mut registry_roots = Vec::new();
-        if let Some(cargo_home) = env::var_os("CARGO_HOME") {
-            registry_roots.push(PathBuf::from(cargo_home).join("registry/src"));
-        }
-        if let Some(home) = env::var_os("HOME") {
-            registry_roots.push(PathBuf::from(home).join(".cargo/registry/src"));
-        }
-
-        for registry_root in registry_roots {
-            if !registry_root.is_dir() {
-                continue;
-            }
-            let Ok(registries) = fs::read_dir(&registry_root) else {
-                continue;
-            };
-            for registry in registries.flatten() {
-                let registry_path = registry.path();
-                if !registry_path.is_dir() {
-                    continue;
-                }
-                let Ok(packages) = fs::read_dir(&registry_path) else {
-                    continue;
-                };
-                for package in packages.flatten() {
-                    let package_path = package.path();
-                    if !package_path.is_dir() {
-                        continue;
-                    }
-                    let Some(name) = package_path.file_name().and_then(|s| s.to_str()) else {
-                        continue;
-                    };
-                    if !name.starts_with("wasip2-") || !name.contains("wasi-0.2.4") {
-                        continue;
-                    }
-                    let deps_dir = package_path.join("wit/deps");
-                    if deps_dir.join("http/types.wit").is_file() {
-                        return deps_dir;
-                    }
-                }
-            }
-        }
-
-        panic!("failed to locate wasip2 wit deps directory for wasi-0.2.4");
-    }
-
-    fn copy_dir_recursive(src: &Path, dst: &Path) {
-        fs::create_dir_all(dst).expect("destination directory should be created");
-        let entries = fs::read_dir(src).expect("source directory should be readable");
-        for entry in entries.flatten() {
-            let from = entry.path();
-            let to = dst.join(entry.file_name());
-            let file_type = entry.file_type().expect("file type should be readable");
-            if file_type.is_dir() {
-                copy_dir_recursive(&from, &to);
-            } else if file_type.is_file() {
-                fs::copy(&from, &to).expect("file copy should succeed");
-            }
-        }
-    }
-
     fn write_wasi_http_component(prefix: &str) -> PathBuf {
         let root = temp_mount_root(prefix);
         fs::create_dir_all(&root).expect("temp root should be created");
-        copy_dir_recursive(&locate_wasi_0_2_4_deps_dir(), &root.join("deps"));
+        let http_deps_dir = root.join("deps/http");
+        fs::create_dir_all(&http_deps_dir).expect("http deps directory should be created");
         fs::write(
             root.join("world.wit"),
             r#"
@@ -963,6 +903,23 @@ world app {
 "#,
         )
         .expect("wit source should be written");
+        fs::write(
+            http_deps_dir.join("package.wit"),
+            r#"
+package wasi:http@0.2.4;
+
+interface types {
+  type field-key = string;
+  type field-name = field-key;
+
+  resource fields {
+    constructor();
+    has: func(name: field-name) -> bool;
+  }
+}
+"#,
+        )
+        .expect("wasi:http fixture should be written");
 
         let mut resolve = Resolve::default();
         let (pkg, _) = resolve
