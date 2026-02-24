@@ -1,13 +1,14 @@
 #[path = "e2e_helper/mod.rs"]
 mod e2e_helper;
 
+use e2e_helper::wait::poll_until;
 use e2e_helper::{AppKind, CmdOutput, Scenario, ServiceHandle, TestResult, WasmArtifact};
 use std::path::PathBuf;
-use std::thread;
 use std::time::Duration;
 
 const COMPLETED_MARKER: &str = "nanokvm-probe: completed";
 const LINKER_DUPLICATE_MARKER: &str = "map entry `wasi:io/error@0.2.6` defined twice";
+const LOG_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 #[test]
 #[ignore]
@@ -45,7 +46,14 @@ fn e2e_nanokvm_native_plugin_multi_import_does_not_duplicate_linker_entries() ->
     ensure_success("nanokvm deploy", &deploy)?;
     assert_command_completed("nanokvm deploy", &deploy)?;
 
-    let logs = wait_logs_with_marker(&service, &scenario, "default", 200, COMPLETED_MARKER, 40)?;
+    let logs = wait_logs_with_marker(
+        &service,
+        &scenario,
+        "default",
+        200,
+        COMPLETED_MARKER,
+        Duration::from_secs(40),
+    )?;
     assert!(
         !logs.contains(LINKER_DUPLICATE_MARKER),
         "unexpected linker duplicate marker in logs: {logs}"
@@ -58,30 +66,31 @@ fn e2e_nanokvm_native_plugin_multi_import_does_not_duplicate_linker_entries() ->
 fn wait_logs_with_marker(
     service: &ServiceHandle,
     scenario: &Scenario,
-    _target: &str,
+    target: &str,
     tail: u32,
     marker: &str,
-    retries: usize,
+    timeout: Duration,
 ) -> TestResult<String> {
-    let tail_text = tail.to_string();
-    let args = ["logs", service.name(), "--tail", tail_text.as_str()];
-    let mut last_combined = String::new();
+    let mut last_logs = String::new();
 
-    for _ in 0..retries {
-        let output = scenario.run_service_cli(service.name(), &args)?;
-        if output.success {
+    poll_until(
+        &format!("marker '{marker}' in {}", service.name()),
+        timeout,
+        LOG_POLL_INTERVAL,
+        || {
+            let output = service.logs(scenario, target, tail)?;
+            if !output.success {
+                return Ok(None);
+            }
             let logs = output.log_messages().join("\n");
             if logs.contains(marker) {
-                return Ok(logs);
+                return Ok(Some(logs));
             }
-        }
-        last_combined = output.combined;
-        thread::sleep(Duration::from_secs(1));
-    }
-
-    Err(anyhow::anyhow!(
-        "timed out waiting for marker '{marker}', last output: {last_combined}"
-    ))
+            last_logs = logs;
+            Ok(None)
+        },
+    )
+    .map_err(|err| anyhow::anyhow!("{err}; last logs: {last_logs}"))
 }
 
 fn ensure_success(label: &str, output: &CmdOutput) -> TestResult {

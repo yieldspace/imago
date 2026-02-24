@@ -2,16 +2,24 @@
 mod e2e_helper;
 
 use e2e_helper::TestResult;
+use e2e_helper::binaries::resolve_imagod_binary;
+use e2e_helper::certs::generate_key_material;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::Builder as TempDirBuilder;
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 const CLIENT_PUBLIC_KEY_SAMPLE: &str =
     "1111111111111111111111111111111111111111111111111111111111111111";
+
+#[derive(Debug, Clone, Copy)]
+enum ReadinessMode {
+    DefaultConfigCreated,
+    Listening,
+}
 
 #[derive(Debug)]
 struct RunResult {
@@ -25,7 +33,9 @@ struct RunResult {
 #[test]
 #[ignore]
 fn e2e_imagod_creates_default_config_when_missing() -> TestResult {
-    let temp = TempDirBuilder::new().prefix("iecfgm").tempdir()?;
+    let temp = TempDirBuilder::new()
+        .prefix("iecfgm")
+        .tempdir_in(std::env::temp_dir())?;
     let config_path = temp.path().join("imagod.toml");
     assert!(
         !config_path.exists(),
@@ -33,7 +43,11 @@ fn e2e_imagod_creates_default_config_when_missing() -> TestResult {
         config_path.display()
     );
 
-    let run = run_imagod_with_timeout(&config_path, DEFAULT_TIMEOUT)?;
+    let run = run_imagod_until_ready(
+        &config_path,
+        DEFAULT_TIMEOUT,
+        ReadinessMode::DefaultConfigCreated,
+    )?;
 
     assert!(
         config_path.exists(),
@@ -43,6 +57,11 @@ fn e2e_imagod_creates_default_config_when_missing() -> TestResult {
     assert!(
         run.combined.contains("imagod created default config at"),
         "default-config creation log was not found: {}",
+        render_run_result(&run)
+    );
+    assert!(
+        !run.timed_out,
+        "imagod startup timed out unexpectedly: {}",
         render_run_result(&run)
     );
     assert!(
@@ -140,10 +159,13 @@ fn e2e_imagod_creates_default_config_when_missing() -> TestResult {
 #[test]
 #[ignore]
 fn e2e_imagod_does_not_overwrite_existing_config() -> TestResult {
-    let temp = TempDirBuilder::new().prefix("iecfgo").tempdir()?;
+    let temp = TempDirBuilder::new()
+        .prefix("iecfgo")
+        .tempdir_in(std::env::temp_dir())?;
     let config_path = temp.path().join("imagod.toml");
-    let storage_root = temp.path().join("storage-root");
-    let server_key = temp.path().join("server.key");
+    let key_material = generate_key_material(temp.path())?;
+    let storage_root = temp.path().join("s");
+    let server_key = key_material.server_key_path;
     let existing = format!(
         "listen_addr = \"127.0.0.1:0\"\nstorage_root = \"{}\"\nserver_version = \"imagod/existing\"\ncompatibility_date = \"2026-02-10\"\n\n[tls]\nserver_key = \"{}\"\nclient_public_keys = [\"{}\"]\n",
         toml_escape(storage_root.to_string_lossy().as_ref()),
@@ -153,7 +175,7 @@ fn e2e_imagod_does_not_overwrite_existing_config() -> TestResult {
     fs::write(&config_path, &existing)?;
     let before = fs::read_to_string(&config_path)?;
 
-    let run = run_imagod_with_timeout(&config_path, DEFAULT_TIMEOUT)?;
+    let run = run_imagod_until_ready(&config_path, DEFAULT_TIMEOUT, ReadinessMode::Listening)?;
     let after = fs::read_to_string(&config_path)?;
 
     assert_eq!(
@@ -167,53 +189,99 @@ fn e2e_imagod_does_not_overwrite_existing_config() -> TestResult {
         "unexpected default-config creation log was found: {}",
         render_run_result(&run)
     );
+    assert!(
+        run.combined.contains("imagod listening on"),
+        "startup listen log was not found: {}",
+        render_run_result(&run)
+    );
+    assert!(
+        !run.timed_out,
+        "imagod startup timed out unexpectedly: {}",
+        render_run_result(&run)
+    );
 
     Ok(())
 }
 
-fn run_imagod_with_timeout(config_path: &Path, timeout: Duration) -> TestResult<RunResult> {
+fn run_imagod_until_ready(
+    config_path: &Path,
+    timeout: Duration,
+    readiness_mode: ReadinessMode,
+) -> TestResult<RunResult> {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let child = Command::new("cargo")
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(workspace_root.join("Cargo.toml"))
-        .arg("-p")
-        .arg("imagod")
-        .arg("--")
+    let imagod_binary = resolve_imagod_binary(&workspace_root, "imagod")?;
+    let stdout_path = config_path.with_extension("stdout.log");
+    let stderr_path = config_path.with_extension("stderr.log");
+    let stdout_file = fs::File::create(&stdout_path)?;
+    let stderr_file = fs::File::create(&stderr_path)?;
+
+    let mut child = Command::new(imagod_binary)
         .arg("--config")
         .arg(config_path)
         .current_dir(&workspace_root)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
         .spawn()?;
-    let (output, timed_out) = wait_or_kill(child, timeout)?;
+    let timed_out = wait_for_readiness_or_kill(
+        &mut child,
+        config_path,
+        &stdout_path,
+        &stderr_path,
+        readiness_mode,
+        timeout,
+    )?;
+    let status = child.wait()?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = read_log_file(&stdout_path);
+    let stderr = read_log_file(&stderr_path);
     let combined = format!("{stdout}{stderr}");
 
     Ok(RunResult {
         stdout,
         stderr,
         combined,
-        status: output.status.to_string(),
+        status: status.to_string(),
         timed_out,
     })
 }
 
-fn wait_or_kill(mut child: Child, timeout: Duration) -> TestResult<(Output, bool)> {
+fn wait_for_readiness_or_kill(
+    child: &mut Child,
+    config_path: &Path,
+    stdout_path: &Path,
+    stderr_path: &Path,
+    readiness_mode: ReadinessMode,
+    timeout: Duration,
+) -> TestResult<bool> {
     let deadline = Instant::now() + timeout;
     loop {
+        let combined = read_log_file(stdout_path) + &read_log_file(stderr_path);
+        if readiness_reached(config_path, &combined, readiness_mode) {
+            let _ = child.kill();
+            return Ok(false);
+        }
         if child.try_wait()?.is_some() {
-            return Ok((child.wait_with_output()?, false));
+            return Ok(false);
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            return Ok((child.wait_with_output()?, true));
+            return Ok(true);
         }
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn readiness_reached(config_path: &Path, logs: &str, readiness_mode: ReadinessMode) -> bool {
+    match readiness_mode {
+        ReadinessMode::DefaultConfigCreated => {
+            config_path.exists() && logs.contains("imagod created default config at")
+        }
+        ReadinessMode::Listening => logs.contains("imagod listening on"),
+    }
+}
+
+fn read_log_file(path: &Path) -> String {
+    fs::read_to_string(path).unwrap_or_default()
 }
 
 fn render_run_result(run: &RunResult) -> String {

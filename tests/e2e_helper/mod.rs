@@ -1,9 +1,11 @@
+pub mod binaries;
 pub mod certs;
 pub mod cli;
 pub mod cluster;
 pub mod http;
 pub mod projects;
 pub mod scenario;
+pub mod wait;
 pub mod wasm_assets;
 
 pub use cli::CmdOutput;

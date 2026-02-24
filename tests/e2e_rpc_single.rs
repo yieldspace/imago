@@ -3,14 +3,16 @@ mod e2e_helper;
 
 use e2e_helper::certs::{generate_key_material, write_known_hosts};
 use e2e_helper::cli::{CmdOutput, run_imago_cli};
+use e2e_helper::wait::poll_until;
 use e2e_helper::{Cluster, TargetSpec, TestResult, WasmArtifact, wasm_file_name, wasm_path};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::thread;
 use std::time::Duration;
 use tempfile::Builder as TempDirBuilder;
 
 const SUCCESS_MARKER: &str = "acme:clock/api.now =>";
+const LOG_WAIT_TIMEOUT: Duration = Duration::from_secs(40);
+const LOG_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 #[test]
 #[ignore]
@@ -82,7 +84,7 @@ fn e2e_rpc_single_node_local_flow() -> TestResult {
         &client_dir,
         &control_home,
         SUCCESS_MARKER,
-        40,
+        LOG_WAIT_TIMEOUT,
     )?;
     let returned = extract_returned_value(&success_logs)?;
     assert!(
@@ -110,23 +112,14 @@ fn wait_logs(
     workspace_root: &Path,
     project_dir: &Path,
     home: &Path,
-    retries: usize,
+    timeout: Duration,
 ) -> TestResult<String> {
-    for _ in 0..retries {
-        let logs = run_imago_cli(
-            workspace_root,
-            project_dir,
-            home,
-            &["logs", "rpc-caller", "--tail", "200"],
-        )?;
-        if logs.success {
-            return Ok(logs.log_messages().join("\n"));
-        }
-        thread::sleep(Duration::from_secs(1));
-    }
-    Err(anyhow::anyhow!(
-        "timed out while collecting rpc-caller logs"
-    ))
+    poll_until(
+        "collecting rpc-caller logs",
+        timeout,
+        LOG_POLL_INTERVAL,
+        || fetch_logs_once(workspace_root, project_dir, home),
+    )
 }
 
 fn wait_logs_with_marker(
@@ -134,16 +127,42 @@ fn wait_logs_with_marker(
     project_dir: &Path,
     home: &Path,
     marker: &str,
-    retries: usize,
+    timeout: Duration,
 ) -> TestResult<String> {
-    for _ in 0..retries {
-        let logs = wait_logs(workspace_root, project_dir, home, 1)?;
-        if logs.contains(marker) {
-            return Ok(logs);
-        }
-        thread::sleep(Duration::from_secs(1));
+    let mut last_logs = String::new();
+    poll_until(
+        &format!("marker '{marker}' in rpc-caller logs"),
+        timeout,
+        LOG_POLL_INTERVAL,
+        || {
+            let Some(logs) = fetch_logs_once(workspace_root, project_dir, home)? else {
+                return Ok(None);
+            };
+            last_logs = logs.clone();
+            if logs.contains(marker) {
+                return Ok(Some(logs));
+            }
+            Ok(None)
+        },
+    )
+    .map_err(|err| anyhow::anyhow!("{err}; last logs: {last_logs}"))
+}
+
+fn fetch_logs_once(
+    workspace_root: &Path,
+    project_dir: &Path,
+    home: &Path,
+) -> TestResult<Option<String>> {
+    let logs = run_imago_cli(
+        workspace_root,
+        project_dir,
+        home,
+        &["logs", "rpc-caller", "--tail", "200"],
+    )?;
+    if !logs.success {
+        return Ok(None);
     }
-    Err(anyhow::anyhow!("timed out waiting for marker '{marker}'"))
+    Ok(Some(logs.log_messages().join("\n")))
 }
 
 fn extract_returned_value(logs: &str) -> TestResult<u64> {

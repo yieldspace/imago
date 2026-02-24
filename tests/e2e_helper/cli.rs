@@ -1,3 +1,4 @@
+use super::binaries::resolve_imago_cli_binary;
 use anyhow::{Result, bail};
 use serde_json::Value;
 use std::path::Path;
@@ -87,14 +88,8 @@ pub fn run_imago_cli(
     home_dir: &Path,
     args: &[&str],
 ) -> Result<CmdOutput> {
-    let output = Command::new("cargo")
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(workspace_root.join("Cargo.toml"))
-        .arg("-p")
-        .arg("imago-cli")
-        .arg("--")
+    let cli_binary = resolve_imago_cli_binary(workspace_root)?;
+    let output = Command::new(cli_binary)
         .arg("--json")
         .args(args)
         .current_dir(project_dir)

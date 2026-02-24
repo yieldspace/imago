@@ -48,47 +48,55 @@ pub(crate) async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyh
     let orchestrator = Orchestrator::new(&config.storage_root, artifacts.clone(), supervisor);
     let mut server = build_server(&config).map_err(anyhow::Error::new)?;
 
-    match orchestrator.gc_unused_plugin_components_on_boot().await {
-        Ok(()) => {
-            eprintln!("plugin component cache gc completed");
+    if config.runtime.boot_plugin_gc_enabled {
+        match orchestrator.gc_unused_plugin_components_on_boot().await {
+            Ok(()) => {
+                eprintln!("plugin component cache gc completed");
+            }
+            Err(err) => {
+                eprintln!(
+                    "plugin component cache gc failed code={:?} stage={} message={}",
+                    err.code, err.stage, err.message
+                );
+            }
         }
-        Err(err) => {
-            eprintln!(
-                "plugin component cache gc failed code={:?} stage={} message={}",
-                err.code, err.stage, err.message
-            );
-        }
+    } else {
+        eprintln!("plugin component cache gc skipped by runtime.boot_plugin_gc_enabled=false");
     }
 
-    match orchestrator.restore_active_services_on_boot().await {
-        Ok(summary) => {
-            for started in &summary.started {
+    if config.runtime.boot_restore_enabled {
+        match orchestrator.restore_active_services_on_boot().await {
+            Ok(summary) => {
+                for started in &summary.started {
+                    eprintln!(
+                        "boot restore started name={} release={}",
+                        started.service_name, started.release_hash
+                    );
+                }
+                for failed in &summary.failed {
+                    eprintln!(
+                        "boot restore failed name={} code={:?} stage={} message={}",
+                        failed.service_name,
+                        failed.error.code,
+                        failed.error.stage,
+                        failed.error.message
+                    );
+                }
                 eprintln!(
-                    "boot restore started name={} release={}",
-                    started.service_name, started.release_hash
+                    "boot restore summary started={} failed={}",
+                    summary.started.len(),
+                    summary.failed.len()
                 );
             }
-            for failed in &summary.failed {
+            Err(err) => {
                 eprintln!(
-                    "boot restore failed name={} code={:?} stage={} message={}",
-                    failed.service_name,
-                    failed.error.code,
-                    failed.error.stage,
-                    failed.error.message
+                    "boot restore scan failed code={:?} stage={} message={}",
+                    err.code, err.stage, err.message
                 );
             }
-            eprintln!(
-                "boot restore summary started={} failed={}",
-                summary.started.len(),
-                summary.failed.len()
-            );
         }
-        Err(err) => {
-            eprintln!(
-                "boot restore scan failed code={:?} stage={} message={}",
-                err.code, err.stage, err.message
-            );
-        }
+    } else {
+        eprintln!("boot restore skipped by runtime.boot_restore_enabled=false");
     }
 
     let handler = ProtocolHandler::new(

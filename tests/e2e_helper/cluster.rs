@@ -1,3 +1,4 @@
+use super::binaries::resolve_imagod_binary;
 use super::certs::{KnownHostEntry, generate_key_material};
 use super::projects::TargetSpec;
 use anyhow::{Context, Result, anyhow, bail};
@@ -93,7 +94,7 @@ impl Cluster {
         let port = pick_free_port()?;
         let imagod_config_path = work_dir.join("i.toml");
         let config = format!(
-            "listen_addr = \"127.0.0.1:{port}\"\nstorage_root = \"d\"\n\n[runtime]\nmax_chunks = 128\nchunk_timeout_ms = 10000\nidle_ttl_secs = 300\nhttp_max_body_bytes = 1048576\ntick_interval_ms = 5000\nrunner_ready_timeout_secs = 10\n\n[tls]\nserver_key = \"{}\"\nadmin_public_keys = [\"{}\"]\nclient_public_keys = [\"{}\"]\n",
+            "listen_addr = \"127.0.0.1:{port}\"\nstorage_root = \"d\"\n\n[runtime]\nmax_chunks = 128\nchunk_timeout_ms = 10000\nidle_ttl_secs = 300\nhttp_max_body_bytes = 1048576\ntick_interval_ms = 5000\nrunner_ready_timeout_secs = 10\nboot_plugin_gc_enabled = false\nboot_restore_enabled = false\n\n[tls]\nserver_key = \"{}\"\nadmin_public_keys = [\"{}\"]\nclient_public_keys = [\"{}\"]\n",
             toml_escape(keys.server_key_path.to_string_lossy().as_ref()),
             self.control_admin_public_hex.as_str(),
             keys.server_public_hex.as_str(),
@@ -127,19 +128,22 @@ impl Cluster {
     }
 
     pub fn start_all(&mut self) -> Result<()> {
+        struct NodeStartup {
+            name: String,
+            listen_addr: String,
+            manager_socket_path: PathBuf,
+            child: Child,
+        }
+
         if !self.running.is_empty() {
             return Ok(());
         }
 
+        let daemon_binary = resolve_imagod_binary(&self.workspace_root, &self.daemon_package)?;
+        let mut startups = Vec::with_capacity(self.nodes.len());
+
         for node in &self.nodes {
-            let mut child = Command::new("cargo")
-                .arg("run")
-                .arg("--quiet")
-                .arg("--manifest-path")
-                .arg(self.workspace_root.join("Cargo.toml"))
-                .arg("-p")
-                .arg(&self.daemon_package)
-                .arg("--")
+            let child = Command::new(&daemon_binary)
                 .arg("--config")
                 .arg(&node.imagod_config_path)
                 .current_dir(&node.work_dir)
@@ -150,19 +154,45 @@ impl Cluster {
                 .spawn()
                 .with_context(|| format!("failed to spawn imagod for node '{}'", node.name))?;
 
-            let manager_socket_path = node
-                .storage_root
-                .join("runtime")
-                .join("ipc")
-                .join("manager-control.sock");
-            wait_for_imagod_ready(
-                &mut child,
-                &manager_socket_path,
-                &node.target.remote,
-                Duration::from_secs(90),
-            )?;
-            self.running.push(NodeProcess { child });
+            startups.push(NodeStartup {
+                name: node.name.clone(),
+                listen_addr: node.target.remote.clone(),
+                manager_socket_path: node
+                    .storage_root
+                    .join("runtime")
+                    .join("ipc")
+                    .join("manager-control.sock"),
+                child,
+            });
         }
+
+        for index in 0..startups.len() {
+            let failure = {
+                let startup = &mut startups[index];
+                wait_for_imagod_ready(
+                    &mut startup.child,
+                    &startup.manager_socket_path,
+                    &startup.listen_addr,
+                    Duration::from_secs(90),
+                )
+                .err()
+                .map(|err| (startup.name.clone(), err))
+            };
+            if let Some((node_name, err)) = failure {
+                for pending in &mut startups {
+                    let _ = pending.child.kill();
+                    let _ = pending.child.wait();
+                }
+                return Err(err).with_context(|| {
+                    format!("imagod readiness check failed for node '{}'", node_name)
+                });
+            }
+        }
+
+        self.running
+            .extend(startups.into_iter().map(|startup| NodeProcess {
+                child: startup.child,
+            }));
 
         Ok(())
     }

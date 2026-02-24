@@ -1,9 +1,11 @@
 #[path = "e2e_helper/mod.rs"]
 mod e2e_helper;
 
+use e2e_helper::wait::poll_until;
 use e2e_helper::{AppKind, CmdOutput, Scenario, TestResult, WasmArtifact};
-use std::thread;
 use std::time::Duration;
+
+const LOG_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 #[test]
 #[ignore]
@@ -129,7 +131,7 @@ IMAGO_E2E_ENV_TOML_ONLY = "from-wasi-only"
             "IMAGO_E2E_ENV_ONLY=from-dotenv-only",
             "IMAGO_E2E_ENV_TOML_ONLY=from-wasi-only",
         ],
-        40,
+        Duration::from_secs(40),
     )?;
 
     assert!(
@@ -152,24 +154,28 @@ fn wait_logs_with_markers(
     target: &str,
     tail: u32,
     markers: &[&str],
-    retries: usize,
+    timeout: Duration,
 ) -> TestResult<String> {
     let mut last_logs = String::new();
 
-    for _ in 0..retries {
-        let output = service.logs(scenario, target, tail)?;
-        let logs = output.log_messages().join("\n");
-        if markers.iter().all(|marker| logs.contains(marker)) {
-            return Ok(logs);
-        }
-        last_logs = logs;
-        thread::sleep(Duration::from_secs(1));
-    }
-
-    Err(anyhow::anyhow!(
-        "timed out waiting for all markers [{}], last logs: {last_logs}",
-        markers.join(", ")
-    ))
+    poll_until(
+        &format!("all markers [{}] in {}", markers.join(", "), service.name()),
+        timeout,
+        LOG_POLL_INTERVAL,
+        || {
+            let output = service.logs(scenario, target, tail)?;
+            if !output.success {
+                return Ok(None);
+            }
+            let logs = output.log_messages().join("\n");
+            if markers.iter().all(|marker| logs.contains(marker)) {
+                return Ok(Some(logs));
+            }
+            last_logs = logs;
+            Ok(None)
+        },
+    )
+    .map_err(|err| anyhow::anyhow!("{err}; last logs: {last_logs}"))
 }
 
 fn assert_command_completed(label: &str, output: &CmdOutput) -> TestResult {
