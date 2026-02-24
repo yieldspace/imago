@@ -57,7 +57,7 @@ privileged = false
 - `plugins/*` 配下で `wit/package.wit` を持つ native plugin は、同じディレクトリに `wkg.lock` を必ずコミットします。
 - WIT を変更したら plugin ディレクトリで `wkg wit build` を実行し、`wkg.lock` を更新します。
   - 例: `(cd plugins/imago-admin && wkg wit build)`
-- CI (`ci-rust-checks`) は `./.github/scripts/verify_plugin_wkg_locks.sh` で `wkg.lock` の整合性を検証し、不整合を失敗として扱います。
+- CI (`ci-wkg-checks`) は `./.github/scripts/verify_plugin_wkg_locks.sh` で `wkg.lock` の整合性を検証し、不整合を失敗として扱います。
 - native plugin WIT の publish は Git tag を `<plugin-dir>@<version>` 形式で push して行います。
   - 例: `imago-admin@0.1.0`
   - `<version>` は必ず `plugins/<plugin-dir>/wit/package.wit` の `package ...@<version>;` と一致している必要があります。
