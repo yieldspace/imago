@@ -1,0 +1,113 @@
+name: imago-build.yml
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/imago-build.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-imago-build-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build_imago:
+    name: Build Imago (${{ matrix.target }})
+    runs-on: imago-cross-runner-set
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            use_zig: false
+          - target: aarch64-unknown-linux-gnu
+            use_zig: false
+          - target: armv7-unknown-linux-gnueabihf
+            use_zig: false
+          - target: riscv64gc-unknown-linux-gnu
+            use_zig: false
+          - target: aarch64-unknown-linux-musl
+            use_zig: true
+          - target: armv7-unknown-linux-musleabihf
+            use_zig: true
+          - target: riscv64gc-unknown-linux-musl
+            use_zig: true
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Build GNU target ${{ matrix.target }}
+        if: matrix.use_zig == false
+        run: cargo build --locked --release --target "${{ matrix.target }}" -p imago-cli -p imagod --bin imago --bin imagod
+
+      - name: Build musl targets with zig
+        if: matrix.use_zig == true
+        run: cargo zigbuild --locked --release --target "${{ matrix.target }}" -p imago-cli -p imagod --bin imago --bin imagod
+
+      - name: Resolve binary versions
+        id: versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          imago_cli_pkgid="$(cargo pkgid -p imago-cli)"
+          imagod_pkgid="$(cargo pkgid -p imagod)"
+          echo "imago_version=${imago_cli_pkgid##*#}" >> "$GITHUB_OUTPUT"
+          echo "imagod_version=${imagod_pkgid##*#}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload imago binary
+        uses: actions/upload-artifact@v6
+        with:
+          if-no-files-found: error
+          name: ${{ matrix.target }}-imago-${{ steps.versions.outputs.imago_version }}-${{ github.sha }}
+          path: target/${{ matrix.target }}/release/imago
+          retention-days: 7
+
+      - name: Upload imagod binary
+        uses: actions/upload-artifact@v6
+        with:
+          if-no-files-found: error
+          name: ${{ matrix.target }}-imagod-${{ steps.versions.outputs.imagod_version }}-${{ github.sha }}
+          path: target/${{ matrix.target }}/release/imagod
+          retention-days: 7
+
+  build_nanokvm:
+    name: Build NanoKVM imagod
+    runs-on: imago-nanokvm-runner-set
+    env:
+      CC_riscv64gc_unknown_linux_musl: /home/runner/riscv64-unknown-linux-musl/bin/riscv64-unknown-linux-musl-gcc
+      AR_riscv64gc_unknown_linux_musl: /home/runner/riscv64-unknown-linux-musl/bin/riscv64-unknown-linux-musl-ar
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER: /home/runner/riscv64-unknown-linux-musl/bin/riscv64-unknown-linux-musl-gcc
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Add PATH
+        run: echo "/home/runner/riscv64-unknown-linux-musl/bin" >> "$GITHUB_PATH"
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Install target
+        run: rustup target add riscv64gc-unknown-linux-musl
+
+      - name: Cache
+        if: ${{ runner.environment != 'self-hosted' }}
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build -p nanokvm-imagod --locked --release --bin imagod --target riscv64gc-unknown-linux-musl
+
+      - name: Upload NanoKVM imagod
+        uses: actions/upload-artifact@v6
+        with:
+          if-no-files-found: error
+          name: nanokvm-imagod-riscv64gc-unknown-linux-musl-${{ github.sha }}
+          path: target/riscv64gc-unknown-linux-musl/release/imagod
+          retention-days: 7
