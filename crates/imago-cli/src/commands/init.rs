@@ -341,11 +341,12 @@ mod tests {
     #[test]
     fn templates_are_valid_imago_config_toml() {
         for template in detected_templates() {
-            let parsed: toml::Value = toml::from_str(template.body)
-                .unwrap_or_else(|err| panic!("template '{}' should be valid TOML: {err}", template.id));
-            let root = parsed
-                .as_table()
-                .unwrap_or_else(|| panic!("template '{}' root should be a TOML table", template.id));
+            let parsed: toml::Value = toml::from_str(template.body).unwrap_or_else(|err| {
+                panic!("template '{}' should be valid TOML: {err}", template.id)
+            });
+            let root = parsed.as_table().unwrap_or_else(|| {
+                panic!("template '{}' root should be a TOML table", template.id)
+            });
 
             if let Some(app_type_value) = root.get("type") {
                 let app_type = app_type_value.as_str().unwrap_or_else(|| {
@@ -364,7 +365,10 @@ mod tests {
                     panic!("template '{}' key 'restart' should be string", template.id)
                 });
                 assert!(
-                    matches!(restart, "never" | "on-failure" | "always" | "unless-stopped"),
+                    matches!(
+                        restart,
+                        "never" | "on-failure" | "always" | "unless-stopped"
+                    ),
                     "template '{}' key 'restart' has unsupported value: {}",
                     template.id,
                     restart
