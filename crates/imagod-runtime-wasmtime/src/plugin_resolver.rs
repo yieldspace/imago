@@ -941,6 +941,8 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    /// Test-only inline WIT bindings used to reproduce a same-package
+    /// multi-import native plugin fixture with minimal surface area.
     mod test_multi_import_bindings {
         wasmtime::component::bindgen!({
             inline: r#"
@@ -963,6 +965,8 @@ mod tests {
         });
     }
 
+    /// Native plugin fixture that exposes multiple imports in one package and
+    /// is used to validate package-scoped `mark_native_plugin_linked` dedup.
     #[derive(Clone, Default)]
     struct TestMultiImportPlugin {
         link_calls: Arc<AtomicUsize>,
