@@ -192,6 +192,9 @@ where
         let request_id = request.request_id;
         let correlation_id = request.correlation_id;
         if let Err(err) = handler.handle_command_start(request, &mut send).await {
+            if !should_wrap_command_start_error(&err) {
+                return Err(err);
+            }
             let response = command_start_error_envelope(request_id, correlation_id, err);
             write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
         }
@@ -375,6 +378,10 @@ fn command_start_error_envelope(
         correlation_id,
         err.to_structured(),
     )
+}
+
+fn should_wrap_command_start_error(err: &ImagodError) -> bool {
+    err.stage == "command.start"
 }
 
 fn collect_stream_task_result(
@@ -563,5 +570,22 @@ mod tests {
         assert_eq!(error.code, ErrorCode::BadRequest);
         assert_eq!(error.stage, "command.start");
         assert_eq!(error.message, "payload does not match command_type");
+    }
+
+    #[test]
+    fn wraps_command_start_errors_before_acceptance_only() {
+        let pre_accept = ImagodError::new(
+            ErrorCode::BadRequest,
+            "command.start",
+            "payload does not match command_type",
+        );
+        assert!(should_wrap_command_start_error(&pre_accept));
+
+        let post_accept = ImagodError::new(
+            ErrorCode::Internal,
+            "runtime.start",
+            "wasi cli run trap: failed to create capture session",
+        );
+        assert!(!should_wrap_command_start_error(&post_accept));
     }
 }

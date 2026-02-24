@@ -73,6 +73,8 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<()> {
             &hello,
         ),
     );
+    let command_stream_timeout =
+        deploy::resolve_command_stream_timeout_from_hello_limits(&hello.limits);
 
     ui::command_stage("run", "command.start", "sending run request");
     let command = deploy::build_command_start_envelope(
@@ -81,7 +83,12 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<()> {
         CommandType::Run,
         CommandPayload::Run(RunCommandPayload { name: service_name }),
     )?;
-    let responses = deploy::request_events(&connected.session, &command).await?;
+    let responses = deploy::request_command_start_events_with_timeout(
+        &connected.session,
+        &command,
+        command_stream_timeout,
+    )
+    .await?;
     handle_terminal_event("run", responses)
 }
 

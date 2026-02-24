@@ -102,6 +102,12 @@ pub struct RuntimeConfig {
     #[serde(default = "default_deploy_stream_timeout_secs")]
     /// Timeout for deployment stream operations in seconds.
     pub deploy_stream_timeout_secs: u64,
+    #[serde(default = "default_transport_keepalive_interval_secs")]
+    /// QUIC transport keepalive interval in seconds.
+    pub transport_keepalive_interval_secs: u64,
+    #[serde(default = "default_transport_max_idle_timeout_secs")]
+    /// QUIC transport max idle timeout in seconds.
+    pub transport_max_idle_timeout_secs: u64,
     #[serde(default = "default_boot_plugin_gc_enabled")]
     /// Whether plugin cache GC runs at manager boot.
     pub boot_plugin_gc_enabled: bool,
@@ -126,6 +132,8 @@ impl Default for RuntimeConfig {
             manager_control_read_timeout_ms: default_manager_control_read_timeout_ms(),
             max_concurrent_sessions: default_max_concurrent_sessions(),
             deploy_stream_timeout_secs: default_deploy_stream_timeout_secs(),
+            transport_keepalive_interval_secs: default_transport_keepalive_interval_secs(),
+            transport_max_idle_timeout_secs: default_transport_max_idle_timeout_secs(),
             boot_plugin_gc_enabled: default_boot_plugin_gc_enabled(),
             boot_restore_enabled: default_boot_restore_enabled(),
         }
@@ -721,6 +729,14 @@ fn default_deploy_stream_timeout_secs() -> u64 {
     15
 }
 
+fn default_transport_keepalive_interval_secs() -> u64 {
+    5
+}
+
+fn default_transport_max_idle_timeout_secs() -> u64 {
+    180
+}
+
 fn default_boot_plugin_gc_enabled() -> bool {
     true
 }
@@ -830,6 +846,8 @@ client_public_keys = ["111111111111111111111111111111111111111111111111111111111
         assert_eq!(config.runtime.manager_control_read_timeout_ms, 500);
         assert_eq!(config.runtime.max_concurrent_sessions, 256);
         assert_eq!(config.runtime.deploy_stream_timeout_secs, 15);
+        assert_eq!(config.runtime.transport_keepalive_interval_secs, 5);
+        assert_eq!(config.runtime.transport_max_idle_timeout_secs, 180);
         assert!(config.runtime.boot_plugin_gc_enabled);
         assert!(config.runtime.boot_restore_enabled);
 
@@ -1440,6 +1458,95 @@ deploy_stream_timeout_secs = 0
     }
 
     #[test]
+    fn rejects_zero_transport_keepalive_interval_secs() {
+        let path = write_temp_config(
+            "rejects_zero_transport_keepalive_interval_secs",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+
+[runtime]
+transport_keepalive_interval_secs = 0
+"#,
+        );
+
+        let err = ImagodConfig::load(&path)
+            .expect_err("config should reject zero transport_keepalive_interval_secs");
+        assert!(
+            err.to_string()
+                .contains("runtime.transport_keepalive_interval_secs")
+        );
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_zero_transport_max_idle_timeout_secs() {
+        let path = write_temp_config(
+            "rejects_zero_transport_max_idle_timeout_secs",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+
+[runtime]
+transport_max_idle_timeout_secs = 0
+"#,
+        );
+
+        let err = ImagodConfig::load(&path)
+            .expect_err("config should reject zero transport_max_idle_timeout_secs");
+        assert!(
+            err.to_string()
+                .contains("runtime.transport_max_idle_timeout_secs")
+        );
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_transport_keepalive_interval_not_less_than_idle_timeout() {
+        let path = write_temp_config(
+            "rejects_transport_keepalive_interval_not_less_than_idle_timeout",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+
+[runtime]
+transport_keepalive_interval_secs = 180
+transport_max_idle_timeout_secs = 180
+"#,
+        );
+
+        let err = ImagodConfig::load(&path).expect_err(
+            "config should reject transport_keepalive_interval_secs >= transport_max_idle_timeout_secs",
+        );
+        assert!(
+            err.to_string()
+                .contains("runtime.transport_keepalive_interval_secs")
+        );
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
     fn rejects_zero_chunk_size() {
         let path = write_temp_config(
             "rejects_zero_chunk_size",
@@ -1545,6 +1652,8 @@ http_worker_queue_capacity = 4
 manager_control_read_timeout_ms = 500
 max_concurrent_sessions = 256
 deploy_stream_timeout_secs = 15
+transport_keepalive_interval_secs = 5
+transport_max_idle_timeout_secs = 180
 "#,
         );
 

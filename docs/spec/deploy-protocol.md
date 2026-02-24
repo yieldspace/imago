@@ -39,6 +39,10 @@
 - サーバ/クライアントとも `quinn::TransportConfig` で DATAGRAM バッファを明示設定する。
   - `datagram_send_buffer_size = 1MiB`
   - `datagram_receive_buffer_size = Some(1MiB)`
+- サーバ/クライアントとも QUIC keepalive / idle timeout を有効化する。
+  - `keep_alive_interval = 5s`
+  - `max_idle_timeout = 180s`
+  - server は `imagod.toml` の `runtime.transport_keepalive_interval_secs` と `runtime.transport_max_idle_timeout_secs` で上書きできる。
 - `logs.chunk` payload は `Session::max_datagram_size()` と実装上限（目安 1024 bytes）を同時に満たすサイズで分割送信する。
 
 ## 3. 共通封筒（ProtocolEnvelope）
@@ -438,9 +442,13 @@ response:
 ## 実装反映ノート（CLI request stream timeout/retry / 2026-02-18）
 
 - `imago-cli` の `request_events` / `request_response` は request stream を timeout 付きで実行する。
-- timeout 対象は `open_bi` / stream write / stream read で、既定値は 30 秒。
+- `command.start` 以外の request stream では timeout 対象は `open_bi` / stream write / stream read で、既定値は 30 秒。
 - deploy 実行時は `hello.negotiate` の `limits.deploy_stream_timeout_secs` を timeout 値に適用する（server 既定は `runtime.deploy_stream_timeout_secs`）。
-- request stream 失敗時は固定回数で再試行する（待機 100ms -> 250ms、最大 3 試行）。
+- `command.start` 以外の request stream 失敗時は固定回数で再試行する（待機 100ms -> 250ms、最大 3 試行）。
+- `command.start` は同一 `request_id` の重複実行を避けるため自動再試行しない（single attempt）。
+- `command.start` は `open_bi` / stream write には timeout を適用するが、stream read には絶対 timeout を適用しない。
+- request stream 失敗時の最終エラーには、最初の失敗理由と最後の失敗理由を併記して一次障害を可視化する。
+- `command.start` の stream 失敗時は「command may still be running」を明示し、in-flight operation の終了確認後に再実行する運用を推奨する。
 
 ## 実装反映ノート（RPK + TOFU / 2026-02-18）
 

@@ -69,6 +69,8 @@ stop_grace_timeout_secs = 30
 runner_ready_timeout_secs = 3
 runner_log_buffer_bytes = 262144
 epoch_tick_interval_ms = 50
+transport_keepalive_interval_secs = 5
+transport_max_idle_timeout_secs = 180
 boot_plugin_gc_enabled = true
 boot_restore_enabled = true
 ```
@@ -78,6 +80,8 @@ boot_restore_enabled = true
 `runtime.runner_log_buffer_bytes` は runner stdout/stderr の保持に加え、停止済みサービスの retained logs を保持する global ring の総量上限としても使う。
 
 `runtime.boot_plugin_gc_enabled=false` を指定すると起動時 plugin component cache GC を skip する。`runtime.boot_restore_enabled=false` を指定すると起動時 boot restore を skip する。
+
+`runtime.transport_keepalive_interval_secs` と `runtime.transport_max_idle_timeout_secs` は QUIC transport の keepalive / idle timeout を制御する。`transport_keepalive_interval_secs < transport_max_idle_timeout_secs` を満たす必要がある。
 
 起動時に解決された設定パス（既定は `/etc/imago/imagod.toml`、`--config` / `IMAGOD_CONFIG` 指定時はそのパス）の `imagod.toml` が存在しない場合、`imagod` は最小有効構成を自動生成して起動を継続する。
 

@@ -11,6 +11,7 @@ const HINT_REMOTE_PARSE: &str =
 const HINT_TRANSPORT_CONNECT: &str =
     "Check target reachability/TLS settings, then retry the QUIC/WebTransport connection.";
 const HINT_BUSY: &str = "The target is busy. Wait for in-flight operations to finish and retry.";
+const HINT_COMMAND_START_STREAM_INTERRUPTED: &str = "The command.start stream was interrupted. The command may still be running on target; inspect target state/logs before retrying deploy/run/stop.";
 const HINT_STORAGE_QUOTA: &str =
     "The target reported storage quota exhaustion. Free disk space or increase quota.";
 const HINT_PRECONDITION_FAILED: &str =
@@ -96,6 +97,19 @@ fn append_hints(err: &Error, hints: &mut Vec<String>) {
         push_unique(hints, HINT_BUSY);
     }
 
+    let looks_like_command_start_stream_interrupted = combined_lower
+        .contains("command.start request stream failed")
+        || combined_lower.contains("command may still be running")
+        || (combined_lower.contains("command.start")
+            && combined_lower.contains("request stream")
+            && (combined_lower.contains("timed out")
+                || combined_lower.contains("connection")
+                || combined_lower.contains("closed")
+                || combined_lower.contains("reset")));
+    if looks_like_command_start_stream_interrupted {
+        push_unique(hints, HINT_COMMAND_START_STREAM_INTERRUPTED);
+    }
+
     if combined.contains("E_STORAGE_QUOTA") || combined.contains("StorageQuota") {
         push_unique(hints, HINT_STORAGE_QUOTA);
     }
@@ -165,5 +179,15 @@ mod tests {
             formatted
                 .contains("Inspect the causes above and retry `stop` after fixing the root issue."),
         );
+    }
+
+    #[test]
+    fn includes_command_start_stream_interrupted_hint() {
+        let err = anyhow!("request stream read timed out after 15000 ms")
+            .context("command.start request stream failed; command may still be running on target");
+
+        let formatted = format_command_error("deploy", &err);
+        assert!(formatted.contains("command.start stream was interrupted"));
+        assert!(formatted.contains("may still be running on target"));
     }
 }
