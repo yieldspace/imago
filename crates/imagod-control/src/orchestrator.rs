@@ -19,7 +19,7 @@ use tokio::fs;
 use uuid::Uuid;
 
 use crate::{
-    artifact_store::ArtifactStore,
+    artifact_store::{ArtifactStore, CommittedArtifact},
     service_supervisor::{
         RunningStatus, RuntimeServiceState, ServiceLaunch, ServiceLogSubscription,
         ServiceSupervisor,
@@ -201,6 +201,14 @@ struct PreparedRelease {
     launch: ServiceLaunch,
 }
 
+/// Staged deploy context after artifact extraction and manifest verification.
+struct StagedRelease {
+    service_name: String,
+    staging_dir: PathBuf,
+    manifest: Manifest,
+    artifact_digest: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RollbackOutcome {
     SkippedNoPreviousRelease,
@@ -275,13 +283,14 @@ impl Orchestrator {
             .await?;
         let mut service_command_guard = Some(self.command_gate.acquire(&service_name)?);
 
-        let prepared = self.prepare_release(payload).await?;
+        let staged = self.prepare_release_staging(payload).await?;
         rebind_deploy_service_command_guard(
             &self.command_gate,
             &mut service_name,
             &mut service_command_guard,
-            &prepared.service_name,
+            &staged.service_name,
         )?;
+        let prepared = self.prepare_release_from_staged(payload, staged).await?;
 
         let launch = prepared.launch.clone();
         if let Err(start_error) = self.supervisor.replace(launch).await {
@@ -455,69 +464,31 @@ impl Orchestrator {
     }
 
     /// Prepares a validated release and launch spec from committed artifact data.
-    async fn prepare_release(
+    async fn prepare_release_staging(
         &self,
         payload: &DeployCommandPayload,
-    ) -> Result<PreparedRelease, ImagodError> {
+    ) -> Result<StagedRelease, ImagodError> {
         let committed = self
             .artifact_store
             .committed_artifact(&payload.deploy_id)
             .await?;
-        let staging_dir = self.storage_root.join("staging").join(&committed.deploy_id);
+        stage_committed_release(&self.storage_root, &self.manifest_validator, &committed).await
+    }
 
-        clean_dir(&staging_dir).await?;
-        fs::create_dir_all(&staging_dir)
-            .await
-            .map_err(|e| map_internal(format!("failed to create staging dir: {e}")))?;
-
-        extract_tar(&committed.path, &staging_dir).await?;
-
-        let manifest_path = staging_dir.join("manifest.json");
-        let manifest_bytes = fs::read(&manifest_path)
-            .await
-            .map_err(|e| map_bad_manifest(format!("manifest read failed: {e}")))?;
-        let manifest = self.manifest_validator.parse_manifest(&manifest_bytes)?;
-        self.manifest_validator.validate_manifest_metadata(
-            &manifest,
-            &manifest_bytes,
-            Some(&committed.manifest_digest),
-        )?;
-
-        let release_hash = release_id_from_artifact_digest(&committed.artifact_digest);
-        let service_root = self.storage_root.join("services").join(&manifest.name);
-        let release_dir = service_root.join(&release_hash);
-        let active_file = service_root.join("active_release");
-        let restart_policy_file = service_root.join(RESTART_POLICY_FILE_NAME);
-        let previous_release = read_active_release(&active_file).await?;
-        let previous_restart_policy = read_restart_policy(&restart_policy_file).await?;
-        validate_deploy_preconditions(payload, previous_release.as_deref())?;
-
-        fs::create_dir_all(&service_root)
-            .await
-            .map_err(|e| map_internal(format!("service root creation failed: {e}")))?;
-        promote_staging_release(&staging_dir, &release_dir).await?;
-
-        cleanup_old_releases(&service_root, &release_hash, previous_release.as_deref()).await?;
-
-        let launch = launch_builder::build_launch_from_release(
-            &release_hash,
-            &release_dir,
-            &manifest,
+    /// Finalizes release promotion under an acquired command gate.
+    async fn prepare_release_from_staged(
+        &self,
+        payload: &DeployCommandPayload,
+        staged: StagedRelease,
+    ) -> Result<PreparedRelease, ImagodError> {
+        prepare_release_from_staged_inner(
+            &self.storage_root,
+            payload,
+            staged,
             &self.manifest_validator,
             &self.plugin_cache,
         )
-        .await?;
-
-        Ok(PreparedRelease {
-            service_name: manifest.name,
-            service_root,
-            release_hash,
-            active_file,
-            restart_policy_file,
-            previous_release,
-            previous_restart_policy,
-            launch,
-        })
+        .await
     }
 
     /// Attempts to roll back active release marker when replacement start fails.
@@ -615,6 +586,90 @@ struct BootRestoreCandidate {
     service_name: String,
     service_root: PathBuf,
     release_hash: String,
+}
+
+async fn stage_committed_release(
+    storage_root: &Path,
+    manifest_validator: &DefaultManifestValidator,
+    committed: &CommittedArtifact,
+) -> Result<StagedRelease, ImagodError> {
+    let staging_dir = storage_root.join("staging").join(&committed.deploy_id);
+
+    clean_dir(&staging_dir).await?;
+    fs::create_dir_all(&staging_dir)
+        .await
+        .map_err(|e| map_internal(format!("failed to create staging dir: {e}")))?;
+
+    extract_tar(&committed.path, &staging_dir).await?;
+
+    let manifest_path = staging_dir.join("manifest.json");
+    let manifest_bytes = fs::read(&manifest_path)
+        .await
+        .map_err(|e| map_bad_manifest(format!("manifest read failed: {e}")))?;
+    let manifest = manifest_validator.parse_manifest(&manifest_bytes)?;
+    manifest_validator.validate_manifest_metadata(
+        &manifest,
+        &manifest_bytes,
+        Some(&committed.manifest_digest),
+    )?;
+
+    Ok(StagedRelease {
+        service_name: manifest.name.clone(),
+        staging_dir,
+        manifest,
+        artifact_digest: committed.artifact_digest.clone(),
+    })
+}
+
+async fn prepare_release_from_staged_inner(
+    storage_root: &Path,
+    payload: &DeployCommandPayload,
+    staged: StagedRelease,
+    manifest_validator: &DefaultManifestValidator,
+    plugin_cache: &FilesystemPluginCache,
+) -> Result<PreparedRelease, ImagodError> {
+    let StagedRelease {
+        service_name,
+        staging_dir,
+        manifest,
+        artifact_digest,
+    } = staged;
+
+    let release_hash = release_id_from_artifact_digest(&artifact_digest);
+    let service_root = storage_root.join("services").join(&service_name);
+    let release_dir = service_root.join(&release_hash);
+    let active_file = service_root.join("active_release");
+    let restart_policy_file = service_root.join(RESTART_POLICY_FILE_NAME);
+    let previous_release = read_active_release(&active_file).await?;
+    let previous_restart_policy = read_restart_policy(&restart_policy_file).await?;
+    validate_deploy_preconditions(payload, previous_release.as_deref())?;
+
+    fs::create_dir_all(&service_root)
+        .await
+        .map_err(|e| map_internal(format!("service root creation failed: {e}")))?;
+    promote_staging_release(&staging_dir, &release_dir).await?;
+
+    cleanup_old_releases(&service_root, &release_hash, previous_release.as_deref()).await?;
+
+    let launch = launch_builder::build_launch_from_release(
+        &release_hash,
+        &release_dir,
+        &manifest,
+        manifest_validator,
+        plugin_cache,
+    )
+    .await?;
+
+    Ok(PreparedRelease {
+        service_name,
+        service_root,
+        release_hash,
+        active_file,
+        restart_policy_file,
+        previous_release,
+        previous_restart_policy,
+        launch,
+    })
 }
 
 /// Builds launch metadata for supervisor from a promoted release directory.
@@ -1295,10 +1350,12 @@ mod tests {
         collect_boot_restore_candidates, collect_deployed_service_releases,
         compose_rollback_failure_error, extract_tar, gc_unused_plugin_components_on_boot,
         merge_deployed_and_runtime_service_states, normalize_archive_entry_path,
-        normalize_manifest_main_path, promote_staging_release, rebind_deploy_service_command_guard,
-        release_id_from_artifact_digest, start_previous_release_with_busy_recovery,
+        normalize_manifest_main_path, prepare_release_from_staged_inner, promote_staging_release,
+        rebind_deploy_service_command_guard, release_id_from_artifact_digest,
+        stage_committed_release, start_previous_release_with_busy_recovery,
         validate_deploy_preconditions, validate_service_name,
     };
+    use crate::artifact_store::CommittedArtifact;
     use imago_protocol::{DeployCommandPayload, ErrorCode, ServiceState, ServiceStatusEntry};
     use imagod_common::ImagodError;
     use imagod_ipc::{
@@ -1334,6 +1391,40 @@ mod tests {
                 algorithm: "sha256".to_string(),
                 targets: vec![HashTarget::Wasm, HashTarget::Manifest, HashTarget::Assets],
             },
+        }
+    }
+
+    fn append_tar_file(builder: &mut Builder<fs::File>, name: &str, bytes: &[u8]) {
+        let mut header = Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, name, bytes)
+            .expect("tar entry should be appended");
+    }
+
+    fn committed_artifact_for_manifest(
+        root: &Path,
+        deploy_id: &str,
+        manifest: &Manifest,
+        component_bytes: &[u8],
+    ) -> CommittedArtifact {
+        let artifact_path = root.join(format!("{deploy_id}.artifact"));
+        let artifact_file = fs::File::create(&artifact_path).expect("artifact file should exist");
+        let mut builder = Builder::new(artifact_file);
+
+        let manifest_bytes =
+            serde_json::to_vec(manifest).expect("manifest should serialize to JSON");
+        append_tar_file(&mut builder, "manifest.json", &manifest_bytes);
+        append_tar_file(&mut builder, &manifest.main, component_bytes);
+        builder.finish().expect("artifact tar should finish");
+
+        CommittedArtifact {
+            deploy_id: deploy_id.to_string(),
+            path: artifact_path,
+            manifest_digest: hex::encode(Sha256::digest(&manifest_bytes)),
+            artifact_digest: hex::encode(Sha256::digest(component_bytes)),
         }
     }
 
@@ -1528,6 +1619,81 @@ mod tests {
             .acquire("svc-prepare")
             .expect_err("prepare lock should remain held when rebind fails");
         assert_eq!(prepare_err.code, ErrorCode::Busy);
+    }
+
+    #[tokio::test]
+    async fn stage_committed_release_does_not_write_services_tree() {
+        let root = temp_dir_path("orchestrator-stage-committed");
+        fs::create_dir_all(&root).expect("root should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.name = "svc-staged".to_string();
+        let committed =
+            committed_artifact_for_manifest(&root, "deploy-staged", &manifest, b"wasm-binary");
+
+        let staged = stage_committed_release(&root, &super::DefaultManifestValidator, &committed)
+            .await
+            .expect("staging should succeed");
+
+        assert_eq!(staged.service_name, "svc-staged");
+        assert!(
+            !root.join("services").exists(),
+            "staging phase must not touch services tree"
+        );
+        assert!(
+            staged.staging_dir.join("manifest.json").exists(),
+            "manifest should be extracted into staging"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn prepare_release_from_staged_writes_services_tree_in_second_phase() {
+        let root = temp_dir_path("orchestrator-finalize-from-staged");
+        fs::create_dir_all(&root).expect("root should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.name = "svc-finalize".to_string();
+        let committed = committed_artifact_for_manifest(
+            &root,
+            "deploy-finalize",
+            &manifest,
+            b"wasm-binary-finalize",
+        );
+        let staged = stage_committed_release(&root, &super::DefaultManifestValidator, &committed)
+            .await
+            .expect("staging should succeed");
+        let service_root = root.join("services").join("svc-finalize");
+        assert!(
+            !service_root.exists(),
+            "services tree should still be untouched before finalize phase"
+        );
+
+        let payload = DeployCommandPayload {
+            deploy_id: "deploy-finalize".to_string(),
+            expected_current_release: "any".to_string(),
+            restart_policy: "never".to_string(),
+            auto_rollback: true,
+        };
+        let plugin_cache = super::FilesystemPluginCache::new(root.clone());
+        let prepared = prepare_release_from_staged_inner(
+            &root,
+            &payload,
+            staged,
+            &super::DefaultManifestValidator,
+            &plugin_cache,
+        )
+        .await
+        .expect("finalize should promote release into services tree");
+
+        assert_eq!(prepared.service_name, "svc-finalize");
+        assert!(
+            service_root.join(&prepared.release_hash).exists(),
+            "finalize phase should create promoted release directory"
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
