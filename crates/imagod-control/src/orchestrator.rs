@@ -269,13 +269,19 @@ impl Orchestrator {
         &self,
         payload: &DeployCommandPayload,
     ) -> Result<DeploySummary, ImagodError> {
-        let service_name = self
+        let mut service_name = self
             .artifact_store
             .service_name_for_deploy(&payload.deploy_id)
             .await?;
-        let _service_command_guard = self.command_gate.acquire(&service_name)?;
+        let mut service_command_guard = Some(self.command_gate.acquire(&service_name)?);
 
         let prepared = self.prepare_release(payload).await?;
+        rebind_deploy_service_command_guard(
+            &self.command_gate,
+            &mut service_name,
+            &mut service_command_guard,
+            &prepared.service_name,
+        )?;
 
         let launch = prepared.launch.clone();
         if let Err(start_error) = self.supervisor.replace(launch).await {
@@ -1187,6 +1193,22 @@ fn service_command_busy_error(service_name: &str) -> ImagodError {
     )
 }
 
+fn rebind_deploy_service_command_guard(
+    command_gate: &ServiceCommandGate,
+    current_service_name: &mut String,
+    current_guard: &mut Option<ServiceCommandGuard>,
+    manifest_service_name: &str,
+) -> Result<(), ImagodError> {
+    if current_service_name == manifest_service_name {
+        return Ok(());
+    }
+
+    let manifest_guard = command_gate.acquire(manifest_service_name)?;
+    *current_guard = Some(manifest_guard);
+    *current_service_name = manifest_service_name.to_string();
+    Ok(())
+}
+
 fn map_rollback_error(err: ImagodError) -> ImagodError {
     let mut mapped = ImagodError::new(ErrorCode::RollbackFailed, STAGE_ORCHESTRATE, err.message)
         .with_retryable(err.retryable);
@@ -1273,9 +1295,9 @@ mod tests {
         collect_boot_restore_candidates, collect_deployed_service_releases,
         compose_rollback_failure_error, extract_tar, gc_unused_plugin_components_on_boot,
         merge_deployed_and_runtime_service_states, normalize_archive_entry_path,
-        normalize_manifest_main_path, promote_staging_release, release_id_from_artifact_digest,
-        start_previous_release_with_busy_recovery, validate_deploy_preconditions,
-        validate_service_name,
+        normalize_manifest_main_path, promote_staging_release, rebind_deploy_service_command_guard,
+        release_id_from_artifact_digest, start_previous_release_with_busy_recovery,
+        validate_deploy_preconditions, validate_service_name,
     };
     use imago_protocol::{DeployCommandPayload, ErrorCode, ServiceState, ServiceStatusEntry};
     use imagod_common::ImagodError;
@@ -1433,6 +1455,79 @@ mod tests {
         let _second = gate
             .acquire("svc-b")
             .expect("different service command should be accepted");
+    }
+
+    #[test]
+    fn rebind_deploy_gate_is_noop_when_service_name_matches() {
+        let gate = ServiceCommandGate::default();
+        let mut service_name = "svc-a".to_string();
+        let mut guard = Some(
+            gate.acquire("svc-a")
+                .expect("initial service command should be accepted"),
+        );
+
+        rebind_deploy_service_command_guard(&gate, &mut service_name, &mut guard, "svc-a")
+            .expect("same service name should not require rebind");
+        assert_eq!(service_name, "svc-a");
+
+        let err = gate
+            .acquire("svc-a")
+            .expect_err("current service should remain locked");
+        assert_eq!(err.code, ErrorCode::Busy);
+    }
+
+    #[test]
+    fn rebind_deploy_gate_switches_to_manifest_service_name() {
+        let gate = ServiceCommandGate::default();
+        let mut service_name = "svc-prepare".to_string();
+        let mut guard = Some(
+            gate.acquire("svc-prepare")
+                .expect("prepare service should be locked initially"),
+        );
+
+        rebind_deploy_service_command_guard(&gate, &mut service_name, &mut guard, "svc-manifest")
+            .expect("manifest service should be rebound when available");
+        assert_eq!(service_name, "svc-manifest");
+
+        let _prepare_guard = gate
+            .acquire("svc-prepare")
+            .expect("prepare service lock should be released after rebind");
+        let err = gate
+            .acquire("svc-manifest")
+            .expect_err("manifest service should stay locked after rebind");
+        assert_eq!(err.code, ErrorCode::Busy);
+    }
+
+    #[test]
+    fn rebind_deploy_gate_returns_busy_when_manifest_service_is_inflight() {
+        let gate = ServiceCommandGate::default();
+        let _manifest_inflight = gate
+            .acquire("svc-manifest")
+            .expect("manifest service should be held by another command");
+        let mut service_name = "svc-prepare".to_string();
+        let mut guard = Some(
+            gate.acquire("svc-prepare")
+                .expect("prepare service should be locked initially"),
+        );
+
+        let err = rebind_deploy_service_command_guard(
+            &gate,
+            &mut service_name,
+            &mut guard,
+            "svc-manifest",
+        )
+        .expect_err("rebind should fail when manifest service is already in-flight");
+        assert_eq!(err.code, ErrorCode::Busy);
+        assert_eq!(err.stage, "orchestration");
+        assert_eq!(
+            err.message,
+            "service 'svc-manifest' command is already in progress"
+        );
+
+        let prepare_err = gate
+            .acquire("svc-prepare")
+            .expect_err("prepare lock should remain held when rebind fails");
+        assert_eq!(prepare_err.code, ErrorCode::Busy);
     }
 
     #[tokio::test]

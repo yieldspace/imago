@@ -151,6 +151,7 @@ sequenceDiagram
 7. `progress(stage="starting")` 送信
 8. `mark_spawned_if_not_canceled` で cancel フラグ確認と phase 遷移を原子的に実行
 9. `deploy/run/stop` は command 実行前に service 単位 gate を取得し、同一 service で in-flight command がある場合は `E_BUSY` (`stage=orchestration`, `message=\"service '<name>' command is already in progress\"`) を即時返却する（待機しない）
+10. `deploy` は `prepare_release` 後に `manifest.name` を実 service 名として再評価し、`deploy.prepare` 名と不一致なら gate を `manifest.name` へ再バインドする
 
 コマンド分岐:
 
@@ -237,6 +238,7 @@ spawn 遷移前 cancel 成立時:
 - `deploy(payload)`
   - `deploy_id` から service 名を解決し command gate を取得（fail-fast）
   - `prepare_release`
+  - `manifest.name` と初期 gate の service 名が不一致なら、初期 gate を保持したまま `manifest.name` 側 gate を追加取得し、成功後に初期 gate を解放して再バインド
   - `supervisor.replace`
   - 成功時 `active_release` 更新
   - 失敗時 `auto_rollback=true` なら rollback 実行
@@ -269,6 +271,7 @@ deploy 経路の要点:
 - `restart_policy` は `never` / `on-failure` / `always` / `unless-stopped` を受理し、未知値は `E_BAD_REQUEST`
 - deploy 成功時に `services/<name>/restart_policy` を更新する
 - deploy/run/stop は service 単位で同時実行不可（同名 service の並行 command は `E_BUSY` fail-fast）
+- deploy は実 service 名を `manifest.name` として扱い、`deploy.prepare` 名と不一致でも gate を `manifest.name` へ再バインドして直列化を保証する
 - 上記直列化により rollback Busy 回復（`force stop`）が他 command の正常起動を巻き込む経路を遮断する
 - manager 起動時の復元対象は `restart_policy=always` の service のみ
 - manager 起動時に active release 参照集合を元に plugin component cache GC を実行
