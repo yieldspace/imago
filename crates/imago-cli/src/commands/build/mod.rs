@@ -609,7 +609,7 @@ fn parse_restart_policy(root: &toml::Table) -> anyhow::Result<String> {
     Ok(value)
 }
 
-fn is_supported_restart_policy(value: &str) -> bool {
+pub(crate) fn is_supported_restart_policy(value: &str) -> bool {
     matches!(
         value,
         DEFAULT_RESTART_POLICY
@@ -826,7 +826,7 @@ pub(crate) fn validate_service_name(name: &str) -> anyhow::Result<()> {
     validation::validate_service_name(name)
 }
 
-fn validate_app_type(app_type: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_app_type(app_type: &str) -> anyhow::Result<()> {
     validation::validate_app_type(app_type)
 }
 
