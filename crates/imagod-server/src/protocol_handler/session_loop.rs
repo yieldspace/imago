@@ -189,7 +189,12 @@ where
     }
 
     if request.message_type == MessageType::CommandStart {
-        handler.handle_command_start(request, &mut send).await?;
+        let request_id = request.request_id;
+        let correlation_id = request.correlation_id;
+        if let Err(err) = handler.handle_command_start(request, &mut send).await {
+            let response = command_start_error_envelope(request_id, correlation_id, err);
+            write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
+        }
         finish_stream(&mut send)?;
         return Ok(());
     }
@@ -359,6 +364,19 @@ fn message_type_name(message_type: MessageType) -> &'static str {
     }
 }
 
+fn command_start_error_envelope(
+    request_id: Uuid,
+    correlation_id: Uuid,
+    err: ImagodError,
+) -> super::Envelope {
+    error_envelope(
+        MessageType::CommandStart,
+        request_id,
+        correlation_id,
+        err.to_structured(),
+    )
+}
+
 fn collect_stream_task_result(
     joined: Option<Result<Result<(), ImagodError>, tokio::task::JoinError>>,
     first_error: &mut Option<ImagodError>,
@@ -520,5 +538,30 @@ mod tests {
             message_type_name(MessageType::ServicesList),
             "services.list"
         );
+    }
+
+    #[test]
+    fn command_start_error_envelope_uses_command_start_message_type_and_request_ids() {
+        let request_id = Uuid::new_v4();
+        let correlation_id = Uuid::new_v4();
+        let envelope = command_start_error_envelope(
+            request_id,
+            correlation_id,
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                "command.start",
+                "payload does not match command_type",
+            ),
+        );
+
+        assert_eq!(envelope.message_type, MessageType::CommandStart);
+        assert_eq!(envelope.request_id, request_id);
+        assert_eq!(envelope.correlation_id, correlation_id);
+        let error = envelope
+            .error
+            .expect("error envelope should include structured error");
+        assert_eq!(error.code, ErrorCode::BadRequest);
+        assert_eq!(error.stage, "command.start");
+        assert_eq!(error.message, "payload does not match command_type");
     }
 }
