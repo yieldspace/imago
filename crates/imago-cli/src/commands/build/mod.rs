@@ -609,7 +609,7 @@ fn parse_restart_policy(root: &toml::Table) -> anyhow::Result<String> {
     Ok(value)
 }
 
-fn is_supported_restart_policy(value: &str) -> bool {
+pub(crate) fn is_supported_restart_policy(value: &str) -> bool {
     matches!(
         value,
         DEFAULT_RESTART_POLICY
@@ -828,6 +828,10 @@ pub(crate) fn validate_service_name(name: &str) -> anyhow::Result<()> {
 
 fn validate_app_type(app_type: &str) -> anyhow::Result<()> {
     validation::validate_app_type(app_type)
+}
+
+pub(crate) fn is_supported_app_type(app_type: &str) -> bool {
+    validate_app_type(app_type).is_ok()
 }
 
 fn parse_http_section(root: &toml::Table, app_type: &str) -> anyhow::Result<Option<ManifestHttp>> {

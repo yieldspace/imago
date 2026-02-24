@@ -285,6 +285,7 @@ fn ensure_gitignore_entries(output_dir: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::build;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(test_name: &str) -> PathBuf {
@@ -348,27 +349,39 @@ mod tests {
                 panic!("template '{}' root should be a TOML table", template.id)
             });
 
-            if let Some(app_type_value) = root.get("type") {
-                let app_type = app_type_value.as_str().unwrap_or_else(|| {
-                    panic!("template '{}' key 'type' should be string", template.id)
-                });
-                assert!(
-                    matches!(app_type, "cli" | "http" | "socket" | "rpc"),
-                    "template '{}' key 'type' has unsupported value: {}",
-                    template.id,
-                    app_type
-                );
-            }
+            let name_value = root
+                .get("name")
+                .unwrap_or_else(|| panic!("template '{}' is missing required key 'name'", template.id));
+            name_value.as_str().unwrap_or_else(|| {
+                panic!("template '{}' key 'name' should be string", template.id)
+            });
+
+            let main_value = root
+                .get("main")
+                .unwrap_or_else(|| panic!("template '{}' is missing required key 'main'", template.id));
+            main_value.as_str().unwrap_or_else(|| {
+                panic!("template '{}' key 'main' should be string", template.id)
+            });
+
+            let app_type_value = root
+                .get("type")
+                .unwrap_or_else(|| panic!("template '{}' is missing required key 'type'", template.id));
+            let app_type = app_type_value
+                .as_str()
+                .unwrap_or_else(|| panic!("template '{}' key 'type' should be string", template.id));
+            assert!(
+                build::is_supported_app_type(app_type),
+                "template '{}' key 'type' has unsupported value: {}",
+                template.id,
+                app_type
+            );
 
             if let Some(restart_value) = root.get("restart") {
                 let restart = restart_value.as_str().unwrap_or_else(|| {
                     panic!("template '{}' key 'restart' should be string", template.id)
                 });
                 assert!(
-                    matches!(
-                        restart,
-                        "never" | "on-failure" | "always" | "unless-stopped"
-                    ),
+                    build::is_supported_restart_policy(restart),
                     "template '{}' key 'restart' has unsupported value: {}",
                     template.id,
                     restart
