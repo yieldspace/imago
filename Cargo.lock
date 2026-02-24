@@ -2481,6 +2481,8 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi",
  "wasmtime-wasi-http",
+ "wit-component 0.244.0",
+ "wit-parser 0.244.0",
 ]
 
 [[package]]
@@ -6969,6 +6971,7 @@ dependencies = [
  "wasm-encoder 0.244.0",
  "wasm-metadata 0.244.0",
  "wasmparser 0.244.0",
+ "wat",
  "wit-parser 0.244.0",
 ]
 

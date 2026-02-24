@@ -18,3 +18,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 wasmtime = { workspace = true, features = ["component-model"] }
 wasmtime-wasi = { workspace = true }
 wasmtime-wasi-http = { workspace = true }
+
+[dev-dependencies]
+wit-component = { workspace = true, features = ["dummy-module"] }
+wit-parser = { workspace = true }

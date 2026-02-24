@@ -187,6 +187,15 @@ impl WasmRuntime {
         (tick_stop_tx, tick_task)
     }
 
+    fn build_component_linker(&self) -> Result<Linker<WasiState>, ImagodError> {
+        let mut linker = Linker::new(&self.engine);
+        add_to_linker_async(&mut linker)
+            .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
+        add_only_http_to_linker_async(&mut linker)
+            .map_err(|e| map_runtime_error(format!("failed to add WASI HTTP linker: {e}")))?;
+        Ok(linker)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn run_cli_component_async(
         &self,
@@ -209,9 +218,7 @@ impl WasmRuntime {
             ))
         })?;
 
-        let mut linker = Linker::new(&self.engine);
-        add_to_linker_async(&mut linker)
-            .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
+        let mut linker = self.build_component_linker()?;
 
         let mut store = self.build_store(args, envs, wasi_mounts, socket, native_plugin_context)?;
         let available_plugins = instantiate_plugin_dependencies(
@@ -296,11 +303,7 @@ impl WasmRuntime {
             ))
         })?;
 
-        let mut linker = Linker::new(&self.engine);
-        add_to_linker_async(&mut linker)
-            .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
-        add_only_http_to_linker_async(&mut linker)
-            .map_err(|e| map_runtime_error(format!("failed to add WASI HTTP linker: {e}")))?;
+        let mut linker = self.build_component_linker()?;
 
         let mut store = self.build_store(args, envs, wasi_mounts, None, native_plugin_context)?;
         let available_plugins = instantiate_plugin_dependencies(
@@ -406,9 +409,7 @@ impl WasmRuntime {
             ))
         })?;
 
-        let mut linker = Linker::new(&self.engine);
-        add_to_linker_async(&mut linker)
-            .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
+        let mut linker = self.build_component_linker()?;
 
         let mut store = self.build_store(args, envs, wasi_mounts, None, native_plugin_context)?;
         let available_plugins = instantiate_plugin_dependencies(
@@ -844,11 +845,13 @@ mod tests {
     use imagod_ipc::{RunnerSocketConfig, RunnerSocketProtocol, RunnerWasiMount};
     use std::{
         collections::BTreeMap,
-        fs,
+        env, fs,
         net::SocketAddr,
-        path::PathBuf,
+        path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
+    use wit_component::{ComponentEncoder, StringEncoding, dummy_module};
+    use wit_parser::{ManglingAndAbi, Resolve};
 
     fn sample_socket_config() -> RunnerSocketConfig {
         RunnerSocketConfig {
@@ -874,6 +877,121 @@ mod tests {
             .expect("clock should be after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("imago-runtime-wasi-mount-{prefix}-{nonce}"))
+    }
+
+    fn allow_all_wasi_capabilities() -> CapabilityPolicy {
+        CapabilityPolicy {
+            privileged: false,
+            deps: BTreeMap::new(),
+            wasi: BTreeMap::from([("*".to_string(), vec!["*".to_string()])]),
+        }
+    }
+
+    fn locate_wasi_0_2_4_deps_dir() -> PathBuf {
+        let mut registry_roots = Vec::new();
+        if let Some(cargo_home) = env::var_os("CARGO_HOME") {
+            registry_roots.push(PathBuf::from(cargo_home).join("registry/src"));
+        }
+        if let Some(home) = env::var_os("HOME") {
+            registry_roots.push(PathBuf::from(home).join(".cargo/registry/src"));
+        }
+
+        for registry_root in registry_roots {
+            if !registry_root.is_dir() {
+                continue;
+            }
+            let Ok(registries) = fs::read_dir(&registry_root) else {
+                continue;
+            };
+            for registry in registries.flatten() {
+                let registry_path = registry.path();
+                if !registry_path.is_dir() {
+                    continue;
+                }
+                let Ok(packages) = fs::read_dir(&registry_path) else {
+                    continue;
+                };
+                for package in packages.flatten() {
+                    let package_path = package.path();
+                    if !package_path.is_dir() {
+                        continue;
+                    }
+                    let Some(name) = package_path.file_name().and_then(|s| s.to_str()) else {
+                        continue;
+                    };
+                    if !name.starts_with("wasip2-") || !name.contains("wasi-0.2.4") {
+                        continue;
+                    }
+                    let deps_dir = package_path.join("wit/deps");
+                    if deps_dir.join("http/types.wit").is_file() {
+                        return deps_dir;
+                    }
+                }
+            }
+        }
+
+        panic!("failed to locate wasip2 wit deps directory for wasi-0.2.4");
+    }
+
+    fn copy_dir_recursive(src: &Path, dst: &Path) {
+        fs::create_dir_all(dst).expect("destination directory should be created");
+        let entries = fs::read_dir(src).expect("source directory should be readable");
+        for entry in entries.flatten() {
+            let from = entry.path();
+            let to = dst.join(entry.file_name());
+            let file_type = entry.file_type().expect("file type should be readable");
+            if file_type.is_dir() {
+                copy_dir_recursive(&from, &to);
+            } else if file_type.is_file() {
+                fs::copy(&from, &to).expect("file copy should succeed");
+            }
+        }
+    }
+
+    fn write_wasi_http_component(prefix: &str) -> PathBuf {
+        let root = temp_mount_root(prefix);
+        fs::create_dir_all(&root).expect("temp root should be created");
+        copy_dir_recursive(&locate_wasi_0_2_4_deps_dir(), &root.join("deps"));
+        fs::write(
+            root.join("world.wit"),
+            r#"
+package test:wasi-http-import@0.1.0;
+
+world app {
+  import wasi:http/types@0.2.4;
+}
+"#,
+        )
+        .expect("wit source should be written");
+
+        let mut resolve = Resolve::default();
+        let (pkg, _) = resolve
+            .push_dir(&root)
+            .expect("fixture WIT directory should parse");
+        let world = resolve
+            .select_world(&[pkg], Some("app"))
+            .expect("world 'app' should exist");
+        let mut module = dummy_module(&resolve, world, ManglingAndAbi::Standard32);
+        wit_component::embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8)
+            .expect("component metadata embedding should succeed");
+        let component = ComponentEncoder::default()
+            .module(&module)
+            .expect("component encoder should accept module")
+            .encode()
+            .expect("component encoding should succeed");
+        let component_path = root.join("component.wasm");
+        fs::write(&component_path, component).expect("component bytes should be written");
+        component_path
+    }
+
+    fn collect_component_import_names(runtime: &WasmRuntime, component_path: &Path) -> Vec<String> {
+        let component =
+            Component::from_file(&runtime.engine, component_path).expect("component should load");
+        component
+            .component_type()
+            .imports(&runtime.engine)
+            .map(|(name, _)| name.to_string())
+            .collect::<Vec<_>>()
     }
 
     #[tokio::test]
@@ -1003,6 +1121,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cli_type_with_wasi_http_import_does_not_fail_with_missing_http_linker() {
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let component_path = write_wasi_http_component("cli-http-linker");
+        let imports = collect_component_import_names(&runtime, &component_path);
+        assert!(
+            imports.iter().any(|name| name == "wasi:http/types@0.2.4"),
+            "component should import wasi:http/types@0.2.4, got: {imports:?}"
+        );
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let err = runtime
+            .run_component(RuntimeRunRequest {
+                app_type: RunnerAppType::Cli,
+                runner_id: "runner-test".to_string(),
+                service_name: "svc-test".to_string(),
+                release_hash: "release-test".to_string(),
+                component_path: component_path.clone(),
+                args: Vec::new(),
+                envs: BTreeMap::new(),
+                wasi_mounts: Vec::new(),
+                socket: None,
+                plugin_dependencies: Vec::new(),
+                capabilities: allow_all_wasi_capabilities(),
+                bindings: Vec::new(),
+                manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+                manager_auth_secret: "secret".to_string(),
+                shutdown: shutdown_rx,
+                epoch_tick_interval_ms: 50,
+                http_worker_count: 2,
+                http_worker_queue_capacity: 4,
+                http_ready_tx: None,
+            })
+            .await
+            .expect_err("component without wasi:cli/run export should fail");
+        let _ = shutdown_tx.send(true);
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(
+            !err.message
+                .contains("matching implementation was not found in the linker"),
+            "unexpected missing-linker error: {}",
+            err.message
+        );
+
+        let _ = fs::remove_dir_all(
+            component_path
+                .parent()
+                .expect("component path should have parent"),
+        );
+    }
+
+    #[tokio::test]
     async fn rpc_type_returns_without_loading_component_when_shutdown_already_signaled() {
         let runtime = WasmRuntime::new().expect("runtime should initialize");
         let (_shutdown_tx, shutdown_rx) = watch::channel(true);
@@ -1073,6 +1242,106 @@ mod tests {
             .await
             .expect("rpc runner should stop promptly after shutdown")
             .expect("rpc run should stop without error");
+    }
+
+    #[tokio::test]
+    async fn rpc_invoke_with_wasi_http_import_does_not_fail_with_missing_http_linker() {
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let component_path = write_wasi_http_component("rpc-http-linker");
+        let imports = collect_component_import_names(&runtime, &component_path);
+        assert!(
+            imports.iter().any(|name| name == "wasi:http/types@0.2.4"),
+            "component should import wasi:http/types@0.2.4, got: {imports:?}"
+        );
+
+        let err = runtime
+            .invoke_component(RuntimeInvokeRequest {
+                app_type: RunnerAppType::Rpc,
+                runner_id: "runner-test".to_string(),
+                service_name: "svc-test".to_string(),
+                release_hash: "release-test".to_string(),
+                component_path: component_path.clone(),
+                args: Vec::new(),
+                envs: BTreeMap::new(),
+                wasi_mounts: Vec::new(),
+                plugin_dependencies: Vec::new(),
+                capabilities: allow_all_wasi_capabilities(),
+                bindings: Vec::new(),
+                manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+                manager_auth_secret: "secret".to_string(),
+                interface_id: "missing:iface/run@0.1.0".to_string(),
+                function: "invoke".to_string(),
+                payload_cbor: Vec::new(),
+            })
+            .await
+            .expect_err("component without rpc export should fail after instantiate");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(
+            err.message.contains("rpc export interface"),
+            "unexpected message: {}",
+            err.message
+        );
+        assert!(
+            !err.message
+                .contains("matching implementation was not found in the linker"),
+            "unexpected missing-linker error: {}",
+            err.message
+        );
+
+        let _ = fs::remove_dir_all(
+            component_path
+                .parent()
+                .expect("component path should have parent"),
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_type_with_wasi_http_import_stays_unauthorized_without_capability() {
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let component_path = write_wasi_http_component("cli-http-unauthorized");
+        let imports = collect_component_import_names(&runtime, &component_path);
+        assert!(
+            imports.iter().any(|name| name == "wasi:http/types@0.2.4"),
+            "component should import wasi:http/types@0.2.4, got: {imports:?}"
+        );
+
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let err = runtime
+            .run_component(RuntimeRunRequest {
+                app_type: RunnerAppType::Cli,
+                runner_id: "runner-test".to_string(),
+                service_name: "svc-test".to_string(),
+                release_hash: "release-test".to_string(),
+                component_path: component_path.clone(),
+                args: Vec::new(),
+                envs: BTreeMap::new(),
+                wasi_mounts: Vec::new(),
+                socket: None,
+                plugin_dependencies: Vec::new(),
+                capabilities: CapabilityPolicy::default(),
+                bindings: Vec::new(),
+                manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+                manager_auth_secret: "secret".to_string(),
+                shutdown: shutdown_rx,
+                epoch_tick_interval_ms: 50,
+                http_worker_count: 2,
+                http_worker_queue_capacity: 4,
+                http_ready_tx: None,
+            })
+            .await
+            .expect_err("missing capability should reject wasi:http import");
+        assert_eq!(err.code, ErrorCode::Unauthorized);
+        assert!(
+            err.message.contains("capability denied"),
+            "unexpected message: {}",
+            err.message
+        );
+
+        let _ = fs::remove_dir_all(
+            component_path
+                .parent()
+                .expect("component path should have parent"),
+        );
     }
 
     #[tokio::test]
