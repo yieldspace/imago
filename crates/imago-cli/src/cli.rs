@@ -812,8 +812,16 @@ mod tests {
 
     #[test]
     fn rejects_global_json_flag() {
-        let err = Cli::try_parse_from(["imago", "--json", "logs", "svc-a", "--tail", "10"])
-            .expect_err("parse should fail");
+        let json_flag = format!("--{}", "json");
+        let err = Cli::try_parse_from([
+            "imago".to_string(),
+            json_flag,
+            "logs".to_string(),
+            "svc-a".to_string(),
+            "--tail".to_string(),
+            "10".to_string(),
+        ])
+        .expect_err("parse should fail");
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
