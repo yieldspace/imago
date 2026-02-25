@@ -37,17 +37,33 @@ jobs:
                   status,
                   per_page: 100,
                 },
-                (response) => response.data.workflow_runs
+                (response) => {
+                  const items = response?.data?.workflow_runs;
+                  if (!Array.isArray(items)) {
+                    core.warning(`Unexpected workflow_runs payload for status=${status}; treat as empty list.`);
+                    return [];
+                  }
+                  return items.filter(Boolean);
+                }
               );
               runs.push(...listed);
             }
 
-            const targets = runs.filter((run) => {
-              if (run.id === context.runId) {
+            const uniqueRuns = Array.from(
+              new Map(
+                runs
+                  .filter((run) => run && typeof run.id === "number")
+                  .map((run) => [run.id, run])
+              ).values()
+            );
+
+            const targets = uniqueRuns.filter((run) => {
+              if (run.id === Number(context.runId)) {
                 return false;
               }
 
-              return run.pull_requests?.some((pr) => pr.number === prNumber) ?? false;
+              const prs = Array.isArray(run.pull_requests) ? run.pull_requests : [];
+              return prs.some((pr) => pr && pr.number === prNumber);
             });
 
             core.info(`Found ${targets.length} run(s) to cancel for PR #${prNumber}.`);
