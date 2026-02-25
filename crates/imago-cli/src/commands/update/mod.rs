@@ -750,8 +750,8 @@ fn ensure_interface_contains_no_resource(
                 interface_name
             ));
         }
-        for (_, param_type) in &function.params {
-            if type_contains_resource(resolve, param_type, &mut BTreeSet::new()) {
+        for param in &function.params {
+            if type_contains_resource(resolve, &param.ty, &mut BTreeSet::new()) {
                 return Err(anyhow!(
                     "binding WIT '{}/{}' contains resource types; `imago update` does not support resources",
                     dependency_name,
@@ -828,7 +828,7 @@ fn type_id_contains_resource(
             type_contains_resource(resolve, key, seen)
                 || type_contains_resource(resolve, value, seen)
         }
-        TypeDefKind::FixedSizeList(ty, _) => type_contains_resource(resolve, ty, seen),
+        TypeDefKind::FixedLengthList(ty, _) => type_contains_resource(resolve, ty, seen),
         TypeDefKind::Future(ty) | TypeDefKind::Stream(ty) => ty
             .as_ref()
             .is_some_and(|item| type_contains_resource(resolve, item, seen)),
