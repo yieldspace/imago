@@ -8,9 +8,11 @@ For one-service recipes, use `imago-core-recipes.md`.
 
 ## Recipe 1: Local one-node compose flow
 
-Run from `/Users/sizumita/.codex/worktrees/3c71/imago/examples/imago-compose-bindings`.
+Run from `examples/imago-compose-bindings`.
 
 ### Terminal A
+
+`prepare` in `compose build prepare --target default` is a profile argument to the `build` subcommand, not a separate top-level compose command.
 
 ```bash
 cargo run -p imago-cli -- compose build prepare --target default
@@ -32,7 +34,7 @@ cargo run -p imago-cli -- compose logs dev --target default --name cli-client --
 
 ## Recipe 2: Docker cross-imagod compose flow (alice/bob)
 
-Run from `/Users/sizumita/.codex/worktrees/3c71/imago/examples/imago-compose-bindings/docker`.
+Run from `examples/imago-compose-bindings/docker`.
 
 ### Start environment
 

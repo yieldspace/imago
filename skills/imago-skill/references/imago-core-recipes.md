@@ -14,7 +14,7 @@ cargo run -p imago-cli -- init services/example --lang rust
 
 ## Recipe 2: Local example (single service)
 
-Run from `/Users/sizumita/.codex/worktrees/3c71/imago/examples/local-imagod`.
+Run from `examples/local-imagod`.
 
 ### Terminal 1
 

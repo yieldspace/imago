@@ -47,6 +47,7 @@ When implementation introduces or changes protocol contracts, defaults, validati
 Default workflow:
 - Update the module docs/docstrings at the contract boundary (`crates/*`) together with implementation changes.
 - If a user-facing explanation is needed, update the relevant guide pages under `docs/`.
+- Do not use workstation-specific absolute paths in documentation; always use repository-relative paths and commands.
 - Keep schema examples synchronized using tests/fixtures or in-code test cases where applicable.
 PR body requirements for design-impacting changes must be written in `.github/pull_request_template.md` sections:
 - `## Motivation`: describe why the design change is needed.
