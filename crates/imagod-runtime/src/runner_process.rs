@@ -1,4 +1,7 @@
 //! Runner process bootstrap and orchestration.
+//!
+//! The runner startup path decodes bootstrap metadata, registers with manager,
+//! starts inbound control handlers, and then executes component runtime flow.
 
 use std::sync::Arc;
 

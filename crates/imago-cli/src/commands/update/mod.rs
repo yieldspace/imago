@@ -1,3 +1,8 @@
+//! Dependency and binding resolution pipeline for `imago update`.
+//!
+//! The update flow resolves WIT/component sources, rewrites `wit/deps`,
+//! and persists lock metadata consumed by build/deploy operations.
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,

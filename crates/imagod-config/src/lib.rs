@@ -1,4 +1,7 @@
 //! Configuration loader and validation for the `imagod` manager process.
+//!
+//! This crate defines daemon defaults, key parsing rules, and strict semantic
+//! validation used before network/session runtime components are initialized.
 
 use std::{
     collections::BTreeMap,

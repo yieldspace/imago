@@ -1,435 +1,107 @@
-# Configuration Specification (`imago.toml`)
-
-## 目的
-
-`imago.toml` の必須項目、上書き規則、権限モデル、既定値、検証条件を固定し、CLI と runtime が同じ解釈で動くようにする。
-
-関連仕様:
-
-- マニフェストへの反映規則: [`manifest.md`](./manifest.md)
-- デプロイ時の利用方法: [`deploy-protocol.md`](./deploy-protocol.md)
-
-## 用語
-
-- base 設定: `imago.toml` のトップレベル設定。
-- env 設定（廃止）: 旧仕様の `[env.<name>]` 配下上書き設定。
-- capabilities: runtime で明示許可する権限。
-
-<a id="required-keys"></a>
-## 必須キー
-
-| キー | 型 | 制約 | 説明 |
-|---|---|---|---|
-| `name` | string | 1-63 文字、空文字不可、`/` `\` `..` 禁止 | サービス識別名 |
-| `main` | string | 相対パス、空文字不可 | 実行対象の Wasm パス |
-| `type` | string | `cli` / `http` / `socket` / `rpc` のいずれか | 実行モデル |
-| `target` | table | 必須 | デプロイ先設定 |
-
-`name` の許可文字は ASCII 英数字、`.`、`-`、`_`。`/`、`\`、`..` は path 文字として拒否する。
-
-## 推奨キー
-
-- `args`
-- `build`
-- `capabilities`
-- `wasi`
-- `limits`
-- `restart`
-- `assets`
-- `dependencies`
-- `bindings`
-- `namespace_registries`
-
-<a id="env-override"></a>
-## `--env` 廃止と `.env` ルール
-
-[BREAKING] `--env` は廃止した。現行実装では次を行わない。
-
-- `[env.<name>]` のマージ
-- `.env.<name>` の読み込み
-- env 名バリデーション
-
-`.env`（`project_root/.env`）は `imago build` 時に読み込み、`manifest.wasi.env` へ統合する。
-
-- 競合時の優先順位は `.env` > `[wasi.env]`。
-- `.env` が存在しない場合は no-op。
-- `.env` の構文不正は build エラー。
-- legacy `[vars]` / `[secrets]` は受理するが無視する（warning/error なし）。
-
-## build コマンド設定
-
-- `imago build` は `imago.toml` の `[build].command` を参照する。
-- `build.command` は次のいずれかを受け付ける。
-  - string: `sh -c "<command>"` として実行
-  - array: `["cmd", "arg1", ...]` として直接実行
-- `build.command` 未指定時はビルドコマンドを実行せず、`main` の存在検証のみ行う。
-- `.env` の値は `build.command` 実行プロセスには注入しない（`manifest.wasi.env` 生成にのみ使用する）。
-
-## `[namespace_registries]`（WARG namespace ごとの registry 上書き）
-
-- top-level の `[namespace_registries]` は `namespace = "registry-host"` の table を受理する。
-- この設定は `warg://` source の `registry` 未指定時のみ適用する。
-- WARG の registry 解決順は次の通り。
-  - 明示 `*.registry`
-  - `[namespace_registries]`
-  - built-in 既定（`wasi` namespace は `wasi.dev`）
-  - グローバル既定（`wa.dev`）
-
-## `[[bindings]]`（service 間呼び出し許可）
-
-- `[[bindings]]` は service 間関数呼び出しの許可ルールを定義する。
-- 各要素は以下を必須とする。
-  - `name`: 呼び出し先 service 名（`name` と同じ文字制約）
-  - `wit`: string（`file://...` / `warg://...` / `oci://...`）
-- [BREAKING] 旧 `wit = "<package>/<interface>"` 形式は受理しない。
-- `imago update` は `wit` で指定した source から解決した WIT package 内の全 interface を展開し、`manifest.bindings[]` へ `{"name":"<service>","wit":"<package>/<interface>"}` の形式で正規化して出力する。
-- `[[bindings]].wit` が remote source（`warg://` / `oci://`）の場合、source URL 上の package 文字列とは照合せず、解決した top-level WIT package 名を正として扱う。
-- 未指定時は `manifest.bindings=[]` として扱い、runtime は deny-by-default で拒否する。
-
-## `[[dependencies]]`（プラグイン依存）
-
-- `[[dependencies]]` は plugin 依存を定義する。
-- 各要素は以下を受理する。
-  - `name` (必須): package 名
-    - 許可文字は ASCII 英数字、`.`、`_`、`-`、`:`, `/`。
-    - `/` は package 階層表現として許可するが、path component は `Normal` のみ許可する（先頭 `/`、drive prefix、`./`、`../` などは拒否）。
-  - `version` (必須): version 文字列
-  - `kind` (必須): `native` / `wasm`
-  - `wit` (任意): string または table
-    - string は `file://...` / `warg://...` / `oci://...` を受理
-      - `oci://` は `oci://<registry>/<namespace>/<name...>@<version>` 形式を受理する。
-    - table は `wit.source`（必須）+ `wit.registry`（任意）を受理
-    - `wit.registry` は `warg://` source のみ指定可能（`oci://` では禁止）
-    - 未指定時は `wit.source = "warg://{name}@{version}"`。`wit.registry` は WARG 解決規則で自動決定される。
-  - `requires` (任意): 依存 plugin package 名配列（明示依存の宣言）
-    - 各要素のバリデーションは `name` と同一。
-  - `component.source` (任意, `kind=wasm` の場合): `file://...` / `warg://...` / `oci://...`
-    - `wit` source が component ではない場合は指定が必要
-  - `component.registry` (任意, `kind=wasm` の場合): `warg://` の registry（省略時は WARG 解決規則。`oci://` では禁止）
-  - `component.sha256` (任意, `kind=wasm` の場合): 指定時は `imago update` で照合
-  - `capabilities` (任意): この plugin が caller になる場合の認可ルール
-- `imago update` は依存の WIT/Component を `.imago/deps/<sanitized dependency>/` に保存し、そこから `wit/deps/` を再生成する。`imago.lock (version=1)` には `wit_source` / `wit_registry` / `wit_digest` / `wit_path` / `resolved_at` を固定する。`wit_path` の依存名サニタイズは wkg 準拠で `:` / `@` を `-` に置換する。
-- remote source（`warg://` / `oci://`）の dependency では、source URL 上の package 文字列ではなく、解決した top-level WIT package 名が `dependencies[].name` と一致することを要求する。
-- `warg://` の direct dependency で WIT 側に version が書かれている場合は、`warg://...@version` と一致している必要がある。
-- `warg://` の WIT package が transitive import を含む場合、依存パッケージも `wit/deps/<package>/package.wit` に展開し、`imago.lock.[[wit_packages]]` に `name` / `registry` / `[[versions]]` (`requirement` / `version` / `digest` / `source` / `path` / `via`) を固定する。
-  - transitive package の `registry` は `namespace_registries > (wasi は wasi.dev) > 親 dependency の解決 registry` で決定する。
-- `dependencies[].wit.source` が `file://...` の場合、`wit/deps` 配下を指す source は禁止する（`imago update` が `wit/deps` を再生成するため）。
-- 複数 dependency が同一 `wit/deps` 出力先へ解決される場合、`imago update` は衝突として失敗する。
-- `warg://` source が plain `.wit` 形式で foreign import を含む場合は `imago update` を失敗させる（WIT package 形式が必要）。
-- `kind=wasm` かつ `component` 未指定で `wit` source が component の場合、`imago update` は component から WIT を抽出し、lock の `component_*` を自動固定する。
-- `kind=wasm` かつ `component` 未指定で `wit` source が component に解釈できない場合、`imago update` は失敗する。
-- `kind=wasm` では `imago.lock` に `component_source` / `component_registry` / `component_sha256` も固定し、component 本体を `.imago/deps/<dependency>/components/<sha256>.wasm` に保存する。
-- `imago build` は `[[dependencies]]` がある場合、まず `.imago/deps` から `wit/deps` を再生成してから `imago.lock` を検証する。`imago.lock` 未生成、`version != 1`、lock digest 不一致、または必要キャッシュ欠損時は失敗し、`imago update` を要求する。
-- `.imago_transitive` は使用しない。transitive package 検証は `imago.lock.[[wit_packages]]` の `digest` と `path/package.wit` の照合で行う。
-- `imago deploy` は `imago.lock` の component 情報と `.imago/deps` の component cache を使って artifact を構築する。必要キャッシュ欠損時は `imago update` を要求して失敗する。
-- runtime の transitive plugin import 解決順は `self(component export)` -> `明示 dependency(package名一致)` -> `error`。
-- transitive 解決では `requires` の記述を必須にしない。
-
-## `[http]`（`type=http` 時の ingress 設定）
-
-- `type = "http"` の場合のみ `[http]` セクションを受理する。
-- `http.port` は必須で、`1..=65535` の整数のみ許可する。
-- `http.max_body_bytes` は任意で、`1..=67108864`（64MiB）の整数のみ許可する。
-- `http.max_body_bytes` 未指定時は `8388608`（8MiB）を既定値として扱う。
-- `type != "http"` で `[http]` を指定した場合は設定不整合として build エラーにする。
-- `imago build` はこの設定を `manifest.http.port` / `manifest.http.max_body_bytes` に正規化して出力する。
-
-## `[socket]`（`type=socket` 時の socket 実行設定）
-
-- `type = "socket"` の場合のみ `[socket]` セクションを受理する。
-- `socket.protocol` は必須で `udp` / `tcp` / `both` のいずれか。
-- `socket.direction` は必須で `inbound` / `outbound` / `both` のいずれか。
-- `socket.listen_addr` は必須で IP アドレス文字列（IPv4/IPv6）を受理する。
-- `socket.listen_port` は必須で `1..=65535` の整数のみ許可する。
-- `type != "socket"` で `[socket]` を指定した場合は設定不整合として build エラーにする。
-- `imago build` はこの設定を `manifest.socket.*` に正規化して出力する。
-
-## `[wasi]`（WASI 実行設定）
-
-- `[wasi]` は任意指定とし、`imago build` は `manifest.wasi` に正規化して出力する。
-- `wasi.args` は string 配列を受理する。
-- `wasi.env` は `key -> value` がともに string の table を受理する。
-- `wasi.http_outbound` は string 配列（`hostname` / `host:port` / `CIDR`）を受理する。
-  - wildcard（`*`, `*.example.com`）は受理しない。
-  - CIDR は request host が IP literal の場合のみ照合する（DNS 解決結果への照合はしない）。
-- `.env` の `key=value` は `manifest.wasi.env` へマージし、同名キーは `.env` で上書きする。
-- `[wasi]` 未指定でも `.env` が非空なら `manifest.wasi.env` を出力する。
-- `[[wasi.mounts]]` は read/write mount を定義する。
-- `[[wasi.read_only_mounts]]` は read-only mount を定義する。
-- `wasi.mounts[]` / `wasi.read_only_mounts[]` の各要素は `asset_dir` と `guest_path` を必須とする。
-  - `asset_dir` は `assets` 由来ディレクトリのみ受理する（mount 単位はディレクトリのみで、ファイル単位は不可）。
-  - `guest_path` は guest 側の絶対パスのみ受理する。
-- `wasi.mounts[]` と `wasi.read_only_mounts[]` では、同一 `guest_path` または同一 `asset_dir` の重複指定（同一配列内および配列跨ぎ）を禁止する。
-- runtime 権限マッピングは次を適用する。
-  - `wasi.mounts[]`: `DirPerms::all` / `FilePerms::all`
-  - `wasi.read_only_mounts[]`: `DirPerms::READ` / `FilePerms::READ`
-
-## `restart`（service 再起動方針）
-
-- `restart` はトップレベルキーとして指定する。
-- 許可値は `never` / `on-failure` / `always` / `unless-stopped`。
-- 未指定時の既定値は `never`。
-- `imagod` 起動時の自動復元対象は `restart="always"` の service のみ。
-- `on-failure` / `unless-stopped` の高度な再起動戦略は現行未実装で、値の受理・保存のみ行う。
-- 旧キー `runtime.restart_policy` は受理しない（設定エラー）。
-
-<a id="capability-model"></a>
-## 権限モデル
-
-### 既定挙動
-
-- `capabilities` 未指定時は全拒否（deny-by-default）。
-
-### `capabilities`
-
-- `capabilities.deps`: 依存 plugin の呼び出し許可ルール。
-  - 許可値は `"*"` または table。
-  - `"*"` は全 dependency の全関数呼び出しを許可する。
-  - table 指定時は `capabilities.deps.<package>` ごとに許可関数を定義する。
-  - `capabilities.deps.<package>` の許可値は関数名文字列配列。
-  - 配列要素に `"*"` を含めると、その dependency の全関数呼び出しを許可する。
-  - table で `capabilities.deps."*"` を指定すると wildcard dependency として扱う。
-  - self 解決（caller 自身の component export）には適用しない。
-  - 明示 dependency への中継時のみ適用する。
-- `capabilities.wasi`: WASI 呼び出し許可ルール。
-  - 許可値は `true` / `false` または table。
-  - `true` は全 WASI を許可する。
-  - `false` は空ルールとして扱い、WASI を許可しない。
-  - table 指定時は `capabilities.wasi.<interface>` ごとに許可関数を定義する。
-  - `capabilities.wasi.<interface>` の許可値は `"*"` または関数名文字列配列。
-- typo キー `capabilirties` は互換受理せずエラーにする。
-
-### `privileged`
-
-- `privileged = true` の場合、`capabilities` は無視し全許可。
-- `privileged` 未指定時は `false` として扱う。
-
-<a id="defaults"></a>
-## 既定値
-
-| キー | 既定値 | 備考 |
-|---|---|---|
-| `limits.shutdown_timeout` | `30s` | graceful 停止待ち時間 |
-| `restart` | `never` | `imago.toml` のトップレベルキー |
-
-## バリデーション要件
-
-- 必須キー欠落はエラー。
-- `type` 不正値はエラー。
-- `type="http"` かつ `http.port` 欠落はエラー。
-- `type="http"` かつ `http.max_body_bytes` が範囲外（`1..=67108864`）はエラー。
-- `type!="http"` かつ `[http]` 指定はエラー。
-- `type="socket"` かつ `[socket]` 欠落はエラー。
-- `type="socket"` かつ `socket.protocol` / `socket.direction` が定義外値ならエラー。
-- `type="socket"` かつ `socket.listen_addr` が IP として不正ならエラー。
-- `type="socket"` かつ `socket.listen_port` が範囲外（`1..=65535`）ならエラー。
-- `type!="socket"` かつ `[socket]` 指定はエラー。
-- `wasi.args` が string 配列以外ならエラー。
-- `wasi.env` が string 値の table 以外ならエラー。
-- `wasi.http_outbound` が string 配列以外ならエラー。
-- `wasi.http_outbound[]` の要素が空文字、wildcard、不正 `host:port`、不正 CIDR の場合はエラー。
-- `.env` が dotenv 記法として解釈できない場合はエラー。
-- `wasi.mounts[]` / `wasi.read_only_mounts[]` の要素に `asset_dir` または `guest_path` 欠落がある場合はエラー。
-- `wasi.mounts[]` / `wasi.read_only_mounts[]` の `asset_dir` が `assets` 由来ディレクトリ以外、またはファイル単位の場合はエラー。
-- `wasi.mounts[]` / `wasi.read_only_mounts[]` の `guest_path` が絶対パスでない場合はエラー。
-- `wasi.mounts[]` / `wasi.read_only_mounts[]` で同一 `guest_path` または同一 `asset_dir` が重複（同一配列内・配列跨ぎ）した場合はエラー。
-- `restart` が許可値（`never` / `on-failure` / `always` / `unless-stopped`）以外ならエラー。
-- `runtime.restart_policy` を指定した場合はエラー（互換受理なし）。
-- `dependencies[].wit` に `https://wa.dev/...` shorthand を指定した場合はエラー（`warg://<package>@<version>` を使用）。
-- `bindings[].wit` に `file://...` / `warg://...` / `oci://...` 以外を指定した場合はエラー。
-- `bindings[].wit` に旧 `"<package>/<interface>"` 文字列を指定した場合はエラー。
-- `dependencies[].wit.registry` または `dependencies[].component.registry` を `oci://` source と併用した場合はエラー。
-- `dependencies[].wit.source` に `file://wit/deps/...`（または同等の `wit/deps` 配下パス）を指定した場合はエラー。
-- 複数 dependency が同一 `wit/deps` 出力パスへ解決される場合はエラー。
-- `dependencies[].name` と `dependencies[].requires[]` に、絶対パス・drive prefix・`./`・`../` を含む path component を指定した場合はエラー。
-- `[[dependencies]]` 使用時に `imago.lock` が存在しない、`version != 1`、または lock の `wit_*` / `component_*` / `wit_packages` が設定・展開結果と一致しない場合はエラー。
-- `[[dependencies]]` 使用時に `.imago/deps` の必要キャッシュ（WIT/Component/metadata）が不足・破損している場合はエラー（`imago update` を要求）。
-- `main` が存在しない場合はビルド時エラー。
-- `shutdown_timeout` が 0 以下はエラー。
-- `privileged = true` かつ `capabilities` 指定ありでもエラーにはしない（`capabilities` を無視）。
-
-## 異常系
-
-- 型不正（例: `shutdown_timeout = "abc"`）。
-- 不正な `type`。
-
-## 実装ノート
-
-- 設定ロードは CLI 側で厳格検証し、正規化結果を [`manifest.md`](./manifest.md) の形式で出力する。
-- runtime 側は manifest を信頼入力として扱い、再解釈を最小化する。
-
-## 実装反映ノート
-
-- `build.command` は string / array の両形式を受理する。
-- `build.command` は必須キー (`name`/`main`/`type`/`target`) と `dependencies` の検証完了後に実行する。不正設定時は実行しない。
-- `imago build` は `project_root/.env` を dotenv 記法で読み込み、`manifest.wasi.env` へマージする（`.env` 優先）。
-- `imago build` は legacy `[vars]` / `[secrets]` を受理するが、manifest には出力しない。
-- `.env` の値は `build.command` 実行環境には注入しない。
-- `imago update` は `warg://` / `oci://` / `file://` を受理し、依存WIT/Componentを `.imago/deps/` に保存した上で `wit/deps/` を再生成する。
-- `imago update` の dependency path サニタイズは wkg 準拠 (`:` / `@` を `-`) を使い、`wit/deps` と `.imago/warg` の両方で同じ命名規則を使う。
-- `imago update` は `dependencies[].wit.source=file://...` が `wit/deps` 配下を指す場合と、dependency 同士で `wit/deps` 出力先が衝突する場合に、`wit/deps` を削除する前に失敗させる。
-- dependency package 名の path バリデーションは `/` を許可しつつ、`Path` component が `Normal` 以外（`RootDir`、`Prefix`、`CurDir`、`ParentDir`）を拒否する。
-- `warg://` は Rust-native client で解決し、`registry` 未指定時は `明示 registry > [namespace_registries] > (wasi は wasi.dev) > wa.dev` で決定する。
-- transitive WARG package は lock 出力時に package ごとに registry を解決し、未指定 namespace では親 dependency の解決 registry を継承する。
-- `oci://` は Rust-native client の OCI backend で解決し、`IMAGO_OCI_USERNAME` / `IMAGO_OCI_PASSWORD` が設定されていれば認証情報として注入する。
-- `imago update` は `kind=wasm` かつ `component` 未指定で `wit` source が component の場合、component hash/source を lock へ自動固定する。
-- `imago update` は `file://` source が存在する場合のみ hash 差分を監視し、差分があればキャッシュを再解決する。source が消えている場合は既存キャッシュを優先する。
-- `imago build` は `capabilities` を正規化して manifest に出力し、`capabilirties` キーは設定エラーとして拒否する。
-- `imago build` は `capabilities.deps` に `string("*")` / table の両形式を受理し、`"*"` は `{"*": ["*"]}` へ正規化する。
-- `imago build` は `capabilities.wasi` に `bool` / table の両形式を受理し、`true` は全許可、`false` は空ルールとして正規化する。
-- `imago build` は `[[dependencies]]` がある場合、`.imago/deps` から `wit/deps` を再構築してから `imago.lock(version=1)` の `wit_*` / `component_*` / `wit_packages` を検証し、不一致時は `imago update` を要求して失敗する（`kind=wasm` で `component` 未指定の場合は `wit` 由来の期待値と照合する）。
-- `imago build` は `main` で指定された wasm を `build/<sha256>-<name>.wasm` へ materialize し、manifest には manifest ファイル同階層基準の相対パス（`<sha256>-<name>.wasm`）を書き込む。
-- `imago update` は `[[bindings]].wit` から WIT package を解決し、package 内の全 interface を `manifest.bindings[]` の `<package>/<interface>` へ展開する。
-- `imago build` は展開済み `manifest.bindings[]` を出力し、runtime の呼び出し認可入力として扱う。
-- `type="http"` のときのみ `[http].port` / `[http].max_body_bytes` を受理し、`manifest.http.port` / `manifest.http.max_body_bytes` へ反映する。
-- `type="socket"` のときのみ `[socket].protocol` / `[socket].direction` / `[socket].listen_addr` / `[socket].listen_port` を受理し、`manifest.socket.*` へ反映する。
-- `imago build` は `[wasi]` を `manifest.wasi` へ反映し、`wasi.mounts[]` / `wasi.read_only_mounts[]` の `asset_dir` / `guest_path` 制約と重複禁止（同一・跨ぎ）を検証する。
-- `imago build` は `[wasi].http_outbound` を `manifest.wasi.http_outbound` へ正規化し、重複を除去する（順序保持）。
-- manager は `manifest.wasi.http_outbound` に対して `localhost` / `127.0.0.1` / `::1` を常時注入し、`wasi:http` の egress allowlist として適用する。
-- runtime の mount 権限は `wasi.mounts[]` を `DirPerms::all` / `FilePerms::all`、`wasi.read_only_mounts[]` を `DirPerms::READ` / `FilePerms::READ` へ対応付ける。
-- CLI の `name` 検証は `imagod` と同等に `..` を拒否し、path 文字を明示的に弾く。
-- `target.<name>.client_key` は path traversal と不正区切りを拒否し、相対指定を `project_root` 基準の絶対パスへ解決する。
-- `known_hosts` は設定キーとして受理せず、CLI 既定パス `~/.imago/known_hosts` を常に使用する。
-- `imagod.storage_root` の既定値は OS 別（Linux=`/var/lib/imago`, macOS=`/usr/local/var/imago`, Windows=`C:\ProgramData\imago`, その他=`/var/lib/imago`）にし、ビルド時環境変数 `IMAGOD_STORAGE_ROOT_DEFAULT` で上書きできる。`imagod.toml` の明示値を最優先する。
-- `imagod.runtime` に `http_worker_count` / `http_worker_queue_capacity` / `manager_control_read_timeout_ms` / `max_concurrent_sessions` / `deploy_stream_timeout_secs` / `transport_keepalive_interval_secs` / `transport_max_idle_timeout_secs` / `boot_plugin_gc_enabled` / `boot_restore_enabled` を追加し、load 時に範囲・正数検証を行う。`RunnerBootstrap` へは `http_worker_count` と `http_worker_queue_capacity` を必須値として伝播する。
-- `restart` はトップレベルキーのみ受理し、`runtime.restart_policy` は移行エラーにする。
-- `.imago_transitive` は廃止し、transitive WIT package の検証正本を `imago.lock.[[wit_packages]]` へ移行した。`imago build` / `imago deploy` は lock version 1 のみ受理する。
-
-## `target.<name>` の接続キー（deploy 通信）
-
-`imago deploy` / `imago run` / `imago stop` / `imago logs` / `imago ps` / `imago compose ps` は `target.<name>` から下記キーを読む。
-
-- `remote`: `host` または `host:port`（`https://` 省略可）
-  - IPv6 は `::1`, `[::1]`, `[::1]:4443`, `https://[::1]:4443` を許可
-- `server_name`: known_hosts で使うサーバ識別名（省略時は `remote` 側の host）
-- `client_key`: クライアント秘密鍵（PEM）
-  - 絶対パスまたは `project_root` 相対パスを受理する。
-  - 相対パスは `project_root` 基準で解決する。
-  - `..`、`\`、Windows ドライブプレフィックス（`C:` など）を含む値は拒否する。
-- `known_hosts` は設定で上書きできず、CLI 既定パス `~/.imago/known_hosts` を固定使用する。
-
-初回接続時に `~/.imago/known_hosts` へ対象ホストの公開鍵が未登録の場合、CLI は TOFU で鍵を登録する。
-2 回目以降は `~/.imago/known_hosts` と一致しないサーバ鍵を拒否する。
-
-`imago build` が生成する `manifest.target` には、上記のうち `remote` と `server_name` のみを含める。
-
-ローカル検証用の RPK 鍵（server/client keypair）は `openssl` 等で生成する。
-`~/.imago/known_hosts` は初回接続（TOFU）で作成・更新される。
-
-## imagod 設定ファイル
-
-`imagod` は `imagod.toml` を読む。既定パスは `/etc/imago/imagod.toml`。
-
-起動時に解決された設定パス（既定は `/etc/imago/imagod.toml`、`--config` / `IMAGOD_CONFIG` 指定時はそのパス）の `imagod.toml` が存在しない場合、`imagod` は同パスへ最小有効構成を自動生成して起動を継続する。
-
-- 既存 `imagod.toml` が存在する場合は上書きしない。
-- 自動生成時は「設定ファイルを自動生成した」旨を起動ログで通知する。
-- 自動生成される `imagod.toml` には英語コメントを含める。
-- 自動生成対象は `listen_addr` / `server_version` / `compatibility_date` / `tls.server_key` / `tls.client_public_keys` のみ。
-- `tls.server_key` は自動生成した `imagod.toml` と同じディレクトリの `server.key`（絶対パス）を指す。該当ファイルが未存在なら `imagod.toml` 自動生成と同時に `server.key` 実体も生成する。既存ファイルは上書きしない。
-- `tls.client_public_keys` は空配列 `[]` を許容し、運用者が後から公開鍵を追加できる。
-
-- `listen_addr`
-- `storage_root`
-- `server_version`
-- `compatibility_date`（`YYYY-MM-DD`、既定値 `2026-02-10`）
-- `tls.server_key`
-- `tls.admin_public_keys`（ed25519 公開鍵 raw 32byte hex。管理操作を許可）
-- `tls.client_public_keys`（ed25519 公開鍵 raw 32byte hex の配列。空配列許容。`rpc.invoke` 専用）
-- `tls.known_public_keys`（`authority -> ed25519 公開鍵 raw 32byte hex` の table。TOFU 永続化）
-- `runtime.chunk_size`
-- `runtime.max_inflight_chunks`
-- `runtime.max_artifact_size_bytes`（既定 `67108864` = 64 MiB）
-- `runtime.upload_session_ttl_secs`
-- `runtime.stop_grace_timeout_secs`（既定 `30`）
-- `runtime.runner_ready_timeout_secs`（既定 `3`）
-- `runtime.runner_log_buffer_bytes`（既定 `262144`。runner log 一時保持と retained logs 用 global ring の総量上限に使用）
-- `runtime.epoch_tick_interval_ms`（既定 `50`）
-- `runtime.http_worker_count`（既定 `2`）
-- `runtime.http_worker_queue_capacity`（既定 `4`）
-- `runtime.manager_control_read_timeout_ms`（既定 `500`）
-- `runtime.max_concurrent_sessions`（既定 `256`）
-- `runtime.deploy_stream_timeout_secs`（既定 `15`）
-- `runtime.transport_keepalive_interval_secs`（既定 `5`）
-- `runtime.transport_max_idle_timeout_secs`（既定 `180`）
-- `runtime.boot_plugin_gc_enabled`（既定 `true`。`false` で起動時 plugin component cache GC を skip）
-- `runtime.boot_restore_enabled`（既定 `true`。`false` で起動時 boot restore を skip）
-
-`storage_root` の既定値決定順序:
-
-1. `imagod.toml` の `storage_root` 明示値
-2. ビルド時環境変数 `IMAGOD_STORAGE_ROOT_DEFAULT`（空文字は無効）
-3. OS 別既定値
-   - Linux: `/var/lib/imago`
-   - macOS: `/usr/local/var/imago`
-   - Windows: `C:\ProgramData\imago`
-   - その他: `/var/lib/imago`
-
-`imagod` の runtime 検証制約:
-
-- `runtime.chunk_size`: `1..=8388608`（1 byte 以上 8 MiB 以下）
-- `runtime.max_inflight_chunks`: `1` 以上
-- `runtime.max_artifact_size_bytes`: `1` 以上
-- `runtime.stop_grace_timeout_secs`: `1` 以上
-- `runtime.runner_ready_timeout_secs`: `1` 以上
-- `runtime.runner_log_buffer_bytes`: `1` 以上
-- `runtime.epoch_tick_interval_ms`: `1` 以上
-- `runtime.http_worker_count`: `1..=4`
-- `runtime.http_worker_queue_capacity`: `1..=16`
-- `runtime.manager_control_read_timeout_ms`: `1` 以上
-- `runtime.max_concurrent_sessions`: `1` 以上
-- `runtime.deploy_stream_timeout_secs`: `1` 以上
-- `runtime.transport_keepalive_interval_secs`: `1` 以上
-- `runtime.transport_max_idle_timeout_secs`: `1` 以上
-- `runtime.transport_keepalive_interval_secs < runtime.transport_max_idle_timeout_secs`
-- `runtime.boot_plugin_gc_enabled`: bool
-- `runtime.boot_restore_enabled`: bool
-
-## 実装反映ノート（RPK + TOFU / 2026-02-18）
-
-- [BREAKING] `target.<name>.ca_cert` / `target.<name>.client_cert` / `target.<name>.known_hosts` を廃止し、`target.<name>.client_key` + CLI 既定 `~/.imago/known_hosts` へ移行した。
-- [BREAKING] `imagod.tls.server_cert` / `imagod.tls.client_ca_cert` を廃止し、`imagod.tls.server_key` + `imagod.tls.client_public_keys` へ移行した。
-- サーバ認証は X.509 チェーン検証ではなく、RPK pin（`known_hosts`）+ TOFU で扱う。
-
-## 実装反映ノート（Network RPC / 2026-02-18）
-
-- [BREAKING] `imago build/deploy/run/stop` の `--env` は廃止した。`[env.*]` と `.env.<name>` の解決も行わない。
-- [BREAKING] `[[bindings]]` は `name` + `wit`（`file://...` / `warg://...` / `oci://...`）のみ受理し、`target` と旧 `wit="<package>/<interface>"` 形式は設定エラーとして拒否する。
-- `type = "rpc"` を追加し、`imago build` / manifest 正規化で受理する。
-- `type = "rpc"` は `main` を必須キーとして維持しつつ、runner 起動時に `main` を自動実行しない（実行契機は `rpc.invoke` のみ）。
-- `imago bindings cert upload` / `imago bindings cert deploy` サブコマンドを追加した。
-- `imago compose update` / `imago compose build` / `imago compose logs` を追加した。
-- `imago-compose.toml` は `[target.<name>]` を受理し、`compose build/deploy/logs` は service `imago.toml` の `target` ではなく compose 側 target を優先して解決する。
-- 単体コマンド (`imago build/deploy/logs`) は従来どおり service `imago.toml` の `target.<name>` を必須とする（compose target への自動フォールバックなし）。
-
-## 実装反映ノート（env 統合 / 2026-02-22）
-
-- [BREAKING] `manifest` から `vars` / `secrets` を削除し、環境変数の出力先を `manifest.wasi.env` に統一した。
-- `imago build` は `project_root/.env` を `manifest.wasi.env` に統合し、同名キーは `.env` を優先する。
-- `imago.toml` の `[vars]` / `[secrets]` は受理するが無視する。
-
-## 実装反映ノート（Retained logs 契約 / 2026-02-20）
-
-- `runtime.runner_log_buffer_bytes` は runner log バッファに加えて retained logs 用 global ring の総量上限としても使用する。
-- retained logs は imagod プロセス寿命内メモリでのみ保持し、eviction または imagod 再起動後は参照できない。
-
-## 実装反映ノート（`ps` 接続キー適用範囲 / 2026-02-21）
-
-- `target.<name>` の接続キー参照対象に `imago ps` / `imago compose ps` を追加した。
-- `ps` 系コマンドも `remote` / `server_name` / `client_key` / `known_hosts` の同一解決規則を使う。
-
-## 実装反映ノート（imagod.toml 自動生成 / 2026-02-21）
-
-- 起動時に `imagod.toml` が未存在なら、英語コメント付きの最小有効構成（`listen_addr` / `server_version` / `compatibility_date` / `tls.server_key` / `tls.client_public_keys`）を自動生成して起動を継続する。
-- 既存 `imagod.toml` がある場合は上書きしない。
-- 自動生成時は起動ログで通知する。
-- `tls.server_key` は自動生成した `imagod.toml` と同じディレクトリの `server.key`（絶対パス）を指し、該当ファイルが未存在なら `imagod.toml` 自動生成と同時に `server.key` 実体も生成する。
-- `tls.client_public_keys` は空配列 `[]` を許容する。
-
-## 実装反映ノート（`imago init` テンプレ生成 / 2026-02-23）
-
-- `imago init [PATH]` を追加し、`PATH` 未指定または `.` のときは current directory、それ以外は `cwd/PATH`（絶対パス指定時はそのまま）へ `imago.toml` を生成する。
-- 生成先ディレクトリは自動作成するが、既存 `imago.toml` は上書きせずエラーにする。
-- `imago init` 成功時は `imago.toml` 生成先ディレクトリの `.gitignore` を整備し、`.imago` と `/build` を不足分のみ追記する（`.gitignore` 未存在時は作成）。
-- テンプレートは `crates/imago-cli/templates/imago/*.toml` のファイル名を `LANG_ID` として自動検出し、ファイル名昇順で扱う。
-- `--lang` 未指定時は対話可能セッションのみ選択プロンプトを表示する。非対話（`--json` / CI / 非TTY）では `--lang` を必須にする。
+# Configuration Specification (`imago.toml` and `imagod.toml`)
+
+## Purpose
+
+This document defines the configuration contracts consumed by `imago-cli` and `imagod`.
+Runtime behavior MUST match this document.
+
+## Normalization Flow
+
+```mermaid
+flowchart LR
+    A["imago.toml"] --> B["imago build validation"]
+    B --> C["build/manifest.json"]
+    C --> D["imagod orchestrator"]
+    D --> E["runner bootstrap"]
+    E --> F["runtime execution"]
+```
+
+## `imago.toml`
+
+### Required keys
+
+- `name`: service identifier. MUST be 1..63 chars and use ASCII `[A-Za-z0-9._-]`.
+- `main`: relative component path. MUST exist at build time.
+- `type`: MUST be one of `cli`, `http`, `socket`, `rpc`.
+- `target.<name>.remote`: required for deploy/run/stop/logs/ps operations.
+
+### Execution type rules
+
+- `type=http` requires `[http]` and rejects `[socket]`.
+- `type=socket` requires `[socket]` and rejects `[http]`.
+- `type=rpc` is resident startup mode and executes functions through `rpc.invoke`.
+
+### Target settings (`[target.<name>]`)
+
+- `remote`: endpoint authority.
+- `server_name`: optional authority override for known-host checks.
+- `client_key`: required for authenticated remote operations.
+
+### Build settings (`[build]`)
+
+- `build.command` MAY be a string or string array.
+- When omitted, `imago build` performs validation and manifest generation without command execution.
+
+### WASI settings (`[wasi]`)
+
+- `args`: string array.
+- `env`: string map.
+- `http_outbound`: string array of host, host:port, or CIDR entries.
+- `mounts` and `read_only_mounts`: each entry MUST define `asset_dir` and absolute `guest_path`.
+
+### Capability settings (`[capabilities]`)
+
+- Default behavior is deny-by-default.
+- `privileged=true` grants full access.
+- `deps` controls dependency function permissions.
+- `wasi` controls WASI interface/function permissions.
+
+### Bindings and dependencies
+
+- `[[bindings]]` defines service call permissions and MUST use `file://`, `warg://`, or `oci://` WIT sources.
+- `[[dependencies]]` defines plugin dependencies with `kind = "native" | "wasm"`.
+- `imago update` MUST resolve dependencies and produce lock/cache state consumed by build/deploy.
+
+### Restart policy
+
+- Top-level `restart` values: `never`, `on-failure`, `always`, `unless-stopped`.
+- Default is `never`.
+- Boot restore currently applies to `always` entries.
+
+## `imagod.toml`
+
+### Top-level keys
+
+- `listen_addr`: server bind address.
+- `storage_root`: artifact/runtime storage root.
+- `server_version`: reported by `hello.negotiate`.
+- `compatibility_date`: protocol compatibility key.
+
+### TLS keys (`[tls]`)
+
+- `server_key`: required private key path.
+- `admin_public_keys`: optional admin key allowlist.
+- `client_public_keys`: client key allowlist.
+- `known_public_keys`: authority-to-key map for pinned peers.
+
+### Runtime keys (`[runtime]`)
+
+- Transfer limits: `chunk_size`, `max_inflight_chunks`, `max_artifact_size_bytes`, `upload_session_ttl_secs`.
+- Process control: `stop_grace_timeout_secs`, `runner_ready_timeout_secs`.
+- Logging/loop config: `runner_log_buffer_bytes`, `epoch_tick_interval_ms`.
+- Ingress/session limits: `http_worker_count`, `http_worker_queue_capacity`, `max_concurrent_sessions`.
+- Transport timeouts: `deploy_stream_timeout_secs`, `transport_keepalive_interval_secs`, `transport_max_idle_timeout_secs`.
+- Boot toggles: `boot_plugin_gc_enabled`, `boot_restore_enabled`.
+
+## Validation Requirements
+
+- Unknown legacy keys MUST be rejected where explicitly unsupported.
+- Required keys MUST produce hard validation errors when missing.
+- Type constraints and range constraints MUST be enforced before runtime execution.
+- Lock/cache mismatches for dependency resolution MUST fail with remediation guidance (`imago update`).
+
+## Related Specifications
+
+- [Manifest Specification](./manifest.md)
+- [Deploy Protocol Specification](./deploy-protocol.md)
+- [imagod Server Specification](./imagod.md)

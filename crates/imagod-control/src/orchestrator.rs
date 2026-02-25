@@ -1,4 +1,10 @@
 //! High-level orchestration for deploy/run/stop commands.
+//!
+//! Contract highlights:
+//! - verifies artifact/manifest integrity before release promotion
+//! - persists active release and restart policy state
+//! - builds launch metadata consumed by `ServiceSupervisor`
+//! - coordinates best-effort boot restore for eligible services
 
 use std::{
     collections::{BTreeMap, BTreeSet},

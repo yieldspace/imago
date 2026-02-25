@@ -8,7 +8,6 @@ The normative contract is [`docs/spec/config.md`](./spec/config.md).
 - [The top-level fields section](#the-top-level-fields-section)
 - [The `[tls]` section](#the-tls-section)
 - [The `[runtime]` section](#the-runtime-section)
-- [Unsupported keys](#unsupported-keys)
 
 <a id="the-top-level-fields-section"></a>
 ## The top-level fields section
@@ -401,18 +400,6 @@ boot_restore_enabled = true
 ```
 
 - Validation error notes: non-boolean values fail validation.
-
-<a id="unsupported-keys"></a>
-## Unsupported keys
-
-The keys below are not supported and are treated as configuration errors.
-
-- `protocol_draft`
-- `tls.server_cert`
-- `tls.client_ca_cert`
-
-`[[dependencies]]` and `[[bindings]]` are `imago.toml`-only sections and are not supported in `imagod.toml`.
-See [`docs/imago-configuration.md`](./imago-configuration.md) for those sections.
 
 ## Related specifications
 

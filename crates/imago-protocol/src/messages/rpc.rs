@@ -1,3 +1,5 @@
+//! RPC invocation payloads exchanged over the deploy protocol envelope.
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -7,6 +9,7 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Target service selector for one RPC call.
 pub struct RpcInvokeTargetService {
     pub name: String,
 }
@@ -19,6 +22,7 @@ impl Validate for RpcInvokeTargetService {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// RPC invocation request payload.
 pub struct RpcInvokeRequest {
     pub interface_id: String,
     pub function: String,
@@ -37,6 +41,7 @@ impl Validate for RpcInvokeRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Structured RPC invocation failure payload.
 pub struct RpcInvokeError {
     pub code: ErrorCode,
     pub stage: String,
@@ -54,6 +59,9 @@ impl Validate for RpcInvokeError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// RPC invocation response payload.
+///
+/// Exactly one of `result_cbor` or `error` MUST be present.
 pub struct RpcInvokeResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_cbor: Option<Vec<u8>>,

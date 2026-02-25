@@ -1,3 +1,5 @@
+//! Handshake payloads for protocol capability and limit negotiation.
+
 use serde::{Deserialize, Serialize};
 
 use crate::validate::{Validate, ValidationError, ensure_non_empty, ensure_required_strings};
@@ -6,6 +8,7 @@ use super::StringMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Negotiation request sent before command operations.
 pub struct HelloNegotiateRequest {
     pub compatibility_date: String,
     pub client_version: String,
@@ -22,6 +25,7 @@ impl Validate for HelloNegotiateRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Negotiation response with accepted features and server limits.
 pub struct HelloNegotiateResponse {
     pub accepted: bool,
     pub server_version: String,

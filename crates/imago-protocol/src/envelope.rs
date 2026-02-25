@@ -1,3 +1,5 @@
+//! Common protocol envelope and identifier invariants.
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -6,6 +8,7 @@ use crate::messages::MessageType;
 use crate::validate::{Validate, ValidationError, ensure_uuid_not_nil};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Generic message envelope used for all request/response payloads.
 pub struct ProtocolEnvelope<TPayload> {
     #[serde(rename = "type")]
     pub message_type: MessageType,
@@ -17,6 +20,7 @@ pub struct ProtocolEnvelope<TPayload> {
 }
 
 impl<TPayload> ProtocolEnvelope<TPayload> {
+    /// Builds a successful envelope without an embedded structured error.
     pub fn new(
         message_type: MessageType,
         request_id: Uuid,

@@ -1,3 +1,5 @@
+//! Validation helpers used by lockfile resolution paths.
+
 use std::{
     fs,
     path::{Component, Path, PathBuf},
@@ -6,8 +8,10 @@ use std::{
 use anyhow::{Context, anyhow};
 
 pub trait PathVerifier {
+    /// Validates a lockfile path field and returns normalized relative path.
     fn validate_safe_wit_path(&self, path: &str, field_name: &str) -> anyhow::Result<PathBuf>;
 
+    /// Ensures no symlink traversal is present on the resolved relative path.
     fn ensure_no_symlink_in_relative_path(
         &self,
         project_root: &Path,

@@ -1,7 +1,13 @@
+//! Validation helpers for `imago.toml` build-time constraints.
+//!
+//! These checks keep path and identifier handling deterministic across
+//! build/update/deploy flows and reject traversal or unsupported symbols early.
+
 use std::path::{Component, Path};
 
 use anyhow::anyhow;
 
+/// Validates service names used in config and manifest records.
 pub(crate) fn validate_service_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty() {
         return Err(anyhow!("name must not be empty"));
@@ -21,6 +27,7 @@ pub(crate) fn validate_service_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Validates declared app execution type.
 pub(crate) fn validate_app_type(app_type: &str) -> anyhow::Result<()> {
     match app_type {
         "cli" | "http" | "socket" | "rpc" => Ok(()),
@@ -31,6 +38,7 @@ pub(crate) fn validate_app_type(app_type: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Validates dependency package names including nested namespace segments.
 pub(crate) fn validate_dependency_package_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty() {
         return Err(anyhow!("must not be empty"));

@@ -1,8 +1,11 @@
+//! Serializable lockfile schema and in-memory expectation/resolve types.
+
 use serde::{Deserialize, Serialize};
 
 pub const IMAGO_LOCK_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Root lockfile model persisted as `imago.lock`.
 pub struct ImagoLock {
     #[serde(default = "default_lock_version")]
     pub version: u32,
@@ -15,6 +18,7 @@ pub struct ImagoLock {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Direct dependency resolution record.
 pub struct ImagoLockDependency {
     pub name: String,
     pub version: String,
@@ -33,6 +37,7 @@ pub struct ImagoLockDependency {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Resolved binding WIT source record.
 pub struct ImagoLockBindingWit {
     pub name: String,
     pub wit_source: String,
@@ -45,6 +50,7 @@ pub struct ImagoLockBindingWit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Aggregated transitive WIT package entry.
 pub struct ImagoLockWitPackage {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,6 +60,7 @@ pub struct ImagoLockWitPackage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// One resolved version requirement for a transitive WIT package.
 pub struct ImagoLockWitPackageVersion {
     pub requirement: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,6 +74,7 @@ pub struct ImagoLockWitPackageVersion {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Expected component metadata supplied by config parsing.
 pub struct ComponentExpectation {
     pub source: String,
     pub registry: Option<String>,
@@ -74,6 +82,7 @@ pub struct ComponentExpectation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Expected direct dependency record supplied by config parsing.
 pub struct DependencyExpectation {
     pub name: String,
     pub version: String,
@@ -83,6 +92,7 @@ pub struct DependencyExpectation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Expected binding WIT record supplied by config parsing.
 pub struct BindingWitExpectation {
     pub name: String,
     pub wit_source: String,
@@ -90,6 +100,7 @@ pub struct BindingWitExpectation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Lock-resolved direct dependency materialized for build/deploy.
 pub struct ResolvedDependency {
     pub name: String,
     pub version: String,
@@ -104,6 +115,7 @@ pub struct ResolvedDependency {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Lock-resolved binding WIT materialized for build operations.
 pub struct ResolvedBindingWit {
     pub name: String,
     pub wit_source: String,
@@ -146,6 +158,7 @@ impl From<&ImagoLockBindingWit> for ResolvedBindingWit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Flattened transitive package record used when rebuilding lock state.
 pub struct TransitivePackageRecord {
     pub name: String,
     pub registry: Option<String>,

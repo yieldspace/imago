@@ -1,4 +1,6 @@
 //! WebTransport server bootstrap with TLS and client certificate validation.
+//!
+//! Exposes server construction primitives with shared datagram buffer defaults.
 
 mod quic_builder;
 mod server_builder;

@@ -1,3 +1,11 @@
+//! Build pipeline for `imago.toml` -> `build/manifest.json`.
+//!
+//! This module is responsible for:
+//! - validating project configuration and mode-specific rules
+//! - resolving bindings/dependencies from lock/cache state
+//! - materializing a normalized manifest and component artifact
+//! - computing integrity metadata consumed by deploy/runtime paths
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,

@@ -1,3 +1,10 @@
+//! Command lifecycle payloads (`start`, `event`, `state`, `cancel`).
+//!
+//! Validation in this module enforces key runtime invariants:
+//! - command payload shape MUST match `command_type`
+//! - state polling responses MUST remain non-terminal
+//! - progress/failed events MUST include required context
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -7,6 +14,7 @@ use crate::validate::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Top-level command operation kind.
 pub enum CommandType {
     #[serde(rename = "deploy")]
     Deploy,
@@ -17,6 +25,7 @@ pub enum CommandType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Emitted lifecycle transitions for one command request.
 pub enum CommandEventType {
     #[serde(rename = "accepted")]
     Accepted,
@@ -31,6 +40,7 @@ pub enum CommandEventType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Snapshot state used by `state.response` and cancel outcomes.
 pub enum CommandState {
     #[serde(rename = "accepted")]
     Accepted,
@@ -45,6 +55,7 @@ pub enum CommandState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Request payload for `command.start`.
 pub struct CommandStartRequest {
     pub request_id: Uuid,
     pub command_type: CommandType,
@@ -68,6 +79,7 @@ impl Validate for CommandStartRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Response payload for `command.start`.
 pub struct CommandStartResponse {
     pub accepted: bool,
 }
@@ -80,6 +92,7 @@ impl Validate for CommandStartResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
+/// Command payload union keyed by `command_type`.
 pub enum CommandPayload {
     Deploy(DeployCommandPayload),
     Stop(StopCommandPayload),
@@ -98,6 +111,7 @@ impl Validate for CommandPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Deploy-specific command payload.
 pub struct DeployCommandPayload {
     pub deploy_id: String,
     pub expected_current_release: String,
@@ -118,6 +132,7 @@ impl Validate for DeployCommandPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Run-specific command payload.
 pub struct RunCommandPayload {
     pub name: String,
 }
@@ -130,6 +145,7 @@ impl Validate for RunCommandPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Stop-specific command payload.
 pub struct StopCommandPayload {
     pub name: String,
     pub force: bool,
@@ -146,6 +162,7 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Event payload emitted during command execution.
 pub struct CommandEvent {
     pub event_type: CommandEventType,
     pub request_id: Uuid,
@@ -181,6 +198,7 @@ impl Validate for CommandEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Poll request payload for in-flight command state.
 pub struct StateRequest {
     pub request_id: Uuid,
 }
@@ -192,6 +210,7 @@ impl Validate for StateRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Poll response payload for in-flight command state.
 pub struct StateResponse {
     pub request_id: Uuid,
     pub state: CommandState,
@@ -217,6 +236,7 @@ impl Validate for StateResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Cancellation request payload keyed by command request id.
 pub struct CommandCancelRequest {
     pub request_id: Uuid,
 }
@@ -228,6 +248,7 @@ impl Validate for CommandCancelRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Cancellation response payload.
 pub struct CommandCancelResponse {
     pub cancellable: bool,
     pub final_state: CommandState,
