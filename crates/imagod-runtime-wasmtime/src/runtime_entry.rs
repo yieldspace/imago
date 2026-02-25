@@ -91,7 +91,6 @@ impl WasmRuntime {
     ) -> Result<Self, ImagodError> {
         let mut config = Config::new();
         config.wasm_component_model(true);
-        config.async_support(true);
         config.epoch_interruption(true);
 
         let engine = Engine::new(&config)
@@ -483,10 +482,6 @@ impl WasmRuntime {
                 .call_async(&mut store, (payload_cbor.to_vec(),))
                 .await
                 .map_err(|e| map_runtime_error(format!("rpc invoke trap: {e}")))?;
-            typed_func
-                .post_return_async(&mut store)
-                .await
-                .map_err(|e| map_runtime_error(format!("rpc invoke post-return failed: {e}")))?;
             return Ok(result_bytes);
         }
 
@@ -495,10 +490,6 @@ impl WasmRuntime {
                 .call_async(&mut store, (payload_cbor.to_vec(),))
                 .await
                 .map_err(|e| map_runtime_error(format!("rpc invoke trap: {e}")))?;
-            typed_func
-                .post_return_async(&mut store)
-                .await
-                .map_err(|e| map_runtime_error(format!("rpc invoke post-return failed: {e}")))?;
             return match result_value {
                 Ok(result_bytes) => Ok(result_bytes),
                 Err(message) => Err(map_runtime_error(format!(
@@ -520,9 +511,6 @@ impl WasmRuntime {
         func.call_async(&mut store, &params, &mut results)
             .await
             .map_err(|e| map_runtime_error(format!("rpc invoke trap: {e}")))?;
-        func.post_return_async(&mut store)
-            .await
-            .map_err(|e| map_runtime_error(format!("rpc invoke post-return failed: {e}")))?;
         encode_payload_values(&results, &result_types).map_err(|err| {
             map_runtime_error(format!(
                 "failed to encode rpc result payload: {}",
