@@ -16,18 +16,23 @@ concurrency:
 jobs:
   checks:
     name: checks
-    runs-on: imago-dind-runner-set
+    runs-on: imago-default-runner-set
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: cargo deny (blocking)
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          rust-version: stable
-          manifest-path: ./Cargo.toml
-          command: check bans licenses sources
-          arguments: --workspace
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust cache
+        if: ${{ runner.environment != 'self-hosted' }}
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: cargo deny checks
+        run: cargo deny --workspace check bans licenses sources
 
   advisories:
     name: advisories
