@@ -1,0 +1,4 @@
+interface:
+  display_name: "Imago Skill"
+  short_description: "Teach imago core and compose workflows"
+  default_prompt: "Use $imago-skill to explain imago core commands and compose workflows for this repository."
