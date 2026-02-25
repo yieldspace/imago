@@ -197,7 +197,7 @@ fn assert_command_completed(label: &str, output: &CmdOutput) -> TestResult {
             output.combined
         )),
         None => Err(anyhow::anyhow!(
-            "{label} command.summary was not found: {}",
+            "{label} completion marker was not found: {}",
             output.combined
         )),
     }

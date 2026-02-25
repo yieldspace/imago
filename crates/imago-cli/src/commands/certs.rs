@@ -52,16 +52,14 @@ pub fn run_generate(args: CertsGenerateArgs) -> CommandResult {
     ui::command_stage("certs.generate", "generate", "creating key material");
     match run_generate_inner(args) {
         Ok(output) => {
-            if ui::current_mode() != ui::UiMode::Json {
-                println!("generated key material:");
-                println!("  {}", output.paths.client_key.display());
-                println!("  {}", output.paths.gitignore.display());
-                println!(
-                    "  client_public_key_hex={}",
-                    output.client_public_key_hex.as_str()
-                );
-                println!("private keys are sensitive. do not commit or share them.");
-            }
+            println!("generated key material:");
+            println!("  {}", output.paths.client_key.display());
+            println!("  {}", output.paths.gitignore.display());
+            println!(
+                "  client_public_key_hex={}",
+                output.client_public_key_hex.as_str()
+            );
+            println!("private keys are sensitive. do not commit or share them.");
 
             ui::command_finish("certs.generate", true, "completed");
             success_generate_result(started_at, output.client_public_key_hex)

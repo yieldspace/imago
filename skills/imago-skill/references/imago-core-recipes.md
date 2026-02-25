@@ -79,7 +79,3 @@ imago bindings cert deploy --from <remote-authority> --to <remote-authority>
 
 - Auth/trust failure:
   - Re-check `certs generate` output and `bindings cert` authority arguments.
-
-- JSON mode requirement:
-  - Add `--json` immediately after `imago` command root.
-  - Example: `imago --json logs <service-name> --tail 200`.

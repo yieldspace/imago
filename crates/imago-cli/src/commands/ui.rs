@@ -1,14 +1,11 @@
 use std::{
     collections::BTreeMap,
     env,
-    io::{self, Write},
     sync::{Mutex, OnceLock},
     time::Duration,
 };
 
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle};
-use serde::Serialize;
-use time::OffsetDateTime;
 
 use super::CommandResult;
 
@@ -100,7 +97,6 @@ fn plain_upload_start_message(command: &str, total_bytes: u64, detail: &str) -> 
 pub enum UiMode {
     Rich,
     Plain,
-    Json,
 }
 
 #[derive(Debug)]
@@ -113,7 +109,7 @@ impl UiRuntime {
     fn new(mode: UiMode) -> Self {
         let rich = match mode {
             UiMode::Rich => Some(Mutex::new(RichState::new())),
-            UiMode::Plain | UiMode::Json => None,
+            UiMode::Plain => None,
         };
         Self { mode, rich }
     }
@@ -219,8 +215,8 @@ fn runtime_cell() -> &'static Mutex<Option<UiRuntime>> {
     UI_RUNTIME.get_or_init(|| Mutex::new(None))
 }
 
-pub fn initialize(global_json: bool) -> UiMode {
-    let mode = detect_mode(global_json);
+pub fn initialize() -> UiMode {
+    let mode = detect_mode();
     if let Ok(mut guard) = runtime_cell().lock() {
         *guard = Some(UiRuntime::new(mode));
     }
@@ -233,13 +229,10 @@ pub fn current_mode() -> UiMode {
     {
         return runtime.mode;
     }
-    detect_mode(false)
+    detect_mode()
 }
 
-fn startup_banner_lines_for_mode(mode: UiMode, version: &str) -> Option<(String, String)> {
-    if mode == UiMode::Json {
-        return None;
-    }
+fn startup_banner_lines_for_mode(_mode: UiMode, version: &str) -> Option<(String, String)> {
     let header = format!("imago {version}");
     let rule = "─".repeat(header.chars().count());
     Some((header, rule))
@@ -253,15 +246,12 @@ pub fn emit_startup_banner(version: &str) {
     println!("{rule}");
 }
 
-fn detect_mode(global_json: bool) -> UiMode {
+fn detect_mode() -> UiMode {
     let ci_env = env::var("CI").ok();
-    detect_mode_from_ci(global_json, ci_env.as_deref())
+    detect_mode_from_ci(ci_env.as_deref())
 }
 
-fn detect_mode_from_ci(global_json: bool, ci_env: Option<&str>) -> UiMode {
-    if global_json {
-        return UiMode::Json;
-    }
+fn detect_mode_from_ci(ci_env: Option<&str>) -> UiMode {
     if ci_env.map(is_ci_value_enabled).unwrap_or(false) {
         return UiMode::Plain;
     }
@@ -283,7 +273,6 @@ fn with_rich_state<R>(f: impl FnOnce(&mut RichState) -> R) -> Option<R> {
 
 pub fn command_start(command: &str, detail: &str) {
     match current_mode() {
-        UiMode::Json => {}
         UiMode::Plain => println!("{}", plain_start_message(command, detail)),
         UiMode::Rich => {
             let _ = with_rich_state(|state| {
@@ -295,7 +284,6 @@ pub fn command_start(command: &str, detail: &str) {
 
 pub fn command_stage(command: &str, stage: &str, detail: &str) {
     match current_mode() {
-        UiMode::Json => {}
         UiMode::Plain => println!("{}", plain_stage_message(command, stage, detail)),
         UiMode::Rich => {
             let _ = with_rich_state(|state| {
@@ -309,7 +297,6 @@ pub fn command_stage(command: &str, stage: &str, detail: &str) {
 
 pub fn command_warn(command: &str, message: &str) {
     match current_mode() {
-        UiMode::Json => {}
         UiMode::Plain => println!("{}", plain_warn_message(command, message)),
         UiMode::Rich => {
             let _ = with_rich_state(|state| {
@@ -329,7 +316,6 @@ fn plain_info_message(command: &str, message: &str) -> String {
 
 fn info_output_for_mode(mode: UiMode, command: &str, message: &str) -> Option<String> {
     match mode {
-        UiMode::Json => None,
         UiMode::Plain => Some(plain_info_message(command, message)),
         UiMode::Rich => Some(rich_info_message(message)),
     }
@@ -365,7 +351,6 @@ pub fn command_info(command: &str, message: &str) {
         return;
     };
     match mode {
-        UiMode::Json => {}
         UiMode::Plain => println!("{formatted}"),
         UiMode::Rich => {
             let _ = with_rich_state(|state| {
@@ -377,7 +362,6 @@ pub fn command_info(command: &str, message: &str) {
 
 pub fn command_upload_start(command: &str, total_bytes: u64, detail: &str) {
     match current_mode() {
-        UiMode::Json => {}
         UiMode::Plain => println!(
             "{}",
             plain_upload_start_message(command, total_bytes, detail)
@@ -402,7 +386,7 @@ pub fn command_upload_start(command: &str, total_bytes: u64, detail: &str) {
 
 pub fn command_upload_inc(command: &str, bytes: u64) {
     match current_mode() {
-        UiMode::Json | UiMode::Plain => {}
+        UiMode::Plain => {}
         UiMode::Rich => {
             let _ = with_rich_state(|state| {
                 if let Some(bar) = state.byte_bars.get(command) {
@@ -415,7 +399,7 @@ pub fn command_upload_inc(command: &str, bytes: u64) {
 
 pub fn command_upload_finish(command: &str) {
     match current_mode() {
-        UiMode::Json | UiMode::Plain => {}
+        UiMode::Plain => {}
         UiMode::Rich => {
             let _ = with_rich_state(|state| {
                 if let Some(bar) = state.byte_bars.remove(command) {
@@ -428,7 +412,6 @@ pub fn command_upload_finish(command: &str) {
 
 pub fn command_finish(command: &str, succeeded: bool, detail: &str) {
     match current_mode() {
-        UiMode::Json => {}
         UiMode::Plain => println!("{}", plain_finish_message(command, succeeded, detail)),
         UiMode::Rich => {
             let _ = with_rich_state(|state| {
@@ -488,59 +471,6 @@ pub(crate) fn compose_build_service_finish(service: &str, succeeded: bool, detai
     });
 }
 
-#[derive(Debug, Serialize)]
-struct JsonCommandSummary<'a> {
-    #[serde(rename = "type")]
-    line_type: &'static str,
-    command: &'a str,
-    status: &'a str,
-    duration_ms: u128,
-    timestamp: String,
-    meta: &'a BTreeMap<String, String>,
-    error: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct JsonCommandError<'a> {
-    #[serde(rename = "type")]
-    line_type: &'static str,
-    command: &'a str,
-    message: &'a str,
-    stage: &'a str,
-    code: &'a str,
-}
-
-fn now_timestamp() -> String {
-    let now = OffsetDateTime::now_utc();
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        now.year(),
-        u8::from(now.month()),
-        now.day(),
-        now.hour(),
-        now.minute(),
-        now.second(),
-    )
-}
-
-fn write_json_line<T: Serialize>(payload: &T) {
-    let mut stdout = io::stdout().lock();
-    if serde_json::to_writer(&mut stdout, payload).is_ok() {
-        let _ = stdout.write_all(b"\n");
-    }
-}
-
-pub fn emit_command_error_json(command: &str, message: &str, stage: &str, code: &str) {
-    let payload = JsonCommandError {
-        line_type: "command.error",
-        command,
-        message,
-        stage,
-        code,
-    };
-    write_json_line(&payload);
-}
-
 fn finalize_error_output_line(result: &CommandResult) -> Option<String> {
     if result.exit_code != 0
         && let Some(message) = result.stderr.as_deref()
@@ -551,32 +481,8 @@ fn finalize_error_output_line(result: &CommandResult) -> Option<String> {
 }
 
 pub fn finalize_result(result: &CommandResult) {
-    match current_mode() {
-        UiMode::Json => {
-            if result.skip_json_summary {
-                return;
-            }
-            let status = if result.exit_code == 0 {
-                "completed"
-            } else {
-                "failed"
-            };
-            let payload = JsonCommandSummary {
-                line_type: "command.summary",
-                command: &result.command,
-                status,
-                duration_ms: result.duration_ms,
-                timestamp: now_timestamp(),
-                meta: &result.meta,
-                error: result.stderr.clone(),
-            };
-            write_json_line(&payload);
-        }
-        UiMode::Plain | UiMode::Rich => {
-            if let Some(message) = finalize_error_output_line(result) {
-                eprintln!("{message}");
-            }
-        }
+    if let Some(message) = finalize_error_output_line(result) {
+        eprintln!("{message}");
     }
 }
 
@@ -586,20 +492,15 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn detects_json_flag_first() {
-        assert_eq!(detect_mode_from_ci(true, Some("true")), UiMode::Json);
-    }
-
-    #[test]
     fn detects_plain_when_ci_enabled() {
-        assert_eq!(detect_mode_from_ci(false, Some("true")), UiMode::Plain);
-        assert_eq!(detect_mode_from_ci(false, Some("1")), UiMode::Plain);
+        assert_eq!(detect_mode_from_ci(Some("true")), UiMode::Plain);
+        assert_eq!(detect_mode_from_ci(Some("1")), UiMode::Plain);
     }
 
     #[test]
     fn detects_rich_when_ci_is_disabled() {
-        assert_eq!(detect_mode_from_ci(false, Some("false")), UiMode::Rich);
-        assert_eq!(detect_mode_from_ci(false, None), UiMode::Rich);
+        assert_eq!(detect_mode_from_ci(Some("false")), UiMode::Rich);
+        assert_eq!(detect_mode_from_ci(None), UiMode::Rich);
     }
 
     #[test]
@@ -651,7 +552,6 @@ mod tests {
             info_output_for_mode(UiMode::Rich, "deploy", message),
             Some("\u{1b}[2m  > cli=0.1.0 project=/tmp/x\u{1b}[0m".to_string())
         );
-        assert_eq!(info_output_for_mode(UiMode::Json, "deploy", message), None);
     }
 
     #[test]
@@ -668,11 +568,6 @@ mod tests {
     }
 
     #[test]
-    fn startup_banner_lines_are_not_generated_for_json() {
-        assert_eq!(startup_banner_lines_for_mode(UiMode::Json, "0.1.0"), None);
-    }
-
-    #[test]
     fn finalize_error_output_line_formats_failure() {
         let result = CommandResult {
             command: "deploy".to_string(),
@@ -680,7 +575,6 @@ mod tests {
             stderr: Some("failed".to_string()),
             duration_ms: 0,
             meta: BTreeMap::new(),
-            skip_json_summary: false,
         };
         assert_eq!(
             finalize_error_output_line(&result),
@@ -696,7 +590,6 @@ mod tests {
             stderr: Some("ignored".to_string()),
             duration_ms: 0,
             meta: BTreeMap::new(),
-            skip_json_summary: false,
         };
         assert_eq!(finalize_error_output_line(&result), None);
     }

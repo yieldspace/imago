@@ -74,7 +74,7 @@ async fn dispatch_with_project_root_async(
 async fn main() {
     install_rustls_provider();
     let cli = Cli::parse();
-    let _ = commands::ui::initialize(cli.json);
+    let _ = commands::ui::initialize();
     commands::ui::emit_startup_banner(env!("CARGO_PKG_VERSION"));
     let result = dispatch_async(cli).await;
     commands::ui::finalize_result(&result);
@@ -126,7 +126,6 @@ mod tests {
         let root = new_temp_dir("dispatch-init-success");
         let result = dispatch_with_project_root_async(
             Cli {
-                json: false,
                 command: Commands::Init(InitArgs {
                     path: Some(PathBuf::from("svc-a")),
                     lang: Some("rust".to_string()),
@@ -147,7 +146,6 @@ mod tests {
         let root = new_temp_dir("dispatch-init-failure");
         let result = dispatch_with_project_root_async(
             Cli {
-                json: false,
                 command: Commands::Init(InitArgs {
                     path: Some(PathBuf::from("svc-a")),
                     lang: Some("unknown".to_string()),
@@ -173,7 +171,6 @@ mod tests {
         let root = new_temp_dir("dispatch-build");
         let result = dispatch_with_project_root_async(
             Cli {
-                json: false,
                 command: Commands::Build(BuildArgs {
                     target: "default".to_string(),
                 }),
@@ -192,7 +189,6 @@ mod tests {
         let root = new_temp_dir("dispatch-deploy");
         let result = dispatch_with_project_root_async(
             Cli {
-                json: false,
                 command: Commands::Deploy(DeployArgs {
                     target: None,
                     detach: false,
@@ -212,7 +208,6 @@ mod tests {
         let root = new_temp_dir("dispatch-run");
         let result = dispatch_with_project_root_async(
             Cli {
-                json: false,
                 command: Commands::Run(RunArgs {
                     name: None,
                     target: None,
@@ -233,7 +228,6 @@ mod tests {
         let root = new_temp_dir("dispatch-stop");
         let result = dispatch_with_project_root_async(
             Cli {
-                json: false,
                 command: Commands::Stop(StopArgs {
                     name: None,
                     force: false,
@@ -254,7 +248,6 @@ mod tests {
         let root = new_temp_dir("dispatch-ps");
         let result = dispatch_with_project_root_async(
             Cli {
-                json: false,
                 command: Commands::Ps(PsArgs {
                     target: "default".to_string(),
                 }),
@@ -273,7 +266,6 @@ mod tests {
         let root = new_temp_dir("dispatch-compose");
         let result = dispatch_with_project_root_async(
             Cli {
-                json: false,
                 command: Commands::Compose(ComposeSubcommandArgs {
                     command: ComposeCommands::Deploy(ComposeDeployArgs {
                         profile: "mini".to_string(),
@@ -295,7 +287,6 @@ mod tests {
         let root = new_temp_dir("dispatch-compose-build");
         let result = dispatch_with_project_root_async(
             Cli {
-                json: false,
                 command: Commands::Compose(ComposeSubcommandArgs {
                     command: ComposeCommands::Build(ComposeBuildArgs {
                         profile: "mini".to_string(),
@@ -318,7 +309,6 @@ mod tests {
         let root = new_temp_dir("dispatch-compose-update");
         let result = dispatch_with_project_root_async(
             Cli {
-                json: false,
                 command: Commands::Compose(ComposeSubcommandArgs {
                     command: ComposeCommands::Update(ComposeUpdateArgs {
                         profile: "mini".to_string(),
@@ -339,7 +329,6 @@ mod tests {
         let root = new_temp_dir("dispatch-compose-logs");
         let result = dispatch_with_project_root_async(
             Cli {
-                json: false,
                 command: Commands::Compose(ComposeSubcommandArgs {
                     command: ComposeCommands::Logs(ComposeLogsArgs {
                         profile: "mini".to_string(),
@@ -364,7 +353,6 @@ mod tests {
         let root = new_temp_dir("dispatch-compose-ps");
         let result = dispatch_with_project_root_async(
             Cli {
-                json: false,
                 command: Commands::Compose(ComposeSubcommandArgs {
                     command: ComposeCommands::Ps(ComposePsArgs {
                         profile: "mini".to_string(),
@@ -395,7 +383,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp);
 
         let result = dispatch_async(Cli {
-            json: false,
             command: Commands::Certs(CertsSubcommandArgs {
                 command: CertsCommands::Generate(crate::cli::CertsGenerateArgs {
                     out_dir: temp.clone(),
@@ -416,7 +403,6 @@ mod tests {
         let root = new_temp_dir("dispatch-bindings-upload");
         let result = dispatch_with_project_root_async(
             Cli {
-                json: false,
                 command: Commands::Bindings(BindingsSubcommandArgs {
                     command: BindingsCommands::Cert(BindingsCertSubcommandArgs {
                         command: BindingsCertCommands::Upload(BindingsCertUploadArgs {
@@ -448,7 +434,6 @@ mod tests {
         let root = new_temp_dir("dispatch-bindings-deploy");
         let result = dispatch_with_project_root_async(
             Cli {
-                json: false,
                 command: Commands::Bindings(BindingsSubcommandArgs {
                     command: BindingsCommands::Cert(BindingsCertSubcommandArgs {
                         command: BindingsCertCommands::Deploy(BindingsCertDeployArgs {

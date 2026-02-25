@@ -195,9 +195,6 @@ fn extract_build_failure_logs(err: &anyhow::Error) -> Option<&[build::BuildComma
 }
 
 fn print_build_failure_logs(err: &anyhow::Error) {
-    if ui::current_mode() == ui::UiMode::Json {
-        return;
-    }
     let Some(lines) = extract_build_failure_logs(err) else {
         return;
     };

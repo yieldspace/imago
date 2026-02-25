@@ -121,7 +121,7 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
         || deploy_cert_partial_fail.has_command_error();
     assert!(
         failed_by_contract,
-        "bindings cert deploy (partial failure) did not emit failed summary/command.error: {}",
+        "bindings cert deploy (partial failure) did not emit failure marker: {}",
         deploy_cert_partial_fail.combined
     );
 
@@ -319,7 +319,7 @@ fn assert_command_completed(label: &str, output: &CmdOutput) -> TestResult {
             output.combined
         )),
         None => Err(anyhow::anyhow!(
-            "{label} command.summary was not found: {}",
+            "{label} completion marker was not found: {}",
             output.combined
         )),
     }

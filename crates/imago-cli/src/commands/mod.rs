@@ -24,7 +24,6 @@ pub struct CommandResult {
     pub stderr: Option<String>,
     pub duration_ms: u128,
     pub meta: BTreeMap<String, String>,
-    pub skip_json_summary: bool,
 }
 
 impl CommandResult {
@@ -35,7 +34,6 @@ impl CommandResult {
             stderr: None,
             duration_ms: started_at.elapsed().as_millis(),
             meta: BTreeMap::new(),
-            skip_json_summary: false,
         }
     }
 
@@ -46,12 +44,6 @@ impl CommandResult {
             stderr: Some(message),
             duration_ms: started_at.elapsed().as_millis(),
             meta: BTreeMap::new(),
-            skip_json_summary: false,
         }
-    }
-
-    pub fn without_json_summary(mut self) -> Self {
-        self.skip_json_summary = true;
-        self
     }
 }
