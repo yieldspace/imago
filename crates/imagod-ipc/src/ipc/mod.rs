@@ -3,6 +3,7 @@
 use std::{
     collections::BTreeMap,
     future::Future,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::{Component, Path, PathBuf},
     pin::Pin,
     time::{SystemTime, UNIX_EPOCH},
@@ -219,6 +220,282 @@ impl Validate for RunnerWasiMount {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+/// Normalized outbound rule for `wasi:http` egress authorization.
+pub enum WasiHttpOutboundRule {
+    /// Allows requests to one host regardless of port.
+    Host { host: String },
+    /// Allows requests to one host and one port.
+    HostPort { host: String, port: u16 },
+    /// Allows requests whose IP-literal host is contained in this CIDR range.
+    Cidr { network: IpAddr, prefix_len: u8 },
+}
+
+impl WasiHttpOutboundRule {
+    /// Parses one user-facing outbound rule (`host`, `host:port`, `CIDR`) and returns normalized form.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let value = raw.trim();
+        if value.is_empty() {
+            return Err("rule must not be empty".to_string());
+        }
+        if value.contains('*') {
+            return Err(format!("wildcard is not supported: {value}"));
+        }
+        if value.chars().any(|ch| ch.is_whitespace()) {
+            return Err(format!("rule must not contain whitespace: {value}"));
+        }
+        if value.contains('/') {
+            return parse_wasi_http_outbound_cidr(value);
+        }
+        parse_wasi_http_outbound_host_or_port(value)
+    }
+
+    /// Returns true when this rule authorizes a request host+port pair.
+    pub fn matches_authority(&self, request_host: &str, request_port: u16) -> bool {
+        let normalized_request_host = normalize_wasi_http_outbound_host(request_host);
+        let request_ip = request_host.parse::<IpAddr>().ok();
+        match self {
+            Self::Host { host } => match &normalized_request_host {
+                Some(v) => v.eq_ignore_ascii_case(host),
+                None => false,
+            },
+            Self::HostPort { host, port } => {
+                if *port != request_port {
+                    return false;
+                }
+                match &normalized_request_host {
+                    Some(v) => v.eq_ignore_ascii_case(host),
+                    None => false,
+                }
+            }
+            Self::Cidr {
+                network,
+                prefix_len,
+            } => request_ip
+                .map(|ip| ip_in_cidr(ip, *network, *prefix_len))
+                .unwrap_or(false),
+        }
+    }
+}
+
+impl Validate for WasiHttpOutboundRule {
+    fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::Host { host } => {
+                let normalized = normalize_wasi_http_outbound_host(host).ok_or_else(|| {
+                    ValidationError::invalid("wasi_http_outbound.host", "contains invalid host")
+                })?;
+                if &normalized != host {
+                    return Err(ValidationError::invalid(
+                        "wasi_http_outbound.host",
+                        "must be normalized",
+                    ));
+                }
+            }
+            Self::HostPort { host, port } => {
+                let normalized = normalize_wasi_http_outbound_host(host).ok_or_else(|| {
+                    ValidationError::invalid("wasi_http_outbound.host", "contains invalid host")
+                })?;
+                if &normalized != host {
+                    return Err(ValidationError::invalid(
+                        "wasi_http_outbound.host",
+                        "must be normalized",
+                    ));
+                }
+                if *port == 0 {
+                    return Err(ValidationError::invalid(
+                        "wasi_http_outbound.port",
+                        "must be between 1 and 65535",
+                    ));
+                }
+            }
+            Self::Cidr {
+                network,
+                prefix_len,
+            } => {
+                let max_prefix = match network {
+                    IpAddr::V4(_) => 32,
+                    IpAddr::V6(_) => 128,
+                };
+                if *prefix_len > max_prefix {
+                    return Err(ValidationError::invalid(
+                        "wasi_http_outbound.prefix_len",
+                        "is out of range for network address family",
+                    ));
+                }
+                let normalized = cidr_network_ip(*network, *prefix_len);
+                if normalized != *network {
+                    return Err(ValidationError::invalid(
+                        "wasi_http_outbound.network",
+                        "must be normalized to network address",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn parse_wasi_http_outbound_cidr(value: &str) -> Result<WasiHttpOutboundRule, String> {
+    let (ip_text, prefix_text) = value
+        .split_once('/')
+        .ok_or_else(|| format!("invalid CIDR rule: {value}"))?;
+    if ip_text.is_empty() || prefix_text.is_empty() || prefix_text.contains('/') {
+        return Err(format!("invalid CIDR rule: {value}"));
+    }
+    let ip = ip_text
+        .parse::<IpAddr>()
+        .map_err(|err| format!("invalid CIDR IP '{ip_text}': {err}"))?;
+    let prefix_len = prefix_text
+        .parse::<u8>()
+        .map_err(|err| format!("invalid CIDR prefix '{prefix_text}': {err}"))?;
+    let max_prefix = match ip {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    };
+    if prefix_len > max_prefix {
+        return Err(format!(
+            "CIDR prefix must be in range 0..={max_prefix}: {prefix_len}"
+        ));
+    }
+    Ok(WasiHttpOutboundRule::Cidr {
+        network: cidr_network_ip(ip, prefix_len),
+        prefix_len,
+    })
+}
+
+fn parse_wasi_http_outbound_host_or_port(value: &str) -> Result<WasiHttpOutboundRule, String> {
+    if value.starts_with('[') {
+        let close_index = value
+            .find(']')
+            .ok_or_else(|| format!("invalid bracketed host rule: {value}"))?;
+        let host_text = &value[1..close_index];
+        let host_ip = host_text
+            .parse::<Ipv6Addr>()
+            .map_err(|err| format!("invalid IPv6 host '{host_text}': {err}"))?;
+        let rest = &value[(close_index + 1)..];
+        if rest.is_empty() {
+            return Ok(WasiHttpOutboundRule::Host {
+                host: host_ip.to_string(),
+            });
+        }
+        let port_text = rest
+            .strip_prefix(':')
+            .ok_or_else(|| format!("invalid bracketed host: {value}"))?;
+        let port = parse_wasi_http_outbound_port(port_text)?;
+        return Ok(WasiHttpOutboundRule::HostPort {
+            host: host_ip.to_string(),
+            port,
+        });
+    }
+
+    if value.matches(':').count() > 1 {
+        let ip = value
+            .parse::<IpAddr>()
+            .map_err(|err| format!("IPv6 host with port must use [ipv6]:port: {value} ({err})"))?;
+        return Ok(WasiHttpOutboundRule::Host {
+            host: ip.to_string(),
+        });
+    }
+
+    if let Some((host_text, port_text)) = value.rsplit_once(':')
+        && port_text.chars().all(|ch| ch.is_ascii_digit())
+    {
+        let host = normalize_wasi_http_outbound_host(host_text)
+            .ok_or_else(|| format!("invalid host in host:port rule: {host_text}"))?;
+        let port = parse_wasi_http_outbound_port(port_text)?;
+        return Ok(WasiHttpOutboundRule::HostPort { host, port });
+    }
+
+    let host = normalize_wasi_http_outbound_host(value)
+        .ok_or_else(|| format!("invalid host rule: {value}"))?;
+    Ok(WasiHttpOutboundRule::Host { host })
+}
+
+fn parse_wasi_http_outbound_port(text: &str) -> Result<u16, String> {
+    let port = text
+        .parse::<u16>()
+        .map_err(|err| format!("port must be in range 1..=65535 (got '{text}'): {err}"))?;
+    if port == 0 {
+        return Err("port must be in range 1..=65535 (got 0)".to_string());
+    }
+    Ok(port)
+}
+
+fn normalize_wasi_http_outbound_host(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.contains('*')
+        || value.contains('/')
+        || value.contains('\\')
+        || value.chars().any(|ch| ch.is_whitespace())
+    {
+        return None;
+    }
+    if value.starts_with('[') || value.ends_with(']') {
+        return None;
+    }
+    if let Ok(ip) = value.parse::<IpAddr>() {
+        return Some(ip.to_string());
+    }
+    if value.contains(':') {
+        return None;
+    }
+    Some(value.to_ascii_lowercase())
+}
+
+fn cidr_network_ip(ip: IpAddr, prefix_len: u8) -> IpAddr {
+    match ip {
+        IpAddr::V4(v4) => {
+            let bits = u32::from(v4);
+            let mask = if prefix_len == 0 {
+                0
+            } else {
+                u32::MAX << u32::from(32_u8.saturating_sub(prefix_len))
+            };
+            IpAddr::V4(Ipv4Addr::from(bits & mask))
+        }
+        IpAddr::V6(v6) => {
+            let bits = u128::from(v6);
+            let mask = if prefix_len == 0 {
+                0
+            } else {
+                u128::MAX << u32::from(128_u8.saturating_sub(prefix_len))
+            };
+            IpAddr::V6(Ipv6Addr::from(bits & mask))
+        }
+    }
+}
+
+fn ip_in_cidr(ip: IpAddr, network: IpAddr, prefix_len: u8) -> bool {
+    match (ip, network) {
+        (IpAddr::V4(ip_v4), IpAddr::V4(net_v4)) => {
+            let ip_bits = u32::from(ip_v4);
+            let net_bits = u32::from(net_v4);
+            let mask = if prefix_len == 0 {
+                0
+            } else {
+                u32::MAX << u32::from(32_u8.saturating_sub(prefix_len))
+            };
+            (ip_bits & mask) == (net_bits & mask)
+        }
+        (IpAddr::V6(ip_v6), IpAddr::V6(net_v6)) => {
+            let ip_bits = u128::from(ip_v6);
+            let net_bits = u128::from(net_v6);
+            let mask = if prefix_len == 0 {
+                0
+            } else {
+                u128::MAX << u32::from(128_u8.saturating_sub(prefix_len))
+            };
+            (ip_bits & mask) == (net_bits & mask)
+        }
+        _ => false,
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 /// Plugin delivery kind used by manifest/bootstrap dependency definitions.
 pub enum PluginKind {
@@ -354,6 +631,9 @@ pub struct RunnerBootstrap {
     /// WASI preopened directory mounts.
     #[serde(default)]
     pub wasi_mounts: Vec<RunnerWasiMount>,
+    /// Allowed outbound rules for `wasi:http` requests.
+    #[serde(default)]
+    pub wasi_http_outbound: Vec<WasiHttpOutboundRule>,
     /// Allowed outbound bindings for this service.
     pub bindings: Vec<ServiceBinding>,
     /// Plugin dependencies available for this app/plugin execution context.
@@ -431,6 +711,9 @@ impl Validate for RunnerBootstrap {
         }
         for mount in &self.wasi_mounts {
             mount.validate()?;
+        }
+        for rule in &self.wasi_http_outbound {
+            rule.validate()?;
         }
         for dependency in &self.plugin_dependencies {
             dependency.validate()?;
@@ -1019,6 +1302,7 @@ mod tests {
             args: vec![],
             envs: BTreeMap::new(),
             wasi_mounts: vec![],
+            wasi_http_outbound: vec![],
             bindings: vec![],
             plugin_dependencies: vec![],
             capabilities: CapabilityPolicy::default(),
@@ -1076,6 +1360,9 @@ mod tests {
                 guest_path: "/assets".to_string(),
                 read_only: true,
             }],
+            wasi_http_outbound: vec![WasiHttpOutboundRule::Host {
+                host: "localhost".to_string(),
+            }],
             bindings: vec![],
             plugin_dependencies: vec![PluginDependency {
                 name: "yieldspace:plugin/example".to_string(),
@@ -1117,6 +1404,13 @@ mod tests {
         assert_eq!(decoded.wasi_mounts.len(), 1);
         assert_eq!(decoded.wasi_mounts[0].guest_path, "/assets");
         assert!(decoded.wasi_mounts[0].read_only);
+        assert_eq!(decoded.wasi_http_outbound.len(), 1);
+        assert_eq!(
+            decoded.wasi_http_outbound[0],
+            WasiHttpOutboundRule::Host {
+                host: "localhost".to_string()
+            }
+        );
         assert_eq!(decoded.plugin_dependencies.len(), 1);
         assert_eq!(
             decoded.plugin_dependencies[0].name,
@@ -1167,6 +1461,72 @@ mod tests {
             .validate()
             .expect_err("bootstrap should reject out-of-range http_worker_queue_capacity");
         assert!(err.to_string().contains("http_worker_queue_capacity"));
+    }
+
+    #[test]
+    fn wasi_http_outbound_rule_parse_normalizes_host_port_and_cidr() {
+        let host_rule =
+            WasiHttpOutboundRule::parse("LOCALHOST").expect("host rule should parse and normalize");
+        assert_eq!(
+            host_rule,
+            WasiHttpOutboundRule::Host {
+                host: "localhost".to_string()
+            }
+        );
+
+        let host_port_rule = WasiHttpOutboundRule::parse("[::1]:443")
+            .expect("host:port rule should parse and normalize");
+        assert_eq!(
+            host_port_rule,
+            WasiHttpOutboundRule::HostPort {
+                host: "::1".to_string(),
+                port: 443
+            }
+        );
+
+        let cidr_rule = WasiHttpOutboundRule::parse("10.1.2.3/8")
+            .expect("CIDR rule should parse and normalize");
+        assert_eq!(
+            cidr_rule,
+            WasiHttpOutboundRule::Cidr {
+                network: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)),
+                prefix_len: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn wasi_http_outbound_rule_parse_rejects_wildcard() {
+        let err = WasiHttpOutboundRule::parse("*.example.com")
+            .expect_err("wildcard rule should be rejected");
+        assert!(err.contains("wildcard"));
+    }
+
+    #[test]
+    fn wasi_http_outbound_rule_matches_authority() {
+        let host = WasiHttpOutboundRule::Host {
+            host: "localhost".to_string(),
+        };
+        assert!(host.matches_authority("LOCALHOST", 80));
+        assert!(!host.matches_authority("example.com", 80));
+
+        let host_port = WasiHttpOutboundRule::HostPort {
+            host: "api.example.com".to_string(),
+            port: 443,
+        };
+        assert!(host_port.matches_authority("API.EXAMPLE.COM", 443));
+        assert!(!host_port.matches_authority("api.example.com", 80));
+
+        let cidr = WasiHttpOutboundRule::Cidr {
+            network: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)),
+            prefix_len: 8,
+        };
+        assert!(cidr.matches_authority("10.1.2.3", 443));
+        assert!(!cidr.matches_authority("11.1.2.3", 443));
+        assert!(
+            !cidr.matches_authority("api.example.com", 443),
+            "CIDR should not match non-IP hostnames"
+        );
     }
 
     #[test]

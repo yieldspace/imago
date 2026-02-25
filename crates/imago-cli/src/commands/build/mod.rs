@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::{BufRead, BufReader, Read},
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc,
@@ -239,6 +239,8 @@ struct ManifestWasiConfig {
     #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(default)]
+    http_outbound: Vec<String>,
+    #[serde(default)]
     mounts: Vec<ManifestWasiMount>,
     #[serde(default)]
     read_only_mounts: Vec<ManifestWasiMount>,
@@ -248,6 +250,7 @@ impl ManifestWasiConfig {
     fn is_empty(&self) -> bool {
         self.args.is_empty()
             && self.env.is_empty()
+            && self.http_outbound.is_empty()
             && self.mounts.is_empty()
             && self.read_only_mounts.is_empty()
     }
@@ -1872,13 +1875,17 @@ fn parse_wasi_section(
         .as_table()
         .ok_or_else(|| anyhow!("wasi must be a table"))?;
     for key in table.keys() {
-        if !matches!(key.as_str(), "args" | "env" | "mounts" | "read_only_mounts") {
+        if !matches!(
+            key.as_str(),
+            "args" | "env" | "http_outbound" | "mounts" | "read_only_mounts"
+        ) {
             return Err(anyhow!("wasi.{key} is not supported"));
         }
     }
 
     let args = parse_wasi_args(table.get("args"))?;
     let env = parse_string_table(table.get("env"), "wasi.env")?;
+    let http_outbound = parse_wasi_http_outbound(table.get("http_outbound"))?;
 
     let allowed_asset_dirs = collect_allowed_wasi_asset_dirs(assets);
     let mounts = parse_wasi_mount_entries(table.get("mounts"), "wasi.mounts", &allowed_asset_dirs)?;
@@ -1892,6 +1899,7 @@ fn parse_wasi_section(
     let wasi = ManifestWasiConfig {
         args,
         env,
+        http_outbound,
         mounts,
         read_only_mounts,
     };
@@ -1922,6 +1930,224 @@ fn parse_wasi_args(value: Option<&TomlValue>) -> anyhow::Result<Vec<String>> {
         args.push(arg);
     }
     Ok(args)
+}
+
+fn parse_wasi_http_outbound(value: Option<&TomlValue>) -> anyhow::Result<Vec<String>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| anyhow!("wasi.http_outbound must be an array of strings"))?;
+    let mut rules = Vec::with_capacity(array.len());
+    let mut seen = BTreeSet::new();
+    for (index, value) in array.iter().enumerate() {
+        let raw = value
+            .as_str()
+            .ok_or_else(|| anyhow!("wasi.http_outbound[{index}] must be a string"))?;
+        let normalized =
+            normalize_wasi_http_outbound_rule(raw, &format!("wasi.http_outbound[{index}]"))?;
+        if seen.insert(normalized.clone()) {
+            rules.push(normalized);
+        }
+    }
+    Ok(rules)
+}
+
+fn normalize_wasi_http_outbound_rule(raw: &str, field_name: &str) -> anyhow::Result<String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err(anyhow!("{field_name} must not be empty"));
+    }
+    if value.contains('*') {
+        return Err(anyhow!("{field_name} wildcard is not supported: {}", value));
+    }
+    if value.chars().any(|ch| ch.is_whitespace()) {
+        return Err(anyhow!(
+            "{field_name} must not contain whitespace: {}",
+            value
+        ));
+    }
+    if value.contains('/') {
+        return normalize_wasi_http_outbound_cidr(value, field_name);
+    }
+
+    normalize_wasi_http_outbound_host_or_host_port(value, field_name)
+}
+
+fn normalize_wasi_http_outbound_cidr(value: &str, field_name: &str) -> anyhow::Result<String> {
+    let (ip_text, prefix_text) = value.split_once('/').ok_or_else(|| {
+        anyhow!(
+            "{field_name} must be hostname, host:port, or CIDR: {}",
+            value
+        )
+    })?;
+    if ip_text.is_empty() || prefix_text.is_empty() || prefix_text.contains('/') {
+        return Err(anyhow!(
+            "{field_name} must be valid CIDR (<ip>/<prefix>): {}",
+            value
+        ));
+    }
+    let ip = ip_text.parse::<IpAddr>().map_err(|err| {
+        anyhow!(
+            "{field_name} CIDR ip is invalid '{}': {err}",
+            ip_text.trim()
+        )
+    })?;
+    let prefix = prefix_text.parse::<u8>().map_err(|err| {
+        anyhow!(
+            "{field_name} CIDR prefix is invalid '{}': {err}",
+            prefix_text.trim()
+        )
+    })?;
+    let max_prefix = match ip {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    };
+    if prefix > max_prefix {
+        return Err(anyhow!(
+            "{field_name} CIDR prefix must be in range 0..={max_prefix}: {}",
+            prefix
+        ));
+    }
+
+    let network_ip = cidr_network_ip(ip, prefix);
+    Ok(format!("{network_ip}/{prefix}"))
+}
+
+fn normalize_wasi_http_outbound_host_or_host_port(
+    value: &str,
+    field_name: &str,
+) -> anyhow::Result<String> {
+    if value.starts_with('[') {
+        let close_index = value
+            .find(']')
+            .ok_or_else(|| anyhow!("{field_name} has invalid bracketed host: {value}"))?;
+        let host_text = &value[1..close_index];
+        let host_ip = host_text.parse::<Ipv6Addr>().map_err(|err| {
+            anyhow!(
+                "{field_name} bracketed host must be valid IPv6: {} ({err})",
+                host_text
+            )
+        })?;
+        let rest = &value[(close_index + 1)..];
+        if rest.is_empty() {
+            return Ok(host_ip.to_string());
+        }
+        let port_text = rest.strip_prefix(':').ok_or_else(|| {
+            anyhow!(
+                "{field_name} bracketed host must use [ipv6]:port format: {}",
+                value
+            )
+        })?;
+        let port = parse_wasi_http_outbound_port(port_text, field_name)?;
+        return Ok(format!("[{host_ip}]:{port}"));
+    }
+
+    if value.matches(':').count() > 1 {
+        let ip = value.parse::<IpAddr>().map_err(|err| {
+            anyhow!(
+                "{field_name} must use [ipv6]:port for IPv6 host: {} ({err})",
+                value
+            )
+        })?;
+        return Ok(ip.to_string());
+    }
+
+    if let Some((host_text, port_text)) = value.rsplit_once(':')
+        && port_text.chars().all(|ch| ch.is_ascii_digit())
+    {
+        let host = normalize_wasi_http_outbound_host(host_text, field_name)?;
+        let port = parse_wasi_http_outbound_port(port_text, field_name)?;
+        if host.contains(':') {
+            return Ok(format!("[{host}]:{port}"));
+        }
+        return Ok(format!("{host}:{port}"));
+    }
+
+    normalize_wasi_http_outbound_host(value, field_name)
+}
+
+fn normalize_wasi_http_outbound_host(raw_host: &str, field_name: &str) -> anyhow::Result<String> {
+    let host = raw_host.trim();
+    if host.is_empty() {
+        return Err(anyhow!("{field_name} host must not be empty"));
+    }
+    if host.contains('*') {
+        return Err(anyhow!(
+            "{field_name} wildcard host is not supported: {}",
+            host
+        ));
+    }
+    if host.contains('/') || host.contains('\\') {
+        return Err(anyhow!(
+            "{field_name} host must not contain path separators: {}",
+            host
+        ));
+    }
+    if host.chars().any(|ch| ch.is_whitespace()) {
+        return Err(anyhow!(
+            "{field_name} host must not contain whitespace: {}",
+            host
+        ));
+    }
+    if host.starts_with('[') || host.ends_with(']') {
+        return Err(anyhow!(
+            "{field_name} host must not contain brackets: {}",
+            host
+        ));
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(ip.to_string());
+    }
+
+    if host.contains(':') {
+        return Err(anyhow!(
+            "{field_name} host with ':' must use [ipv6]:port format: {}",
+            host
+        ));
+    }
+
+    Ok(host.to_ascii_lowercase())
+}
+
+fn parse_wasi_http_outbound_port(port_text: &str, field_name: &str) -> anyhow::Result<u16> {
+    let port = port_text.parse::<u16>().map_err(|err| {
+        anyhow!(
+            "{field_name} port must be in range 1..=65535 (got '{}'): {err}",
+            port_text
+        )
+    })?;
+    if port == 0 {
+        return Err(anyhow!(
+            "{field_name} port must be in range 1..=65535 (got 0)"
+        ));
+    }
+    Ok(port)
+}
+
+fn cidr_network_ip(ip: IpAddr, prefix: u8) -> IpAddr {
+    match ip {
+        IpAddr::V4(v4) => {
+            let bits = u32::from(v4);
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << u32::from(32_u8.saturating_sub(prefix))
+            };
+            IpAddr::V4(Ipv4Addr::from(bits & mask))
+        }
+        IpAddr::V6(v6) => {
+            let bits = u128::from(v6);
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << u32::from(128_u8.saturating_sub(prefix))
+            };
+            IpAddr::V6(Ipv6Addr::from(bits & mask))
+        }
+    }
 }
 
 fn load_dotenv_wasi_env(project_root: &Path) -> anyhow::Result<BTreeMap<String, String>> {
@@ -3514,6 +3740,7 @@ remote = "127.0.0.1:4443"
         let wasi = manifest.wasi.expect("wasi section should be emitted");
         assert_eq!(wasi.args, vec!["--serve".to_string()]);
         assert_eq!(wasi.env.get("WASI_ONLY"), Some(&"1".to_string()));
+        assert!(wasi.http_outbound.is_empty());
         assert_eq!(
             wasi.mounts,
             vec![ManifestWasiMount {
@@ -3528,6 +3755,125 @@ remote = "127.0.0.1:4443"
                 guest_path: "/guest/ro".to_string(),
             }]
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_accepts_wasi_http_outbound_and_normalizes_entries() {
+        let root = new_temp_dir("wasi-http-outbound");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[wasi]
+http_outbound = [
+  "LOCALHOST",
+  "api.example.com:443",
+  "10.1.2.3/8",
+  "api.example.com:443",
+  "127.0.0.1"
+]
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        let wasi = manifest.wasi.expect("wasi section should exist");
+        assert_eq!(
+            wasi.http_outbound,
+            vec![
+                "localhost".to_string(),
+                "api.example.com:443".to_string(),
+                "10.0.0.0/8".to_string(),
+                "127.0.0.1".to_string(),
+            ]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_wasi_http_outbound_non_array() {
+        let root = new_temp_dir("wasi-http-outbound-non-array");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[wasi]
+http_outbound = "localhost"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project("default", &root).expect_err("build should fail");
+        assert!(
+            err.to_string()
+                .contains("wasi.http_outbound must be an array")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_wasi_http_outbound_wildcard() {
+        let root = new_temp_dir("wasi-http-outbound-wildcard");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[wasi]
+http_outbound = ["*.example.com"]
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project("default", &root).expect_err("build should fail");
+        assert!(err.to_string().contains("wildcard is not supported"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_wasi_http_outbound_invalid_cidr() {
+        let root = new_temp_dir("wasi-http-outbound-cidr-invalid");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[wasi]
+http_outbound = ["10.0.0.0/99"]
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let err = build_project("default", &root).expect_err("build should fail");
+        assert!(err.to_string().contains("CIDR prefix must be in range"));
 
         let _ = fs::remove_dir_all(root);
     }

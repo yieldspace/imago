@@ -18,7 +18,11 @@
     "env": {
       "V": "1",
       "S": "x"
-    }
+    },
+    "http_outbound": [
+      "api.example.com:443",
+      "10.0.0.0/8"
+    ]
   },
   "assets": [
     {

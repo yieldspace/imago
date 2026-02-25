@@ -11,10 +11,14 @@ mod runtime_entry;
 
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
-use imagod_ipc::RunnerAppType;
+use imagod_ipc::{RunnerAppType, WasiHttpOutboundRule};
 use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
-use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
+use wasmtime_wasi_http::{
+    WasiHttpCtx, WasiHttpView,
+    bindings::http::types::ErrorCode as WasiHttpErrorCode,
+    types::{HostFutureIncomingResponse, OutgoingRequestConfig, default_send_request},
+};
 
 pub use native_plugins::{NativePlugin, NativePluginRegistry, NativePluginRegistryBuilder};
 pub use runtime_entry::WasmRuntime;
@@ -90,6 +94,7 @@ pub struct WasiState {
     pub(crate) table: ResourceTable,
     pub(crate) wasi: WasiCtx,
     pub(crate) http: WasiHttpCtx,
+    pub(crate) wasi_http_outbound: Vec<WasiHttpOutboundRule>,
     pub(crate) native_plugin_context: NativePluginContext,
 }
 
@@ -116,6 +121,35 @@ impl WasiHttpView for WasiState {
     fn table(&mut self) -> &mut ResourceTable {
         &mut self.table
     }
+
+    fn send_request(
+        &mut self,
+        request: hyper::Request<wasmtime_wasi_http::body::HyperOutgoingBody>,
+        config: OutgoingRequestConfig,
+    ) -> wasmtime_wasi_http::HttpResult<HostFutureIncomingResponse> {
+        let Some(authority) = request.uri().authority() else {
+            return Err(WasiHttpErrorCode::HttpRequestUriInvalid.into());
+        };
+        let request_host = authority.host();
+        let request_port = authority
+            .port_u16()
+            .unwrap_or(if config.use_tls { 443 } else { 80 });
+        if is_http_outbound_allowed(&self.wasi_http_outbound, request_host, request_port) {
+            Ok(default_send_request(request, config))
+        } else {
+            Err(WasiHttpErrorCode::HttpRequestDenied.into())
+        }
+    }
+}
+
+fn is_http_outbound_allowed(
+    rules: &[WasiHttpOutboundRule],
+    request_host: &str,
+    request_port: u16,
+) -> bool {
+    rules
+        .iter()
+        .any(|rule| rule.matches_authority(request_host, request_port))
 }
 
 pub(crate) fn map_runtime_error(message: String) -> ImagodError {
@@ -129,7 +163,11 @@ pub(crate) fn map_runtime_unauthorized_error(message: String) -> ImagodError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Empty};
     use imagod_ipc::RunnerAppType;
+    use std::time::Duration;
+    use wasmtime_wasi_http::bindings::http::types::ErrorCode as WasiHttpErrorCode;
 
     #[test]
     fn native_plugin_app_type_text_is_stable() {
@@ -158,5 +196,90 @@ mod tests {
             std::path::Path::new("/tmp/manager.sock")
         );
         assert_eq!(context.manager_auth_secret(), "secret");
+    }
+
+    #[test]
+    fn http_outbound_matcher_supports_host_host_port_and_cidr() {
+        let rules = vec![
+            WasiHttpOutboundRule::Host {
+                host: "api.example.com".to_string(),
+            },
+            WasiHttpOutboundRule::HostPort {
+                host: "secure.example.com".to_string(),
+                port: 443,
+            },
+            WasiHttpOutboundRule::Cidr {
+                network: "10.0.0.0".parse().expect("valid CIDR network"),
+                prefix_len: 8,
+            },
+        ];
+        assert!(is_http_outbound_allowed(&rules, "API.EXAMPLE.COM", 80));
+        assert!(is_http_outbound_allowed(&rules, "secure.example.com", 443));
+        assert!(!is_http_outbound_allowed(&rules, "secure.example.com", 80));
+        assert!(is_http_outbound_allowed(&rules, "10.1.2.3", 8080));
+        assert!(
+            !is_http_outbound_allowed(&rules, "www.example.net", 8080),
+            "CIDR rule must not match non-IP hosts"
+        );
+    }
+
+    #[test]
+    fn http_outbound_matcher_accepts_default_localhost_entries() {
+        let rules = vec![
+            WasiHttpOutboundRule::Host {
+                host: "localhost".to_string(),
+            },
+            WasiHttpOutboundRule::Host {
+                host: "127.0.0.1".to_string(),
+            },
+            WasiHttpOutboundRule::Host {
+                host: "::1".to_string(),
+            },
+        ];
+        assert!(is_http_outbound_allowed(&rules, "LOCALHOST", 80));
+        assert!(is_http_outbound_allowed(&rules, "127.0.0.1", 80));
+        assert!(is_http_outbound_allowed(&rules, "::1", 80));
+    }
+
+    #[test]
+    fn send_request_rejects_non_allowlisted_authority_with_http_request_denied() {
+        let mut state = WasiState {
+            table: ResourceTable::new(),
+            wasi: WasiCtx::builder().build(),
+            http: WasiHttpCtx::new(),
+            wasi_http_outbound: vec![WasiHttpOutboundRule::Host {
+                host: "localhost".to_string(),
+            }],
+            native_plugin_context: NativePluginContext::new(
+                "svc-test".to_string(),
+                "release-test".to_string(),
+                "runner-test".to_string(),
+                RunnerAppType::Cli,
+                std::path::PathBuf::from("/tmp/manager.sock"),
+                "secret".to_string(),
+            ),
+        };
+        let request = hyper::Request::builder()
+            .uri("http://example.com/")
+            .body(
+                Empty::<Bytes>::new()
+                    .map_err(|never| match never {})
+                    .boxed_unsync(),
+            )
+            .expect("request should be built");
+        let config = OutgoingRequestConfig {
+            use_tls: false,
+            connect_timeout: Duration::from_secs(1),
+            first_byte_timeout: Duration::from_secs(1),
+            between_bytes_timeout: Duration::from_secs(1),
+        };
+
+        let err = state
+            .send_request(request, config)
+            .expect_err("request must be denied by outbound allowlist");
+        assert!(matches!(
+            err.downcast_ref(),
+            Some(code) if matches!(code, WasiHttpErrorCode::HttpRequestDenied)
+        ));
     }
 }

@@ -26,7 +26,7 @@
 | `bindings` | array | service 間呼び出し許可一覧（省略時は `[]`） |
 | `http` | object | `type=http` 時の HTTP 実行設定（`port` 必須） |
 | `socket` | object | `type=socket` 時の socket 実行設定（必須） |
-| `wasi` | object | WASI 実行設定（`args` / `env` / `mounts` / `read_only_mounts`） |
+| `wasi` | object | WASI 実行設定（`args` / `env` / `http_outbound` / `mounts` / `read_only_mounts`） |
 | `dependencies` | array | typed plugin 依存解決結果 |
 | `capabilities` | object | 正規化済み capability ルール（省略時は deny-by-default） |
 | `hash` | object | 全体整合性情報 |
@@ -114,6 +114,9 @@
 - `wasi` は任意の object。
 - `wasi.args` は string 配列。
 - `wasi.env` は `key -> value` がともに string の table。
+- `wasi.http_outbound` は string 配列（`hostname` / `host:port` / `CIDR`）。
+  - wildcard（`*`, `*.example.com`）は不許可。
+  - CIDR は request host が IP literal の場合のみ照合する（DNS 解決結果は照合しない）。
 - `wasi.mounts` は read/write mount 配列。
 - `wasi.read_only_mounts` は read-only mount 配列。
 - `wasi.mounts[]` / `wasi.read_only_mounts[]` の各要素は `asset_dir` と `guest_path` を必須とする。
@@ -153,6 +156,8 @@
 - `capabilities.wasi` は `bool` または table 以外を拒否する。
 - `wasi.args` は string 配列以外を拒否する。
 - `wasi.env` は string 値の table 以外を拒否する。
+- `wasi.http_outbound` は string 配列以外を拒否する。
+- `wasi.http_outbound[]` の要素が空文字、wildcard、不正 `host:port`、不正 CIDR の場合は拒否する。
 - `wasi.mounts[]` / `wasi.read_only_mounts[]` の要素に `asset_dir` または `guest_path` 欠落がある場合は拒否する。
 - `wasi.mounts[]` / `wasi.read_only_mounts[]` の `asset_dir` が `assets` 由来ディレクトリ以外、またはファイル単位の場合は拒否する。
 - `wasi.mounts[]` / `wasi.read_only_mounts[]` の `guest_path` が絶対パスでない場合は拒否する。
@@ -179,8 +184,9 @@
 - CLI は `capabilities.wasi` に `bool` / table の両形式を受理し、`true` は全許可、`false` は空ルールとして正規化する。
 - CLI は `type=http` 時のみ `imago.toml` の `[http].port` / `[http].max_body_bytes` を `manifest.http.port` / `manifest.http.max_body_bytes` へ正規化して出力する。
 - CLI は `type=socket` 時のみ `imago.toml` の `[socket].protocol` / `[socket].direction` / `[socket].listen_addr` / `[socket].listen_port` を `manifest.socket.*` へ正規化して出力する。
-- CLI は `[wasi]` を `manifest.wasi`（`args` / `env` / `mounts` / `read_only_mounts`）へ正規化して出力し、`project_root/.env` のキーを `manifest.wasi.env` へ追加・上書きする（`.env` 優先）。
+- CLI は `[wasi]` を `manifest.wasi`（`args` / `env` / `http_outbound` / `mounts` / `read_only_mounts`）へ正規化して出力し、`project_root/.env` のキーを `manifest.wasi.env` へ追加・上書きする（`.env` 優先）。
 - CLI は `imago.toml` の legacy `[vars]` / `[secrets]` を受理するが、manifest には出力しない。
+- manager は `manifest.wasi.http_outbound` へ `localhost` / `127.0.0.1` / `::1` を常時注入して runner に渡す（重複除去）。
 - runtime は `wasi.mounts[]` を `DirPerms::all` / `FilePerms::all`、`wasi.read_only_mounts[]` を `DirPerms::READ` / `FilePerms::READ` として適用する。
 
 ## 実装反映ノート（Network RPC / 2026-02-18）
