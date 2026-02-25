@@ -1,0 +1,49 @@
+name: dependabot-automerge
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: dependabot-automerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  automerge:
+    name: enable auto-merge for dependabot patch updates
+    if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.state == 'open' }}
+    runs-on: imago-default-runner-set
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable pull request auto-merge (squash)
+        if: ${{ steps.metadata.outputs.update-type == 'version-update:semver-patch' }}
+        uses: peter-evans/enable-pull-request-automerge@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          pull-request-number: ${{ github.event.pull_request.number }}
+          merge-method: squash
+
+      - name: Summarize outcome
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          update_type='${{ steps.metadata.outputs.update-type }}'
+
+          if [[ "$update_type" == "version-update:semver-patch" ]]; then
+            echo "Enabled auto-merge with squash for Dependabot patch PR #${{ github.event.pull_request.number }}."
+          else
+            echo "Skip: non-patch update (update-type=$update_type) for PR #${{ github.event.pull_request.number }}."
+          fi
