@@ -61,7 +61,7 @@ pub(crate) fn parse_wit_descriptor(
                     function.name
                 ));
             }
-            WorldItem::Type(_) => {
+            WorldItem::Type { .. } => {
                 return Err("imported type is not supported; import one interface only".to_string());
             }
         }
