@@ -10,7 +10,6 @@ use imago_protocol::{
     MessageType, ServiceListRequest, ServiceListResponse, ServiceState as ProtocolServiceState,
     ServiceStatusEntry,
 };
-use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
@@ -27,16 +26,6 @@ use crate::{
 };
 
 const PS_HELLO_REQUIRED_FEATURES: [&str; 1] = ["services.list"];
-
-#[derive(Debug, Serialize)]
-struct JsonServiceStateLine<'a> {
-    #[serde(rename = "type")]
-    line_type: &'static str,
-    name: &'a str,
-    state: &'a str,
-    release: &'a str,
-    started_at: &'a str,
-}
 
 pub async fn run(args: PsArgs) -> CommandResult {
     run_with_project_root(args, Path::new(".")).await
@@ -57,19 +46,13 @@ pub(crate) async fn run_with_project_root_and_target_override(
     match run_async_with_target_override(args, project_root, target_override, names_filter).await {
         Ok(()) => {
             ui::command_finish("ps", true, "completed");
-            CommandResult::success("ps", started_at).without_json_summary()
+            CommandResult::success("ps", started_at)
         }
         Err(err) => {
             let summary_message = err.to_string();
             let diagnostic_message = format_command_error("ps", &err);
             ui::command_finish("ps", false, &summary_message);
-            let mut result = CommandResult::failure("ps", started_at, diagnostic_message.clone())
-                .without_json_summary();
-            if ui::current_mode() == ui::UiMode::Json {
-                ui::emit_command_error_json("ps", &diagnostic_message, "ps", "E_UNKNOWN");
-                result.stderr = None;
-            }
-            result
+            CommandResult::failure("ps", started_at, diagnostic_message)
         }
     }
 }
@@ -165,10 +148,7 @@ fn service_state_text(state: ProtocolServiceState) -> &'static str {
 }
 
 fn render_services(services: &[ServiceStatusEntry]) -> anyhow::Result<()> {
-    match ui::current_mode() {
-        ui::UiMode::Json => render_services_json_lines(services),
-        ui::UiMode::Plain | ui::UiMode::Rich => render_services_table(services),
-    }
+    render_services_table(services)
 }
 
 fn render_services_table(services: &[ServiceStatusEntry]) -> anyhow::Result<()> {
@@ -185,25 +165,6 @@ fn render_services_table(services: &[ServiceStatusEntry]) -> anyhow::Result<()> 
             started_at,
         )
         .context("failed to write ps table row")?;
-    }
-    Ok(())
-}
-
-fn render_services_json_lines(services: &[ServiceStatusEntry]) -> anyhow::Result<()> {
-    let mut stdout = io::stdout().lock();
-    for service in services {
-        let started_at = format_service_started_at(service);
-        let line = JsonServiceStateLine {
-            line_type: "service.state",
-            name: &service.name,
-            state: service_state_text(service.state),
-            release: &service.release_hash,
-            started_at: &started_at,
-        };
-        serde_json::to_writer(&mut stdout, &line).context("failed to encode service.state line")?;
-        stdout
-            .write_all(b"\n")
-            .context("failed to write service.state line delimiter")?;
     }
     Ok(())
 }
@@ -262,30 +223,6 @@ mod tests {
     }
 
     #[test]
-    fn json_service_state_line_contains_required_fields() {
-        let service = ServiceStatusEntry {
-            name: "svc-a".to_string(),
-            release_hash: "sha256:abc".to_string(),
-            started_at: "2026-02-21T10:00:00Z".to_string(),
-            state: ProtocolServiceState::Running,
-        };
-
-        let line = JsonServiceStateLine {
-            line_type: "service.state",
-            name: &service.name,
-            state: service_state_text(service.state),
-            release: &service.release_hash,
-            started_at: &service.started_at,
-        };
-        let value = serde_json::to_value(line).expect("line should serialize");
-        assert_eq!(value["type"], "service.state");
-        assert_eq!(value["name"], "svc-a");
-        assert_eq!(value["state"], "running");
-        assert_eq!(value["release"], "sha256:abc");
-        assert_eq!(value["started_at"], "2026-02-21T10:00:00Z");
-    }
-
-    #[test]
     fn ps_hello_required_features_are_fixed() {
         assert_eq!(PS_HELLO_REQUIRED_FEATURES, ["services.list"]);
     }
@@ -324,26 +261,5 @@ mod tests {
 
         assert_eq!(format_service_started_at(&stopped_empty), "-");
         assert_eq!(format_service_started_at(&stopped_zero), "-");
-    }
-
-    #[test]
-    fn json_service_state_line_uses_unknown_started_at_for_stopped() {
-        let service = ServiceStatusEntry {
-            name: "svc-a".to_string(),
-            release_hash: "sha256:abc".to_string(),
-            started_at: "0".to_string(),
-            state: ProtocolServiceState::Stopped,
-        };
-
-        let started_at = format_service_started_at(&service);
-        let line = JsonServiceStateLine {
-            line_type: "service.state",
-            name: &service.name,
-            state: service_state_text(service.state),
-            release: &service.release_hash,
-            started_at: &started_at,
-        };
-        let value = serde_json::to_value(line).expect("line should serialize");
-        assert_eq!(value["started_at"], "-");
     }
 }

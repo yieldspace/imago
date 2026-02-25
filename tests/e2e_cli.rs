@@ -186,7 +186,7 @@ fn assert_command_completed(label: &str, output: &CmdOutput) -> TestResult {
             output.combined
         )),
         None => Err(anyhow::anyhow!(
-            "{label} command.summary was not found: {}",
+            "{label} completion marker was not found: {}",
             output.combined
         )),
     }
@@ -204,7 +204,7 @@ fn assert_unknown_target_failure(label: &str, output: &CmdOutput) -> TestResult 
         output.command_summary_status().as_deref() == Some("failed") || output.has_command_error();
     if !failed_by_contract {
         return Err(anyhow::anyhow!(
-            "{label} did not emit failed summary/command.error: {}",
+            "{label} did not emit failure marker: {}",
             output.combined
         ));
     }

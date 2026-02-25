@@ -36,9 +36,8 @@ Use it when users ask how to run imago without compose.
 
 ## Output Modes
 
-- `--json` emits JSON Lines and overrides rich/plain UI.
-- Use `--json` for automation or machine parsing.
-- Use rich/plain mode for interactive operator sessions.
+- `CI=true` forces plain output.
+- Rich mode is used for interactive operator sessions.
 
 ## Trust Responsibilities
 

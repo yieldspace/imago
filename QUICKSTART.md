@@ -32,9 +32,8 @@ cd imago
 # Interactive (TTY)
 imago init .
 
-# Non-interactive (CI/--json/no TTY): --lang is required
+# Non-interactive (CI/no TTY): --lang is required
 imago init services/example --lang rust
-imago --json init services/example --lang generic
 ```
 
 `imago init` updates `.gitignore` in the project directory and ensures `.imago` and `/build` entries exist.
@@ -60,22 +59,6 @@ In rich/plain output, success includes a log line similar to:
 
 ```text
 local-imagod-app stdout | local-imagod-app started
-```
-
-For JSON mode:
-
-```bash
-cargo run -p imago-cli -- --json logs local-imagod-app --tail 200
-```
-
-```json
-{"type":"log.line","name":"local-imagod-app","stream":"stdout","timestamp":"1739982001","log":"local-imagod-app started"}
-```
-
-Failure emits `command.error`:
-
-```json
-{"type":"command.error","command":"logs","message":"...","stage":"logs","code":"E_UNKNOWN"}
 ```
 
 ## More Examples

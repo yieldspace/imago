@@ -101,7 +101,7 @@ fn assert_deploy_failure_includes_wasm_logs(label: &str, output: &CmdOutput) -> 
         output.command_summary_status().as_deref() == Some("failed") || output.has_command_error();
     if !failed_by_contract {
         return Err(anyhow::anyhow!(
-            "{label} did not emit failed summary/command.error: {}",
+            "{label} did not emit failure marker: {}",
             output.combined
         ));
     }

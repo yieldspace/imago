@@ -35,9 +35,8 @@ Initialize a project:
 # Interactive (TTY)
 imago init .
 
-# Non-interactive (--json/CI/no TTY)
+# Non-interactive (CI/no TTY)
 imago init services/example --lang rust
-imago --json init services/example --lang generic
 ```
 
 Run local example:
@@ -59,27 +58,8 @@ cargo run -p imago-cli -- logs local-imagod-app --tail 200
 
 Mode priority:
 
-1. `--json`
-2. `CI=true`
-3. Rich terminal output
-
-Example success summary (`--json`):
-
-```json
-{"type":"command.summary","command":"deploy","status":"completed","duration_ms":1234,"timestamp":"2026-02-20T12:34:56Z","meta":{},"error":null}
-```
-
-Example log line (`logs --json`):
-
-```json
-{"type":"log.line","name":"local-imagod-app","stream":"stdout","timestamp":"1739982001","log":"local-imagod-app started"}
-```
-
-Example failure line:
-
-```json
-{"type":"command.error","command":"logs","message":"...","stage":"logs","code":"E_UNKNOWN"}
-```
+1. `CI=true` (plain output)
+2. Rich terminal output
 
 ## Configuration References
 
