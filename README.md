@@ -93,6 +93,12 @@ cargo run -p imago-cli -- logs local-imagod-app --tail 200
 
 他の example は [`examples/README.md`](examples/README.md)、詳細手順は [`QUICKSTART.md`](QUICKSTART.md) を参照してください。
 
+## 設定リファレンス
+
+- `imago.toml`: [`docs/imago-configuration.md`](docs/imago-configuration.md)
+- `imagod.toml`: [`docs/imagod-configuration.md`](docs/imagod-configuration.md)
+- 実装契約の正本: [`docs/spec/config.md`](docs/spec/config.md)
+
 ## WITプラグイン
 
 imagoは依存関係として**WIT**を利用し、プラグインを導入できます。
