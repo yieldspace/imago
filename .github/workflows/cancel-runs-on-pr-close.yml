@@ -23,11 +23,21 @@ jobs:
         with:
           script: |
             const { owner, repo } = context.repo;
-            const prNumber = context.payload.pull_request.number;
+            const pullRequest = context.payload.pull_request;
+            const prNumber = pullRequest?.number;
+            const prHeadSha = String(pullRequest?.head?.sha ?? "").trim().toLowerCase();
             const statuses = ["queued", "in_progress"];
-            const runs = [];
             const maxAttempts = 4;
             const baseDelayMs = 1000;
+            const runs = [];
+            let listedRunCount = 0;
+            let cancelOkCount = 0;
+            let cancelFailedCount = 0;
+
+            if (!prNumber) {
+              core.warning("pull_request number is missing; skip cancellation.");
+              return;
+            }
 
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -69,40 +79,81 @@ jobs:
               }
             };
 
-            for (const status of statuses) {
-              const listed = await withRetry(
-                `listWorkflowRunsForRepo(status=${status})`,
-                () =>
-                  github.paginate(
-                    github.rest.actions.listWorkflowRunsForRepo,
-                    {
-                      owner,
-                      repo,
-                      event: "pull_request",
-                      status,
-                      per_page: 100,
-                    },
-                    (response) => {
-                      const items = response?.data?.workflow_runs;
-                      if (!Array.isArray(items)) {
-                        core.warning(
-                          `Unexpected workflow_runs payload for status=${status}; treat as empty list.`
-                        );
-                        return [];
-                      }
-                      return items.filter(Boolean);
-                    }
-                  )
+            const prShas = new Set();
+            if (prHeadSha) {
+              prShas.add(prHeadSha);
+            }
+
+            try {
+              const commits = await withRetry(`pulls.listCommits(pr=${prNumber})`, () =>
+                github.paginate(github.rest.pulls.listCommits, {
+                  owner,
+                  repo,
+                  pull_number: prNumber,
+                  per_page: 100,
+                })
               );
-              runs.push(...listed);
+
+              if (Array.isArray(commits)) {
+                for (const commit of commits) {
+                  const sha = String(commit?.sha ?? "").trim().toLowerCase();
+                  if (sha) {
+                    prShas.add(sha);
+                  }
+                }
+              } else {
+                core.warning("pulls.listCommits returned non-array payload; continue with head sha only.");
+              }
+            } catch (error) {
+              core.warning(
+                `Failed to list PR commits after retries (pr=${prNumber}): ${error?.message ?? error}. Continue with head sha only.`
+              );
+            }
+
+            if (prShas.size === 0) {
+              core.warning(`No PR SHA available for PR #${prNumber}; skip cancellation.`);
+              core.info("summary: sha_count=0 listed_run_count=0 target_count=0 cancel_ok_count=0 cancel_failed_count=0");
+              return;
+            }
+
+            for (const status of statuses) {
+              try {
+                const listed = await withRetry(`listWorkflowRunsForRepo(status=${status})`, () =>
+                  github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+                    owner,
+                    repo,
+                    event: "pull_request",
+                    status,
+                    per_page: 100,
+                  })
+                );
+
+                if (!Array.isArray(listed)) {
+                  core.warning(`Run list for status=${status} was non-array; skip this status.`);
+                  continue;
+                }
+
+                for (const run of listed) {
+                  if (!run || typeof run.id !== "number") {
+                    continue;
+                  }
+
+                  if (typeof run.head_sha !== "string" || run.head_sha.length === 0) {
+                    continue;
+                  }
+
+                  listedRunCount += 1;
+                  runs.push(run);
+                }
+              } catch (error) {
+                core.warning(
+                  `Failed to list runs for status=${status} after retries: ${error?.message ?? error}. Continue.`
+                );
+              }
             }
 
             const uniqueRuns = Array.from(
-              new Map(
-                runs
-                  .filter((run) => run && typeof run.id === "number")
-                  .map((run) => [run.id, run])
-              ).values()
+              new Map(runs.map((run) => [run.id, run])).values()
             );
 
             const targets = uniqueRuns.filter((run) => {
@@ -110,19 +161,32 @@ jobs:
                 return false;
               }
 
-              const prs = Array.isArray(run.pull_requests) ? run.pull_requests : [];
-              return prs.some((pr) => pr && pr.number === prNumber);
+              return prShas.has(String(run.head_sha).toLowerCase());
             });
 
-            core.info(`Found ${targets.length} run(s) to cancel for PR #${prNumber}.`);
+            core.info(
+              `Found ${targets.length} run(s) to cancel for PR #${prNumber} (sha_count=${prShas.size}, listed_run_count=${listedRunCount}).`
+            );
 
             for (const run of targets) {
-              core.info(`Cancel run_id=${run.id} status=${run.status} name=${run.name}`);
-              await withRetry(`cancelWorkflowRun(run_id=${run.id})`, () =>
-                github.rest.actions.cancelWorkflowRun({
-                  owner,
-                  repo,
-                  run_id: run.id,
-                })
-              );
+              core.info(`Cancel run_id=${run.id} status=${run.status} head_sha=${run.head_sha} name=${run.name}`);
+              try {
+                await withRetry(`cancelWorkflowRun(run_id=${run.id})`, () =>
+                  github.rest.actions.cancelWorkflowRun({
+                    owner,
+                    repo,
+                    run_id: run.id,
+                  })
+                );
+                cancelOkCount += 1;
+              } catch (error) {
+                cancelFailedCount += 1;
+                core.warning(
+                  `Failed to cancel run_id=${run.id} after retries: ${error?.message ?? error}. Continue.`
+                );
+              }
             }
+
+            core.info(
+              `summary: sha_count=${prShas.size} listed_run_count=${listedRunCount} target_count=${targets.length} cancel_ok_count=${cancelOkCount} cancel_failed_count=${cancelFailedCount}`
+            );
