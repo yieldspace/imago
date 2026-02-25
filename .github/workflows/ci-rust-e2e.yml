@@ -23,8 +23,9 @@ jobs:
         include:
           - name: ubuntu
             runs_on: imago-default-runner-set
-          - name: macos
-            runs_on: macos-latest
+          # Disabled on 2026-02-25 by request: macOS e2e is temporarily turned off.
+          # - name: macos
+          #   runs_on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
