@@ -20,7 +20,7 @@ cargo run -p imagod -- --config "$(pwd)/imagod.toml"
 
 ```bash
 cd examples/local-imagod-plugin-native-admin
-cargo run -p imago-cli -- deploy --target default
+cargo run -p imago-cli -- deploy --target default --detach
 cargo run -p imago-cli -- logs local-imagod-plugin-native-admin-app --tail 200
 ```
 

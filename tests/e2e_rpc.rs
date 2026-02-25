@@ -71,7 +71,7 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
         &workspace_root,
         &greeter_dir,
         &control_home,
-        &["deploy", "--target", "default"],
+        &["deploy", "--target", "default", "--detach"],
     )?;
     ensure_success("rpc-greeter deploy", &deploy_greeter)?;
     assert_command_completed("rpc-greeter deploy", &deploy_greeter)?;
@@ -83,7 +83,7 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
         &workspace_root,
         &client_dir,
         &control_home,
-        &["deploy", "--target", "default"],
+        &["deploy", "--target", "default", "--detach"],
     )?;
     ensure_success("cli-client deploy", &deploy_client)?;
     assert_command_completed("cli-client deploy", &deploy_client)?;

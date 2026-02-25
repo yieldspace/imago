@@ -68,8 +68,10 @@ fn e2e_cli_deploy_failure_includes_wasm_logs() -> TestResult {
     let mut deploy_failed = None;
     let mut last_output = None;
     for _attempt in 1..=DEPLOY_FAIL_MAX_ATTEMPTS {
-        let output =
-            scenario.run_service_cli(service.name(), &["deploy", "--target", "default"])?;
+        let output = scenario.run_service_cli(
+            service.name(),
+            &["deploy", "--target", "default", "--detach"],
+        )?;
         if !output.success {
             deploy_failed = Some(output);
             break;

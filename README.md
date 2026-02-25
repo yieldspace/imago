@@ -61,7 +61,7 @@ cargo run -p imagod -- --config imagod.toml
 # ターミナル2
 cd examples/local-imagod
 # ターミナル1 で imagod が起動したことを確認してから実行
-cargo run -p imago-cli -- deploy --target default
+cargo run -p imago-cli -- deploy --target default --detach
 cargo run -p imago-cli -- logs local-imagod-app --tail 200
 ```
 

@@ -741,12 +741,7 @@ fn format_structured_bytes(
     let mut segment_start = 0usize;
     while segment_start < bytes.len() {
         if at_line_start {
-            let prefix = format!(
-                "{} {} {} | ",
-                current_timestamp_unix_secs(),
-                name,
-                stream_kind_label(stream_kind)
-            );
+            let prefix = format!("{} {} | ", name, stream_kind_label(stream_kind));
             let prefix_bytes = prefix.as_bytes();
             out.reserve(bytes.len().saturating_add(prefix_bytes.len()));
             out.extend_from_slice(prefix_bytes);
@@ -832,8 +827,8 @@ mod tests {
         let (rendered, at_line_start) =
             format_structured_bytes("svc-a", LogStreamKind::Stdout, b"a\nb\n", true);
         let rendered_text = String::from_utf8_lossy(&rendered);
-        assert!(rendered_text.contains(" svc-a stdout | a\n"));
-        assert!(rendered_text.contains(" svc-a stdout | b\n"));
+        assert!(rendered_text.contains("svc-a stdout | a\n"));
+        assert!(rendered_text.contains("svc-a stdout | b\n"));
         assert!(at_line_start);
     }
 
@@ -860,7 +855,7 @@ mod tests {
 
         let first_rendered = renderable_chunk_bytes(&first, true, &mut prefix_state).into_owned();
         let first_text = String::from_utf8_lossy(&first_rendered);
-        assert!(first_text.contains(" svc-a stdout | hel"));
+        assert!(first_text.contains("svc-a stdout | hel"));
         assert_eq!(
             renderable_chunk_bytes(&second, true, &mut prefix_state).as_ref(),
             b"lo\n"
@@ -890,7 +885,7 @@ mod tests {
 
         let first_rendered = renderable_chunk_bytes(&first, false, &mut prefix_state).into_owned();
         let first_prefix_text = String::from_utf8_lossy(&first_rendered);
-        assert!(first_prefix_text.contains(" svc-a stdout | "));
+        assert!(first_prefix_text.contains("svc-a stdout | "));
         assert!(first_rendered.ends_with(&[0xe3, 0x81]));
         assert_eq!(
             renderable_chunk_bytes(&second, false, &mut prefix_state).as_ref(),

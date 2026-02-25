@@ -71,6 +71,10 @@ pub struct DeployArgs {
     /// Target name defined in imago.toml [target.<name>].
     #[arg(long, value_name = "TARGET_NAME")]
     pub target: Option<String>,
+
+    /// Return immediately after deploy succeeds without following logs.
+    #[arg(short = 'd', long)]
+    pub detach: bool,
 }
 
 /// Start a deployed service.
@@ -83,6 +87,10 @@ pub struct RunArgs {
     /// Target name defined in imago.toml [target.<name>].
     #[arg(long, value_name = "TARGET_NAME")]
     pub target: Option<String>,
+
+    /// Return immediately after run succeeds without following logs.
+    #[arg(short = 'd', long)]
+    pub detach: bool,
 }
 
 /// Stop a running service.
@@ -179,7 +187,7 @@ pub struct ComposeLogsArgs {
     pub name: Option<String>,
 
     /// Keep streaming logs until interrupted.
-    #[arg(long)]
+    #[arg(short = 'f', long)]
     pub follow: bool,
 
     /// Number of recent log lines to fetch before streaming.
@@ -207,7 +215,7 @@ pub struct LogsArgs {
     pub name: Option<String>,
 
     /// Keep streaming logs until interrupted.
-    #[arg(long)]
+    #[arg(short = 'f', long)]
     pub follow: bool,
 
     /// Number of recent log lines to fetch before streaming.
@@ -409,7 +417,10 @@ mod tests {
             cli,
             Cli {
                 json: false,
-                command: Commands::Deploy(DeployArgs { target: None }),
+                command: Commands::Deploy(DeployArgs {
+                    target: None,
+                    detach: false,
+                }),
             }
         );
     }
@@ -432,6 +443,23 @@ mod tests {
                 json: false,
                 command: Commands::Deploy(DeployArgs {
                     target: Some("default".to_string()),
+                    detach: false,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_deploy_with_detach() {
+        let cli = Cli::try_parse_from(["imago", "deploy", "-d"]).expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                json: false,
+                command: Commands::Deploy(DeployArgs {
+                    target: None,
+                    detach: true,
                 }),
             }
         );
@@ -557,6 +585,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_compose_logs_with_short_follow_flag() {
+        let cli = Cli::try_parse_from([
+            "imago",
+            "compose",
+            "logs",
+            "nanokvm-mini",
+            "--target",
+            "nanokvm-cube",
+            "-f",
+        ])
+        .expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                json: false,
+                command: Commands::Compose(ComposeSubcommandArgs {
+                    command: ComposeCommands::Logs(ComposeLogsArgs {
+                        profile: "nanokvm-mini".to_string(),
+                        target: "nanokvm-cube".to_string(),
+                        name: None,
+                        follow: true,
+                        tail: 200,
+                    }),
+                }),
+            }
+        );
+    }
+
+    #[test]
     fn compose_logs_requires_target() {
         let err = Cli::try_parse_from(["imago", "compose", "logs", "nanokvm-mini"])
             .expect_err("parse should fail");
@@ -624,6 +682,7 @@ mod tests {
                 command: Commands::Run(RunArgs {
                     name: None,
                     target: None,
+                    detach: false,
                 }),
             }
         );
@@ -641,6 +700,25 @@ mod tests {
                 command: Commands::Run(RunArgs {
                     name: Some("svc-a".to_string()),
                     target: Some("edge".to_string()),
+                    detach: false,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_run_with_detach() {
+        let cli = Cli::try_parse_from(["imago", "run", "svc-a", "--detach"])
+            .expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                json: false,
+                command: Commands::Run(RunArgs {
+                    name: Some("svc-a".to_string()),
+                    target: None,
+                    detach: true,
                 }),
             }
         );
@@ -739,6 +817,24 @@ mod tests {
                     name: Some("svc-a".to_string()),
                     follow: true,
                     tail: 50,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_logs_with_short_follow_flag() {
+        let cli =
+            Cli::try_parse_from(["imago", "logs", "svc-a", "-f"]).expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                json: false,
+                command: Commands::Logs(LogsArgs {
+                    name: Some("svc-a".to_string()),
+                    follow: true,
+                    tail: 200,
                 }),
             }
         );
@@ -932,6 +1028,7 @@ mod tests {
 
         assert!(help.contains("--target <TARGET_NAME>"));
         assert!(help.contains("Target name defined in imago.toml [target.<name>]"));
+        assert!(help.contains("-d, --detach"));
     }
 
     #[test]
@@ -941,7 +1038,7 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
         let help = err.to_string();
 
-        assert!(help.contains("--follow"));
+        assert!(help.contains("-f, --follow"));
         assert!(help.contains("Keep streaming logs until interrupted"));
         assert!(help.contains("--tail <N>"));
         assert!(help.contains("Number of recent log lines to fetch before streaming"));

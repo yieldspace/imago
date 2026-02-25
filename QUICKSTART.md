@@ -52,7 +52,7 @@ cargo run -p imagod -- --config imagod.toml
 # ターミナル2
 cd examples/local-imagod
 # ターミナル1 で imagod が起動したことを確認してから実行
-cargo run -p imago-cli -- deploy --target default
+cargo run -p imago-cli -- deploy --target default --detach
 cargo run -p imago-cli -- logs local-imagod-app --tail 200
 ```
 
@@ -61,7 +61,7 @@ cargo run -p imago-cli -- logs local-imagod-app --tail 200
 既定（Rich）または `CI=true`（Plain）では、`imago-cli logs` の出力に次の形式で `local-imagod-app started` が含まれていれば成功です。
 
 ```text
-1739982001 local-imagod-app stdout | local-imagod-app started
+local-imagod-app stdout | local-imagod-app started
 ```
 
 `--json` 指定時は JSON Lines で `log.line` が出力されます（`logs --json` は `command.summary` を出力しません）。
