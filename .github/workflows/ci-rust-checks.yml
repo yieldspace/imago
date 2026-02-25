@@ -105,6 +105,9 @@ jobs:
       - name: cargo check
         run: cargo check --workspace
 
+      - name: cargo doc
+        run: cargo doc --workspace --no-deps
+
   checks:
     name: checks
     needs:

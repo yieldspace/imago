@@ -1,4 +1,10 @@
 //! Service process supervisor and manager-side control-plane server.
+//!
+//! Contract highlights:
+//! - one runner process per service with readiness gating
+//! - bounded in-memory log retention for live and retained subscriptions
+//! - manager/runner auth proof and invocation token enforcement
+//! - graceful stop first, forced termination fallback
 
 #[cfg(test)]
 use std::process::Stdio;

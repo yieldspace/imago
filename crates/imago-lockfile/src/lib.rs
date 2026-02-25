@@ -1,3 +1,8 @@
+//! Lockfile types and resolution helpers for dependency/build determinism.
+//!
+//! `imago.lock` is the resolved-state contract used by `imago update`,
+//! `imago build`, and deploy-time artifact assembly.
+
 mod hash;
 mod resolve;
 mod types;

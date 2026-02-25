@@ -1,3 +1,8 @@
+//! Message payload domains and wire-level routing tags.
+//!
+//! Each submodule maps to one protocol concern (artifact transfer, commands,
+//! logs, RPC, and service status). `MessageType` is the canonical route key.
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -28,6 +33,7 @@ pub use service::{ServiceListRequest, ServiceListResponse, ServiceState, Service
 pub type StringMap = BTreeMap<String, String>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Canonical envelope route keys exchanged between `imago-cli` and `imagod`.
 pub enum MessageType {
     #[serde(rename = "hello.negotiate")]
     HelloNegotiate,

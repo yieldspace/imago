@@ -1,4 +1,7 @@
 //! Deploy protocol session handler and message dispatch implementation.
+//!
+//! This layer owns envelope routing, request stream limits, and role-aware
+//! dynamic key checks before delegating to orchestration/control components.
 
 use std::{
     collections::HashSet,

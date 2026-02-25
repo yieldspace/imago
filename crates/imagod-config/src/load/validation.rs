@@ -1,3 +1,8 @@
+//! Semantic validation helpers for decoded daemon configuration.
+//!
+//! This module enforces cross-field and bounds constraints that are not
+//! expressed by TOML type decoding alone.
+
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 

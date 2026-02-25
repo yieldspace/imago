@@ -8,7 +8,7 @@
 
 ## Summary
 - List the key implementation changes.
-- Include any design/spec updates.
+- Include any design, doc, and code-doc updates.
 
 ## Validation
 - List the commands you ran.

@@ -1,14 +1,13 @@
 # imagod.toml reference
 
 This page is a practical reference for `imagod.toml`.
-The normative contract is [`docs/spec/config.md`](./spec/config.md).
+Source of truth is the codebase (module docs, type definitions, validation logic, and tests).
 
 ## Sections
 
 - [The top-level fields section](#the-top-level-fields-section)
 - [The `[tls]` section](#the-tls-section)
 - [The `[runtime]` section](#the-runtime-section)
-- [Unsupported keys](#unsupported-keys)
 
 <a id="the-top-level-fields-section"></a>
 ## The top-level fields section
@@ -402,20 +401,14 @@ boot_restore_enabled = true
 
 - Validation error notes: non-boolean values fail validation.
 
-<a id="unsupported-keys"></a>
-## Unsupported keys
+## Related source modules
 
-The keys below are not supported and are treated as configuration errors.
-
-- `protocol_draft`
-- `tls.server_cert`
-- `tls.client_ca_cert`
-
-`[[dependencies]]` and `[[bindings]]` are `imago.toml`-only sections and are not supported in `imagod.toml`.
-See [`docs/imago-configuration.md`](./imago-configuration.md) for those sections.
-
-## Related specifications
-
-- Normative specification: [`docs/spec/config.md`](./spec/config.md)
-- Deploy/runtime protocol details: [`docs/spec/deploy-protocol.md`](./spec/deploy-protocol.md)
-- Daemon overview: [`docs/spec/imagod.md`](./spec/imagod.md)
+- Config model and defaults:
+  - [`crates/imagod-config/src/lib.rs`](../crates/imagod-config/src/lib.rs)
+- Semantic validation:
+  - [`crates/imagod-config/src/load/validation.rs`](../crates/imagod-config/src/load/validation.rs)
+- Protocol handling and session routing:
+  - [`crates/imagod-server/src/protocol_handler.rs`](../crates/imagod-server/src/protocol_handler.rs)
+- Deploy/runtime orchestration:
+  - [`crates/imagod-control/src/orchestrator.rs`](../crates/imagod-control/src/orchestrator.rs)
+  - [`crates/imagod-control/src/service_supervisor.rs`](../crates/imagod-control/src/service_supervisor.rs)

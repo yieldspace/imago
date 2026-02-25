@@ -1,12 +1,16 @@
+//! Validation trait and reusable validators for protocol payloads.
+
 use std::fmt;
 
 use uuid::Uuid;
 
 pub trait Validate {
+    /// Validates schema-level and semantic constraints for this payload.
     fn validate(&self) -> Result<(), ValidationError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Field-focused validation error used across protocol payloads.
 pub struct ValidationError {
     pub field: &'static str,
     pub message: &'static str,

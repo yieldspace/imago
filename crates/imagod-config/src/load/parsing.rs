@@ -1,3 +1,5 @@
+//! TOML parsing and typed decode helpers for `imagod.toml`.
+
 use std::path::Path;
 
 use imago_protocol::ErrorCode;

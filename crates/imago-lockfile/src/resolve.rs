@@ -1,3 +1,8 @@
+//! Lockfile read/write and resolution logic.
+//!
+//! Resolution verifies that project materialization (`wit/deps`, component cache)
+//! matches lock metadata and returns deterministic records for build/deploy paths.
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,

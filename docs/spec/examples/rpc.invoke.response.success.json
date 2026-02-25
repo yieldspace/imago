@@ -1,9 +1,0 @@
-{
-  "type": "rpc.invoke",
-  "request_id": "00000000-0000-0000-0000-000000000001",
-  "correlation_id": "00000000-0000-0000-0000-000000000002",
-  "payload": {
-    "result_cbor": [245]
-  },
-  "error": null
-}

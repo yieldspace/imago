@@ -1,3 +1,5 @@
+//! Structured protocol error model shared by client and server components.
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -5,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::validate::{Validate, ValidationError, ensure_required_strings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Stable wire-level error code set.
 pub enum ErrorCode {
     #[serde(rename = "E_UNAUTHORIZED")]
     Unauthorized,
@@ -37,6 +40,7 @@ pub enum ErrorCode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Rich error payload embedded in protocol envelopes.
 pub struct StructuredError {
     pub code: ErrorCode,
     pub message: String,

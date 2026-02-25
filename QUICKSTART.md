@@ -1,6 +1,6 @@
 # QUICKSTART
 
-## 前提
+## Prerequisites
 
 - Rust toolchain
 - `wasm32-wasip2` target
@@ -9,62 +9,60 @@
 rustup target add wasm32-wasip2
 ```
 
-- imago CLI
+- Imago CLI
 
 ```bash
-curl -sSf https://imago.yield.space | sh
+curl -sSf https://install.imago.sh | sh
 ```
 
 ```bash
-cargo install imago
+cargo install imago-cli --git https://github.com/yieldspace/imago
 ```
 
-## リポジトリ取得
+## Clone Repository
 
 ```bash
 git clone https://github.com/yieldspace/imago
 cd imago
 ```
 
-## `imago.toml` 初期化
+## Initialize `imago.toml`
 
 ```bash
-# 対話実行（TTY）
+# Interactive (TTY)
 imago init .
 
-# 非対話実行（CI/--json/TTYなし）は --lang が必須
+# Non-interactive (CI/--json/no TTY): --lang is required
 imago init services/example --lang rust
 imago --json init services/example --lang generic
 ```
 
-`imago init` は `imago.toml` 作成先の `.gitignore` を自動整備し、
-`.imago` と `/build` を不足分だけ追記します（`.gitignore` が無ければ作成）。
+`imago init` updates `.gitignore` in the project directory and ensures `.imago` and `/build` entries exist.
 
-## 実行
+## Run Example
 
 ```bash
-# ターミナル1
+# Terminal 1
 cd examples/local-imagod
 cargo run -p imagod -- --config imagod.toml
 ```
 
 ```bash
-# ターミナル2
+# Terminal 2
 cd examples/local-imagod
-# ターミナル1 で imagod が起動したことを確認してから実行
 cargo run -p imago-cli -- deploy --target default --detach
 cargo run -p imago-cli -- logs local-imagod-app --tail 200
 ```
 
-## 成功判定
+## Success Check
 
-既定（Rich）または `CI=true`（Plain）では、`imago-cli logs` の出力に次の形式で `local-imagod-app started` が含まれていれば成功です。
+In rich/plain output, success includes a log line similar to:
 
 ```text
 local-imagod-app stdout | local-imagod-app started
 ```
 
-`--json` 指定時は JSON Lines で `log.line` が出力されます（`logs --json` は `command.summary` を出力しません）。
+For JSON mode:
 
 ```bash
 cargo run -p imago-cli -- --json logs local-imagod-app --tail 200
@@ -74,12 +72,21 @@ cargo run -p imago-cli -- --json logs local-imagod-app --tail 200
 {"type":"log.line","name":"local-imagod-app","stream":"stdout","timestamp":"1739982001","log":"local-imagod-app started"}
 ```
 
-失敗時のみ `command.error` が 1 行出力されます。
+Failure emits `command.error`:
 
 ```json
 {"type":"command.error","command":"logs","message":"...","stage":"logs","code":"E_UNKNOWN"}
 ```
 
-## 他のexamples参照
+## More Examples
 
-他の実行例は [`examples/README.md`](examples/README.md) を参照してください。
+See [examples/README.md](examples/README.md).
+
+## Documentation And Code References
+
+- Documentation index: [docs/README.md](docs/README.md)
+- Generated API docs:
+
+```bash
+cargo doc --workspace --no-deps
+```
