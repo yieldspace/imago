@@ -5,15 +5,16 @@ The normative contract is [`docs/spec/config.md`](./spec/config.md).
 
 ## Sections
 
-- [The `[server]` section](#the-server-section)
+- [The top-level fields section](#the-top-level-fields-section)
 - [The `[tls]` section](#the-tls-section)
 - [The `[runtime]` section](#the-runtime-section)
 - [Unsupported keys](#unsupported-keys)
 
-<a id="the-server-section"></a>
-## The [server] section
+<a id="the-top-level-fields-section"></a>
+## The top-level fields section
 
 This section describes top-level daemon server settings.
+These keys are defined at the root of `imagod.toml`; there is no `[server]` table.
 
 ### The `listen_addr` field
 

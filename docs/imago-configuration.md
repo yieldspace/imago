@@ -5,7 +5,7 @@ The normative contract is [`docs/spec/config.md`](./spec/config.md).
 
 ## Sections
 
-- [The `[package]` section](#the-package-section)
+- [The top-level fields section](#the-top-level-fields-section)
 - [The `[build]` section](#the-build-section)
 - [The `[target.<name>]` section](#the-targetname-section)
 - [The `[[assets]]` section](#the-assets-section)
@@ -18,10 +18,11 @@ The normative contract is [`docs/spec/config.md`](./spec/config.md).
 - [The `[namespace_registries]` section](#the-namespace_registries-section)
 - [Legacy sections](#legacy-sections)
 
-<a id="the-package-section"></a>
-## The [package] section
+<a id="the-top-level-fields-section"></a>
+## The top-level fields section
 
 This section defines service identity and execution model.
+These keys are read from the root TOML table and are not nested under a `[package]` table.
 
 ### The `name` field
 
