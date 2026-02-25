@@ -71,3 +71,9 @@
 
 - [BREAKING] `manifest` の `vars` / `secrets` を削除し、環境変数は `manifest.wasi.env` に統一した。
 - `imago build` は `project_root/.env` を `manifest.wasi.env` へ統合し、同名キーは `.env` を優先する。
+
+## 実装反映ノート（`wasi.http_outbound` / 2026-02-25）
+
+- `imago.toml` の `[wasi].http_outbound` を追加し、`manifest.wasi.http_outbound` へ正規化する。
+- manager は未指定時を含め `localhost` / `127.0.0.1` / `::1` を常時許可として注入する。
+- runtime は `wasi:http` の outbound request だけを allowlist 制御し、raw socket は既存ポリシーを維持する。

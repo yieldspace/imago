@@ -149,6 +149,9 @@
 - `[wasi]` は任意指定とし、`imago build` は `manifest.wasi` に正規化して出力する。
 - `wasi.args` は string 配列を受理する。
 - `wasi.env` は `key -> value` がともに string の table を受理する。
+- `wasi.http_outbound` は string 配列（`hostname` / `host:port` / `CIDR`）を受理する。
+  - wildcard（`*`, `*.example.com`）は受理しない。
+  - CIDR は request host が IP literal の場合のみ照合する（DNS 解決結果への照合はしない）。
 - `.env` の `key=value` は `manifest.wasi.env` へマージし、同名キーは `.env` で上書きする。
 - `[wasi]` 未指定でも `.env` が非空なら `manifest.wasi.env` を出力する。
 - `[[wasi.mounts]]` は read/write mount を定義する。
@@ -223,6 +226,8 @@
 - `type!="socket"` かつ `[socket]` 指定はエラー。
 - `wasi.args` が string 配列以外ならエラー。
 - `wasi.env` が string 値の table 以外ならエラー。
+- `wasi.http_outbound` が string 配列以外ならエラー。
+- `wasi.http_outbound[]` の要素が空文字、wildcard、不正 `host:port`、不正 CIDR の場合はエラー。
 - `.env` が dotenv 記法として解釈できない場合はエラー。
 - `wasi.mounts[]` / `wasi.read_only_mounts[]` の要素に `asset_dir` または `guest_path` 欠落がある場合はエラー。
 - `wasi.mounts[]` / `wasi.read_only_mounts[]` の `asset_dir` が `assets` 由来ディレクトリ以外、またはファイル単位の場合はエラー。
@@ -279,6 +284,8 @@
 - `type="http"` のときのみ `[http].port` / `[http].max_body_bytes` を受理し、`manifest.http.port` / `manifest.http.max_body_bytes` へ反映する。
 - `type="socket"` のときのみ `[socket].protocol` / `[socket].direction` / `[socket].listen_addr` / `[socket].listen_port` を受理し、`manifest.socket.*` へ反映する。
 - `imago build` は `[wasi]` を `manifest.wasi` へ反映し、`wasi.mounts[]` / `wasi.read_only_mounts[]` の `asset_dir` / `guest_path` 制約と重複禁止（同一・跨ぎ）を検証する。
+- `imago build` は `[wasi].http_outbound` を `manifest.wasi.http_outbound` へ正規化し、重複を除去する（順序保持）。
+- manager は `manifest.wasi.http_outbound` に対して `localhost` / `127.0.0.1` / `::1` を常時注入し、`wasi:http` の egress allowlist として適用する。
 - runtime の mount 権限は `wasi.mounts[]` を `DirPerms::all` / `FilePerms::all`、`wasi.read_only_mounts[]` を `DirPerms::READ` / `FilePerms::READ` へ対応付ける。
 - CLI の `name` 検証は `imagod` と同等に `..` を拒否し、path 文字を明示的に弾く。
 - `target.<name>.client_key` は path traversal と不正区切りを拒否し、相対指定を `project_root` 基準の絶対パスへ解決する。

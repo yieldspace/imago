@@ -18,8 +18,8 @@ use imagod_common::ImagodError;
 use imagod_ipc::{
     CapabilityPolicy, PluginDependency, RunnerAppType, RunnerBootstrap, RunnerInboundRequest,
     RunnerInboundResponse, RunnerSocketConfig, RunnerWasiMount, ServiceBinding,
-    compute_manager_auth_proof, dbus_p2p::DbusP2pTransport, issue_invocation_token, now_unix_secs,
-    random_secret_hex,
+    WasiHttpOutboundRule, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
+    issue_invocation_token, now_unix_secs, random_secret_hex,
 };
 #[cfg(test)]
 use imagod_ipc::{ControlRequest, ControlResponse};
@@ -81,6 +81,8 @@ pub struct ServiceLaunch {
     pub envs: BTreeMap<String, String>,
     /// WASI preopened directory mounts.
     pub wasi_mounts: Vec<RunnerWasiMount>,
+    /// Allowed outbound rules for `wasi:http` requests.
+    pub wasi_http_outbound: Vec<WasiHttpOutboundRule>,
     /// Allowed invocation bindings for this service.
     pub bindings: Vec<ServiceBinding>,
     /// Plugin dependencies available to the runtime.
@@ -422,6 +424,7 @@ impl ServiceSupervisor {
                 args: launch.args.clone(),
                 envs: launch.envs.clone(),
                 wasi_mounts: launch.wasi_mounts.clone(),
+                wasi_http_outbound: launch.wasi_http_outbound.clone(),
                 bindings: launch.bindings.clone(),
                 plugin_dependencies: launch.plugin_dependencies.clone(),
                 capabilities: launch.capabilities.clone(),

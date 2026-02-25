@@ -62,6 +62,10 @@ fn main() {
         "IMAGO_E2E_WASM_RPC_CALLEE",
         &wasm_dir.join("e2e_rpc_callee.wasm"),
     );
+    export_artifact(
+        "IMAGO_E2E_WASM_HTTP_OUTBOUND_CLI",
+        &wasm_dir.join("e2e_http_outbound_cli.wasm"),
+    );
 }
 
 fn export_artifact(key: &str, path: &Path) {

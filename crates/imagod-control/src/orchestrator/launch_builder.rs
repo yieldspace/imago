@@ -4,11 +4,13 @@ use std::{
 };
 
 use imagod_common::ImagodError;
-use imagod_ipc::RunnerWasiMount;
+use imagod_ipc::{RunnerWasiMount, WasiHttpOutboundRule};
 
 use super::{
     Manifest, ServiceLaunch, manifest::ManifestValidator, plugin_cache::FilesystemPluginCache,
 };
+
+const DEFAULT_WASI_HTTP_OUTBOUND: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 
 pub(super) async fn build_launch_from_release(
     release_hash: &str,
@@ -32,8 +34,12 @@ pub(super) async fn build_launch_from_release(
         )));
     }
 
-    let ResolvedWasiConfig { args, env, mounts } =
-        resolve_wasi_config(release_dir, manifest, manifest_validator).await?;
+    let ResolvedWasiConfig {
+        args,
+        env,
+        mounts,
+        http_outbound,
+    } = resolve_wasi_config(release_dir, manifest, manifest_validator).await?;
 
     let bindings = manifest_validator.validate_bindings(&manifest.bindings)?;
     let (http_port, http_max_body_bytes) = manifest_validator.validate_http(manifest)?;
@@ -53,6 +59,7 @@ pub(super) async fn build_launch_from_release(
         args,
         envs: env,
         wasi_mounts: mounts,
+        wasi_http_outbound: http_outbound,
         bindings,
         plugin_dependencies,
         capabilities: manifest_validator.normalize_capability_policy(&manifest.capabilities),
@@ -64,6 +71,7 @@ struct ResolvedWasiConfig {
     args: Vec<String>,
     env: BTreeMap<String, String>,
     mounts: Vec<RunnerWasiMount>,
+    http_outbound: Vec<WasiHttpOutboundRule>,
 }
 
 async fn resolve_wasi_config(
@@ -72,7 +80,12 @@ async fn resolve_wasi_config(
     manifest_validator: &impl ManifestValidator,
 ) -> Result<ResolvedWasiConfig, ImagodError> {
     let Some(wasi) = manifest.wasi.as_ref() else {
-        return Ok(ResolvedWasiConfig::default());
+        return Ok(ResolvedWasiConfig {
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            mounts: Vec::new(),
+            http_outbound: resolve_wasi_http_outbound_rules(&[], "manifest.wasi.http_outbound")?,
+        });
     };
 
     let mut args = Vec::with_capacity(wasi.args.len());
@@ -99,8 +112,44 @@ async fn resolve_wasi_config(
     let allowed_asset_dirs = collect_allowed_asset_dirs(manifest, manifest_validator)?;
     let mounts =
         resolve_wasi_mounts(release_dir, wasi, &allowed_asset_dirs, manifest_validator).await?;
+    let http_outbound =
+        resolve_wasi_http_outbound_rules(&wasi.http_outbound, "manifest.wasi.http_outbound")?;
 
-    Ok(ResolvedWasiConfig { args, env, mounts })
+    Ok(ResolvedWasiConfig {
+        args,
+        env,
+        mounts,
+        http_outbound,
+    })
+}
+
+fn resolve_wasi_http_outbound_rules(
+    values: &[String],
+    field_name: &str,
+) -> Result<Vec<WasiHttpOutboundRule>, ImagodError> {
+    let mut rules = Vec::new();
+
+    for default_value in DEFAULT_WASI_HTTP_OUTBOUND {
+        let rule = WasiHttpOutboundRule::parse(default_value).map_err(|err| {
+            super::map_bad_manifest(format!(
+                "failed to build default {field_name} rule '{default_value}': {err}"
+            ))
+        })?;
+        if !rules.contains(&rule) {
+            rules.push(rule);
+        }
+    }
+
+    for (index, raw) in values.iter().enumerate() {
+        let rule = WasiHttpOutboundRule::parse(raw).map_err(|err| {
+            super::map_bad_manifest(format!("{field_name}[{index}] is invalid: {err}"))
+        })?;
+        if !rules.contains(&rule) {
+            rules.push(rule);
+        }
+    }
+
+    Ok(rules)
 }
 
 fn collect_allowed_asset_dirs(

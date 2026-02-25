@@ -149,6 +149,15 @@ port = 8080
 # type: array(string)
 # constraints: each item is non-empty string
 # default: empty
+# key: wasi.http_outbound
+# required: optional
+# type: array(string)
+# constraints:
+# - each item must be hostname / host:port / CIDR
+# - wildcard is not supported ("*", "*.example.com" are rejected)
+# - CIDR is evaluated only when request host is an IP literal
+# - manager always injects localhost defaults: localhost / 127.0.0.1 / ::1
+# default: empty (manager-side default injection applies)
 # key: wasi.env.<KEY>
 # required: optional
 # type: string
@@ -164,6 +173,7 @@ port = 8080
 # - guest_path and asset_dir must be unique across both mounts arrays
 # [wasi]
 # args = ["--serve"]
+# http_outbound = ["localhost", "api.example.com:443", "10.0.0.0/8"]
 # [wasi.env]
 # WASI_ONLY = "1"
 # [[wasi.mounts]]

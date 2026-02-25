@@ -99,6 +99,8 @@ struct ManifestWasiConfig {
     #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(default)]
+    http_outbound: Vec<String>,
+    #[serde(default)]
     mounts: Vec<ManifestWasiMount>,
     #[serde(default)]
     read_only_mounts: Vec<ManifestWasiMount>,
@@ -1360,7 +1362,7 @@ mod tests {
     use imagod_common::ImagodError;
     use imagod_ipc::{
         CapabilityPolicy, PluginComponent, PluginDependency, PluginKind, RunnerSocketConfig,
-        RunnerSocketDirection, RunnerSocketProtocol, RunnerWasiMount,
+        RunnerSocketDirection, RunnerSocketProtocol, RunnerWasiMount, WasiHttpOutboundRule,
     };
     use sha2::{Digest, Sha256};
     use std::{
@@ -2071,6 +2073,7 @@ mod tests {
                 ("SECRET_B".to_string(), "2".to_string()),
                 ("WASI_ONLY".to_string(), "1".to_string()),
             ]),
+            http_outbound: vec!["api.example.com:443".to_string()],
             mounts: vec![ManifestWasiMount {
                 asset_dir: "assets/rw".to_string(),
                 guest_path: "/guest/rw".to_string(),
@@ -2088,6 +2091,7 @@ mod tests {
         assert_eq!(launch.envs.get("VAR_A"), Some(&"1".to_string()));
         assert_eq!(launch.envs.get("SECRET_B"), Some(&"2".to_string()));
         assert_eq!(launch.envs.get("WASI_ONLY"), Some(&"1".to_string()));
+        assert_eq!(launch.wasi_http_outbound.len(), 4);
         assert_eq!(
             launch.wasi_mounts,
             vec![
@@ -2103,6 +2107,58 @@ mod tests {
                 }
             ]
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_injects_default_localhost_http_outbound_when_wasi_is_missing() {
+        let root = temp_dir_path("orchestrator-wasi-default-http-outbound");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let manifest = valid_manifest();
+        let launch = build_launch_from_release(&root, "release-a", &root, &manifest)
+            .await
+            .expect("launch should be built");
+        assert_eq!(
+            launch.wasi_http_outbound,
+            vec![
+                WasiHttpOutboundRule::Host {
+                    host: "localhost".to_string()
+                },
+                WasiHttpOutboundRule::Host {
+                    host: "127.0.0.1".to_string()
+                },
+                WasiHttpOutboundRule::Host {
+                    host: "::1".to_string()
+                }
+            ]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_invalid_wasi_http_outbound_rule() {
+        let root = temp_dir_path("orchestrator-wasi-invalid-http-outbound");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.wasi = Some(ManifestWasiConfig {
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            http_outbound: vec!["*.example.com".to_string()],
+            mounts: Vec::new(),
+            read_only_mounts: Vec::new(),
+        });
+
+        let err = build_launch_from_release(&root, "release-a", &root, &manifest)
+            .await
+            .expect_err("invalid rule should be rejected as bad manifest");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("manifest.wasi.http_outbound[0]"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2128,6 +2184,7 @@ mod tests {
         manifest.wasi = Some(ManifestWasiConfig {
             args: Vec::new(),
             env: BTreeMap::new(),
+            http_outbound: Vec::new(),
             mounts: vec![ManifestWasiMount {
                 asset_dir: "assets/rw".to_string(),
                 guest_path: "/guest/shared".to_string(),

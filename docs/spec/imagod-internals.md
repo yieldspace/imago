@@ -352,10 +352,16 @@ backend 選択:
 
 WASI 設定伝播（manager -> runner -> runtime）:
 
-- manager（`orchestrator`）は release `manifest.json` の `capabilities.wasi` と `wasi`（`args` / `env` / `mounts` / `read_only_mounts`）を `ServiceLaunch` に格納する。
+- manager（`orchestrator`）は release `manifest.json` の `capabilities.wasi` と `wasi`（`args` / `env` / `http_outbound` / `mounts` / `read_only_mounts`）を `ServiceLaunch` に格納する。
+- manager は `wasi.http_outbound` に `localhost` / `127.0.0.1` / `::1` を常時注入し、重複を除去して runner へ伝播する。
 - `service_supervisor.start` は `ServiceLaunch` を `RunnerBootstrap`（stdin CBOR）へ変換して runner へ渡す。
 - runner process は `RunnerBootstrap` の `capabilities.wasi` と `wasi` を runtime request へ引き継ぎ、backend へ渡す。
 - runtime backend は mount 権限を `wasi.mounts` = `DirPerms::all` / `FilePerms::all`、`wasi.read_only_mounts` = `DirPerms::READ` / `FilePerms::READ` で適用する。
+- runtime backend（wasmtime）は `wasi:http/outgoing-handler` の `send_request` で `wasi_http_outbound` を照合し、非許可 authority は `HttpRequestDenied` を返す。
+  - `hostname`: host のみ照合（port 不問、大小無視）。
+  - `host:port`: host+port 完全一致で照合。
+  - `CIDR`: request host が IP literal の場合のみ照合（DNS 解決結果は照合しない）。
+- raw socket (`wasi:sockets`) の制御は従来の `socket_addr_check` ポリシーを維持し、本機能の対象外とする。
 - `wasi.mounts` / `wasi.read_only_mounts` の `guest_path`・`asset_dir` 重複（同一・跨ぎ）は manager 側の起動前検証で拒否し、runner 起動へ進ませない。
 
 設定:
@@ -573,6 +579,14 @@ flowchart TD
 - manager は `manifest.wasi.args` / `manifest.wasi.env` / `manifest.wasi.mounts` / `manifest.wasi.read_only_mounts` を `ServiceLaunch` に保持し、`RunnerBootstrap` 経由で runner へ伝播する。
 - runner は同設定を runtime backend へそのまま引き継ぎ、WASI コンテキスト構築に使用する。
 - mount 権限は `wasi.mounts` を read/write（`DirPerms::all` / `FilePerms::all`）、`wasi.read_only_mounts` を read-only（`DirPerms::READ` / `FilePerms::READ`）へ写像する。
+
+## 実装反映ノート（`wasi.http_outbound` egress 制御 / 2026-02-25）
+
+- `manifest.wasi.http_outbound` を manager/runner/runtime の IPC に追加した。
+- manager は `localhost` / `127.0.0.1` / `::1` を常時注入して `wasi_http_outbound` を構成する（重複除去）。
+- runtime（wasmtime）は `wasi:http/outgoing-handler` の `send_request` で allowlist を照合し、非許可先を `HttpRequestDenied` で拒否する。
+- `CIDR` は request host が IP literal の場合のみ照合し、DNS 解決結果への照合は行わない。
+- raw socket (`wasi:sockets`) の `socket_addr_check` ポリシーは変更しない。
 
 ## 実装参照インデックス
 

@@ -11,7 +11,7 @@ use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{
     CapabilityPolicy, PluginDependency, RunnerAppType, RunnerSocketConfig, RunnerSocketDirection,
-    RunnerWasiMount, ServiceBinding,
+    RunnerWasiMount, ServiceBinding, WasiHttpOutboundRule,
 };
 use imagod_runtime_internal::{
     ComponentRuntime, HttpComponentSupervisor, PluginResolver, RuntimeHttpRequest,
@@ -126,6 +126,7 @@ impl WasmRuntime {
         args: &[String],
         envs: &BTreeMap<String, String>,
         wasi_mounts: &[RunnerWasiMount],
+        wasi_http_outbound: &[WasiHttpOutboundRule],
         socket: Option<&RunnerSocketConfig>,
         native_plugin_context: NativePluginContext,
     ) -> Result<Store<WasiState>, ImagodError> {
@@ -152,6 +153,7 @@ impl WasmRuntime {
             table: wasmtime::component::ResourceTable::new(),
             wasi: builder.build(),
             http: wasmtime_wasi_http::WasiHttpCtx::new(),
+            wasi_http_outbound: wasi_http_outbound.to_vec(),
             native_plugin_context,
         };
         let mut store = Store::new(&self.engine, state);
@@ -203,6 +205,7 @@ impl WasmRuntime {
         args: &[String],
         envs: &BTreeMap<String, String>,
         wasi_mounts: &[RunnerWasiMount],
+        wasi_http_outbound: &[WasiHttpOutboundRule],
         socket: Option<&RunnerSocketConfig>,
         native_plugin_context: NativePluginContext,
         plugin_dependencies: &[PluginDependency],
@@ -220,7 +223,14 @@ impl WasmRuntime {
 
         let mut linker = self.build_component_linker()?;
 
-        let mut store = self.build_store(args, envs, wasi_mounts, socket, native_plugin_context)?;
+        let mut store = self.build_store(
+            args,
+            envs,
+            wasi_mounts,
+            wasi_http_outbound,
+            socket,
+            native_plugin_context,
+        )?;
         let available_plugins = instantiate_plugin_dependencies(
             self.plugin_resolver.as_ref(),
             self.capability_checker.as_ref(),
@@ -286,6 +296,7 @@ impl WasmRuntime {
         args: &[String],
         envs: &BTreeMap<String, String>,
         wasi_mounts: &[RunnerWasiMount],
+        wasi_http_outbound: &[WasiHttpOutboundRule],
         native_plugin_context: NativePluginContext,
         plugin_dependencies: &[PluginDependency],
         capabilities: &CapabilityPolicy,
@@ -305,7 +316,14 @@ impl WasmRuntime {
 
         let mut linker = self.build_component_linker()?;
 
-        let mut store = self.build_store(args, envs, wasi_mounts, None, native_plugin_context)?;
+        let mut store = self.build_store(
+            args,
+            envs,
+            wasi_mounts,
+            wasi_http_outbound,
+            None,
+            native_plugin_context,
+        )?;
         let available_plugins = instantiate_plugin_dependencies(
             self.plugin_resolver.as_ref(),
             self.capability_checker.as_ref(),
@@ -394,6 +412,7 @@ impl WasmRuntime {
         args: &[String],
         envs: &BTreeMap<String, String>,
         wasi_mounts: &[RunnerWasiMount],
+        wasi_http_outbound: &[WasiHttpOutboundRule],
         native_plugin_context: NativePluginContext,
         plugin_dependencies: &[PluginDependency],
         capabilities: &CapabilityPolicy,
@@ -411,7 +430,14 @@ impl WasmRuntime {
 
         let mut linker = self.build_component_linker()?;
 
-        let mut store = self.build_store(args, envs, wasi_mounts, None, native_plugin_context)?;
+        let mut store = self.build_store(
+            args,
+            envs,
+            wasi_mounts,
+            wasi_http_outbound,
+            None,
+            native_plugin_context,
+        )?;
         let available_plugins = instantiate_plugin_dependencies(
             self.plugin_resolver.as_ref(),
             self.capability_checker.as_ref(),
@@ -518,6 +544,7 @@ impl WasmRuntime {
             args,
             envs,
             wasi_mounts,
+            wasi_http_outbound,
             plugin_dependencies,
             capabilities,
             bindings,
@@ -548,6 +575,7 @@ impl WasmRuntime {
             &args,
             &envs,
             &wasi_mounts,
+            &wasi_http_outbound,
             native_plugin_context,
             &plugin_dependencies,
             &capabilities,
@@ -646,6 +674,7 @@ impl ComponentRuntime for WasmRuntime {
             args,
             envs,
             wasi_mounts,
+            wasi_http_outbound,
             socket,
             plugin_dependencies,
             capabilities,
@@ -679,6 +708,7 @@ impl ComponentRuntime for WasmRuntime {
                     &args,
                     &envs,
                     &wasi_mounts,
+                    &wasi_http_outbound,
                     None,
                     native_plugin_context.clone(),
                     &plugin_dependencies,
@@ -708,6 +738,7 @@ impl ComponentRuntime for WasmRuntime {
                     &args,
                     &envs,
                     &wasi_mounts,
+                    &wasi_http_outbound,
                     native_plugin_context.clone(),
                     &plugin_dependencies,
                     &capabilities,
@@ -731,6 +762,7 @@ impl ComponentRuntime for WasmRuntime {
                     &args,
                     &envs,
                     &wasi_mounts,
+                    &wasi_http_outbound,
                     Some(socket),
                     native_plugin_context,
                     &plugin_dependencies,
@@ -986,6 +1018,7 @@ interface types {
                 args: Vec::new(),
                 envs: BTreeMap::new(),
                 wasi_mounts: Vec::new(),
+                wasi_http_outbound: Vec::new(),
                 socket: None,
                 plugin_dependencies: Vec::new(),
                 capabilities: CapabilityPolicy::default(),
@@ -1022,6 +1055,7 @@ interface types {
                 args: Vec::new(),
                 envs: BTreeMap::new(),
                 wasi_mounts: Vec::new(),
+                wasi_http_outbound: Vec::new(),
                 socket: Some(sample_socket_config()),
                 plugin_dependencies: Vec::new(),
                 capabilities: CapabilityPolicy::default(),
@@ -1058,6 +1092,7 @@ interface types {
                 args: Vec::new(),
                 envs: BTreeMap::new(),
                 wasi_mounts: Vec::new(),
+                wasi_http_outbound: Vec::new(),
                 socket: None,
                 plugin_dependencies: Vec::new(),
                 capabilities: CapabilityPolicy::default(),
@@ -1101,6 +1136,7 @@ interface types {
                 args: Vec::new(),
                 envs: BTreeMap::new(),
                 wasi_mounts: Vec::new(),
+                wasi_http_outbound: Vec::new(),
                 socket: None,
                 plugin_dependencies: Vec::new(),
                 capabilities: allow_all_wasi_capabilities(),
@@ -1139,6 +1175,7 @@ interface types {
                 args: Vec::new(),
                 envs: BTreeMap::new(),
                 wasi_mounts: Vec::new(),
+                wasi_http_outbound: Vec::new(),
                 socket: None,
                 plugin_dependencies: Vec::new(),
                 capabilities: CapabilityPolicy::default(),
@@ -1168,6 +1205,7 @@ interface types {
             args: Vec::new(),
             envs: BTreeMap::new(),
             wasi_mounts: Vec::new(),
+            wasi_http_outbound: Vec::new(),
             socket: None,
             plugin_dependencies: Vec::new(),
             capabilities: CapabilityPolicy::default(),
@@ -1218,6 +1256,7 @@ interface types {
                 args: Vec::new(),
                 envs: BTreeMap::new(),
                 wasi_mounts: Vec::new(),
+                wasi_http_outbound: Vec::new(),
                 plugin_dependencies: Vec::new(),
                 capabilities: allow_all_wasi_capabilities(),
                 bindings: Vec::new(),
@@ -1264,6 +1303,7 @@ interface types {
                 args: Vec::new(),
                 envs: BTreeMap::new(),
                 wasi_mounts: Vec::new(),
+                wasi_http_outbound: Vec::new(),
                 socket: None,
                 plugin_dependencies: Vec::new(),
                 capabilities: CapabilityPolicy::default(),
