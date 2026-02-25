@@ -138,3 +138,11 @@ CLI は起動時に 1 つの出力モードを選ぶ。
 
 - `ps` / `compose ps` は `started_at` 表示を `chrono` ベースのローカル時刻変換へ更新した。
 - `state=stopped` で `started_at` が空文字または `"0"` の場合、table/JSON ともに `"-"` を表示する契約を追加した。
+
+## 12. 実装反映ノート（run/deploy 自動 logs follow + detach / 2026-02-25）
+
+- `run` / `deploy` は成功時に対象サービスの `logs --follow` を既定で開始する。`-d` / `--detach` 指定時は自動追従を行わず即時終了する。
+- 自動追従で `logs` が失敗しても、`run` / `deploy` 自体は成功扱いを維持し、`Rich` / `Plain` では警告のみ表示する。
+- `logs` / `compose logs` は `-f` を `--follow` の短縮オプションとして受理する。
+- Textログの prefix から timestamp を削除し、`<service> <stream> | <log>` 形式へ統一した。
+- `logs --json` の `log.line.timestamp` は従来どおり維持する。

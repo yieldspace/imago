@@ -61,7 +61,7 @@ cargo run -p imagod -- --config imagod.toml
 # ターミナル2
 cd examples/local-imagod
 # ターミナル1 で imagod が起動したことを確認してから実行
-cargo run -p imago-cli -- deploy --target default
+cargo run -p imago-cli -- deploy --target default --detach
 cargo run -p imago-cli -- logs local-imagod-app --tail 200
 ```
 
@@ -92,6 +92,12 @@ cargo run -p imago-cli -- logs local-imagod-app --tail 200
 ```
 
 他の example は [`examples/README.md`](examples/README.md)、詳細手順は [`QUICKSTART.md`](QUICKSTART.md) を参照してください。
+
+## 設定リファレンス
+
+- `imago.toml`: [`docs/imago-configuration.md`](docs/imago-configuration.md)
+- `imagod.toml`: [`docs/imagod-configuration.md`](docs/imagod-configuration.md)
+- 実装契約の正本: [`docs/spec/config.md`](docs/spec/config.md)
 
 ## WITプラグイン
 

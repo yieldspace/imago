@@ -193,7 +193,10 @@ mod tests {
         let result = dispatch_with_project_root_async(
             Cli {
                 json: false,
-                command: Commands::Deploy(DeployArgs { target: None }),
+                command: Commands::Deploy(DeployArgs {
+                    target: None,
+                    detach: false,
+                }),
             },
             &root,
         )
@@ -213,6 +216,7 @@ mod tests {
                 command: Commands::Run(RunArgs {
                     name: None,
                     target: None,
+                    detach: false,
                 }),
             },
             &root,

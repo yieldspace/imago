@@ -174,7 +174,7 @@ impl Scenario {
     pub fn deploy_service(&self, service_name: &str, target: &str) -> TestResult<CmdOutput> {
         let service = self.service(service_name)?;
         ensure_target_exists(service, target)?;
-        let args = ["deploy", "--target", target];
+        let args = ["deploy", "--target", target, "--detach"];
         let output = self.run_service_cli(service_name, &args)?;
         output.ensure_success(&args)?;
         Ok(output)

@@ -40,9 +40,9 @@ use uuid::Uuid;
 use web_transport_quinn::{Session, proto::ConnectRequest};
 
 use crate::{
-    cli::DeployArgs,
+    cli::{DeployArgs, LogsArgs},
     commands::{
-        CommandResult, build, command_common, error_diagnostics,
+        CommandResult, build, command_common, error_diagnostics, logs,
         shared::dependency::{DependencyResolver, StandardDependencyResolver},
         ui,
     },
@@ -80,6 +80,7 @@ const IMAGO_DIR_NAME: &str = ".imago";
 const KNOWN_HOSTS_FILE_NAME: &str = "known_hosts";
 const DETAIL_WASM_STDOUT: &str = "wasm.stdout";
 const DETAIL_WASM_STDERR: &str = "wasm.stderr";
+const AUTO_FOLLOW_TAIL_LINES: u32 = 200;
 #[cfg(unix)]
 const IMAGO_DIR_MODE: u32 = 0o700;
 #[cfg(unix)]
@@ -434,14 +435,12 @@ async fn run_async_with_target_override(
     project_root: &Path,
     target_override: Option<&build::TargetConfig>,
 ) -> anyhow::Result<()> {
+    let DeployArgs { target, detach } = args;
     let dependency_resolver = StandardDependencyResolver;
     let target_connector = network::QuinnTargetConnector;
     let artifact_bundler = artifact::TarArtifactBundler;
 
-    let target_name = args
-        .target
-        .clone()
-        .unwrap_or_else(|| build::default_target_name().to_string());
+    let target_name = target.unwrap_or_else(|| build::default_target_name().to_string());
     let service_name =
         build::load_service_name(project_root).unwrap_or_else(|_| "<unknown>".to_string());
     let context_target = match target_override {
@@ -491,6 +490,7 @@ async fn run_async_with_target_override(
     let dependency_component_sources = dependency_resolver
         .resolve_dependency_component_sources(project_root, &manifest.dependencies)?;
 
+    let target_config_for_logs = build_output.target.clone();
     let target = build_output
         .target
         .require_deploy_credentials()
@@ -596,7 +596,13 @@ async fn run_async_with_target_override(
     let terminal =
         terminal.ok_or_else(|| anyhow!("command.event terminal event was not received"))?;
     match terminal.event_type {
-        CommandEventType::Succeeded => Ok(()),
+        CommandEventType::Succeeded => {
+            if !detach {
+                follow_logs_after_deploy(project_root, &target_config_for_logs, &manifest.name)
+                    .await;
+            }
+            Ok(())
+        }
         CommandEventType::Failed => {
             if let Some(err) = terminal.error {
                 Err(anyhow!(
@@ -609,6 +615,32 @@ async fn run_async_with_target_override(
         }
         CommandEventType::Canceled => Err(anyhow!("deploy was canceled")),
         _ => Err(anyhow!("unexpected terminal event")),
+    }
+}
+
+async fn follow_logs_after_deploy(
+    project_root: &Path,
+    target_config: &build::TargetConfig,
+    service_name: &str,
+) {
+    let logs_result = logs::run_with_project_root_and_target_override(
+        LogsArgs {
+            name: Some(service_name.to_string()),
+            follow: true,
+            tail: AUTO_FOLLOW_TAIL_LINES,
+        },
+        project_root,
+        Some(target_config),
+    )
+    .await;
+    if logs_result.exit_code != 0 {
+        let detail = logs_result
+            .stderr
+            .unwrap_or_else(|| format!("exit code {}", logs_result.exit_code));
+        ui::command_warn(
+            "deploy",
+            &format!("logs --follow failed after deploy succeeded: {detail}"),
+        );
     }
 }
 
@@ -2338,7 +2370,14 @@ mod tests {
             std::env::temp_dir().join(format!("imago-cli-deploy-run-fail-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).expect("temp dir should be created");
 
-        let result = run_with_project_root(DeployArgs { target: None }, &root).await;
+        let result = run_with_project_root(
+            DeployArgs {
+                target: None,
+                detach: false,
+            },
+            &root,
+        )
+        .await;
 
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.expect("stderr should be present");

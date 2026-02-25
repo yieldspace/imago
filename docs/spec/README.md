@@ -13,6 +13,8 @@
 - デプロイ通信仕様: [`deploy-protocol.md`](./deploy-protocol.md)
 - 観測・状態照会仕様: [`observability.md`](./observability.md)
 - CLI 出力仕様: [`cli-output.md`](./cli-output.md)
+- 実用設定リファレンス (`imago.toml`): [`../imago-configuration.md`](../imago-configuration.md)
+- 実用設定リファレンス (`imagod.toml`): [`../imagod-configuration.md`](../imagod-configuration.md)
 
 ### Layer 2: サブシステム概要
 - `imagod` 概要: [`imagod.md`](./imagod.md)

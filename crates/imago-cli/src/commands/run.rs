@@ -5,16 +5,18 @@ use imago_protocol::{CommandPayload, CommandType, RunCommandPayload};
 use uuid::Uuid;
 
 use crate::{
-    cli::RunArgs,
+    cli::{LogsArgs, RunArgs},
     commands::{
         CommandResult, build,
         command_common::{
             format_local_context_line, format_peer_context_line, handle_terminal_event,
             negotiate_hello, resolve_service_name,
         },
-        deploy, error_diagnostics, ui,
+        deploy, error_diagnostics, logs, ui,
     },
 };
+
+const AUTO_FOLLOW_TAIL_LINES: u32 = 200;
 
 pub async fn run(args: RunArgs) -> CommandResult {
     run_with_project_root(args, Path::new(".")).await
@@ -38,16 +40,19 @@ pub(crate) async fn run_with_project_root(args: RunArgs, project_root: &Path) ->
 }
 
 async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<()> {
+    let RunArgs {
+        name,
+        target,
+        detach,
+    } = args;
     ui::command_stage("run", "load-config", "loading target configuration");
-    let target_name = args
-        .target
-        .clone()
-        .unwrap_or_else(|| build::default_target_name().to_string());
-    let target = build::load_target_config(&target_name, project_root)
-        .context("failed to load target configuration")?
+    let target_name = target.unwrap_or_else(|| build::default_target_name().to_string());
+    let target_config = build::load_target_config(&target_name, project_root)
+        .context("failed to load target configuration")?;
+    let target = target_config
         .require_deploy_credentials()
         .context("target settings are invalid for run")?;
-    let service_name = resolve_service_name(args.name.as_deref(), project_root)
+    let service_name = resolve_service_name(name.as_deref(), project_root)
         .context("failed to resolve service name for run")?;
     ui::command_info(
         "run",
@@ -81,7 +86,9 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<()> {
         correlation_id,
         Uuid::new_v4(),
         CommandType::Run,
-        CommandPayload::Run(RunCommandPayload { name: service_name }),
+        CommandPayload::Run(RunCommandPayload {
+            name: service_name.clone(),
+        }),
     )?;
     let responses = deploy::request_command_start_events_with_timeout(
         &connected.session,
@@ -89,7 +96,37 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<()> {
         command_stream_timeout,
     )
     .await?;
-    handle_terminal_event("run", responses)
+    handle_terminal_event("run", responses)?;
+    if !detach {
+        follow_logs_after_run(project_root, &target_config, &service_name).await;
+    }
+    Ok(())
+}
+
+async fn follow_logs_after_run(
+    project_root: &Path,
+    target_config: &build::TargetConfig,
+    service_name: &str,
+) {
+    let logs_result = logs::run_with_project_root_and_target_override(
+        LogsArgs {
+            name: Some(service_name.to_string()),
+            follow: true,
+            tail: AUTO_FOLLOW_TAIL_LINES,
+        },
+        project_root,
+        Some(target_config),
+    )
+    .await;
+    if logs_result.exit_code != 0 {
+        let detail = logs_result
+            .stderr
+            .unwrap_or_else(|| format!("exit code {}", logs_result.exit_code));
+        ui::command_warn(
+            "run",
+            &format!("logs --follow failed after run succeeded: {detail}"),
+        );
+    }
 }
 
 #[cfg(test)]
