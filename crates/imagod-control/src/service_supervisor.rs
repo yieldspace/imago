@@ -1635,8 +1635,8 @@ mod tests {
             &log_buffers,
         )
         .await;
-        assert!(disabled.details.get(DETAIL_WASM_STDOUT).is_none());
-        assert!(disabled.details.get(DETAIL_WASM_STDERR).is_none());
+        assert!(!disabled.details.contains_key(DETAIL_WASM_STDOUT));
+        assert!(!disabled.details.contains_key(DETAIL_WASM_STDERR));
     }
 
     #[tokio::test]
