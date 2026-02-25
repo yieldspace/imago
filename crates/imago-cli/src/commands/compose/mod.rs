@@ -439,6 +439,7 @@ async fn run_compose_deploy(args: ComposeDeployArgs, project_root: &Path) -> any
         let deploy_result = deploy::run_with_project_root_and_target_override(
             DeployArgs {
                 target: Some(args.target.clone()),
+                detach: true,
             },
             &service_project_root,
             Some(&target),
