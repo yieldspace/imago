@@ -35,16 +35,21 @@ impl CmdOutput {
     }
 
     pub fn command_summary_error(&self) -> Option<String> {
-        self.command_error_messages().into_iter().last()
+        self.plain_command_error_messages().into_iter().last()
     }
 
     pub fn has_command_error(&self) -> bool {
-        !self.command_error_messages().is_empty()
+        !self.plain_command_error_messages().is_empty()
+    }
+
+    fn plain_command_error_messages(&self) -> Vec<String> {
+        let mut messages = collect_plain_error_messages(&self.stdout);
+        messages.extend(collect_plain_error_messages(&self.stderr));
+        messages
     }
 
     pub fn command_error_messages(&self) -> Vec<String> {
-        let mut messages = collect_plain_error_messages(&self.stdout);
-        messages.extend(collect_plain_error_messages(&self.stderr));
+        let mut messages = self.plain_command_error_messages();
         if messages.is_empty() {
             let fallback = self.stderr.trim();
             if !fallback.is_empty() {
