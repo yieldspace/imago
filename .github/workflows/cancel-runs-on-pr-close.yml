@@ -26,25 +26,73 @@ jobs:
             const prNumber = context.payload.pull_request.number;
             const statuses = ["queued", "in_progress"];
             const runs = [];
+            const maxAttempts = 4;
+            const baseDelayMs = 1000;
+
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+            const isRetryableError = (error) => {
+              const status = typeof error?.status === "number" ? error.status : null;
+              const message = String(error?.message ?? "");
+
+              if (status === 429) {
+                return true;
+              }
+
+              if (status !== null && status >= 500) {
+                return true;
+              }
+
+              return /(fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|EAI_AGAIN|ENOTFOUND)/i.test(
+                message
+              );
+            };
+
+            const withRetry = async (label, fn) => {
+              let attempt = 1;
+              while (true) {
+                try {
+                  return await fn();
+                } catch (error) {
+                  const retryable = isRetryableError(error);
+                  if (!retryable || attempt >= maxAttempts) {
+                    throw error;
+                  }
+
+                  const delayMs = baseDelayMs * attempt;
+                  core.warning(
+                    `${label} failed (attempt ${attempt}/${maxAttempts}, status=${error?.status ?? "unknown"}): ${error?.message ?? error}. retry in ${delayMs}ms`
+                  );
+                  await sleep(delayMs);
+                  attempt += 1;
+                }
+              }
+            };
 
             for (const status of statuses) {
-              const listed = await github.paginate(
-                github.rest.actions.listWorkflowRunsForRepo,
-                {
-                  owner,
-                  repo,
-                  event: "pull_request",
-                  status,
-                  per_page: 100,
-                },
-                (response) => {
-                  const items = response?.data?.workflow_runs;
-                  if (!Array.isArray(items)) {
-                    core.warning(`Unexpected workflow_runs payload for status=${status}; treat as empty list.`);
-                    return [];
-                  }
-                  return items.filter(Boolean);
-                }
+              const listed = await withRetry(
+                `listWorkflowRunsForRepo(status=${status})`,
+                () =>
+                  github.paginate(
+                    github.rest.actions.listWorkflowRunsForRepo,
+                    {
+                      owner,
+                      repo,
+                      event: "pull_request",
+                      status,
+                      per_page: 100,
+                    },
+                    (response) => {
+                      const items = response?.data?.workflow_runs;
+                      if (!Array.isArray(items)) {
+                        core.warning(
+                          `Unexpected workflow_runs payload for status=${status}; treat as empty list.`
+                        );
+                        return [];
+                      }
+                      return items.filter(Boolean);
+                    }
+                  )
               );
               runs.push(...listed);
             }
@@ -70,9 +118,11 @@ jobs:
 
             for (const run of targets) {
               core.info(`Cancel run_id=${run.id} status=${run.status} name=${run.name}`);
-              await github.rest.actions.cancelWorkflowRun({
-                owner,
-                repo,
-                run_id: run.id,
-              });
+              await withRetry(`cancelWorkflowRun(run_id=${run.id})`, () =>
+                github.rest.actions.cancelWorkflowRun({
+                  owner,
+                  repo,
+                  run_id: run.id,
+                })
+              );
             }
