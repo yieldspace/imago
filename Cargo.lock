@@ -2266,7 +2266,7 @@ dependencies = [
  "wasm-pkg-client",
  "wasm-pkg-common",
  "web-transport-quinn",
- "wit-component 0.244.0",
+ "wit-component 0.245.1",
  "wit-parser 0.244.0",
 ]
 
@@ -2494,7 +2494,7 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi",
  "wasmtime-wasi-http",
- "wit-component 0.244.0",
+ "wit-component 0.245.1",
  "wit-parser 0.244.0",
 ]
 
@@ -6977,7 +6977,6 @@ dependencies = [
  "wasm-encoder 0.244.0",
  "wasm-metadata 0.244.0",
  "wasmparser 0.244.0",
- "wat",
  "wit-parser 0.244.0",
 ]
 
@@ -6997,6 +6996,7 @@ dependencies = [
  "wasm-encoder 0.245.1",
  "wasm-metadata 0.245.1",
  "wasmparser 0.245.1",
+ "wat",
  "wit-parser 0.245.1",
 ]
 
