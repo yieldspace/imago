@@ -45,7 +45,7 @@ publish = false
 
 [workspace.dependencies]
 async-trait = "0.1.89"
-anyhow = "1.0.101"
+anyhow = "1.0.102"
 base64 = "0.22.1"
 bytes = "1.11.1"
 ciborium = "0.2.2"
