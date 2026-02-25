@@ -131,3 +131,30 @@ fn assert_deploy_failure_includes_wasm_logs(label: &str, output: &CmdOutput) -> 
 
     Ok(())
 }
+
+#[test]
+fn has_command_error_requires_error_marker() {
+    let output = CmdOutput {
+        status: "exit status: 1".to_string(),
+        status_code: Some(1),
+        success: false,
+        stdout: String::new(),
+        stderr: "deployment failed without marker".to_string(),
+        combined: "deployment failed without marker".to_string(),
+    };
+
+    assert!(
+        !output.has_command_error(),
+        "non-empty stderr without [error] marker must not set command error contract"
+    );
+    assert_eq!(
+        output.command_summary_error(),
+        None,
+        "summary error must only come from [error] markers"
+    );
+    assert_eq!(
+        output.command_error_messages(),
+        vec!["deployment failed without marker".to_string()],
+        "diagnostic fallback should remain available in command_error_messages"
+    );
+}
