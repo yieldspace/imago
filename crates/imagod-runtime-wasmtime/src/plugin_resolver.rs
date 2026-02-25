@@ -445,7 +445,6 @@ pub(crate) fn register_plugin_import_shims(
                                 )
                                 .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
                                 callee.call_async(&mut store, params, results).await?;
-                                callee.post_return_async(&mut store).await?;
                                 Ok(())
                             })
                         })
@@ -499,7 +498,6 @@ pub(crate) fn register_plugin_import_shims(
                                     move |mut store, _ty, params, results| {
                                         Box::new(async move {
                                             callee.call_async(&mut store, params, results).await?;
-                                            callee.post_return_async(&mut store).await?;
                                             Ok(())
                                         })
                                     },
