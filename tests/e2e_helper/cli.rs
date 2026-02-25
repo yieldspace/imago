@@ -35,21 +35,16 @@ impl CmdOutput {
     }
 
     pub fn command_summary_error(&self) -> Option<String> {
-        self.output_lines()
-            .filter_map(parse_plain_error_message)
-            .last()
+        self.command_error_messages().into_iter().last()
     }
 
     pub fn has_command_error(&self) -> bool {
-        self.output_lines()
-            .any(|line| parse_plain_error_message(line).is_some())
+        !self.command_error_messages().is_empty()
     }
 
     pub fn command_error_messages(&self) -> Vec<String> {
-        let mut messages: Vec<String> = self
-            .output_lines()
-            .filter_map(parse_plain_error_message)
-            .collect();
+        let mut messages = collect_plain_error_messages(&self.stdout);
+        messages.extend(collect_plain_error_messages(&self.stderr));
         if messages.is_empty() {
             let fallback = self.stderr.trim();
             if !fallback.is_empty() {
@@ -92,6 +87,33 @@ fn parse_plain_error_message(line: &str) -> Option<String> {
     Some(message.to_string())
 }
 
+fn collect_plain_error_messages(output: &str) -> Vec<String> {
+    let lines: Vec<&str> = output.lines().collect();
+    let mut messages = Vec::new();
+    let mut idx = 0;
+    while idx < lines.len() {
+        if let Some(mut message) = parse_plain_error_message(lines[idx]) {
+            idx += 1;
+            while idx < lines.len() {
+                let continuation = lines[idx];
+                if continuation.trim_start().starts_with('[') {
+                    break;
+                }
+                let continuation = continuation.trim();
+                if !continuation.is_empty() {
+                    message.push('\n');
+                    message.push_str(continuation);
+                }
+                idx += 1;
+            }
+            messages.push(message);
+            continue;
+        }
+        idx += 1;
+    }
+    messages
+}
+
 fn parse_plain_log_message(line: &str) -> Option<String> {
     let trimmed = line.trim();
     let (prefix, message) = trimmed.split_once(" | ")?;
@@ -105,6 +127,41 @@ fn parse_plain_log_message(line: &str) -> Option<String> {
         return None;
     }
     Some(message.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_plain_error_messages;
+
+    #[test]
+    fn collects_multiline_plain_error_block() {
+        let output = "\
+[error] deploy deploy failed: service exited before ready\n\
+  causes:\n\
+  - deployment failed\n\
+  wasm stdout:\n\
+  IMAGO_E2E_DEPLOY_FAIL_STDOUT\n\
+  wasm stderr:\n\
+  IMAGO_E2E_DEPLOY_FAIL_STDERR\n\
+[failed] deploy deploy failed\n";
+        let messages = collect_plain_error_messages(output);
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert!(message.contains("wasm stdout:"));
+        assert!(message.contains("IMAGO_E2E_DEPLOY_FAIL_STDOUT"));
+        assert!(message.contains("wasm stderr:"));
+        assert!(message.contains("IMAGO_E2E_DEPLOY_FAIL_STDERR"));
+    }
+
+    #[test]
+    fn stops_collecting_error_block_at_next_marker() {
+        let output = "\
+[error] deploy deploy failed\n\
+  detail line\n\
+[info] deploy retrying\n";
+        let messages = collect_plain_error_messages(output);
+        assert_eq!(messages, vec!["deploy failed\ndetail line".to_string()]);
+    }
 }
 
 pub fn run_imago_cli(
