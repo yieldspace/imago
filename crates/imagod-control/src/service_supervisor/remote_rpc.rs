@@ -8,8 +8,9 @@ use std::{
 };
 
 use imago_protocol::{
-    ErrorCode, HelloNegotiateRequest, HelloNegotiateResponse, MessageType, ProtocolEnvelope,
-    RpcInvokeRequest, RpcInvokeResponse, RpcInvokeTargetService, Validate, from_cbor, to_cbor,
+    ErrorCode, HelloNegotiateRequest, HelloNegotiateResponse, MessageType, PROTOCOL_VERSION,
+    ProtocolEnvelope, RpcInvokeRequest, RpcInvokeResponse, RpcInvokeTargetService,
+    SUPPORTED_PROTOCOL_VERSION_RANGE, Validate, from_cbor, to_cbor,
 };
 use imagod_common::ImagodError;
 use imagod_config::{ImagodConfig, upsert_tls_known_public_key};
@@ -23,6 +24,7 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
     sign::CertifiedKey,
 };
+use semver::{Version, VersionReq};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::net::lookup_host;
@@ -35,7 +37,6 @@ const DEFAULT_RPC_PORT: u16 = 4443;
 const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
 const DATAGRAM_BUFFER_BYTES: usize = 1024 * 1024;
 const STREAM_TIMEOUT: Duration = Duration::from_secs(15);
-const COMPATIBILITY_DATE: &str = "2026-02-10";
 const ED25519_SPKI_PREFIX: [u8; 12] = [
     0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
 ];
@@ -142,6 +143,54 @@ fn remote_error(code: ErrorCode, message: impl Into<String>) -> ImagodError {
     ImagodError::new(code, STAGE_REMOTE_RPC, message.into())
 }
 
+fn hello_rejection_message(response: &HelloNegotiateResponse) -> String {
+    if let Some(announcement) = response.compatibility_announcement.as_deref()
+        && !announcement.trim().is_empty()
+    {
+        return announcement.to_string();
+    }
+
+    format!(
+        "hello.negotiate was rejected by remote imagod (server_protocol_version={}, supported_protocol_version_range={})",
+        response.server_protocol_version, response.supported_protocol_version_range
+    )
+}
+
+fn ensure_server_protocol_version_supported(
+    response: &HelloNegotiateResponse,
+) -> Result<(), ImagodError> {
+    let supported_range = VersionReq::parse(SUPPORTED_PROTOCOL_VERSION_RANGE).map_err(|err| {
+        remote_error(
+            ErrorCode::Internal,
+            format!(
+                "invalid client supported protocol range '{}': {err}",
+                SUPPORTED_PROTOCOL_VERSION_RANGE
+            ),
+        )
+    })?;
+    let server_protocol_version =
+        Version::parse(&response.server_protocol_version).map_err(|err| {
+            remote_error(
+                ErrorCode::BadRequest,
+                format!(
+                    "server_protocol_version '{}' is not valid semver: {err}",
+                    response.server_protocol_version
+                ),
+            )
+        })?;
+    if supported_range.matches(&server_protocol_version) {
+        return Ok(());
+    }
+
+    Err(remote_error(
+        ErrorCode::BadRequest,
+        format!(
+            "server protocol version '{}' is not supported by this client (client supports '{}')",
+            response.server_protocol_version, SUPPORTED_PROTOCOL_VERSION_RANGE
+        ),
+    ))
+}
+
 async fn invoke_remote_authority(
     config_path: &Path,
     authority: &RemoteAuthority,
@@ -191,8 +240,7 @@ async fn negotiate_hello(session: &Session, correlation_id: Uuid) -> Result<(), 
         Uuid::new_v4(),
         correlation_id,
         &HelloNegotiateRequest {
-            compatibility_date: COMPATIBILITY_DATE.to_string(),
-            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            client_version: PROTOCOL_VERSION.to_string(),
             required_features: vec!["rpc.invoke".to_string()],
         },
     )?;
@@ -202,9 +250,10 @@ async fn negotiate_hello(session: &Session, correlation_id: Uuid) -> Result<(), 
     if !hello_response.accepted {
         return Err(remote_error(
             ErrorCode::BadRequest,
-            "hello.negotiate was rejected by remote imagod",
+            hello_rejection_message(&hello_response),
         ));
     }
+    ensure_server_protocol_version_supported(&hello_response)?;
     if !hello_response
         .features
         .iter()

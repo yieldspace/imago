@@ -99,11 +99,6 @@ fn e2e_imagod_creates_default_config_when_missing() -> TestResult {
         generated
     );
     assert!(
-        generated.contains("compatibility_date = "),
-        "generated config is missing compatibility_date: {}",
-        generated
-    );
-    assert!(
         generated.contains("[tls]"),
         "generated config is missing [tls]: {}",
         generated
@@ -167,7 +162,7 @@ fn e2e_imagod_does_not_overwrite_existing_config() -> TestResult {
     let storage_root = temp.path().join("s");
     let server_key = key_material.server_key_path;
     let existing = format!(
-        "listen_addr = \"127.0.0.1:0\"\nstorage_root = \"{}\"\nserver_version = \"imagod/existing\"\ncompatibility_date = \"2026-02-10\"\n\n[tls]\nserver_key = \"{}\"\nclient_public_keys = [\"{}\"]\n",
+        "listen_addr = \"127.0.0.1:0\"\nstorage_root = \"{}\"\nserver_version = \"imagod/existing\"\n\n[tls]\nserver_key = \"{}\"\nclient_public_keys = [\"{}\"]\n",
         toml_escape(storage_root.to_string_lossy().as_ref()),
         toml_escape(server_key.to_string_lossy().as_ref()),
         CLIENT_PUBLIC_KEY_SAMPLE,

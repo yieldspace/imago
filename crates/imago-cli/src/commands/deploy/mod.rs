@@ -15,7 +15,7 @@ use imago_protocol::{
     ArtifactStatus, ByteRange, CommandEvent, CommandEventType, CommandPayload, CommandStartRequest,
     CommandStartResponse, CommandType, DeployCommandPayload, DeployPrepareRequest,
     DeployPrepareResponse, ErrorCode, HelloNegotiateRequest, HelloNegotiateResponse, MessageType,
-    ProtocolEnvelope, StructuredError, from_cbor, to_cbor,
+    PROTOCOL_VERSION, ProtocolEnvelope, StructuredError, from_cbor, to_cbor,
 };
 use rustls::{
     DigitallySignedStruct, SignatureScheme,
@@ -52,7 +52,6 @@ mod artifact;
 mod network;
 
 const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
-pub(crate) const COMPATIBILITY_DATE: &str = "2026-02-10";
 const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
 const DEFAULT_MAX_INFLIGHT_CHUNKS: usize = 16;
 const TRANSPORT_CONNECT_STAGE: &str = "transport.connect";
@@ -696,8 +695,7 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
         Uuid::new_v4(),
         inputs.correlation_id,
         &HelloNegotiateRequest {
-            compatibility_date: COMPATIBILITY_DATE.to_string(),
-            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            client_version: PROTOCOL_VERSION.to_string(),
             required_features: vec![
                 "deploy.prepare".to_string(),
                 "artifact.push".to_string(),
@@ -709,9 +707,7 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
     )?;
     let hello_response: HelloNegotiateResponse =
         response_payload(request_response(&session, &hello).await?)?;
-    if !hello_response.accepted {
-        return Err(anyhow!("hello.negotiate was rejected by server"));
-    }
+    command_common::ensure_hello_protocol_compatibility(&hello_response)?;
     let hello_summary = hello_summary_from_response(&hello_response);
     ui::command_info(
         "deploy",
@@ -2554,6 +2550,9 @@ mod tests {
         let response = HelloNegotiateResponse {
             accepted: true,
             server_version: "imagod-test".to_string(),
+            server_protocol_version: "0.1.0".to_string(),
+            supported_protocol_version_range: ">=0.1.0,<0.2.0".to_string(),
+            compatibility_announcement: None,
             features: vec![],
             limits: BTreeMap::from([
                 ("chunk_size".to_string(), "2048".to_string()),
@@ -2578,6 +2577,9 @@ mod tests {
         let response = HelloNegotiateResponse {
             accepted: true,
             server_version: "imagod-test".to_string(),
+            server_protocol_version: "0.1.0".to_string(),
+            supported_protocol_version_range: ">=0.1.0,<0.2.0".to_string(),
+            compatibility_announcement: None,
             features: vec![],
             limits: BTreeMap::from([("chunk_size".to_string(), "0".to_string())]),
         };
@@ -3038,6 +3040,9 @@ mod tests {
         let response = HelloNegotiateResponse {
             accepted: true,
             server_version: "imagod/0.2.0".to_string(),
+            server_protocol_version: "0.1.0".to_string(),
+            supported_protocol_version_range: ">=0.1.0,<0.2.0".to_string(),
+            compatibility_announcement: None,
             features: vec!["logs.request".to_string()],
             limits: BTreeMap::from([
                 ("chunk_size".to_string(), "4096".to_string()),

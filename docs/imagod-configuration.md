@@ -58,21 +58,7 @@ storage_root = "/var/lib/imago"
 server_version = "imagod/0.1.0"
 ```
 
-- Validation error notes: non-string values fail validation.
-
-### The `compatibility_date` field
-
-- Type: `string`
-- Required/Optional: Optional.
-- Accepted values / Constraints: `YYYY-MM-DD` format with month `1..12` and day `1..31`.
-- Default: `"2026-02-10"`.
-- Example:
-
-```toml
-compatibility_date = "2026-02-10"
-```
-
-- Validation error notes: invalid date formats fail validation.
+- Validation error notes: non-string values fail validation. `compatibility_date` is a legacy key and now fails validation; protocol compatibility is negotiated via `hello.negotiate.client_version`.
 
 <a id="the-tls-section"></a>
 ## The [tls] section

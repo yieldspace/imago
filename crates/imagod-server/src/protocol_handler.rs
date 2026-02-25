@@ -260,7 +260,7 @@ mod tests {
         },
         router::{
             ensure_command_start_allowed, ensure_command_start_request_id_match,
-            finalize_operation_after_terminal_event, is_compatible_date_match,
+            finalize_operation_after_terminal_event, protocol_compatibility_announcement,
             validate_push_payload,
         },
         session_loop::{read_stream_with_timeout, stream_read_timeout_error},
@@ -276,13 +276,22 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn accepts_same_compatibility_date() {
-        assert!(is_compatible_date_match("2026-02-10", "2026-02-10"));
+    fn accepts_supported_protocol_version() {
+        assert!(protocol_compatibility_announcement("0.1.0").is_none());
     }
 
     #[test]
-    fn rejects_different_compatibility_date() {
-        assert!(!is_compatible_date_match("2026-02-11", "2026-02-10"));
+    fn rejects_unsupported_protocol_version() {
+        let message = protocol_compatibility_announcement("0.2.0")
+            .expect("unsupported version should return announcement");
+        assert!(message.contains("not supported"));
+    }
+
+    #[test]
+    fn rejects_invalid_protocol_version() {
+        let message = protocol_compatibility_announcement("not-semver")
+            .expect("invalid semver should return announcement");
+        assert!(message.contains("invalid"));
     }
 
     #[test]

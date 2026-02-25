@@ -12,11 +12,13 @@ use imago_protocol::messages::{
 use imago_protocol::{
     ArtifactPushRequest, CommandCancelRequest, CommandEventType, CommandPayload,
     CommandStartRequest, CommandStartResponse, CommandState, CommandType, DeployPrepareRequest,
-    MessageType, ServiceListRequest, ServiceListResponse, StateRequest, Validate,
+    MessageType, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSION_RANGE, ServiceListRequest,
+    ServiceListResponse, StateRequest, Validate,
 };
 use imagod_common::ImagodError;
 use imagod_config::upsert_tls_known_client_key;
 use imagod_control::{OperationManager, SpawnTransition};
+use semver::{Version, VersionReq};
 use serde::Serialize;
 use web_transport_quinn::SendStream;
 
@@ -55,8 +57,9 @@ impl ProtocolHandler {
             .validate()
             .map_err(|e| bad_request("hello.negotiate", e.to_string()))?;
 
-        let accepted =
-            is_compatible_date_match(&payload.compatibility_date, &self.config.compatibility_date);
+        let compatibility_announcement =
+            protocol_compatibility_announcement(&payload.client_version);
+        let accepted = compatibility_announcement.is_none();
         let mut limits = BTreeMap::new();
         limits.insert(
             "chunk_size".to_string(),
@@ -86,6 +89,9 @@ impl ProtocolHandler {
             &imago_protocol::HelloNegotiateResponse {
                 accepted,
                 server_version: self.config.server_version.clone(),
+                server_protocol_version: PROTOCOL_VERSION.to_string(),
+                supported_protocol_version_range: SUPPORTED_PROTOCOL_VERSION_RANGE.to_string(),
+                compatibility_announcement,
                 features: vec![
                     "hello.negotiate".to_string(),
                     "deploy.prepare".to_string(),
@@ -505,8 +511,35 @@ impl ProtocolHandler {
     }
 }
 
-pub(crate) fn is_compatible_date_match(request: &str, configured: &str) -> bool {
-    request == configured
+pub(crate) fn protocol_compatibility_announcement(client_protocol_version: &str) -> Option<String> {
+    let supported_range = match VersionReq::parse(SUPPORTED_PROTOCOL_VERSION_RANGE) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            return Some(format!(
+                "imagod protocol compatibility is misconfigured: supported range '{}' is invalid ({err})",
+                SUPPORTED_PROTOCOL_VERSION_RANGE
+            ));
+        }
+    };
+
+    let client_version = match Version::parse(client_protocol_version) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            return Some(format!(
+                "client protocol version '{client_protocol_version}' is invalid; supported range is '{}' (server protocol '{}')",
+                SUPPORTED_PROTOCOL_VERSION_RANGE, PROTOCOL_VERSION
+            ));
+        }
+    };
+
+    if supported_range.matches(&client_version) {
+        return None;
+    }
+
+    Some(format!(
+        "client protocol version '{client_protocol_version}' is not supported; imagod supports '{}' (server protocol '{}')",
+        SUPPORTED_PROTOCOL_VERSION_RANGE, PROTOCOL_VERSION
+    ))
 }
 
 pub(crate) fn ensure_command_start_request_id_match(

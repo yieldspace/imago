@@ -3,8 +3,9 @@ use std::{collections::BTreeMap, path::Path};
 use anyhow::anyhow;
 use imago_protocol::{
     CommandEvent, CommandEventType, CommandStartResponse, HelloNegotiateRequest,
-    HelloNegotiateResponse, MessageType,
+    HelloNegotiateResponse, MessageType, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSION_RANGE,
 };
+use semver::{Version, VersionReq};
 use uuid::Uuid;
 
 use crate::commands::ui;
@@ -48,8 +49,7 @@ pub(crate) async fn negotiate_hello_with_features(
         Uuid::new_v4(),
         correlation_id,
         &HelloNegotiateRequest {
-            compatibility_date: deploy::COMPATIBILITY_DATE.to_string(),
-            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            client_version: PROTOCOL_VERSION.to_string(),
             required_features: required_features
                 .iter()
                 .map(|feature| feature.to_string())
@@ -58,15 +58,64 @@ pub(crate) async fn negotiate_hello_with_features(
     )?;
     let hello_response: HelloNegotiateResponse =
         deploy::response_payload(deploy::request_response(session, &hello_request).await?)?;
-    if !hello_response.accepted {
-        return Err(anyhow!("hello.negotiate was rejected by server"));
-    }
+    ensure_hello_protocol_compatibility(&hello_response)?;
 
     Ok(HelloSummary {
         server_version: hello_response.server_version,
         features: hello_response.features,
         limits: hello_response.limits,
     })
+}
+
+pub(crate) fn ensure_hello_protocol_compatibility(
+    response: &HelloNegotiateResponse,
+) -> anyhow::Result<()> {
+    if !response.accepted {
+        return Err(anyhow!("{}", hello_rejection_message(response)));
+    }
+
+    ensure_server_protocol_version_supported(response)
+}
+
+fn hello_rejection_message(response: &HelloNegotiateResponse) -> String {
+    if let Some(announcement) = response.compatibility_announcement.as_deref()
+        && !announcement.trim().is_empty()
+    {
+        return announcement.to_string();
+    }
+
+    format!(
+        "hello.negotiate was rejected by server (server_protocol_version={}, supported_protocol_version_range={})",
+        response.server_protocol_version, response.supported_protocol_version_range
+    )
+}
+
+fn ensure_server_protocol_version_supported(
+    response: &HelloNegotiateResponse,
+) -> anyhow::Result<()> {
+    let supported_range = VersionReq::parse(SUPPORTED_PROTOCOL_VERSION_RANGE).map_err(|err| {
+        anyhow!(
+            "invalid client supported protocol range '{}': {err}",
+            SUPPORTED_PROTOCOL_VERSION_RANGE
+        )
+    })?;
+    let server_protocol_version =
+        Version::parse(&response.server_protocol_version).map_err(|err| {
+            anyhow!(
+                "server_protocol_version '{}' is not valid semver: {err}",
+                response.server_protocol_version
+            )
+        })?;
+
+    if supported_range.matches(&server_protocol_version) {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "server protocol version '{}' is not supported by this client (client supports '{}')",
+        response.server_protocol_version,
+        SUPPORTED_PROTOCOL_VERSION_RANGE
+    ))
 }
 
 fn absolute_project_path(project_root: &Path) -> String {
@@ -191,6 +240,43 @@ pub(crate) fn handle_terminal_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_hello_response() -> HelloNegotiateResponse {
+        HelloNegotiateResponse {
+            accepted: true,
+            server_version: "imagod/0.1.0".to_string(),
+            server_protocol_version: "0.1.0".to_string(),
+            supported_protocol_version_range: ">=0.1.0,<0.2.0".to_string(),
+            compatibility_announcement: None,
+            features: vec!["hello.negotiate".to_string()],
+            limits: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn ensure_hello_protocol_compatibility_accepts_supported_server_version() {
+        let response = sample_hello_response();
+        assert!(ensure_hello_protocol_compatibility(&response).is_ok());
+    }
+
+    #[test]
+    fn ensure_hello_protocol_compatibility_prefers_server_announcement() {
+        let mut response = sample_hello_response();
+        response.accepted = false;
+        response.compatibility_announcement = Some("upgrade protocol".to_string());
+        let err = ensure_hello_protocol_compatibility(&response)
+            .expect_err("rejected response should fail");
+        assert!(err.to_string().contains("upgrade protocol"));
+    }
+
+    #[test]
+    fn ensure_hello_protocol_compatibility_rejects_unsupported_server_version() {
+        let mut response = sample_hello_response();
+        response.server_protocol_version = "0.2.0".to_string();
+        let err = ensure_hello_protocol_compatibility(&response)
+            .expect_err("unsupported server protocol should fail");
+        assert!(err.to_string().contains("not supported"));
+    }
 
     #[test]
     fn format_local_context_line_contains_required_keys_and_placeholder() {
