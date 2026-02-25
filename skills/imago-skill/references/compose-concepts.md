@@ -62,6 +62,8 @@ client_key = "certs/client.key"
 - `compose logs <profile> --target <target> [--name <service>] [--follow] [--tail N]`
 - `compose ps <profile> --target <target>`
 
+`<profile>` is a profile name defined under `[profile.<name>]` (for example `prepare`, `dev`, `client`, `greeter`), not a compose subcommand.
+
 ## Practical Teaching Pattern
 
 1. Explain the map (`profile -> config -> services -> target`).

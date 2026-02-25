@@ -40,8 +40,13 @@ cargo run -p imago-cli -- update
 cargo run -p imago-cli -- build --target default
 cargo run -p imago-cli -- deploy --target default --detach
 cargo run -p imago-cli -- ps --target default
-cargo run -p imago-cli -- run <service-name> --target default --detach
+```
+
+`deploy` already starts/replaces the service. Use the following only when you intentionally want to restart:
+
+```bash
 cargo run -p imago-cli -- stop <service-name> --target default
+cargo run -p imago-cli -- run <service-name> --target default --detach
 ```
 
 ## Recipe 4: Cert and binding trust setup
