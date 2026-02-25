@@ -373,6 +373,8 @@ response:
 - `retryable`
 - `stage`
 - `details`（`BTreeMap<String, String>`）
+  - `deploy` の `command.event(event_type=failed)` で `stage=service.start` の場合、`details` に `wasm.stdout` / `wasm.stderr` キーを含むことがある。
+  - 値は manager が保持する runner log ring（`runtime.runner_log_buffer_bytes` 上限内）から取得した各 stream の全文文字列（lossy UTF-8）とする。
 
 主要コード:
 

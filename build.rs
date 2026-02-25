@@ -49,6 +49,10 @@ fn main() {
         "IMAGO_E2E_WASM_CLI_BASE",
         &wasm_dir.join("e2e_cli_base.wasm"),
     );
+    export_artifact(
+        "IMAGO_E2E_WASM_CLI_FAIL",
+        &wasm_dir.join("e2e_cli_fail.wasm"),
+    );
     export_artifact("IMAGO_E2E_WASM_HTTP", &wasm_dir.join("e2e_http.wasm"));
     export_artifact(
         "IMAGO_E2E_WASM_RPC_CALLER",

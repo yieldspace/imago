@@ -78,6 +78,8 @@ const TRANSPORT_KEEPALIVE_INTERVAL_SECS: u64 = 5;
 const TRANSPORT_MAX_IDLE_TIMEOUT_SECS: u64 = 180;
 const IMAGO_DIR_NAME: &str = ".imago";
 const KNOWN_HOSTS_FILE_NAME: &str = "known_hosts";
+const DETAIL_WASM_STDOUT: &str = "wasm.stdout";
+const DETAIL_WASM_STDERR: &str = "wasm.stderr";
 #[cfg(unix)]
 const IMAGO_DIR_MODE: u32 = 0o700;
 #[cfg(unix)]
@@ -205,6 +207,31 @@ fn print_build_failure_logs(err: &anyhow::Error) {
     println!("{}", build_failure_footer_line());
 }
 
+fn format_deploy_structured_error(error: &StructuredError) -> String {
+    let mut formatted = format!("{} ({:?}) at {}", error.message, error.code, error.stage);
+    append_wasm_log_section(&mut formatted, error, DETAIL_WASM_STDOUT, "wasm stdout");
+    append_wasm_log_section(&mut formatted, error, DETAIL_WASM_STDERR, "wasm stderr");
+    formatted
+}
+
+fn append_wasm_log_section(
+    formatted: &mut String,
+    error: &StructuredError,
+    detail_key: &str,
+    section_label: &str,
+) {
+    let Some(detail) = error.details.get(detail_key) else {
+        return;
+    };
+    if detail.is_empty() {
+        return;
+    }
+    formatted.push('\n');
+    formatted.push_str(section_label);
+    formatted.push_str(":\n");
+    formatted.push_str(detail);
+}
+
 #[derive(Debug, Clone)]
 struct ServerResponseError {
     error: StructuredError,
@@ -214,8 +241,8 @@ impl std::fmt::Display for ServerResponseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "server error: {} ({:?}) at {}",
-            self.error.message, self.error.code, self.error.stage
+            "server error: {}",
+            format_deploy_structured_error(&self.error)
         )
     }
 }
@@ -573,10 +600,8 @@ async fn run_async_with_target_override(
         CommandEventType::Failed => {
             if let Some(err) = terminal.error {
                 Err(anyhow!(
-                    "deploy failed: {} ({:?}) at {}",
-                    err.message,
-                    err.code,
-                    err.stage
+                    "deploy failed: {}",
+                    format_deploy_structured_error(&err)
                 ))
             } else {
                 Err(anyhow!("deploy failed without structured error"))
@@ -2557,6 +2582,29 @@ mod tests {
             stage: "upload".to_string(),
             details: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn format_deploy_structured_error_includes_wasm_stdout_and_stderr_sections() {
+        let mut error = sample_structured_error(ErrorCode::Internal, false);
+        error
+            .details
+            .insert(DETAIL_WASM_STDOUT.to_string(), "stdout-line\n".to_string());
+        error
+            .details
+            .insert(DETAIL_WASM_STDERR.to_string(), "stderr-line\n".to_string());
+
+        let formatted = format_deploy_structured_error(&error);
+        assert!(formatted.starts_with("error (Internal) at upload"));
+        assert!(formatted.contains("\nwasm stdout:\nstdout-line\n"));
+        assert!(formatted.contains("\nwasm stderr:\nstderr-line\n"));
+    }
+
+    #[test]
+    fn format_deploy_structured_error_without_wasm_sections_keeps_legacy_shape() {
+        let error = sample_structured_error(ErrorCode::Internal, false);
+        let formatted = format_deploy_structured_error(&error);
+        assert_eq!(formatted, "error (Internal) at upload");
     }
 
     fn sample_server_error(code: ErrorCode, retryable: bool) -> anyhow::Error {

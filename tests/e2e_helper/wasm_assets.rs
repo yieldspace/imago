@@ -4,6 +4,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy)]
 pub enum WasmArtifact {
     CliBase,
+    CliFail,
     Http,
     RpcCaller,
     RpcCallee,
@@ -22,6 +23,7 @@ pub fn wasm_path(artifact: WasmArtifact) -> Result<PathBuf> {
 pub fn wasm_file_name(artifact: WasmArtifact) -> &'static str {
     match artifact {
         WasmArtifact::CliBase => "e2e_cli_base.wasm",
+        WasmArtifact::CliFail => "e2e_cli_fail.wasm",
         WasmArtifact::Http => "e2e_http.wasm",
         WasmArtifact::RpcCaller => "e2e_rpc_caller.wasm",
         WasmArtifact::RpcCallee => "e2e_rpc_callee.wasm",
@@ -31,6 +33,7 @@ pub fn wasm_file_name(artifact: WasmArtifact) -> &'static str {
 fn artifact_env_key(artifact: WasmArtifact) -> &'static str {
     match artifact {
         WasmArtifact::CliBase => "IMAGO_E2E_WASM_CLI_BASE",
+        WasmArtifact::CliFail => "IMAGO_E2E_WASM_CLI_FAIL",
         WasmArtifact::Http => "IMAGO_E2E_WASM_HTTP",
         WasmArtifact::RpcCaller => "IMAGO_E2E_WASM_RPC_CALLER",
         WasmArtifact::RpcCallee => "IMAGO_E2E_WASM_RPC_CALLEE",
