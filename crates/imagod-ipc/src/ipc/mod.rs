@@ -228,7 +228,11 @@ pub enum WasiHttpOutboundRule {
     /// Allows requests to one host and one port.
     HostPort { host: String, port: u16 },
     /// Allows requests whose IP-literal host is contained in this CIDR range.
-    Cidr { network: IpAddr, prefix_len: u8 },
+    Cidr {
+        #[serde(with = "ip_addr_string_serde")]
+        network: IpAddr,
+        prefix_len: u8,
+    },
 }
 
 impl WasiHttpOutboundRule {
@@ -420,6 +424,29 @@ fn parse_wasi_http_outbound_port(text: &str) -> Result<u16, String> {
         return Err("port must be in range 1..=65535 (got 0)".to_string());
     }
     Ok(port)
+}
+
+mod ip_addr_string_serde {
+    use std::net::IpAddr;
+
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+
+    pub fn serialize<S>(value: &IpAddr, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<IpAddr, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value
+            .parse::<IpAddr>()
+            .map_err(|err| D::Error::custom(format!("invalid IP address: {err}")))
+    }
 }
 
 fn normalize_wasi_http_outbound_host(raw: &str) -> Option<String> {
@@ -1527,6 +1554,20 @@ mod tests {
             !cidr.matches_authority("api.example.com", 443),
             "CIDR should not match non-IP hostnames"
         );
+    }
+
+    #[test]
+    fn wasi_http_outbound_rule_cidr_cbor_round_trip() {
+        let rule = WasiHttpOutboundRule::Cidr {
+            network: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)),
+            prefix_len: 8,
+        };
+
+        let encoded = imago_protocol::to_cbor(&rule).expect("CIDR rule encoding should work");
+        let decoded = imago_protocol::from_cbor::<WasiHttpOutboundRule>(&encoded)
+            .expect("CIDR rule decoding should work");
+
+        assert_eq!(decoded, rule);
     }
 
     #[test]
