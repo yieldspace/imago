@@ -43,9 +43,6 @@ pub struct ImagodConfig {
     #[serde(default = "default_server_version")]
     /// Server version reported via negotiate response.
     pub server_version: String,
-    #[serde(default = "default_compatibility_date")]
-    /// Compatibility key used by hello negotiation.
-    pub compatibility_date: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -489,10 +486,6 @@ fn write_default_config_atomic(config_path: &Path) -> Result<(), ImagodError> {
         "server_version".to_string(),
         toml::Value::String(default_server_version()),
     );
-    root.insert(
-        "compatibility_date".to_string(),
-        toml::Value::String(default_compatibility_date()),
-    );
 
     let mut tls = toml::Table::new();
     tls.insert(
@@ -676,10 +669,6 @@ fn default_server_version() -> String {
     "imagod/0.1.0".to_string()
 }
 
-fn default_compatibility_date() -> String {
-    "2026-02-10".to_string()
-}
-
 fn default_chunk_size() -> usize {
     1024 * 1024
 }
@@ -782,46 +771,15 @@ fn decode_hex_nibble(value: u8) -> Option<u8> {
     }
 }
 
-fn is_valid_compatibility_date(value: &str) -> bool {
-    if value.len() != 10 {
-        return false;
-    }
-
-    let bytes = value.as_bytes();
-    if bytes[4] != b'-' || bytes[7] != b'-' {
-        return false;
-    }
-
-    if !bytes
-        .iter()
-        .enumerate()
-        .all(|(index, b)| matches!(index, 4 | 7) || b.is_ascii_digit())
-    {
-        return false;
-    }
-
-    let year_ok = value[0..4].parse::<u32>().is_ok();
-    let month_ok = value[5..7]
-        .parse::<u32>()
-        .map(|m| (1..=12).contains(&m))
-        .unwrap_or(false);
-    let day_ok = value[8..10]
-        .parse::<u32>()
-        .map(|d| (1..=31).contains(&d))
-        .unwrap_or(false);
-
-    year_ok && month_ok && day_ok
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn defaults_compatibility_date_when_missing() {
+    fn defaults_runtime_fields_when_missing() {
         let path = write_temp_config(
-            "defaults_compatibility_date_when_missing",
+            "defaults_runtime_fields_when_missing",
             r#"
 listen_addr = "127.0.0.1:4443"
 server_version = "imagod/test"
@@ -840,7 +798,6 @@ client_public_keys = ["111111111111111111111111111111111111111111111111111111111
                 option_env!("IMAGOD_STORAGE_ROOT_DEFAULT")
             )
         );
-        assert_eq!(config.compatibility_date, "2026-02-10");
         assert_eq!(config.runtime.max_artifact_size_bytes, 64 * 1024 * 1024);
         assert_eq!(config.runtime.runner_ready_timeout_secs, 3);
         assert_eq!(config.runtime.runner_log_buffer_bytes, 256 * 1024);
@@ -886,7 +843,6 @@ client_public_keys = ["111111111111111111111111111111111111111111111111111111111
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago-explicit"
 server_version = "imagod/test"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "server.key"
@@ -956,7 +912,32 @@ client_public_keys = ["111111111111111111111111111111111111111111111111111111111
         let err = ImagodConfig::load(&path).expect_err("config should reject legacy key");
         let message = err.to_string();
         assert!(message.contains("protocol_draft"));
+        assert!(message.contains("client_version"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_legacy_compatibility_date_key() {
+        let path = write_temp_config(
+            "rejects_legacy_compatibility_date_key",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+compatibility_date = "2026-02-10"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+"#,
+        );
+
+        let err = ImagodConfig::load(&path)
+            .expect_err("config should reject legacy compatibility_date key");
+        let message = err.to_string();
         assert!(message.contains("compatibility_date"));
+        assert!(message.contains("client_version"));
 
         cleanup_temp_path(path);
     }
@@ -1219,7 +1200,6 @@ known_public_keys = { "" = "2222222222222222222222222222222222222222222222222222
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
 server_version = "imagod/test"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "server.key"
@@ -1249,7 +1229,6 @@ epoch_tick_interval_ms = 0
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
 server_version = "imagod/test"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "server.key"
@@ -1274,7 +1253,6 @@ max_artifact_size_bytes = 0
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
 server_version = "imagod/test"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "server.key"
@@ -1303,7 +1281,6 @@ runner_ready_timeout_secs = 0
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
 server_version = "imagod/test"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "server.key"
@@ -1329,7 +1306,6 @@ runner_log_buffer_bytes = 0
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
 server_version = "imagod/test"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "server.key"
@@ -1355,7 +1331,6 @@ http_worker_count = 5
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
 server_version = "imagod/test"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "server.key"
@@ -1384,7 +1359,6 @@ http_worker_queue_capacity = 17
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
 server_version = "imagod/test"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "server.key"
@@ -1413,7 +1387,6 @@ manager_control_read_timeout_ms = 0
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
 server_version = "imagod/test"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "server.key"
@@ -1439,7 +1412,6 @@ max_concurrent_sessions = 0
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
 server_version = "imagod/test"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "server.key"
@@ -1468,7 +1440,6 @@ deploy_stream_timeout_secs = 0
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
 server_version = "imagod/test"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "server.key"
@@ -1497,7 +1468,6 @@ transport_keepalive_interval_secs = 0
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
 server_version = "imagod/test"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "server.key"
@@ -1526,7 +1496,6 @@ transport_max_idle_timeout_secs = 0
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
 server_version = "imagod/test"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "server.key"
@@ -1557,7 +1526,6 @@ transport_max_idle_timeout_secs = 180
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
 server_version = "imagod/test"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "server.key"
@@ -1582,7 +1550,6 @@ chunk_size = 0
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
 server_version = "imagod/test"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "server.key"
@@ -1608,7 +1575,6 @@ max_inflight_chunks = 0
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
 server_version = "imagod/test"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "server.key"
@@ -1634,7 +1600,6 @@ chunk_size = 8388609
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
 server_version = "imagod/test"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "server.key"
@@ -1695,7 +1660,6 @@ transport_max_idle_timeout_secs = 180
         let expected_server_key_path = expected_generated_server_key_path(&path);
         assert_eq!(result.config.listen_addr, "[::]:4443");
         assert_eq!(result.config.server_version, "imagod/0.1.0");
-        assert_eq!(result.config.compatibility_date, "2026-02-10");
         assert_eq!(result.config.tls.server_key, expected_server_key_path);
         assert!(result.config.tls.client_public_keys.is_empty());
         let server_key = fs::read_to_string(&result.config.tls.server_key)
@@ -1737,7 +1701,6 @@ transport_max_idle_timeout_secs = 180
 listen_addr = "127.0.0.1:9443"
 storage_root = "/tmp/imago-existing"
 server_version = "imagod/existing"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "/tmp/existing/server.key"
@@ -1787,10 +1750,7 @@ client_public_keys = ["222222222222222222222222222222222222222222222222222222222
             root.get("server_version").and_then(toml::Value::as_str),
             Some("imagod/0.1.0")
         );
-        assert_eq!(
-            root.get("compatibility_date").and_then(toml::Value::as_str),
-            Some("2026-02-10")
-        );
+        assert!(!root.contains_key("compatibility_date"));
         assert!(!root.contains_key("storage_root"));
         assert!(!root.contains_key("runtime"));
 

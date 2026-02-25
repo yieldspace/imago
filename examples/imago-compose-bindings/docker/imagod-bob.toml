@@ -1,7 +1,6 @@
 listen_addr = "0.0.0.0:4443"
 storage_root = "/var/lib/imagod/bob"
 server_version = "imagod/imago-compose-bindings-bob"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "/etc/imago/example/certs/bob/server.key"

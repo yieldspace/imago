@@ -26,7 +26,6 @@ mod tests {
     #[test]
     fn hello_negotiate_round_trip_and_validate() {
         let request = HelloNegotiateRequest {
-            compatibility_date: "2026-02-10".to_string(),
             client_version: "0.1.0".to_string(),
             required_features: vec!["resumable-upload".to_string()],
         };
@@ -39,14 +38,12 @@ mod tests {
 
     #[derive(Debug, Serialize)]
     struct HelloNegotiateMissingRequiredFeatures<'a> {
-        compatibility_date: &'a str,
         client_version: &'a str,
     }
 
     #[test]
     fn hello_negotiate_rejects_missing_required_field() {
         let encoded = to_cbor(&HelloNegotiateMissingRequiredFeatures {
-            compatibility_date: "2026-02-10",
             client_version: "0.1.0",
         })
         .expect("encoding should succeed");
@@ -57,19 +54,17 @@ mod tests {
 
     #[derive(Debug, Serialize)]
     struct HelloNegotiateWithLegacyField<'a> {
-        compatibility_date: &'a str,
         client_version: &'a str,
         required_features: Vec<&'a str>,
-        protocol_draft: &'a str,
+        compatibility_date: &'a str,
     }
 
     #[test]
-    fn hello_negotiate_rejects_legacy_protocol_draft_field() {
+    fn hello_negotiate_rejects_legacy_compatibility_date_field() {
         let encoded = to_cbor(&HelloNegotiateWithLegacyField {
-            compatibility_date: "2026-02-10",
             client_version: "0.1.0",
             required_features: vec![],
-            protocol_draft: "2026-02-10",
+            compatibility_date: "2026-02-10",
         })
         .expect("encoding should succeed");
 

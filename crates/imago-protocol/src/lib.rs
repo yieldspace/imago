@@ -12,6 +12,11 @@ pub mod error;
 pub mod messages;
 pub mod validate;
 
+/// Current wire protocol version emitted during `hello.negotiate`.
+pub const PROTOCOL_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Supported peer protocol versions for this build.
+pub const SUPPORTED_PROTOCOL_VERSION_RANGE: &str = ">=0.1.0,<0.2.0";
+
 /// CBOR serialization and deserialization helpers.
 pub use cbor::{CborError, from_cbor, to_cbor};
 /// Common protocol envelope used on stream/datagram payloads.

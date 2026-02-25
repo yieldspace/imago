@@ -1,7 +1,6 @@
 listen_addr = "127.0.0.1:4443"
 storage_root = ".imagod-data"
 server_version = "imagod/local-socket-example"
-compatibility_date = "2026-02-10"
 
 [tls]
 server_key = "certs/server.key"
