@@ -1,199 +1,719 @@
-# `imago.toml` Configuration Reference
+# imago.toml reference
 
-## 目的と適用範囲
+This page is a practical reference for `imago.toml`.
+The normative contract is [`docs/spec/config.md`](./spec/config.md).
 
-このドキュメントは、`imago.toml` の各キーを実用的に参照するためのリファレンスです。  
-実装契約の正本は [`docs/spec/config.md`](./spec/config.md) で、本ページは「読みやすさ重視」の補助資料です。
+## Sections
 
-## 最小構成サンプル
+- [The `[package]` section](#the-package-section)
+- [The `[build]` section](#the-build-section)
+- [The `[target.<name>]` section](#the-targetname-section)
+- [The `[[assets]]` section](#the-assets-section)
+- [The `[http]` section](#the-http-section)
+- [The `[socket]` section](#the-socket-section)
+- [The `[wasi]` section](#the-wasi-section)
+- [The `[capabilities]` section](#the-capabilities-section)
+- [The `[[bindings]]` section](#the-bindings-section)
+- [The `[[dependencies]]` section](#the-dependencies-section)
+- [The `[namespace_registries]` section](#the-namespace_registries-section)
+- [Legacy sections](#legacy-sections)
+
+<a id="the-package-section"></a>
+## The [package] section
+
+This section defines service identity and execution model.
+
+### The `name` field
+
+- Type: `string`
+- Required/Optional: Required.
+- Accepted values / Constraints: 1..=63 characters; ASCII `[A-Za-z0-9._-]` only; must not contain `/`, `\\`, or `..`.
+- Default: none.
+- Example:
 
 ```toml
 name = "example-service"
-main = "build/app.wasm"
-type = "cli"
+```
 
+- Validation error notes: missing, empty, or invalid characters cause `imago build` to fail.
+
+### The `main` field
+
+- Type: `string` (relative file path)
+- Required/Optional: Required.
+- Accepted values / Constraints: non-empty; relative path only; no Windows drive prefix; no backslashes; no path traversal; file must exist.
+- Default: none.
+- Example:
+
+```toml
+main = "build/app.wasm"
+```
+
+- Validation error notes: missing file or unsafe path causes `imago build` to fail.
+
+### The `type` field
+
+- Type: `string` enum
+- Required/Optional: Required.
+- Accepted values / Constraints: one of `cli`, `http`, `socket`, `rpc`.
+- Default: none.
+- Example:
+
+```toml
+type = "http"
+```
+
+- Validation error notes: unknown values fail validation; `http` requires `[http]`; `socket` requires `[socket]`; `http` and `socket` sections are rejected for other types.
+
+### The `restart` field
+
+- Type: `string` enum
+- Required/Optional: Optional.
+- Accepted values / Constraints: one of `never`, `on-failure`, `always`, `unless-stopped`.
+- Default: `never`.
+- Example:
+
+```toml
+restart = "always"
+```
+
+- Validation error notes: any other value fails validation; `runtime.restart_policy` is rejected as a legacy key.
+
+<a id="the-build-section"></a>
+## The [build] section
+
+This section configures the local build command used by `imago build`.
+
+### The `command` field
+
+- Type: `string` or `array(string)`
+- Required/Optional: Optional.
+- Accepted values / Constraints: a string must be non-empty; an array must be non-empty and contain only strings.
+- Default: none (no command execution; only `main` file checks run).
+- Example:
+
+```toml
+[build]
+command = "cargo component build --release"
+```
+
+- Validation error notes: wrong type or empty command fails validation.
+
+<a id="the-targetname-section"></a>
+## The [target.<name>] section
+
+This section configures remote deployment targets.
+
+### The `remote` field
+
+- Type: `string`
+- Required/Optional: Required for the selected target.
+- Accepted values / Constraints: endpoint string; validated in deploy/run paths.
+- Default: none.
+- Example:
+
+```toml
 [target.default]
 remote = "127.0.0.1:4443"
 ```
 
-- `type = "http"` の場合は `[http]` が必須です。
-- `type = "socket"` の場合は `[socket]` が必須です。
-- `type = "cli"` / `type = "rpc"` では `[http]` / `[socket]` は指定しません。
+- Validation error notes: missing selected target or invalid endpoint causes deploy/run failure.
 
-## セクション一覧
+### The `server_name` field
 
-- トップレベルキー (`name`, `main`, `type`, `restart`)
-- `[build]`
-- `[vars]` (legacy)
-- `[secrets]` (legacy)
-- `[target.<name>]`
-- `[http]`
-- `[socket]`
-- `[[assets]]`
-- `[wasi]`
-- `[capabilities]`
-- `[namespace_registries]`
-
-## キーごとのリファレンス
-
-### トップレベルキー
-
-| キー | 必須 | 型 | 制約 | 既定値 | 例 |
-|---|---|---|---|---|---|
-| `name` | 必須 | string | 1..=63 文字、ASCII `[A-Za-z0-9._-]`、`/` `\\` `..` 禁止 | なし | `name = "example-service"` |
-| `main` | 必須 | string (relative path) | 非空、相対パスのみ、backslash/drive prefix/path traversal 禁止、実ファイル存在必須 | なし | `main = "build/app.wasm"` |
-| `type` | 必須 | string enum | `cli` / `http` / `socket` / `rpc` のいずれか | なし | `type = "http"` |
-| `restart` | 任意 | string enum | `never` / `on-failure` / `always` / `unless-stopped` | `never` | `restart = "always"` |
-
-### `[build]`
-
-| キー | 必須 | 型 | 制約 | 既定値 | 例 |
-|---|---|---|---|---|---|
-| `build.command` | 任意 | string OR array(string) | string は非空、array は非空かつ全要素 string | なし | `command = "cargo component build --release"` |
-
-### `[vars]` (legacy)
-
-| キー | 必須 | 型 | 制約 | 既定値 | 例 |
-|---|---|---|---|---|---|
-| `vars.<KEY>` | 任意 | string | table の値は string のみ。manifest には出力されない | 空 table | `APP_MODE = "prod"` |
-
-### `[secrets]` (legacy)
-
-| キー | 必須 | 型 | 制約 | 既定値 | 例 |
-|---|---|---|---|---|---|
-| `secrets.<KEY>` | 任意 | string | table の値は string のみ。manifest には出力されない | 空 table | `SECRET_TOKEN = "change-me"` |
-
-### `[target.<name>]`
-
-`<name>` は target 名です。CLI では通常 `default` target が使われます。
-
-| キー | 必須 | 型 | 制約 | 既定値 | 例 |
-|---|---|---|---|---|---|
-| `target.<name>.remote` | 選択 target では必須 | string | endpoint 文字列。deploy/run 経路で形式検証 | なし | `remote = "127.0.0.1:4443"` |
-| `target.<name>.server_name` | 任意 | string | string であること | なし | `server_name = "node-a.example.com"` |
-| `target.<name>.client_key` | build では任意、deploy では必須 | string (path) | 非空、backslash/drive prefix/path traversal 禁止、相対は project root 基準、絶対パス可 | なし | `client_key = "certs/client.key"` |
-
-### `[http]` (`type = "http"` のとき必須)
-
-| キー | 必須 | 型 | 制約 | 既定値 | 例 |
-|---|---|---|---|---|---|
-| `http.port` | `type = "http"` で必須 | integer | `1..=65535` | なし | `port = 8080` |
-| `http.max_body_bytes` | 任意 | integer | `1..=67108864` (64 MiB) | `8388608` (8 MiB) | `max_body_bytes = 8388608` |
-
-### `[socket]` (`type = "socket"` のとき必須)
-
-| キー | 必須 | 型 | 制約 | 既定値 | 例 |
-|---|---|---|---|---|---|
-| `socket.protocol` | `type = "socket"` で必須 | string enum | `udp` / `tcp` / `both` | なし | `protocol = "tcp"` |
-| `socket.direction` | `type = "socket"` で必須 | string enum | `inbound` / `outbound` / `both` | なし | `direction = "inbound"` |
-| `socket.listen_addr` | `type = "socket"` で必須 | string | 有効な IP アドレス literal | なし | `listen_addr = "0.0.0.0"` |
-| `socket.listen_port` | `type = "socket"` で必須 | integer | `1..=65535` | なし | `listen_port = 9000` |
-
-### `[[assets]]`
-
-| キー | 必須 | 型 | 制約 | 既定値 | 例 |
-|---|---|---|---|---|---|
-| `assets[].path` | 各 entry で必須 | string (relative path) | 非空、`main` と同等の相対パス制約、実ファイル存在必須 | なし | `path = "assets/config.json"` |
-
-- `[[assets]]` の追加キーは受理され、manifest に JSON 値として転送されます。
-
-### `[wasi]`
-
-| キー | 必須 | 型 | 制約 | 既定値 | 例 |
-|---|---|---|---|---|---|
-| `wasi.args` | 任意 | array(string) | 各要素は非空 string | 空 array | `args = ["--serve"]` |
-| `wasi.http_outbound` | 任意 | array(string) | `hostname` / `host:port` / `CIDR`。wildcard 不可。CIDR は request host が IP literal の場合のみ評価 | 空 array (manager 側で localhost 系を注入) | `http_outbound = ["localhost", "api.example.com:443", "10.0.0.0/8"]` |
-| `wasi.env.<KEY>` | 任意 | string | key/value とも string。`project_root/.env` が同名キーを上書き | 空 table | `WASI_ONLY = "1"` |
-| `wasi.mounts[].asset_dir` | 任意 | string | `assets[].path` 親ディレクトリ由来のみ指定可能。`read_only_mounts` と重複不可 | なし | `asset_dir = "assets"` |
-| `wasi.mounts[].guest_path` | 任意 | string | 絶対 unix path、backslash/path traversal 禁止。`read_only_mounts` と重複不可 | なし | `guest_path = "/app/assets"` |
-| `wasi.read_only_mounts[].asset_dir` | 任意 | string | `assets[].path` 親ディレクトリ由来のみ指定可能。`mounts` と重複不可 | なし | `asset_dir = "readonly"` |
-| `wasi.read_only_mounts[].guest_path` | 任意 | string | 絶対 unix path、backslash/path traversal 禁止。`mounts` と重複不可 | なし | `guest_path = "/app/readonly"` |
-
-### `[capabilities]`
-
-| キー | 必須 | 型 | 制約 | 既定値 | 例 |
-|---|---|---|---|---|---|
-| `capabilities.privileged` | 任意 | boolean | bool のみ | `false` | `privileged = false` |
-| `capabilities.deps` | 任意 | string `"*"` OR table(map<string, array(string)>) | string は `"*"` のみ。table は dependency package 名または `"*"` を key にとり、値は関数名配列 | 空 table | `deps = "*"` |
-| `capabilities.wasi` | 任意 | boolean OR table(map<string, array(string)>) | `true` は wildcard allow、`false` は空 policy。table は interface ごとの関数許可 | 空 table | `wasi = true` |
-
-### `[namespace_registries]`
-
-| キー | 必須 | 型 | 制約 | 既定値 | 例 |
-|---|---|---|---|---|---|
-| `namespace_registries.<namespace>` | 任意 | string | registry host 文字列。`warg://` source の registry 省略時のみ適用 | なし | `"wasi" = "wasi.dev"` |
-
-## 型別・用途別の注意点
-
-### `type = "cli"`
-
-- `[http]` / `[socket]` は指定しません。
-- `main` の実行に必要な権限は `[capabilities]` と `[wasi]` で明示します。
-
-### `type = "http"`
-
-- `[http].port` は必須です。
-- body 制限を明示したい場合は `[http].max_body_bytes` を指定します。
-
-### `type = "socket"`
-
-- `[socket]` 4キー (`protocol`, `direction`, `listen_addr`, `listen_port`) が必須です。
-- `listen_addr` は hostname ではなく IP literal を使います。
-
-### `type = "rpc"`
-
-- `[http]` / `[socket]` は不要です。
-- service 間通信は `[[bindings]]` と `[capabilities.deps]` を併用して制御します。
-
-## エラーになりやすい設定例
-
-### 1. `type` とセクション不整合
+- Type: `string`
+- Required/Optional: Optional.
+- Accepted values / Constraints: must be a string; used as authority for known-host matching.
+- Default: none.
+- Example:
 
 ```toml
-type = "http"
+[target.default]
+server_name = "node-a.example.com"
+```
 
+- Validation error notes: non-string values fail validation.
+
+### The `client_key` field
+
+- Type: `string` (path)
+- Required/Optional: Optional for `imago build`; required for deploy/run/stop/logs/ps paths.
+- Accepted values / Constraints: non-empty; no path traversal; no backslashes; no Windows drive prefix; relative paths resolve from project root; absolute paths are allowed.
+- Default: none.
+- Example:
+
+```toml
+[target.default]
+client_key = "certs/client.key"
+```
+
+- Validation error notes: invalid paths fail validation; missing key in deploy paths fails the command.
+
+<a id="the-assets-section"></a>
+## The [[assets]] section
+
+This section declares files bundled as service assets.
+
+### The `path` field
+
+- Type: `string` (relative file path)
+- Required/Optional: Required in each `[[assets]]` entry.
+- Accepted values / Constraints: non-empty; same safe-path rules as `main`; file must exist.
+- Default: none.
+- Example:
+
+```toml
+[[assets]]
+path = "assets/config.json"
+mode = "0644"
+```
+
+- Validation error notes: missing/unsafe path fails validation. Additional keys are accepted and forwarded to `manifest.assets[]` as JSON values.
+
+<a id="the-http-section"></a>
+## The [http] section
+
+This section is valid only when `type = "http"`.
+
+### The `port` field
+
+- Type: `integer`
+- Required/Optional: Required when `type = "http"`.
+- Accepted values / Constraints: `1..=65535`.
+- Default: none.
+- Example:
+
+```toml
+[http]
+port = 8080
+```
+
+- Validation error notes: missing or out-of-range values fail validation.
+
+### The `max_body_bytes` field
+
+- Type: `integer`
+- Required/Optional: Optional.
+- Accepted values / Constraints: `1..=67108864` (64 MiB).
+- Default: `8388608` (8 MiB).
+- Example:
+
+```toml
+[http]
+port = 8080
+max_body_bytes = 8388608
+```
+
+- Validation error notes: out-of-range values fail validation.
+
+<a id="the-socket-section"></a>
+## The [socket] section
+
+This section is valid only when `type = "socket"`.
+
+### The `protocol` field
+
+- Type: `string` enum
+- Required/Optional: Required when `type = "socket"`.
+- Accepted values / Constraints: one of `udp`, `tcp`, `both`.
+- Default: none.
+- Example:
+
+```toml
 [socket]
 protocol = "tcp"
+```
+
+- Validation error notes: unknown values fail validation.
+
+### The `direction` field
+
+- Type: `string` enum
+- Required/Optional: Required when `type = "socket"`.
+- Accepted values / Constraints: one of `inbound`, `outbound`, `both`.
+- Default: none.
+- Example:
+
+```toml
+[socket]
 direction = "inbound"
+```
+
+- Validation error notes: unknown values fail validation.
+
+### The `listen_addr` field
+
+- Type: `string`
+- Required/Optional: Required when `type = "socket"`.
+- Accepted values / Constraints: valid IP address literal.
+- Default: none.
+- Example:
+
+```toml
+[socket]
 listen_addr = "0.0.0.0"
+```
+
+- Validation error notes: non-IP values fail validation.
+
+### The `listen_port` field
+
+- Type: `integer`
+- Required/Optional: Required when `type = "socket"`.
+- Accepted values / Constraints: `1..=65535`.
+- Default: none.
+- Example:
+
+```toml
+[socket]
 listen_port = 9000
 ```
 
-`type = "http"` で `[socket]` を指定すると検証エラーになります。
+- Validation error notes: out-of-range values fail validation.
 
-### 2. `restart` の不正値
+<a id="the-wasi-section"></a>
+## The [wasi] section
 
-```toml
-restart = "sometimes"
-```
+This section defines WASI runtime settings and outbound policies.
 
-`restart` は `never` / `on-failure` / `always` / `unless-stopped` のみ許可されます。
+### The `args` field
 
-### 3. `wasi.http_outbound` の wildcard 指定
+- Type: `array(string)`
+- Required/Optional: Optional.
+- Accepted values / Constraints: each item must be a non-empty string.
+- Default: empty array.
+- Example:
 
 ```toml
 [wasi]
-http_outbound = ["*.example.com"]
+args = ["--serve"]
 ```
 
-wildcard は未対応のためエラーになります。
+- Validation error notes: non-string entries fail validation.
 
-### 4. mount 重複
+### The `http_outbound` field
+
+- Type: `array(string)`
+- Required/Optional: Optional.
+- Accepted values / Constraints: each rule must be `hostname`, `host:port`, or CIDR; wildcard patterns such as `*` or `*.example.com` are rejected; CIDR rules apply only when request host is an IP literal.
+- Default: empty array (manager injects `localhost`, `127.0.0.1`, `::1` at runtime).
+- Example:
+
+```toml
+[wasi]
+http_outbound = ["localhost", "api.example.com:443", "10.0.0.0/8"]
+```
+
+- Validation error notes: invalid host/port/CIDR or wildcard values fail validation.
+
+### The `env.<KEY>` field
+
+- Type: `string` value in a table
+- Required/Optional: Optional.
+- Accepted values / Constraints: both key and value must be strings.
+- Default: empty table.
+- Example:
+
+```toml
+[wasi.env]
+WASI_ONLY = "1"
+```
+
+- Validation error notes: non-string key/value types fail validation. `.env` values override duplicate keys.
+
+### The `mounts[].asset_dir` field
+
+- Type: `string`
+- Required/Optional: Required in each `[[wasi.mounts]]` entry.
+- Accepted values / Constraints: must refer to a directory derived from `assets[].path` parent directories; unique across read-write and read-only mount arrays.
+- Default: none.
+- Example:
 
 ```toml
 [[wasi.mounts]]
 asset_dir = "assets"
-guest_path = "/app/data"
-
-[[wasi.read_only_mounts]]
-asset_dir = "assets"
-guest_path = "/app/data"
+guest_path = "/app/assets"
 ```
 
-`asset_dir` / `guest_path` の重複は配列間でも禁止です。
+- Validation error notes: unknown or duplicate `asset_dir` fails validation.
 
-## 関連仕様リンク
+### The `mounts[].guest_path` field
 
-- 正本: [`docs/spec/config.md`](./spec/config.md)
-- manifest 反映: [`docs/spec/manifest.md`](./spec/manifest.md)
-- `imagod` 概要: [`docs/spec/imagod.md`](./spec/imagod.md)
+- Type: `string`
+- Required/Optional: Required in each `[[wasi.mounts]]` entry.
+- Accepted values / Constraints: absolute Unix-style path; no path traversal; unique across read-write and read-only mount arrays.
+- Default: none.
+- Example:
+
+```toml
+[[wasi.mounts]]
+guest_path = "/app/assets"
+```
+
+- Validation error notes: non-absolute or duplicate guest path fails validation.
+
+### The `read_only_mounts[].asset_dir` field
+
+- Type: `string`
+- Required/Optional: Required in each `[[wasi.read_only_mounts]]` entry.
+- Accepted values / Constraints: same rules as `mounts[].asset_dir`; unique across both mount arrays.
+- Default: none.
+- Example:
+
+```toml
+[[wasi.read_only_mounts]]
+asset_dir = "readonly"
+guest_path = "/app/readonly"
+```
+
+- Validation error notes: unknown or duplicate `asset_dir` fails validation.
+
+### The `read_only_mounts[].guest_path` field
+
+- Type: `string`
+- Required/Optional: Required in each `[[wasi.read_only_mounts]]` entry.
+- Accepted values / Constraints: same rules as `mounts[].guest_path`; unique across both mount arrays.
+- Default: none.
+- Example:
+
+```toml
+[[wasi.read_only_mounts]]
+guest_path = "/app/readonly"
+```
+
+- Validation error notes: non-absolute or duplicate guest path fails validation.
+
+<a id="the-capabilities-section"></a>
+## The [capabilities] section
+
+This section defines explicit allow rules for dependency and WASI calls.
+
+### The `privileged` field
+
+- Type: `boolean`
+- Required/Optional: Optional.
+- Accepted values / Constraints: `true` or `false`.
+- Default: `false`.
+- Example:
+
+```toml
+[capabilities]
+privileged = false
+```
+
+- Validation error notes: non-boolean values fail validation. `true` bypasses capability tables.
+
+### The `deps` field
+
+- Type: `"*"` string or `table(map<string, array(string)>)`
+- Required/Optional: Optional.
+- Accepted values / Constraints: string form must be exactly `"*"`; table keys are dependency package names or `"*"`; values are arrays of non-empty function names or `"*"`.
+- Default: empty table.
+- Example:
+
+```toml
+[capabilities]
+deps = "*"
+```
+
+- Validation error notes: non-wildcard strings or wrong table value types fail validation.
+
+### The `wasi` field
+
+- Type: `boolean` or `table(map<string, array(string)>)`
+- Required/Optional: Optional.
+- Accepted values / Constraints: `true` means wildcard allow; `false` means empty policy; table form maps WASI interface names to allowed function arrays.
+- Default: empty table.
+- Example:
+
+```toml
+[capabilities]
+wasi = true
+```
+
+- Validation error notes: wrong value types fail validation.
+
+<a id="the-bindings-section"></a>
+## The [[bindings]] section
+
+This section defines allowed service-to-service interface bindings.
+
+### The `name` field
+
+- Type: `string`
+- Required/Optional: Required in each `[[bindings]]` entry.
+- Accepted values / Constraints: service name with the same character rules as top-level `name`.
+- Default: none.
+- Example:
+
+```toml
+[[bindings]]
+name = "rpc-provider"
+wit = "warg://acme:rpc-api@0.1.0"
+```
+
+- Validation error notes: missing or invalid target name fails validation.
+
+### The `wit` field
+
+- Type: `string`
+- Required/Optional: Required in each `[[bindings]]` entry.
+- Accepted values / Constraints: must use one of `file://`, `warg://`, or `oci://`.
+- Default: none.
+- Example:
+
+```toml
+[[bindings]]
+name = "rpc-provider"
+wit = "file://wit/interfaces/rpc/package.wit"
+```
+
+- Validation error notes: unsupported schemes fail validation. Legacy `"<package>/<interface>"` format is not supported and fails validation.
+
+### The `imago update` expansion behavior
+
+- Type: behavior note
+- Required/Optional: Applies whenever `[[bindings]]` is configured.
+- Accepted values / Constraints: `imago update` resolves the referenced WIT package and expands all interfaces into `manifest.bindings[]` entries in the form `{ "name": "<service>", "wit": "<package>/<interface>" }`.
+- Default: if omitted, `manifest.bindings=[]` and runtime authorization is deny-by-default.
+- Example:
+
+```toml
+[[bindings]]
+name = "rpc-provider"
+wit = "warg://acme:rpc-api@0.1.0"
+```
+
+- Validation error notes: for remote sources (`warg://`, `oci://`), package verification uses the resolved top-level package name rather than the literal package token in the URL.
+
+<a id="the-dependencies-section"></a>
+## The [[dependencies]] section
+
+This section defines plugin dependencies and their resolution sources.
+
+### The `name` field
+
+- Type: `string`
+- Required/Optional: Required in each `[[dependencies]]` entry.
+- Accepted values / Constraints: ASCII letters/digits plus `.`, `_`, `-`, `:`, `/`; path components must be normal (no absolute prefix, `./`, `../`, or drive prefix).
+- Default: none.
+- Example:
+
+```toml
+[[dependencies]]
+name = "acme:plugin/example"
+version = "0.1.0"
+kind = "wasm"
+```
+
+- Validation error notes: invalid path-like components fail validation.
+
+### The `version` field
+
+- Type: `string`
+- Required/Optional: Required in each `[[dependencies]]` entry.
+- Accepted values / Constraints: semantic version string used by resolution workflows.
+- Default: none.
+- Example:
+
+```toml
+version = "0.1.0"
+```
+
+- Validation error notes: missing version fails validation.
+
+### The `kind` field
+
+- Type: `string` enum
+- Required/Optional: Required in each `[[dependencies]]` entry.
+- Accepted values / Constraints: one of `native` or `wasm`.
+- Default: none.
+- Example:
+
+```toml
+kind = "wasm"
+```
+
+- Validation error notes: unknown values fail validation.
+
+### The `wit` field
+
+- Type: `string` or `table`
+- Required/Optional: Optional.
+- Accepted values / Constraints:
+  - String form accepts `file://`, `warg://`, `oci://`.
+  - Table form accepts `wit.source` (required) and `wit.registry` (optional, `warg://` only).
+  - If omitted, source defaults to `warg://{name}@{version}`.
+- Default: `warg://{name}@{version}` plus registry fallback resolution.
+- Example:
+
+```toml
+wit = "warg://acme:plugin/example@0.1.0"
+```
+
+- Validation error notes: `https://wa.dev/...` shorthand is rejected; `wit.registry` with `oci://` sources is rejected.
+
+### The `requires` field
+
+- Type: `array(string)`
+- Required/Optional: Optional.
+- Accepted values / Constraints: each item follows the same package-name constraints as `name`.
+- Default: empty array.
+- Example:
+
+```toml
+requires = ["acme:shared/runtime"]
+```
+
+- Validation error notes: invalid package-name path components fail validation.
+
+### The `component.source` field
+
+- Type: `string`
+- Required/Optional: Optional for `kind = "wasm"`; required when `wit` does not resolve to a component.
+- Accepted values / Constraints: `file://`, `warg://`, or `oci://`.
+- Default: none.
+- Example:
+
+```toml
+[dependencies.component]
+source = "oci://registry.example.com/acme/plugins/example@0.1.0"
+```
+
+- Validation error notes: missing component source for non-component WIT inputs fails update/deploy workflows.
+
+### The `component.registry` field
+
+- Type: `string`
+- Required/Optional: Optional.
+- Accepted values / Constraints: registry override for `warg://` component sources only.
+- Default: registry fallback resolution.
+- Example:
+
+```toml
+[dependencies.component]
+registry = "wasi.dev"
+```
+
+- Validation error notes: using this field with `oci://` component sources fails validation.
+
+### The `component.sha256` field
+
+- Type: `string`
+- Required/Optional: Optional.
+- Accepted values / Constraints: sha256 digest string checked by `imago update` when provided.
+- Default: none.
+- Example:
+
+```toml
+[dependencies.component]
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+```
+
+- Validation error notes: digest mismatch fails dependency resolution.
+
+### The `capabilities` field
+
+- Type: table
+- Required/Optional: Optional.
+- Accepted values / Constraints: dependency-scoped capability rules for plugin call behavior.
+- Default: none.
+- Example:
+
+```toml
+[dependencies.capabilities]
+wasi = true
+```
+
+- Validation error notes: invalid capability schema fails validation.
+
+### Resolution, lockfile, and cache behavior
+
+- Type: behavior note
+- Required/Optional: Applies whenever `[[dependencies]]` is present.
+- Accepted values / Constraints:
+  - `imago update` resolves dependency WIT/component inputs and stores artifacts under `.imago/deps/<sanitized dependency>/`.
+  - `imago update` regenerates `wit/deps/` and writes lock metadata into `imago.lock` (`version = 1`).
+  - `imago build` requires matching lock/cache state and rebuilds `wit/deps/` from `.imago/deps` before validation.
+  - `imago deploy` uses component metadata from `imago.lock` plus `.imago/deps` caches.
+- Default: not applicable.
+- Example:
+
+```toml
+[[dependencies]]
+name = "acme:plugin/example"
+version = "0.1.0"
+kind = "wasm"
+wit = "warg://acme:plugin/example@0.1.0"
+```
+
+- Validation error notes:
+  - `dependencies[].wit.source = "file://..."` pointing into `wit/deps` is rejected.
+  - Multiple dependencies resolving to the same `wit/deps` output path are rejected.
+  - Missing or mismatched `imago.lock` entries (`wit_*`, `component_*`, `wit_packages`) fail build/deploy and require `imago update`.
+  - For remote inputs, resolved top-level package names must match `dependencies[].name`.
+
+<a id="the-namespace_registries-section"></a>
+## The [namespace_registries] section
+
+This section overrides WARG registry hosts by namespace.
+
+### The `<namespace>` field
+
+- Type: `string` value in a table
+- Required/Optional: Optional.
+- Accepted values / Constraints: table key is namespace; value is registry host string.
+- Default: none.
+- Example:
+
+```toml
+[namespace_registries]
+wasi = "wasi.dev"
+```
+
+- Validation error notes: values must be strings. This table applies only when a `warg://` source omits its registry.
+
+<a id="legacy-sections"></a>
+## Legacy sections
+
+These sections are still accepted for compatibility but are ignored by manifest output.
+
+### The `[vars]` section
+
+#### The `<KEY>` field
+
+- Type: `string` value in a table
+- Required/Optional: Optional.
+- Accepted values / Constraints: string values only.
+- Default: empty table.
+- Example:
+
+```toml
+[vars]
+APP_MODE = "prod"
+```
+
+- Validation error notes: non-string values fail validation.
+
+### The `[secrets]` section
+
+#### The `<KEY>` field
+
+- Type: `string` value in a table
+- Required/Optional: Optional.
+- Accepted values / Constraints: string values only.
+- Default: empty table.
+- Example:
+
+```toml
+[secrets]
+SECRET_TOKEN = "change-me"
+```
+
+- Validation error notes: non-string values fail validation.
+
+## Related specifications
+
+- Normative specification: [`docs/spec/config.md`](./spec/config.md)
+- Manifest mapping: [`docs/spec/manifest.md`](./spec/manifest.md)
+- Daemon behavior overview: [`docs/spec/imagod.md`](./spec/imagod.md)
