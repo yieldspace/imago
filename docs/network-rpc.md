@@ -38,8 +38,9 @@ sequenceDiagram
 - Use explicit target naming for predictable known-host lookups.
 - Treat transport and permission failures as separate diagnosis tracks.
 
-## Related Specifications
+## Source References
 
-- [Deploy Protocol Specification](./spec/deploy-protocol.md)
-- [Observability Specification](./spec/observability.md)
-- [imago-protocol Specification](./spec/imago-protocol.md)
+- RPC payload contracts: [`crates/imago-protocol/src/messages/rpc.rs`](../crates/imago-protocol/src/messages/rpc.rs)
+- Server protocol routing: [`crates/imagod-server/src/protocol_handler.rs`](../crates/imagod-server/src/protocol_handler.rs)
+- Runtime invoke authorization: [`crates/imagod-control/src/service_supervisor.rs`](../crates/imagod-control/src/service_supervisor.rs)
+- Runner startup behavior: [`crates/imagod-runtime/src/runner_process.rs`](../crates/imagod-runtime/src/runner_process.rs)

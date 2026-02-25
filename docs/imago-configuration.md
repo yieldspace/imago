@@ -1,7 +1,7 @@
 # imago.toml reference
 
 This page is a practical reference for `imago.toml`.
-The normative contract is [`docs/spec/config.md`](./spec/config.md).
+Source of truth is the codebase (module docs, type definitions, validation logic, and tests).
 
 ## Sections
 
@@ -713,8 +713,12 @@ SECRET_TOKEN = "change-me"
 
 - Validation error notes: non-string values fail validation.
 
-## Related specifications
+## Related source modules
 
-- Normative specification: [`docs/spec/config.md`](./spec/config.md)
-- Manifest mapping: [`docs/spec/manifest.md`](./spec/manifest.md)
-- Daemon behavior overview: [`docs/spec/imagod.md`](./spec/imagod.md)
+- Build and manifest normalization:
+  - [`crates/imago-cli/src/commands/build/mod.rs`](../crates/imago-cli/src/commands/build/mod.rs)
+- Config validation helpers:
+  - [`crates/imago-cli/src/commands/build/validation.rs`](../crates/imago-cli/src/commands/build/validation.rs)
+- Dependency and lock resolution:
+  - [`crates/imago-cli/src/commands/update/mod.rs`](../crates/imago-cli/src/commands/update/mod.rs)
+  - [`crates/imago-lockfile/src/lib.rs`](../crates/imago-lockfile/src/lib.rs)

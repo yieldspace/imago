@@ -1,7 +1,7 @@
 # Architecture
 
-This page explains the runtime and deployment architecture at a high level.
-For normative details, use [docs/spec](./spec/README.md).
+This page explains runtime and deployment architecture at a high level.
+Normative behavior is defined by source modules and their tests.
 
 ## Goals
 
@@ -45,3 +45,11 @@ flowchart TD
 3. `imagod` verifies digests, promotes release state, and launches a runner.
 4. Runner executes the component and reports control-plane events.
 5. Logs, status, and RPC invocations are served through protocol APIs.
+
+## Source References
+
+- Build/manifest: [`crates/imago-cli/src/commands/build/mod.rs`](../crates/imago-cli/src/commands/build/mod.rs)
+- Protocol handler: [`crates/imagod-server/src/protocol_handler.rs`](../crates/imagod-server/src/protocol_handler.rs)
+- Orchestration: [`crates/imagod-control/src/orchestrator.rs`](../crates/imagod-control/src/orchestrator.rs)
+- Supervision: [`crates/imagod-control/src/service_supervisor.rs`](../crates/imagod-control/src/service_supervisor.rs)
+- Runner bootstrap: [`crates/imagod-runtime/src/runner_process.rs`](../crates/imagod-runtime/src/runner_process.rs)

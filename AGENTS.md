@@ -8,7 +8,7 @@ If a deeper `AGENTS.md` exists in a subdirectory, that file overrides this one f
 This repository is a Rust workspace for embedded Linux use cases, not a single-crate project.
 Workspace members include `crates/*`, `plugins/*`, `examples/local-imagod*`, and `e2e`.
 Manage dependency versions and internal path dependencies in root `workspace.dependencies`, then reference them from member crates with `workspace = true`.
-Protocol and runtime specs live under `docs/spec/`, and JSON samples live under `docs/spec/examples/`.
+Protocol and runtime contracts are source-of-truth in code under `crates/*` (module docs, type definitions, validation logic, and tests). User-facing guides live under `docs/`.
 Keep generated artifacts such as `target/` out of commits.
 
 ## Cross-cutting Engineering Rules
@@ -22,7 +22,7 @@ Use `snake_case` for functions/modules/files, `PascalCase` for types/traits, and
 Prefer simplicity over pathological correctness. Follow YAGNI, KISS, and DRY.
 Do not add backward-compat shims or fallback paths unless they come for free without increasing cyclomatic complexity.
 Keep modules focused and explicit.
-When behavior changes, update related `docs/spec/` files in the same PR so implementation and documentation stay aligned.
+When behavior changes, update related code docs (`//!`/`///`) and user-facing docs in the same PR so implementation and documentation stay aligned.
 
 ## WIT Writing Conventions
 These rules apply to `plugins/*/wit/package.wit`.
@@ -43,10 +43,11 @@ These rules apply to `plugins/*/wit/package.wit`.
 - `cargo clippy --workspace --all-targets -- -D warnings`: lint strictly and fail on warnings.
 
 ## Design Change Documentation Policy
-When implementation introduces or changes protocol contracts, defaults, validation rules, or structured error contracts, update corresponding files under `docs/spec/` in the same PR.
+When implementation introduces or changes protocol contracts, defaults, validation rules, or structured error contracts, update the corresponding source modules and code docs in the same PR.
 Default workflow:
-- If the delta is too large for inline notes, create a separate document and link it from both `docs/spec/README.md` and the related spec file(s).
-- Keep `docs/spec/examples/` synchronized for schema and contract changes.
+- Update the module docs/docstrings at the contract boundary (`crates/*`) together with implementation changes.
+- If a user-facing explanation is needed, update the relevant guide pages under `docs/`.
+- Keep schema examples synchronized using tests/fixtures or in-code test cases where applicable.
 PR body requirements for design-impacting changes must be written in `.github/pull_request_template.md` sections:
 - `## Motivation`: describe why the design change is needed.
 - `## Summary`: summarize design deltas and list updated spec files.
@@ -63,5 +64,5 @@ Include required details inside those sections: what changed and why, linked iss
 Use t-wada style TDD for new behavior: Red (failing test first), Green (minimum implementation), Refactor (cleanup with tests still green).
 Add unit tests close to implementation with `#[cfg(test)] mod tests`.
 Name tests by behavior (for example, `rejects_invalid_manifest_hash`).
-For protocol or schema changes, add both success and failure-path tests and keep `docs/spec/examples/` synchronized.
+For protocol or schema changes, add both success and failure-path tests and keep test fixtures/examples synchronized in code or `tests/fixtures` when applicable.
 No strict coverage target exists, but new logic should cover key branches.

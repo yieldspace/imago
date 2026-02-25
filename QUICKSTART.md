@@ -12,11 +12,11 @@ rustup target add wasm32-wasip2
 - Imago CLI
 
 ```bash
-curl -sSf https://imago.yield.space | sh
+curl -sSf https://install.imago.sh | sh
 ```
 
 ```bash
-cargo install imago
+cargo install imago-cli --git https://github.com/yieldspace/imago
 ```
 
 ## Clone Repository
@@ -81,3 +81,12 @@ Failure emits `command.error`:
 ## More Examples
 
 See [examples/README.md](examples/README.md).
+
+## Documentation And Code References
+
+- Documentation index: [docs/README.md](docs/README.md)
+- Generated API docs:
+
+```bash
+cargo doc --workspace --no-deps
+```

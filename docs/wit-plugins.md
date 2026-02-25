@@ -36,7 +36,7 @@ Supported WIT source schemes:
 - `warg://`
 - `oci://`
 
-`imago update` resolves sources into project cache and lock data. `imago build` and `imago deploy` consume the resolved lock/cache state instead of resolving from network paths during execution.
+`imago update` resolves sources into project cache and lock data. `imago build` and `imago deploy` consume the resolved lock/cache state instead of resolving from remote paths during execution.
 
 ## Resolution and Locking
 
@@ -54,8 +54,13 @@ For plugin crates under `plugins/*` with `wit/package.wit`:
 - Publish tags in `<plugin-dir>@<version>` format.
 - Keep the tag version aligned with the WIT package version.
 
-## Related Specifications
+## Source References
 
-- [Configuration Specification](./spec/config.md)
-- [Manifest Specification](./spec/manifest.md)
-- [imagod Internal Reference](./spec/imagod-internals.md)
+- Dependency resolution and lock output:
+  - [`crates/imago-cli/src/commands/update/mod.rs`](../crates/imago-cli/src/commands/update/mod.rs)
+  - [`crates/imago-lockfile/src/lib.rs`](../crates/imago-lockfile/src/lib.rs)
+  - [`crates/imago-lockfile/src/resolve.rs`](../crates/imago-lockfile/src/resolve.rs)
+- Build-time dependency normalization:
+  - [`crates/imago-cli/src/commands/build/mod.rs`](../crates/imago-cli/src/commands/build/mod.rs)
+- Runtime dependency execution boundary:
+  - [`crates/imagod-control/src/orchestrator.rs`](../crates/imagod-control/src/orchestrator.rs)

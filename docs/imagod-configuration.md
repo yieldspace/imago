@@ -1,7 +1,7 @@
 # imagod.toml reference
 
 This page is a practical reference for `imagod.toml`.
-The normative contract is [`docs/spec/config.md`](./spec/config.md).
+Source of truth is the codebase (module docs, type definitions, validation logic, and tests).
 
 ## Sections
 
@@ -401,8 +401,14 @@ boot_restore_enabled = true
 
 - Validation error notes: non-boolean values fail validation.
 
-## Related specifications
+## Related source modules
 
-- Normative specification: [`docs/spec/config.md`](./spec/config.md)
-- Deploy/runtime protocol details: [`docs/spec/deploy-protocol.md`](./spec/deploy-protocol.md)
-- Daemon overview: [`docs/spec/imagod.md`](./spec/imagod.md)
+- Config model and defaults:
+  - [`crates/imagod-config/src/lib.rs`](../crates/imagod-config/src/lib.rs)
+- Semantic validation:
+  - [`crates/imagod-config/src/load/validation.rs`](../crates/imagod-config/src/load/validation.rs)
+- Protocol handling and session routing:
+  - [`crates/imagod-server/src/protocol_handler.rs`](../crates/imagod-server/src/protocol_handler.rs)
+- Deploy/runtime orchestration:
+  - [`crates/imagod-control/src/orchestrator.rs`](../crates/imagod-control/src/orchestrator.rs)
+  - [`crates/imagod-control/src/service_supervisor.rs`](../crates/imagod-control/src/service_supervisor.rs)

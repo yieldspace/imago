@@ -17,11 +17,11 @@ Start with the documentation landing page:
 ## Quickstart
 
 ```bash
-curl -sSf https://imago.yield.space | sh
+curl -sSf https://install.imago.sh | sh
 ```
 
 ```bash
-cargo install imago
+cargo install imago-cli --git https://github.com/yieldspace/imago
 ```
 
 ```bash
@@ -85,13 +85,29 @@ Example failure line:
 
 - [imago.toml Reference](docs/imago-configuration.md)
 - [imagod.toml Reference](docs/imagod-configuration.md)
-- [Configuration Specification](docs/spec/config.md)
+- [Documentation Home](docs/README.md)
 
-## Plugin and Protocol References
+## Source Of Truth (Code)
 
-- [WIT Plugins](docs/wit-plugins.md)
-- [Deploy Protocol Specification](docs/spec/deploy-protocol.md)
-- [Observability Specification](docs/spec/observability.md)
+- Build and manifest normalization:
+  - [`crates/imago-cli/src/commands/build/mod.rs`](crates/imago-cli/src/commands/build/mod.rs)
+  - [`crates/imago-cli/src/commands/build/validation.rs`](crates/imago-cli/src/commands/build/validation.rs)
+- Dependency and lock resolution:
+  - [`crates/imago-cli/src/commands/update/mod.rs`](crates/imago-cli/src/commands/update/mod.rs)
+  - [`crates/imago-lockfile/src/lib.rs`](crates/imago-lockfile/src/lib.rs)
+- Wire contracts and validation:
+  - [`crates/imago-protocol/src/lib.rs`](crates/imago-protocol/src/lib.rs)
+  - [`crates/imago-protocol/src/messages`](crates/imago-protocol/src/messages)
+- Daemon runtime boundary:
+  - [`crates/imagod-server/src/protocol_handler.rs`](crates/imagod-server/src/protocol_handler.rs)
+  - [`crates/imagod-control/src/orchestrator.rs`](crates/imagod-control/src/orchestrator.rs)
+  - [`crates/imagod-control/src/service_supervisor.rs`](crates/imagod-control/src/service_supervisor.rs)
+
+For generated API docs:
+
+```bash
+cargo doc --workspace --no-deps
+```
 
 ## Development Checks
 
