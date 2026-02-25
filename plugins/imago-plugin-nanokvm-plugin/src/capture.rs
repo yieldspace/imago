@@ -19,19 +19,36 @@ pub(crate) fn read_first_jpeg_frame_from_session(
 
     let request = crate::session::build_http_agent()
         .get(&url)
-        .set("Accept", "multipart/x-mixed-replace");
+        .header("Accept", "multipart/x-mixed-replace");
     let request = if let Some(cookie_header) = &session.cookie_header {
-        request.set("Cookie", cookie_header)
+        request.header("Cookie", cookie_header)
     } else {
         request
     };
 
-    let response = request
+    let mut response = request
         .call()
         .map_err(|err| map_http_error("nanokvm mjpeg request failed", err))?;
+    let status_code = response.status().as_u16();
+    if !response.status().is_success() {
+        let body = response.body_mut().read_to_string().unwrap_or_default();
+        if body.trim().is_empty() {
+            return Err(format!(
+                "nanokvm mjpeg request failed: http status {status_code}"
+            ));
+        }
+        return Err(format!(
+            "nanokvm mjpeg request failed: http status {status_code}: {}",
+            body.trim()
+        ));
+    }
 
-    let boundary = parse_mjpeg_boundary(response.header("Content-Type"))?;
-    let reader = response.into_reader();
+    let content_type = response
+        .headers()
+        .get("Content-Type")
+        .and_then(|value| value.to_str().ok());
+    let boundary = parse_mjpeg_boundary(content_type)?;
+    let reader = response.into_body().into_reader();
     read_first_mjpeg_frame(reader, &boundary)
 }
 

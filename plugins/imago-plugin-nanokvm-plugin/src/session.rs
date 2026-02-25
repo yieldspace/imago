@@ -163,10 +163,13 @@ pub(crate) fn create_local_session(auth: SessionAuth) -> Result<NanoKvmSession, 
 }
 
 pub(crate) fn build_http_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(3))
-        .timeout_read(Duration::from_secs(10))
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(Duration::from_secs(3)))
+        .timeout_recv_response(Some(Duration::from_secs(10)))
+        .timeout_recv_body(Some(Duration::from_secs(10)))
         .build()
+        .into()
 }
 
 pub(crate) fn request_login_token(
@@ -181,30 +184,39 @@ pub(crate) fn request_login_token(
     })
     .to_string();
 
-    let response = build_http_agent()
+    let mut response = build_http_agent()
         .post(&url)
-        .set("Accept", "application/json")
-        .set("Content-Type", "application/json")
-        .send_string(&payload)
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .send(payload)
         .map_err(|err| map_http_error("nanokvm login request failed", err))?;
 
     let body = response
-        .into_string()
+        .body_mut()
+        .read_to_string()
         .map_err(|err| format!("nanokvm login response read failed: {err}"))?;
+    let status_code = response.status().as_u16();
+    if !response.status().is_success() {
+        if body.trim().is_empty() {
+            return Err(format!(
+                "nanokvm login request failed: http status {status_code}"
+            ));
+        }
+        return Err(format!(
+            "nanokvm login request failed: http status {status_code}: {}",
+            body.trim()
+        ));
+    }
+
     parse_login_response(&body)
 }
 
 pub(crate) fn map_http_error(context: &str, err: ureq::Error) -> String {
     match err {
-        ureq::Error::Status(code, response) => {
-            let body = response.into_string().unwrap_or_default();
-            if body.trim().is_empty() {
-                format!("{context}: http status {code}")
-            } else {
-                format!("{context}: http status {code}: {}", body.trim())
-            }
-        }
-        ureq::Error::Transport(err) => format!("{context}: transport error: {err}"),
+        ureq::Error::StatusCode(code) => format!("{context}: http status {code}"),
+        ureq::Error::Io(err) => format!("{context}: transport error: {err}"),
+        ureq::Error::Timeout(timeout) => format!("{context}: transport timeout: {timeout}"),
+        _ => format!("{context}: {err}"),
     }
 }
 
