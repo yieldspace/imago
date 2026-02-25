@@ -28,7 +28,8 @@ use crate::runtime::{ComponentRuntime, RuntimeInvoker, RuntimeRunRequest};
 #[cfg(not(feature = "runtime-wasmtime"))]
 use crate::runtime::{RuntimeHttpRequest, RuntimeHttpResponse, RuntimeInvokeRequest};
 
-const STARTUP_CONFIRM_WINDOW: Duration = Duration::from_millis(200);
+const STARTUP_CONFIRM_WINDOW_ENV: &str = "IMAGOD_RUNNER_STARTUP_CONFIRM_WINDOW_MS";
+const STARTUP_CONFIRM_WINDOW_DEFAULT_MS: u64 = 200;
 
 #[cfg(feature = "runtime-wasmtime")]
 type RuntimeBackend = WasmRuntime;
@@ -90,6 +91,17 @@ enum HttpRuntimeReadyState {
     Ready,
     /// Runtime task exited before becoming ready.
     Finished(Result<(), ImagodError>),
+}
+
+fn startup_confirm_window() -> Duration {
+    startup_confirm_window_from_env(std::env::var(STARTUP_CONFIRM_WINDOW_ENV).ok().as_deref())
+}
+
+fn startup_confirm_window_from_env(value: Option<&str>) -> Duration {
+    let configured_ms = value
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|ms| *ms > 0);
+    Duration::from_millis(configured_ms.unwrap_or(STARTUP_CONFIRM_WINDOW_DEFAULT_MS))
 }
 
 /// Starts runner mode by reading `RunnerBootstrap` from stdin and executing the component.
@@ -229,7 +241,7 @@ pub async fn run_runner_from_stdin_with_registry(
     };
 
     if bootstrap.app_type != RunnerAppType::Http {
-        match observe_startup_window(&mut run_task, STARTUP_CONFIRM_WINDOW).await? {
+        match observe_startup_window(&mut run_task, startup_confirm_window()).await? {
             StartupRunState::Finished(run_result) => {
                 if run_result.is_ok()
                     && let Err(err) = mark_ready(&bootstrap, &manager_client).await
@@ -419,6 +431,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn startup_confirm_window_uses_default_when_env_is_unset() {
+        assert_eq!(
+            startup_confirm_window_from_env(None),
+            Duration::from_millis(STARTUP_CONFIRM_WINDOW_DEFAULT_MS)
+        );
+    }
+
+    #[test]
+    fn startup_confirm_window_uses_env_override_when_valid() {
+        assert_eq!(
+            startup_confirm_window_from_env(Some("5000")),
+            Duration::from_millis(5000)
+        );
+    }
+
+    #[test]
+    fn startup_confirm_window_falls_back_when_env_is_invalid() {
+        assert_eq!(
+            startup_confirm_window_from_env(Some("invalid")),
+            Duration::from_millis(STARTUP_CONFIRM_WINDOW_DEFAULT_MS)
+        );
+        assert_eq!(
+            startup_confirm_window_from_env(Some("0")),
+            Duration::from_millis(STARTUP_CONFIRM_WINDOW_DEFAULT_MS)
+        );
+    }
+
     #[tokio::test]
     async fn startup_window_detects_early_error_exit() {
         let mut run_task = tokio::spawn(async {
@@ -428,9 +468,12 @@ mod tests {
                 "early startup failure",
             ))
         });
-        let state = observe_startup_window(&mut run_task, STARTUP_CONFIRM_WINDOW)
-            .await
-            .expect("startup observation should succeed");
+        let state = observe_startup_window(
+            &mut run_task,
+            Duration::from_millis(STARTUP_CONFIRM_WINDOW_DEFAULT_MS),
+        )
+        .await
+        .expect("startup observation should succeed");
         match state {
             StartupRunState::Finished(Err(err)) => assert_eq!(err.code, ErrorCode::Internal),
             _ => panic!("startup should classify early error as finished failure"),
@@ -440,9 +483,12 @@ mod tests {
     #[tokio::test]
     async fn startup_window_keeps_early_ok_exit_compatible() {
         let mut run_task = tokio::spawn(async { Ok(()) });
-        let state = observe_startup_window(&mut run_task, STARTUP_CONFIRM_WINDOW)
-            .await
-            .expect("startup observation should succeed");
+        let state = observe_startup_window(
+            &mut run_task,
+            Duration::from_millis(STARTUP_CONFIRM_WINDOW_DEFAULT_MS),
+        )
+        .await
+        .expect("startup observation should succeed");
         match state {
             StartupRunState::Finished(Ok(())) => {}
             _ => panic!("startup should classify early ok as finished success"),

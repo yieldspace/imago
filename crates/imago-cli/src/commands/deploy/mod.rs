@@ -239,7 +239,11 @@ struct ServerResponseError {
 
 impl std::fmt::Display for ServerResponseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "server error: {}", format_deploy_structured_error(&self.error))
+        write!(
+            f,
+            "server error: {}",
+            format_deploy_structured_error(&self.error)
+        )
     }
 }
 

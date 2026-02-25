@@ -2,14 +2,58 @@
 mod e2e_helper;
 
 use e2e_helper::{AppKind, CmdOutput, Scenario, TestResult, WasmArtifact};
+use std::ffi::OsString;
 
 const FAIL_STDOUT_MARKER: &str = "IMAGO_E2E_DEPLOY_FAIL_STDOUT";
 const FAIL_STDERR_MARKER: &str = "IMAGO_E2E_DEPLOY_FAIL_STDERR";
 const DEPLOY_FAIL_MAX_ATTEMPTS: usize = 3;
+const RUNNER_STARTUP_CONFIRM_WINDOW_ENV: &str = "IMAGOD_RUNNER_STARTUP_CONFIRM_WINDOW_MS";
+const RUNNER_STARTUP_CONFIRM_WINDOW_E2E_MS: &str = "5000";
+
+struct ScopedEnvVar {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl ScopedEnvVar {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        // SAFETY: This test binary has a single ignored test and uses this override
+        // only for spawned child processes in this test scope.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => {
+                // SAFETY: Restores prior process environment value at end of this test scope.
+                unsafe {
+                    std::env::set_var(self.key, value);
+                }
+            }
+            None => {
+                // SAFETY: Removes test-local override set in this scope.
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+}
 
 #[test]
 #[ignore]
 fn e2e_cli_deploy_failure_includes_wasm_logs() -> TestResult {
+    let _startup_window = ScopedEnvVar::set(
+        RUNNER_STARTUP_CONFIRM_WINDOW_ENV,
+        RUNNER_STARTUP_CONFIRM_WINDOW_E2E_MS,
+    );
+
     let mut scenario = Scenario::new("e2e-clif")?;
     let _default = scenario.cluster().add_node("default")?;
     scenario.cluster().start_all()?;
