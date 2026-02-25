@@ -470,6 +470,7 @@ stateDiagram-v2
 - `message: String`
 - `retryable: bool`
 - `details`
+  - `deploy` 経路で `service.start` が失敗した場合は、`details` の `wasm.stdout` / `wasm.stderr` キーへ runner log ring の snapshot（lossy UTF-8）を付与する。
 
 `to_structured()` で `imago_protocol::StructuredError` へ変換して wire に載せる。
 

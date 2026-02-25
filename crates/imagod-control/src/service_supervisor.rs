@@ -47,6 +47,8 @@ const STAGE_STOP: &str = "service.stop";
 const STAGE_CONTROL: &str = "service.control";
 const STAGE_LOGS: &str = "service.logs";
 const STAGE_INVOKE: &str = "service.invoke";
+const DETAIL_WASM_STDOUT: &str = "wasm.stdout";
+const DETAIL_WASM_STDERR: &str = "wasm.stderr";
 const STARTUP_EXIT_CHECK_INTERVAL_MS: u64 = 25;
 const INVOCATION_TOKEN_TTL_SECS: u64 = 30;
 const RUNNER_ENDPOINT_HASH_BYTES: usize = 16;
@@ -145,6 +147,12 @@ struct RunningService {
     composite_log: Arc<Mutex<BoundedLogBuffer>>,
     log_sender: broadcast::Sender<ServiceLogEvent>,
     last_heartbeat_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct StartFailureLogBuffers {
+    stdout_log: Arc<Mutex<BoundedLogBuffer>>,
+    stderr_log: Arc<Mutex<BoundedLogBuffer>>,
 }
 
 #[derive(Debug)]
@@ -383,6 +391,14 @@ impl ServiceSupervisor {
 
     /// Starts a service by spawning a runner child process.
     pub async fn start(&self, launch: ServiceLaunch) -> Result<(), ImagodError> {
+        self.start_internal(launch, false).await
+    }
+
+    async fn start_internal(
+        &self,
+        launch: ServiceLaunch,
+        include_wasm_log_details_on_failure: bool,
+    ) -> Result<(), ImagodError> {
         self.reap_finished_service(&launch.name).await;
         self.reserve_start(&launch.name).await?;
         let service_name = launch.name.clone();
@@ -436,6 +452,10 @@ impl ServiceSupervisor {
             let stderr_log = Arc::new(Mutex::new(BoundedLogBuffer::new(
                 self.runner_log_buffer_bytes / 2,
             )));
+            let start_failure_log_buffers = StartFailureLogBuffers {
+                stdout_log: stdout_log.clone(),
+                stderr_log: stderr_log.clone(),
+            };
             let composite_log = Arc::new(Mutex::new(BoundedLogBuffer::new(
                 self.runner_log_buffer_bytes,
             )));
@@ -492,6 +512,12 @@ impl ServiceSupervisor {
                 .write_bootstrap_to_running_service(&launch.name, &bootstrap)
                 .await
             {
+                let err = attach_start_failure_wasm_log_details(
+                    err,
+                    include_wasm_log_details_on_failure,
+                    &start_failure_log_buffers,
+                )
+                .await;
                 self.pending_ready.lock().await.remove(&runner_id);
                 self.cleanup_start_failure(&launch.name).await;
                 return Err(err);
@@ -503,6 +529,12 @@ impl ServiceSupervisor {
             self.pending_ready.lock().await.remove(&runner_id);
 
             if let Err(err) = ready_result {
+                let err = attach_start_failure_wasm_log_details(
+                    err,
+                    include_wasm_log_details_on_failure,
+                    &start_failure_log_buffers,
+                )
+                .await;
                 self.cleanup_start_failure(&launch.name).await;
                 return Err(err);
             }
@@ -521,7 +553,7 @@ impl ServiceSupervisor {
             Err(err) if err.code == ErrorCode::NotFound => {}
             Err(err) => return Err(err),
         }
-        self.start(launch).await
+        self.start_internal(launch, true).await
     }
 
     /// Stops a running service, optionally forcing immediate kill.
@@ -1276,6 +1308,40 @@ impl ServiceSupervisor {
     }
 }
 
+async fn attach_start_failure_wasm_log_details(
+    mut err: ImagodError,
+    include_wasm_log_details_on_failure: bool,
+    log_buffers: &StartFailureLogBuffers,
+) -> ImagodError {
+    if !include_wasm_log_details_on_failure {
+        return err;
+    }
+
+    let stdout = {
+        let buffer = log_buffers.stdout_log.lock().await;
+        buffer.snapshot()
+    };
+    if !stdout.is_empty() {
+        let stdout_text = String::from_utf8_lossy(&stdout).into_owned();
+        if !stdout_text.is_empty() {
+            err = err.with_detail(DETAIL_WASM_STDOUT, stdout_text);
+        }
+    }
+
+    let stderr = {
+        let buffer = log_buffers.stderr_log.lock().await;
+        buffer.snapshot()
+    };
+    if !stderr.is_empty() {
+        let stderr_text = String::from_utf8_lossy(&stderr).into_owned();
+        if !stderr_text.is_empty() {
+            err = err.with_detail(DETAIL_WASM_STDERR, stderr_text);
+        }
+    }
+
+    err
+}
+
 fn build_runner_endpoint(storage_root: &Path, service_name: &str, runner_id: &str) -> PathBuf {
     runner_spawn::build_runner_endpoint(storage_root, service_name, runner_id)
 }
@@ -1529,6 +1595,64 @@ mod tests {
         buffer.push(b"abc");
         buffer.push(b"def");
         assert_eq!(buffer.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn attach_start_failure_wasm_log_details_adds_details_only_when_enabled() {
+        let stdout_log = Arc::new(Mutex::new(BoundedLogBuffer::new(128)));
+        let stderr_log = Arc::new(Mutex::new(BoundedLogBuffer::new(128)));
+        {
+            let mut stdout = stdout_log.lock().await;
+            stdout.push(b"stdout-line\n");
+        }
+        {
+            let mut stderr = stderr_log.lock().await;
+            stderr.push(b"stderr-line\n");
+        }
+        let log_buffers = StartFailureLogBuffers {
+            stdout_log,
+            stderr_log,
+        };
+
+        let enabled = attach_start_failure_wasm_log_details(
+            ImagodError::new(ErrorCode::Internal, STAGE_START, "runner failed"),
+            true,
+            &log_buffers,
+        )
+        .await;
+        assert_eq!(
+            enabled.details.get(DETAIL_WASM_STDOUT).map(String::as_str),
+            Some("stdout-line\n")
+        );
+        assert_eq!(
+            enabled.details.get(DETAIL_WASM_STDERR).map(String::as_str),
+            Some("stderr-line\n")
+        );
+
+        let disabled = attach_start_failure_wasm_log_details(
+            ImagodError::new(ErrorCode::Internal, STAGE_START, "runner failed"),
+            false,
+            &log_buffers,
+        )
+        .await;
+        assert!(disabled.details.get(DETAIL_WASM_STDOUT).is_none());
+        assert!(disabled.details.get(DETAIL_WASM_STDERR).is_none());
+    }
+
+    #[tokio::test]
+    async fn attach_start_failure_wasm_log_details_skips_empty_streams() {
+        let log_buffers = StartFailureLogBuffers {
+            stdout_log: Arc::new(Mutex::new(BoundedLogBuffer::new(128))),
+            stderr_log: Arc::new(Mutex::new(BoundedLogBuffer::new(128))),
+        };
+
+        let err = attach_start_failure_wasm_log_details(
+            ImagodError::new(ErrorCode::Internal, STAGE_START, "runner failed"),
+            true,
+            &log_buffers,
+        )
+        .await;
+        assert!(err.details.is_empty());
     }
 
     #[test]

@@ -44,6 +44,7 @@ CLI は起動時に 1 つの出力モードを選ぶ。
 - `error`: 失敗時メッセージ（成功時は `null`）
   - 複数行文字列を許容する。
   - 実装は `causes:` / `hints:` セクションを含む診断文を設定しうる。
+  - `deploy` 失敗で server 側 `StructuredError.details` に `wasm.stdout` / `wasm.stderr` がある場合、各セクションを追記表示する。
 
 ### 3.3 `command.error`
 
