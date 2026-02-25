@@ -15,7 +15,7 @@ Route each request to the shortest reliable command sequence, then diagnose fail
 - Use core imago commands (`init/build/update/deploy/run/stop/ps/logs`) when the user is working on one service project rooted by one `imago.toml`.
 - Use `compose` commands (`compose build/update/deploy/logs/ps`) when the user is orchestrating multiple services via `imago-compose.toml`.
 - Use `bindings cert` commands when trust data must be uploaded or copied between authorities.
-- Use `certs generate` when the user needs a local client key for imago-cli authentication.
+- Use `certs generate` when the user needs a local client key for `imago` authentication.
 
 ## Concept model (imago.toml vs imago-compose.toml)
 
@@ -53,33 +53,33 @@ Route each request to the shortest reliable command sequence, then diagnose fail
 ### Playbook A: initialize a service project
 
 ```bash
-cargo run -p imago-cli -- init .
-cargo run -p imago-cli -- init services/example --lang rust
+imago init .
+imago init services/example --lang rust
 ```
 
 ### Playbook B: first deployment for one service
 
 ```bash
-cargo run -p imago-cli -- update
-cargo run -p imago-cli -- build --target <target>
-cargo run -p imago-cli -- deploy --target <target> --detach
-cargo run -p imago-cli -- ps --target <target>
-cargo run -p imago-cli -- logs <service-name> --tail 200
+imago update
+imago build --target <target>
+imago deploy --target <target> --detach
+imago ps --target <target>
+imago logs <service-name> --tail 200
 ```
 
 ### Playbook C: lifecycle operations
 
 ```bash
-cargo run -p imago-cli -- run <service-name> --target <target> --detach
-cargo run -p imago-cli -- stop <service-name> --target <target>
+imago run <service-name> --target <target> --detach
+imago stop <service-name> --target <target>
 ```
 
 ### Playbook D: certificate and trust operations
 
 ```bash
-cargo run -p imago-cli -- certs generate --out-dir certs
-cargo run -p imago-cli -- bindings cert upload <public_key_hex> --to <remote-authority>
-cargo run -p imago-cli -- bindings cert deploy --from <remote-authority> --to <remote-authority>
+imago certs generate --out-dir certs
+imago bindings cert upload <public_key_hex> --to <remote-authority>
+imago bindings cert deploy --from <remote-authority> --to <remote-authority>
 ```
 
 ## Compose playbooks
@@ -87,19 +87,19 @@ cargo run -p imago-cli -- bindings cert deploy --from <remote-authority> --to <r
 ### Playbook E: initial deployment of a profile
 
 ```bash
-cargo run -p imago-cli -- compose update <profile>
-cargo run -p imago-cli -- compose build <profile> --target <target>
-cargo run -p imago-cli -- compose deploy <profile> --target <target>
-cargo run -p imago-cli -- compose ps <profile> --target <target>
-cargo run -p imago-cli -- compose logs <profile> --target <target> --tail 200
+imago compose update <profile>
+imago compose build <profile> --target <target>
+imago compose deploy <profile> --target <target>
+imago compose ps <profile> --target <target>
+imago compose logs <profile> --target <target> --tail 200
 ```
 
 ### Playbook F: inspect status and logs only
 
 ```bash
-cargo run -p imago-cli -- compose ps <profile> --target <target>
-cargo run -p imago-cli -- compose logs <profile> --target <target> --name <service-name> --tail 200
-cargo run -p imago-cli -- compose logs <profile> --target <target> --follow --tail 200
+imago compose ps <profile> --target <target>
+imago compose logs <profile> --target <target> --name <service-name> --tail 200
+imago compose logs <profile> --target <target> --follow --tail 200
 ```
 
 ## Troubleshooting matrix

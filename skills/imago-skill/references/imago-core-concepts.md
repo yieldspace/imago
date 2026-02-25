@@ -42,7 +42,7 @@ Use it when users ask how to run imago without compose.
 
 ## Trust Responsibilities
 
-- `certs generate` creates local client key material used by imago-cli.
+- `certs generate` creates local client key material used by the `imago` command.
 - `bindings cert upload` uploads a public key to a remote authority.
 - `bindings cert deploy` copies binding trust from one authority to another.
 - Treat trust operations as separate from deploy/build failures.

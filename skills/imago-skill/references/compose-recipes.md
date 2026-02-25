@@ -15,17 +15,17 @@ Run from `examples/imago-compose-bindings`.
 `prepare` in `compose build prepare --target default` is a profile argument to the `build` subcommand, not a separate top-level compose command.
 
 ```bash
-cargo run -p imago-cli -- compose build prepare --target default
-cargo run -p imago-cli -- compose update dev
-cargo run -p imago-cli -- compose build dev --target default
-cargo run -p imagod -- --config imagod.toml
+imago compose build prepare --target default
+imago compose update dev
+imago compose build dev --target default
+imagod --config imagod.toml
 ```
 
 ### Terminal B
 
 ```bash
-cargo run -p imago-cli -- compose deploy dev --target default
-cargo run -p imago-cli -- compose logs dev --target default --name cli-client --tail 200
+imago compose deploy dev --target default
+imago compose logs dev --target default --name cli-client --tail 200
 ```
 
 ### Success signal
@@ -35,6 +35,7 @@ cargo run -p imago-cli -- compose logs dev --target default --name cli-client --
 ## Recipe 2: Docker cross-imagod compose flow (alice/bob)
 
 Run from `examples/imago-compose-bindings/docker`.
+Assume the `imago` binary is available in the `imago-deployer` container.
 
 ### Start environment
 
@@ -47,15 +48,15 @@ docker compose --project-name imago-compose-bindings-alice-bob-e2e up --build -d
 ```bash
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  cargo run -p imago-cli -- compose update greeter
+  imago compose update greeter
 
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  cargo run -p imago-cli -- compose build greeter --target bob
+  imago compose build greeter --target bob
 
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  cargo run -p imago-cli -- compose deploy greeter --target bob
+  imago compose deploy greeter --target bob
 ```
 
 ### Deploy client to alice
@@ -63,15 +64,15 @@ docker compose --project-name imago-compose-bindings-alice-bob-e2e \
 ```bash
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  cargo run -p imago-cli -- compose update client
+  imago compose update client
 
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  cargo run -p imago-cli -- compose build client --target alice
+  imago compose build client --target alice
 
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  cargo run -p imago-cli -- compose deploy client --target alice
+  imago compose deploy client --target alice
 ```
 
 ### Inspect logs before and after trust distribution
@@ -79,15 +80,15 @@ docker compose --project-name imago-compose-bindings-alice-bob-e2e \
 ```bash
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  cargo run -p imago-cli -- compose logs client --target alice --name cli-client --tail 200
+  imago compose logs client --target alice --name cli-client --tail 200
 
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  cargo run -p imago-cli -- bindings cert deploy --from imagod-alice:4443 --to imagod-bob:4443
+  imago bindings cert deploy --from imagod-alice:4443 --to imagod-bob:4443
 
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  cargo run -p imago-cli -- compose logs client --target alice --name cli-client --tail 200
+  imago compose logs client --target alice --name cli-client --tail 200
 ```
 
 ### Success signal
