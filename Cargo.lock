@@ -2341,6 +2341,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "imago-plugin-imago-experimental-gpio"
+version = "0.1.0"
+dependencies = [
+ "imago-plugin-macros",
+ "imagod-runtime-wasmtime",
+ "tokio",
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
 name = "imago-plugin-imago-experimental-i2c"
 version = "0.1.0"
 dependencies = [
@@ -2403,6 +2414,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "imago-plugin-imago-admin",
+ "imago-plugin-imago-experimental-gpio",
  "imago-plugin-imago-experimental-i2c",
  "imago-plugin-imago-node",
  "imagod-config",
@@ -2942,6 +2954,14 @@ dependencies = [
 
 [[package]]
 name = "local-imagod-plugin-native-admin-app"
+version = "0.1.0"
+dependencies = [
+ "wasi 0.14.7+wasi-0.2.4",
+ "wit-bindgen 0.53.1",
+]
+
+[[package]]
+name = "local-imagod-plugin-native-experimental-gpio-app"
 version = "0.1.0"
 dependencies = [
  "wasi 0.14.7+wasi-0.2.4",

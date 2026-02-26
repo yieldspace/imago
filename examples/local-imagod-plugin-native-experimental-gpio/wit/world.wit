@@ -1,0 +1,7 @@
+package example:local-imagod-plugin-native-experimental-gpio;
+
+world plugin-imports {
+    import imago:experimental-gpio/delay@0.1.0;
+    import imago:experimental-gpio/digital@0.1.0;
+    import imago:experimental-gpio/analog@0.1.0;
+}

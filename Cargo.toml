@@ -31,6 +31,7 @@ members = [
     "examples/local-imagod",
     "examples/local-imagod-http",
     "examples/local-imagod-plugin-native-admin",
+    "examples/local-imagod-plugin-native-experimental-gpio",
     "examples/local-imagod-plugin-native-experimental-i2c",
     "examples/local-imagod-plugin-hello",
     "examples/local-imagod-socket",
@@ -96,6 +97,7 @@ web-transport-quinn = "0.11.6"
 syn = "2.0.117"
 
 imago-plugin-imago-admin = { path = "plugins/imago-admin", version = "0.1.0" }
+imago-plugin-imago-experimental-gpio = { path = "plugins/imago-experimental-gpio", version = "0.1.0" }
 imago-plugin-imago-experimental-i2c = { path = "plugins/imago-experimental-i2c", version = "0.1.0" }
 imago-plugin-imago-node = { path = "plugins/imago-node", version = "0.1.0" }
 imago-plugin-nanokvm-plugin = { path = "plugins/imago-plugin-nanokvm-plugin", version = "0.1.0" }
