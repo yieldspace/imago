@@ -143,13 +143,13 @@ port = 8080
 # path = "assets/config.json"
 # mode = "0644"
 
-# [wasi]
-# key: wasi.args
+# [resources]
+# key: resources.args
 # required: optional
 # type: array(string)
 # constraints: each item is non-empty string
 # default: empty
-# key: wasi.http_outbound
+# key: resources.http_outbound
 # required: optional
 # type: array(string)
 # constraints:
@@ -158,12 +158,12 @@ port = 8080
 # - CIDR is evaluated only when request host is an IP literal
 # - manager always injects localhost defaults: localhost / 127.0.0.1 / ::1
 # default: empty (manager-side default injection applies)
-# key: wasi.env.<KEY>
+# key: resources.env.<KEY>
 # required: optional
 # type: string
 # constraints: key/value must be strings; values in project_root/.env override the same keys
 # default: empty
-# key: wasi.mounts[] / wasi.read_only_mounts[]
+# key: resources.mounts[] / resources.read_only_mounts[]
 # required: optional
 # type: array(table)
 # constraints:
@@ -171,15 +171,20 @@ port = 8080
 # - asset_dir: relative path matching a directory derived from assets[].path parent directories
 # - guest_path: absolute unix path; no backslashes; no path traversal
 # - guest_path and asset_dir must be unique across both mounts arrays
-# [wasi]
+# key: resources.<custom_key>
+# required: optional
+# type: any TOML value (bool/string/number/array/table)
+# constraints: key must be non-empty; value is forwarded to runtime/native plugins as JSON
+# default: none
+# [resources]
 # args = ["--serve"]
 # http_outbound = ["localhost", "api.example.com:443", "10.0.0.0/8"]
-# [wasi.env]
+# [resources.env]
 # WASI_ONLY = "1"
-# [[wasi.mounts]]
+# [[resources.mounts]]
 # asset_dir = "assets"
 # guest_path = "/app/assets"
-# [[wasi.read_only_mounts]]
+# [[resources.read_only_mounts]]
 # asset_dir = "readonly"
 # guest_path = "/app/readonly"
 

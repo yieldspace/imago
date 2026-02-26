@@ -11,7 +11,7 @@ mod runtime_entry;
 
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
-use imagod_ipc::{RunnerAppType, WasiHttpOutboundRule};
+use imagod_ipc::{ResourceMap, RunnerAppType, WasiHttpOutboundRule};
 use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{
@@ -34,6 +34,7 @@ pub struct NativePluginContext {
     app_type: String,
     manager_control_endpoint: std::path::PathBuf,
     manager_auth_secret: String,
+    resources: ResourceMap,
 }
 
 impl NativePluginContext {
@@ -44,6 +45,7 @@ impl NativePluginContext {
         app_type: RunnerAppType,
         manager_control_endpoint: std::path::PathBuf,
         manager_auth_secret: String,
+        resources: ResourceMap,
     ) -> Self {
         Self {
             service_name,
@@ -52,6 +54,7 @@ impl NativePluginContext {
             app_type: app_type_text(app_type).to_string(),
             manager_control_endpoint,
             manager_auth_secret,
+            resources,
         }
     }
 
@@ -77,6 +80,10 @@ impl NativePluginContext {
 
     pub fn manager_auth_secret(&self) -> &str {
         &self.manager_auth_secret
+    }
+
+    pub fn resources(&self) -> &ResourceMap {
+        &self.resources
     }
 }
 
@@ -186,6 +193,10 @@ mod tests {
             RunnerAppType::Http,
             std::path::PathBuf::from("/tmp/manager.sock"),
             "secret".to_string(),
+            std::collections::BTreeMap::from([(
+                "i2c".to_string(),
+                serde_json::json!({ "allowed_buses": ["/dev/i2c-1"] }),
+            )]),
         );
         assert_eq!(context.service_name(), "svc-test");
         assert_eq!(context.release_hash(), "release-test");
@@ -196,6 +207,10 @@ mod tests {
             std::path::Path::new("/tmp/manager.sock")
         );
         assert_eq!(context.manager_auth_secret(), "secret");
+        assert_eq!(
+            context.resources().get("i2c"),
+            Some(&serde_json::json!({ "allowed_buses": ["/dev/i2c-1"] }))
+        );
     }
 
     #[test]
@@ -257,6 +272,7 @@ mod tests {
                 RunnerAppType::Cli,
                 std::path::PathBuf::from("/tmp/manager.sock"),
                 "secret".to_string(),
+                std::collections::BTreeMap::new(),
             ),
         };
         let request = hyper::Request::builder()

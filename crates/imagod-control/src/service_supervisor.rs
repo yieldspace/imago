@@ -22,9 +22,9 @@ use std::{
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{
-    CapabilityPolicy, PluginDependency, RunnerAppType, RunnerBootstrap, RunnerInboundRequest,
-    RunnerInboundResponse, RunnerSocketConfig, RunnerWasiMount, ServiceBinding,
-    WasiHttpOutboundRule, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
+    CapabilityPolicy, PluginDependency, ResourceMap, RunnerAppType, RunnerBootstrap,
+    RunnerInboundRequest, RunnerInboundResponse, RunnerSocketConfig, RunnerWasiMount,
+    ServiceBinding, WasiHttpOutboundRule, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
     issue_invocation_token, now_unix_secs, random_secret_hex,
 };
 #[cfg(test)]
@@ -89,6 +89,8 @@ pub struct ServiceLaunch {
     pub wasi_mounts: Vec<RunnerWasiMount>,
     /// Allowed outbound rules for `wasi:http` requests.
     pub wasi_http_outbound: Vec<WasiHttpOutboundRule>,
+    /// Arbitrary resource policy map available to runtime/native plugins.
+    pub resources: ResourceMap,
     /// Allowed invocation bindings for this service.
     pub bindings: Vec<ServiceBinding>,
     /// Plugin dependencies available to the runtime.
@@ -431,6 +433,7 @@ impl ServiceSupervisor {
                 envs: launch.envs.clone(),
                 wasi_mounts: launch.wasi_mounts.clone(),
                 wasi_http_outbound: launch.wasi_http_outbound.clone(),
+                resources: launch.resources.clone(),
                 bindings: launch.bindings.clone(),
                 plugin_dependencies: launch.plugin_dependencies.clone(),
                 capabilities: launch.capabilities.clone(),

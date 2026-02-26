@@ -439,6 +439,7 @@ mod tests {
             RunnerAppType::Rpc,
             manager_socket.clone(),
             manager_secret,
+            std::collections::BTreeMap::new(),
         );
         let connection_rep = allocate_connection_rep(RpcConnection::LocalUds);
         let actual = invoke_connection(

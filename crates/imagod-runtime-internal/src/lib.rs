@@ -8,8 +8,8 @@ use std::{
 use async_trait::async_trait;
 use imagod_common::ImagodError;
 use imagod_ipc::{
-    CapabilityPolicy, PluginDependency, RunnerAppType, RunnerSocketConfig, RunnerWasiMount,
-    ServiceBinding, WasiHttpOutboundRule,
+    CapabilityPolicy, PluginDependency, ResourceMap, RunnerAppType, RunnerSocketConfig,
+    RunnerWasiMount, ServiceBinding, WasiHttpOutboundRule,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -34,6 +34,8 @@ pub struct RuntimeRunRequest {
     pub wasi_mounts: Vec<RunnerWasiMount>,
     /// Allowed outbound rules for `wasi:http` requests.
     pub wasi_http_outbound: Vec<WasiHttpOutboundRule>,
+    /// Arbitrary resource policy map available to runtime/native plugins.
+    pub resources: ResourceMap,
     /// Socket runtime settings when `app_type=socket`.
     pub socket: Option<RunnerSocketConfig>,
     /// Plugin dependencies resolved from manifest and prepared by manager.
@@ -79,6 +81,8 @@ pub struct RuntimeInvokeRequest {
     pub wasi_mounts: Vec<RunnerWasiMount>,
     /// Allowed outbound rules for `wasi:http` requests.
     pub wasi_http_outbound: Vec<WasiHttpOutboundRule>,
+    /// Arbitrary resource policy map available to runtime/native plugins.
+    pub resources: ResourceMap,
     /// Plugin dependencies resolved from manifest and prepared by manager.
     pub plugin_dependencies: Vec<PluginDependency>,
     /// App-level capability policy used by runtime bridge authorization.

@@ -355,6 +355,7 @@ mod tests {
             RunnerAppType::Rpc,
             manager_socket.clone(),
             manager_secret,
+            std::collections::BTreeMap::new(),
         );
         let connection_rep = rpc_bridge::allocate_connection_rep(RpcConnection::LocalUds);
         let actual = rpc_bridge::invoke_connection(
