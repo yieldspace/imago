@@ -31,7 +31,9 @@ pub fn http_post(port: u16, body: &[u8]) -> Result<String> {
 
 fn http_request(port: u16, method: &str, path: &str, body: &[u8]) -> Result<String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+    let (read_timeout, write_timeout) = timeouts_for_method(method);
+    stream.set_read_timeout(Some(read_timeout))?;
+    stream.set_write_timeout(Some(write_timeout))?;
     stream.write_all(
         format!(
             "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
@@ -53,4 +55,37 @@ pub fn parse_http_status(response: &str) -> Option<u16> {
     let mut parts = line.split_whitespace();
     let _http_version = parts.next()?;
     parts.next()?.parse().ok()
+}
+
+fn timeouts_for_method(method: &str) -> (Duration, Duration) {
+    if method.eq_ignore_ascii_case("GET") {
+        (Duration::from_secs(2), Duration::from_secs(2))
+    } else {
+        (Duration::from_secs(15), Duration::from_secs(15))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::timeouts_for_method;
+    use std::time::Duration;
+
+    #[test]
+    fn uses_short_timeout_for_get_requests() {
+        let (read_timeout, write_timeout) = timeouts_for_method("GET");
+        assert_eq!(read_timeout, Duration::from_secs(2));
+        assert_eq!(write_timeout, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn uses_long_timeout_for_post_requests() {
+        let (read_timeout, write_timeout) = timeouts_for_method("POST");
+        assert_eq!(read_timeout, Duration::from_secs(15));
+        assert_eq!(write_timeout, Duration::from_secs(15));
+    }
+
+    #[test]
+    fn treats_get_method_case_insensitively() {
+        assert_eq!(timeouts_for_method("GET"), timeouts_for_method("get"));
+    }
 }
