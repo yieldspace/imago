@@ -1,0 +1,366 @@
+package imago:experimental-gpio@0.1.0;
+
+/// Shared GPIO types used by digital and analog interfaces.
+@since(version = 0.1.0)
+interface general {
+  /// Error codes returned by GPIO operations.
+  @since(version = 0.1.0)
+  variant gpio-error {
+    /// Pin controller could not access the hardware.
+    hardware-fault,
+    /// Pin is already acquired by another resource.
+    already-in-use,
+    /// Policy denies use of this pin.
+    pin-not-allowed,
+    /// Policy denies this pin mode with the current request.
+    pin-mode-not-allowed,
+    /// Pin label does not exist in the runtime catalog.
+    undefined-pin-label,
+    /// Requested pin mode is unavailable for the pin.
+    pin-mode-not-available,
+    /// Operation would block in the current execution context.
+    would-block,
+    /// Operation is not supported by the current backend.
+    operation-not-supported,
+    /// Unspecified backend error with optional detail text.
+    other(string),
+  }
+
+  /// Active-level polarity used by GPIO pins.
+  @since(version = 0.1.0)
+  enum active-level {
+    /// Active state maps to logical high.
+    active-high,
+    /// Active state maps to logical low.
+    active-low,
+  }
+
+  /// Pin direction mode.
+  @since(version = 0.1.0)
+  enum pin-mode {
+    /// Input-only mode.
+    in,
+    /// Output-only mode.
+    out,
+    /// Bidirectional input/output mode.
+    in-out,
+  }
+
+  /// Pull-resistor configuration for digital input paths.
+  @since(version = 0.1.0)
+  enum pull-resistor {
+    /// Enable pull-up resistor.
+    pull-up,
+    /// Enable pull-down resistor.
+    pull-down,
+  }
+}
+
+/// Digital GPIO interface.
+@since(version = 0.1.0)
+interface digital {
+  @since(version = 0.1.0)
+  use general.{active-level, gpio-error, pin-mode, pull-resistor};
+  @since(version = 0.1.0)
+  use wasi:io/poll@0.2.6.{pollable};
+
+  /// Logical pin state resolved through active-level polarity.
+  @since(version = 0.1.0)
+  enum pin-state {
+    /// Pin is in active state.
+    active,
+    /// Pin is in inactive state.
+    inactive,
+  }
+
+  /// Resolved configuration for a digital pin resource.
+  @since(version = 0.1.0)
+  record digital-config {
+    /// Pin label used for acquisition.
+    label: string,
+    /// Pin mode assigned to this resource.
+    pin-mode: pin-mode,
+    /// Active-level polarity used by this resource.
+    active-level: active-level,
+    /// Optional pull-resistor hint used at acquisition.
+    pull-resistor: option<pull-resistor>,
+  }
+
+  /// Digital acquisition flags.
+  @since(version = 0.1.0)
+  flags digital-flags {
+    /// Request active-high polarity.
+    active-high,
+    /// Request active-low polarity.
+    active-low,
+    /// Request pull-up resistor.
+    pull-up,
+    /// Request pull-down resistor.
+    pull-down,
+  }
+
+  /// Resource for output-only digital pins.
+  @since(version = 0.1.0)
+  resource digital-out-pin {
+    /// Return resolved pin configuration.
+    @since(version = 0.1.0)
+    get-config: func() -> digital-config;
+    /// Return a pollable that becomes ready when the pin backend is ready.
+    @since(version = 0.1.0)
+    watch-for-ready: func() -> pollable;
+    /// Set pin state explicitly.
+    @since(version = 0.1.0)
+    set-state: func(state: pin-state) -> result<_, gpio-error>;
+    /// Set pin to active state.
+    @since(version = 0.1.0)
+    set-active: func() -> result<_, gpio-error>;
+    /// Set pin to inactive state.
+    @since(version = 0.1.0)
+    set-inactive: func() -> result<_, gpio-error>;
+    /// Toggle pin state.
+    @since(version = 0.1.0)
+    toggle: func() -> result<_, gpio-error>;
+  }
+
+  /// Resource for input-only digital pins.
+  @since(version = 0.1.0)
+  resource digital-in-pin {
+    /// Return resolved pin configuration.
+    @since(version = 0.1.0)
+    get-config: func() -> digital-config;
+    /// Return a pollable that becomes ready when the pin backend is ready.
+    @since(version = 0.1.0)
+    watch-for-ready: func() -> pollable;
+    /// Read current pin state.
+    @since(version = 0.1.0)
+    read: func() -> result<pin-state, gpio-error>;
+    /// Return true when pin is active.
+    @since(version = 0.1.0)
+    is-active: func() -> result<bool, gpio-error>;
+    /// Return true when pin is inactive.
+    @since(version = 0.1.0)
+    is-inactive: func() -> result<bool, gpio-error>;
+    /// Return pollable that becomes ready when requested state is observed.
+    @since(version = 0.1.0)
+    watch-state: func(state: pin-state) -> result<pollable, gpio-error>;
+    /// Return pollable that becomes ready when active state is observed.
+    @since(version = 0.1.0)
+    watch-active: func() -> result<pollable, gpio-error>;
+    /// Return pollable that becomes ready when inactive state is observed.
+    @since(version = 0.1.0)
+    watch-inactive: func() -> result<pollable, gpio-error>;
+    /// Return pollable that becomes ready on active->inactive transition.
+    @since(version = 0.1.0)
+    watch-falling-edge: func() -> result<pollable, gpio-error>;
+    /// Return pollable that becomes ready on inactive->active transition.
+    @since(version = 0.1.0)
+    watch-rising-edge: func() -> result<pollable, gpio-error>;
+  }
+
+  /// Resource for bidirectional digital pins.
+  @since(version = 0.1.0)
+  resource digital-in-out-pin {
+    /// Return resolved pin configuration.
+    @since(version = 0.1.0)
+    get-config: func() -> digital-config;
+    /// Return a pollable that becomes ready when the pin backend is ready.
+    @since(version = 0.1.0)
+    watch-for-ready: func() -> pollable;
+    /// Set pin state explicitly.
+    @since(version = 0.1.0)
+    set-state: func(state: pin-state) -> result<_, gpio-error>;
+    /// Set pin to active state.
+    @since(version = 0.1.0)
+    set-active: func() -> result<_, gpio-error>;
+    /// Set pin to inactive state.
+    @since(version = 0.1.0)
+    set-inactive: func() -> result<_, gpio-error>;
+    /// Toggle pin state.
+    @since(version = 0.1.0)
+    toggle: func() -> result<_, gpio-error>;
+    /// Read current pin state.
+    @since(version = 0.1.0)
+    read: func() -> result<pin-state, gpio-error>;
+    /// Return true when pin is active.
+    @since(version = 0.1.0)
+    is-active: func() -> result<bool, gpio-error>;
+    /// Return true when pin is inactive.
+    @since(version = 0.1.0)
+    is-inactive: func() -> result<bool, gpio-error>;
+    /// Return pollable that becomes ready when requested state is observed.
+    @since(version = 0.1.0)
+    watch-state: func(state: pin-state) -> result<pollable, gpio-error>;
+    /// Return pollable that becomes ready when active state is observed.
+    @since(version = 0.1.0)
+    watch-active: func() -> result<pollable, gpio-error>;
+    /// Return pollable that becomes ready when inactive state is observed.
+    @since(version = 0.1.0)
+    watch-inactive: func() -> result<pollable, gpio-error>;
+    /// Return pollable that becomes ready on active->inactive transition.
+    @since(version = 0.1.0)
+    watch-falling-edge: func() -> result<pollable, gpio-error>;
+    /// Return pollable that becomes ready on inactive->active transition.
+    @since(version = 0.1.0)
+    watch-rising-edge: func() -> result<pollable, gpio-error>;
+  }
+
+  /// Acquire an input-only digital pin by label.
+  @since(version = 0.1.0)
+  get-digital-in: func(pin-label: string, options: list<digital-flags>) -> result<digital-in-pin, gpio-error>;
+
+  /// Acquire an output-only digital pin by label.
+  @since(version = 0.1.0)
+  get-digital-out: func(pin-label: string, options: list<digital-flags>) -> result<digital-out-pin, gpio-error>;
+
+  /// Acquire a bidirectional digital pin by label.
+  @since(version = 0.1.0)
+  get-digital-in-out: func(pin-label: string, options: list<digital-flags>) -> result<digital-in-out-pin, gpio-error>;
+}
+
+/// Analog GPIO interface.
+@since(version = 0.1.0)
+interface analog {
+  @since(version = 0.1.0)
+  use general.{active-level, gpio-error, pin-mode};
+  @since(version = 0.1.0)
+  use wasi:io/poll@0.2.6.{pollable};
+
+  /// Resolved configuration for an analog pin resource.
+  @since(version = 0.1.0)
+  record analog-config {
+    /// Pin label used for acquisition.
+    label: string,
+    /// Pin mode assigned to this resource.
+    pin-mode: pin-mode,
+    /// Active-level polarity used by this resource.
+    active-level: active-level,
+  }
+
+  /// Analog acquisition flags.
+  @since(version = 0.1.0)
+  flags analog-flags {
+    /// Request active-high polarity.
+    active-high,
+    /// Request active-low polarity.
+    active-low,
+  }
+
+  /// Resource for output-only analog pins.
+  @since(version = 0.1.0)
+  resource analog-out-pin {
+    /// Return resolved pin configuration.
+    @since(version = 0.1.0)
+    get-config: func() -> analog-config;
+    /// Return a pollable that becomes ready when the pin backend is ready.
+    @since(version = 0.1.0)
+    watch-for-ready: func() -> pollable;
+    /// Set backend raw analog value.
+    @since(version = 0.1.0)
+    set-value-raw: func(value: u32) -> result<_, gpio-error>;
+    /// Set normalized analog value in range [0.0, 1.0].
+    @since(version = 0.1.0)
+    set-value: func(value: f32) -> result<_, gpio-error>;
+  }
+
+  /// Resource for input-only analog pins.
+  @since(version = 0.1.0)
+  resource analog-in-pin {
+    /// Return resolved pin configuration.
+    @since(version = 0.1.0)
+    get-config: func() -> analog-config;
+    /// Return a pollable that becomes ready when the pin backend is ready.
+    @since(version = 0.1.0)
+    watch-for-ready: func() -> pollable;
+    /// Read backend raw analog value.
+    @since(version = 0.1.0)
+    read-raw: func() -> result<u32, gpio-error>;
+    /// Read normalized analog value in range [0.0, 1.0].
+    @since(version = 0.1.0)
+    read: func() -> result<f32, gpio-error>;
+    /// Return pollable that becomes ready when raw value is above threshold.
+    @since(version = 0.1.0)
+    watch-above-raw: func(value: u32) -> result<pollable, gpio-error>;
+    /// Return pollable that becomes ready when normalized value is above threshold.
+    @since(version = 0.1.0)
+    watch-above: func(value: f32) -> result<pollable, gpio-error>;
+    /// Return pollable that becomes ready when raw value is below threshold.
+    @since(version = 0.1.0)
+    watch-below-raw: func(value: u32) -> result<pollable, gpio-error>;
+    /// Return pollable that becomes ready when normalized value is below threshold.
+    @since(version = 0.1.0)
+    watch-below: func(value: f32) -> result<pollable, gpio-error>;
+  }
+
+  /// Resource for bidirectional analog pins.
+  @since(version = 0.1.0)
+  resource analog-in-out-pin {
+    /// Return resolved pin configuration.
+    @since(version = 0.1.0)
+    get-config: func() -> analog-config;
+    /// Return a pollable that becomes ready when the pin backend is ready.
+    @since(version = 0.1.0)
+    watch-for-ready: func() -> pollable;
+    /// Set backend raw analog value.
+    @since(version = 0.1.0)
+    set-value-raw: func(value: u32) -> result<_, gpio-error>;
+    /// Set normalized analog value in range [0.0, 1.0].
+    @since(version = 0.1.0)
+    set-value: func(value: f32) -> result<_, gpio-error>;
+    /// Read backend raw analog value.
+    @since(version = 0.1.0)
+    read-raw: func() -> result<u32, gpio-error>;
+    /// Read normalized analog value in range [0.0, 1.0].
+    @since(version = 0.1.0)
+    read: func() -> result<f32, gpio-error>;
+    /// Return pollable that becomes ready when raw value is above threshold.
+    @since(version = 0.1.0)
+    watch-above-raw: func(value: u32) -> result<pollable, gpio-error>;
+    /// Return pollable that becomes ready when normalized value is above threshold.
+    @since(version = 0.1.0)
+    watch-above: func(value: f32) -> result<pollable, gpio-error>;
+    /// Return pollable that becomes ready when raw value is below threshold.
+    @since(version = 0.1.0)
+    watch-below-raw: func(value: u32) -> result<pollable, gpio-error>;
+    /// Return pollable that becomes ready when normalized value is below threshold.
+    @since(version = 0.1.0)
+    watch-below: func(value: f32) -> result<pollable, gpio-error>;
+  }
+
+  /// Acquire an input-only analog pin by label.
+  @since(version = 0.1.0)
+  get-analog-in: func(pin-label: string, options: list<analog-flags>) -> result<analog-in-pin, gpio-error>;
+
+  /// Acquire an output-only analog pin by label.
+  @since(version = 0.1.0)
+  get-analog-out: func(pin-label: string, options: list<analog-flags>) -> result<analog-out-pin, gpio-error>;
+
+  /// Acquire a bidirectional analog pin by label.
+  @since(version = 0.1.0)
+  get-analog-in-out: func(pin-label: string, options: list<analog-flags>) -> result<analog-in-out-pin, gpio-error>;
+}
+
+/// Delay interface used by GPIO workflows.
+@since(version = 0.1.0)
+interface delay {
+  /// Suspend execution for at least `ns` nanoseconds.
+  @since(version = 0.1.0)
+  delay-ns: func(ns: u32);
+
+  /// Suspend execution for at least `us` microseconds.
+  @since(version = 0.1.0)
+  delay-us: func(us: u32);
+
+  /// Suspend execution for at least `ms` milliseconds.
+  @since(version = 0.1.0)
+  delay-ms: func(ms: u32);
+}
+
+/// Host world for experimental GPIO native plugin imports.
+@since(version = 0.1.0)
+world host {
+  import general;
+  import wasi:io/poll@0.2.6;
+  import digital;
+  import analog;
+  import delay;
+}

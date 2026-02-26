@@ -1,0 +1,24 @@
+name = "local-imagod-plugin-native-experimental-gpio-app"
+main = "target/wasm32-wasip2/release/local-imagod-plugin-native-experimental-gpio-app.wasm"
+type = "cli"
+
+[build]
+command = "CARGO_TARGET_DIR=target cargo build --target wasm32-wasip2 --release"
+
+[[dependencies]]
+name = "imago:experimental-gpio"
+version = "0.1.0"
+kind = "native"
+wit = "file://../../plugins/imago-experimental-gpio/wit"
+
+[capabilities]
+privileged = true
+wasi = true
+
+[capabilities.deps]
+"imago:experimental-gpio" = ["*"]
+
+[target.default]
+remote = "127.0.0.1:4443"
+server_name = "localhost"
+client_key = "certs/client.key"

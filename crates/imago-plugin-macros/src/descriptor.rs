@@ -97,7 +97,7 @@ pub(crate) fn parse_wit_descriptor(
             }
         }
 
-        if interface.functions.is_empty() {
+        if interface.functions.is_empty() && !options.allow_non_resource_types {
             return Err("imported interface must define at least one function".to_string());
         }
 
@@ -375,6 +375,56 @@ world host {
         assert_eq!(
             descriptor.symbols[0],
             "imago:admin/runtime@0.1.0.service-name"
+        );
+    }
+
+    #[test]
+    fn parse_wit_descriptor_allows_empty_interface_functions_when_non_resource_types_enabled() {
+        let root = new_temp_dir("empty-functions-enabled");
+        write(
+            &root.join("wit/package.wit"),
+            r#"
+package imago:gpio@0.1.0;
+
+interface general {
+    enum active-level {
+        active-high,
+        active-low,
+    }
+}
+
+interface delay {
+    delay-ms: func(ms: u32);
+}
+
+world host {
+    import general;
+    import delay;
+}
+"#,
+        );
+
+        let descriptor = parse_wit_descriptor(
+            &root.join("wit"),
+            "host",
+            ParseOptions {
+                allow_multiple_imports: true,
+                allow_non_resource_types: true,
+            },
+        )
+        .expect("type-only interface should be accepted when non-resource types are enabled");
+
+        assert_eq!(descriptor.package_name, "imago:gpio");
+        assert_eq!(
+            descriptor.import_names,
+            vec![
+                "imago:gpio/general@0.1.0".to_string(),
+                "imago:gpio/delay@0.1.0".to_string(),
+            ]
+        );
+        assert_eq!(
+            descriptor.symbols,
+            vec!["imago:gpio/delay@0.1.0.delay-ms".to_string()]
         );
     }
 }

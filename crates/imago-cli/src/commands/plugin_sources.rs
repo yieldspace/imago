@@ -19,7 +19,7 @@ use wasm_pkg_common::{
     registry::Registry,
 };
 use wit_component::DecodedWasm;
-use wit_parser::UnresolvedPackageGroup;
+use wit_parser::{Resolve, UnresolvedPackageGroup};
 
 pub(crate) const DEFAULT_WARG_REGISTRY: &str = "wa.dev";
 pub(crate) const DEFAULT_WASI_WARG_REGISTRY: &str = "wasi.dev";
@@ -278,9 +278,29 @@ pub(crate) async fn materialize_wit_source(
     let parsed = parse_wit_source(project_root, source, registry, namespace_registries)?;
     match parsed {
         ParsedWitSource::File { path, source } => {
+            ensure_wit_source_has_no_symlinks(&path)?;
             let metadata = fs::metadata(&path)
                 .with_context(|| format!("failed to inspect wit source: {}", path.display()))?;
             if metadata.is_dir() {
+                if let Ok((resolve, top_package)) = parse_local_wit_package_dir(&path) {
+                    let source_desc = format!("file source '{}'", path.display());
+                    let transitive_packages = materialize_wit_package_resolve(
+                        destination_dir,
+                        &resolve,
+                        top_package,
+                        WitPackageResolveOptions {
+                            expected_package,
+                            expected_version: None,
+                            source_detail: None,
+                            namespace_registries,
+                            source_desc: &source_desc,
+                        },
+                    )?;
+                    return Ok(MaterializedWitSource {
+                        derived_component: None,
+                        transitive_packages,
+                    });
+                }
                 copy_wit_tree(&path, destination_dir)?;
                 return Ok(MaterializedWitSource::default());
             }
@@ -373,6 +393,55 @@ pub(crate) async fn materialize_wit_source(
             )
         }
     }
+}
+
+fn ensure_wit_source_has_no_symlinks(path: &Path) -> anyhow::Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect wit source: {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(anyhow!(
+            "wit source must not contain symlinks: {}",
+            path.display()
+        ));
+    }
+    if metadata.is_dir() {
+        ensure_wit_dir_has_no_symlink_entries(path)?;
+    }
+    Ok(())
+}
+
+fn ensure_wit_dir_has_no_symlink_entries(path: &Path) -> anyhow::Result<()> {
+    for entry in fs::read_dir(path)
+        .with_context(|| format!("failed to read directory: {}", path.display()))?
+    {
+        let entry = entry
+            .with_context(|| format!("failed to read directory entry in {}", path.display()))?;
+        let source_path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect source path: {}", source_path.display()))?;
+        if file_type.is_symlink() {
+            return Err(anyhow!(
+                "wit source must not contain symlinks: {}",
+                source_path.display()
+            ));
+        }
+        if file_type.is_dir() {
+            ensure_wit_dir_has_no_symlink_entries(&source_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn parse_local_wit_package_dir(path: &Path) -> anyhow::Result<(Resolve, wit_parser::PackageId)> {
+    let mut resolve = Resolve::default();
+    let (top_package, _) = resolve.push_path(path).with_context(|| {
+        format!(
+            "failed to parse local WIT package directory {}",
+            path.display()
+        )
+    })?;
+    Ok((resolve, top_package))
 }
 
 pub(crate) async fn resolve_component_sha256(
@@ -1653,7 +1722,7 @@ fn copy_dir_contents(source_dir: &Path, destination_dir: &Path) -> anyhow::Resul
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_WARG_REGISTRY, DEFAULT_WASI_WARG_REGISTRY, copy_wit_tree,
+        DEFAULT_WARG_REGISTRY, DEFAULT_WASI_WARG_REGISTRY, copy_wit_tree, materialize_wit_source,
         normalize_registry_for_source, oci_backend_auth_config, parse_oci_spec, parse_warg_spec,
         resolve_oci_package_for_client, resolve_warg_registry_for_package,
         resolve_warg_registry_for_package_with_fallback, sanitize_wit_deps_name,
@@ -1937,6 +2006,116 @@ mod tests {
         symlink(&source_real, &source_link).expect("symlink should be created");
 
         let err = copy_wit_tree(&source_link, &destination).expect_err("symlink root must fail");
+        assert!(
+            err.to_string()
+                .contains("wit source must not contain symlinks"),
+            "unexpected error: {err:#}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn materialize_file_directory_includes_transitive_wit_packages() {
+        let root = new_temp_dir("materialize-file-dir-transitive");
+        let source = root.join("source");
+        let destination = root.join("dest/wit/deps/imago-experimental-gpio");
+        write(
+            &source.join("package.wit"),
+            br#"
+package imago:experimental-gpio@0.1.0;
+
+interface digital {
+    use wasi:io/poll@0.2.6.{pollable};
+
+    resource digital-out-pin {
+        watch-for-ready: func() -> pollable;
+    }
+}
+
+world host {
+    import digital;
+}
+"#,
+        );
+        write(
+            &source.join("deps/wasi-io-0.2.6/package.wit"),
+            br#"
+package wasi:io@0.2.6;
+
+interface poll {
+    resource pollable {
+        block: func();
+    }
+}
+"#,
+        );
+
+        let source_ref = format!("file://{}", source.display());
+        let materialized = materialize_wit_source(
+            &root,
+            &source_ref,
+            None,
+            None,
+            Some("imago:experimental-gpio"),
+            &destination,
+        )
+        .await
+        .expect("materialize should succeed");
+
+        assert!(
+            destination.join("package.wit").is_file(),
+            "top-level package.wit must be written"
+        );
+        assert!(
+            root.join("dest/wit/deps/wasi-io/package.wit").is_file(),
+            "transitive package must be materialized at wit/deps root"
+        );
+        assert_eq!(materialized.transitive_packages.len(), 1);
+        assert_eq!(materialized.transitive_packages[0].name, "wasi:io");
+        assert_eq!(materialized.transitive_packages[0].path, "wit/deps/wasi-io");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn materialize_file_directory_rejects_symlink_root_source() {
+        let root = new_temp_dir("materialize-file-dir-symlink-root");
+        let source_real = root.join("source-real");
+        let source_link = root.join("source-link");
+        let destination = root.join("dest/wit/deps/imago-experimental-gpio");
+
+        write(
+            &source_real.join("package.wit"),
+            br#"
+package imago:experimental-gpio@0.1.0;
+
+interface digital {
+    resource digital-out-pin {
+        watch-for-ready: func();
+    }
+}
+
+world host {
+    import digital;
+}
+"#,
+        );
+        symlink(&source_real, &source_link).expect("symlink should be created");
+
+        let source_ref = format!("file://{}", source_link.display());
+        let err = materialize_wit_source(
+            &root,
+            &source_ref,
+            None,
+            None,
+            Some("imago:experimental-gpio"),
+            &destination,
+        )
+        .await
+        .expect_err("symlink root source must fail");
+
         assert!(
             err.to_string()
                 .contains("wit source must not contain symlinks"),

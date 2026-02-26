@@ -1,0 +1,13 @@
+[package]
+name = "imago-plugin-imago-experimental-gpio"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+imago-plugin-macros = { workspace = true }
+imagod-runtime-wasmtime = { workspace = true }
+tokio = { workspace = true, features = ["fs", "rt", "time"] }
+wasmtime = { workspace = true, features = ["component-model"] }
+wasmtime-wasi = { workspace = true }
