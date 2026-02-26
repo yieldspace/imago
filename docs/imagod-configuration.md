@@ -258,6 +258,7 @@ epoch_tick_interval_ms = 50
 - Required/Optional: Optional.
 - Accepted values / Constraints: `1..=4`.
 - Default: `2`.
+- Behavior notes: compatibility knob retained for runtime bootstrap. Current HTTP execution path runs a single worker task.
 - Example:
 
 ```toml
@@ -273,6 +274,7 @@ http_worker_count = 2
 - Required/Optional: Optional.
 - Accepted values / Constraints: `1..=16`.
 - Default: `4`.
+- Behavior notes: this is an upper bound. Effective queue capacity is clamped by `runtime.http_queue_memory_budget_bytes / manifest.http.max_body_bytes`.
 - Example:
 
 ```toml
@@ -281,6 +283,24 @@ http_worker_queue_capacity = 4
 ```
 
 - Validation error notes: out-of-range values fail validation.
+
+### The `http_queue_memory_budget_bytes` field
+
+- Type: `integer` (`u64`)
+- Required/Optional: Optional.
+- Accepted values / Constraints: `1..=67108864` (64 MiB).
+- Default: `33554432` (32 MiB).
+- Behavior notes:
+  - Defines the total memory budget for queued HTTP request bodies.
+  - If `manifest.http.max_body_bytes` is larger than this budget, service start fails with a validation error in `service.start`.
+- Example:
+
+```toml
+[runtime]
+http_queue_memory_budget_bytes = 33554432
+```
+
+- Validation error notes: zero and values over 64 MiB fail validation.
 
 ### The `manager_control_read_timeout_ms` field
 

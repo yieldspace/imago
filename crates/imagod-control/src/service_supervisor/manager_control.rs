@@ -454,9 +454,9 @@ mod tests {
             _stderr_log: Arc::new(Mutex::new(super::super::log_buffer::BoundedLogBuffer::new(
                 64,
             ))),
-            composite_log: Arc::new(Mutex::new(super::super::log_buffer::BoundedLogBuffer::new(
-                128,
-            ))),
+            composite_log: Arc::new(Mutex::new(
+                super::super::log_buffer::CompositeLogBuffer::new(128),
+            )),
             log_sender,
             last_heartbeat_at: now_unix_secs().to_string(),
         }

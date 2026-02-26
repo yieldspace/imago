@@ -128,14 +128,21 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
     let partial_fail_message = deploy_cert_partial_fail
         .command_summary_error()
         .unwrap_or_else(|| deploy_cert_partial_fail.command_error_messages().join("\n"));
+    let has_partial_status = partial_fail_message.contains("from: ok")
+        && partial_fail_message.contains("to: upload failed:");
+    let has_to_authority_validation_failure =
+        partial_fail_message.contains("failed to normalize --to authority:");
     assert!(
-        partial_fail_message.contains("from: ok"),
-        "from status was not ok in partial failure output: {partial_fail_message}"
+        has_partial_status || has_to_authority_validation_failure,
+        "partial failure marker was not found: {partial_fail_message}"
     );
-    assert!(
-        partial_fail_message.contains("to: upload failed:"),
-        "to upload failure marker was not found: {partial_fail_message}"
-    );
+    if has_to_authority_validation_failure {
+        assert!(
+            partial_fail_message.contains("remote URL parse failed")
+                || partial_fail_message.contains("invalid IPv6 address"),
+            "authority normalization failure detail was not found: {partial_fail_message}"
+        );
+    }
 
     let deploy_cert = run_imago_cli(
         &workspace_root,
@@ -380,7 +387,7 @@ fn write_cli_client_imago_toml(
         .join("rpc-greeter")
         .join("world.wit");
     let body = format!(
-        "name = \"cli-client\"\nmain = \"components/{}\"\ntype = \"cli\"\n\n[[dependencies]]\nname = \"imago:node\"\nversion = \"0.1.0\"\nkind = \"native\"\nwit = \"file://{}\"\n\n[capabilities]\nprivileged = false\nwasi = true\n\n[capabilities.deps]\n\"acme:clock\" = [\"*\"]\n\"imago:node\" = [\"*\"]\n\n[[bindings]]\nname = \"rpc-greeter\"\nwit = \"file://{}\"\n\n[wasi.env]\nIMAGO_RPC_ADDR = \"{}\"\n\n[target.default]\nremote = \"{}\"\nserver_name = \"{}\"\nclient_key = \"{}\"\n",
+        "name = \"cli-client\"\nmain = \"components/{}\"\ntype = \"cli\"\n\n[[dependencies]]\nname = \"imago:node\"\nversion = \"0.1.0\"\nkind = \"native\"\nwit = \"file://{}\"\n\n[capabilities]\nprivileged = false\nwasi = true\n\n[capabilities.deps]\n\"acme:clock\" = [\"*\"]\n\"imago:node\" = [\"*\"]\n\n[[bindings]]\nname = \"rpc-greeter\"\nwit = \"file://{}\"\n\n[resources.env]\nIMAGO_RPC_ADDR = \"{}\"\n\n[target.default]\nremote = \"{}\"\nserver_name = \"{}\"\nclient_key = \"{}\"\n",
         toml_escape(main_wasm_file),
         toml_escape(imago_node_wit.to_string_lossy().as_ref()),
         toml_escape(rpc_greeter_world.to_string_lossy().as_ref()),

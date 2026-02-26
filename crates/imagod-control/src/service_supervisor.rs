@@ -22,9 +22,9 @@ use std::{
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{
-    CapabilityPolicy, PluginDependency, RunnerAppType, RunnerBootstrap, RunnerInboundRequest,
-    RunnerInboundResponse, RunnerSocketConfig, RunnerWasiMount, ServiceBinding,
-    WasiHttpOutboundRule, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
+    CapabilityPolicy, PluginDependency, ResourceMap, RunnerAppType, RunnerBootstrap,
+    RunnerInboundRequest, RunnerInboundResponse, RunnerSocketConfig, RunnerWasiMount,
+    ServiceBinding, WasiHttpOutboundRule, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
     issue_invocation_token, now_unix_secs, random_secret_hex,
 };
 #[cfg(test)]
@@ -39,7 +39,8 @@ use tokio::{
 };
 
 use self::{
-    log_buffer::BoundedLogBuffer, manager_control::DefaultManagerControlHandler,
+    log_buffer::{BoundedLogBuffer, CompositeLogBuffer},
+    manager_control::DefaultManagerControlHandler,
     runner_spawn::DefaultRunnerSpawner,
 };
 
@@ -61,6 +62,7 @@ const RUNNER_ENDPOINT_HASH_BYTES: usize = 16;
 const MAX_MANAGER_CONTROL_CONNECTION_HANDLERS: usize = 32;
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
 const LOG_CHANNEL_CAPACITY: usize = 256;
+const DEFAULT_HTTP_QUEUE_MEMORY_BUDGET_BYTES: u64 = 32 * 1024 * 1024;
 type PendingReadyMap = BTreeMap<String, oneshot::Sender<Result<(), ImagodError>>>;
 type StoppingServicesMap = BTreeMap<String, usize>;
 
@@ -89,6 +91,8 @@ pub struct ServiceLaunch {
     pub wasi_mounts: Vec<RunnerWasiMount>,
     /// Allowed outbound rules for `wasi:http` requests.
     pub wasi_http_outbound: Vec<WasiHttpOutboundRule>,
+    /// Arbitrary resource policy map available to runtime/native plugins.
+    pub resources: ResourceMap,
     /// Allowed invocation bindings for this service.
     pub bindings: Vec<ServiceBinding>,
     /// Plugin dependencies available to the runtime.
@@ -127,6 +131,7 @@ pub enum ServiceLogStream {
 pub struct ServiceLogEvent {
     pub stream: ServiceLogStream,
     pub bytes: Vec<u8>,
+    pub timestamp_unix_ms: u64,
 }
 
 #[derive(Debug)]
@@ -134,6 +139,7 @@ pub struct ServiceLogEvent {
 pub struct ServiceLogSubscription {
     pub service_name: String,
     pub snapshot_bytes: Vec<u8>,
+    pub snapshot_events: Vec<ServiceLogEvent>,
     pub receiver: Option<broadcast::Receiver<ServiceLogEvent>>,
 }
 
@@ -152,7 +158,7 @@ struct RunningService {
     child: Child,
     _stdout_log: Arc<Mutex<BoundedLogBuffer>>,
     _stderr_log: Arc<Mutex<BoundedLogBuffer>>,
-    composite_log: Arc<Mutex<BoundedLogBuffer>>,
+    composite_log: Arc<Mutex<CompositeLogBuffer>>,
     log_sender: broadcast::Sender<ServiceLogEvent>,
     last_heartbeat_at: String,
 }
@@ -167,6 +173,7 @@ struct StartFailureLogBuffers {
 struct RetainedServiceLogEntry {
     service_name: String,
     snapshot_bytes: Vec<u8>,
+    snapshot_events: Vec<ServiceLogEvent>,
     weight_bytes: usize,
 }
 
@@ -186,7 +193,12 @@ impl RetainedServiceLogRing {
         }
     }
 
-    fn upsert(&mut self, service_name: String, snapshot_bytes: Vec<u8>) {
+    fn upsert(
+        &mut self,
+        service_name: String,
+        snapshot_bytes: Vec<u8>,
+        snapshot_events: Vec<ServiceLogEvent>,
+    ) {
         if let Some(index) = self
             .entries
             .iter()
@@ -196,11 +208,20 @@ impl RetainedServiceLogRing {
             self.total_bytes = self.total_bytes.saturating_sub(removed.weight_bytes);
         }
 
-        let weight_bytes = retained_entry_weight_bytes(&service_name, snapshot_bytes.len());
+        let snapshot_events_bytes_len = snapshot_events
+            .iter()
+            .map(|event| event.bytes.len())
+            .sum::<usize>();
+        let weight_bytes = retained_entry_weight_bytes(
+            &service_name,
+            snapshot_bytes.len(),
+            snapshot_events_bytes_len,
+        );
         self.total_bytes = self.total_bytes.saturating_add(weight_bytes);
         self.entries.push_back(RetainedServiceLogEntry {
             service_name,
             snapshot_bytes,
+            snapshot_events,
             weight_bytes,
         });
 
@@ -212,11 +233,11 @@ impl RetainedServiceLogRing {
         }
     }
 
-    fn snapshot(&self, service_name: &str) -> Option<Vec<u8>> {
+    fn snapshot(&self, service_name: &str) -> Option<(Vec<u8>, Vec<ServiceLogEvent>)> {
         self.entries
             .iter()
             .find(|entry| entry.service_name == service_name)
-            .map(|entry| entry.snapshot_bytes.clone())
+            .map(|entry| (entry.snapshot_bytes.clone(), entry.snapshot_events.clone()))
     }
 
     fn service_names(&self) -> Vec<String> {
@@ -227,9 +248,17 @@ impl RetainedServiceLogRing {
     }
 }
 
-fn retained_entry_weight_bytes(service_name: &str, snapshot_bytes_len: usize) -> usize {
+fn retained_entry_weight_bytes(
+    service_name: &str,
+    snapshot_bytes_len: usize,
+    snapshot_events_bytes_len: usize,
+) -> usize {
     // Keep empty snapshots bounded too by charging key bytes with a floor of 1.
-    service_name.len().saturating_add(snapshot_bytes_len).max(1)
+    service_name
+        .len()
+        .saturating_add(snapshot_bytes_len)
+        .saturating_add(snapshot_events_bytes_len)
+        .max(1)
 }
 
 #[derive(Debug)]
@@ -255,6 +284,7 @@ pub struct ServiceSupervisor {
     runner_ready_timeout: Duration,
     http_worker_count: u32,
     http_worker_queue_capacity: u32,
+    http_queue_memory_budget_bytes: u64,
     runner_log_buffer_bytes: usize,
     epoch_tick_interval_ms: u64,
     manager_control_endpoint: PathBuf,
@@ -358,7 +388,7 @@ impl ServiceSupervisor {
 
         let inner = Arc::new(RwLock::new(BTreeMap::new()));
         let retained_logs = Arc::new(Mutex::new(RetainedServiceLogRing::new(
-            runner_log_buffer_bytes,
+            runner_log_buffer_bytes.saturating_mul(2),
         )));
         let stopping_services = Arc::new(StdMutex::new(BTreeMap::new()));
         let pending_ready = Arc::new(Mutex::new(BTreeMap::new()));
@@ -381,6 +411,7 @@ impl ServiceSupervisor {
             runner_ready_timeout,
             http_worker_count,
             http_worker_queue_capacity,
+            http_queue_memory_budget_bytes: DEFAULT_HTTP_QUEUE_MEMORY_BUDGET_BYTES,
             runner_log_buffer_bytes,
             epoch_tick_interval_ms: epoch_tick_interval_ms.max(1),
             manager_control_endpoint,
@@ -397,6 +428,15 @@ impl ServiceSupervisor {
         Ok(supervisor)
     }
 
+    /// Overrides queued HTTP request memory budget in bytes.
+    pub fn with_http_queue_memory_budget_bytes(
+        mut self,
+        http_queue_memory_budget_bytes: u64,
+    ) -> Self {
+        self.http_queue_memory_budget_bytes = http_queue_memory_budget_bytes;
+        self
+    }
+
     /// Starts a service by spawning a runner child process.
     pub async fn start(&self, launch: ServiceLaunch) -> Result<(), ImagodError> {
         self.start_internal(launch, false).await
@@ -411,6 +451,8 @@ impl ServiceSupervisor {
         self.reserve_start(&launch.name).await?;
         let service_name = launch.name.clone();
         let result = async {
+            let effective_http_worker_queue_capacity =
+                self.effective_http_worker_queue_capacity(&launch)?;
             let runner_id = uuid::Uuid::new_v4().to_string();
             let manager_auth_secret = random_secret_hex();
             let invocation_secret = random_secret_hex();
@@ -424,13 +466,14 @@ impl ServiceSupervisor {
                 http_port: launch.http_port,
                 http_max_body_bytes: launch.http_max_body_bytes,
                 http_worker_count: self.http_worker_count,
-                http_worker_queue_capacity: self.http_worker_queue_capacity,
+                http_worker_queue_capacity: effective_http_worker_queue_capacity,
                 socket: launch.socket.clone(),
                 component_path: launch.component_path.clone(),
                 args: launch.args.clone(),
                 envs: launch.envs.clone(),
                 wasi_mounts: launch.wasi_mounts.clone(),
                 wasi_http_outbound: launch.wasi_http_outbound.clone(),
+                resources: launch.resources.clone(),
                 bindings: launch.bindings.clone(),
                 plugin_dependencies: launch.plugin_dependencies.clone(),
                 capabilities: launch.capabilities.clone(),
@@ -465,7 +508,7 @@ impl ServiceSupervisor {
                 stdout_log: stdout_log.clone(),
                 stderr_log: stderr_log.clone(),
             };
-            let composite_log = Arc::new(Mutex::new(BoundedLogBuffer::new(
+            let composite_log = Arc::new(Mutex::new(CompositeLogBuffer::new(
                 self.runner_log_buffer_bytes,
             )));
             let (log_sender, _) = broadcast::channel(LOG_CHANNEL_CAPACITY);
@@ -553,6 +596,59 @@ impl ServiceSupervisor {
         .await;
         self.release_start(&service_name).await;
         result
+    }
+
+    fn effective_http_worker_queue_capacity(
+        &self,
+        launch: &ServiceLaunch,
+    ) -> Result<u32, ImagodError> {
+        if launch.app_type != RunnerAppType::Http {
+            return Ok(self.http_worker_queue_capacity);
+        }
+
+        let Some(max_body_bytes) = launch.http_max_body_bytes else {
+            return Err(ImagodError::new(
+                ErrorCode::Internal,
+                STAGE_START,
+                format!(
+                    "service '{}' is missing manifest.http.max_body_bytes for app_type=http",
+                    launch.name
+                ),
+            ));
+        };
+
+        if max_body_bytes == 0 {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                STAGE_START,
+                format!(
+                    "service '{}' must declare manifest.http.max_body_bytes greater than zero",
+                    launch.name
+                ),
+            ));
+        }
+
+        let max_queue_by_budget = self.http_queue_memory_budget_bytes / max_body_bytes;
+        if max_queue_by_budget == 0 {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                STAGE_START,
+                format!(
+                    "service '{}' exceeds runtime.http_queue_memory_budget_bytes: budget={} max_body_bytes={}",
+                    launch.name, self.http_queue_memory_budget_bytes, max_body_bytes
+                ),
+            ));
+        }
+
+        let configured_capacity = u64::from(self.http_worker_queue_capacity);
+        let effective_capacity = configured_capacity.min(max_queue_by_budget);
+        u32::try_from(effective_capacity).map_err(|_| {
+            ImagodError::new(
+                ErrorCode::Internal,
+                STAGE_START,
+                format!("effective HTTP queue capacity is too large: {effective_capacity}"),
+            )
+        })
     }
 
     /// Replaces an existing service using stop-then-start sequence.
@@ -838,14 +934,21 @@ impl ServiceSupervisor {
         };
 
         if let Some((snapshot_source, receiver)) = running_subscription {
-            let snapshot_bytes = {
+            let (full_snapshot_bytes, full_snapshot_events) = {
                 let buffer = snapshot_source.lock().await;
-                tail_lines_from_bytes(&buffer.snapshot(), tail_lines)
+                buffer.snapshot()
             };
+            let snapshot_bytes = tail_lines_from_bytes(&full_snapshot_bytes, tail_lines);
+            let snapshot_events = tail_events_from_snapshot_bytes(
+                &full_snapshot_events,
+                &full_snapshot_bytes,
+                snapshot_bytes.len(),
+            );
 
             return Ok(ServiceLogSubscription {
                 service_name: service_name.to_string(),
                 snapshot_bytes,
+                snapshot_events,
                 receiver,
             });
         }
@@ -858,7 +961,7 @@ impl ServiceSupervisor {
             ));
         }
 
-        let retained_snapshot = {
+        let (retained_snapshot, retained_events) = {
             let retained = self.retained_logs.lock().await;
             retained.snapshot(service_name)
         }
@@ -870,9 +973,17 @@ impl ServiceSupervisor {
             )
         })?;
 
+        let snapshot_bytes = tail_lines_from_bytes(&retained_snapshot, tail_lines);
+        let snapshot_events = tail_events_from_snapshot_bytes(
+            &retained_events,
+            &retained_snapshot,
+            snapshot_bytes.len(),
+        );
+
         Ok(ServiceLogSubscription {
             service_name: service_name.to_string(),
-            snapshot_bytes: tail_lines_from_bytes(&retained_snapshot, tail_lines),
+            snapshot_bytes,
+            snapshot_events,
             receiver: None,
         })
     }
@@ -1239,17 +1350,18 @@ impl ServiceSupervisor {
     async fn retain_composite_snapshot(
         &self,
         service_name: &str,
-        composite_log: &Arc<Mutex<BoundedLogBuffer>>,
+        composite_log: &Arc<Mutex<CompositeLogBuffer>>,
     ) {
-        let snapshot_bytes = {
+        let (snapshot_bytes, snapshot_events) = {
             let buffer = composite_log.lock().await;
             buffer.snapshot()
         };
 
-        self.retained_logs
-            .lock()
-            .await
-            .upsert(service_name.to_string(), snapshot_bytes);
+        self.retained_logs.lock().await.upsert(
+            service_name.to_string(),
+            snapshot_bytes,
+            snapshot_events,
+        );
     }
 
     async fn take_running(&self, service_name: &str) -> Result<RunningService, ImagodError> {
@@ -1386,10 +1498,11 @@ fn is_binding_allowed(bindings: &[ServiceBinding], target_service: &str, wit: &s
 /// Drains one child output stream into bounded in-memory log buffer.
 ///
 /// Concurrency: runs as a detached task per stream.
+#[allow(clippy::too_many_arguments)]
 fn spawn_log_drain<R>(
     reader: R,
     buffer: Arc<Mutex<BoundedLogBuffer>>,
-    composite_buffer: Arc<Mutex<BoundedLogBuffer>>,
+    composite_buffer: Arc<Mutex<CompositeLogBuffer>>,
     sender: broadcast::Sender<ServiceLogEvent>,
     service_name: String,
     stream_name: &'static str,
@@ -1410,6 +1523,63 @@ fn spawn_log_drain<R>(
 
 fn tail_lines_from_bytes(bytes: &[u8], tail_lines: u32) -> Vec<u8> {
     log_buffer::tail_lines_from_bytes(bytes, tail_lines)
+}
+
+fn tail_events_from_snapshot_bytes(
+    events: &[ServiceLogEvent],
+    full_snapshot_bytes: &[u8],
+    tailed_bytes_len: usize,
+) -> Vec<ServiceLogEvent> {
+    if tailed_bytes_len == 0 {
+        return Vec::new();
+    }
+
+    let start = full_snapshot_bytes.len().saturating_sub(tailed_bytes_len);
+    let mut skip = start;
+    let mut remaining = tailed_bytes_len;
+    let mut out = Vec::new();
+
+    for event in events {
+        if remaining == 0 {
+            break;
+        }
+        if skip >= event.bytes.len() {
+            skip = skip.saturating_sub(event.bytes.len());
+            continue;
+        }
+
+        let start = skip;
+        let available = event.bytes.len().saturating_sub(start);
+        let take = available.min(remaining);
+        if take == 0 {
+            continue;
+        }
+
+        out.push(ServiceLogEvent {
+            stream: event.stream,
+            bytes: event.bytes[start..start + take].to_vec(),
+            timestamp_unix_ms: event.timestamp_unix_ms,
+        });
+        skip = 0;
+        remaining = remaining.saturating_sub(take);
+    }
+
+    if remaining == 0 {
+        return out;
+    }
+
+    // Fall back to preserving exact tail bytes even when event boundaries are inconsistent.
+    vec![ServiceLogEvent {
+        stream: events
+            .last()
+            .map(|event| event.stream)
+            .unwrap_or(ServiceLogStream::Stdout),
+        bytes: full_snapshot_bytes[start..].to_vec(),
+        timestamp_unix_ms: events
+            .last()
+            .map(|event| event.timestamp_unix_ms)
+            .unwrap_or(0),
+    }]
 }
 
 /// Sends kill signal to child and waits for termination.
@@ -1579,7 +1749,7 @@ mod tests {
             child,
             _stdout_log: Arc::new(Mutex::new(BoundedLogBuffer::new(64))),
             _stderr_log: Arc::new(Mutex::new(BoundedLogBuffer::new(64))),
-            composite_log: Arc::new(Mutex::new(BoundedLogBuffer::new(128))),
+            composite_log: Arc::new(Mutex::new(CompositeLogBuffer::new(128))),
             log_sender,
             last_heartbeat_at: now_unix_secs().to_string(),
         }
@@ -1598,12 +1768,88 @@ mod tests {
         }
     }
 
+    fn sample_http_launch(max_body_bytes: u64) -> ServiceLaunch {
+        ServiceLaunch {
+            name: "svc-http".to_string(),
+            release_hash: "release-test".to_string(),
+            app_type: RunnerAppType::Http,
+            http_port: Some(18080),
+            http_max_body_bytes: Some(max_body_bytes),
+            socket: None,
+            component_path: PathBuf::from("/tmp/unused.wasm"),
+            args: Vec::new(),
+            envs: std::collections::BTreeMap::new(),
+            wasi_mounts: Vec::new(),
+            wasi_http_outbound: Vec::new(),
+            bindings: Vec::new(),
+            plugin_dependencies: Vec::new(),
+            capabilities: CapabilityPolicy::default(),
+        }
+    }
+
     #[test]
     fn bounded_log_buffer_keeps_latest_bytes_only() {
         let mut buffer = BoundedLogBuffer::new(5);
         buffer.push(b"abc");
         buffer.push(b"def");
         assert_eq!(buffer.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn effective_http_worker_queue_capacity_respects_budget_when_body_is_8mib() {
+        let root = new_test_root("http-queue-budget-8mib");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize")
+            .with_http_queue_memory_budget_bytes(32 * 1024 * 1024);
+        let launch = sample_http_launch(8 * 1024 * 1024);
+        assert_eq!(
+            supervisor
+                .effective_http_worker_queue_capacity(&launch)
+                .expect("queue capacity should be computed"),
+            4
+        );
+
+        drop(supervisor);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn effective_http_worker_queue_capacity_clamps_to_budget_when_body_is_16mib() {
+        let root = new_test_root("http-queue-budget-16mib");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize")
+            .with_http_queue_memory_budget_bytes(32 * 1024 * 1024);
+        let launch = sample_http_launch(16 * 1024 * 1024);
+        assert_eq!(
+            supervisor
+                .effective_http_worker_queue_capacity(&launch)
+                .expect("queue capacity should be clamped by budget"),
+            2
+        );
+
+        drop(supervisor);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn effective_http_worker_queue_capacity_rejects_when_budget_is_smaller_than_max_body() {
+        let root = new_test_root("http-queue-budget-too-small");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize")
+            .with_http_queue_memory_budget_bytes(32 * 1024 * 1024);
+        let launch = sample_http_launch(64 * 1024 * 1024);
+        let err = supervisor
+            .effective_http_worker_queue_capacity(&launch)
+            .expect_err("budget smaller than max_body should fail");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert_eq!(err.stage, STAGE_START);
+        assert!(
+            err.message
+                .contains("runtime.http_queue_memory_budget_bytes")
+        );
+
+        drop(supervisor);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
@@ -1673,11 +1919,68 @@ mod tests {
     }
 
     #[test]
+    fn tail_events_from_snapshot_bytes_preserves_timestamp_for_tailed_content() {
+        let full = b"l1\nl2\nl3\n".to_vec();
+        let tailed = tail_lines_from_bytes(&full, 2);
+        let events = vec![
+            ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"l1\n".to_vec(),
+                timestamp_unix_ms: 1,
+            },
+            ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"l2\n".to_vec(),
+                timestamp_unix_ms: 2,
+            },
+            ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"l3\n".to_vec(),
+                timestamp_unix_ms: 3,
+            },
+        ];
+
+        let tailed_events = tail_events_from_snapshot_bytes(&events, &full, tailed.len());
+        let joined = tailed_events
+            .iter()
+            .flat_map(|event| event.bytes.clone())
+            .collect::<Vec<_>>();
+        let timestamps = tailed_events
+            .iter()
+            .map(|event| event.timestamp_unix_ms)
+            .collect::<Vec<_>>();
+
+        assert_eq!(joined, tailed);
+        assert_eq!(timestamps, vec![2, 3]);
+    }
+
+    #[test]
+    fn tail_events_from_snapshot_bytes_preserves_full_snapshot_bytes_when_events_are_shorter() {
+        let full = b"abc\ndef\n".to_vec();
+        let events = vec![ServiceLogEvent {
+            stream: ServiceLogStream::Stdout,
+            bytes: b"def\n".to_vec(),
+            timestamp_unix_ms: 10,
+        }];
+
+        let tailed_events = tail_events_from_snapshot_bytes(&events, &full, full.len());
+        assert_eq!(
+            tailed_events
+                .iter()
+                .flat_map(|event| event.bytes.clone())
+                .collect::<Vec<_>>(),
+            full
+        );
+        assert_eq!(tailed_events.len(), 1);
+        assert_eq!(tailed_events[0].timestamp_unix_ms, 10);
+    }
+
+    #[test]
     fn retained_log_ring_evicts_oldest_entries_when_total_bytes_exceed_capacity() {
         let mut ring = RetainedServiceLogRing::new(9);
-        ring.upsert("a".to_string(), b"abc".to_vec());
-        ring.upsert("b".to_string(), b"de".to_vec());
-        ring.upsert("c".to_string(), b"1234".to_vec());
+        ring.upsert("a".to_string(), b"abc".to_vec(), Vec::new());
+        ring.upsert("b".to_string(), b"de".to_vec(), Vec::new());
+        ring.upsert("c".to_string(), b"1234".to_vec(), Vec::new());
 
         assert!(
             ring.snapshot("a").is_none(),
@@ -1689,11 +1992,11 @@ mod tests {
     #[test]
     fn retained_log_ring_reinserting_same_service_replaces_and_moves_to_tail() {
         let mut ring = RetainedServiceLogRing::new(64);
-        ring.upsert("svc-a".to_string(), b"old".to_vec());
-        ring.upsert("svc-b".to_string(), b"mid".to_vec());
-        ring.upsert("svc-a".to_string(), b"new".to_vec());
+        ring.upsert("svc-a".to_string(), b"old".to_vec(), Vec::new());
+        ring.upsert("svc-b".to_string(), b"mid".to_vec(), Vec::new());
+        ring.upsert("svc-a".to_string(), b"new".to_vec(), Vec::new());
 
-        assert_eq!(ring.snapshot("svc-a"), Some(b"new".to_vec()));
+        assert_eq!(ring.snapshot("svc-a"), Some((b"new".to_vec(), Vec::new())));
         assert_eq!(
             ring.service_names(),
             vec!["svc-b".to_string(), "svc-a".to_string()]
@@ -1703,15 +2006,108 @@ mod tests {
     #[test]
     fn retained_log_ring_counts_empty_snapshots_toward_capacity() {
         let mut ring = RetainedServiceLogRing::new(2);
-        ring.upsert("a".to_string(), Vec::new());
-        ring.upsert("b".to_string(), Vec::new());
-        ring.upsert("c".to_string(), Vec::new());
+        ring.upsert("a".to_string(), Vec::new(), Vec::new());
+        ring.upsert("b".to_string(), Vec::new(), Vec::new());
+        ring.upsert("c".to_string(), Vec::new(), Vec::new());
 
         assert!(
             ring.snapshot("a").is_none(),
             "empty snapshots must still consume capacity and evict old entries"
         );
         assert_eq!(ring.service_names(), vec!["b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn retained_log_ring_counts_snapshot_events_toward_capacity() {
+        let mut ring = RetainedServiceLogRing::new(10);
+        ring.upsert(
+            "a".to_string(),
+            b"x".to_vec(),
+            vec![ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"1234".to_vec(),
+                timestamp_unix_ms: 1,
+            }],
+        );
+        ring.upsert(
+            "b".to_string(),
+            b"y".to_vec(),
+            vec![ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"5678".to_vec(),
+                timestamp_unix_ms: 2,
+            }],
+        );
+
+        assert!(ring.snapshot("a").is_none());
+        assert_eq!(ring.service_names(), vec!["b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn retained_logs_capacity_is_double_runner_log_buffer_bytes() {
+        let root = new_test_root("retained-capacity-double");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 1024, 50)
+            .expect("supervisor should initialize");
+        let capacity = supervisor.retained_logs.lock().await.capacity_bytes;
+        assert_eq!(capacity, 2048);
+
+        drop(supervisor);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn stop_retains_snapshot_with_events_under_double_capacity() {
+        let root = new_test_root("retained-capacity-snapshot");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 1024, 50)
+            .expect("supervisor should initialize");
+        let service_name = "svc-retained-capacity";
+        let runner_endpoint = root
+            .join("runtime")
+            .join("ipc")
+            .join("runners")
+            .join("retained-capacity.sock");
+
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep process should spawn");
+        let mut service = new_running_service(child, "runner-retained-capacity", runner_endpoint);
+        service.composite_log = Arc::new(Mutex::new(CompositeLogBuffer::new(1024)));
+        {
+            let mut log = service.composite_log.lock().await;
+            log.push_event(ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: vec![b'x'; 900],
+                timestamp_unix_ms: 42,
+            });
+        }
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(service_name.to_string(), service);
+        }
+
+        supervisor
+            .stop(service_name, true)
+            .await
+            .expect("force stop should succeed");
+        let subscription = supervisor
+            .open_logs(service_name, 10, false)
+            .await
+            .expect("retained logs should remain available");
+        assert_eq!(subscription.snapshot_bytes.len(), 900);
+        assert_eq!(
+            subscription
+                .snapshot_events
+                .iter()
+                .flat_map(|event| event.bytes.clone())
+                .collect::<Vec<_>>(),
+            subscription.snapshot_bytes
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
@@ -1756,7 +2152,21 @@ mod tests {
         let service = new_running_service(child, "runner-open-logs", runner_endpoint);
         {
             let mut log = service.composite_log.lock().await;
-            log.push(b"a\nb\nc\n");
+            log.push_event(ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"a\n".to_vec(),
+                timestamp_unix_ms: 10,
+            });
+            log.push_event(ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"b\n".to_vec(),
+                timestamp_unix_ms: 11,
+            });
+            log.push_event(ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"c\n".to_vec(),
+                timestamp_unix_ms: 12,
+            });
         }
 
         {
@@ -1770,6 +2180,22 @@ mod tests {
             .expect("open_logs should succeed");
         assert_eq!(subscription.service_name, service_name);
         assert_eq!(subscription.snapshot_bytes, b"b\nc\n");
+        assert_eq!(
+            subscription
+                .snapshot_events
+                .iter()
+                .flat_map(|event| event.bytes.clone())
+                .collect::<Vec<_>>(),
+            subscription.snapshot_bytes
+        );
+        assert_eq!(
+            subscription
+                .snapshot_events
+                .iter()
+                .map(|event| event.timestamp_unix_ms)
+                .collect::<Vec<_>>(),
+            vec![11, 12]
+        );
         assert!(subscription.receiver.is_some(), "follow should subscribe");
 
         stop_running_service_best_effort(&supervisor.inner, service_name).await;
@@ -1834,11 +2260,27 @@ mod tests {
             .expect("supervisor should initialize");
         let service_name = "svc-open-logs-retained";
 
-        supervisor
-            .retained_logs
-            .lock()
-            .await
-            .upsert(service_name.to_string(), b"old-a\nold-b\nold-c\n".to_vec());
+        supervisor.retained_logs.lock().await.upsert(
+            service_name.to_string(),
+            b"old-a\nold-b\nold-c\n".to_vec(),
+            vec![
+                ServiceLogEvent {
+                    stream: ServiceLogStream::Stdout,
+                    bytes: b"old-a\n".to_vec(),
+                    timestamp_unix_ms: 21,
+                },
+                ServiceLogEvent {
+                    stream: ServiceLogStream::Stdout,
+                    bytes: b"old-b\n".to_vec(),
+                    timestamp_unix_ms: 22,
+                },
+                ServiceLogEvent {
+                    stream: ServiceLogStream::Stdout,
+                    bytes: b"old-c\n".to_vec(),
+                    timestamp_unix_ms: 23,
+                },
+            ],
+        );
 
         let subscription = supervisor
             .open_logs(service_name, 2, true)
@@ -1846,6 +2288,22 @@ mod tests {
             .expect("retained open_logs should succeed");
         assert_eq!(subscription.service_name, service_name);
         assert_eq!(subscription.snapshot_bytes, b"old-b\nold-c\n");
+        assert_eq!(
+            subscription
+                .snapshot_events
+                .iter()
+                .flat_map(|event| event.bytes.clone())
+                .collect::<Vec<_>>(),
+            subscription.snapshot_bytes
+        );
+        assert_eq!(
+            subscription
+                .snapshot_events
+                .iter()
+                .map(|event| event.timestamp_unix_ms)
+                .collect::<Vec<_>>(),
+            vec![22, 23]
+        );
         assert!(
             subscription.receiver.is_none(),
             "retained logs should not provide follow receiver"
@@ -1861,11 +2319,11 @@ mod tests {
             .expect("supervisor should initialize");
         let service_name = "svc-open-logs-retained-stopping";
 
-        supervisor
-            .retained_logs
-            .lock()
-            .await
-            .upsert(service_name.to_string(), b"old-a\nold-b\n".to_vec());
+        supervisor.retained_logs.lock().await.upsert(
+            service_name.to_string(),
+            b"old-a\nold-b\n".to_vec(),
+            Vec::new(),
+        );
 
         let _stopping_guard = supervisor.begin_stop_service(service_name);
         let err = supervisor
@@ -1898,12 +2356,17 @@ mod tests {
         let service = new_running_service(child, "runner-open-logs-priority", runner_endpoint);
         {
             let mut log = service.composite_log.lock().await;
-            log.push(b"running-a\nrunning-b\n");
+            log.push_event(ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"running-a\nrunning-b\n".to_vec(),
+                timestamp_unix_ms: 1,
+            });
         }
 
         supervisor.retained_logs.lock().await.upsert(
             service_name.to_string(),
             b"retained-a\nretained-b\n".to_vec(),
+            Vec::new(),
         );
         {
             let mut inner = supervisor.inner.write().await;
@@ -2051,8 +2514,16 @@ mod tests {
         }
         {
             let mut retained = supervisor.retained_logs.lock().await;
-            retained.upsert("svc-running".to_string(), b"running-retained\n".to_vec());
-            retained.upsert("svc-retained".to_string(), b"retained-only\n".to_vec());
+            retained.upsert(
+                "svc-running".to_string(),
+                b"running-retained\n".to_vec(),
+                Vec::new(),
+            );
+            retained.upsert(
+                "svc-retained".to_string(),
+                b"retained-only\n".to_vec(),
+                Vec::new(),
+            );
         }
 
         let names = supervisor.loggable_service_names().await;
@@ -2073,8 +2544,16 @@ mod tests {
 
         {
             let mut retained = supervisor.retained_logs.lock().await;
-            retained.upsert("svc-stopping".to_string(), b"retained\n".to_vec());
-            retained.upsert("svc-available".to_string(), b"retained\n".to_vec());
+            retained.upsert(
+                "svc-stopping".to_string(),
+                b"retained\n".to_vec(),
+                Vec::new(),
+            );
+            retained.upsert(
+                "svc-available".to_string(),
+                b"retained\n".to_vec(),
+                Vec::new(),
+            );
         }
         let _stopping_guard = supervisor.begin_stop_service("svc-stopping");
 
@@ -2163,7 +2642,11 @@ mod tests {
         let service = new_running_service(child, "runner-reserve-reclaim", runner_endpoint.clone());
         {
             let mut log = service.composite_log.lock().await;
-            log.push(b"reclaim-a\nreclaim-b\n");
+            log.push_event(ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"reclaim-a\nreclaim-b\n".to_vec(),
+                timestamp_unix_ms: 1,
+            });
         }
         {
             let mut inner = supervisor.inner.write().await;
@@ -2645,7 +3128,11 @@ mod tests {
         let service = new_running_service(child, "runner-stop-retained-success", runner_endpoint);
         {
             let mut log = service.composite_log.lock().await;
-            log.push(b"line-a\nline-b\n");
+            log.push_event(ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"line-a\nline-b\n".to_vec(),
+                timestamp_unix_ms: 1,
+            });
         }
         {
             let mut inner = supervisor.inner.write().await;
@@ -2696,7 +3183,11 @@ mod tests {
         );
         {
             let mut log = service.composite_log.lock().await;
-            log.push(b"done-a\ndone-b\n");
+            log.push_event(ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"done-a\ndone-b\n".to_vec(),
+                timestamp_unix_ms: 1,
+            });
         }
         {
             let mut inner = supervisor.inner.write().await;
@@ -3195,7 +3686,11 @@ mod tests {
         let service = new_running_service(child, "runner-reap-retained", runner_endpoint);
         {
             let mut log = service.composite_log.lock().await;
-            log.push(b"reap-a\nreap-b\n");
+            log.push_event(ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"reap-a\nreap-b\n".to_vec(),
+                timestamp_unix_ms: 1,
+            });
         }
         {
             let mut inner = supervisor.inner.write().await;
@@ -3241,7 +3736,11 @@ mod tests {
         );
         {
             let mut log = service.composite_log.lock().await;
-            log.push(b"single-a\nsingle-b\n");
+            log.push_event(ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"single-a\nsingle-b\n".to_vec(),
+                timestamp_unix_ms: 1,
+            });
         }
         {
             let mut inner = supervisor.inner.write().await;

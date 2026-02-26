@@ -13,6 +13,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
 use imago_protocol::{ErrorCode, Validate, ValidationError};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use sha2::Sha256;
 
 use imagod_common::ImagodError;
@@ -64,6 +65,9 @@ fn validation_error(code: ErrorCode, stage: &str, error: ValidationError) -> Ima
 #[allow(dead_code)]
 /// Boxed future used by transport traits to avoid exposing concrete future types.
 pub type BoxFutureResult<'a, T> = Pin<Box<dyn Future<Output = Result<T, ImagodError>> + Send + 'a>>;
+
+/// Arbitrary resource policy map propagated to runtime/native plugins.
+pub type ResourceMap = BTreeMap<String, JsonValue>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Binding rule that allows one service to invoke an interface on another service.
@@ -643,9 +647,9 @@ pub struct RunnerBootstrap {
     pub http_port: Option<u16>,
     /// Max accepted HTTP request body size in bytes when `app_type=http`.
     pub http_max_body_bytes: Option<u64>,
-    /// Number of HTTP workers available to runtime ingress.
+    /// Compatibility worker-count value forwarded from manager configuration.
     pub http_worker_count: u32,
-    /// Queue capacity for each HTTP worker.
+    /// Effective HTTP request queue capacity for ingress dispatch.
     pub http_worker_queue_capacity: u32,
     /// Socket runtime configuration when `app_type=socket`.
     pub socket: Option<RunnerSocketConfig>,
@@ -661,6 +665,9 @@ pub struct RunnerBootstrap {
     /// Allowed outbound rules for `wasi:http` requests.
     #[serde(default)]
     pub wasi_http_outbound: Vec<WasiHttpOutboundRule>,
+    /// Arbitrary resource policy map available to runtime/native plugins.
+    #[serde(default)]
+    pub resources: ResourceMap,
     /// Allowed outbound bindings for this service.
     pub bindings: Vec<ServiceBinding>,
     /// Plugin dependencies available for this app/plugin execution context.
@@ -741,6 +748,9 @@ impl Validate for RunnerBootstrap {
         }
         for rule in &self.wasi_http_outbound {
             rule.validate()?;
+        }
+        for key in self.resources.keys() {
+            validate_non_empty(key, "resources.key")?;
         }
         for dependency in &self.plugin_dependencies {
             dependency.validate()?;
@@ -1330,6 +1340,7 @@ mod tests {
             envs: BTreeMap::new(),
             wasi_mounts: vec![],
             wasi_http_outbound: vec![],
+            resources: BTreeMap::new(),
             bindings: vec![],
             plugin_dependencies: vec![],
             capabilities: CapabilityPolicy::default(),
@@ -1390,6 +1401,10 @@ mod tests {
             wasi_http_outbound: vec![WasiHttpOutboundRule::Host {
                 host: "localhost".to_string(),
             }],
+            resources: BTreeMap::from([(
+                "i2c".to_string(),
+                serde_json::json!({ "allowed_buses": ["/dev/i2c-1"] }),
+            )]),
             bindings: vec![],
             plugin_dependencies: vec![PluginDependency {
                 name: "yieldspace:plugin/example".to_string(),
@@ -1437,6 +1452,10 @@ mod tests {
             WasiHttpOutboundRule::Host {
                 host: "localhost".to_string()
             }
+        );
+        assert_eq!(
+            decoded.resources.get("i2c"),
+            Some(&serde_json::json!({ "allowed_buses": ["/dev/i2c-1"] }))
         );
         assert_eq!(decoded.plugin_dependencies.len(), 1);
         assert_eq!(

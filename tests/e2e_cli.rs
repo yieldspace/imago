@@ -108,7 +108,7 @@ fn e2e_cli_reads_dotenv_and_overrides_wasi_env() -> TestResult {
     service.append_imago_toml(
         &scenario,
         r#"
-[wasi.env]
+[resources.env]
 IMAGO_E2E_ENV_OVERRIDE = "from-wasi"
 IMAGO_E2E_ENV_TOML_ONLY = "from-wasi-only"
 "#,

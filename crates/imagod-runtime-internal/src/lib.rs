@@ -6,10 +6,11 @@ use std::{
 };
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use imagod_common::ImagodError;
 use imagod_ipc::{
-    CapabilityPolicy, PluginDependency, RunnerAppType, RunnerSocketConfig, RunnerWasiMount,
-    ServiceBinding, WasiHttpOutboundRule,
+    CapabilityPolicy, PluginDependency, ResourceMap, RunnerAppType, RunnerSocketConfig,
+    RunnerWasiMount, ServiceBinding, WasiHttpOutboundRule,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -34,6 +35,8 @@ pub struct RuntimeRunRequest {
     pub wasi_mounts: Vec<RunnerWasiMount>,
     /// Allowed outbound rules for `wasi:http` requests.
     pub wasi_http_outbound: Vec<WasiHttpOutboundRule>,
+    /// Arbitrary resource policy map available to runtime/native plugins.
+    pub resources: ResourceMap,
     /// Socket runtime settings when `app_type=socket`.
     pub socket: Option<RunnerSocketConfig>,
     /// Plugin dependencies resolved from manifest and prepared by manager.
@@ -50,9 +53,9 @@ pub struct RuntimeRunRequest {
     pub shutdown: watch::Receiver<bool>,
     /// Epoch tick interval used for interruption-aware runtimes.
     pub epoch_tick_interval_ms: u64,
-    /// Number of HTTP workers available to runtime ingress.
+    /// Compatibility worker-count value forwarded from manager configuration.
     pub http_worker_count: u32,
-    /// Queue capacity for each HTTP worker.
+    /// Effective HTTP request queue capacity for ingress dispatch.
     pub http_worker_queue_capacity: u32,
     /// Optional signal sent when HTTP runtime initialization has completed.
     pub http_ready_tx: Option<oneshot::Sender<()>>,
@@ -79,6 +82,8 @@ pub struct RuntimeInvokeRequest {
     pub wasi_mounts: Vec<RunnerWasiMount>,
     /// Allowed outbound rules for `wasi:http` requests.
     pub wasi_http_outbound: Vec<WasiHttpOutboundRule>,
+    /// Arbitrary resource policy map available to runtime/native plugins.
+    pub resources: ResourceMap,
     /// Plugin dependencies resolved from manifest and prepared by manager.
     pub plugin_dependencies: Vec<PluginDependency>,
     /// App-level capability policy used by runtime bridge authorization.
@@ -125,8 +130,8 @@ pub struct RuntimeHttpResponse {
     pub status: u16,
     /// HTTP headers represented as raw bytes.
     pub headers: Vec<(String, Vec<u8>)>,
-    /// Entire response body.
-    pub body: Vec<u8>,
+    /// Entire response body as a shareable byte buffer.
+    pub body: Bytes,
 }
 
 /// Runtime abstraction so runner can swap out concrete wasm engines.

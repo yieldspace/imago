@@ -18,7 +18,7 @@ const HINT_PRECONDITION_FAILED: &str =
     "A precondition failed on the target. Refresh state and retry with up-to-date inputs.";
 
 pub fn format_command_error(command: &str, err: &Error) -> String {
-    let summary = err.to_string();
+    let summary = normalize_error_summary(command, &err.to_string());
 
     let mut causes: Vec<String> = err.chain().map(|cause| cause.to_string()).collect();
     if causes.first().is_some_and(|head| head == &summary) {
@@ -37,18 +37,66 @@ pub fn format_command_error(command: &str, err: &Error) -> String {
     }
 
     let mut formatted = String::new();
+    formatted.push_str("error: ");
     formatted.push_str(&summary);
-    formatted.push_str("\ncauses:");
+    formatted.push_str("\ncaused by:");
     for cause in causes {
-        formatted.push_str("\n- ");
+        formatted.push_str("\n  - ");
         formatted.push_str(&cause);
     }
-    formatted.push_str("\nhints:");
+    formatted.push_str("\nhint:");
     for hint in hints {
-        formatted.push_str("\n- ");
+        formatted.push_str("\n  - ");
         formatted.push_str(&hint);
     }
     formatted
+}
+
+pub fn summarize_command_failure(_command: &str, err: &Error) -> String {
+    let chain_messages: Vec<String> = err.chain().map(|cause| cause.to_string()).collect();
+    let combined = chain_messages.join("\n");
+    let combined_lower = combined.to_ascii_lowercase();
+
+    if combined_lower.contains("build stage failed")
+        || combined_lower.contains("failed to run build before deploy")
+        || combined_lower.contains("build.command failed")
+    {
+        return "build stage failed".to_string();
+    }
+
+    if combined_lower.contains("failed to load target configuration")
+        || combined_lower.contains("target settings are invalid")
+    {
+        return "load-config stage failed".to_string();
+    }
+
+    if combined_lower.contains("failed to establish quic")
+        || combined_lower.contains("failed to start quic")
+        || combined_lower.contains("failed to establish webtransport")
+        || combined_lower.contains("connect failed")
+    {
+        return "connect stage failed".to_string();
+    }
+
+    if combined_lower.contains("hello.negotiate")
+        || (combined_lower.contains("hello") && combined_lower.contains("negotiate"))
+    {
+        return "hello stage failed".to_string();
+    }
+
+    if combined_lower.contains("command.start") {
+        return "command.start stage failed".to_string();
+    }
+
+    if combined_lower.contains("logs.request") {
+        return "logs.request stage failed".to_string();
+    }
+
+    if combined_lower.contains("services.list") {
+        return "services.list stage failed".to_string();
+    }
+
+    "operation failed".to_string()
 }
 
 fn append_hints(err: &Error, hints: &mut Vec<String>) {
@@ -119,6 +167,20 @@ fn append_hints(err: &Error, hints: &mut Vec<String>) {
     }
 }
 
+fn normalize_error_summary(command: &str, summary: &str) -> String {
+    let prefix_with_colon = format!("{command} failed: ");
+    if let Some(stripped) = summary.strip_prefix(&prefix_with_colon) {
+        return stripped.trim().to_string();
+    }
+
+    let prefix_without_colon = format!("{command} failed ");
+    if let Some(stripped) = summary.strip_prefix(&prefix_without_colon) {
+        return stripped.trim().to_string();
+    }
+
+    summary.to_string()
+}
+
 fn push_unique(hints: &mut Vec<String>, hint: &str) {
     if hints.iter().any(|existing| existing == hint) {
         return;
@@ -128,7 +190,7 @@ fn push_unique(hints: &mut Vec<String>, hint: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::format_command_error;
+    use super::{format_command_error, summarize_command_failure};
     use anyhow::anyhow;
 
     #[test]
@@ -136,8 +198,8 @@ mod tests {
         let err = anyhow!("simple failure");
         let formatted = format_command_error("build", &err);
 
-        assert!(formatted.starts_with("simple failure\ncauses:\n- "));
-        assert!(formatted.contains("\nhints:\n- "));
+        assert!(formatted.starts_with("error: simple failure\ncaused by:\n  - "));
+        assert!(formatted.contains("\nhint:\n  - "));
     }
 
     #[test]
@@ -147,9 +209,9 @@ mod tests {
             .context("top summary");
 
         let formatted = format_command_error("deploy", &err);
-        assert!(formatted.starts_with("top summary"));
-        assert!(formatted.contains("- middle cause"));
-        assert!(formatted.contains("- root cause"));
+        assert!(formatted.starts_with("error: top summary"));
+        assert!(formatted.contains("  - middle cause"));
+        assert!(formatted.contains("  - root cause"));
     }
 
     #[test]
@@ -189,5 +251,33 @@ mod tests {
         let formatted = format_command_error("deploy", &err);
         assert!(formatted.contains("command.start stream was interrupted"));
         assert!(formatted.contains("may still be running on target"));
+    }
+
+    #[test]
+    fn strips_redundant_command_prefix_from_summary() {
+        let err = anyhow!("root").context("deploy failed: root");
+        let formatted = format_command_error("deploy", &err);
+        assert!(formatted.starts_with("error: root"));
+    }
+
+    #[test]
+    fn summarize_command_failure_reports_build_stage() {
+        let err = anyhow!("build.command failed with exit code 1");
+        assert_eq!(
+            summarize_command_failure("deploy", &err),
+            "build stage failed"
+        );
+    }
+
+    #[test]
+    fn summarize_command_failure_reports_hello_stage() {
+        let err = anyhow!("hello.negotiate was rejected by server");
+        assert_eq!(summarize_command_failure("run", &err), "hello stage failed");
+    }
+
+    #[test]
+    fn summarize_command_failure_uses_fallback() {
+        let err = anyhow!("unexpected failure");
+        assert_eq!(summarize_command_failure("run", &err), "operation failed");
     }
 }

@@ -9,7 +9,10 @@ use std::path::Path;
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 
-use crate::{ImagodConfig, MAX_CHUNK_SIZE_BYTES, parse_ed25519_raw_public_key_hex};
+use crate::{
+    ImagodConfig, MAX_CHUNK_SIZE_BYTES, MAX_HTTP_QUEUE_MEMORY_BUDGET_BYTES,
+    parse_ed25519_raw_public_key_hex,
+};
 
 pub(crate) fn reject_legacy_keys(path: &Path, raw: &toml::Value) -> Result<(), ImagodError> {
     if raw.get("protocol_draft").is_some() {
@@ -120,6 +123,18 @@ pub(crate) fn validate(config: &ImagodConfig) -> Result<(), ImagodError> {
             ErrorCode::BadRequest,
             "config.load",
             "runtime.http_worker_queue_capacity must be between 1 and 16",
+        ));
+    }
+
+    if config.runtime.http_queue_memory_budget_bytes == 0
+        || config.runtime.http_queue_memory_budget_bytes > MAX_HTTP_QUEUE_MEMORY_BUDGET_BYTES
+    {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.load",
+            format!(
+                "runtime.http_queue_memory_budget_bytes must be in range 1..={MAX_HTTP_QUEUE_MEMORY_BUDGET_BYTES}"
+            ),
         ));
     }
 

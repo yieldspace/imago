@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
@@ -11,6 +11,8 @@ use wasmtime::Store;
 use wasmtime_wasi_http::{WasiHttpView, bindings::Proxy, bindings::http::types::Scheme};
 
 use crate::{STAGE_RUNTIME, WasiState, map_runtime_error};
+
+type HyperOutgoingBody = wasmtime_wasi_http::body::HyperOutgoingBody;
 
 #[derive(Default)]
 pub(crate) struct DefaultHttpComponentSupervisor {
@@ -171,12 +173,10 @@ fn runtime_request_to_hyper_request(
 }
 
 async fn runtime_response_from_hyper(
-    response: hyper::Response<wasmtime_wasi_http::body::HyperOutgoingBody>,
+    response: hyper::Response<HyperOutgoingBody>,
 ) -> Result<RuntimeHttpResponse, ImagodError> {
     let (parts, body) = response.into_parts();
-    let collected = BodyExt::collect(body)
-        .await
-        .map_err(|e| map_runtime_error(format!("failed to collect outgoing response body: {e}")))?;
+    let body = collect_response_body_optimized(body).await?;
     let headers = parts
         .headers
         .iter()
@@ -186,6 +186,247 @@ async fn runtime_response_from_hyper(
     Ok(RuntimeHttpResponse {
         status: parts.status.as_u16(),
         headers,
-        body: collected.to_bytes().to_vec(),
+        body,
     })
+}
+
+#[derive(Default, Debug)]
+enum ResponseBodyAccumulator {
+    #[default]
+    Empty,
+    Single(Bytes),
+    Multi(BytesMut),
+}
+
+impl ResponseBodyAccumulator {
+    fn push_data(&mut self, data: Bytes) {
+        if data.is_empty() {
+            return;
+        }
+        match self {
+            Self::Empty => {
+                *self = Self::Single(data);
+            }
+            Self::Single(single) => {
+                let first = std::mem::take(single);
+                let mut combined = BytesMut::with_capacity(first.len().saturating_add(data.len()));
+                combined.extend_from_slice(first.as_ref());
+                combined.extend_from_slice(data.as_ref());
+                *self = Self::Multi(combined);
+            }
+            Self::Multi(combined) => {
+                combined.extend_from_slice(data.as_ref());
+            }
+        }
+    }
+
+    fn finish(self) -> Bytes {
+        match self {
+            Self::Empty => Bytes::new(),
+            Self::Single(single) => single,
+            Self::Multi(combined) => combined.freeze(),
+        }
+    }
+}
+
+fn consume_response_frame(
+    accumulator: &mut ResponseBodyAccumulator,
+    frame: hyper::body::Frame<Bytes>,
+) {
+    if let Ok(data) = frame.into_data() {
+        accumulator.push_data(data);
+    }
+}
+
+async fn collect_response_body_optimized(
+    mut body: HyperOutgoingBody,
+) -> Result<Bytes, ImagodError> {
+    let mut accumulator = ResponseBodyAccumulator::default();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|e| {
+            map_runtime_error(format!("failed to read outgoing response body frame: {e}"))
+        })?;
+        consume_response_frame(&mut accumulator, frame);
+    }
+    Ok(accumulator.finish())
+}
+
+#[cfg(test)]
+async fn collect_response_body_legacy(body: HyperOutgoingBody) -> Result<Bytes, ImagodError> {
+    let collected = BodyExt::collect(body)
+        .await
+        .map_err(|e| map_runtime_error(format!("failed to collect outgoing response body: {e}")))?;
+    Ok(Bytes::from(collected.to_bytes().to_vec()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn single_frame_outgoing_body(body: Bytes) -> HyperOutgoingBody {
+        Full::new(body)
+            .map_err(|never| match never {})
+            .boxed_unsync()
+    }
+
+    fn p99_micros(samples: &mut [u128]) -> u128 {
+        samples.sort_unstable();
+        let index = samples
+            .len()
+            .saturating_mul(99)
+            .div_ceil(100)
+            .saturating_sub(1);
+        samples[index]
+    }
+
+    #[cfg(unix)]
+    fn peak_rss_bytes() -> Option<u64> {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        if result != 0 {
+            return None;
+        }
+
+        let usage = unsafe { usage.assume_init() };
+        let max_rss = usage.ru_maxrss;
+        if max_rss < 0 {
+            return None;
+        }
+
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd",
+            target_os = "dragonfly"
+        ))]
+        {
+            Some(max_rss as u64)
+        }
+
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd",
+            target_os = "dragonfly"
+        )))]
+        {
+            Some((max_rss as u64).saturating_mul(1024))
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn peak_rss_bytes() -> Option<u64> {
+        None
+    }
+
+    #[test]
+    fn response_body_accumulator_uses_single_state_for_one_chunk() {
+        let body = Bytes::from_static(b"single");
+        let body_ptr = body.as_ptr();
+        let mut accumulator = ResponseBodyAccumulator::default();
+        accumulator.push_data(body.clone());
+        assert!(matches!(accumulator, ResponseBodyAccumulator::Single(_)));
+
+        let assembled = accumulator.finish();
+        assert_eq!(assembled, body);
+        assert_eq!(assembled.as_ptr(), body_ptr);
+    }
+
+    #[test]
+    fn response_body_accumulator_concatenates_multiple_chunks() {
+        let mut accumulator = ResponseBodyAccumulator::default();
+        accumulator.push_data(Bytes::from_static(b"hello"));
+        accumulator.push_data(Bytes::from_static(b"-"));
+        accumulator.push_data(Bytes::from_static(b"world"));
+
+        assert!(matches!(accumulator, ResponseBodyAccumulator::Multi(_)));
+        assert_eq!(accumulator.finish(), Bytes::from_static(b"hello-world"));
+    }
+
+    #[test]
+    fn consume_response_frame_ignores_trailers() {
+        let mut accumulator = ResponseBodyAccumulator::default();
+        consume_response_frame(
+            &mut accumulator,
+            hyper::body::Frame::data(Bytes::from_static(b"chunk")),
+        );
+        let mut trailers = hyper::HeaderMap::new();
+        trailers.insert("x-test", hyper::header::HeaderValue::from_static("1"));
+        consume_response_frame(&mut accumulator, hyper::body::Frame::trailers(trailers));
+
+        assert_eq!(accumulator.finish(), Bytes::from_static(b"chunk"));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn http_response_perf_compare() {
+        const BODY_SIZE_BYTES: usize = 32 * 1024 * 1024;
+        const ITERATIONS: usize = 64;
+        let payload = Bytes::from(vec![b'x'; BODY_SIZE_BYTES]);
+
+        // `ru_maxrss` is process-global peak memory; run legacy first as the baseline.
+        let _ = collect_response_body_legacy(single_frame_outgoing_body(payload.clone()))
+            .await
+            .expect("legacy warmup should succeed");
+        let mut legacy_samples = Vec::with_capacity(ITERATIONS);
+        for _ in 0..ITERATIONS {
+            let started = Instant::now();
+            let out = collect_response_body_legacy(single_frame_outgoing_body(payload.clone()))
+                .await
+                .expect("legacy collection should succeed");
+            legacy_samples.push(started.elapsed().as_micros());
+            assert_eq!(out.len(), BODY_SIZE_BYTES);
+        }
+        let legacy_rss_peak = peak_rss_bytes();
+
+        let _ = collect_response_body_optimized(single_frame_outgoing_body(payload.clone()))
+            .await
+            .expect("optimized warmup should succeed");
+        let mut optimized_samples = Vec::with_capacity(ITERATIONS);
+        for _ in 0..ITERATIONS {
+            let started = Instant::now();
+            let out = collect_response_body_optimized(single_frame_outgoing_body(payload.clone()))
+                .await
+                .expect("optimized collection should succeed");
+            optimized_samples.push(started.elapsed().as_micros());
+            assert_eq!(out.len(), BODY_SIZE_BYTES);
+        }
+        let optimized_rss_peak = peak_rss_bytes();
+
+        let optimized_p99 = p99_micros(&mut optimized_samples);
+        let legacy_p99 = p99_micros(&mut legacy_samples);
+
+        eprintln!(
+            "http_response_perf_compare optimized_p99_us={} legacy_p99_us={} optimized_peak_rss_bytes={:?} legacy_peak_rss_bytes={:?}",
+            optimized_p99, legacy_p99, optimized_rss_peak, legacy_rss_peak
+        );
+
+        assert!(
+            optimized_p99 <= legacy_p99,
+            "optimized p99 {}us is slower than legacy {}us",
+            optimized_p99,
+            legacy_p99
+        );
+
+        match (optimized_rss_peak, legacy_rss_peak) {
+            (Some(optimized), Some(legacy)) => {
+                assert!(
+                    optimized <= legacy,
+                    "optimized peak RSS {} bytes exceeds legacy {} bytes",
+                    optimized,
+                    legacy
+                );
+            }
+            _ => {
+                eprintln!(
+                    "http_response_perf_compare peak RSS measurement unavailable on this platform; reporting N/A"
+                );
+            }
+        }
+    }
 }

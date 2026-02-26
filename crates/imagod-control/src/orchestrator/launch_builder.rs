@@ -4,7 +4,8 @@ use std::{
 };
 
 use imagod_common::ImagodError;
-use imagod_ipc::{RunnerWasiMount, WasiHttpOutboundRule};
+use imagod_ipc::{ResourceMap, RunnerWasiMount, WasiHttpOutboundRule};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use super::{
     Manifest, ServiceLaunch, manifest::ManifestValidator, plugin_cache::FilesystemPluginCache,
@@ -34,12 +35,13 @@ pub(super) async fn build_launch_from_release(
         )));
     }
 
-    let ResolvedWasiConfig {
+    let ResolvedResourcesConfig {
         args,
         env,
         mounts,
         http_outbound,
-    } = resolve_wasi_config(release_dir, manifest, manifest_validator).await?;
+        resources,
+    } = resolve_resources_config(release_dir, manifest, manifest_validator).await?;
 
     let bindings = manifest_validator.validate_bindings(&manifest.bindings)?;
     let (http_port, http_max_body_bytes) = manifest_validator.validate_http(manifest)?;
@@ -60,6 +62,7 @@ pub(super) async fn build_launch_from_release(
         envs: env,
         wasi_mounts: mounts,
         wasi_http_outbound: http_outbound,
+        resources,
         bindings,
         plugin_dependencies,
         capabilities: manifest_validator.normalize_capability_policy(&manifest.capabilities),
@@ -67,60 +70,149 @@ pub(super) async fn build_launch_from_release(
 }
 
 #[derive(Default)]
-struct ResolvedWasiConfig {
+struct ResolvedResourcesConfig {
     args: Vec<String>,
     env: BTreeMap<String, String>,
     mounts: Vec<RunnerWasiMount>,
     http_outbound: Vec<WasiHttpOutboundRule>,
+    resources: ResourceMap,
 }
 
-async fn resolve_wasi_config(
+async fn resolve_resources_config(
     release_dir: &Path,
     manifest: &Manifest,
     manifest_validator: &impl ManifestValidator,
-) -> Result<ResolvedWasiConfig, ImagodError> {
-    let Some(wasi) = manifest.wasi.as_ref() else {
-        return Ok(ResolvedWasiConfig {
+) -> Result<ResolvedResourcesConfig, ImagodError> {
+    let Some(resources) = manifest.resources.as_ref() else {
+        return Ok(ResolvedResourcesConfig {
             args: Vec::new(),
             env: BTreeMap::new(),
             mounts: Vec::new(),
-            http_outbound: resolve_wasi_http_outbound_rules(&[], "manifest.wasi.http_outbound")?,
+            http_outbound: resolve_wasi_http_outbound_rules(
+                &[],
+                "manifest.resources.http_outbound",
+            )?,
+            resources: ResourceMap::new(),
         });
     };
 
-    let mut args = Vec::with_capacity(wasi.args.len());
-    for (index, arg) in wasi.args.iter().enumerate() {
+    let mut args = Vec::with_capacity(resources.args.len());
+    for (index, arg) in resources.args.iter().enumerate() {
         let trimmed = arg.trim();
         if trimmed.is_empty() {
             return Err(super::map_bad_manifest(format!(
-                "manifest.wasi.args[{index}] must not be empty"
+                "manifest.resources.args[{index}] must not be empty"
             )));
         }
         args.push(trimmed.to_string());
     }
 
     let mut env = BTreeMap::new();
-    for (key, value) in &wasi.env {
+    for (key, value) in &resources.env {
         if key.trim().is_empty() {
             return Err(super::map_bad_manifest(
-                "manifest.wasi.env contains empty key".to_string(),
+                "manifest.resources.env contains empty key".to_string(),
             ));
         }
         env.insert(key.clone(), value.clone());
     }
 
     let allowed_asset_dirs = collect_allowed_asset_dirs(manifest, manifest_validator)?;
-    let mounts =
-        resolve_wasi_mounts(release_dir, wasi, &allowed_asset_dirs, manifest_validator).await?;
-    let http_outbound =
-        resolve_wasi_http_outbound_rules(&wasi.http_outbound, "manifest.wasi.http_outbound")?;
+    let mounts = resolve_wasi_mounts(
+        release_dir,
+        &resources.mounts,
+        &resources.read_only_mounts,
+        &allowed_asset_dirs,
+        manifest_validator,
+    )
+    .await?;
+    let http_outbound = resolve_wasi_http_outbound_rules(
+        &resources.http_outbound,
+        "manifest.resources.http_outbound",
+    )?;
 
-    Ok(ResolvedWasiConfig {
+    Ok(ResolvedResourcesConfig {
         args,
         env,
         mounts,
         http_outbound,
+        resources: build_resource_map(resources),
     })
+}
+
+fn build_resource_map(resources: &super::ManifestResourcesConfig) -> ResourceMap {
+    let mut map = resources.extra.clone();
+    if !resources.args.is_empty() {
+        map.insert(
+            "args".to_string(),
+            JsonValue::Array(
+                resources
+                    .args
+                    .iter()
+                    .cloned()
+                    .map(JsonValue::String)
+                    .collect(),
+            ),
+        );
+    }
+    if !resources.env.is_empty() {
+        let mut object = JsonMap::new();
+        for (key, value) in &resources.env {
+            object.insert(key.clone(), JsonValue::String(value.clone()));
+        }
+        map.insert("env".to_string(), JsonValue::Object(object));
+    }
+    if !resources.http_outbound.is_empty() {
+        map.insert(
+            "http_outbound".to_string(),
+            JsonValue::Array(
+                resources
+                    .http_outbound
+                    .iter()
+                    .cloned()
+                    .map(JsonValue::String)
+                    .collect(),
+            ),
+        );
+    }
+    if !resources.mounts.is_empty() {
+        map.insert(
+            "mounts".to_string(),
+            JsonValue::Array(
+                resources
+                    .mounts
+                    .iter()
+                    .map(wasi_mount_to_json)
+                    .collect::<Vec<_>>(),
+            ),
+        );
+    }
+    if !resources.read_only_mounts.is_empty() {
+        map.insert(
+            "read_only_mounts".to_string(),
+            JsonValue::Array(
+                resources
+                    .read_only_mounts
+                    .iter()
+                    .map(wasi_mount_to_json)
+                    .collect::<Vec<_>>(),
+            ),
+        );
+    }
+    map
+}
+
+fn wasi_mount_to_json(mount: &super::ManifestWasiMount) -> JsonValue {
+    let mut object = JsonMap::new();
+    object.insert(
+        "asset_dir".to_string(),
+        JsonValue::String(mount.asset_dir.clone()),
+    );
+    object.insert(
+        "guest_path".to_string(),
+        JsonValue::String(mount.guest_path.clone()),
+    );
+    JsonValue::Object(object)
 }
 
 fn resolve_wasi_http_outbound_rules(
@@ -171,18 +263,19 @@ fn collect_allowed_asset_dirs(
 
 async fn resolve_wasi_mounts(
     release_dir: &Path,
-    wasi: &super::ManifestWasiConfig,
+    mounts_entries: &[super::ManifestWasiMount],
+    read_only_mounts_entries: &[super::ManifestWasiMount],
     allowed_asset_dirs: &BTreeSet<PathBuf>,
     manifest_validator: &impl ManifestValidator,
 ) -> Result<Vec<RunnerWasiMount>, ImagodError> {
-    let mut mounts = Vec::with_capacity(wasi.mounts.len() + wasi.read_only_mounts.len());
+    let mut mounts = Vec::with_capacity(mounts_entries.len() + read_only_mounts_entries.len());
     let mut seen_guest_paths = BTreeSet::new();
     let mut seen_asset_dirs = BTreeSet::new();
 
     resolve_wasi_mount_entries(
         release_dir,
-        "manifest.wasi.mounts",
-        &wasi.mounts,
+        "manifest.resources.mounts",
+        mounts_entries,
         false,
         allowed_asset_dirs,
         manifest_validator,
@@ -193,8 +286,8 @@ async fn resolve_wasi_mounts(
     .await?;
     resolve_wasi_mount_entries(
         release_dir,
-        "manifest.wasi.read_only_mounts",
-        &wasi.read_only_mounts,
+        "manifest.resources.read_only_mounts",
+        read_only_mounts_entries,
         true,
         allowed_asset_dirs,
         manifest_validator,

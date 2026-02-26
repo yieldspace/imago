@@ -10,7 +10,11 @@ use dialoguer::{Select, theme::ColorfulTheme};
 
 use crate::{
     cli::InitArgs,
-    commands::{CommandResult, error_diagnostics::format_command_error, ui},
+    commands::{
+        CommandResult,
+        error_diagnostics::{format_command_error, summarize_command_failure},
+        ui,
+    },
 };
 
 const INIT_COMMAND: &str = "init";
@@ -63,7 +67,7 @@ fn run_with_cwd_and_prompt(
                     output.template_id
                 ),
             );
-            ui::command_finish(INIT_COMMAND, true, "completed");
+            ui::command_finish(INIT_COMMAND, true, "");
             let mut result = CommandResult::success(INIT_COMMAND, started_at);
             result
                 .meta
@@ -74,7 +78,7 @@ fn run_with_cwd_and_prompt(
             result
         }
         Err(err) => {
-            let summary = err.to_string();
+            let summary = summarize_command_failure(INIT_COMMAND, &err);
             let message = format_command_error(INIT_COMMAND, &err);
             ui::command_finish(INIT_COMMAND, false, &summary);
             CommandResult::failure(INIT_COMMAND, started_at, message)

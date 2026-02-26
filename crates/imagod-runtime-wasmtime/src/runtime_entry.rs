@@ -533,6 +533,7 @@ impl WasmRuntime {
             envs,
             wasi_mounts,
             wasi_http_outbound,
+            resources,
             plugin_dependencies,
             capabilities,
             bindings,
@@ -557,6 +558,7 @@ impl WasmRuntime {
             app_type,
             manager_control_endpoint,
             manager_auth_secret,
+            resources,
         );
         self.invoke_rpc_component_async(
             &component_path,
@@ -635,15 +637,12 @@ fn dispatch_http_work_item(
 }
 
 fn http_request_queue_capacity(http_worker_count: u32, http_worker_queue_capacity: u32) -> usize {
-    let worker_count = usize::try_from(http_worker_count)
-        .ok()
-        .filter(|v| *v > 0)
-        .unwrap_or(1);
+    let _ = http_worker_count;
     let queue_capacity = usize::try_from(http_worker_queue_capacity)
         .ok()
         .filter(|v| *v > 0)
         .unwrap_or(HTTP_REQUEST_QUEUE_CAPACITY);
-    worker_count.saturating_mul(queue_capacity).max(1)
+    queue_capacity.max(1)
 }
 
 #[async_trait]
@@ -663,6 +662,7 @@ impl ComponentRuntime for WasmRuntime {
             envs,
             wasi_mounts,
             wasi_http_outbound,
+            resources,
             socket,
             plugin_dependencies,
             capabilities,
@@ -682,6 +682,7 @@ impl ComponentRuntime for WasmRuntime {
             app_type,
             manager_control_endpoint,
             manager_auth_secret,
+            resources,
         );
 
         match app_type {
@@ -899,6 +900,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn http_request_queue_capacity_uses_configured_queue_capacity_only() {
+        assert_eq!(http_request_queue_capacity(1, 4), 4);
+        assert_eq!(http_request_queue_capacity(4, 4), 4);
+        assert_eq!(
+            http_request_queue_capacity(0, 0),
+            HTTP_REQUEST_QUEUE_CAPACITY
+        );
+    }
+
     struct WasiHttpFixture {
         _temp_dir: TempDir,
         component_path: PathBuf,
@@ -1007,6 +1018,7 @@ interface types {
                 envs: BTreeMap::new(),
                 wasi_mounts: Vec::new(),
                 wasi_http_outbound: Vec::new(),
+                resources: std::collections::BTreeMap::new(),
                 socket: None,
                 plugin_dependencies: Vec::new(),
                 capabilities: CapabilityPolicy::default(),
@@ -1044,6 +1056,7 @@ interface types {
                 envs: BTreeMap::new(),
                 wasi_mounts: Vec::new(),
                 wasi_http_outbound: Vec::new(),
+                resources: std::collections::BTreeMap::new(),
                 socket: Some(sample_socket_config()),
                 plugin_dependencies: Vec::new(),
                 capabilities: CapabilityPolicy::default(),
@@ -1081,6 +1094,7 @@ interface types {
                 envs: BTreeMap::new(),
                 wasi_mounts: Vec::new(),
                 wasi_http_outbound: Vec::new(),
+                resources: std::collections::BTreeMap::new(),
                 socket: None,
                 plugin_dependencies: Vec::new(),
                 capabilities: CapabilityPolicy::default(),
@@ -1125,6 +1139,7 @@ interface types {
                 envs: BTreeMap::new(),
                 wasi_mounts: Vec::new(),
                 wasi_http_outbound: Vec::new(),
+                resources: std::collections::BTreeMap::new(),
                 socket: None,
                 plugin_dependencies: Vec::new(),
                 capabilities: allow_all_wasi_capabilities(),
@@ -1164,6 +1179,7 @@ interface types {
                 envs: BTreeMap::new(),
                 wasi_mounts: Vec::new(),
                 wasi_http_outbound: Vec::new(),
+                resources: std::collections::BTreeMap::new(),
                 socket: None,
                 plugin_dependencies: Vec::new(),
                 capabilities: CapabilityPolicy::default(),
@@ -1194,6 +1210,7 @@ interface types {
             envs: BTreeMap::new(),
             wasi_mounts: Vec::new(),
             wasi_http_outbound: Vec::new(),
+            resources: std::collections::BTreeMap::new(),
             socket: None,
             plugin_dependencies: Vec::new(),
             capabilities: CapabilityPolicy::default(),
@@ -1245,6 +1262,7 @@ interface types {
                 envs: BTreeMap::new(),
                 wasi_mounts: Vec::new(),
                 wasi_http_outbound: Vec::new(),
+                resources: std::collections::BTreeMap::new(),
                 plugin_dependencies: Vec::new(),
                 capabilities: allow_all_wasi_capabilities(),
                 bindings: Vec::new(),
@@ -1292,6 +1310,7 @@ interface types {
                 envs: BTreeMap::new(),
                 wasi_mounts: Vec::new(),
                 wasi_http_outbound: Vec::new(),
+                resources: std::collections::BTreeMap::new(),
                 socket: None,
                 plugin_dependencies: Vec::new(),
                 capabilities: CapabilityPolicy::default(),

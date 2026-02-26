@@ -300,7 +300,7 @@ mod tests {
 
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.expect("stderr should be present");
-        assert!(stderr.contains("hints:"));
+        assert!(stderr.contains("hint:"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -336,6 +336,7 @@ mod tests {
                         name: None,
                         follow: false,
                         tail: 200,
+                        with_timestamp: false,
                     }),
                 }),
             },

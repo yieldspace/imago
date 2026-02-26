@@ -325,7 +325,7 @@ pub fn runtime_http_response_to_hyper(response: RuntimeHttpResponse) -> Response
 
     let mut out = Response::builder()
         .status(status)
-        .body(Full::new(Bytes::from(response.body)))
+        .body(Full::new(response.body))
         .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"invalid response"))));
     for (name, value) in response.headers {
         let Ok(name) = hyper::header::HeaderName::from_bytes(name.as_bytes()) else {
@@ -430,6 +430,7 @@ mod tests {
             envs: BTreeMap::new(),
             wasi_mounts: Vec::new(),
             wasi_http_outbound: Vec::new(),
+            resources: BTreeMap::new(),
             bindings: Vec::new(),
             plugin_dependencies: Vec::new(),
             capabilities: imagod_ipc::CapabilityPolicy::default(),
@@ -477,7 +478,7 @@ mod tests {
             Ok(RuntimeHttpResponse {
                 status: 200,
                 headers: vec![("content-type".to_string(), b"text/plain".to_vec())],
-                body: b"hello-http".to_vec(),
+                body: Bytes::from_static(b"hello-http"),
             })
         }
     }

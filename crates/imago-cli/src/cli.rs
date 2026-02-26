@@ -189,6 +189,10 @@ pub struct ComposeLogsArgs {
     /// Number of recent log lines to fetch before streaming.
     #[arg(long, value_name = "N", default_value_t = 200)]
     pub tail: u32,
+
+    /// Include per-log timestamp from server events.
+    #[arg(long)]
+    pub with_timestamp: bool,
 }
 
 /// List deployed service states in a compose profile.
@@ -217,6 +221,10 @@ pub struct LogsArgs {
     /// Number of recent log lines to fetch before streaming.
     #[arg(long, value_name = "N", default_value_t = 200)]
     pub tail: u32,
+
+    /// Include per-log timestamp from server events.
+    #[arg(long)]
+    pub with_timestamp: bool,
 }
 
 /// Bindings subcommands.
@@ -560,6 +568,7 @@ mod tests {
                         name: Some("svc-a".to_string()),
                         follow: true,
                         tail: 50,
+                        with_timestamp: false,
                     }),
                 }),
             }
@@ -589,6 +598,37 @@ mod tests {
                         name: None,
                         follow: true,
                         tail: 200,
+                        with_timestamp: false,
+                    }),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_compose_logs_with_timestamp_flag() {
+        let cli = Cli::try_parse_from([
+            "imago",
+            "compose",
+            "logs",
+            "nanokvm-mini",
+            "--target",
+            "nanokvm-cube",
+            "--with-timestamp",
+        ])
+        .expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Commands::Compose(ComposeSubcommandArgs {
+                    command: ComposeCommands::Logs(ComposeLogsArgs {
+                        profile: "nanokvm-mini".to_string(),
+                        target: "nanokvm-cube".to_string(),
+                        name: None,
+                        follow: false,
+                        tail: 200,
+                        with_timestamp: true,
                     }),
                 }),
             }
@@ -645,6 +685,7 @@ mod tests {
                     name: None,
                     follow: false,
                     tail: 200,
+                    with_timestamp: false,
                 }),
             }
         );
@@ -788,6 +829,7 @@ mod tests {
                     name: Some("svc-a".to_string()),
                     follow: true,
                     tail: 50,
+                    with_timestamp: false,
                 }),
             }
         );
@@ -805,6 +847,25 @@ mod tests {
                     name: Some("svc-a".to_string()),
                     follow: true,
                     tail: 200,
+                    with_timestamp: false,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_logs_with_timestamp_flag() {
+        let cli = Cli::try_parse_from(["imago", "logs", "svc-a", "--with-timestamp"])
+            .expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Commands::Logs(LogsArgs {
+                    name: Some("svc-a".to_string()),
+                    follow: false,
+                    tail: 200,
+                    with_timestamp: true,
                 }),
             }
         );
@@ -1005,8 +1066,20 @@ mod tests {
         assert!(help.contains("Keep streaming logs until interrupted"));
         assert!(help.contains("--tail <N>"));
         assert!(help.contains("Number of recent log lines to fetch before streaming"));
+        assert!(help.contains("--with-timestamp"));
+        assert!(help.contains("Include per-log timestamp from server events"));
         assert!(help.contains("--target <TARGET_NAME>"));
         assert!(help.contains("Target name used for all services in this profile"));
+    }
+
+    #[test]
+    fn logs_help_includes_with_timestamp_help_text() {
+        let err = Cli::try_parse_from(["imago", "logs", "--help"]).expect_err("help should exit");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+
+        assert!(help.contains("--with-timestamp"));
+        assert!(help.contains("Include per-log timestamp from server events"));
     }
 
     #[test]

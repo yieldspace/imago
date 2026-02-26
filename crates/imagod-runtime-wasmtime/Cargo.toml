@@ -14,12 +14,14 @@ imagod-common = { workspace = true }
 imagod-ipc = { workspace = true }
 imagod-runtime-internal = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 wasmtime = { workspace = true, features = ["component-model"] }
 wasmtime-wasi = { workspace = true }
 wasmtime-wasi-http = { workspace = true }
 
 [dev-dependencies]
+libc = { workspace = true }
 tempfile = { workspace = true }
 wit-component = { workspace = true, features = ["dummy-module"] }
 wit-parser = { workspace = true }
