@@ -1781,6 +1781,7 @@ mod tests {
             envs: std::collections::BTreeMap::new(),
             wasi_mounts: Vec::new(),
             wasi_http_outbound: Vec::new(),
+            resources: ResourceMap::default(),
             bindings: Vec::new(),
             plugin_dependencies: Vec::new(),
             capabilities: CapabilityPolicy::default(),
