@@ -198,6 +198,8 @@ static DIGITAL_IN_OUT_REGISTRY: OnceLock<Mutex<BTreeMap<u32, DigitalPinHandle>>>
 static ANALOG_IN_REGISTRY: OnceLock<Mutex<BTreeMap<u32, AnalogPinHandle>>> = OnceLock::new();
 static ANALOG_OUT_REGISTRY: OnceLock<Mutex<BTreeMap<u32, AnalogPinHandle>>> = OnceLock::new();
 static ANALOG_IN_OUT_REGISTRY: OnceLock<Mutex<BTreeMap<u32, AnalogPinHandle>>> = OnceLock::new();
+static DIGITAL_PIN_CATALOG_CACHE: OnceLock<Mutex<BTreeMap<String, Vec<DigitalPinSpec>>>> =
+    OnceLock::new();
 
 fn acquired_pin_modes() -> &'static Mutex<BTreeMap<String, PinMode>> {
     ACQUIRED_PIN_MODES.get_or_init(|| Mutex::new(BTreeMap::new()))
@@ -225,6 +227,17 @@ fn analog_out_registry() -> &'static Mutex<BTreeMap<u32, AnalogPinHandle>> {
 
 fn analog_in_out_registry() -> &'static Mutex<BTreeMap<u32, AnalogPinHandle>> {
     ANALOG_IN_OUT_REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn digital_pin_catalog_cache() -> &'static Mutex<BTreeMap<String, Vec<DigitalPinSpec>>> {
+    DIGITAL_PIN_CATALOG_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+fn clear_digital_pin_catalog_cache_for_tests() {
+    if let Ok(mut guard) = digital_pin_catalog_cache().lock() {
+        guard.clear();
+    }
 }
 
 fn register_handle<T: Clone>(
@@ -335,6 +348,28 @@ fn parse_required_active_level(
     }
 }
 
+fn normalize_digital_value_path(value_path: &str) -> Result<String, GpioError> {
+    let mut normalized = PathBuf::new();
+    for component in Path::new(value_path).components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    let normalized = normalized.to_string_lossy().into_owned();
+    if normalized.is_empty() {
+        return Err(GpioError::Other(
+            "resources.gpio.digital_pins[].value_path must not normalize to empty path".to_string(),
+        ));
+    }
+    Ok(normalized)
+}
+
 fn parse_digital_pin_catalog(
     resources: &BTreeMap<String, JsonValue>,
 ) -> Result<Vec<DigitalPinSpec>, GpioError> {
@@ -360,8 +395,15 @@ fn parse_digital_pin_catalog(
             .as_object()
             .ok_or_else(|| GpioError::Other(format!("{pin_path} must be a table")))?;
         let label = parse_required_string(pin, "label", &format!("{pin_path}.label"))?;
-        let value_path =
+        if !seen_labels.insert(label.clone()) {
+            return Err(GpioError::Other(format!(
+                "{pin_path}.label is duplicated: {}",
+                label
+            )));
+        }
+        let value_path_raw =
             parse_required_string(pin, "value_path", &format!("{pin_path}.value_path"))?;
+        let value_path = normalize_digital_value_path(&value_path_raw)?;
         if !seen_value_paths.insert(value_path.clone()) {
             return Err(GpioError::Other(format!(
                 "{pin_path}.value_path is duplicated: {value_path}"
@@ -389,12 +431,6 @@ fn parse_digital_pin_catalog(
             "allow_pull_resistor",
             &format!("{pin_path}.allow_pull_resistor"),
         )?;
-        if !seen_labels.insert(label.clone()) {
-            return Err(GpioError::Other(format!(
-                "{pin_path}.label is duplicated: {}",
-                label
-            )));
-        }
 
         specs.push(DigitalPinSpec {
             label,
@@ -408,15 +444,59 @@ fn parse_digital_pin_catalog(
     Ok(specs)
 }
 
-fn lookup_digital_spec(
-    resources: &BTreeMap<String, JsonValue>,
+fn lookup_digital_spec_from_catalog(
+    catalog: &[DigitalPinSpec],
     pin_label: &str,
 ) -> Result<DigitalPinSpec, GpioError> {
-    parse_digital_pin_catalog(resources)?
+    catalog
         .iter()
         .find(|spec| spec.label == pin_label)
         .cloned()
         .ok_or(GpioError::UndefinedPinLabel)
+}
+
+#[cfg(test)]
+fn lookup_digital_spec(
+    resources: &BTreeMap<String, JsonValue>,
+    pin_label: &str,
+) -> Result<DigitalPinSpec, GpioError> {
+    let catalog = parse_digital_pin_catalog(resources)?;
+    lookup_digital_spec_from_catalog(&catalog, pin_label)
+}
+
+fn digital_catalog_cache_key(service_name: &str, release_hash: &str, runner_id: &str) -> String {
+    format!("{service_name}\u{1f}{release_hash}\u{1f}{runner_id}")
+}
+
+fn lookup_digital_spec_cached(
+    cache_key: &str,
+    resources: &BTreeMap<String, JsonValue>,
+    pin_label: &str,
+) -> Result<DigitalPinSpec, GpioError> {
+    let mut guard = digital_pin_catalog_cache()
+        .lock()
+        .map_err(|_| GpioError::Other("digital pin catalog cache lock poisoned".to_string()))?;
+    if !guard.contains_key(cache_key) {
+        let catalog = parse_digital_pin_catalog(resources)?;
+        guard.insert(cache_key.to_string(), catalog);
+    }
+    let catalog = guard
+        .get(cache_key)
+        .expect("digital pin catalog cache entry must exist");
+    lookup_digital_spec_from_catalog(catalog, pin_label)
+}
+
+fn lookup_digital_spec_for_state(
+    state: &WasiState,
+    pin_label: &str,
+) -> Result<DigitalPinSpec, GpioError> {
+    let context = state.native_plugin_context();
+    let cache_key = digital_catalog_cache_key(
+        context.service_name(),
+        context.release_hash(),
+        context.runner_id(),
+    );
+    lookup_digital_spec_cached(&cache_key, context.resources(), pin_label)
 }
 
 fn lookup_analog_spec(pin_label: &str) -> Result<&'static AnalogPinSpec, GpioError> {
@@ -987,7 +1067,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
     ) -> Result<Resource<DigitalInResource>, GpioError> {
         ensure_gpio_supported()?;
 
-        let spec = lookup_digital_spec(self.native_plugin_context().resources(), &pin_label)?;
+        let spec = lookup_digital_spec_for_state(self, &pin_label)?;
         if !mode_is_supported_for_digital(&spec, PinMode::In) {
             return Err(GpioError::PinModeNotAvailable);
         }
@@ -1021,7 +1101,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
     ) -> Result<Resource<DigitalOutResource>, GpioError> {
         ensure_gpio_supported()?;
 
-        let spec = lookup_digital_spec(self.native_plugin_context().resources(), &pin_label)?;
+        let spec = lookup_digital_spec_for_state(self, &pin_label)?;
         if !mode_is_supported_for_digital(&spec, PinMode::Out) {
             return Err(GpioError::PinModeNotAvailable);
         }
@@ -1055,7 +1135,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
     ) -> Result<Resource<DigitalInOutResource>, GpioError> {
         ensure_gpio_supported()?;
 
-        let spec = lookup_digital_spec(self.native_plugin_context().resources(), &pin_label)?;
+        let spec = lookup_digital_spec_for_state(self, &pin_label)?;
         if !mode_is_supported_for_digital(&spec, PinMode::InOut) {
             return Err(GpioError::PinModeNotAvailable);
         }
@@ -2094,6 +2174,42 @@ mod tests {
     }
 
     #[test]
+    fn parse_digital_pin_catalog_rejects_duplicate_labels_before_other_field_validation() {
+        let resources = BTreeMap::from([(
+            "gpio".to_string(),
+            json!({
+                "digital_pins": [
+                    {
+                        "label": "GPIO17",
+                        "value_path": "/sys/class/gpio/gpio17/value",
+                        "supports_input": true,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": true
+                    },
+                    {
+                        "label": "GPIO17"
+                    }
+                ]
+            }),
+        )]);
+        let err =
+            parse_digital_pin_catalog(&resources).expect_err("duplicate labels should fail first");
+        let message = match err {
+            GpioError::Other(message) => message,
+            _ => panic!("expected other error"),
+        };
+        assert!(
+            message.contains(".label is duplicated"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            !message.contains("supports_output"),
+            "duplicate label should fail before other field validation: {message}"
+        );
+    }
+
+    #[test]
     fn parse_digital_pin_catalog_rejects_duplicate_value_paths() {
         let resources = BTreeMap::from([(
             "gpio".to_string(),
@@ -2120,6 +2236,43 @@ mod tests {
         )]);
         let err =
             parse_digital_pin_catalog(&resources).expect_err("duplicate value_path must fail");
+        let message = match err {
+            GpioError::Other(message) => message,
+            _ => panic!("expected other error"),
+        };
+        assert!(
+            message.contains("value_path is duplicated"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_digital_pin_catalog_rejects_duplicate_value_paths_after_normalization() {
+        let resources = BTreeMap::from([(
+            "gpio".to_string(),
+            json!({
+                "digital_pins": [
+                    {
+                        "label": "GPIO17",
+                        "value_path": "/sys/class/gpio/gpio17/value",
+                        "supports_input": true,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": true
+                    },
+                    {
+                        "label": "GPIO22",
+                        "value_path": "/sys/class/gpio/../gpio/gpio17/value",
+                        "supports_input": true,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": true
+                    }
+                ]
+            }),
+        )]);
+        let err = parse_digital_pin_catalog(&resources)
+            .expect_err("normalized duplicate value_path should fail");
         let message = match err {
             GpioError::Other(message) => message,
             _ => panic!("expected other error"),
@@ -2169,6 +2322,45 @@ mod tests {
         assert_eq!(spec.value_path, "/sys/class/gpio/gpio17/value");
         assert!(spec.supports_input);
         assert!(spec.supports_output);
+    }
+
+    #[test]
+    fn parse_digital_pin_catalog_normalizes_value_path_in_lookup_result() {
+        let resources = BTreeMap::from([(
+            "gpio".to_string(),
+            json!({
+                "digital_pins": [
+                    {
+                        "label": "GPIO17",
+                        "value_path": "/sys/class/gpio/../gpio/gpio17/value",
+                        "supports_input": true,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": true
+                    }
+                ]
+            }),
+        )]);
+        let spec = lookup_digital_spec(&resources, "GPIO17").expect("known label should resolve");
+        assert_eq!(spec.value_path, "/sys/class/gpio/gpio17/value");
+    }
+
+    #[test]
+    fn lookup_digital_spec_cached_reuses_catalog_for_same_cache_key() {
+        clear_digital_pin_catalog_cache_for_tests();
+        let cache_key =
+            digital_catalog_cache_key("service-cache-test", "release-cache-test", "runner-cache");
+
+        let resources = resources_with_valid_digital_pins();
+        let first = lookup_digital_spec_cached(&cache_key, &resources, "GPIO17")
+            .expect("first lookup should parse and resolve");
+        assert_eq!(first.label, "GPIO17");
+
+        let second = lookup_digital_spec_cached(&cache_key, &BTreeMap::new(), "GPIO17")
+            .expect("second lookup should use cached catalog");
+        assert_eq!(second.label, "GPIO17");
+
+        clear_digital_pin_catalog_cache_for_tests();
     }
 
     #[test]
