@@ -206,7 +206,15 @@ impl RetainedServiceLogRing {
             self.total_bytes = self.total_bytes.saturating_sub(removed.weight_bytes);
         }
 
-        let weight_bytes = retained_entry_weight_bytes(&service_name, snapshot_bytes.len());
+        let snapshot_events_bytes_len = snapshot_events
+            .iter()
+            .map(|event| event.bytes.len())
+            .sum::<usize>();
+        let weight_bytes = retained_entry_weight_bytes(
+            &service_name,
+            snapshot_bytes.len(),
+            snapshot_events_bytes_len,
+        );
         self.total_bytes = self.total_bytes.saturating_add(weight_bytes);
         self.entries.push_back(RetainedServiceLogEntry {
             service_name,
@@ -238,9 +246,17 @@ impl RetainedServiceLogRing {
     }
 }
 
-fn retained_entry_weight_bytes(service_name: &str, snapshot_bytes_len: usize) -> usize {
+fn retained_entry_weight_bytes(
+    service_name: &str,
+    snapshot_bytes_len: usize,
+    snapshot_events_bytes_len: usize,
+) -> usize {
     // Keep empty snapshots bounded too by charging key bytes with a floor of 1.
-    service_name.len().saturating_add(snapshot_bytes_len).max(1)
+    service_name
+        .len()
+        .saturating_add(snapshot_bytes_len)
+        .saturating_add(snapshot_events_bytes_len)
+        .max(1)
 }
 
 #[derive(Debug)]
@@ -1485,11 +1501,9 @@ fn tail_events_from_snapshot_bytes(
     if tailed_bytes_len == 0 {
         return Vec::new();
     }
-    if tailed_bytes_len >= full_snapshot_bytes.len() {
-        return events.to_vec();
-    }
 
-    let mut skip = full_snapshot_bytes.len().saturating_sub(tailed_bytes_len);
+    let start = full_snapshot_bytes.len().saturating_sub(tailed_bytes_len);
+    let mut skip = start;
     let mut remaining = tailed_bytes_len;
     let mut out = Vec::new();
 
@@ -1518,23 +1532,22 @@ fn tail_events_from_snapshot_bytes(
         remaining = remaining.saturating_sub(take);
     }
 
-    if remaining > 0 {
-        // Fall back to best-effort output to avoid dropping snapshot bytes entirely when
-        // byte/event alignment diverges.
-        let mut fallback = Vec::new();
-        if let Some(last) = events.last() {
-            fallback.push(ServiceLogEvent {
-                stream: last.stream,
-                bytes: full_snapshot_bytes
-                    [full_snapshot_bytes.len().saturating_sub(tailed_bytes_len)..]
-                    .to_vec(),
-                timestamp_unix_ms: last.timestamp_unix_ms,
-            });
-        }
-        return fallback;
+    if remaining == 0 {
+        return out;
     }
 
-    out
+    // Fall back to preserving exact tail bytes even when event boundaries are inconsistent.
+    vec![ServiceLogEvent {
+        stream: events
+            .last()
+            .map(|event| event.stream)
+            .unwrap_or(ServiceLogStream::Stdout),
+        bytes: full_snapshot_bytes[start..].to_vec(),
+        timestamp_unix_ms: events
+            .last()
+            .map(|event| event.timestamp_unix_ms)
+            .unwrap_or(0),
+    }]
 }
 
 /// Sends kill signal to child and waits for termination.
@@ -1835,6 +1848,27 @@ mod tests {
     }
 
     #[test]
+    fn tail_events_from_snapshot_bytes_preserves_full_snapshot_bytes_when_events_are_shorter() {
+        let full = b"abc\ndef\n".to_vec();
+        let events = vec![ServiceLogEvent {
+            stream: ServiceLogStream::Stdout,
+            bytes: b"def\n".to_vec(),
+            timestamp_unix_ms: 10,
+        }];
+
+        let tailed_events = tail_events_from_snapshot_bytes(&events, &full, full.len());
+        assert_eq!(
+            tailed_events
+                .iter()
+                .flat_map(|event| event.bytes.clone())
+                .collect::<Vec<_>>(),
+            full
+        );
+        assert_eq!(tailed_events.len(), 1);
+        assert_eq!(tailed_events[0].timestamp_unix_ms, 10);
+    }
+
+    #[test]
     fn retained_log_ring_evicts_oldest_entries_when_total_bytes_exceed_capacity() {
         let mut ring = RetainedServiceLogRing::new(9);
         ring.upsert("a".to_string(), b"abc".to_vec(), Vec::new());
@@ -1874,6 +1908,32 @@ mod tests {
             "empty snapshots must still consume capacity and evict old entries"
         );
         assert_eq!(ring.service_names(), vec!["b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn retained_log_ring_counts_snapshot_events_toward_capacity() {
+        let mut ring = RetainedServiceLogRing::new(10);
+        ring.upsert(
+            "a".to_string(),
+            b"x".to_vec(),
+            vec![ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"1234".to_vec(),
+                timestamp_unix_ms: 1,
+            }],
+        );
+        ring.upsert(
+            "b".to_string(),
+            b"y".to_vec(),
+            vec![ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"5678".to_vec(),
+                timestamp_unix_ms: 2,
+            }],
+        );
+
+        assert!(ring.snapshot("a").is_none());
+        assert_eq!(ring.service_names(), vec!["b".to_string()]);
     }
 
     #[tokio::test]
@@ -1950,6 +2010,14 @@ mod tests {
             .expect("open_logs should succeed");
         assert_eq!(subscription.service_name, service_name);
         assert_eq!(subscription.snapshot_bytes, b"b\nc\n");
+        assert_eq!(
+            subscription
+                .snapshot_events
+                .iter()
+                .flat_map(|event| event.bytes.clone())
+                .collect::<Vec<_>>(),
+            subscription.snapshot_bytes
+        );
         assert_eq!(
             subscription
                 .snapshot_events
@@ -2050,6 +2118,14 @@ mod tests {
             .expect("retained open_logs should succeed");
         assert_eq!(subscription.service_name, service_name);
         assert_eq!(subscription.snapshot_bytes, b"old-b\nold-c\n");
+        assert_eq!(
+            subscription
+                .snapshot_events
+                .iter()
+                .flat_map(|event| event.bytes.clone())
+                .collect::<Vec<_>>(),
+            subscription.snapshot_bytes
+        );
         assert_eq!(
             subscription
                 .snapshot_events

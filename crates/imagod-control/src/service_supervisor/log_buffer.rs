@@ -66,7 +66,27 @@ impl BoundedLogEventBuffer {
         }
     }
 
-    /// Appends one event and evicts oldest events when capacity is exceeded.
+    fn evict_front_bytes(&mut self, mut bytes_to_evict: usize) {
+        while bytes_to_evict > 0 {
+            let Some(front) = self.events.front_mut() else {
+                break;
+            };
+            let front_len = front.bytes.len();
+            if front_len <= bytes_to_evict {
+                bytes_to_evict = bytes_to_evict.saturating_sub(front_len);
+                self.total_bytes = self.total_bytes.saturating_sub(front_len);
+                let _ = self.events.pop_front();
+                continue;
+            }
+
+            let trimmed = front.bytes.split_off(bytes_to_evict);
+            front.bytes = trimmed;
+            self.total_bytes = self.total_bytes.saturating_sub(bytes_to_evict);
+            bytes_to_evict = 0;
+        }
+    }
+
+    /// Appends one event and evicts oldest bytes when capacity is exceeded.
     pub(super) fn push(&mut self, mut event: ServiceLogEvent) {
         if event.bytes.is_empty() {
             return;
@@ -78,11 +98,8 @@ impl BoundedLogEventBuffer {
 
         self.total_bytes = self.total_bytes.saturating_add(event.bytes.len());
         self.events.push_back(event);
-        while self.total_bytes > self.max_bytes {
-            let Some(evicted) = self.events.pop_front() else {
-                break;
-            };
-            self.total_bytes = self.total_bytes.saturating_sub(evicted.bytes.len());
+        if self.total_bytes > self.max_bytes {
+            self.evict_front_bytes(self.total_bytes.saturating_sub(self.max_bytes));
         }
     }
 
@@ -272,7 +289,13 @@ mod tests {
             .map(|event| event.bytes.len())
             .sum::<usize>();
         assert!(total_bytes <= 5);
-        assert!(!snapshot.is_empty());
-        assert!(buffer.len() >= 1);
+        assert_eq!(
+            snapshot
+                .iter()
+                .flat_map(|event| event.bytes.clone())
+                .collect::<Vec<_>>(),
+            b"bcdef"
+        );
+        assert_eq!(buffer.len(), 2);
     }
 }
