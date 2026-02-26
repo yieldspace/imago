@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 imago-plugin-macros = { workspace = true }
 imagod-runtime-wasmtime = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["fs", "rt", "time"] }
 wasmtime = { workspace = true, features = ["component-model"] }
 wasmtime-wasi = { workspace = true }

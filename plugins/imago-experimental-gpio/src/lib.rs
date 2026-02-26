@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{
         Mutex, OnceLock,
@@ -9,9 +9,12 @@ use std::{
 };
 
 use imago_plugin_macros::imago_native_plugin;
+use imagod_runtime_wasmtime::WasiState;
 use imagod_runtime_wasmtime::native_plugins::{
     HasSelf, NativePlugin, NativePluginLinker, NativePluginResult, map_native_plugin_linker_error,
+    map_native_plugin_resource_validation_error,
 };
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use wasmtime::component::{Resource, ResourceTable};
 use wasmtime_wasi::WasiView;
 use wasmtime_wasi::p2::{DynPollable, Pollable, subscribe};
@@ -22,9 +25,6 @@ pub mod imago_experimental_gpio_plugin_bindings {
         world: "host",
         imports: {
             default: async,
-        },
-        with: {
-            "wasi": wasmtime_wasi::p2::bindings::sync,
         },
     });
 }
@@ -64,9 +64,24 @@ impl NativePlugin for ImagoExperimentalGpioPlugin {
     fn add_to_linker(&self, linker: &mut NativePluginLinker) -> NativePluginResult<()> {
         imago_experimental_gpio_plugin_bindings::Host_::add_to_linker::<_, HasSelf<_>>(
             linker,
-            |state| state.ctx().table,
+            |state| state,
         )
         .map_err(|err| map_native_plugin_linker_error(Self::PACKAGE_NAME, err))
+    }
+
+    fn validate_resources(
+        &self,
+        resources: &BTreeMap<String, JsonValue>,
+    ) -> NativePluginResult<()> {
+        parse_digital_pin_catalog(resources)
+            .map(|_| ())
+            .map_err(|err| {
+                let message = match err {
+                    GpioError::Other(message) => message,
+                    other => format!("{other:?}"),
+                };
+                map_native_plugin_resource_validation_error(Self::PACKAGE_NAME, message)
+            })
     }
 }
 
@@ -103,10 +118,13 @@ type AnalogInOutResource =
 
 const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-#[derive(Debug, Clone, Copy)]
+const GPIO_RESOURCE_KEY: &str = "gpio";
+const GPIO_RESOURCE_DIGITAL_PINS_KEY: &str = "digital_pins";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DigitalPinSpec {
-    label: &'static str,
-    value_path: &'static str,
+    label: String,
+    value_path: String,
     supports_input: bool,
     supports_output: bool,
     default_active_level: ActiveLevel,
@@ -121,34 +139,6 @@ struct AnalogPinSpec {
     max_raw: u32,
     default_active_level: ActiveLevel,
 }
-
-// TODO: Replace hardcoded pin catalog with values from imago.toml.
-const DIGITAL_PIN_CATALOG: &[DigitalPinSpec] = &[
-    DigitalPinSpec {
-        label: "GPIO17",
-        value_path: "/sys/class/gpio/gpio17/value",
-        supports_input: true,
-        supports_output: true,
-        default_active_level: ActiveLevel::ActiveHigh,
-        allow_pull_resistor: true,
-    },
-    DigitalPinSpec {
-        label: "GPIO27",
-        value_path: "/sys/class/gpio/gpio27/value",
-        supports_input: true,
-        supports_output: false,
-        default_active_level: ActiveLevel::ActiveHigh,
-        allow_pull_resistor: true,
-    },
-    DigitalPinSpec {
-        label: "GPIO22",
-        value_path: "/sys/class/gpio/gpio22/value",
-        supports_input: false,
-        supports_output: true,
-        default_active_level: ActiveLevel::ActiveHigh,
-        allow_pull_resistor: false,
-    },
-];
 
 const ANALOG_PIN_CATALOG: &[AnalogPinSpec] = &[
     AnalogPinSpec {
@@ -299,10 +289,133 @@ where
         .map_err(map_join_error)?
 }
 
-fn lookup_digital_spec(pin_label: &str) -> Result<&'static DigitalPinSpec, GpioError> {
-    DIGITAL_PIN_CATALOG
+fn parse_required_string(
+    object: &JsonMap<String, JsonValue>,
+    field_name: &str,
+    field_path: &str,
+) -> Result<String, GpioError> {
+    let value = object
+        .get(field_name)
+        .ok_or_else(|| GpioError::Other(format!("{field_path} is required")))?;
+    let value = value
+        .as_str()
+        .ok_or_else(|| GpioError::Other(format!("{field_path} must be a string")))?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(GpioError::Other(format!("{field_path} must not be empty")));
+    }
+    Ok(value.to_string())
+}
+
+fn parse_required_bool(
+    object: &JsonMap<String, JsonValue>,
+    field_name: &str,
+    field_path: &str,
+) -> Result<bool, GpioError> {
+    let value = object
+        .get(field_name)
+        .ok_or_else(|| GpioError::Other(format!("{field_path} is required")))?;
+    value
+        .as_bool()
+        .ok_or_else(|| GpioError::Other(format!("{field_path} must be a boolean")))
+}
+
+fn parse_required_active_level(
+    object: &JsonMap<String, JsonValue>,
+    field_name: &str,
+    field_path: &str,
+) -> Result<ActiveLevel, GpioError> {
+    let raw = parse_required_string(object, field_name, field_path)?;
+    match raw.as_str() {
+        "active-high" => Ok(ActiveLevel::ActiveHigh),
+        "active-low" => Ok(ActiveLevel::ActiveLow),
+        other => Err(GpioError::Other(format!(
+            "{field_path} must be 'active-high' or 'active-low' (got: {other})"
+        ))),
+    }
+}
+
+fn parse_digital_pin_catalog(
+    resources: &BTreeMap<String, JsonValue>,
+) -> Result<Vec<DigitalPinSpec>, GpioError> {
+    let Some(gpio_value) = resources.get(GPIO_RESOURCE_KEY) else {
+        return Ok(Vec::new());
+    };
+    let gpio = gpio_value
+        .as_object()
+        .ok_or_else(|| GpioError::Other("resources.gpio must be a table".to_string()))?;
+    let digital_pins_value = gpio
+        .get(GPIO_RESOURCE_DIGITAL_PINS_KEY)
+        .ok_or_else(|| GpioError::Other("resources.gpio.digital_pins is required".to_string()))?;
+    let digital_pins = digital_pins_value.as_array().ok_or_else(|| {
+        GpioError::Other("resources.gpio.digital_pins must be an array".to_string())
+    })?;
+
+    let mut seen_labels = BTreeSet::new();
+    let mut seen_value_paths = BTreeSet::new();
+    let mut specs = Vec::with_capacity(digital_pins.len());
+    for (index, pin_value) in digital_pins.iter().enumerate() {
+        let pin_path = format!("resources.gpio.digital_pins[{index}]");
+        let pin = pin_value
+            .as_object()
+            .ok_or_else(|| GpioError::Other(format!("{pin_path} must be a table")))?;
+        let label = parse_required_string(pin, "label", &format!("{pin_path}.label"))?;
+        let value_path =
+            parse_required_string(pin, "value_path", &format!("{pin_path}.value_path"))?;
+        if !seen_value_paths.insert(value_path.clone()) {
+            return Err(GpioError::Other(format!(
+                "{pin_path}.value_path is duplicated: {value_path}"
+            )));
+        }
+        let supports_input =
+            parse_required_bool(pin, "supports_input", &format!("{pin_path}.supports_input"))?;
+        let supports_output = parse_required_bool(
+            pin,
+            "supports_output",
+            &format!("{pin_path}.supports_output"),
+        )?;
+        if !supports_input && !supports_output {
+            return Err(GpioError::Other(format!(
+                "{pin_path} must allow at least one mode (supports_input or supports_output)"
+            )));
+        }
+        let default_active_level = parse_required_active_level(
+            pin,
+            "default_active_level",
+            &format!("{pin_path}.default_active_level"),
+        )?;
+        let allow_pull_resistor = parse_required_bool(
+            pin,
+            "allow_pull_resistor",
+            &format!("{pin_path}.allow_pull_resistor"),
+        )?;
+        if !seen_labels.insert(label.clone()) {
+            return Err(GpioError::Other(format!(
+                "{pin_path}.label is duplicated: {}",
+                label
+            )));
+        }
+
+        specs.push(DigitalPinSpec {
+            label,
+            value_path,
+            supports_input,
+            supports_output,
+            default_active_level,
+            allow_pull_resistor,
+        });
+    }
+    Ok(specs)
+}
+
+fn lookup_digital_spec(
+    resources: &BTreeMap<String, JsonValue>,
+    pin_label: &str,
+) -> Result<DigitalPinSpec, GpioError> {
+    parse_digital_pin_catalog(resources)?
         .iter()
         .find(|spec| spec.label == pin_label)
+        .cloned()
         .ok_or(GpioError::UndefinedPinLabel)
 }
 
@@ -661,6 +774,14 @@ where
     Ok(Resource::new_own(pollable_resource.rep()))
 }
 
+fn to_dyn_pollable_resource(pollable: Resource<PollableResource>) -> Resource<DynPollable> {
+    if pollable.owned() {
+        Resource::new_own(pollable.rep())
+    } else {
+        Resource::new_borrow(pollable.rep())
+    }
+}
+
 struct PathReadyPollable {
     paths: Vec<PathBuf>,
     interval: Duration,
@@ -798,14 +919,51 @@ async fn read_analog_raw_async(path: &Path) -> Option<u32> {
     parse_analog_raw_value(&text).ok()
 }
 
+impl imago_experimental_gpio_plugin_bindings::wasi::io::poll::Host for WasiState {
+    async fn poll(&mut self, pollables: Vec<Resource<PollableResource>>) -> Vec<u32> {
+        let dyn_pollables = pollables
+            .into_iter()
+            .map(to_dyn_pollable_resource)
+            .collect();
+        wasmtime_wasi::p2::bindings::sync::io::poll::Host::poll(self.ctx().table, dyn_pollables)
+            .expect("wasi:io/poll::poll should not fail")
+    }
+}
+
+impl imago_experimental_gpio_plugin_bindings::wasi::io::poll::HostPollable for WasiState {
+    async fn ready(&mut self, pollable: Resource<PollableResource>) -> bool {
+        let dyn_pollable = to_dyn_pollable_resource(pollable);
+        wasmtime_wasi::p2::bindings::sync::io::poll::HostPollable::ready(
+            self.ctx().table,
+            dyn_pollable,
+        )
+        .expect("wasi:io/poll::pollable.ready should not fail")
+    }
+
+    async fn block(&mut self, pollable: Resource<PollableResource>) {
+        let dyn_pollable = to_dyn_pollable_resource(pollable);
+        wasmtime_wasi::p2::bindings::sync::io::poll::HostPollable::block(
+            self.ctx().table,
+            dyn_pollable,
+        )
+        .expect("wasi:io/poll::pollable.block should not fail");
+    }
+
+    async fn drop(&mut self, pollable: Resource<PollableResource>) -> wasmtime::Result<()> {
+        let dyn_pollable = to_dyn_pollable_resource(pollable);
+        wasmtime_wasi::p2::bindings::sync::io::poll::HostPollable::drop(
+            self.ctx().table,
+            dyn_pollable,
+        )
+    }
+}
+
 impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::general::Host
-    for ResourceTable
+    for WasiState
 {
 }
 
-impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::delay::Host
-    for ResourceTable
-{
+impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::delay::Host for WasiState {
     async fn delay_ns(&mut self, ns: u32) {
         tokio::time::sleep(Duration::from_nanos(u64::from(ns))).await;
     }
@@ -820,7 +978,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::delay::H
 }
 
 impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital::Host
-    for ResourceTable
+    for WasiState
 {
     async fn get_digital_in(
         &mut self,
@@ -829,13 +987,13 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
     ) -> Result<Resource<DigitalInResource>, GpioError> {
         ensure_gpio_supported()?;
 
-        let spec = lookup_digital_spec(&pin_label)?;
-        if !mode_is_supported_for_digital(spec, PinMode::In) {
+        let spec = lookup_digital_spec(self.native_plugin_context().resources(), &pin_label)?;
+        if !mode_is_supported_for_digital(&spec, PinMode::In) {
             return Err(GpioError::PinModeNotAvailable);
         }
 
-        let (active_level, pull_resistor) = resolve_digital_config(spec, &flags)?;
-        let path = spec.value_path.to_string();
+        let (active_level, pull_resistor) = resolve_digital_config(&spec, &flags)?;
+        let path = spec.value_path.clone();
         let validation_path = path.clone();
         let (need_read, need_write) = digital_backend_requirements(PinMode::In);
         run_blocking_gpio(move || {
@@ -863,13 +1021,13 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
     ) -> Result<Resource<DigitalOutResource>, GpioError> {
         ensure_gpio_supported()?;
 
-        let spec = lookup_digital_spec(&pin_label)?;
-        if !mode_is_supported_for_digital(spec, PinMode::Out) {
+        let spec = lookup_digital_spec(self.native_plugin_context().resources(), &pin_label)?;
+        if !mode_is_supported_for_digital(&spec, PinMode::Out) {
             return Err(GpioError::PinModeNotAvailable);
         }
 
-        let (active_level, pull_resistor) = resolve_digital_config(spec, &flags)?;
-        let path = spec.value_path.to_string();
+        let (active_level, pull_resistor) = resolve_digital_config(&spec, &flags)?;
+        let path = spec.value_path.clone();
         let validation_path = path.clone();
         let (need_read, need_write) = digital_backend_requirements(PinMode::Out);
         run_blocking_gpio(move || {
@@ -897,13 +1055,13 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
     ) -> Result<Resource<DigitalInOutResource>, GpioError> {
         ensure_gpio_supported()?;
 
-        let spec = lookup_digital_spec(&pin_label)?;
-        if !mode_is_supported_for_digital(spec, PinMode::InOut) {
+        let spec = lookup_digital_spec(self.native_plugin_context().resources(), &pin_label)?;
+        if !mode_is_supported_for_digital(&spec, PinMode::InOut) {
             return Err(GpioError::PinModeNotAvailable);
         }
 
-        let (active_level, pull_resistor) = resolve_digital_config(spec, &flags)?;
-        let path = spec.value_path.to_string();
+        let (active_level, pull_resistor) = resolve_digital_config(&spec, &flags)?;
+        let path = spec.value_path.clone();
         let validation_path = path.clone();
         let (need_read, need_write) = digital_backend_requirements(PinMode::InOut);
         run_blocking_gpio(move || {
@@ -926,7 +1084,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
 }
 
 impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital::HostDigitalOutPin
-    for ResourceTable
+    for WasiState
 {
     async fn get_config(&mut self, self_: Resource<DigitalOutResource>) -> DigitalConfig {
         let handle = lookup_handle(digital_out_registry(), self_.rep())
@@ -941,7 +1099,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
         let handle = lookup_handle(digital_out_registry(), self_.rep())
             .expect("digital-out resource should exist");
         push_pollable_resource(
-            self,
+            self.ctx().table,
             PathReadyPollable {
                 paths: vec![PathBuf::from(handle.value_path)],
                 interval: WATCH_POLL_INTERVAL,
@@ -997,7 +1155,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
 }
 
 impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital::HostDigitalInPin
-    for ResourceTable
+    for WasiState
 {
     async fn get_config(&mut self, self_: Resource<DigitalInResource>) -> DigitalConfig {
         let handle = lookup_handle(digital_in_registry(), self_.rep())
@@ -1012,7 +1170,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
         let handle = lookup_handle(digital_in_registry(), self_.rep())
             .expect("digital-in resource should exist");
         push_pollable_resource(
-            self,
+            self.ctx().table,
             PathReadyPollable {
                 paths: vec![PathBuf::from(handle.value_path)],
                 interval: WATCH_POLL_INTERVAL,
@@ -1050,7 +1208,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
         ensure_digital_readable(&handle)?;
 
         push_pollable_resource(
-            self,
+            self.ctx().table,
             DigitalStatePollable {
                 path: PathBuf::from(handle.value_path),
                 desired_state: state,
@@ -1082,7 +1240,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
         ensure_digital_readable(&handle)?;
 
         push_pollable_resource(
-            self,
+            self.ctx().table,
             DigitalEdgePollable {
                 path: PathBuf::from(handle.value_path),
                 active_level: handle.active_level,
@@ -1101,7 +1259,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
         ensure_digital_readable(&handle)?;
 
         push_pollable_resource(
-            self,
+            self.ctx().table,
             DigitalEdgePollable {
                 path: PathBuf::from(handle.value_path),
                 active_level: handle.active_level,
@@ -1121,7 +1279,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
 }
 
 impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital::HostDigitalInOutPin
-    for ResourceTable
+    for WasiState
 {
     async fn get_config(&mut self, self_: Resource<DigitalInOutResource>) -> DigitalConfig {
         let handle = lookup_handle(digital_in_out_registry(), self_.rep())
@@ -1136,7 +1294,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
         let handle = lookup_handle(digital_in_out_registry(), self_.rep())
             .expect("digital-in-out resource should exist");
         push_pollable_resource(
-            self,
+            self.ctx().table,
             PathReadyPollable {
                 paths: vec![PathBuf::from(handle.value_path)],
                 interval: WATCH_POLL_INTERVAL,
@@ -1221,7 +1379,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
         ensure_digital_readable(&handle)?;
 
         push_pollable_resource(
-            self,
+            self.ctx().table,
             DigitalStatePollable {
                 path: PathBuf::from(handle.value_path),
                 desired_state: state,
@@ -1253,7 +1411,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
         ensure_digital_readable(&handle)?;
 
         push_pollable_resource(
-            self,
+            self.ctx().table,
             DigitalEdgePollable {
                 path: PathBuf::from(handle.value_path),
                 active_level: handle.active_level,
@@ -1272,7 +1430,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
         ensure_digital_readable(&handle)?;
 
         push_pollable_resource(
-            self,
+            self.ctx().table,
             DigitalEdgePollable {
                 path: PathBuf::from(handle.value_path),
                 active_level: handle.active_level,
@@ -1291,9 +1449,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
     }
 }
 
-impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::Host
-    for ResourceTable
-{
+impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::Host for WasiState {
     async fn get_analog_in(
         &mut self,
         pin_label: String,
@@ -1392,7 +1548,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
 }
 
 impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::HostAnalogOutPin
-    for ResourceTable
+    for WasiState
 {
     async fn get_config(&mut self, self_: Resource<AnalogOutResource>) -> AnalogConfig {
         let handle = lookup_handle(analog_out_registry(), self_.rep())
@@ -1412,7 +1568,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
         }
 
         push_pollable_resource(
-            self,
+            self.ctx().table,
             PathReadyPollable {
                 paths,
                 interval: WATCH_POLL_INTERVAL,
@@ -1452,7 +1608,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
 }
 
 impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::HostAnalogInPin
-    for ResourceTable
+    for WasiState
 {
     async fn get_config(&mut self, self_: Resource<AnalogInResource>) -> AnalogConfig {
         let handle = lookup_handle(analog_in_registry(), self_.rep())
@@ -1472,7 +1628,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
         }
 
         push_pollable_resource(
-            self,
+            self.ctx().table,
             PathReadyPollable {
                 paths,
                 interval: WATCH_POLL_INTERVAL,
@@ -1510,7 +1666,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
         let path = ensure_analog_readable(&handle)?.to_string();
 
         push_pollable_resource(
-            self,
+            self.ctx().table,
             AnalogThresholdPollable {
                 read_raw_path: PathBuf::from(path),
                 active_level: handle.active_level,
@@ -1536,7 +1692,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
         let path = ensure_analog_readable(&handle)?.to_string();
 
         push_pollable_resource(
-            self,
+            self.ctx().table,
             AnalogThresholdPollable {
                 read_raw_path: PathBuf::from(path),
                 active_level: handle.active_level,
@@ -1556,7 +1712,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
         let path = ensure_analog_readable(&handle)?.to_string();
 
         push_pollable_resource(
-            self,
+            self.ctx().table,
             AnalogThresholdPollable {
                 read_raw_path: PathBuf::from(path),
                 active_level: handle.active_level,
@@ -1582,7 +1738,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
         let path = ensure_analog_readable(&handle)?.to_string();
 
         push_pollable_resource(
-            self,
+            self.ctx().table,
             AnalogThresholdPollable {
                 read_raw_path: PathBuf::from(path),
                 active_level: handle.active_level,
@@ -1602,7 +1758,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
 }
 
 impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::HostAnalogInOutPin
-    for ResourceTable
+    for WasiState
 {
     async fn get_config(&mut self, self_: Resource<AnalogInOutResource>) -> AnalogConfig {
         let handle = lookup_handle(analog_in_out_registry(), self_.rep())
@@ -1625,7 +1781,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
         }
 
         push_pollable_resource(
-            self,
+            self.ctx().table,
             PathReadyPollable {
                 paths,
                 interval: WATCH_POLL_INTERVAL,
@@ -1685,7 +1841,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
         let path = ensure_analog_readable(&handle)?.to_string();
 
         push_pollable_resource(
-            self,
+            self.ctx().table,
             AnalogThresholdPollable {
                 read_raw_path: PathBuf::from(path),
                 active_level: handle.active_level,
@@ -1711,7 +1867,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
         let path = ensure_analog_readable(&handle)?.to_string();
 
         push_pollable_resource(
-            self,
+            self.ctx().table,
             AnalogThresholdPollable {
                 read_raw_path: PathBuf::from(path),
                 active_level: handle.active_level,
@@ -1731,7 +1887,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
         let path = ensure_analog_readable(&handle)?.to_string();
 
         push_pollable_resource(
-            self,
+            self.ctx().table,
             AnalogThresholdPollable {
                 read_raw_path: PathBuf::from(path),
                 active_level: handle.active_level,
@@ -1757,7 +1913,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
         let path = ensure_analog_readable(&handle)?.to_string();
 
         push_pollable_resource(
-            self,
+            self.ctx().table,
             AnalogThresholdPollable {
                 read_raw_path: PathBuf::from(path),
                 active_level: handle.active_level,
@@ -1779,11 +1935,240 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn digital_spec_fixture(allow_pull_resistor: bool) -> DigitalPinSpec {
+        DigitalPinSpec {
+            label: "GPIO17".to_string(),
+            value_path: "/sys/class/gpio/gpio17/value".to_string(),
+            supports_input: true,
+            supports_output: true,
+            default_active_level: ActiveLevel::ActiveHigh,
+            allow_pull_resistor,
+        }
+    }
+
+    fn resources_with_valid_digital_pins() -> BTreeMap<String, JsonValue> {
+        BTreeMap::from([(
+            "gpio".to_string(),
+            json!({
+                "digital_pins": [
+                    {
+                        "label": "GPIO17",
+                        "value_path": "/sys/class/gpio/gpio17/value",
+                        "supports_input": true,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": true
+                    },
+                    {
+                        "label": "GPIO22",
+                        "value_path": "/sys/class/gpio/gpio22/value",
+                        "supports_input": false,
+                        "supports_output": true,
+                        "default_active_level": "active-low",
+                        "allow_pull_resistor": false
+                    }
+                ]
+            }),
+        )])
+    }
 
     #[test]
-    fn lookup_digital_spec_reports_undefined_label() {
-        let err = lookup_digital_spec("DOES_NOT_EXIST").expect_err("unknown label should fail");
+    fn lookup_digital_spec_reports_undefined_label_when_resources_gpio_is_missing() {
+        let resources = BTreeMap::new();
+        let err = lookup_digital_spec(&resources, "DOES_NOT_EXIST")
+            .expect_err("unknown label should fail");
         assert!(matches!(err, GpioError::UndefinedPinLabel));
+    }
+
+    #[test]
+    fn parse_digital_pin_catalog_rejects_non_array_digital_pins() {
+        let resources = BTreeMap::from([(
+            "gpio".to_string(),
+            json!({
+                "digital_pins": "not-an-array"
+            }),
+        )]);
+        let err = parse_digital_pin_catalog(&resources).expect_err("non-array must fail");
+        let message = match err {
+            GpioError::Other(message) => message,
+            _ => panic!("expected other error"),
+        };
+        assert!(
+            message.contains("resources.gpio.digital_pins must be an array"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_digital_pin_catalog_rejects_missing_required_field() {
+        let resources = BTreeMap::from([(
+            "gpio".to_string(),
+            json!({
+                "digital_pins": [
+                    {
+                        "label": "GPIO17",
+                        "value_path": "/sys/class/gpio/gpio17/value",
+                        "supports_input": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": true
+                    }
+                ]
+            }),
+        )]);
+        let err = parse_digital_pin_catalog(&resources).expect_err("missing field must fail");
+        let message = match err {
+            GpioError::Other(message) => message,
+            _ => panic!("expected other error"),
+        };
+        assert!(
+            message.contains("resources.gpio.digital_pins[0].supports_output is required"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_digital_pin_catalog_rejects_invalid_default_active_level() {
+        let resources = BTreeMap::from([(
+            "gpio".to_string(),
+            json!({
+                "digital_pins": [
+                    {
+                        "label": "GPIO17",
+                        "value_path": "/sys/class/gpio/gpio17/value",
+                        "supports_input": true,
+                        "supports_output": true,
+                        "default_active_level": "invalid",
+                        "allow_pull_resistor": true
+                    }
+                ]
+            }),
+        )]);
+        let err =
+            parse_digital_pin_catalog(&resources).expect_err("invalid active level must fail");
+        let message = match err {
+            GpioError::Other(message) => message,
+            _ => panic!("expected other error"),
+        };
+        assert!(
+            message.contains("default_active_level"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_digital_pin_catalog_rejects_duplicate_labels() {
+        let resources = BTreeMap::from([(
+            "gpio".to_string(),
+            json!({
+                "digital_pins": [
+                    {
+                        "label": "GPIO17",
+                        "value_path": "/sys/class/gpio/gpio17/value",
+                        "supports_input": true,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": true
+                    },
+                    {
+                        "label": "GPIO17",
+                        "value_path": "/sys/class/gpio/gpio22/value",
+                        "supports_input": true,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": true
+                    }
+                ]
+            }),
+        )]);
+        let err = parse_digital_pin_catalog(&resources).expect_err("duplicate labels must fail");
+        let message = match err {
+            GpioError::Other(message) => message,
+            _ => panic!("expected other error"),
+        };
+        assert!(
+            message.contains(".label is duplicated"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_digital_pin_catalog_rejects_duplicate_value_paths() {
+        let resources = BTreeMap::from([(
+            "gpio".to_string(),
+            json!({
+                "digital_pins": [
+                    {
+                        "label": "GPIO17",
+                        "value_path": "/sys/class/gpio/gpio17/value",
+                        "supports_input": true,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": true
+                    },
+                    {
+                        "label": "GPIO22",
+                        "value_path": "/sys/class/gpio/gpio17/value",
+                        "supports_input": true,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": true
+                    }
+                ]
+            }),
+        )]);
+        let err =
+            parse_digital_pin_catalog(&resources).expect_err("duplicate value_path must fail");
+        let message = match err {
+            GpioError::Other(message) => message,
+            _ => panic!("expected other error"),
+        };
+        assert!(
+            message.contains("value_path is duplicated"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_digital_pin_catalog_rejects_pin_without_supported_mode() {
+        let resources = BTreeMap::from([(
+            "gpio".to_string(),
+            json!({
+                "digital_pins": [
+                    {
+                        "label": "GPIO17",
+                        "value_path": "/sys/class/gpio/gpio17/value",
+                        "supports_input": false,
+                        "supports_output": false,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": true
+                    }
+                ]
+            }),
+        )]);
+        let err =
+            parse_digital_pin_catalog(&resources).expect_err("unsupported mode pin must fail");
+        let message = match err {
+            GpioError::Other(message) => message,
+            _ => panic!("expected other error"),
+        };
+        assert!(
+            message.contains("must allow at least one mode"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_digital_pin_catalog_and_lookup_accepts_valid_entries() {
+        let resources = resources_with_valid_digital_pins();
+        let parsed = parse_digital_pin_catalog(&resources).expect("catalog should parse");
+        assert_eq!(parsed.len(), 2);
+        let spec = lookup_digital_spec(&resources, "GPIO17").expect("known label should resolve");
+        assert_eq!(spec.label, "GPIO17");
+        assert_eq!(spec.value_path, "/sys/class/gpio/gpio17/value");
+        assert!(spec.supports_input);
+        assert!(spec.supports_output);
     }
 
     #[test]
@@ -1838,9 +2223,9 @@ mod tests {
 
     #[test]
     fn resolve_digital_config_applies_active_low_and_pull_up() {
-        let spec = lookup_digital_spec("GPIO17").expect("known pin");
+        let spec = digital_spec_fixture(true);
         let (active_level, pull_resistor) =
-            resolve_digital_config(spec, &[DigitalFlags::ACTIVE_LOW, DigitalFlags::PULL_UP])
+            resolve_digital_config(&spec, &[DigitalFlags::ACTIVE_LOW, DigitalFlags::PULL_UP])
                 .expect("flags should be accepted");
         assert_eq!(active_level, ActiveLevel::ActiveLow);
         assert_eq!(pull_resistor, Some(PullResistor::PullUp));
@@ -1848,25 +2233,27 @@ mod tests {
 
     #[test]
     fn resolve_digital_config_rejects_conflicting_active_level_flags() {
-        let spec = lookup_digital_spec("GPIO17").expect("known pin");
-        let err =
-            resolve_digital_config(spec, &[DigitalFlags::ACTIVE_HIGH, DigitalFlags::ACTIVE_LOW])
-                .expect_err("conflicting active-level flags must fail");
+        let spec = digital_spec_fixture(true);
+        let err = resolve_digital_config(
+            &spec,
+            &[DigitalFlags::ACTIVE_HIGH, DigitalFlags::ACTIVE_LOW],
+        )
+        .expect_err("conflicting active-level flags must fail");
         assert!(matches!(err, GpioError::Other(_)));
     }
 
     #[test]
     fn resolve_digital_config_rejects_conflicting_pull_flags() {
-        let spec = lookup_digital_spec("GPIO17").expect("known pin");
-        let err = resolve_digital_config(spec, &[DigitalFlags::PULL_UP, DigitalFlags::PULL_DOWN])
+        let spec = digital_spec_fixture(true);
+        let err = resolve_digital_config(&spec, &[DigitalFlags::PULL_UP, DigitalFlags::PULL_DOWN])
             .expect_err("conflicting pull flags must fail");
         assert!(matches!(err, GpioError::Other(_)));
     }
 
     #[test]
     fn resolve_digital_config_rejects_pull_flags_when_pin_disallows_pull_resistor() {
-        let spec = lookup_digital_spec("GPIO22").expect("known pin");
-        let err = resolve_digital_config(spec, &[DigitalFlags::PULL_UP])
+        let spec = digital_spec_fixture(false);
+        let err = resolve_digital_config(&spec, &[DigitalFlags::PULL_UP])
             .expect_err("pull flag must fail when pin disallows pull resistor");
         assert!(matches!(err, GpioError::Other(_)));
     }
@@ -1889,9 +2276,9 @@ mod tests {
 
     #[test]
     fn resolve_digital_config_allows_duplicate_same_active_level_flag() {
-        let spec = lookup_digital_spec("GPIO17").expect("known pin");
+        let spec = digital_spec_fixture(true);
         let (active_level, pull_resistor) =
-            resolve_digital_config(spec, &[DigitalFlags::ACTIVE_LOW, DigitalFlags::ACTIVE_LOW])
+            resolve_digital_config(&spec, &[DigitalFlags::ACTIVE_LOW, DigitalFlags::ACTIVE_LOW])
                 .expect("duplicate same flag should be accepted");
         assert_eq!(active_level, ActiveLevel::ActiveLow);
         assert_eq!(pull_resistor, None);
@@ -1899,28 +2286,28 @@ mod tests {
 
     #[test]
     fn resolve_digital_config_accepts_combined_bitset_in_single_element() {
-        let spec = lookup_digital_spec("GPIO17").expect("known pin");
+        let spec = digital_spec_fixture(true);
         let combined = DigitalFlags::ACTIVE_LOW | DigitalFlags::PULL_UP;
         let (active_level, pull_resistor) =
-            resolve_digital_config(spec, &[combined]).expect("combined bitset should be accepted");
+            resolve_digital_config(&spec, &[combined]).expect("combined bitset should be accepted");
         assert_eq!(active_level, ActiveLevel::ActiveLow);
         assert_eq!(pull_resistor, Some(PullResistor::PullUp));
     }
 
     #[test]
     fn resolve_digital_config_rejects_conflicting_active_level_bits_in_single_element() {
-        let spec = lookup_digital_spec("GPIO17").expect("known pin");
+        let spec = digital_spec_fixture(true);
         let combined = DigitalFlags::ACTIVE_HIGH | DigitalFlags::ACTIVE_LOW;
-        let err = resolve_digital_config(spec, &[combined])
+        let err = resolve_digital_config(&spec, &[combined])
             .expect_err("single-element conflicting active-level bits must fail");
         assert!(matches!(err, GpioError::Other(_)));
     }
 
     #[test]
     fn resolve_digital_config_rejects_conflicting_pull_bits_in_single_element() {
-        let spec = lookup_digital_spec("GPIO17").expect("known pin");
+        let spec = digital_spec_fixture(true);
         let combined = DigitalFlags::PULL_UP | DigitalFlags::PULL_DOWN;
-        let err = resolve_digital_config(spec, &[combined])
+        let err = resolve_digital_config(&spec, &[combined])
             .expect_err("single-element conflicting pull bits must fail");
         assert!(matches!(err, GpioError::Other(_)));
     }

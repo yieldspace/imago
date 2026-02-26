@@ -181,6 +181,10 @@ port = 8080
 # http_outbound = ["localhost", "api.example.com:443", "10.0.0.0/8"]
 # [resources.env]
 # WASI_ONLY = "1"
+# [resources.gpio]
+# digital_pins = [
+#   { label = "GPIO17", value_path = "/sys/class/gpio/gpio17/value", supports_input = true, supports_output = true, default_active_level = "active-high", allow_pull_resistor = true },
+# ]
 # [[resources.mounts]]
 # asset_dir = "assets"
 # guest_path = "/app/assets"

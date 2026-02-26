@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
+use imagod_ipc::ResourceMap;
 use wasmtime::component::Linker;
 
 use super::WasiState;
@@ -17,6 +18,9 @@ pub trait NativePlugin: Send + Sync + 'static {
     fn supports_import(&self, import_name: &str) -> bool;
     fn symbols(&self) -> &'static [&'static str];
     fn add_to_linker(&self, linker: &mut NativePluginLinker) -> NativePluginResult<()>;
+    fn validate_resources(&self, _resources: &ResourceMap) -> NativePluginResult<()> {
+        Ok(())
+    }
 
     fn supports_symbol(&self, symbol: &str) -> bool {
         self.symbols().contains(&symbol)
@@ -95,6 +99,20 @@ pub fn map_native_plugin_linker_error(
         STAGE_NATIVE_PLUGIN,
         format!(
             "failed to add native plugin linker '{}' to wasmtime linker: {err}",
+            package_name
+        ),
+    )
+}
+
+pub fn map_native_plugin_resource_validation_error(
+    package_name: &str,
+    err: impl std::fmt::Display,
+) -> ImagodError {
+    ImagodError::new(
+        ErrorCode::Internal,
+        STAGE_NATIVE_PLUGIN,
+        format!(
+            "failed to validate native plugin resources '{}': {err}",
             package_name
         ),
     )

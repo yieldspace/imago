@@ -187,12 +187,14 @@ where
         let dep = &dependencies[dep_index];
         match dep.kind {
             PluginKind::Native => {
-                if !native_plugins.has_plugin(&dep.name) {
-                    return Err(map_runtime_error(format!(
+                let native_plugin = native_plugins.plugin(&dep.name).ok_or_else(|| {
+                    map_runtime_error(format!(
                         "native plugin '{}' is declared in manifest but not registered in runtime",
                         dep.name
-                    )));
-                }
+                    ))
+                })?;
+                native_plugin
+                    .validate_resources(store.data().native_plugin_context().resources())?;
                 available.insert(
                     dep.name.clone(),
                     AvailablePlugin {
@@ -934,9 +936,12 @@ mod tests {
         HasSelf, NativePlugin, NativePluginLinker, NativePluginResult,
         map_native_plugin_linker_error,
     };
+    use imago_protocol::ErrorCode;
+    use serde_json::json;
+    use std::path::PathBuf;
     use std::sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     /// Test-only inline WIT bindings used to reproduce a same-package
@@ -980,6 +985,103 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct TestResourceValidationPlugin {
+        validate_calls: Arc<AtomicUsize>,
+        saw_gpio_resource: Arc<AtomicBool>,
+        fail_validation: bool,
+    }
+
+    impl TestResourceValidationPlugin {
+        const PACKAGE_NAME: &'static str = "test:resource-validation";
+        const SYMBOLS: [&'static str; 0] = [];
+
+        fn new(fail_validation: bool) -> Self {
+            Self {
+                validate_calls: Arc::new(AtomicUsize::new(0)),
+                saw_gpio_resource: Arc::new(AtomicBool::new(false)),
+                fail_validation,
+            }
+        }
+
+        fn validate_call_count(&self) -> usize {
+            self.validate_calls.load(Ordering::Relaxed)
+        }
+
+        fn saw_gpio_resource(&self) -> bool {
+            self.saw_gpio_resource.load(Ordering::Relaxed)
+        }
+    }
+
+    impl NativePlugin for TestResourceValidationPlugin {
+        fn package_name(&self) -> &'static str {
+            Self::PACKAGE_NAME
+        }
+
+        fn supports_import(&self, _import_name: &str) -> bool {
+            false
+        }
+
+        fn symbols(&self) -> &'static [&'static str] {
+            &Self::SYMBOLS
+        }
+
+        fn add_to_linker(&self, _linker: &mut NativePluginLinker) -> NativePluginResult<()> {
+            Ok(())
+        }
+
+        fn validate_resources(
+            &self,
+            resources: &imagod_ipc::ResourceMap,
+        ) -> NativePluginResult<()> {
+            self.validate_calls.fetch_add(1, Ordering::Relaxed);
+            self.saw_gpio_resource
+                .store(resources.contains_key("gpio"), Ordering::Relaxed);
+            if self.fail_validation {
+                return Err(ImagodError::new(
+                    ErrorCode::Internal,
+                    "runtime.native_plugin",
+                    "resource validation failed",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    fn native_plugin_dependency(package_name: &str) -> PluginDependency {
+        PluginDependency {
+            name: package_name.to_string(),
+            version: "0.1.0".to_string(),
+            kind: PluginKind::Native,
+            wit: format!("{package_name}/api@0.1.0"),
+            requires: Vec::new(),
+            component: None,
+            capabilities: CapabilityPolicy::default(),
+        }
+    }
+
+    fn test_store_with_resources(
+        engine: &Engine,
+        resources: imagod_ipc::ResourceMap,
+    ) -> Store<WasiState> {
+        let state = WasiState {
+            table: wasmtime::component::ResourceTable::new(),
+            wasi: wasmtime_wasi::WasiCtxBuilder::new().build(),
+            http: wasmtime_wasi_http::WasiHttpCtx::new(),
+            wasi_http_outbound: Vec::new(),
+            native_plugin_context: crate::NativePluginContext::new(
+                "svc-test".to_string(),
+                "release-test".to_string(),
+                "runner-test".to_string(),
+                imagod_ipc::RunnerAppType::Cli,
+                PathBuf::from("/tmp/manager.sock"),
+                "secret".to_string(),
+                resources,
+            ),
+        };
+        Store::new(engine, state)
+    }
+
     impl NativePlugin for TestMultiImportPlugin {
         fn package_name(&self) -> &'static str {
             Self::PACKAGE_NAME
@@ -1006,6 +1108,97 @@ mod tests {
 
     impl test_multi_import_bindings::test::multi::b::Host for WasiState {
         fn ping(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn instantiate_plugin_dependencies_validates_native_plugin_resources() {
+        let plugin = TestResourceValidationPlugin::new(false);
+        let mut registry_builder = crate::native_plugins::NativePluginRegistryBuilder::new();
+        registry_builder
+            .register_plugin(Arc::new(plugin.clone()))
+            .expect("resource validation plugin should register");
+        let registry = registry_builder.build();
+
+        let engine = Engine::default();
+        let mut store = test_store_with_resources(
+            &engine,
+            std::collections::BTreeMap::from([("gpio".to_string(), json!({ "digital_pins": [] }))]),
+        );
+        let dependencies = vec![native_plugin_dependency(
+            TestResourceValidationPlugin::PACKAGE_NAME,
+        )];
+        let checker = crate::capability_checker::DefaultCapabilityChecker;
+
+        let available = instantiate_plugin_dependencies(
+            &DefaultPluginResolver,
+            &checker,
+            &registry,
+            &engine,
+            &mut store,
+            &dependencies,
+        )
+        .await
+        .expect("native dependency resolution should succeed");
+
+        assert!(
+            available.contains_key(TestResourceValidationPlugin::PACKAGE_NAME),
+            "native plugin should be available after dependency resolution"
+        );
+        assert_eq!(
+            plugin.validate_call_count(),
+            1,
+            "native plugin resources should be validated exactly once"
+        );
+        assert!(
+            plugin.saw_gpio_resource(),
+            "native plugin validation should receive runner resources"
+        );
+    }
+
+    #[tokio::test]
+    async fn instantiate_plugin_dependencies_propagates_resource_validation_error() {
+        let plugin = TestResourceValidationPlugin::new(true);
+        let mut registry_builder = crate::native_plugins::NativePluginRegistryBuilder::new();
+        registry_builder
+            .register_plugin(Arc::new(plugin.clone()))
+            .expect("resource validation plugin should register");
+        let registry = registry_builder.build();
+
+        let engine = Engine::default();
+        let mut store = test_store_with_resources(
+            &engine,
+            std::collections::BTreeMap::from([("gpio".to_string(), json!({ "digital_pins": [] }))]),
+        );
+        let dependencies = vec![native_plugin_dependency(
+            TestResourceValidationPlugin::PACKAGE_NAME,
+        )];
+        let checker = crate::capability_checker::DefaultCapabilityChecker;
+
+        let err = match instantiate_plugin_dependencies(
+            &DefaultPluginResolver,
+            &checker,
+            &registry,
+            &engine,
+            &mut store,
+            &dependencies,
+        )
+        .await
+        {
+            Ok(_) => panic!("resource validation failure should stop dependency resolution"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.stage, "runtime.native_plugin");
+        assert!(
+            err.message.contains("resource validation failed"),
+            "unexpected validation message: {}",
+            err.message
+        );
+        assert_eq!(
+            plugin.validate_call_count(),
+            1,
+            "failing resource validation should still execute exactly once"
+        );
     }
 
     #[test]

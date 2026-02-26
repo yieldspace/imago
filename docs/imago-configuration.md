@@ -399,9 +399,14 @@ allowed_devices = ["/dev/i2c-1", "/dev/i2c-2"]
 
 [resources.policy]
 mode = "strict"
+
+[resources.gpio]
+digital_pins = [
+  { label = "GPIO17", value_path = "/sys/class/gpio/gpio17/value", supports_input = true, supports_output = true, default_active_level = "active-high", allow_pull_resistor = true }
+]
 ```
 
-- Validation error notes: empty keys fail validation.
+- Validation error notes: empty keys fail validation. `resources.gpio.digital_pins` rejects duplicated `label` and duplicated `value_path` during runtime startup.
 
 <a id="the-capabilities-section"></a>
 ## The [capabilities] section
