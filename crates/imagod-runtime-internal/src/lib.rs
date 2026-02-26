@@ -6,6 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use imagod_common::ImagodError;
 use imagod_ipc::{
     CapabilityPolicy, PluginDependency, RunnerAppType, RunnerSocketConfig, RunnerWasiMount,
@@ -125,8 +126,8 @@ pub struct RuntimeHttpResponse {
     pub status: u16,
     /// HTTP headers represented as raw bytes.
     pub headers: Vec<(String, Vec<u8>)>,
-    /// Entire response body.
-    pub body: Vec<u8>,
+    /// Entire response body as a shareable byte buffer.
+    pub body: Bytes,
 }
 
 /// Runtime abstraction so runner can swap out concrete wasm engines.
