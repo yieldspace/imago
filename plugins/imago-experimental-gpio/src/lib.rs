@@ -348,24 +348,26 @@ fn release_pin_label(pin_label: &str) {
     }
 }
 
+fn digital_backend_requirements(mode: PinMode) -> (bool, bool) {
+    match mode {
+        PinMode::In => (true, false),
+        PinMode::Out => (false, true),
+        PinMode::InOut => (true, true),
+    }
+}
+
 fn resolve_digital_config(
     spec: &DigitalPinSpec,
     flags: &[DigitalFlags],
 ) -> Result<(ActiveLevel, Option<PullResistor>), GpioError> {
-    let mut active_high = false;
-    let mut active_low = false;
-    let mut pull_up = false;
-    let mut pull_down = false;
-
+    let mut combined = DigitalFlags::default();
     for flag in flags {
-        match flag {
-            flag if flag == &DigitalFlags::ACTIVE_HIGH => active_high = true,
-            flag if flag == &DigitalFlags::ACTIVE_LOW => active_low = true,
-            flag if flag == &DigitalFlags::PULL_UP => pull_up = true,
-            flag if flag == &DigitalFlags::PULL_DOWN => pull_down = true,
-            _ => {}
-        }
+        combined |= *flag;
     }
+    let active_high = combined.contains(DigitalFlags::ACTIVE_HIGH);
+    let active_low = combined.contains(DigitalFlags::ACTIVE_LOW);
+    let pull_up = combined.contains(DigitalFlags::PULL_UP);
+    let pull_down = combined.contains(DigitalFlags::PULL_DOWN);
 
     if active_high && active_low {
         return Err(GpioError::Other(
@@ -406,16 +408,12 @@ fn resolve_analog_config(
     spec: &AnalogPinSpec,
     flags: &[AnalogFlags],
 ) -> Result<ActiveLevel, GpioError> {
-    let mut active_high = false;
-    let mut active_low = false;
-
+    let mut combined = AnalogFlags::default();
     for flag in flags {
-        match flag {
-            flag if flag == &AnalogFlags::ACTIVE_HIGH => active_high = true,
-            flag if flag == &AnalogFlags::ACTIVE_LOW => active_low = true,
-            _ => {}
-        }
+        combined |= *flag;
     }
+    let active_high = combined.contains(AnalogFlags::ACTIVE_HIGH);
+    let active_low = combined.contains(AnalogFlags::ACTIVE_LOW);
 
     if active_high && active_low {
         return Err(GpioError::Other(
@@ -839,7 +837,11 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
         let (active_level, pull_resistor) = resolve_digital_config(spec, &flags)?;
         let path = spec.value_path.to_string();
         let validation_path = path.clone();
-        run_blocking_gpio(move || validate_digital_backend(&validation_path, true, false)).await?;
+        let (need_read, need_write) = digital_backend_requirements(PinMode::In);
+        run_blocking_gpio(move || {
+            validate_digital_backend(&validation_path, need_read, need_write)
+        })
+        .await?;
 
         acquire_pin_label(&pin_label, PinMode::In)?;
 
@@ -869,7 +871,11 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
         let (active_level, pull_resistor) = resolve_digital_config(spec, &flags)?;
         let path = spec.value_path.to_string();
         let validation_path = path.clone();
-        run_blocking_gpio(move || validate_digital_backend(&validation_path, true, true)).await?;
+        let (need_read, need_write) = digital_backend_requirements(PinMode::Out);
+        run_blocking_gpio(move || {
+            validate_digital_backend(&validation_path, need_read, need_write)
+        })
+        .await?;
 
         acquire_pin_label(&pin_label, PinMode::Out)?;
 
@@ -899,7 +905,11 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
         let (active_level, pull_resistor) = resolve_digital_config(spec, &flags)?;
         let path = spec.value_path.to_string();
         let validation_path = path.clone();
-        run_blocking_gpio(move || validate_digital_backend(&validation_path, true, true)).await?;
+        let (need_read, need_write) = digital_backend_requirements(PinMode::InOut);
+        run_blocking_gpio(move || {
+            validate_digital_backend(&validation_path, need_read, need_write)
+        })
+        .await?;
 
         acquire_pin_label(&pin_label, PinMode::InOut)?;
 
@@ -1885,6 +1895,56 @@ mod tests {
                 .expect("duplicate same flag should be accepted");
         assert_eq!(active_level, ActiveLevel::ActiveLow);
         assert_eq!(pull_resistor, None);
+    }
+
+    #[test]
+    fn resolve_digital_config_accepts_combined_bitset_in_single_element() {
+        let spec = lookup_digital_spec("GPIO17").expect("known pin");
+        let combined = DigitalFlags::ACTIVE_LOW | DigitalFlags::PULL_UP;
+        let (active_level, pull_resistor) =
+            resolve_digital_config(spec, &[combined]).expect("combined bitset should be accepted");
+        assert_eq!(active_level, ActiveLevel::ActiveLow);
+        assert_eq!(pull_resistor, Some(PullResistor::PullUp));
+    }
+
+    #[test]
+    fn resolve_digital_config_rejects_conflicting_active_level_bits_in_single_element() {
+        let spec = lookup_digital_spec("GPIO17").expect("known pin");
+        let combined = DigitalFlags::ACTIVE_HIGH | DigitalFlags::ACTIVE_LOW;
+        let err = resolve_digital_config(spec, &[combined])
+            .expect_err("single-element conflicting active-level bits must fail");
+        assert!(matches!(err, GpioError::Other(_)));
+    }
+
+    #[test]
+    fn resolve_digital_config_rejects_conflicting_pull_bits_in_single_element() {
+        let spec = lookup_digital_spec("GPIO17").expect("known pin");
+        let combined = DigitalFlags::PULL_UP | DigitalFlags::PULL_DOWN;
+        let err = resolve_digital_config(spec, &[combined])
+            .expect_err("single-element conflicting pull bits must fail");
+        assert!(matches!(err, GpioError::Other(_)));
+    }
+
+    #[test]
+    fn resolve_analog_config_accepts_combined_bitset_in_single_element() {
+        let spec = lookup_analog_spec("ADC0").expect("known pin");
+        let active_level = resolve_analog_config(spec, &[AnalogFlags::ACTIVE_LOW])
+            .expect("combined bitset with single flag should be accepted");
+        assert_eq!(active_level, ActiveLevel::ActiveLow);
+    }
+
+    #[test]
+    fn resolve_analog_config_rejects_conflicting_bits_in_single_element() {
+        let spec = lookup_analog_spec("ADC0").expect("known pin");
+        let combined = AnalogFlags::ACTIVE_HIGH | AnalogFlags::ACTIVE_LOW;
+        let err = resolve_analog_config(spec, &[combined])
+            .expect_err("single-element conflicting active-level bits must fail");
+        assert!(matches!(err, GpioError::Other(_)));
+    }
+
+    #[test]
+    fn digital_out_backend_validation_does_not_require_read_access() {
+        assert_eq!(digital_backend_requirements(PinMode::Out), (false, true));
     }
 
     #[cfg(not(target_os = "linux"))]
