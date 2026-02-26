@@ -229,6 +229,7 @@ fn collect_transaction_read_lengths(
     Ok(read_lengths)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn unsupported_i2c_error() -> String {
     "unsupported: i2c native backend is available only on Linux".to_string()
 }
