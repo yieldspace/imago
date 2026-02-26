@@ -11,6 +11,13 @@ version = "0.1.0"
 kind = "native"
 wit = "file://../../plugins/imago-experimental-gpio/wit"
 
+[resources.gpio]
+digital_pins = [
+  { label = "GPIO17", value_path = "/sys/class/gpio/gpio17/value", supports_input = true, supports_output = true, default_active_level = "active-high", allow_pull_resistor = true },
+  { label = "GPIO27", value_path = "/sys/class/gpio/gpio27/value", supports_input = true, supports_output = false, default_active_level = "active-high", allow_pull_resistor = true },
+  { label = "GPIO22", value_path = "/sys/class/gpio/gpio22/value", supports_input = false, supports_output = true, default_active_level = "active-high", allow_pull_resistor = false },
+]
+
 [capabilities]
 privileged = true
 wasi = true

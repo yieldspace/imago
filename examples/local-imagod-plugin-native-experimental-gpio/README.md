@@ -4,6 +4,12 @@
 
 同一マシンで native plugin（`imago:experimental-gpio@0.1.0`）を使い、`delay.delay-ms` と basic digital 操作の呼び出し動作を確認するサンプルです。
 
+## GPIO カタログ設定
+
+digital pin の定義は `imago.toml` の `[resources.gpio]` 配下 `digital_pins` から読み込まれます。  
+`resources.gpio` が未設定の場合は空カタログ扱いになり、`get-digital-*` は `undefined-pin-label` を返します。
+`digital_pins` では `label` と `value_path` の重複は許可されず、重複時は起動時に設定エラーになります。
+
 ## 実行
 
 Rust toolchain と `wasm32-wasip2` target を用意します（未導入なら `rustup target add wasm32-wasip2`）。
