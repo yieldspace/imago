@@ -104,6 +104,7 @@ impl ProtocolHandler {
                     "command.cancel".to_string(),
                     "logs.request".to_string(),
                     "logs.chunk".to_string(),
+                    "logs.chunk.timestamp".to_string(),
                     "logs.end".to_string(),
                     "rpc.invoke".to_string(),
                     "bindings.cert.upload".to_string(),
@@ -287,6 +288,7 @@ impl ProtocolHandler {
             name,
             tail_lines,
             follow,
+            with_timestamp,
         } = payload;
 
         let loggable_names = if name.is_none() {
@@ -332,6 +334,7 @@ impl ProtocolHandler {
                     request.request_id,
                     request.correlation_id,
                     subscriptions,
+                    with_timestamp,
                 )
                 .await;
         });

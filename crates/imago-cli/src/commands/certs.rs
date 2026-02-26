@@ -20,7 +20,7 @@ use crate::{
             format_local_context_line, format_peer_context_line, negotiate_hello_with_features,
         },
         deploy,
-        error_diagnostics::format_command_error,
+        error_diagnostics::{format_command_error, summarize_command_failure},
         ui,
     },
 };
@@ -46,6 +46,18 @@ struct GenerateOutput {
     client_public_key_hex: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BindingsCertUploadSummary {
+    authority: String,
+    remote: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BindingsCertDeploySummary {
+    from_authority: String,
+    to_authority: String,
+}
+
 pub fn run_generate(args: CertsGenerateArgs) -> CommandResult {
     let started_at = Instant::now();
     ui::command_start("certs.generate", "starting");
@@ -61,11 +73,11 @@ pub fn run_generate(args: CertsGenerateArgs) -> CommandResult {
             );
             println!("private keys are sensitive. do not commit or share them.");
 
-            ui::command_finish("certs.generate", true, "completed");
+            ui::command_finish("certs.generate", true, "");
             success_generate_result(started_at, output.client_public_key_hex)
         }
         Err(err) => {
-            let summary_message = err.to_string();
+            let summary_message = summarize_command_failure("certs.generate", &err);
             let diagnostic_message = format_command_error("certs.generate", &err);
             ui::command_finish("certs.generate", false, &summary_message);
             CommandResult::failure("certs.generate", started_at, diagnostic_message)
@@ -92,12 +104,17 @@ pub(crate) async fn run_bindings_cert_upload_with_project_root(
     let started_at = Instant::now();
     ui::command_start("bindings.cert.upload", "starting");
     match run_bindings_cert_upload_async(args, project_root).await {
-        Ok(()) => {
-            ui::command_finish("bindings.cert.upload", true, "completed");
-            CommandResult::success("bindings.cert.upload", started_at)
+        Ok(summary) => {
+            ui::command_finish("bindings.cert.upload", true, "");
+            let mut result = CommandResult::success("bindings.cert.upload", started_at);
+            result
+                .meta
+                .insert("authority".to_string(), summary.authority);
+            result.meta.insert("remote".to_string(), summary.remote);
+            result
         }
         Err(err) => {
-            let summary_message = err.to_string();
+            let summary_message = summarize_command_failure("bindings.cert.upload", &err);
             let diagnostic_message = format_command_error("bindings.cert.upload", &err);
             ui::command_finish("bindings.cert.upload", false, &summary_message);
             CommandResult::failure("bindings.cert.upload", started_at, diagnostic_message)
@@ -116,12 +133,17 @@ pub(crate) async fn run_bindings_cert_deploy_with_project_root(
     let started_at = Instant::now();
     ui::command_start("bindings.cert.deploy", "starting");
     match run_bindings_cert_deploy_async(args, project_root).await {
-        Ok(()) => {
-            ui::command_finish("bindings.cert.deploy", true, "completed");
-            CommandResult::success("bindings.cert.deploy", started_at)
+        Ok(summary) => {
+            ui::command_finish("bindings.cert.deploy", true, "");
+            let mut result = CommandResult::success("bindings.cert.deploy", started_at);
+            result
+                .meta
+                .insert("from".to_string(), summary.from_authority);
+            result.meta.insert("to".to_string(), summary.to_authority);
+            result
         }
         Err(err) => {
-            let summary_message = err.to_string();
+            let summary_message = summarize_command_failure("bindings.cert.deploy", &err);
             let diagnostic_message = format_command_error("bindings.cert.deploy", &err);
             ui::command_finish("bindings.cert.deploy", false, &summary_message);
             CommandResult::failure("bindings.cert.deploy", started_at, diagnostic_message)
@@ -132,7 +154,7 @@ pub(crate) async fn run_bindings_cert_deploy_with_project_root(
 async fn run_bindings_cert_upload_async(
     args: BindingsCertUploadArgs,
     project_root: &Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<BindingsCertUploadSummary> {
     ui::command_stage(
         "bindings.cert.upload",
         "load-config",
@@ -162,13 +184,17 @@ async fn run_bindings_cert_upload_async(
         &client_key,
         &BINDINGS_CERT_UPLOAD_REQUIRED_FEATURES,
     )
-    .await
+    .await?;
+    Ok(BindingsCertUploadSummary {
+        authority,
+        remote: args.to,
+    })
 }
 
 async fn run_bindings_cert_deploy_async(
     args: BindingsCertDeployArgs,
     project_root: &Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<BindingsCertDeploySummary> {
     ui::command_stage(
         "bindings.cert.deploy",
         "load-config",
@@ -219,6 +245,8 @@ async fn run_bindings_cert_deploy_async(
 
     let from_authority = normalize_known_hosts_authority(&args.from)
         .with_context(|| format!("failed to normalize --from authority: {}", args.from))?;
+    let to_authority = normalize_known_hosts_authority(&args.to)
+        .with_context(|| format!("failed to normalize --to authority: {}", args.to))?;
     let known_hosts_path = resolve_known_hosts_path()?;
 
     let from_public_key_hex = match read_known_host_public_key(&known_hosts_path, &from_authority) {
@@ -265,7 +293,10 @@ async fn run_bindings_cert_deploy_async(
     };
 
     if from_error.is_none() && to_error.is_none() {
-        return Ok(());
+        return Ok(BindingsCertDeploySummary {
+            from_authority,
+            to_authority,
+        });
     }
 
     Err(anyhow!(format_bindings_cert_deploy_result(

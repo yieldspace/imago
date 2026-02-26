@@ -20,12 +20,18 @@ use crate::{
             format_local_context_line, format_peer_context_line, negotiate_hello_with_features,
         },
         deploy,
-        error_diagnostics::format_command_error,
+        error_diagnostics::{format_command_error, summarize_command_failure},
         ui,
     },
 };
 
 const PS_HELLO_REQUIRED_FEATURES: [&str; 1] = ["services.list"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PsSummary {
+    target_name: String,
+    services: usize,
+}
 
 pub async fn run(args: PsArgs) -> CommandResult {
     run_with_project_root(args, Path::new(".")).await
@@ -44,12 +50,19 @@ pub(crate) async fn run_with_project_root_and_target_override(
     let started_at = Instant::now();
     ui::command_start("ps", "starting");
     match run_async_with_target_override(args, project_root, target_override, names_filter).await {
-        Ok(()) => {
-            ui::command_finish("ps", true, "completed");
-            CommandResult::success("ps", started_at)
+        Ok(summary) => {
+            ui::command_finish("ps", true, "");
+            let mut result = CommandResult::success("ps", started_at);
+            result
+                .meta
+                .insert("target".to_string(), summary.target_name);
+            result
+                .meta
+                .insert("services".to_string(), summary.services.to_string());
+            result
         }
         Err(err) => {
-            let summary_message = err.to_string();
+            let summary_message = summarize_command_failure("ps", &err);
             let diagnostic_message = format_command_error("ps", &err);
             ui::command_finish("ps", false, &summary_message);
             CommandResult::failure("ps", started_at, diagnostic_message)
@@ -62,7 +75,7 @@ async fn run_async_with_target_override(
     project_root: &Path,
     target_override: Option<&build::TargetConfig>,
     names_filter: Option<Vec<String>>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PsSummary> {
     let target_name = if target_override.is_some() {
         "override".to_string()
     } else {
@@ -111,7 +124,12 @@ async fn run_async_with_target_override(
 
     ui::command_stage("ps", "services.list", "requesting service states");
     let response = request_services_list(&connected.session, correlation_id, names_filter).await?;
-    render_services(&response.services)
+    let services = response.services.len();
+    render_services(&response.services)?;
+    Ok(PsSummary {
+        target_name,
+        services,
+    })
 }
 
 fn ps_service_context(names_filter: Option<&[String]>) -> String {

@@ -145,12 +145,12 @@ fn has_command_error_requires_error_marker() {
 
     assert!(
         !output.has_command_error(),
-        "non-empty stderr without [error] marker must not set command error contract"
+        "non-empty stderr without error: marker must not set command error contract"
     );
     assert_eq!(
         output.command_summary_error(),
         None,
-        "summary error must only come from [error] markers"
+        "summary error must only come from error: markers"
     );
     assert_eq!(
         output.command_error_messages(),

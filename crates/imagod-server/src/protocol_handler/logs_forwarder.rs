@@ -20,6 +20,7 @@ pub(crate) trait LogsForwarder: Send + Sync {
         request_id: Uuid,
         correlation_id: Uuid,
         subscriptions: Vec<ServiceLogSubscription>,
+        with_timestamp: bool,
     ) where
         S: ProtocolSession + 'static;
 }
@@ -34,10 +35,18 @@ impl LogsForwarder for DefaultLogsForwarder {
         request_id: Uuid,
         correlation_id: Uuid,
         subscriptions: Vec<ServiceLogSubscription>,
+        with_timestamp: bool,
     ) where
         S: ProtocolSession + 'static,
     {
-        run_logs_forwarder(session, request_id, correlation_id, subscriptions).await;
+        run_logs_forwarder(
+            session,
+            request_id,
+            correlation_id,
+            subscriptions,
+            with_timestamp,
+        )
+        .await;
     }
 }
 
@@ -46,6 +55,7 @@ pub(crate) async fn run_logs_forwarder<S>(
     request_id: Uuid,
     correlation_id: Uuid,
     subscriptions: Vec<ServiceLogSubscription>,
+    with_timestamp: bool,
 ) where
     S: ProtocolSession + 'static,
 {
@@ -66,6 +76,7 @@ pub(crate) async fn run_logs_forwarder<S>(
         correlation_id,
         max_datagram_size,
         &service_names,
+        with_timestamp,
     ) {
         Ok(size) => size,
         Err(err) => {
@@ -87,6 +98,7 @@ pub(crate) async fn run_logs_forwarder<S>(
         correlation_id,
         max_datagram_size,
         chunk_size,
+        with_timestamp,
     );
 
     let stream_result = stream_logs_datagrams(
@@ -108,6 +120,7 @@ pub(crate) async fn run_logs_forwarder<S>(
                     LogStreamKind::Composite,
                     Vec::new(),
                     true,
+                    None,
                 )
                 .await;
             let _ = sender.send_logs_end_datagram(seq, None).await;
@@ -129,6 +142,7 @@ where
     correlation_id: Uuid,
     max_datagram_size: usize,
     chunk_size: usize,
+    with_timestamp: bool,
 }
 
 impl<'a, S> LogsDatagramSender<'a, S>
@@ -141,6 +155,7 @@ where
         correlation_id: Uuid,
         max_datagram_size: usize,
         chunk_size: usize,
+        with_timestamp: bool,
     ) -> Self {
         Self {
             session,
@@ -148,6 +163,7 @@ where
             correlation_id,
             max_datagram_size,
             chunk_size,
+            with_timestamp,
         }
     }
 
@@ -157,6 +173,7 @@ where
         name: &str,
         stream_kind: LogStreamKind,
         bytes: &[u8],
+        timestamp_unix_ms: Option<u64>,
         last_name: &mut Option<String>,
     ) -> Result<(), ImagodError> {
         if bytes.is_empty() {
@@ -173,8 +190,15 @@ where
         let mut offset = 0usize;
         while offset < bytes.len() {
             let end = bytes.len().min(offset.saturating_add(self.chunk_size));
-            self.send_single_log_chunk(seq, name, stream_kind, bytes[offset..end].to_vec(), false)
-                .await?;
+            self.send_single_log_chunk(
+                seq,
+                name,
+                stream_kind,
+                bytes[offset..end].to_vec(),
+                false,
+                timestamp_unix_ms,
+            )
+            .await?;
             *last_name = Some(name.to_string());
             offset = end;
         }
@@ -189,7 +213,13 @@ where
         stream_kind: LogStreamKind,
         bytes: Vec<u8>,
         is_last: bool,
+        timestamp_unix_ms: Option<u64>,
     ) -> Result<(), ImagodError> {
+        let timestamp_unix_ms = if self.with_timestamp {
+            timestamp_unix_ms
+        } else {
+            None
+        };
         let chunk = LogChunk {
             request_id: self.request_id,
             seq: *seq,
@@ -197,6 +227,7 @@ where
             stream_kind,
             bytes,
             is_last,
+            timestamp_unix_ms,
         };
         let envelope = ProtocolEnvelope::new(
             MessageType::LogsChunk,
@@ -257,15 +288,31 @@ where
     S: ProtocolSession,
 {
     for subscription in &subscriptions {
-        sender
-            .send_log_data_chunks(
-                seq,
-                &subscription.service_name,
-                LogStreamKind::Composite,
-                &subscription.snapshot_bytes,
-                last_name,
-            )
-            .await?;
+        if sender.with_timestamp {
+            for event in &subscription.snapshot_events {
+                sender
+                    .send_log_data_chunks(
+                        seq,
+                        &subscription.service_name,
+                        LogStreamKind::Composite,
+                        &event.bytes,
+                        Some(event.timestamp_unix_ms),
+                        last_name,
+                    )
+                    .await?;
+            }
+        } else {
+            sender
+                .send_log_data_chunks(
+                    seq,
+                    &subscription.service_name,
+                    LogStreamKind::Composite,
+                    &subscription.snapshot_bytes,
+                    None,
+                    last_name,
+                )
+                .await?;
+        }
     }
 
     let mut follow_targets = subscriptions
@@ -344,6 +391,7 @@ where
                                 &service_name,
                                 service_log_stream_to_protocol(event.stream),
                                 &event.bytes,
+                                Some(event.timestamp_unix_ms),
                                 last_name,
                             )
                             .await?;
@@ -426,6 +474,7 @@ pub(crate) fn fixed_log_chunk_size(
     correlation_id: Uuid,
     max_datagram_size: usize,
     service_names: &[String],
+    with_timestamp: bool,
 ) -> Result<usize, ImagodError> {
     let name = service_names
         .iter()
@@ -439,6 +488,7 @@ pub(crate) fn fixed_log_chunk_size(
         stream_kind: LogStreamKind::Composite,
         bytes: Vec::new(),
         is_last: false,
+        timestamp_unix_ms: with_timestamp.then_some(u64::MAX),
     };
     let envelope = ProtocolEnvelope::new(MessageType::LogsChunk, request_id, correlation_id, probe);
     let overhead = to_cbor(&envelope).map_err(|e| {

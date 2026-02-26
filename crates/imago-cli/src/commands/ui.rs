@@ -50,23 +50,25 @@ fn finished_progress_style() -> ProgressStyle {
 }
 
 fn rich_start_message(command: &str, detail: &str) -> String {
-    format!("{command} {detail}")
+    format!("{command}: {detail}...")
 }
 
 fn plain_start_message(command: &str, detail: &str) -> String {
-    format!("[start] {command} {detail}")
+    format!("{command}: {detail}...")
 }
 
 fn rich_stage_message(command: &str, stage: &str, detail: &str) -> String {
-    format!("{command} [{stage}] {detail}")
+    let _ = stage;
+    format!("{command}: {detail}...")
 }
 
 fn plain_stage_message(command: &str, stage: &str, detail: &str) -> String {
-    format!("[progress] {command} stage={stage} {detail}")
+    let _ = stage;
+    format!("{command}: {detail}...")
 }
 
 fn rich_warn_message(command: &str, message: &str) -> String {
-    format!("[warn] {command} {message}")
+    format!("warning: {command}: {message}")
 }
 
 fn compose_build_service_stage_message(service: &str, stage: &str, detail: &str) -> String {
@@ -86,11 +88,11 @@ fn compose_build_service_failure_message(service: &str, detail: &str) -> String 
 }
 
 fn plain_warn_message(command: &str, message: &str) -> String {
-    format!("[warn] {command} {message}")
+    format!("warning: {command}: {message}")
 }
 
 fn plain_upload_start_message(command: &str, total_bytes: u64, detail: &str) -> String {
-    format!("[progress] {command} stage=upload {detail} total_bytes={total_bytes}")
+    format!("{command}: {detail}... ({total_bytes} bytes)")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,6 +209,15 @@ impl RichState {
             .finish_with_message(compose_build_service_failure_message(service, detail));
         lines.log.finish();
     }
+
+    fn clear_command(&mut self, command: &str) {
+        if let Some(bar) = self.byte_bars.remove(command) {
+            bar.finish_and_clear();
+        }
+        if let Some(spinner) = self.spinners.remove(command) {
+            spinner.finish_and_clear();
+        }
+    }
 }
 
 static UI_RUNTIME: OnceLock<Mutex<Option<UiRuntime>>> = OnceLock::new();
@@ -310,8 +321,8 @@ fn rich_info_message(message: &str) -> String {
     format!("{ANSI_DIM}  > {message}{ANSI_RESET}")
 }
 
-fn plain_info_message(command: &str, message: &str) -> String {
-    format!("[info] {command} {message}")
+fn plain_info_message(_command: &str, message: &str) -> String {
+    format!("  {message}")
 }
 
 fn info_output_for_mode(mode: UiMode, command: &str, message: &str) -> Option<String> {
@@ -322,18 +333,23 @@ fn info_output_for_mode(mode: UiMode, command: &str, message: &str) -> Option<St
 }
 
 fn rich_success_message(command: &str, detail: &str) -> String {
-    format!("✔ completed {command} {detail}")
+    let _ = detail;
+    format!("{command} succeeded")
 }
 
 fn rich_failure_message(command: &str, detail: &str) -> String {
-    format!("[failed] {command} {detail}")
+    if detail.trim().is_empty() {
+        return format!("{command} failed");
+    }
+    format!("{command} failed ({detail})")
 }
 
 fn plain_finish_message(command: &str, succeeded: bool, detail: &str) -> String {
     if succeeded {
-        format!("[completed] {command} {detail}")
+        let _ = detail;
+        format!("{command} succeeded")
     } else {
-        format!("[failed] {command} {detail}")
+        rich_failure_message(command, detail)
     }
 }
 
@@ -435,6 +451,15 @@ pub fn command_finish(command: &str, succeeded: bool, detail: &str) {
     }
 }
 
+pub fn command_clear(command: &str) {
+    if current_mode() != UiMode::Rich {
+        return;
+    }
+    let _ = with_rich_state(|state| {
+        state.clear_command(command);
+    });
+}
+
 pub(crate) fn ensure_compose_service_lines(service: &str) {
     if current_mode() != UiMode::Rich {
         return;
@@ -475,14 +500,39 @@ fn finalize_error_output_line(result: &CommandResult) -> Option<String> {
     if result.exit_code != 0
         && let Some(message) = result.stderr.as_deref()
     {
-        return Some(format!("[error] {} {}", result.command, message));
+        return Some(message.to_string());
     }
     None
+}
+
+fn should_suppress_success_meta_output(result: &CommandResult) -> bool {
+    result
+        .meta
+        .get("_suppress_success_meta_output")
+        .is_some_and(|value| value == "true")
+}
+
+fn success_meta_lines(result: &CommandResult) -> Vec<String> {
+    result
+        .meta
+        .iter()
+        .filter(|(key, _)| !key.starts_with('_'))
+        .map(|(key, value)| format!("  {key}: {value}"))
+        .collect()
 }
 
 pub fn finalize_result(result: &CommandResult) {
     if let Some(message) = finalize_error_output_line(result) {
         eprintln!("{message}");
+        return;
+    }
+
+    if should_suppress_success_meta_output(result) {
+        return;
+    }
+
+    for line in success_meta_lines(result) {
+        println!("{line}");
     }
 }
 
@@ -534,10 +584,10 @@ mod tests {
     }
 
     #[test]
-    fn rich_success_message_uses_check_mark() {
+    fn rich_success_message_uses_natural_success_line() {
         assert_eq!(
             rich_success_message("deploy", "completed"),
-            "✔ completed deploy completed"
+            "deploy succeeded"
         );
     }
 
@@ -546,7 +596,7 @@ mod tests {
         let message = "cli=0.1.0 project=/tmp/x";
         assert_eq!(
             info_output_for_mode(UiMode::Plain, "deploy", message),
-            Some("[info] deploy cli=0.1.0 project=/tmp/x".to_string())
+            Some("  cli=0.1.0 project=/tmp/x".to_string())
         );
         assert_eq!(
             info_output_for_mode(UiMode::Rich, "deploy", message),
@@ -572,13 +622,13 @@ mod tests {
         let result = CommandResult {
             command: "deploy".to_string(),
             exit_code: 2,
-            stderr: Some("failed".to_string()),
+            stderr: Some("error: failed".to_string()),
             duration_ms: 0,
             meta: BTreeMap::new(),
         };
         assert_eq!(
             finalize_error_output_line(&result),
-            Some("[error] deploy failed".to_string())
+            Some("error: failed".to_string())
         );
     }
 
@@ -592,6 +642,43 @@ mod tests {
             meta: BTreeMap::new(),
         };
         assert_eq!(finalize_error_output_line(&result), None);
+    }
+
+    #[test]
+    fn success_meta_lines_hide_internal_keys() {
+        let mut result = CommandResult {
+            command: "deploy".to_string(),
+            exit_code: 0,
+            stderr: None,
+            duration_ms: 0,
+            meta: BTreeMap::new(),
+        };
+        result.meta.insert(
+            "_suppress_success_meta_output".to_string(),
+            "false".to_string(),
+        );
+        result
+            .meta
+            .insert("service".to_string(), "svc-a".to_string());
+
+        assert_eq!(success_meta_lines(&result), vec!["  service: svc-a"]);
+    }
+
+    #[test]
+    fn suppress_success_meta_output_respects_internal_flag() {
+        let mut result = CommandResult {
+            command: "logs".to_string(),
+            exit_code: 0,
+            stderr: None,
+            duration_ms: 0,
+            meta: BTreeMap::new(),
+        };
+        result.meta.insert(
+            "_suppress_success_meta_output".to_string(),
+            "true".to_string(),
+        );
+
+        assert!(should_suppress_success_meta_output(&result));
     }
 
     #[test]
@@ -661,5 +748,20 @@ mod tests {
             lines.log.message(),
             compose_build_service_log_message("api", "stderr", "compile failed")
         );
+    }
+
+    #[test]
+    fn clear_command_removes_spinner_and_upload_bar() {
+        let mut state = RichState::new();
+        let spinner = state.ensure_spinner("logs", "starting");
+        let bar = state.multi.add(ProgressBar::new(64));
+        state.byte_bars.insert("logs".to_string(), bar.clone());
+
+        state.clear_command("logs");
+
+        assert!(!state.spinners.contains_key("logs"));
+        assert!(!state.byte_bars.contains_key("logs"));
+        assert!(spinner.is_finished());
+        assert!(bar.is_finished());
     }
 }

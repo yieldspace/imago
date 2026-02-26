@@ -1,4 +1,8 @@
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::VecDeque,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -44,13 +48,106 @@ impl BoundedLogBuffer {
     }
 }
 
+#[derive(Debug)]
+/// Bounded event ring used for timestamp-preserving log snapshot capture.
+pub(super) struct BoundedLogEventBuffer {
+    max_bytes: usize,
+    total_bytes: usize,
+    events: VecDeque<ServiceLogEvent>,
+}
+
+impl BoundedLogEventBuffer {
+    /// Creates a new bounded log event buffer.
+    pub(super) fn new(max_bytes: usize) -> Self {
+        Self {
+            max_bytes: max_bytes.max(1),
+            total_bytes: 0,
+            events: VecDeque::new(),
+        }
+    }
+
+    fn evict_front_bytes(&mut self, mut bytes_to_evict: usize) {
+        while bytes_to_evict > 0 {
+            let Some(front) = self.events.front_mut() else {
+                break;
+            };
+            let front_len = front.bytes.len();
+            if front_len <= bytes_to_evict {
+                bytes_to_evict = bytes_to_evict.saturating_sub(front_len);
+                self.total_bytes = self.total_bytes.saturating_sub(front_len);
+                let _ = self.events.pop_front();
+                continue;
+            }
+
+            let trimmed = front.bytes.split_off(bytes_to_evict);
+            front.bytes = trimmed;
+            self.total_bytes = self.total_bytes.saturating_sub(bytes_to_evict);
+            bytes_to_evict = 0;
+        }
+    }
+
+    /// Appends one event and evicts oldest bytes when capacity is exceeded.
+    pub(super) fn push(&mut self, mut event: ServiceLogEvent) {
+        if event.bytes.is_empty() {
+            return;
+        }
+        if event.bytes.len() > self.max_bytes {
+            let start = event.bytes.len().saturating_sub(self.max_bytes);
+            event.bytes = event.bytes[start..].to_vec();
+        }
+
+        self.total_bytes = self.total_bytes.saturating_add(event.bytes.len());
+        self.events.push_back(event);
+        if self.total_bytes > self.max_bytes {
+            self.evict_front_bytes(self.total_bytes.saturating_sub(self.max_bytes));
+        }
+    }
+
+    pub(super) fn snapshot(&self) -> Vec<ServiceLogEvent> {
+        self.events.iter().cloned().collect()
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.events.len()
+    }
+}
+
+#[derive(Debug)]
+/// Bounded composite buffer keeping bytes and timestamped events in the same order.
+pub(super) struct CompositeLogBuffer {
+    bytes: BoundedLogBuffer,
+    events: BoundedLogEventBuffer,
+}
+
+impl CompositeLogBuffer {
+    /// Creates a new bounded composite log buffer.
+    pub(super) fn new(max_bytes: usize) -> Self {
+        Self {
+            bytes: BoundedLogBuffer::new(max_bytes),
+            events: BoundedLogEventBuffer::new(max_bytes),
+        }
+    }
+
+    /// Appends one log event to both byte and event rings in one call.
+    pub(super) fn push_event(&mut self, event: ServiceLogEvent) {
+        self.bytes.push(&event.bytes);
+        self.events.push(event);
+    }
+
+    pub(super) fn snapshot(&self) -> (Vec<u8>, Vec<ServiceLogEvent>) {
+        (self.bytes.snapshot(), self.events.snapshot())
+    }
+}
+
 /// Drains one child output stream into bounded in-memory log buffer.
 ///
 /// Concurrency: runs as a detached task per stream.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_log_drain<R>(
     mut reader: R,
     buffer: Arc<Mutex<BoundedLogBuffer>>,
-    composite_buffer: Arc<Mutex<BoundedLogBuffer>>,
+    composite_buffer: Arc<Mutex<CompositeLogBuffer>>,
     sender: broadcast::Sender<ServiceLogEvent>,
     service_name: String,
     stream_name: &'static str,
@@ -78,16 +175,28 @@ pub(super) fn spawn_log_drain<R>(
                 let mut guard = buffer.lock().await;
                 guard.push(&chunk[..read]);
             }
-            {
-                let mut guard = composite_buffer.lock().await;
-                guard.push(&chunk[..read]);
-            }
-            let _ = sender.send(ServiceLogEvent {
+            let timestamp_unix_ms = unix_timestamp_ms_now();
+            let event = ServiceLogEvent {
                 stream,
                 bytes: chunk[..read].to_vec(),
-            });
+                timestamp_unix_ms,
+            };
+            {
+                let mut guard = composite_buffer.lock().await;
+                guard.push_event(event.clone());
+            }
+            let _ = sender.send(event);
         }
     });
+}
+
+fn unix_timestamp_ms_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 pub(super) fn tail_lines_from_bytes(bytes: &[u8], tail_lines: u32) -> Vec<u8> {
@@ -122,7 +231,7 @@ mod tests {
         let stream_bytes = b"hello-from-wasm\nline-2\n";
         let expected = stream_bytes.to_vec();
         let per_stream = Arc::new(Mutex::new(BoundedLogBuffer::new(256)));
-        let composite = Arc::new(Mutex::new(BoundedLogBuffer::new(256)));
+        let composite = Arc::new(Mutex::new(CompositeLogBuffer::new(256)));
         let (sender, _) = broadcast::channel(16);
         let mut receiver = sender.subscribe();
         let (mut writer, reader) = duplex(256);
@@ -152,6 +261,7 @@ mod tests {
             match tokio::time::timeout(Duration::from_millis(100), receiver.recv()).await {
                 Ok(Ok(event)) => {
                     assert_eq!(event.stream, ServiceLogStream::Stdout);
+                    assert!(event.timestamp_unix_ms > 0);
                     received_bytes.extend_from_slice(&event.bytes);
                 }
                 Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
@@ -164,8 +274,12 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let per_stream_snapshot = { per_stream.lock().await.snapshot() };
-                let composite_snapshot = { composite.lock().await.snapshot() };
-                if per_stream_snapshot == expected && composite_snapshot == expected {
+                let (composite_snapshot, composite_events_snapshot) =
+                    { composite.lock().await.snapshot() };
+                if per_stream_snapshot == expected
+                    && composite_snapshot == expected
+                    && !composite_events_snapshot.is_empty()
+                {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -173,5 +287,59 @@ mod tests {
         })
         .await
         .expect("log drain should publish snapshots");
+    }
+
+    #[test]
+    fn composite_log_buffer_snapshot_matches_joined_event_bytes() {
+        let mut buffer = CompositeLogBuffer::new(8);
+        buffer.push_event(ServiceLogEvent {
+            stream: ServiceLogStream::Stdout,
+            bytes: b"ab".to_vec(),
+            timestamp_unix_ms: 1,
+        });
+        buffer.push_event(ServiceLogEvent {
+            stream: ServiceLogStream::Stderr,
+            bytes: b"cd".to_vec(),
+            timestamp_unix_ms: 2,
+        });
+
+        let (snapshot_bytes, snapshot_events) = buffer.snapshot();
+        assert_eq!(
+            snapshot_events
+                .iter()
+                .flat_map(|event| event.bytes.clone())
+                .collect::<Vec<_>>(),
+            snapshot_bytes
+        );
+    }
+
+    #[test]
+    fn bounded_log_event_buffer_keeps_latest_bytes_only() {
+        let mut buffer = BoundedLogEventBuffer::new(5);
+        buffer.push(ServiceLogEvent {
+            stream: ServiceLogStream::Stdout,
+            bytes: b"abc".to_vec(),
+            timestamp_unix_ms: 1,
+        });
+        buffer.push(ServiceLogEvent {
+            stream: ServiceLogStream::Stdout,
+            bytes: b"def".to_vec(),
+            timestamp_unix_ms: 2,
+        });
+
+        let snapshot = buffer.snapshot();
+        let total_bytes = snapshot
+            .iter()
+            .map(|event| event.bytes.len())
+            .sum::<usize>();
+        assert!(total_bytes <= 5);
+        assert_eq!(
+            snapshot
+                .iter()
+                .flat_map(|event| event.bytes.clone())
+                .collect::<Vec<_>>(),
+            b"bcdef"
+        );
+        assert_eq!(buffer.len(), 2);
     }
 }

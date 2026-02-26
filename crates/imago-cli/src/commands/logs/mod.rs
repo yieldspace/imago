@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
+use chrono::{DateTime, Local, Utc};
 use imago_protocol::{
     LogChunk, LogEnd, LogRequest, LogStreamKind, MessageType, ProtocolEnvelope, StructuredError,
     from_cbor,
@@ -24,7 +25,7 @@ use crate::{
             format_local_context_line, format_peer_context_line, negotiate_hello_with_features,
         },
         deploy,
-        error_diagnostics::format_command_error,
+        error_diagnostics::{format_command_error, summarize_command_failure},
         ui,
     },
 };
@@ -32,14 +33,41 @@ use crate::{
 const NON_FOLLOW_IDLE_TIMEOUT_SECS: u64 = 2;
 const POST_END_DRAIN_TIMEOUT_MS: u64 = 200;
 const LOGS_HELLO_REQUIRED_FEATURES: [&str; 1] = ["logs.request"];
+const LOGS_HELLO_REQUIRED_FEATURES_WITH_TIMESTAMP: [&str; 2] =
+    ["logs.request", "logs.chunk.timestamp"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogsTermination {
+    Completed,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LogsSummary {
+    name: String,
+    target_name: String,
+    follow: bool,
+    tail: u32,
+    with_timestamp: bool,
+    termination: LogsTermination,
+}
 
 fn logs_service_for_context(name: Option<&str>) -> &str {
     name.unwrap_or("<all-running>")
 }
 
+fn max_name_width_from_ack_names(names: &[String]) -> usize {
+    names
+        .iter()
+        .map(|name| name.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Default)]
 struct PrefixRenderState {
     streams: Vec<StreamPrefixState>,
+    max_name_width_chars: usize,
 }
 
 #[derive(Debug)]
@@ -50,6 +78,24 @@ struct StreamPrefixState {
 }
 
 impl PrefixRenderState {
+    fn with_initial_name_width(initial_name_width_chars: usize) -> Self {
+        Self {
+            streams: Vec::new(),
+            max_name_width_chars: initial_name_width_chars,
+        }
+    }
+
+    fn observe_name(&mut self, name: &str) {
+        let observed = name.chars().count();
+        if observed > self.max_name_width_chars {
+            self.max_name_width_chars = observed;
+        }
+    }
+
+    fn current_name_width(&self) -> usize {
+        self.max_name_width_chars.max(1)
+    }
+
     fn at_line_start(&self, name: &str, stream_kind: LogStreamKind) -> bool {
         self.streams
             .iter()
@@ -115,12 +161,9 @@ pub(crate) async fn run_with_project_root_and_target_override(
     let started_at = Instant::now();
     ui::command_start("logs", "starting");
     match run_async_with_target_override(args, project_root, target_override).await {
-        Ok(()) => {
-            ui::command_finish("logs", true, "completed");
-            CommandResult::success("logs", started_at)
-        }
+        Ok(summary) => build_logs_success_result(summary, started_at),
         Err(err) => {
-            let summary_message = err.to_string();
+            let summary_message = summarize_command_failure("logs", &err);
             let diagnostic_message = format_logs_error_message(&err);
             ui::command_finish("logs", false, &summary_message);
             CommandResult::failure("logs", started_at, diagnostic_message)
@@ -132,17 +175,54 @@ fn format_logs_error_message(err: &anyhow::Error) -> String {
     format_command_error("logs", err)
 }
 
+fn build_logs_success_result(summary: LogsSummary, started_at: Instant) -> CommandResult {
+    let mut result = CommandResult::success("logs", started_at);
+    result.meta.insert("name".to_string(), summary.name);
+    result
+        .meta
+        .insert("target".to_string(), summary.target_name);
+    result
+        .meta
+        .insert("follow".to_string(), summary.follow.to_string());
+    result
+        .meta
+        .insert("tail".to_string(), summary.tail.to_string());
+    result.meta.insert(
+        "with_timestamp".to_string(),
+        summary.with_timestamp.to_string(),
+    );
+    result.meta.insert(
+        "termination".to_string(),
+        match summary.termination {
+            LogsTermination::Completed => "completed",
+            LogsTermination::Interrupted => "interrupted",
+        }
+        .to_string(),
+    );
+    result.meta.insert(
+        "_suppress_success_meta_output".to_string(),
+        "true".to_string(),
+    );
+    result
+}
+
 async fn run_async_with_target_override(
     args: LogsArgs,
     project_root: &Path,
     target_override: Option<&build::TargetConfig>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<LogsSummary> {
+    let LogsArgs {
+        name,
+        follow,
+        tail,
+        with_timestamp,
+    } = args;
     let target_name = if target_override.is_some() {
         "override".to_string()
     } else {
         build::default_target_name().to_string()
     };
-    let service_name = logs_service_for_context(args.name.as_deref());
+    let service_name = logs_service_for_context(name.as_deref());
     ui::command_stage("logs", "load-config", "loading target configuration");
     let target = match target_override {
         Some(target) => target.clone(),
@@ -164,12 +244,14 @@ async fn run_async_with_target_override(
     ui::command_stage("logs", "connect", "connecting target");
     let connected = deploy::connect_target(&target).await?;
     ui::command_stage("logs", "hello", "negotiating hello");
-    let hello = negotiate_hello_with_features(
-        &connected.session,
-        Uuid::new_v4(),
-        &LOGS_HELLO_REQUIRED_FEATURES,
-    )
-    .await?;
+    let required_features = if with_timestamp {
+        LOGS_HELLO_REQUIRED_FEATURES_WITH_TIMESTAMP.as_slice()
+    } else {
+        LOGS_HELLO_REQUIRED_FEATURES.as_slice()
+    };
+    let hello =
+        negotiate_hello_with_features(&connected.session, Uuid::new_v4(), required_features)
+            .await?;
     ui::command_info(
         "logs",
         &format_peer_context_line(
@@ -186,9 +268,10 @@ async fn run_async_with_target_override(
         request_id,
         correlation_id,
         &LogRequest {
-            name: args.name.clone(),
-            follow: args.follow,
-            tail_lines: args.tail,
+            name: name.clone(),
+            follow,
+            tail_lines: tail,
+            with_timestamp,
         },
     )?;
     let ack: LogsRequestAck =
@@ -199,15 +282,26 @@ async fn run_async_with_target_override(
     if ack.names.is_empty() {
         return Err(anyhow!("logs.request returned no target service"));
     }
+    ui::command_clear("logs");
 
-    receive_logs_datagrams(
+    let initial_name_width_chars = max_name_width_from_ack_names(&ack.names);
+    let termination = receive_logs_datagrams(
         &connected.session,
         request_id,
-        args.follow,
-        args.name.is_none(),
+        follow,
+        name.is_none(),
+        with_timestamp,
+        initial_name_width_chars,
     )
     .await?;
-    Ok(())
+    Ok(LogsSummary {
+        name: name.unwrap_or_else(|| "<all-running>".to_string()),
+        target_name,
+        follow,
+        tail,
+        with_timestamp,
+        termination,
+    })
 }
 
 async fn receive_logs_datagrams(
@@ -215,10 +309,12 @@ async fn receive_logs_datagrams(
     request_id: Uuid,
     follow: bool,
     all_processes: bool,
-) -> anyhow::Result<()> {
+    with_timestamp: bool,
+    initial_name_width_chars: usize,
+) -> anyhow::Result<LogsTermination> {
     let mut expected_seq: Option<u64> = None;
     let mut truncated_warned = false;
-    let mut prefix_state = PrefixRenderState::default();
+    let mut prefix_state = PrefixRenderState::with_initial_name_width(initial_name_width_chars);
 
     'stream: loop {
         let datagram_result = if follow {
@@ -244,7 +340,7 @@ async fn receive_logs_datagrams(
         };
 
         let Some(datagram_result) = datagram_result else {
-            break 'stream Ok(());
+            break 'stream Ok(LogsTermination::Interrupted);
         };
         let datagram = match datagram_result {
             Ok(datagram) => datagram,
@@ -262,7 +358,9 @@ async fn receive_logs_datagrams(
                     continue;
                 }
                 warn_if_seq_gap(&mut expected_seq, chunk.seq, &mut truncated_warned);
-                if let Err(err) = render_chunk(&chunk, all_processes, &mut prefix_state) {
+                if let Err(err) =
+                    render_chunk(&chunk, all_processes, with_timestamp, &mut prefix_state)
+                {
                     break 'stream Err(err);
                 }
             }
@@ -281,6 +379,7 @@ async fn receive_logs_datagrams(
                     session,
                     request_id,
                     all_processes,
+                    with_timestamp,
                     &mut prefix_state,
                     end.seq,
                 )
@@ -295,7 +394,7 @@ async fn receive_logs_datagrams(
                     &delayed_chunk_seqs,
                     &mut truncated_warned,
                 );
-                break 'stream Ok(());
+                break 'stream Ok(LogsTermination::Completed);
             }
         }
     }
@@ -305,6 +404,7 @@ async fn drain_post_end_chunks(
     session: &Session,
     request_id: Uuid,
     all_processes: bool,
+    with_timestamp: bool,
     prefix_state: &mut PrefixRenderState,
     end_seq: u64,
 ) -> anyhow::Result<Vec<u64>> {
@@ -330,7 +430,7 @@ async fn drain_post_end_chunks(
         if chunk.seq >= end_seq {
             continue;
         }
-        render_chunk(&chunk, all_processes, prefix_state)?;
+        render_chunk(&chunk, all_processes, with_timestamp, prefix_state)?;
         delayed_chunk_seqs.push(chunk.seq);
     }
 
@@ -404,21 +504,24 @@ fn apply_end_seq_after_drain(
 fn render_chunk(
     chunk: &LogChunk,
     all_processes: bool,
+    with_timestamp: bool,
     prefix_state: &mut PrefixRenderState,
 ) -> anyhow::Result<()> {
     if chunk.bytes.is_empty() {
         return Ok(());
     }
 
-    render_text_chunk(chunk, all_processes, prefix_state)
+    render_text_chunk(chunk, all_processes, with_timestamp, prefix_state)
 }
 
 fn render_text_chunk(
     chunk: &LogChunk,
     all_processes: bool,
+    with_timestamp: bool,
     prefix_state: &mut PrefixRenderState,
 ) -> anyhow::Result<()> {
-    let rendered = renderable_chunk_bytes(chunk, all_processes, prefix_state);
+    let timestamp = format_chunk_timestamp(chunk, with_timestamp)?;
+    let rendered = renderable_chunk_bytes(chunk, all_processes, timestamp.as_deref(), prefix_state);
     if should_write_text_chunk_to_stderr(chunk, all_processes) {
         let mut stderr = io::stderr().lock();
         stderr
@@ -441,28 +544,39 @@ fn should_write_text_chunk_to_stderr(chunk: &LogChunk, all_processes: bool) -> b
 fn renderable_chunk_bytes<'a>(
     chunk: &'a LogChunk,
     all_processes: bool,
+    timestamp: Option<&str>,
     prefix_state: &mut PrefixRenderState,
 ) -> Cow<'a, [u8]> {
     let _ = all_processes;
+    prefix_state.observe_name(&chunk.name);
     let at_line_start = prefix_state.at_line_start(&chunk.name, chunk.stream_kind);
-    let (rendered, next_at_line_start) =
-        format_structured_bytes(&chunk.name, chunk.stream_kind, &chunk.bytes, at_line_start);
+    let (rendered, next_at_line_start) = format_structured_bytes(
+        &chunk.name,
+        &chunk.bytes,
+        timestamp,
+        at_line_start,
+        prefix_state.current_name_width(),
+    );
     prefix_state.set_at_line_start(&chunk.name, chunk.stream_kind, next_at_line_start);
     Cow::Owned(rendered)
 }
 
 fn format_structured_bytes(
     name: &str,
-    stream_kind: LogStreamKind,
     bytes: &[u8],
+    timestamp: Option<&str>,
     mut at_line_start: bool,
+    name_width_chars: usize,
 ) -> (Vec<u8>, bool) {
     let mut out = Vec::new();
 
     let mut segment_start = 0usize;
     while segment_start < bytes.len() {
         if at_line_start {
-            let prefix = format!("{} {} | ", name, stream_kind_label(stream_kind));
+            let prefix = match timestamp {
+                Some(timestamp) => format!("{name:<name_width_chars$} | {timestamp} "),
+                None => format!("{name:<name_width_chars$} | "),
+            };
             let prefix_bytes = prefix.as_bytes();
             out.reserve(bytes.len().saturating_add(prefix_bytes.len()));
             out.extend_from_slice(prefix_bytes);
@@ -489,12 +603,25 @@ fn format_structured_bytes(
     (out, at_line_start)
 }
 
-fn stream_kind_label(stream_kind: LogStreamKind) -> &'static str {
-    match stream_kind {
-        LogStreamKind::Stdout => "stdout",
-        LogStreamKind::Stderr => "stderr",
-        LogStreamKind::Composite => "composite",
+fn format_chunk_timestamp(
+    chunk: &LogChunk,
+    with_timestamp: bool,
+) -> anyhow::Result<Option<String>> {
+    if !with_timestamp {
+        return Ok(None);
     }
+
+    let timestamp_unix_ms = chunk
+        .timestamp_unix_ms
+        .ok_or_else(|| anyhow!("logs.chunk is missing timestamp_unix_ms"))?;
+    format_timestamp_rfc3339_local(timestamp_unix_ms).map(Some)
+}
+
+fn format_timestamp_rfc3339_local(timestamp_unix_ms: u64) -> anyhow::Result<String> {
+    let millis = i64::try_from(timestamp_unix_ms).context("timestamp_unix_ms is out of range")?;
+    let utc = DateTime::<Utc>::from_timestamp_millis(millis)
+        .ok_or_else(|| anyhow!("timestamp_unix_ms is invalid"))?;
+    Ok(utc.with_timezone(&Local).to_rfc3339())
 }
 
 #[cfg(test)]
@@ -545,11 +672,10 @@ mod tests {
 
     #[test]
     fn format_structured_bytes_adds_prefix_for_each_newline_terminated_line() {
-        let (rendered, at_line_start) =
-            format_structured_bytes("svc-a", LogStreamKind::Stdout, b"a\nb\n", true);
+        let (rendered, at_line_start) = format_structured_bytes("svc-a", b"a\nb\n", None, true, 5);
         let rendered_text = String::from_utf8_lossy(&rendered);
-        assert!(rendered_text.contains("svc-a stdout | a\n"));
-        assert!(rendered_text.contains("svc-a stdout | b\n"));
+        assert!(rendered_text.contains("svc-a | a\n"));
+        assert!(rendered_text.contains("svc-a | b\n"));
         assert!(at_line_start);
     }
 
@@ -564,6 +690,7 @@ mod tests {
             stream_kind: LogStreamKind::Stdout,
             bytes: b"hel".to_vec(),
             is_last: false,
+            timestamp_unix_ms: None,
         };
         let second = LogChunk {
             request_id,
@@ -572,13 +699,15 @@ mod tests {
             stream_kind: LogStreamKind::Stdout,
             bytes: b"lo\n".to_vec(),
             is_last: false,
+            timestamp_unix_ms: None,
         };
 
-        let first_rendered = renderable_chunk_bytes(&first, true, &mut prefix_state).into_owned();
+        let first_rendered =
+            renderable_chunk_bytes(&first, true, None, &mut prefix_state).into_owned();
         let first_text = String::from_utf8_lossy(&first_rendered);
-        assert!(first_text.contains("svc-a stdout | hel"));
+        assert!(first_text.contains("svc-a | hel"));
         assert_eq!(
-            renderable_chunk_bytes(&second, true, &mut prefix_state).as_ref(),
+            renderable_chunk_bytes(&second, true, None, &mut prefix_state).as_ref(),
             b"lo\n"
         );
     }
@@ -594,6 +723,7 @@ mod tests {
             stream_kind: LogStreamKind::Stdout,
             bytes: vec![0xe3, 0x81],
             is_last: false,
+            timestamp_unix_ms: None,
         };
         let second = LogChunk {
             request_id,
@@ -602,16 +732,100 @@ mod tests {
             stream_kind: LogStreamKind::Stdout,
             bytes: vec![0x82],
             is_last: false,
+            timestamp_unix_ms: None,
         };
 
-        let first_rendered = renderable_chunk_bytes(&first, false, &mut prefix_state).into_owned();
+        let first_rendered =
+            renderable_chunk_bytes(&first, false, None, &mut prefix_state).into_owned();
         let first_prefix_text = String::from_utf8_lossy(&first_rendered);
-        assert!(first_prefix_text.contains("svc-a stdout | "));
+        assert!(first_prefix_text.contains("svc-a | "));
         assert!(first_rendered.ends_with(&[0xe3, 0x81]));
         assert_eq!(
-            renderable_chunk_bytes(&second, false, &mut prefix_state).as_ref(),
+            renderable_chunk_bytes(&second, false, None, &mut prefix_state).as_ref(),
             &[0x82]
         );
+    }
+
+    #[test]
+    fn format_structured_bytes_aligns_pipe_with_given_width() {
+        let (short, _) = format_structured_bytes("a", b"x\n", None, true, 8);
+        let (long, _) = format_structured_bytes("longname", b"y\n", None, true, 8);
+        let short_pipe = short
+            .iter()
+            .position(|byte| *byte == b'|')
+            .expect("short output should contain pipe");
+        let long_pipe = long
+            .iter()
+            .position(|byte| *byte == b'|')
+            .expect("long output should contain pipe");
+
+        assert_eq!(short_pipe, long_pipe);
+    }
+
+    #[test]
+    fn renderable_chunk_bytes_expands_alignment_width_for_new_longer_name() {
+        let request_id = Uuid::new_v4();
+        let mut prefix_state = PrefixRenderState::with_initial_name_width(3);
+        let short_first = LogChunk {
+            request_id,
+            seq: 0,
+            name: "api".to_string(),
+            stream_kind: LogStreamKind::Stdout,
+            bytes: b"one\n".to_vec(),
+            is_last: false,
+            timestamp_unix_ms: None,
+        };
+        let longer = LogChunk {
+            request_id,
+            seq: 1,
+            name: "longer-name".to_string(),
+            stream_kind: LogStreamKind::Stdout,
+            bytes: b"two\n".to_vec(),
+            is_last: false,
+            timestamp_unix_ms: None,
+        };
+        let short_after = LogChunk {
+            request_id,
+            seq: 2,
+            name: "api".to_string(),
+            stream_kind: LogStreamKind::Stdout,
+            bytes: b"three\n".to_vec(),
+            is_last: false,
+            timestamp_unix_ms: None,
+        };
+
+        let first_rendered =
+            renderable_chunk_bytes(&short_first, false, None, &mut prefix_state).into_owned();
+        let longer_rendered =
+            renderable_chunk_bytes(&longer, false, None, &mut prefix_state).into_owned();
+        let after_rendered =
+            renderable_chunk_bytes(&short_after, false, None, &mut prefix_state).into_owned();
+
+        let first_pipe = first_rendered
+            .iter()
+            .position(|byte| *byte == b'|')
+            .expect("first output should contain pipe");
+        let longer_pipe = longer_rendered
+            .iter()
+            .position(|byte| *byte == b'|')
+            .expect("longer output should contain pipe");
+        let after_pipe = after_rendered
+            .iter()
+            .position(|byte| *byte == b'|')
+            .expect("after output should contain pipe");
+
+        assert!(longer_pipe > first_pipe);
+        assert_eq!(after_pipe, longer_pipe);
+    }
+
+    #[test]
+    fn max_name_width_from_ack_names_uses_longest_name() {
+        let width = max_name_width_from_ack_names(&[
+            "api".to_string(),
+            "service-long-name".to_string(),
+            "db".to_string(),
+        ]);
+        assert_eq!(width, "service-long-name".chars().count());
     }
 
     #[test]
@@ -628,6 +842,7 @@ mod tests {
                 stream_kind: LogStreamKind::Stdout,
                 bytes: b"hello".to_vec(),
                 is_last: false,
+                timestamp_unix_ms: None,
             },
         );
         let datagram = to_cbor(&envelope).expect("encoding should succeed");
@@ -651,6 +866,7 @@ mod tests {
             stream_kind: LogStreamKind::Stderr,
             bytes: b"oops".to_vec(),
             is_last: false,
+            timestamp_unix_ms: None,
         };
         assert!(should_write_text_chunk_to_stderr(&chunk, false));
         assert!(!should_write_text_chunk_to_stderr(&chunk, true));
@@ -665,6 +881,7 @@ mod tests {
             stream_kind: LogStreamKind::Stdout,
             bytes: b"ok".to_vec(),
             is_last: false,
+            timestamp_unix_ms: None,
         };
         assert!(!should_write_text_chunk_to_stderr(&chunk, false));
         assert!(!should_write_text_chunk_to_stderr(&chunk, true));
@@ -673,6 +890,10 @@ mod tests {
     #[test]
     fn logs_hello_required_features_are_fixed() {
         assert_eq!(LOGS_HELLO_REQUIRED_FEATURES, ["logs.request"]);
+        assert_eq!(
+            LOGS_HELLO_REQUIRED_FEATURES_WITH_TIMESTAMP,
+            ["logs.request", "logs.chunk.timestamp"]
+        );
     }
 
     #[test]
@@ -685,8 +906,72 @@ mod tests {
     fn logs_error_message_uses_diagnostics_sections() {
         let err = anyhow!("failed to load target configuration");
         let message = format_logs_error_message(&err);
-        assert!(message.contains("causes:"));
-        assert!(message.contains("hints:"));
+        assert!(message.contains("caused by:"));
+        assert!(message.contains("hint:"));
         assert!(message.contains("target settings"));
+    }
+
+    #[test]
+    fn logs_success_result_always_suppresses_finalize_output() {
+        let result = build_logs_success_result(
+            LogsSummary {
+                name: "<all-running>".to_string(),
+                target_name: "default".to_string(),
+                follow: false,
+                tail: 200,
+                with_timestamp: false,
+                termination: LogsTermination::Completed,
+            },
+            Instant::now(),
+        );
+
+        assert_eq!(
+            result
+                .meta
+                .get("_suppress_success_meta_output")
+                .map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn format_structured_bytes_includes_timestamp_prefix_when_present() {
+        let (rendered, at_line_start) = format_structured_bytes(
+            "svc-a",
+            b"hello\n",
+            Some("2026-02-26T12:34:56+09:00"),
+            true,
+            5,
+        );
+        let rendered_text = String::from_utf8_lossy(&rendered);
+        assert!(rendered_text.starts_with("svc-a | 2026-02-26T12:34:56+09:00 hello\n"));
+        assert!(at_line_start);
+    }
+
+    #[test]
+    fn format_chunk_timestamp_requires_timestamp_when_enabled() {
+        let chunk = LogChunk {
+            request_id: Uuid::new_v4(),
+            seq: 0,
+            name: "svc-a".to_string(),
+            stream_kind: LogStreamKind::Stdout,
+            bytes: b"ok".to_vec(),
+            is_last: false,
+            timestamp_unix_ms: None,
+        };
+        let err = format_chunk_timestamp(&chunk, true).expect_err("missing timestamp should fail");
+        assert!(
+            err.to_string().contains("missing timestamp_unix_ms"),
+            "error should mention missing timestamp field"
+        );
+    }
+
+    #[test]
+    fn format_timestamp_rfc3339_local_emits_parseable_rfc3339() {
+        let rendered =
+            format_timestamp_rfc3339_local(1_739_700_000_123).expect("format should succeed");
+        let parsed =
+            chrono::DateTime::parse_from_rfc3339(&rendered).expect("timestamp should be RFC3339");
+        assert_eq!(parsed.timestamp_millis(), 1_739_700_000_123);
     }
 }
