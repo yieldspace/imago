@@ -2536,6 +2536,7 @@ name = "imagod-runtime-internal"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "imagod-common",
  "imagod-ipc",
  "tokio",
@@ -2553,6 +2554,7 @@ dependencies = [
  "imagod-common",
  "imagod-ipc",
  "imagod-runtime-internal",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

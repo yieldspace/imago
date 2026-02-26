@@ -46,6 +46,19 @@ flowchart TD
 4. Runner executes the component and reports control-plane events.
 5. Logs, status, and RPC invocations are served through protocol APIs.
 
+## Performance Reproduction
+
+Issue #227 (`runtime response body copy amplification`) has a reproducible perf check:
+
+```bash
+cargo test -p imagod-runtime-wasmtime http_response_perf_compare -- --ignored --nocapture --test-threads=1
+```
+
+This ignored test compares the legacy (`collect -> to_bytes -> to_vec`) path and the optimized frame-by-frame path with a fixed `32 MiB` single-frame workload (`64` iterations), and prints:
+
+- `p99` latency in microseconds
+- peak RSS in bytes (or `N/A` when unavailable on the platform)
+
 ## Source References
 
 - Build/manifest: [`crates/imago-cli/src/commands/build/mod.rs`](../crates/imago-cli/src/commands/build/mod.rs)
