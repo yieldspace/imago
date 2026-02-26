@@ -637,15 +637,12 @@ fn dispatch_http_work_item(
 }
 
 fn http_request_queue_capacity(http_worker_count: u32, http_worker_queue_capacity: u32) -> usize {
-    let worker_count = usize::try_from(http_worker_count)
-        .ok()
-        .filter(|v| *v > 0)
-        .unwrap_or(1);
+    let _ = http_worker_count;
     let queue_capacity = usize::try_from(http_worker_queue_capacity)
         .ok()
         .filter(|v| *v > 0)
         .unwrap_or(HTTP_REQUEST_QUEUE_CAPACITY);
-    worker_count.saturating_mul(queue_capacity).max(1)
+    queue_capacity.max(1)
 }
 
 #[async_trait]
@@ -901,6 +898,16 @@ mod tests {
             deps: BTreeMap::new(),
             wasi: BTreeMap::from([("*".to_string(), vec!["*".to_string()])]),
         }
+    }
+
+    #[test]
+    fn http_request_queue_capacity_uses_configured_queue_capacity_only() {
+        assert_eq!(http_request_queue_capacity(1, 4), 4);
+        assert_eq!(http_request_queue_capacity(4, 4), 4);
+        assert_eq!(
+            http_request_queue_capacity(0, 0),
+            HTTP_REQUEST_QUEUE_CAPACITY
+        );
     }
 
     struct WasiHttpFixture {

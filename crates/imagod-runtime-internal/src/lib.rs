@@ -53,9 +53,9 @@ pub struct RuntimeRunRequest {
     pub shutdown: watch::Receiver<bool>,
     /// Epoch tick interval used for interruption-aware runtimes.
     pub epoch_tick_interval_ms: u64,
-    /// Number of HTTP workers available to runtime ingress.
+    /// Compatibility worker-count value forwarded from manager configuration.
     pub http_worker_count: u32,
-    /// Queue capacity for each HTTP worker.
+    /// Effective HTTP request queue capacity for ingress dispatch.
     pub http_worker_queue_capacity: u32,
     /// Optional signal sent when HTTP runtime initialization has completed.
     pub http_ready_tx: Option<oneshot::Sender<()>>,

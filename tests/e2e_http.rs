@@ -1,8 +1,11 @@
 #[path = "e2e_helper/mod.rs"]
 mod e2e_helper;
 
+use e2e_helper::http::{http_post, parse_http_status};
 use e2e_helper::{AppKind, CmdOutput, Scenario, TestResult, WasmArtifact};
 use std::net::TcpListener;
+use std::sync::{Arc, Barrier, mpsc};
+use std::thread;
 use std::time::Duration;
 
 #[test]
@@ -15,7 +18,10 @@ fn e2e_http_deploy_and_respond() -> TestResult {
     let http_port = pick_free_port()?;
     let service = scenario.add_service(
         "e2e-http-svc",
-        AppKind::Http { port: http_port },
+        AppKind::Http {
+            port: http_port,
+            max_body_bytes: None,
+        },
         "default",
         WasmArtifact::Http,
     )?;
@@ -37,6 +43,81 @@ fn e2e_http_deploy_and_respond() -> TestResult {
     assert!(
         response_v2.contains("\r\n\r\n"),
         "http v2 response body section was not present: {response_v2}"
+    );
+
+    let _ = service.stop(&scenario, "default");
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn e2e_http_large_body_burst_returns_busy_when_queue_budget_is_exhausted() -> TestResult {
+    let mut scenario = Scenario::new("e2e-http-burst")?;
+    let _default = scenario.cluster().add_node("default")?;
+    scenario.cluster().start_all()?;
+
+    let http_port = pick_free_port()?;
+    let service = scenario.add_service(
+        "e2e-http-burst-svc",
+        AppKind::Http {
+            port: http_port,
+            max_body_bytes: Some(64 * 1024 * 1024),
+        },
+        "default",
+        WasmArtifact::HttpSlow,
+    )?;
+
+    let deploy = service.deploy(&scenario, "default")?;
+    assert_command_completed("http burst deploy", &deploy)?;
+
+    let burst_count = 12usize;
+    let start_barrier = Arc::new(Barrier::new(burst_count));
+    let payload = Arc::new(vec![b'a'; 8 * 1024 * 1024]);
+    let (result_tx, result_rx) = mpsc::channel::<TestResult<u16>>();
+    let mut workers = Vec::with_capacity(burst_count);
+
+    for _ in 0..burst_count {
+        let start_barrier = start_barrier.clone();
+        let payload = payload.clone();
+        let result_tx = result_tx.clone();
+        workers.push(thread::spawn(move || {
+            start_barrier.wait();
+            let status = http_post(http_port, payload.as_slice()).and_then(|response| {
+                parse_http_status(&response)
+                    .ok_or_else(|| anyhow::anyhow!("failed to parse status line: {response}"))
+            });
+            let _ = result_tx.send(status);
+        }));
+    }
+    drop(result_tx);
+
+    for worker in workers {
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("burst worker thread panicked"))?;
+    }
+
+    let mut has_ok = false;
+    let mut has_busy = false;
+    let mut statuses = Vec::new();
+    for status in result_rx {
+        let status = status?;
+        statuses.push(status);
+        if status == 200 {
+            has_ok = true;
+        }
+        if status == 503 {
+            has_busy = true;
+        }
+    }
+
+    assert!(
+        has_ok,
+        "expected at least one successful response, got statuses={statuses:?}"
+    );
+    assert!(
+        has_busy,
+        "expected at least one busy response, got statuses={statuses:?}"
     );
 
     let _ = service.stop(&scenario, "default");

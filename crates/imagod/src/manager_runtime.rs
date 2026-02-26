@@ -44,7 +44,8 @@ pub(crate) async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyh
         config.runtime.epoch_tick_interval_ms,
         &config_path,
     )
-    .map_err(anyhow::Error::new)?;
+    .map_err(anyhow::Error::new)?
+    .with_http_queue_memory_budget_bytes(config.runtime.http_queue_memory_budget_bytes);
     let orchestrator = Orchestrator::new(&config.storage_root, artifacts.clone(), supervisor);
     let mut server = build_server(&config).map_err(anyhow::Error::new)?;
 
