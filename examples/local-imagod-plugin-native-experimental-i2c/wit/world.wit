@@ -1,0 +1,7 @@
+package example:local-imagod-plugin-native-experimental-i2c;
+
+world plugin-imports {
+    import imago:experimental-i2c/provider@0.1.0;
+    import imago:experimental-i2c/delay@0.1.0;
+    import imago:experimental-i2c/i2c@0.1.0;
+}

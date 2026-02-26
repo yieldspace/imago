@@ -1,0 +1,16 @@
+[package]
+name = "imago-plugin-imago-experimental-i2c"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+imago-plugin-macros = { workspace = true }
+imagod-runtime-wasmtime = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time"] }
+wasmtime = { workspace = true, features = ["component-model"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+embedded-hal = { workspace = true }
+linux-embedded-hal = { workspace = true }
