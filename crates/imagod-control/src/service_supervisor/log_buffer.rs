@@ -113,6 +113,33 @@ impl BoundedLogEventBuffer {
     }
 }
 
+#[derive(Debug)]
+/// Bounded composite buffer keeping bytes and timestamped events in the same order.
+pub(super) struct CompositeLogBuffer {
+    bytes: BoundedLogBuffer,
+    events: BoundedLogEventBuffer,
+}
+
+impl CompositeLogBuffer {
+    /// Creates a new bounded composite log buffer.
+    pub(super) fn new(max_bytes: usize) -> Self {
+        Self {
+            bytes: BoundedLogBuffer::new(max_bytes),
+            events: BoundedLogEventBuffer::new(max_bytes),
+        }
+    }
+
+    /// Appends one log event to both byte and event rings in one call.
+    pub(super) fn push_event(&mut self, event: ServiceLogEvent) {
+        self.bytes.push(&event.bytes);
+        self.events.push(event);
+    }
+
+    pub(super) fn snapshot(&self) -> (Vec<u8>, Vec<ServiceLogEvent>) {
+        (self.bytes.snapshot(), self.events.snapshot())
+    }
+}
+
 /// Drains one child output stream into bounded in-memory log buffer.
 ///
 /// Concurrency: runs as a detached task per stream.
@@ -120,8 +147,7 @@ impl BoundedLogEventBuffer {
 pub(super) fn spawn_log_drain<R>(
     mut reader: R,
     buffer: Arc<Mutex<BoundedLogBuffer>>,
-    composite_buffer: Arc<Mutex<BoundedLogBuffer>>,
-    composite_events: Arc<Mutex<BoundedLogEventBuffer>>,
+    composite_buffer: Arc<Mutex<CompositeLogBuffer>>,
     sender: broadcast::Sender<ServiceLogEvent>,
     service_name: String,
     stream_name: &'static str,
@@ -149,10 +175,6 @@ pub(super) fn spawn_log_drain<R>(
                 let mut guard = buffer.lock().await;
                 guard.push(&chunk[..read]);
             }
-            {
-                let mut guard = composite_buffer.lock().await;
-                guard.push(&chunk[..read]);
-            }
             let timestamp_unix_ms = unix_timestamp_ms_now();
             let event = ServiceLogEvent {
                 stream,
@@ -160,8 +182,8 @@ pub(super) fn spawn_log_drain<R>(
                 timestamp_unix_ms,
             };
             {
-                let mut guard = composite_events.lock().await;
-                guard.push(event.clone());
+                let mut guard = composite_buffer.lock().await;
+                guard.push_event(event.clone());
             }
             let _ = sender.send(event);
         }
@@ -209,8 +231,7 @@ mod tests {
         let stream_bytes = b"hello-from-wasm\nline-2\n";
         let expected = stream_bytes.to_vec();
         let per_stream = Arc::new(Mutex::new(BoundedLogBuffer::new(256)));
-        let composite = Arc::new(Mutex::new(BoundedLogBuffer::new(256)));
-        let composite_events = Arc::new(Mutex::new(BoundedLogEventBuffer::new(256)));
+        let composite = Arc::new(Mutex::new(CompositeLogBuffer::new(256)));
         let (sender, _) = broadcast::channel(16);
         let mut receiver = sender.subscribe();
         let (mut writer, reader) = duplex(256);
@@ -219,7 +240,6 @@ mod tests {
             reader,
             per_stream.clone(),
             composite.clone(),
-            composite_events.clone(),
             sender,
             "svc-test".to_string(),
             "stdout",
@@ -254,8 +274,8 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let per_stream_snapshot = { per_stream.lock().await.snapshot() };
-                let composite_snapshot = { composite.lock().await.snapshot() };
-                let composite_events_snapshot = { composite_events.lock().await.snapshot() };
+                let (composite_snapshot, composite_events_snapshot) =
+                    { composite.lock().await.snapshot() };
                 if per_stream_snapshot == expected
                     && composite_snapshot == expected
                     && !composite_events_snapshot.is_empty()
@@ -267,6 +287,30 @@ mod tests {
         })
         .await
         .expect("log drain should publish snapshots");
+    }
+
+    #[test]
+    fn composite_log_buffer_snapshot_matches_joined_event_bytes() {
+        let mut buffer = CompositeLogBuffer::new(8);
+        buffer.push_event(ServiceLogEvent {
+            stream: ServiceLogStream::Stdout,
+            bytes: b"ab".to_vec(),
+            timestamp_unix_ms: 1,
+        });
+        buffer.push_event(ServiceLogEvent {
+            stream: ServiceLogStream::Stderr,
+            bytes: b"cd".to_vec(),
+            timestamp_unix_ms: 2,
+        });
+
+        let (snapshot_bytes, snapshot_events) = buffer.snapshot();
+        assert_eq!(
+            snapshot_events
+                .iter()
+                .flat_map(|event| event.bytes.clone())
+                .collect::<Vec<_>>(),
+            snapshot_bytes
+        );
     }
 
     #[test]
