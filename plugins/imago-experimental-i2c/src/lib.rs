@@ -210,6 +210,25 @@ fn validate_transaction_len(len: usize) -> Result<(), I2cErrorCode> {
     Ok(())
 }
 
+fn collect_transaction_read_lengths(
+    operations: &[I2cOperation],
+) -> Result<Vec<usize>, I2cErrorCode> {
+    validate_transaction_len(operations.len())?;
+
+    let mut read_lengths = Vec::new();
+    for operation in operations {
+        match operation {
+            I2cOperation::Read(len) => {
+                read_lengths.push(validate_io_len(*len)?);
+            }
+            I2cOperation::Write(data) => {
+                validate_write_len(data.len())?;
+            }
+        }
+    }
+    Ok(read_lengths)
+}
+
 fn unsupported_i2c_error() -> String {
     "unsupported: i2c native backend is available only on Linux".to_string()
 }
@@ -232,6 +251,10 @@ fn map_missing_resource_to_i2c_error(_err: String) -> I2cErrorCode {
 
 fn map_blocking_join_to_i2c_error(_err: tokio::task::JoinError) -> I2cErrorCode {
     I2cErrorCode::Other
+}
+
+fn map_blocking_join_to_string_error(err: tokio::task::JoinError) -> String {
+    format!("blocking task failed: {err}")
 }
 
 fn validate_read_request(address: u16, len: u64) -> Result<(), I2cErrorCode> {
@@ -261,17 +284,7 @@ fn validate_transaction_request(
     operations: &[I2cOperation],
 ) -> Result<(), I2cErrorCode> {
     let _ = validate_address(address)?;
-    validate_transaction_len(operations.len())?;
-    for operation in operations {
-        match operation {
-            I2cOperation::Read(len) => {
-                let _ = validate_io_len(*len)?;
-            }
-            I2cOperation::Write(data) => {
-                validate_write_len(data.len())?;
-            }
-        }
-    }
+    let _ = collect_transaction_read_lengths(operations)?;
     Ok(())
 }
 
@@ -285,14 +298,50 @@ where
         .map_err(map_blocking_join_to_i2c_error)?
 }
 
+async fn run_blocking_string<T, F>(operation: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(map_blocking_join_to_string_error)?
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn map_open_i2c_error(bus: &str, err: impl std::fmt::Display) -> String {
+    format!("failed to open i2c bus '{bus}': {err}")
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn validate_bus_open_with<F, E>(bus: &str, open_fn: F) -> Result<(), String>
+where
+    F: FnOnce(&str) -> Result<(), E>,
+    E: std::fmt::Display,
+{
+    open_fn(bus).map_err(|err| map_open_i2c_error(bus, err))
+}
+
+#[cfg(target_os = "linux")]
+fn validate_bus_open_sync(bus: &str) -> Result<(), String> {
+    use linux_embedded_hal::I2cdev;
+
+    validate_bus_open_with(bus, |path| I2cdev::new(path).map(|_| ()))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn validate_bus_open_sync(_bus: &str) -> Result<(), String> {
+    Err(unsupported_i2c_error())
+}
+
 #[cfg(target_os = "linux")]
 mod linux_backend {
     use embedded_hal::i2c::I2c as _;
     use linux_embedded_hal::I2cdev;
 
     use super::{
-        I2cErrorCode, I2cOperation, MAX_TRANSACTION_OPERATIONS, NoAcknowledgeSource,
-        validate_address, validate_io_len, validate_transaction_len, validate_write_len,
+        I2cErrorCode, I2cOperation, NoAcknowledgeSource, collect_transaction_read_lengths,
+        validate_address, validate_io_len, validate_write_len,
     };
 
     fn map_linux_error(err: impl std::fmt::Display) -> I2cErrorCode {
@@ -356,27 +405,34 @@ mod linux_backend {
     ) -> Result<Vec<Vec<u8>>, I2cErrorCode> {
         let mut dev = I2cdev::new(bus).map_err(map_linux_error)?;
         let address = validate_address(address)?;
-        if operations.len() > MAX_TRANSACTION_OPERATIONS {
-            return Err(I2cErrorCode::Other);
-        }
-        validate_transaction_len(operations.len())?;
+        let read_lengths = collect_transaction_read_lengths(operations)?;
+        let mut read_results = read_lengths
+            .into_iter()
+            .map(|len| vec![0u8; len])
+            .collect::<Vec<_>>();
 
-        let mut read_results = Vec::new();
-        for operation in operations {
-            match operation {
-                I2cOperation::Read(len) => {
-                    let len = validate_io_len(*len)?;
-                    let mut out = vec![0u8; len];
-                    if len > 0 {
-                        dev.read(address, &mut out).map_err(map_linux_error)?;
+        {
+            let mut read_buffers = read_results
+                .iter_mut()
+                .map(|buffer| buffer.as_mut_slice())
+                .collect::<Vec<_>>();
+            let mut read_iter = read_buffers.drain(..);
+            let mut hal_operations = Vec::with_capacity(operations.len());
+
+            for operation in operations {
+                match operation {
+                    I2cOperation::Read(_) => {
+                        let read_buffer = read_iter.next().ok_or(I2cErrorCode::Other)?;
+                        hal_operations.push(embedded_hal::i2c::Operation::Read(read_buffer));
                     }
-                    read_results.push(out);
-                }
-                I2cOperation::Write(data) => {
-                    validate_write_len(data.len())?;
-                    dev.write(address, data).map_err(map_linux_error)?;
+                    I2cOperation::Write(data) => {
+                        hal_operations.push(embedded_hal::i2c::Operation::Write(data));
+                    }
                 }
             }
+
+            dev.transaction(address, &mut hal_operations)
+                .map_err(map_linux_error)?;
         }
 
         Ok(read_results)
@@ -417,12 +473,16 @@ impl imago_experimental_i2c_plugin_bindings::imago::experimental_i2c::provider::
     async fn open_i2c(&mut self, bus: String) -> Result<Resource<I2cResource>, String> {
         ensure_i2c_supported()?;
         let bus = validate_bus_path(&bus)?;
+        let bus_for_validation = bus.clone();
+        run_blocking_string(move || validate_bus_open_sync(&bus_for_validation)).await?;
         Ok(Resource::new_own(register_i2c_handle(I2cHandle { bus })))
     }
 
     async fn open_default_i2c(&mut self) -> Result<Resource<I2cResource>, String> {
         ensure_i2c_supported()?;
         let bus = resolve_default_bus_path()?;
+        let bus_for_validation = bus.clone();
+        run_blocking_string(move || validate_bus_open_sync(&bus_for_validation)).await?;
         Ok(Resource::new_own(register_i2c_handle(I2cHandle { bus })))
     }
 
@@ -643,6 +703,32 @@ mod tests {
     }
 
     #[test]
+    fn collect_transaction_read_lengths_preserves_read_order_in_mixed_operations() {
+        let operations = vec![
+            I2cOperation::Write(vec![0x10, 0x11]),
+            I2cOperation::Read(2),
+            I2cOperation::Write(vec![0x12]),
+            I2cOperation::Read(4),
+        ];
+        let lengths =
+            collect_transaction_read_lengths(&operations).expect("mixed operations should pass");
+        assert_eq!(lengths, vec![2, 4]);
+    }
+
+    #[test]
+    fn collect_transaction_read_lengths_rejects_oversized_read() {
+        let operations = vec![I2cOperation::Read((MAX_IO_BYTES + 1) as u64)];
+        assert!(
+            matches!(
+                collect_transaction_read_lengths(&operations)
+                    .expect_err("oversized read should fail"),
+                I2cErrorCode::Other
+            ),
+            "oversized read should map to error-code::other"
+        );
+    }
+
+    #[test]
     fn validates_transaction_request_rejects_too_many_operations() {
         let operations = vec![I2cOperation::Read(1); MAX_TRANSACTION_OPERATIONS + 1];
         assert!(
@@ -673,6 +759,22 @@ mod tests {
             matches!(err, I2cErrorCode::Other),
             "join error should map to error-code::other"
         );
+    }
+
+    #[test]
+    fn validate_bus_open_with_formats_contextual_error() {
+        let err = validate_bus_open_with("/dev/i2c-9", |_path| -> Result<(), &str> {
+            Err("permission denied")
+        })
+        .expect_err("open failure should propagate as contextual error");
+        assert!(err.contains("/dev/i2c-9"), "unexpected error: {err}");
+        assert!(err.contains("permission denied"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_bus_open_with_accepts_success() {
+        validate_bus_open_with("/dev/i2c-1", |_path| -> Result<(), &str> { Ok(()) })
+            .expect("open helper should succeed");
     }
 
     #[test]
