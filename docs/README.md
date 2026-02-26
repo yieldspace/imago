@@ -8,6 +8,7 @@ This documentation is organized for quick onboarding first, then direct source r
 - [Architecture](./architecture.md)
 - [imago.toml Reference](./imago-configuration.md)
 - [imagod.toml Reference](./imagod-configuration.md)
+- [CLI Output Contract](./cli-output-contract.md)
 
 ```mermaid
 flowchart LR

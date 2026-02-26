@@ -448,6 +448,7 @@ mod tests {
             correlation_id,
             max_datagram_size,
             &["svc-a".to_string()],
+            false,
         )
         .expect("chunk size should be computed");
         assert!(chunk_size <= 1024);
@@ -464,6 +465,7 @@ mod tests {
                 stream_kind: LogStreamKind::Composite,
                 bytes: vec![0xAB; chunk_size],
                 is_last: false,
+                timestamp_unix_ms: None,
             },
         );
         let encoded = to_cbor(&probe).expect("encoding must succeed");
@@ -481,6 +483,7 @@ mod tests {
             correlation_id,
             max_datagram_size,
             std::slice::from_ref(&name),
+            false,
         )
         .expect("chunk size should be computed");
         assert!(chunk_size > 0);
@@ -496,6 +499,7 @@ mod tests {
                 stream_kind: LogStreamKind::Composite,
                 bytes: vec![0xCD; chunk_size],
                 is_last: false,
+                timestamp_unix_ms: None,
             },
         );
         let encoded = to_cbor(&probe).expect("encoding must succeed");
@@ -504,10 +508,50 @@ mod tests {
 
     #[test]
     fn fixed_log_chunk_size_rejects_too_small_datagram() {
-        let err = fixed_log_chunk_size(Uuid::new_v4(), Uuid::new_v4(), 8, &["svc-a".to_string()])
-            .expect_err("small datagram should be rejected");
+        let err = fixed_log_chunk_size(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            8,
+            &["svc-a".to_string()],
+            false,
+        )
+        .expect_err("small datagram should be rejected");
         assert_eq!(err.code, ErrorCode::Internal);
         assert_eq!(err.stage, "logs.datagram");
+    }
+
+    #[test]
+    fn fixed_log_chunk_size_accounts_for_timestamp_overhead() {
+        let request_id = Uuid::new_v4();
+        let correlation_id = Uuid::new_v4();
+        let max_datagram_size = 1413usize;
+        let chunk_size = fixed_log_chunk_size(
+            request_id,
+            correlation_id,
+            max_datagram_size,
+            &["svc-a".to_string()],
+            true,
+        )
+        .expect("chunk size should be computed");
+        assert!(chunk_size <= 1024);
+        assert!(chunk_size > 0);
+
+        let probe = ProtocolEnvelope::new(
+            MessageType::LogsChunk,
+            request_id,
+            correlation_id,
+            LogChunk {
+                request_id,
+                seq: u64::MAX,
+                name: "svc-a".to_string(),
+                stream_kind: LogStreamKind::Composite,
+                bytes: vec![0xEF; chunk_size],
+                is_last: false,
+                timestamp_unix_ms: Some(u64::MAX),
+            },
+        );
+        let encoded = to_cbor(&probe).expect("encoding must succeed");
+        assert!(encoded.len() <= max_datagram_size);
     }
 
     #[test]

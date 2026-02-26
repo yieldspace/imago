@@ -39,7 +39,8 @@ use tokio::{
 };
 
 use self::{
-    log_buffer::BoundedLogBuffer, manager_control::DefaultManagerControlHandler,
+    log_buffer::{BoundedLogBuffer, BoundedLogEventBuffer},
+    manager_control::DefaultManagerControlHandler,
     runner_spawn::DefaultRunnerSpawner,
 };
 
@@ -127,6 +128,7 @@ pub enum ServiceLogStream {
 pub struct ServiceLogEvent {
     pub stream: ServiceLogStream,
     pub bytes: Vec<u8>,
+    pub timestamp_unix_ms: u64,
 }
 
 #[derive(Debug)]
@@ -134,6 +136,7 @@ pub struct ServiceLogEvent {
 pub struct ServiceLogSubscription {
     pub service_name: String,
     pub snapshot_bytes: Vec<u8>,
+    pub snapshot_events: Vec<ServiceLogEvent>,
     pub receiver: Option<broadcast::Receiver<ServiceLogEvent>>,
 }
 
@@ -153,6 +156,7 @@ struct RunningService {
     _stdout_log: Arc<Mutex<BoundedLogBuffer>>,
     _stderr_log: Arc<Mutex<BoundedLogBuffer>>,
     composite_log: Arc<Mutex<BoundedLogBuffer>>,
+    composite_events: Arc<Mutex<BoundedLogEventBuffer>>,
     log_sender: broadcast::Sender<ServiceLogEvent>,
     last_heartbeat_at: String,
 }
@@ -167,6 +171,7 @@ struct StartFailureLogBuffers {
 struct RetainedServiceLogEntry {
     service_name: String,
     snapshot_bytes: Vec<u8>,
+    snapshot_events: Vec<ServiceLogEvent>,
     weight_bytes: usize,
 }
 
@@ -186,7 +191,12 @@ impl RetainedServiceLogRing {
         }
     }
 
-    fn upsert(&mut self, service_name: String, snapshot_bytes: Vec<u8>) {
+    fn upsert(
+        &mut self,
+        service_name: String,
+        snapshot_bytes: Vec<u8>,
+        snapshot_events: Vec<ServiceLogEvent>,
+    ) {
         if let Some(index) = self
             .entries
             .iter()
@@ -201,6 +211,7 @@ impl RetainedServiceLogRing {
         self.entries.push_back(RetainedServiceLogEntry {
             service_name,
             snapshot_bytes,
+            snapshot_events,
             weight_bytes,
         });
 
@@ -212,11 +223,11 @@ impl RetainedServiceLogRing {
         }
     }
 
-    fn snapshot(&self, service_name: &str) -> Option<Vec<u8>> {
+    fn snapshot(&self, service_name: &str) -> Option<(Vec<u8>, Vec<ServiceLogEvent>)> {
         self.entries
             .iter()
             .find(|entry| entry.service_name == service_name)
-            .map(|entry| entry.snapshot_bytes.clone())
+            .map(|entry| (entry.snapshot_bytes.clone(), entry.snapshot_events.clone()))
     }
 
     fn service_names(&self) -> Vec<String> {
@@ -468,6 +479,9 @@ impl ServiceSupervisor {
             let composite_log = Arc::new(Mutex::new(BoundedLogBuffer::new(
                 self.runner_log_buffer_bytes,
             )));
+            let composite_events = Arc::new(Mutex::new(BoundedLogEventBuffer::new(
+                self.runner_log_buffer_bytes,
+            )));
             let (log_sender, _) = broadcast::channel(LOG_CHANNEL_CAPACITY);
 
             if let Some(stdout) = child.stdout.take() {
@@ -475,6 +489,7 @@ impl ServiceSupervisor {
                     stdout,
                     stdout_log.clone(),
                     composite_log.clone(),
+                    composite_events.clone(),
                     log_sender.clone(),
                     launch.name.clone(),
                     "stdout",
@@ -486,6 +501,7 @@ impl ServiceSupervisor {
                     stderr,
                     stderr_log.clone(),
                     composite_log.clone(),
+                    composite_events.clone(),
                     log_sender.clone(),
                     launch.name.clone(),
                     "stderr",
@@ -511,6 +527,7 @@ impl ServiceSupervisor {
                         _stdout_log: stdout_log,
                         _stderr_log: stderr_log,
                         composite_log,
+                        composite_events,
                         log_sender,
                         last_heartbeat_at: now_unix_secs().to_string(),
                     },
@@ -580,8 +597,12 @@ impl ServiceSupervisor {
                 exit_status,
             );
             remove_runner_endpoint_best_effort(&service.runner_endpoint);
-            self.retain_composite_snapshot(service_name, &service.composite_log)
-                .await;
+            self.retain_composite_snapshot(
+                service_name,
+                &service.composite_log,
+                &service.composite_events,
+            )
+            .await;
             return Err(ImagodError::new(
                 ErrorCode::NotFound,
                 STAGE_STOP,
@@ -671,8 +692,12 @@ impl ServiceSupervisor {
         match stop_result {
             Ok(()) => {
                 remove_runner_endpoint_best_effort(&service.runner_endpoint);
-                self.retain_composite_snapshot(service_name, &service.composite_log)
-                    .await;
+                self.retain_composite_snapshot(
+                    service_name,
+                    &service.composite_log,
+                    &service.composite_events,
+                )
+                .await;
                 Ok(())
             }
             Err(err) => {
@@ -756,8 +781,12 @@ impl ServiceSupervisor {
                 status,
             );
             remove_runner_endpoint_best_effort(&service.runner_endpoint);
-            self.retain_composite_snapshot(&name, &service.composite_log)
-                .await;
+            self.retain_composite_snapshot(
+                &name,
+                &service.composite_log,
+                &service.composite_events,
+            )
+            .await;
         }
     }
 
@@ -831,21 +860,36 @@ impl ServiceSupervisor {
                     } else {
                         None
                     };
-                    Some((service.composite_log.clone(), receiver))
+                    Some((
+                        service.composite_log.clone(),
+                        service.composite_events.clone(),
+                        receiver,
+                    ))
                 }
                 _ => None,
             }
         };
 
-        if let Some((snapshot_source, receiver)) = running_subscription {
-            let snapshot_bytes = {
+        if let Some((snapshot_source, events_source, receiver)) = running_subscription {
+            let full_snapshot_bytes = {
                 let buffer = snapshot_source.lock().await;
-                tail_lines_from_bytes(&buffer.snapshot(), tail_lines)
+                buffer.snapshot()
             };
+            let full_snapshot_events = {
+                let events = events_source.lock().await;
+                events.snapshot()
+            };
+            let snapshot_bytes = tail_lines_from_bytes(&full_snapshot_bytes, tail_lines);
+            let snapshot_events = tail_events_from_snapshot_bytes(
+                &full_snapshot_events,
+                &full_snapshot_bytes,
+                snapshot_bytes.len(),
+            );
 
             return Ok(ServiceLogSubscription {
                 service_name: service_name.to_string(),
                 snapshot_bytes,
+                snapshot_events,
                 receiver,
             });
         }
@@ -858,7 +902,7 @@ impl ServiceSupervisor {
             ));
         }
 
-        let retained_snapshot = {
+        let (retained_snapshot, retained_events) = {
             let retained = self.retained_logs.lock().await;
             retained.snapshot(service_name)
         }
@@ -870,9 +914,17 @@ impl ServiceSupervisor {
             )
         })?;
 
+        let snapshot_bytes = tail_lines_from_bytes(&retained_snapshot, tail_lines);
+        let snapshot_events = tail_events_from_snapshot_bytes(
+            &retained_events,
+            &retained_snapshot,
+            snapshot_bytes.len(),
+        );
+
         Ok(ServiceLogSubscription {
             service_name: service_name.to_string(),
-            snapshot_bytes: tail_lines_from_bytes(&retained_snapshot, tail_lines),
+            snapshot_bytes,
+            snapshot_events,
             receiver: None,
         })
     }
@@ -1227,8 +1279,12 @@ impl ServiceSupervisor {
                 exit_status,
             );
             remove_runner_endpoint_best_effort(&service.runner_endpoint);
-            self.retain_composite_snapshot(service_name, &service.composite_log)
-                .await;
+            self.retain_composite_snapshot(
+                service_name,
+                &service.composite_log,
+                &service.composite_events,
+            )
+            .await;
             self.pending_ready
                 .lock()
                 .await
@@ -1240,16 +1296,22 @@ impl ServiceSupervisor {
         &self,
         service_name: &str,
         composite_log: &Arc<Mutex<BoundedLogBuffer>>,
+        composite_events: &Arc<Mutex<BoundedLogEventBuffer>>,
     ) {
         let snapshot_bytes = {
             let buffer = composite_log.lock().await;
             buffer.snapshot()
         };
+        let snapshot_events = {
+            let events = composite_events.lock().await;
+            events.snapshot()
+        };
 
-        self.retained_logs
-            .lock()
-            .await
-            .upsert(service_name.to_string(), snapshot_bytes);
+        self.retained_logs.lock().await.upsert(
+            service_name.to_string(),
+            snapshot_bytes,
+            snapshot_events,
+        );
     }
 
     async fn take_running(&self, service_name: &str) -> Result<RunningService, ImagodError> {
@@ -1386,10 +1448,12 @@ fn is_binding_allowed(bindings: &[ServiceBinding], target_service: &str, wit: &s
 /// Drains one child output stream into bounded in-memory log buffer.
 ///
 /// Concurrency: runs as a detached task per stream.
+#[allow(clippy::too_many_arguments)]
 fn spawn_log_drain<R>(
     reader: R,
     buffer: Arc<Mutex<BoundedLogBuffer>>,
     composite_buffer: Arc<Mutex<BoundedLogBuffer>>,
+    composite_events: Arc<Mutex<BoundedLogEventBuffer>>,
     sender: broadcast::Sender<ServiceLogEvent>,
     service_name: String,
     stream_name: &'static str,
@@ -1401,6 +1465,7 @@ fn spawn_log_drain<R>(
         reader,
         buffer,
         composite_buffer,
+        composite_events,
         sender,
         service_name,
         stream_name,
@@ -1410,6 +1475,66 @@ fn spawn_log_drain<R>(
 
 fn tail_lines_from_bytes(bytes: &[u8], tail_lines: u32) -> Vec<u8> {
     log_buffer::tail_lines_from_bytes(bytes, tail_lines)
+}
+
+fn tail_events_from_snapshot_bytes(
+    events: &[ServiceLogEvent],
+    full_snapshot_bytes: &[u8],
+    tailed_bytes_len: usize,
+) -> Vec<ServiceLogEvent> {
+    if tailed_bytes_len == 0 {
+        return Vec::new();
+    }
+    if tailed_bytes_len >= full_snapshot_bytes.len() {
+        return events.to_vec();
+    }
+
+    let mut skip = full_snapshot_bytes.len().saturating_sub(tailed_bytes_len);
+    let mut remaining = tailed_bytes_len;
+    let mut out = Vec::new();
+
+    for event in events {
+        if remaining == 0 {
+            break;
+        }
+        if skip >= event.bytes.len() {
+            skip = skip.saturating_sub(event.bytes.len());
+            continue;
+        }
+
+        let start = skip;
+        let available = event.bytes.len().saturating_sub(start);
+        let take = available.min(remaining);
+        if take == 0 {
+            continue;
+        }
+
+        out.push(ServiceLogEvent {
+            stream: event.stream,
+            bytes: event.bytes[start..start + take].to_vec(),
+            timestamp_unix_ms: event.timestamp_unix_ms,
+        });
+        skip = 0;
+        remaining = remaining.saturating_sub(take);
+    }
+
+    if remaining > 0 {
+        // Fall back to best-effort output to avoid dropping snapshot bytes entirely when
+        // byte/event alignment diverges.
+        let mut fallback = Vec::new();
+        if let Some(last) = events.last() {
+            fallback.push(ServiceLogEvent {
+                stream: last.stream,
+                bytes: full_snapshot_bytes
+                    [full_snapshot_bytes.len().saturating_sub(tailed_bytes_len)..]
+                    .to_vec(),
+                timestamp_unix_ms: last.timestamp_unix_ms,
+            });
+        }
+        return fallback;
+    }
+
+    out
 }
 
 /// Sends kill signal to child and waits for termination.
@@ -1580,6 +1705,7 @@ mod tests {
             _stdout_log: Arc::new(Mutex::new(BoundedLogBuffer::new(64))),
             _stderr_log: Arc::new(Mutex::new(BoundedLogBuffer::new(64))),
             composite_log: Arc::new(Mutex::new(BoundedLogBuffer::new(128))),
+            composite_events: Arc::new(Mutex::new(BoundedLogEventBuffer::new(128))),
             log_sender,
             last_heartbeat_at: now_unix_secs().to_string(),
         }
@@ -1673,11 +1799,47 @@ mod tests {
     }
 
     #[test]
+    fn tail_events_from_snapshot_bytes_preserves_timestamp_for_tailed_content() {
+        let full = b"l1\nl2\nl3\n".to_vec();
+        let tailed = tail_lines_from_bytes(&full, 2);
+        let events = vec![
+            ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"l1\n".to_vec(),
+                timestamp_unix_ms: 1,
+            },
+            ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"l2\n".to_vec(),
+                timestamp_unix_ms: 2,
+            },
+            ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"l3\n".to_vec(),
+                timestamp_unix_ms: 3,
+            },
+        ];
+
+        let tailed_events = tail_events_from_snapshot_bytes(&events, &full, tailed.len());
+        let joined = tailed_events
+            .iter()
+            .flat_map(|event| event.bytes.clone())
+            .collect::<Vec<_>>();
+        let timestamps = tailed_events
+            .iter()
+            .map(|event| event.timestamp_unix_ms)
+            .collect::<Vec<_>>();
+
+        assert_eq!(joined, tailed);
+        assert_eq!(timestamps, vec![2, 3]);
+    }
+
+    #[test]
     fn retained_log_ring_evicts_oldest_entries_when_total_bytes_exceed_capacity() {
         let mut ring = RetainedServiceLogRing::new(9);
-        ring.upsert("a".to_string(), b"abc".to_vec());
-        ring.upsert("b".to_string(), b"de".to_vec());
-        ring.upsert("c".to_string(), b"1234".to_vec());
+        ring.upsert("a".to_string(), b"abc".to_vec(), Vec::new());
+        ring.upsert("b".to_string(), b"de".to_vec(), Vec::new());
+        ring.upsert("c".to_string(), b"1234".to_vec(), Vec::new());
 
         assert!(
             ring.snapshot("a").is_none(),
@@ -1689,11 +1851,11 @@ mod tests {
     #[test]
     fn retained_log_ring_reinserting_same_service_replaces_and_moves_to_tail() {
         let mut ring = RetainedServiceLogRing::new(64);
-        ring.upsert("svc-a".to_string(), b"old".to_vec());
-        ring.upsert("svc-b".to_string(), b"mid".to_vec());
-        ring.upsert("svc-a".to_string(), b"new".to_vec());
+        ring.upsert("svc-a".to_string(), b"old".to_vec(), Vec::new());
+        ring.upsert("svc-b".to_string(), b"mid".to_vec(), Vec::new());
+        ring.upsert("svc-a".to_string(), b"new".to_vec(), Vec::new());
 
-        assert_eq!(ring.snapshot("svc-a"), Some(b"new".to_vec()));
+        assert_eq!(ring.snapshot("svc-a"), Some((b"new".to_vec(), Vec::new())));
         assert_eq!(
             ring.service_names(),
             vec!["svc-b".to_string(), "svc-a".to_string()]
@@ -1703,9 +1865,9 @@ mod tests {
     #[test]
     fn retained_log_ring_counts_empty_snapshots_toward_capacity() {
         let mut ring = RetainedServiceLogRing::new(2);
-        ring.upsert("a".to_string(), Vec::new());
-        ring.upsert("b".to_string(), Vec::new());
-        ring.upsert("c".to_string(), Vec::new());
+        ring.upsert("a".to_string(), Vec::new(), Vec::new());
+        ring.upsert("b".to_string(), Vec::new(), Vec::new());
+        ring.upsert("c".to_string(), Vec::new(), Vec::new());
 
         assert!(
             ring.snapshot("a").is_none(),
@@ -1758,6 +1920,24 @@ mod tests {
             let mut log = service.composite_log.lock().await;
             log.push(b"a\nb\nc\n");
         }
+        {
+            let mut events = service.composite_events.lock().await;
+            events.push(ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"a\n".to_vec(),
+                timestamp_unix_ms: 10,
+            });
+            events.push(ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"b\n".to_vec(),
+                timestamp_unix_ms: 11,
+            });
+            events.push(ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"c\n".to_vec(),
+                timestamp_unix_ms: 12,
+            });
+        }
 
         {
             let mut inner = supervisor.inner.write().await;
@@ -1770,6 +1950,14 @@ mod tests {
             .expect("open_logs should succeed");
         assert_eq!(subscription.service_name, service_name);
         assert_eq!(subscription.snapshot_bytes, b"b\nc\n");
+        assert_eq!(
+            subscription
+                .snapshot_events
+                .iter()
+                .map(|event| event.timestamp_unix_ms)
+                .collect::<Vec<_>>(),
+            vec![11, 12]
+        );
         assert!(subscription.receiver.is_some(), "follow should subscribe");
 
         stop_running_service_best_effort(&supervisor.inner, service_name).await;
@@ -1834,11 +2022,27 @@ mod tests {
             .expect("supervisor should initialize");
         let service_name = "svc-open-logs-retained";
 
-        supervisor
-            .retained_logs
-            .lock()
-            .await
-            .upsert(service_name.to_string(), b"old-a\nold-b\nold-c\n".to_vec());
+        supervisor.retained_logs.lock().await.upsert(
+            service_name.to_string(),
+            b"old-a\nold-b\nold-c\n".to_vec(),
+            vec![
+                ServiceLogEvent {
+                    stream: ServiceLogStream::Stdout,
+                    bytes: b"old-a\n".to_vec(),
+                    timestamp_unix_ms: 21,
+                },
+                ServiceLogEvent {
+                    stream: ServiceLogStream::Stdout,
+                    bytes: b"old-b\n".to_vec(),
+                    timestamp_unix_ms: 22,
+                },
+                ServiceLogEvent {
+                    stream: ServiceLogStream::Stdout,
+                    bytes: b"old-c\n".to_vec(),
+                    timestamp_unix_ms: 23,
+                },
+            ],
+        );
 
         let subscription = supervisor
             .open_logs(service_name, 2, true)
@@ -1846,6 +2050,14 @@ mod tests {
             .expect("retained open_logs should succeed");
         assert_eq!(subscription.service_name, service_name);
         assert_eq!(subscription.snapshot_bytes, b"old-b\nold-c\n");
+        assert_eq!(
+            subscription
+                .snapshot_events
+                .iter()
+                .map(|event| event.timestamp_unix_ms)
+                .collect::<Vec<_>>(),
+            vec![22, 23]
+        );
         assert!(
             subscription.receiver.is_none(),
             "retained logs should not provide follow receiver"
@@ -1861,11 +2073,11 @@ mod tests {
             .expect("supervisor should initialize");
         let service_name = "svc-open-logs-retained-stopping";
 
-        supervisor
-            .retained_logs
-            .lock()
-            .await
-            .upsert(service_name.to_string(), b"old-a\nold-b\n".to_vec());
+        supervisor.retained_logs.lock().await.upsert(
+            service_name.to_string(),
+            b"old-a\nold-b\n".to_vec(),
+            Vec::new(),
+        );
 
         let _stopping_guard = supervisor.begin_stop_service(service_name);
         let err = supervisor
@@ -1904,6 +2116,7 @@ mod tests {
         supervisor.retained_logs.lock().await.upsert(
             service_name.to_string(),
             b"retained-a\nretained-b\n".to_vec(),
+            Vec::new(),
         );
         {
             let mut inner = supervisor.inner.write().await;
@@ -2051,8 +2264,16 @@ mod tests {
         }
         {
             let mut retained = supervisor.retained_logs.lock().await;
-            retained.upsert("svc-running".to_string(), b"running-retained\n".to_vec());
-            retained.upsert("svc-retained".to_string(), b"retained-only\n".to_vec());
+            retained.upsert(
+                "svc-running".to_string(),
+                b"running-retained\n".to_vec(),
+                Vec::new(),
+            );
+            retained.upsert(
+                "svc-retained".to_string(),
+                b"retained-only\n".to_vec(),
+                Vec::new(),
+            );
         }
 
         let names = supervisor.loggable_service_names().await;
@@ -2073,8 +2294,16 @@ mod tests {
 
         {
             let mut retained = supervisor.retained_logs.lock().await;
-            retained.upsert("svc-stopping".to_string(), b"retained\n".to_vec());
-            retained.upsert("svc-available".to_string(), b"retained\n".to_vec());
+            retained.upsert(
+                "svc-stopping".to_string(),
+                b"retained\n".to_vec(),
+                Vec::new(),
+            );
+            retained.upsert(
+                "svc-available".to_string(),
+                b"retained\n".to_vec(),
+                Vec::new(),
+            );
         }
         let _stopping_guard = supervisor.begin_stop_service("svc-stopping");
 

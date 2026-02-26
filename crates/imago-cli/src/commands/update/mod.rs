@@ -24,7 +24,7 @@ use crate::{
         CommandResult,
         build::{self},
         dependency_cache::{self},
-        error_diagnostics::format_command_error,
+        error_diagnostics::{format_command_error, summarize_command_failure},
         plugin_sources,
         shared::dependency::StandardDependencyResolver,
         ui,
@@ -46,6 +46,12 @@ struct ResolvedBindingWit {
     interface_names: BTreeSet<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UpdateSummary {
+    dependencies: usize,
+    binding_wits: usize,
+}
+
 pub async fn run(args: UpdateArgs) -> CommandResult {
     run_with_project_root(args, Path::new(".")).await
 }
@@ -54,12 +60,19 @@ pub(crate) async fn run_with_project_root(_args: UpdateArgs, project_root: &Path
     let started_at = Instant::now();
     ui::command_start("update", "starting");
     match run_inner_async(project_root).await {
-        Ok(()) => {
-            ui::command_finish("update", true, "completed");
-            CommandResult::success("update", started_at)
+        Ok(summary) => {
+            ui::command_finish("update", true, "");
+            let mut result = CommandResult::success("update", started_at);
+            result
+                .meta
+                .insert("dependencies".to_string(), summary.dependencies.to_string());
+            result
+                .meta
+                .insert("binding_wits".to_string(), summary.binding_wits.to_string());
+            result
         }
         Err(err) => {
-            let summary_message = err.to_string();
+            let summary_message = summarize_command_failure("update", &err);
             let diagnostic_message = format_command_error("update", &err);
             ui::command_finish("update", false, &summary_message);
             CommandResult::failure("update", started_at, diagnostic_message)
@@ -1004,7 +1017,7 @@ fn remove_other_wit_files(root: &Path, keep: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
+async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
     ui::command_stage("update", "load-input", "loading dependencies and bindings");
     let namespace_registries = build::load_namespace_registries(project_root)?;
     let dependency_resolver = StandardDependencyResolver;
@@ -1121,6 +1134,8 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
             .then(a.wit_path.cmp(&b.wit_path))
     });
     lock_entries.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
+    let dependency_count = lock_entries.len();
+    let binding_wits_count = binding_wits.len();
     let lock = ImagoLock {
         version: IMAGO_LOCK_VERSION,
         dependencies: lock_entries,
@@ -1130,7 +1145,10 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<()> {
     ui::command_stage("update", "write-lock", "writing imago.lock");
     save_to_project_root(project_root, &lock)?;
 
-    Ok(())
+    Ok(UpdateSummary {
+        dependencies: dependency_count,
+        binding_wits: binding_wits_count,
+    })
 }
 
 #[cfg(test)]

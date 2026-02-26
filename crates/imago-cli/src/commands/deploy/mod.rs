@@ -129,6 +129,18 @@ struct UploadPhaseResult {
     session: Session,
     deploy_id: String,
     deploy_stream_timeout: Duration,
+    authority: String,
+    resolved_addr: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeployRunSummary {
+    service_name: String,
+    deploy_id: String,
+    target_name: String,
+    authority: String,
+    resolved: String,
+    deployed_at: String,
 }
 
 pub(crate) struct ConnectedTargetSession {
@@ -413,12 +425,29 @@ pub(crate) async fn run_with_project_root_and_target_override(
     let started_at = Instant::now();
     ui::command_start("deploy", "starting");
     match run_async_with_target_override(args, project_root, target_override).await {
-        Ok(()) => {
-            ui::command_finish("deploy", true, "completed");
-            CommandResult::success("deploy", started_at)
+        Ok(summary) => {
+            ui::command_finish("deploy", true, "");
+            let mut result = CommandResult::success("deploy", started_at);
+            result
+                .meta
+                .insert("service".to_string(), summary.service_name);
+            result
+                .meta
+                .insert("deploy_id".to_string(), summary.deploy_id);
+            result
+                .meta
+                .insert("target".to_string(), summary.target_name);
+            result
+                .meta
+                .insert("authority".to_string(), summary.authority);
+            result.meta.insert("resolved".to_string(), summary.resolved);
+            result
+                .meta
+                .insert("deployed_at".to_string(), summary.deployed_at);
+            result
         }
         Err(err) => {
-            let summary = err.to_string();
+            let summary = error_diagnostics::summarize_command_failure("deploy", &err);
             ui::command_finish("deploy", false, &summary);
             let message = error_diagnostics::format_command_error("deploy", &err);
             CommandResult::failure("deploy", started_at, message)
@@ -430,7 +459,7 @@ async fn run_async_with_target_override(
     args: DeployArgs,
     project_root: &Path,
     target_override: Option<&build::TargetConfig>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<DeployRunSummary> {
     let DeployArgs { target, detach } = args;
     let dependency_resolver = StandardDependencyResolver;
     let target_connector = network::QuinnTargetConnector;
@@ -474,7 +503,7 @@ async fn run_async_with_target_override(
         Ok(output) => output,
         Err(err) => {
             print_build_failure_logs(&err);
-            return Err(err).context("failed to run build before deploy");
+            return Err(err).context("build stage failed");
         }
     };
 
@@ -597,7 +626,14 @@ async fn run_async_with_target_override(
                 follow_logs_after_deploy(project_root, &target_config_for_logs, &manifest.name)
                     .await;
             }
-            Ok(())
+            Ok(DeployRunSummary {
+                service_name: manifest.name.clone(),
+                deploy_id: upload_result.deploy_id,
+                target_name,
+                authority: upload_result.authority,
+                resolved: upload_result.resolved_addr,
+                deployed_at: terminal.timestamp,
+            })
         }
         CommandEventType::Failed => {
             if let Some(err) = terminal.error {
@@ -624,6 +660,7 @@ async fn follow_logs_after_deploy(
             name: Some(service_name.to_string()),
             follow: true,
             tail: AUTO_FOLLOW_TAIL_LINES,
+            with_timestamp: false,
         },
         project_root,
         Some(target_config),
@@ -797,6 +834,8 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
         session,
         deploy_id: prepare_response.deploy_id,
         deploy_stream_timeout: upload_limits.deploy_stream_timeout,
+        authority: connected.authority,
+        resolved_addr: connected.resolved_addr.to_string(),
     })
 }
 
@@ -2374,9 +2413,9 @@ mod tests {
 
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.expect("stderr should be present");
-        assert!(stderr.contains("failed to run build before deploy"));
-        assert!(stderr.contains("causes:"));
-        assert!(stderr.contains("hints:"));
+        assert!(stderr.contains("build stage failed"));
+        assert!(stderr.contains("caused by:"));
+        assert!(stderr.contains("hint:"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3006,7 +3045,7 @@ mod tests {
             line: "compile error: expected `;`".to_string(),
         }];
         let err = anyhow::Error::new(build::BuildCommandFailure::new(Some(7), lines.clone()))
-            .context("failed to run build before deploy");
+            .context("build stage failed");
 
         let extracted = extract_build_failure_logs(&err).expect("build logs should be found");
         assert_eq!(extracted, lines.as_slice());

@@ -359,6 +359,7 @@ mod tests {
             name: None,
             follow: false,
             tail_lines: 0,
+            with_timestamp: false,
         };
         assert!(all.validate().is_ok());
 
@@ -366,12 +367,51 @@ mod tests {
             name: Some("svc-a".to_string()),
             follow: true,
             tail_lines: 200,
+            with_timestamp: true,
         };
         assert!(named.validate().is_ok());
 
         let encoded = to_cbor(&named).expect("encoding should succeed");
         let decoded = from_cbor::<LogRequest>(&encoded).expect("decoding should succeed");
         assert_eq!(decoded, named);
+    }
+
+    #[derive(Debug, Serialize)]
+    struct LogRequestWithoutWithTimestamp<'a> {
+        name: Option<&'a str>,
+        follow: bool,
+        tail_lines: u32,
+    }
+
+    #[test]
+    fn log_request_defaults_with_timestamp_to_false_when_field_missing() {
+        let encoded = to_cbor(&LogRequestWithoutWithTimestamp {
+            name: Some("svc-a"),
+            follow: true,
+            tail_lines: 100,
+        })
+        .expect("encoding should succeed");
+        let decoded = from_cbor::<LogRequest>(&encoded).expect("decoding should succeed");
+        assert!(!decoded.with_timestamp);
+    }
+
+    #[test]
+    fn log_request_omits_with_timestamp_when_false() {
+        let request = LogRequest {
+            name: Some("svc-a".to_string()),
+            follow: true,
+            tail_lines: 200,
+            with_timestamp: false,
+        };
+        let encoded = to_cbor(&request).expect("encoding should succeed");
+        let raw: ciborium::value::Value = from_cbor(&encoded).expect("decode cbor should succeed");
+        let ciborium::value::Value::Map(map) = raw else {
+            panic!("expected map value");
+        };
+        let has_with_timestamp = map.iter().any(|(key, _)| {
+            matches!(key, ciborium::value::Value::Text(field) if field == "with_timestamp")
+        });
+        assert!(!has_with_timestamp);
     }
 
     #[test]
@@ -383,6 +423,7 @@ mod tests {
             stream_kind: LogStreamKind::Stdout,
             bytes: b"abc".to_vec(),
             is_last: false,
+            timestamp_unix_ms: None,
         };
         assert!(invalid.validate().is_err());
 
@@ -393,8 +434,35 @@ mod tests {
             stream_kind: LogStreamKind::Composite,
             bytes: b"line\n".to_vec(),
             is_last: true,
+            timestamp_unix_ms: Some(1_739_700_000_123),
         };
         assert!(valid.validate().is_ok());
+    }
+
+    #[derive(Debug, Serialize)]
+    struct LogChunkWithoutTimestamp<'a> {
+        request_id: Uuid,
+        seq: u64,
+        name: &'a str,
+        stream_kind: LogStreamKind,
+        #[serde(with = "serde_bytes")]
+        bytes: &'a [u8],
+        is_last: bool,
+    }
+
+    #[test]
+    fn log_chunk_defaults_timestamp_to_none_when_field_missing() {
+        let encoded = to_cbor(&LogChunkWithoutTimestamp {
+            request_id: sample_request_id(),
+            seq: 2,
+            name: "svc-a",
+            stream_kind: LogStreamKind::Stdout,
+            bytes: b"log-line\n",
+            is_last: false,
+        })
+        .expect("encoding should succeed");
+        let decoded = from_cbor::<LogChunk>(&encoded).expect("decoding should succeed");
+        assert_eq!(decoded.timestamp_unix_ms, None);
     }
 
     #[test]

@@ -356,14 +356,21 @@ pub(crate) fn run_with_project_root_and_target_override(
     target_override: Option<&TargetConfig>,
 ) -> CommandResult {
     let started_at = Instant::now();
+    let target_name = args.target.clone();
     ui::command_start("build", "starting");
     match run_inner_with_target_override(args, project_root, target_override) {
-        Ok(()) => {
-            ui::command_finish("build", true, "completed");
-            CommandResult::success("build", started_at)
+        Ok(output) => {
+            ui::command_finish("build", true, "");
+            let mut result = CommandResult::success("build", started_at);
+            result.meta.insert("target".to_string(), target_name);
+            result.meta.insert(
+                "manifest_path".to_string(),
+                output.manifest_path.display().to_string(),
+            );
+            result
         }
         Err(err) => {
-            let summary = err.to_string();
+            let summary = error_diagnostics::summarize_command_failure("build", &err);
             ui::command_finish("build", false, &summary);
             let message = error_diagnostics::format_command_error("build", &err);
             CommandResult::failure("build", started_at, message)
@@ -375,16 +382,13 @@ fn run_inner_with_target_override(
     args: BuildArgs,
     project_root: &Path,
     target_override: Option<&TargetConfig>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<BuildOutput> {
     match target_override {
         Some(target) => {
-            build_project_with_target_override(&args.target, project_root, Some(target))?;
+            build_project_with_target_override(&args.target, project_root, Some(target))
         }
-        None => {
-            build_project(&args.target, project_root)?;
-        }
+        None => build_project(&args.target, project_root),
     }
-    Ok(())
 }
 
 pub fn load_target_config(target_name: &str, project_root: &Path) -> anyhow::Result<TargetConfig> {

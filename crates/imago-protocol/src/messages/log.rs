@@ -9,6 +9,8 @@ pub struct LogRequest {
     pub name: Option<String>,
     pub follow: bool,
     pub tail_lines: u32,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub with_timestamp: bool,
 }
 
 impl Validate for LogRequest {
@@ -41,6 +43,8 @@ pub struct LogChunk {
     #[serde(with = "serde_bytes")]
     pub bytes: Vec<u8>,
     pub is_last: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_unix_ms: Option<u64>,
 }
 
 impl Validate for LogChunk {
@@ -48,6 +52,10 @@ impl Validate for LogChunk {
         ensure_uuid_not_nil(&self.request_id, "request_id")?;
         ensure_non_empty(&self.name, "name")
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

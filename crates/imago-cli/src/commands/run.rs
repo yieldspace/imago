@@ -12,11 +12,20 @@ use crate::{
             format_local_context_line, format_peer_context_line, handle_terminal_event,
             negotiate_hello, resolve_service_name,
         },
-        deploy, error_diagnostics, logs, ui,
+        deploy,
+        error_diagnostics::{self, summarize_command_failure},
+        logs, ui,
     },
 };
 
 const AUTO_FOLLOW_TAIL_LINES: u32 = 200;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunSummary {
+    service_name: String,
+    target_name: String,
+    detach: bool,
+}
 
 pub async fn run(args: RunArgs) -> CommandResult {
     run_with_project_root(args, Path::new(".")).await
@@ -26,12 +35,22 @@ pub(crate) async fn run_with_project_root(args: RunArgs, project_root: &Path) ->
     let started_at = Instant::now();
     ui::command_start("run", "starting");
     match run_async(args, project_root).await {
-        Ok(()) => {
-            ui::command_finish("run", true, "completed");
-            CommandResult::success("run", started_at)
+        Ok(summary) => {
+            ui::command_finish("run", true, "");
+            let mut result = CommandResult::success("run", started_at);
+            result
+                .meta
+                .insert("service".to_string(), summary.service_name);
+            result
+                .meta
+                .insert("target".to_string(), summary.target_name);
+            result
+                .meta
+                .insert("detach".to_string(), summary.detach.to_string());
+            result
         }
         Err(err) => {
-            let summary = err.to_string();
+            let summary = summarize_command_failure("run", &err);
             ui::command_finish("run", false, &summary);
             let message = error_diagnostics::format_command_error("run", &err);
             CommandResult::failure("run", started_at, message)
@@ -39,7 +58,7 @@ pub(crate) async fn run_with_project_root(args: RunArgs, project_root: &Path) ->
     }
 }
 
-async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<()> {
+async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<RunSummary> {
     let RunArgs {
         name,
         target,
@@ -100,7 +119,11 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<()> {
     if !detach {
         follow_logs_after_run(project_root, &target_config, &service_name).await;
     }
-    Ok(())
+    Ok(RunSummary {
+        service_name,
+        target_name,
+        detach,
+    })
 }
 
 async fn follow_logs_after_run(
@@ -113,6 +136,7 @@ async fn follow_logs_after_run(
             name: Some(service_name.to_string()),
             follow: true,
             tail: AUTO_FOLLOW_TAIL_LINES,
+            with_timestamp: false,
         },
         project_root,
         Some(target_config),

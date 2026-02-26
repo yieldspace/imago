@@ -457,6 +457,9 @@ mod tests {
             composite_log: Arc::new(Mutex::new(super::super::log_buffer::BoundedLogBuffer::new(
                 128,
             ))),
+            composite_events: Arc::new(Mutex::new(
+                super::super::log_buffer::BoundedLogEventBuffer::new(128),
+            )),
             log_sender,
             last_heartbeat_at: now_unix_secs().to_string(),
         }

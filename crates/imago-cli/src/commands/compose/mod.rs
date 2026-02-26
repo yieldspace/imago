@@ -14,7 +14,9 @@ use crate::{
         ComposeSubcommandArgs, ComposeUpdateArgs, DeployArgs, LogsArgs, PsArgs, UpdateArgs,
     },
     commands::{
-        CommandResult, build, deploy, error_diagnostics::format_command_error, logs, ps, ui, update,
+        CommandResult, build, deploy,
+        error_diagnostics::{format_command_error, summarize_command_failure},
+        logs, ps, ui, update,
     },
 };
 
@@ -74,6 +76,14 @@ impl std::fmt::Display for ComposeCommandError {
 }
 
 impl std::error::Error for ComposeCommandError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComposeSummary {
+    subcommand: &'static str,
+    profile: String,
+    target: String,
+    services: usize,
+}
 fn compose_logs_failure_error(logs_result: &CommandResult) -> ComposeCommandError {
     let detail = logs_result
         .stderr
@@ -105,12 +115,21 @@ pub(crate) async fn run_with_project_root(
     let started_at = Instant::now();
     ui::command_start("compose", "starting");
     match run_async(args, project_root).await {
-        Ok(()) => {
-            ui::command_finish("compose", true, "completed");
-            CommandResult::success("compose", started_at)
+        Ok(summary) => {
+            ui::command_finish("compose", true, "");
+            let mut result = CommandResult::success("compose", started_at);
+            result
+                .meta
+                .insert("subcommand".to_string(), summary.subcommand.to_string());
+            result.meta.insert("profile".to_string(), summary.profile);
+            result.meta.insert("target".to_string(), summary.target);
+            result
+                .meta
+                .insert("services".to_string(), summary.services.to_string());
+            result
         }
         Err(err) => {
-            let summary_message = err.to_string();
+            let summary_message = summarize_command_failure("compose", &err);
             let diagnostic_message = format_command_error("compose", &err);
             ui::command_finish("compose", false, &summary_message);
             CommandResult::failure("compose", started_at, diagnostic_message)
@@ -118,7 +137,10 @@ pub(crate) async fn run_with_project_root(
     }
 }
 
-async fn run_async(args: ComposeSubcommandArgs, project_root: &Path) -> anyhow::Result<()> {
+async fn run_async(
+    args: ComposeSubcommandArgs,
+    project_root: &Path,
+) -> anyhow::Result<ComposeSummary> {
     match args.command {
         ComposeCommands::Build(args) => run_compose_build(args, project_root).await,
         ComposeCommands::Update(args) => run_compose_update(args, project_root).await,
@@ -128,7 +150,10 @@ async fn run_async(args: ComposeSubcommandArgs, project_root: &Path) -> anyhow::
     }
 }
 
-async fn run_compose_build(args: ComposeBuildArgs, project_root: &Path) -> anyhow::Result<()> {
+async fn run_compose_build(
+    args: ComposeBuildArgs,
+    project_root: &Path,
+) -> anyhow::Result<ComposeSummary> {
     let rich_mode = ui::current_mode() == ui::UiMode::Rich;
     run_compose_build_inner(args, project_root, rich_mode).await
 }
@@ -137,7 +162,7 @@ async fn run_compose_build_inner(
     args: ComposeBuildArgs,
     project_root: &Path,
     rich_mode: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ComposeSummary> {
     ui::command_stage("compose", "load-config", "loading compose build profile");
     let compose_file = load_compose_file(project_root)?;
     let resolved = resolve_compose_config(&compose_file, &args.profile)?;
@@ -220,7 +245,12 @@ async fn run_compose_build_inner(
         }
     }
 
-    Ok(())
+    Ok(ComposeSummary {
+        subcommand: "build",
+        profile: args.profile,
+        target: args.target,
+        services: total,
+    })
 }
 
 fn compose_build_service_stage(index: usize, total: usize, service: &str) {
@@ -290,7 +320,10 @@ fn take_compose_build_ui_events() -> Vec<ComposeBuildUiEvent> {
     Vec::new()
 }
 
-async fn run_compose_update(args: ComposeUpdateArgs, project_root: &Path) -> anyhow::Result<()> {
+async fn run_compose_update(
+    args: ComposeUpdateArgs,
+    project_root: &Path,
+) -> anyhow::Result<ComposeSummary> {
     ui::command_stage("compose", "load-config", "loading compose update profile");
     let compose_file = load_compose_file(project_root)?;
     let resolved = resolve_compose_config(&compose_file, &args.profile)?;
@@ -327,10 +360,18 @@ async fn run_compose_update(args: ComposeUpdateArgs, project_root: &Path) -> any
         }
     }
 
-    Ok(())
+    Ok(ComposeSummary {
+        subcommand: "update",
+        profile: args.profile,
+        target: "-".to_string(),
+        services: total,
+    })
 }
 
-async fn run_compose_deploy(args: ComposeDeployArgs, project_root: &Path) -> anyhow::Result<()> {
+async fn run_compose_deploy(
+    args: ComposeDeployArgs,
+    project_root: &Path,
+) -> anyhow::Result<ComposeSummary> {
     ui::command_stage("compose", "load-config", "loading compose deploy profile");
     let compose_file = load_compose_file(project_root)?;
     let resolved = resolve_compose_config(&compose_file, &args.profile)?;
@@ -384,10 +425,18 @@ async fn run_compose_deploy(args: ComposeDeployArgs, project_root: &Path) -> any
         }
     }
 
-    Ok(())
+    Ok(ComposeSummary {
+        subcommand: "deploy",
+        profile: args.profile,
+        target: args.target,
+        services: total,
+    })
 }
 
-async fn run_compose_logs(args: ComposeLogsArgs, project_root: &Path) -> anyhow::Result<()> {
+async fn run_compose_logs(
+    args: ComposeLogsArgs,
+    project_root: &Path,
+) -> anyhow::Result<ComposeSummary> {
     ui::command_stage("compose", "load-config", "loading compose logs profile");
     let compose_file = load_compose_file(project_root)?;
     let resolved = resolve_compose_config(&compose_file, &args.profile)?;
@@ -405,6 +454,7 @@ async fn run_compose_logs(args: ComposeLogsArgs, project_root: &Path) -> anyhow:
             name: args.name.clone(),
             follow: args.follow,
             tail: args.tail,
+            with_timestamp: args.with_timestamp,
         },
         project_root,
         Some(&target),
@@ -415,15 +465,24 @@ async fn run_compose_logs(args: ComposeLogsArgs, project_root: &Path) -> anyhow:
         return Err(compose_logs_failure_error(&logs_result).into());
     }
 
-    Ok(())
+    Ok(ComposeSummary {
+        subcommand: "logs",
+        profile: args.profile,
+        target: args.target,
+        services: resolved.config.services.len(),
+    })
 }
 
-async fn run_compose_ps(args: ComposePsArgs, project_root: &Path) -> anyhow::Result<()> {
+async fn run_compose_ps(
+    args: ComposePsArgs,
+    project_root: &Path,
+) -> anyhow::Result<ComposeSummary> {
     ui::command_stage("compose", "load-config", "loading compose ps profile");
     let compose_file = load_compose_file(project_root)?;
     let resolved = resolve_compose_config(&compose_file, &args.profile)?;
     ensure_compose_services_non_empty(resolved.config, &args.profile)?;
     let names = resolve_compose_service_names(resolved, project_root)?;
+    let services = names.len();
     let target = resolve_compose_target(&compose_file, &args.target, project_root)?;
 
     let ps_result = ps::run_with_project_root_and_target_override(
@@ -439,7 +498,12 @@ async fn run_compose_ps(args: ComposePsArgs, project_root: &Path) -> anyhow::Res
         return Err(compose_ps_failure_error(&ps_result).into());
     }
 
-    Ok(())
+    Ok(ComposeSummary {
+        subcommand: "ps",
+        profile: args.profile,
+        target: args.target,
+        services,
+    })
 }
 
 fn resolve_compose_service_names(
@@ -829,6 +893,7 @@ type = "cli"
                     name: Some("svc-a".to_string()),
                     follow: false,
                     tail: 10,
+                    with_timestamp: false,
                 }),
             },
             &root,

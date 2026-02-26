@@ -12,9 +12,18 @@ use crate::{
             format_local_context_line, format_peer_context_line, handle_terminal_event,
             negotiate_hello, resolve_service_name,
         },
-        deploy, error_diagnostics, ui,
+        deploy,
+        error_diagnostics::{self, summarize_command_failure},
+        ui,
     },
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StopSummary {
+    service_name: String,
+    target_name: String,
+    force: bool,
+}
 
 pub async fn run(args: StopArgs) -> CommandResult {
     run_with_project_root(args, Path::new(".")).await
@@ -24,12 +33,22 @@ pub(crate) async fn run_with_project_root(args: StopArgs, project_root: &Path) -
     let started_at = Instant::now();
     ui::command_start("stop", "starting");
     match run_async(args, project_root).await {
-        Ok(()) => {
-            ui::command_finish("stop", true, "completed");
-            CommandResult::success("stop", started_at)
+        Ok(summary) => {
+            ui::command_finish("stop", true, "");
+            let mut result = CommandResult::success("stop", started_at);
+            result
+                .meta
+                .insert("service".to_string(), summary.service_name);
+            result
+                .meta
+                .insert("target".to_string(), summary.target_name);
+            result
+                .meta
+                .insert("force".to_string(), summary.force.to_string());
+            result
         }
         Err(err) => {
-            let summary = err.to_string();
+            let summary = summarize_command_failure("stop", &err);
             ui::command_finish("stop", false, &summary);
             let message = error_diagnostics::format_command_error("stop", &err);
             CommandResult::failure("stop", started_at, message)
@@ -37,7 +56,7 @@ pub(crate) async fn run_with_project_root(args: StopArgs, project_root: &Path) -
     }
 }
 
-async fn run_async(args: StopArgs, project_root: &Path) -> anyhow::Result<()> {
+async fn run_async(args: StopArgs, project_root: &Path) -> anyhow::Result<StopSummary> {
     ui::command_stage("stop", "load-config", "loading target configuration");
     let target_name = args
         .target
@@ -82,7 +101,7 @@ async fn run_async(args: StopArgs, project_root: &Path) -> anyhow::Result<()> {
         Uuid::new_v4(),
         CommandType::Stop,
         CommandPayload::Stop(StopCommandPayload {
-            name: service_name,
+            name: service_name.clone(),
             force: args.force,
         }),
     )?;
@@ -92,7 +111,11 @@ async fn run_async(args: StopArgs, project_root: &Path) -> anyhow::Result<()> {
         command_stream_timeout,
     )
     .await?;
-    handle_terminal_event("stop", responses)
+    handle_terminal_event("stop", responses).map(|_| StopSummary {
+        service_name,
+        target_name,
+        force: args.force,
+    })
 }
 
 #[cfg(test)]
