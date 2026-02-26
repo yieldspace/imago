@@ -166,7 +166,7 @@ fn validate_bus_path(bus: &str) -> Result<String, String> {
         return Err("i2c bus path must not contain NUL".to_string());
     }
     if !trimmed.starts_with(I2C_BUS_PREFIX) {
-        return Err(format!("i2c bus path must start with '{I2C_BUS_PREFIX}'",));
+        return Err(format!("i2c bus path must start with '{I2C_BUS_PREFIX}'"));
     }
     let suffix = &trimmed[I2C_BUS_PREFIX.len()..];
     if suffix.is_empty() || !suffix.chars().all(|ch| ch.is_ascii_digit()) {

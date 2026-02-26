@@ -69,7 +69,7 @@ interface delay {
     /// Delay capability handle.
     @since(version = 0.1.0)
     resource delay {
-        /// Block the current thread for at least `ns` nanoseconds.
+        /// Suspend execution for at least `ns` nanoseconds.
         @since(version = 0.1.0)
         delay-ns: func(ns: u32);
     }
