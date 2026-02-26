@@ -22,6 +22,8 @@ Use `snake_case` for functions/modules/files, `PascalCase` for types/traits, and
 Prefer simplicity over pathological correctness. Follow YAGNI, KISS, and DRY.
 Do not add backward-compat shims or fallback paths unless they come for free without increasing cyclomatic complexity.
 Keep modules focused and explicit.
+Implement new plugin host interfaces as async by default (for example, `wasmtime::component::bindgen!` imports with async settings).
+If device/backend APIs are blocking, isolate them from the async executor (for example, `tokio::task::spawn_blocking`) instead of blocking async host functions directly.
 When behavior changes, update related code docs (`//!`/`///`) and user-facing docs in the same PR so implementation and documentation stay aligned.
 
 ## WIT Writing Conventions

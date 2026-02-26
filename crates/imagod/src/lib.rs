@@ -3,6 +3,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use imago_plugin_imago_admin::ImagoAdminPlugin;
+use imago_plugin_imago_experimental_i2c::ImagoExperimentalI2cPlugin;
 use imago_plugin_imago_node::ImagoNodePlugin;
 
 mod manager_runtime;
@@ -58,6 +59,9 @@ pub fn register_builtin_native_plugins(
         .map_err(anyhow::Error::new)?;
     builder
         .register_plugin(Arc::new(ImagoNodePlugin))
+        .map_err(anyhow::Error::new)?;
+    builder
+        .register_plugin(Arc::new(ImagoExperimentalI2cPlugin))
         .map_err(anyhow::Error::new)?;
     Ok(())
 }
@@ -186,6 +190,7 @@ mod tests {
             let registry = builtin_native_plugin_registry().expect("registry should build");
             assert!(registry.has_plugin("imago:admin"));
             assert!(registry.has_plugin("imago:node"));
+            assert!(registry.has_plugin("imago:experimental-i2c"));
         }
 
         #[test]
@@ -199,6 +204,7 @@ mod tests {
             let registry = builder.build();
             assert!(registry.has_plugin("imago:admin"));
             assert!(registry.has_plugin("imago:node"));
+            assert!(registry.has_plugin("imago:experimental-i2c"));
             assert!(registry.has_plugin("test:custom"));
         }
 

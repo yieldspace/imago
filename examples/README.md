@@ -9,4 +9,5 @@
 | `examples/local-imagod-socket` | `type=socket` の実行例 | `examples/local-imagod-socket/README.md` |
 | `examples/local-imagod-plugin-hello` | Wasm plugin 依存の実行例 | `examples/local-imagod-plugin-hello/README.md` |
 | `examples/local-imagod-plugin-native-admin` | native plugin 依存の実行例 | `examples/local-imagod-plugin-native-admin/README.md` |
+| `examples/local-imagod-plugin-native-experimental-i2c` | experimental-i2c native plugin 依存の実行例 | `examples/local-imagod-plugin-native-experimental-i2c/README.md` |
 | `examples/imago-compose-bindings` | compose/bindings の実行例 | `examples/imago-compose-bindings/README.md` |
