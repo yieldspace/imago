@@ -106,7 +106,7 @@ struct Manifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     socket: Option<ManifestSocket>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    wasi: Option<ManifestWasiConfig>,
+    resources: Option<ManifestResourcesConfig>,
     dependencies: Vec<ManifestDependency>,
     #[serde(default, skip_serializing_if = "ManifestCapabilityPolicy::is_empty")]
     capabilities: ManifestCapabilityPolicy,
@@ -240,8 +240,8 @@ struct ManifestWasiMount {
     guest_path: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-struct ManifestWasiConfig {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+struct ManifestResourcesConfig {
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
@@ -252,15 +252,18 @@ struct ManifestWasiConfig {
     mounts: Vec<ManifestWasiMount>,
     #[serde(default)]
     read_only_mounts: Vec<ManifestWasiMount>,
+    #[serde(flatten, default)]
+    extra: BTreeMap<String, JsonValue>,
 }
 
-impl ManifestWasiConfig {
+impl ManifestResourcesConfig {
     fn is_empty(&self) -> bool {
         self.args.is_empty()
             && self.env.is_empty()
             && self.http_outbound.is_empty()
             && self.mounts.is_empty()
             && self.read_only_mounts.is_empty()
+            && self.extra.is_empty()
     }
 }
 
@@ -523,11 +526,11 @@ fn build_project_with_target_override_inner(
         .to_os_string();
 
     let assets = parse_assets(root.get("assets"), project_root)?;
-    let mut wasi = parse_wasi_section(&root, &assets)?;
-    let dotenv_wasi_env = load_dotenv_wasi_env(project_root)?;
-    if !dotenv_wasi_env.is_empty() {
-        let resolved = wasi.get_or_insert_with(ManifestWasiConfig::default);
-        for (key, value) in dotenv_wasi_env {
+    let mut resources = parse_resources_section(&root, &assets)?;
+    let dotenv_resources_env = load_dotenv_resources_env(project_root)?;
+    if !dotenv_resources_env.is_empty() {
+        let resolved = resources.get_or_insert_with(ManifestResourcesConfig::default);
+        for (key, value) in dotenv_resources_env {
             resolved.env.insert(key, value);
         }
     }
@@ -544,7 +547,7 @@ fn build_project_with_target_override_inner(
         bindings,
         http,
         socket,
-        wasi,
+        resources,
         dependencies,
         capabilities,
         hash: ManifestHash {
@@ -1876,89 +1879,97 @@ fn parse_assets(
     Ok(assets)
 }
 
-fn parse_wasi_section(
+fn parse_resources_section(
     root: &toml::Table,
     assets: &[AssetSource],
-) -> anyhow::Result<Option<ManifestWasiConfig>> {
-    let Some(value) = root.get("wasi") else {
+) -> anyhow::Result<Option<ManifestResourcesConfig>> {
+    let Some(value) = root.get("resources") else {
         return Ok(None);
     };
     let table = value
         .as_table()
-        .ok_or_else(|| anyhow!("wasi must be a table"))?;
-    for key in table.keys() {
-        if !matches!(
+        .ok_or_else(|| anyhow!("resources must be a table"))?;
+
+    let args = parse_resources_args(table.get("args"))?;
+    let env = parse_string_table(table.get("env"), "resources.env")?;
+    let http_outbound = parse_resources_http_outbound(table.get("http_outbound"))?;
+
+    let allowed_asset_dirs = collect_allowed_resource_asset_dirs(assets);
+    let mounts =
+        parse_resource_mount_entries(table.get("mounts"), "resources.mounts", &allowed_asset_dirs)?;
+    let read_only_mounts = parse_resource_mount_entries(
+        table.get("read_only_mounts"),
+        "resources.read_only_mounts",
+        &allowed_asset_dirs,
+    )?;
+    validate_resource_mount_uniqueness(&mounts, &read_only_mounts)?;
+
+    let mut extra = BTreeMap::new();
+    for (key, value) in table {
+        if matches!(
             key.as_str(),
             "args" | "env" | "http_outbound" | "mounts" | "read_only_mounts"
         ) {
-            return Err(anyhow!("wasi.{key} is not supported"));
+            continue;
         }
+        if key.trim().is_empty() {
+            return Err(anyhow!("resources contains an empty key"));
+        }
+        extra.insert(key.clone(), toml_to_json_normalized(value)?);
     }
 
-    let args = parse_wasi_args(table.get("args"))?;
-    let env = parse_string_table(table.get("env"), "wasi.env")?;
-    let http_outbound = parse_wasi_http_outbound(table.get("http_outbound"))?;
-
-    let allowed_asset_dirs = collect_allowed_wasi_asset_dirs(assets);
-    let mounts = parse_wasi_mount_entries(table.get("mounts"), "wasi.mounts", &allowed_asset_dirs)?;
-    let read_only_mounts = parse_wasi_mount_entries(
-        table.get("read_only_mounts"),
-        "wasi.read_only_mounts",
-        &allowed_asset_dirs,
-    )?;
-    validate_wasi_mount_uniqueness(&mounts, &read_only_mounts)?;
-
-    let wasi = ManifestWasiConfig {
+    let resources = ManifestResourcesConfig {
         args,
         env,
         http_outbound,
         mounts,
         read_only_mounts,
+        extra,
     };
-    if wasi.is_empty() {
+    if resources.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(wasi))
+        Ok(Some(resources))
     }
 }
 
-fn parse_wasi_args(value: Option<&TomlValue>) -> anyhow::Result<Vec<String>> {
+fn parse_resources_args(value: Option<&TomlValue>) -> anyhow::Result<Vec<String>> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
     let array = value
         .as_array()
-        .ok_or_else(|| anyhow!("wasi.args must be an array of strings"))?;
+        .ok_or_else(|| anyhow!("resources.args must be an array of strings"))?;
     let mut args = Vec::with_capacity(array.len());
     for (index, value) in array.iter().enumerate() {
         let arg = value
             .as_str()
-            .ok_or_else(|| anyhow!("wasi.args[{index}] must be a string"))?
+            .ok_or_else(|| anyhow!("resources.args[{index}] must be a string"))?
             .trim()
             .to_string();
         if arg.is_empty() {
-            return Err(anyhow!("wasi.args[{index}] must not be empty"));
+            return Err(anyhow!("resources.args[{index}] must not be empty"));
         }
         args.push(arg);
     }
     Ok(args)
 }
 
-fn parse_wasi_http_outbound(value: Option<&TomlValue>) -> anyhow::Result<Vec<String>> {
+fn parse_resources_http_outbound(value: Option<&TomlValue>) -> anyhow::Result<Vec<String>> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
     let array = value
         .as_array()
-        .ok_or_else(|| anyhow!("wasi.http_outbound must be an array of strings"))?;
+        .ok_or_else(|| anyhow!("resources.http_outbound must be an array of strings"))?;
     let mut rules = Vec::with_capacity(array.len());
     let mut seen = BTreeSet::new();
     for (index, value) in array.iter().enumerate() {
         let raw = value
             .as_str()
-            .ok_or_else(|| anyhow!("wasi.http_outbound[{index}] must be a string"))?;
+            .ok_or_else(|| anyhow!("resources.http_outbound[{index}] must be a string"))?;
         let normalized =
-            normalize_wasi_http_outbound_rule(raw, &format!("wasi.http_outbound[{index}]"))?;
+            normalize_wasi_http_outbound_rule(raw, &format!("resources.http_outbound[{index}]"))?;
         if seen.insert(normalized.clone()) {
             rules.push(normalized);
         }
@@ -2162,7 +2173,7 @@ fn cidr_network_ip(ip: IpAddr, prefix: u8) -> IpAddr {
     }
 }
 
-fn load_dotenv_wasi_env(project_root: &Path) -> anyhow::Result<BTreeMap<String, String>> {
+fn load_dotenv_resources_env(project_root: &Path) -> anyhow::Result<BTreeMap<String, String>> {
     let path = project_root.join(".env");
     if !path.exists() {
         return Ok(BTreeMap::new());
@@ -2178,7 +2189,7 @@ fn load_dotenv_wasi_env(project_root: &Path) -> anyhow::Result<BTreeMap<String, 
     Ok(env)
 }
 
-fn collect_allowed_wasi_asset_dirs(assets: &[AssetSource]) -> BTreeSet<PathBuf> {
+fn collect_allowed_resource_asset_dirs(assets: &[AssetSource]) -> BTreeSet<PathBuf> {
     let mut allowed = BTreeSet::new();
     for asset in assets {
         if let Some(parent) = asset.source_path.parent()
@@ -2190,7 +2201,7 @@ fn collect_allowed_wasi_asset_dirs(assets: &[AssetSource]) -> BTreeSet<PathBuf> 
     allowed
 }
 
-fn parse_wasi_mount_entries(
+fn parse_resource_mount_entries(
     value: Option<&TomlValue>,
     field_name: &str,
     allowed_asset_dirs: &BTreeSet<PathBuf>,
@@ -2241,7 +2252,7 @@ fn parse_wasi_mount_entries(
     Ok(mounts)
 }
 
-fn validate_wasi_mount_uniqueness(
+fn validate_resource_mount_uniqueness(
     mounts: &[ManifestWasiMount],
     read_only_mounts: &[ManifestWasiMount],
 ) -> anyhow::Result<()> {
@@ -2250,13 +2261,13 @@ fn validate_wasi_mount_uniqueness(
     for mount in mounts.iter().chain(read_only_mounts.iter()) {
         if !seen_guest_paths.insert(mount.guest_path.clone()) {
             return Err(anyhow!(
-                "wasi mounts contain duplicate guest_path: {}",
+                "resources mounts contain duplicate guest_path: {}",
                 mount.guest_path
             ));
         }
         if !seen_asset_dirs.insert(mount.asset_dir.clone()) {
             return Err(anyhow!(
-                "wasi mounts contain duplicate asset_dir: {}",
+                "resources mounts contain duplicate asset_dir: {}",
                 mount.asset_dir
             ));
         }
@@ -3725,17 +3736,17 @@ path = "assets/rw/input.txt"
 [[assets]]
 path = "assets/ro/input.txt"
 
-[wasi]
+[resources]
 args = ["--serve"]
 
-[wasi.env]
+[resources.env]
 WASI_ONLY = "1"
 
-[[wasi.mounts]]
+[[resources.mounts]]
 asset_dir = "assets/rw"
 guest_path = "/guest/rw"
 
-[[wasi.read_only_mounts]]
+[[resources.read_only_mounts]]
 asset_dir = "assets/ro"
 guest_path = "/guest/ro"
 
@@ -3749,23 +3760,70 @@ remote = "127.0.0.1:4443"
 
         let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
-        let wasi = manifest.wasi.expect("wasi section should be emitted");
-        assert_eq!(wasi.args, vec!["--serve".to_string()]);
-        assert_eq!(wasi.env.get("WASI_ONLY"), Some(&"1".to_string()));
-        assert!(wasi.http_outbound.is_empty());
+        let resources = manifest
+            .resources
+            .expect("resources section should be emitted");
+        assert_eq!(resources.args, vec!["--serve".to_string()]);
+        assert_eq!(resources.env.get("WASI_ONLY"), Some(&"1".to_string()));
+        assert!(resources.http_outbound.is_empty());
         assert_eq!(
-            wasi.mounts,
+            resources.mounts,
             vec![ManifestWasiMount {
                 asset_dir: "assets/rw".to_string(),
                 guest_path: "/guest/rw".to_string(),
             }]
         );
         assert_eq!(
-            wasi.read_only_mounts,
+            resources.read_only_mounts,
             vec![ManifestWasiMount {
                 asset_dir: "assets/ro".to_string(),
                 guest_path: "/guest/ro".to_string(),
             }]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_accepts_resources_custom_fields() {
+        let root = new_temp_dir("resources-custom-fields");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[resources]
+feature_enabled = true
+allowed_devices = ["/dev/i2c-1", "/dev/i2c-2"]
+
+[resources.policy]
+mode = "strict"
+retry = 3
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        let resources = manifest
+            .resources
+            .expect("resources section should be emitted");
+        assert_eq!(
+            resources.extra.get("feature_enabled"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            resources.extra.get("allowed_devices"),
+            Some(&serde_json::json!(["/dev/i2c-1", "/dev/i2c-2"]))
+        );
+        assert_eq!(
+            resources.extra.get("policy"),
+            Some(&serde_json::json!({ "mode": "strict", "retry": 3 }))
         );
 
         let _ = fs::remove_dir_all(root);
@@ -3781,7 +3839,7 @@ name = "svc"
 main = "build/app.wasm"
 type = "cli"
 
-[wasi]
+[resources]
 http_outbound = [
   "LOCALHOST",
   "api.example.com:443",
@@ -3798,9 +3856,9 @@ remote = "127.0.0.1:4443"
 
         let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
-        let wasi = manifest.wasi.expect("wasi section should exist");
+        let resources = manifest.resources.expect("resources section should exist");
         assert_eq!(
-            wasi.http_outbound,
+            resources.http_outbound,
             vec![
                 "localhost".to_string(),
                 "api.example.com:443".to_string(),
@@ -3822,7 +3880,7 @@ name = "svc"
 main = "build/app.wasm"
 type = "cli"
 
-[wasi]
+[resources]
 http_outbound = "localhost"
 
 [target.default]
@@ -3834,7 +3892,7 @@ remote = "127.0.0.1:4443"
         let err = build_project("default", &root).expect_err("build should fail");
         assert!(
             err.to_string()
-                .contains("wasi.http_outbound must be an array")
+                .contains("resources.http_outbound must be an array")
         );
 
         let _ = fs::remove_dir_all(root);
@@ -3850,7 +3908,7 @@ name = "svc"
 main = "build/app.wasm"
 type = "cli"
 
-[wasi]
+[resources]
 http_outbound = ["*.example.com"]
 
 [target.default]
@@ -3875,7 +3933,7 @@ name = "svc"
 main = "build/app.wasm"
 type = "cli"
 
-[wasi]
+[resources]
 http_outbound = ["10.0.0.0/99"]
 
 [target.default]
@@ -3903,7 +3961,7 @@ type = "cli"
 [vars]
 SHARED = "a"
 
-[wasi.env]
+[resources.env]
 SHARED = "b"
 
 [target.default]
@@ -3914,8 +3972,8 @@ remote = "127.0.0.1:4443"
 
         let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
-        let wasi = manifest.wasi.expect("wasi section should exist");
-        assert_eq!(wasi.env.get("SHARED"), Some(&"b".to_string()));
+        let resources = manifest.resources.expect("resources section should exist");
+        assert_eq!(resources.env.get("SHARED"), Some(&"b".to_string()));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3930,7 +3988,7 @@ name = "svc"
 main = "build/app.wasm"
 type = "cli"
 
-[wasi.env]
+[resources.env]
 FROM_TOML = "toml"
 SHARED = "toml"
 
@@ -3946,15 +4004,18 @@ remote = "127.0.0.1:4443"
 
         let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
-        let wasi = manifest.wasi.expect("wasi section should exist");
+        let resources = manifest.resources.expect("resources section should exist");
 
-        assert_eq!(wasi.env.get("FROM_TOML"), Some(&"toml".to_string()));
-        assert_eq!(wasi.env.get("SHARED"), Some(&"dotenv".to_string()));
+        assert_eq!(resources.env.get("FROM_TOML"), Some(&"toml".to_string()));
+        assert_eq!(resources.env.get("SHARED"), Some(&"dotenv".to_string()));
         assert_eq!(
-            wasi.env.get("FROM_DOTENV"),
+            resources.env.get("FROM_DOTENV"),
             Some(&"dotenv-value".to_string())
         );
-        assert_eq!(wasi.env.get("QUOTED"), Some(&"hello world".to_string()));
+        assert_eq!(
+            resources.env.get("QUOTED"),
+            Some(&"hello world".to_string())
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3978,12 +4039,12 @@ remote = "127.0.0.1:4443"
 
         let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
-        let wasi = manifest.wasi.expect("wasi section should exist");
+        let resources = manifest.resources.expect("resources section should exist");
 
-        assert_eq!(wasi.env.get("DOTENV_ONLY"), Some(&"1".to_string()));
-        assert!(wasi.args.is_empty());
-        assert!(wasi.mounts.is_empty());
-        assert!(wasi.read_only_mounts.is_empty());
+        assert_eq!(resources.env.get("DOTENV_ONLY"), Some(&"1".to_string()));
+        assert!(resources.args.is_empty());
+        assert!(resources.mounts.is_empty());
+        assert!(resources.read_only_mounts.is_empty());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -4030,7 +4091,7 @@ remote = "127.0.0.1:4443"
 
         let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
-        assert!(manifest.wasi.is_none());
+        assert!(manifest.resources.is_none());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -4051,11 +4112,11 @@ path = "assets/rw/input.txt"
 [[assets]]
 path = "assets/ro/input.txt"
 
-[[wasi.mounts]]
+[[resources.mounts]]
 asset_dir = "assets/rw"
 guest_path = "/guest/shared"
 
-[[wasi.read_only_mounts]]
+[[resources.read_only_mounts]]
 asset_dir = "assets/ro"
 guest_path = "/guest/shared"
 
@@ -4086,11 +4147,11 @@ type = "cli"
 [[assets]]
 path = "assets/shared/input.txt"
 
-[[wasi.mounts]]
+[[resources.mounts]]
 asset_dir = "assets/shared"
 guest_path = "/guest/rw"
 
-[[wasi.read_only_mounts]]
+[[resources.read_only_mounts]]
 asset_dir = "assets/shared"
 guest_path = "/guest/ro"
 
@@ -4120,7 +4181,7 @@ type = "cli"
 [[assets]]
 path = "assets/ro/input.txt"
 
-[[wasi.read_only_mounts]]
+[[resources.read_only_mounts]]
 asset_dir = "assets/ro"
 guest_path = "/guest/ro"
 
@@ -4133,10 +4194,12 @@ remote = "127.0.0.1:4443"
 
         let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
-        let wasi = manifest.wasi.expect("wasi section should be emitted");
-        assert!(wasi.mounts.is_empty());
+        let resources = manifest
+            .resources
+            .expect("resources section should be emitted");
+        assert!(resources.mounts.is_empty());
         assert_eq!(
-            wasi.read_only_mounts,
+            resources.read_only_mounts,
             vec![ManifestWasiMount {
                 asset_dir: "assets/ro".to_string(),
                 guest_path: "/guest/ro".to_string(),
@@ -4159,7 +4222,7 @@ type = "cli"
 [[assets]]
 path = "assets/rw/input.txt"
 
-[[wasi.mounts]]
+[[resources.mounts]]
 asset_dir = "assets/not-listed"
 guest_path = "/guest/rw"
 

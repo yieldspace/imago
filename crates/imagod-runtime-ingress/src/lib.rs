@@ -430,6 +430,7 @@ mod tests {
             envs: BTreeMap::new(),
             wasi_mounts: Vec::new(),
             wasi_http_outbound: Vec::new(),
+            resources: BTreeMap::new(),
             bindings: Vec::new(),
             plugin_dependencies: Vec::new(),
             capabilities: imagod_ipc::CapabilityPolicy::default(),

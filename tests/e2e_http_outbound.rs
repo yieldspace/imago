@@ -28,7 +28,7 @@ fn e2e_http_outbound_default_deny_non_allowlisted_authority() -> TestResult {
         &scenario,
         &format!(
             r#"
-[wasi.env]
+[resources.env]
 IMAGO_E2E_HTTP_TARGET_AUTHORITY = "{HTTP_TARGET_AUTHORITY}"
 "#
         ),
@@ -72,10 +72,10 @@ fn e2e_http_outbound_allows_authority_when_explicit_cidr_configured() -> TestRes
         &scenario,
         &format!(
             r#"
-[wasi]
+[resources]
 http_outbound = ["127.0.0.0/8"]
 
-[wasi.env]
+[resources.env]
 IMAGO_E2E_HTTP_TARGET_AUTHORITY = "{HTTP_TARGET_AUTHORITY}"
 "#
         ),

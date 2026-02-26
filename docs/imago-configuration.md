@@ -11,7 +11,7 @@ Source of truth is the codebase (module docs, type definitions, validation logic
 - [The `[[assets]]` section](#the-assets-section)
 - [The `[http]` section](#the-http-section)
 - [The `[socket]` section](#the-socket-section)
-- [The `[wasi]` section](#the-wasi-section)
+- [The `[resources]` section](#the-resources-section)
 - [The `[capabilities]` section](#the-capabilities-section)
 - [The `[[bindings]]` section](#the-bindings-section)
 - [The `[[dependencies]]` section](#the-dependencies-section)
@@ -272,10 +272,10 @@ listen_port = 9000
 
 - Validation error notes: out-of-range values fail validation.
 
-<a id="the-wasi-section"></a>
-## The [wasi] section
+<a id="the-resources-section"></a>
+## The [resources] section
 
-This section defines WASI runtime settings and outbound policies.
+This section defines runtime resource policy and custom resource metadata.
 
 ### The `args` field
 
@@ -286,7 +286,7 @@ This section defines WASI runtime settings and outbound policies.
 - Example:
 
 ```toml
-[wasi]
+[resources]
 args = ["--serve"]
 ```
 
@@ -301,7 +301,7 @@ args = ["--serve"]
 - Example:
 
 ```toml
-[wasi]
+[resources]
 http_outbound = ["localhost", "api.example.com:443", "10.0.0.0/8"]
 ```
 
@@ -316,7 +316,7 @@ http_outbound = ["localhost", "api.example.com:443", "10.0.0.0/8"]
 - Example:
 
 ```toml
-[wasi.env]
+[resources.env]
 WASI_ONLY = "1"
 ```
 
@@ -325,13 +325,13 @@ WASI_ONLY = "1"
 ### The `mounts[].asset_dir` field
 
 - Type: `string`
-- Required/Optional: Required in each `[[wasi.mounts]]` entry.
+- Required/Optional: Required in each `[[resources.mounts]]` entry.
 - Accepted values / Constraints: must refer to a directory derived from `assets[].path` parent directories; unique across read-write and read-only mount arrays.
 - Default: none.
 - Example:
 
 ```toml
-[[wasi.mounts]]
+[[resources.mounts]]
 asset_dir = "assets"
 guest_path = "/app/assets"
 ```
@@ -341,13 +341,13 @@ guest_path = "/app/assets"
 ### The `mounts[].guest_path` field
 
 - Type: `string`
-- Required/Optional: Required in each `[[wasi.mounts]]` entry.
+- Required/Optional: Required in each `[[resources.mounts]]` entry.
 - Accepted values / Constraints: absolute Unix-style path; no path traversal; unique across read-write and read-only mount arrays.
 - Default: none.
 - Example:
 
 ```toml
-[[wasi.mounts]]
+[[resources.mounts]]
 guest_path = "/app/assets"
 ```
 
@@ -356,13 +356,13 @@ guest_path = "/app/assets"
 ### The `read_only_mounts[].asset_dir` field
 
 - Type: `string`
-- Required/Optional: Required in each `[[wasi.read_only_mounts]]` entry.
+- Required/Optional: Required in each `[[resources.read_only_mounts]]` entry.
 - Accepted values / Constraints: same rules as `mounts[].asset_dir`; unique across both mount arrays.
 - Default: none.
 - Example:
 
 ```toml
-[[wasi.read_only_mounts]]
+[[resources.read_only_mounts]]
 asset_dir = "readonly"
 guest_path = "/app/readonly"
 ```
@@ -372,17 +372,36 @@ guest_path = "/app/readonly"
 ### The `read_only_mounts[].guest_path` field
 
 - Type: `string`
-- Required/Optional: Required in each `[[wasi.read_only_mounts]]` entry.
+- Required/Optional: Required in each `[[resources.read_only_mounts]]` entry.
 - Accepted values / Constraints: same rules as `mounts[].guest_path`; unique across both mount arrays.
 - Default: none.
 - Example:
 
 ```toml
-[[wasi.read_only_mounts]]
+[[resources.read_only_mounts]]
 guest_path = "/app/readonly"
 ```
 
 - Validation error notes: non-absolute or duplicate guest path fails validation.
+
+### The `<custom_key>` field
+
+- Type: any TOML value (`boolean`, `string`, `integer`, `float`, `array`, `table`, datetime)
+- Required/Optional: Optional.
+- Accepted values / Constraints: key must be non-empty.
+- Default: none.
+- Example:
+
+```toml
+[resources]
+feature_enabled = true
+allowed_devices = ["/dev/i2c-1", "/dev/i2c-2"]
+
+[resources.policy]
+mode = "strict"
+```
+
+- Validation error notes: empty keys fail validation.
 
 <a id="the-capabilities-section"></a>
 ## The [capabilities] section

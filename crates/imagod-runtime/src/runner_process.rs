@@ -171,6 +171,7 @@ pub async fn run_runner_from_stdin_with_registry(
                 envs: bootstrap_for_run.envs.clone(),
                 wasi_mounts: bootstrap_for_run.wasi_mounts.clone(),
                 wasi_http_outbound: bootstrap_for_run.wasi_http_outbound.clone(),
+                resources: bootstrap_for_run.resources.clone(),
                 socket: bootstrap_for_run.socket.clone(),
                 plugin_dependencies: bootstrap_for_run.plugin_dependencies.clone(),
                 capabilities: bootstrap_for_run.capabilities.clone(),

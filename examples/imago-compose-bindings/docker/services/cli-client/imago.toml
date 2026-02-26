@@ -23,5 +23,5 @@ wasi = true
 name = "rpc-greeter"
 wit = "file://../../../services/rpc-greeter/wit/world.wit"
 
-[wasi.env]
+[resources.env]
 IMAGO_RPC_ADDR = "rpc://imagod-bob:4443"

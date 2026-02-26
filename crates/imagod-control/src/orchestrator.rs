@@ -18,7 +18,9 @@ use imago_protocol::{
     StopCommandPayload,
 };
 use imagod_common::ImagodError;
-use imagod_ipc::{CapabilityPolicy, PluginDependency, RunnerAppType, RunnerSocketConfig};
+use imagod_ipc::{
+    CapabilityPolicy, PluginDependency, ResourceMap, RunnerAppType, RunnerSocketConfig,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::fs;
@@ -64,7 +66,7 @@ struct Manifest {
     #[serde(default)]
     socket: Option<RunnerSocketConfig>,
     #[serde(default)]
-    wasi: Option<ManifestWasiConfig>,
+    resources: Option<ManifestResourcesConfig>,
     #[serde(default)]
     assets: Vec<ManifestAsset>,
     #[serde(default)]
@@ -97,9 +99,9 @@ struct ManifestHttp {
     max_body_bytes: u64,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
-/// Manifest WASI execution settings.
-struct ManifestWasiConfig {
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+/// Manifest resource policy settings.
+struct ManifestResourcesConfig {
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
@@ -110,6 +112,8 @@ struct ManifestWasiConfig {
     mounts: Vec<ManifestWasiMount>,
     #[serde(default)]
     read_only_mounts: Vec<ManifestWasiMount>,
+    #[serde(flatten, default)]
+    extra: ResourceMap,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1351,7 +1355,7 @@ where
 mod tests {
     use super::{
         DEFAULT_HTTP_MAX_BODY_BYTES, HashTarget, MAX_HTTP_MAX_BODY_BYTES, Manifest, ManifestAsset,
-        ManifestBinding, ManifestHash, ManifestHttp, ManifestWasiConfig, ManifestWasiMount,
+        ManifestBinding, ManifestHash, ManifestHttp, ManifestResourcesConfig, ManifestWasiMount,
         RESTART_POLICY_ALWAYS, RESTART_POLICY_FILE_NAME, RollbackOutcome, RunnerAppType,
         RunningStatus, RuntimeServiceState, STOPPED_SERVICE_STARTED_AT, ServiceCommandGate,
         append_rollback_success_message, build_launch_from_release, classify_boot_restore_entry,
@@ -1390,7 +1394,7 @@ mod tests {
             app_type: RunnerAppType::Cli,
             http: None,
             socket: None,
-            wasi: None,
+            resources: None,
             assets: Vec::<ManifestAsset>::new(),
             bindings: Vec::new(),
             dependencies: Vec::<PluginDependency>::new(),
@@ -2072,7 +2076,7 @@ mod tests {
                 path: "assets/ro/input.txt".to_string(),
             },
         ];
-        manifest.wasi = Some(ManifestWasiConfig {
+        manifest.resources = Some(ManifestResourcesConfig {
             args: vec!["--serve".to_string()],
             env: BTreeMap::from([
                 ("VAR_A".to_string(), "1".to_string()),
@@ -2088,6 +2092,10 @@ mod tests {
                 asset_dir: "assets/ro".to_string(),
                 guest_path: "/guest/ro".to_string(),
             }],
+            extra: BTreeMap::from([(
+                "custom".to_string(),
+                serde_json::json!({ "allow": ["i2c"] }),
+            )]),
         });
 
         let launch = build_launch_from_release(&root, "release-a", &root, &manifest)
@@ -2113,12 +2121,28 @@ mod tests {
                 }
             ]
         );
+        assert_eq!(
+            launch.resources.get("args"),
+            Some(&serde_json::json!(["--serve"]))
+        );
+        assert_eq!(
+            launch.resources.get("env"),
+            Some(&serde_json::json!({
+                "SECRET_B": "2",
+                "VAR_A": "1",
+                "WASI_ONLY": "1"
+            }))
+        );
+        assert_eq!(
+            launch.resources.get("custom"),
+            Some(&serde_json::json!({ "allow": ["i2c"] }))
+        );
 
         let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
-    async fn build_launch_injects_default_localhost_http_outbound_when_wasi_is_missing() {
+    async fn build_launch_injects_default_localhost_http_outbound_when_resources_is_missing() {
         let root = temp_dir_path("orchestrator-wasi-default-http-outbound");
         fs::create_dir_all(&root).expect("release dir should exist");
         fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
@@ -2152,19 +2176,20 @@ mod tests {
         fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
 
         let mut manifest = valid_manifest();
-        manifest.wasi = Some(ManifestWasiConfig {
+        manifest.resources = Some(ManifestResourcesConfig {
             args: Vec::new(),
             env: BTreeMap::new(),
             http_outbound: vec!["*.example.com".to_string()],
             mounts: Vec::new(),
             read_only_mounts: Vec::new(),
+            extra: BTreeMap::new(),
         });
 
         let err = build_launch_from_release(&root, "release-a", &root, &manifest)
             .await
             .expect_err("invalid rule should be rejected as bad manifest");
         assert_eq!(err.code, ErrorCode::BadManifest);
-        assert!(err.message.contains("manifest.wasi.http_outbound[0]"));
+        assert!(err.message.contains("manifest.resources.http_outbound[0]"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2187,7 +2212,7 @@ mod tests {
                 path: "assets/ro/input.txt".to_string(),
             },
         ];
-        manifest.wasi = Some(ManifestWasiConfig {
+        manifest.resources = Some(ManifestResourcesConfig {
             args: Vec::new(),
             env: BTreeMap::new(),
             http_outbound: Vec::new(),
@@ -2199,6 +2224,7 @@ mod tests {
                 asset_dir: "assets/ro".to_string(),
                 guest_path: "/guest/shared".to_string(),
             }],
+            extra: BTreeMap::new(),
         });
 
         let err = build_launch_from_release(&root, "release-a", &root, &manifest)
