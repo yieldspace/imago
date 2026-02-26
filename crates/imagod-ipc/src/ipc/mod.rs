@@ -643,9 +643,9 @@ pub struct RunnerBootstrap {
     pub http_port: Option<u16>,
     /// Max accepted HTTP request body size in bytes when `app_type=http`.
     pub http_max_body_bytes: Option<u64>,
-    /// Number of HTTP workers available to runtime ingress.
+    /// Compatibility worker-count value forwarded from manager configuration.
     pub http_worker_count: u32,
-    /// Queue capacity for each HTTP worker.
+    /// Effective HTTP request queue capacity for ingress dispatch.
     pub http_worker_queue_capacity: u32,
     /// Socket runtime configuration when `app_type=socket`.
     pub socket: Option<RunnerSocketConfig>,

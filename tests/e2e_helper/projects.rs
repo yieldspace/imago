@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy)]
 pub enum AppKind {
     Cli,
-    Http { port: u16 },
+    Http {
+        port: u16,
+        max_body_bytes: Option<u64>,
+    },
     Rpc,
 }
 
@@ -112,8 +115,15 @@ impl ProjectLayout {
             append_target(&mut body, &target.name, target);
         }
 
-        if let AppKind::Http { port } = app_kind {
+        if let AppKind::Http {
+            port,
+            max_body_bytes,
+        } = app_kind
+        {
             body.push_str(&format!("\n[http]\nport = {port}\n"));
+            if let Some(max_body_bytes) = max_body_bytes {
+                body.push_str(&format!("max_body_bytes = {max_body_bytes}\n"));
+            }
         }
 
         let imago_toml_path = self.project_dir.join("imago.toml");

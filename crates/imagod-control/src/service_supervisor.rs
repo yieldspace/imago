@@ -61,6 +61,7 @@ const RUNNER_ENDPOINT_HASH_BYTES: usize = 16;
 const MAX_MANAGER_CONTROL_CONNECTION_HANDLERS: usize = 32;
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
 const LOG_CHANNEL_CAPACITY: usize = 256;
+const DEFAULT_HTTP_QUEUE_MEMORY_BUDGET_BYTES: u64 = 32 * 1024 * 1024;
 type PendingReadyMap = BTreeMap<String, oneshot::Sender<Result<(), ImagodError>>>;
 type StoppingServicesMap = BTreeMap<String, usize>;
 
@@ -255,6 +256,7 @@ pub struct ServiceSupervisor {
     runner_ready_timeout: Duration,
     http_worker_count: u32,
     http_worker_queue_capacity: u32,
+    http_queue_memory_budget_bytes: u64,
     runner_log_buffer_bytes: usize,
     epoch_tick_interval_ms: u64,
     manager_control_endpoint: PathBuf,
@@ -381,6 +383,7 @@ impl ServiceSupervisor {
             runner_ready_timeout,
             http_worker_count,
             http_worker_queue_capacity,
+            http_queue_memory_budget_bytes: DEFAULT_HTTP_QUEUE_MEMORY_BUDGET_BYTES,
             runner_log_buffer_bytes,
             epoch_tick_interval_ms: epoch_tick_interval_ms.max(1),
             manager_control_endpoint,
@@ -397,6 +400,15 @@ impl ServiceSupervisor {
         Ok(supervisor)
     }
 
+    /// Overrides queued HTTP request memory budget in bytes.
+    pub fn with_http_queue_memory_budget_bytes(
+        mut self,
+        http_queue_memory_budget_bytes: u64,
+    ) -> Self {
+        self.http_queue_memory_budget_bytes = http_queue_memory_budget_bytes;
+        self
+    }
+
     /// Starts a service by spawning a runner child process.
     pub async fn start(&self, launch: ServiceLaunch) -> Result<(), ImagodError> {
         self.start_internal(launch, false).await
@@ -411,6 +423,8 @@ impl ServiceSupervisor {
         self.reserve_start(&launch.name).await?;
         let service_name = launch.name.clone();
         let result = async {
+            let effective_http_worker_queue_capacity =
+                self.effective_http_worker_queue_capacity(&launch)?;
             let runner_id = uuid::Uuid::new_v4().to_string();
             let manager_auth_secret = random_secret_hex();
             let invocation_secret = random_secret_hex();
@@ -424,7 +438,7 @@ impl ServiceSupervisor {
                 http_port: launch.http_port,
                 http_max_body_bytes: launch.http_max_body_bytes,
                 http_worker_count: self.http_worker_count,
-                http_worker_queue_capacity: self.http_worker_queue_capacity,
+                http_worker_queue_capacity: effective_http_worker_queue_capacity,
                 socket: launch.socket.clone(),
                 component_path: launch.component_path.clone(),
                 args: launch.args.clone(),
@@ -553,6 +567,59 @@ impl ServiceSupervisor {
         .await;
         self.release_start(&service_name).await;
         result
+    }
+
+    fn effective_http_worker_queue_capacity(
+        &self,
+        launch: &ServiceLaunch,
+    ) -> Result<u32, ImagodError> {
+        if launch.app_type != RunnerAppType::Http {
+            return Ok(self.http_worker_queue_capacity);
+        }
+
+        let Some(max_body_bytes) = launch.http_max_body_bytes else {
+            return Err(ImagodError::new(
+                ErrorCode::Internal,
+                STAGE_START,
+                format!(
+                    "service '{}' is missing manifest.http.max_body_bytes for app_type=http",
+                    launch.name
+                ),
+            ));
+        };
+
+        if max_body_bytes == 0 {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                STAGE_START,
+                format!(
+                    "service '{}' must declare manifest.http.max_body_bytes greater than zero",
+                    launch.name
+                ),
+            ));
+        }
+
+        let max_queue_by_budget = self.http_queue_memory_budget_bytes / max_body_bytes;
+        if max_queue_by_budget == 0 {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                STAGE_START,
+                format!(
+                    "service '{}' exceeds runtime.http_queue_memory_budget_bytes: budget={} max_body_bytes={}",
+                    launch.name, self.http_queue_memory_budget_bytes, max_body_bytes
+                ),
+            ));
+        }
+
+        let configured_capacity = u64::from(self.http_worker_queue_capacity);
+        let effective_capacity = configured_capacity.min(max_queue_by_budget);
+        u32::try_from(effective_capacity).map_err(|_| {
+            ImagodError::new(
+                ErrorCode::Internal,
+                STAGE_START,
+                format!("effective HTTP queue capacity is too large: {effective_capacity}"),
+            )
+        })
     }
 
     /// Replaces an existing service using stop-then-start sequence.
@@ -1598,12 +1665,88 @@ mod tests {
         }
     }
 
+    fn sample_http_launch(max_body_bytes: u64) -> ServiceLaunch {
+        ServiceLaunch {
+            name: "svc-http".to_string(),
+            release_hash: "release-test".to_string(),
+            app_type: RunnerAppType::Http,
+            http_port: Some(18080),
+            http_max_body_bytes: Some(max_body_bytes),
+            socket: None,
+            component_path: PathBuf::from("/tmp/unused.wasm"),
+            args: Vec::new(),
+            envs: std::collections::BTreeMap::new(),
+            wasi_mounts: Vec::new(),
+            wasi_http_outbound: Vec::new(),
+            bindings: Vec::new(),
+            plugin_dependencies: Vec::new(),
+            capabilities: CapabilityPolicy::default(),
+        }
+    }
+
     #[test]
     fn bounded_log_buffer_keeps_latest_bytes_only() {
         let mut buffer = BoundedLogBuffer::new(5);
         buffer.push(b"abc");
         buffer.push(b"def");
         assert_eq!(buffer.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn effective_http_worker_queue_capacity_respects_budget_when_body_is_8mib() {
+        let root = new_test_root("http-queue-budget-8mib");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize")
+            .with_http_queue_memory_budget_bytes(32 * 1024 * 1024);
+        let launch = sample_http_launch(8 * 1024 * 1024);
+        assert_eq!(
+            supervisor
+                .effective_http_worker_queue_capacity(&launch)
+                .expect("queue capacity should be computed"),
+            4
+        );
+
+        drop(supervisor);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn effective_http_worker_queue_capacity_clamps_to_budget_when_body_is_16mib() {
+        let root = new_test_root("http-queue-budget-16mib");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize")
+            .with_http_queue_memory_budget_bytes(32 * 1024 * 1024);
+        let launch = sample_http_launch(16 * 1024 * 1024);
+        assert_eq!(
+            supervisor
+                .effective_http_worker_queue_capacity(&launch)
+                .expect("queue capacity should be clamped by budget"),
+            2
+        );
+
+        drop(supervisor);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn effective_http_worker_queue_capacity_rejects_when_budget_is_smaller_than_max_body() {
+        let root = new_test_root("http-queue-budget-too-small");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize")
+            .with_http_queue_memory_budget_bytes(32 * 1024 * 1024);
+        let launch = sample_http_launch(64 * 1024 * 1024);
+        let err = supervisor
+            .effective_http_worker_queue_capacity(&launch)
+            .expect_err("budget smaller than max_body should fail");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert_eq!(err.stage, STAGE_START);
+        assert!(
+            err.message
+                .contains("runtime.http_queue_memory_budget_bytes")
+        );
+
+        drop(supervisor);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

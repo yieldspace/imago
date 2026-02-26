@@ -94,7 +94,7 @@ impl Cluster {
         let port = pick_free_port()?;
         let imagod_config_path = work_dir.join("i.toml");
         let config = format!(
-            "listen_addr = \"127.0.0.1:{port}\"\nstorage_root = \"d\"\n\n[runtime]\nmax_chunks = 128\nchunk_timeout_ms = 10000\nidle_ttl_secs = 300\nhttp_max_body_bytes = 1048576\ntick_interval_ms = 5000\nrunner_ready_timeout_secs = 10\nboot_plugin_gc_enabled = false\nboot_restore_enabled = false\n\n[tls]\nserver_key = \"{}\"\nadmin_public_keys = [\"{}\"]\nclient_public_keys = [\"{}\"]\n",
+            "listen_addr = \"127.0.0.1:{port}\"\nstorage_root = \"d\"\n\n[runtime]\nmax_chunks = 128\nchunk_timeout_ms = 10000\nidle_ttl_secs = 300\nhttp_max_body_bytes = 1048576\ntick_interval_ms = 5000\nrunner_ready_timeout_secs = 10\nhttp_queue_memory_budget_bytes = 67108864\nboot_plugin_gc_enabled = false\nboot_restore_enabled = false\n\n[tls]\nserver_key = \"{}\"\nadmin_public_keys = [\"{}\"]\nclient_public_keys = [\"{}\"]\n",
             toml_escape(keys.server_key_path.to_string_lossy().as_ref()),
             self.control_admin_public_hex.as_str(),
             keys.server_public_hex.as_str(),

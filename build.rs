@@ -55,6 +55,10 @@ fn main() {
     );
     export_artifact("IMAGO_E2E_WASM_HTTP", &wasm_dir.join("e2e_http.wasm"));
     export_artifact(
+        "IMAGO_E2E_WASM_HTTP_SLOW",
+        &wasm_dir.join("e2e_http_slow.wasm"),
+    );
+    export_artifact(
         "IMAGO_E2E_WASM_RPC_CALLER",
         &wasm_dir.join("e2e_rpc_caller.wasm"),
     );

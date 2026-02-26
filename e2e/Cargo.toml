@@ -22,6 +22,10 @@ name = "e2e_http"
 required-features = ["e2e"]
 
 [[bin]]
+name = "e2e_http_slow"
+required-features = ["e2e"]
+
+[[bin]]
 name = "e2e_rpc_caller"
 required-features = ["e2e"]
 
