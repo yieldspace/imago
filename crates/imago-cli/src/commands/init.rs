@@ -402,9 +402,9 @@ fn build_init_plan(output_dir: &Path, template: &InitTemplate) -> InitPlan {
         });
     }
 
-    let mut expanded_directories = BTreeSet::new();
-    for dir in directories {
-        insert_missing_paths_with_ancestors(&dir, &mut expanded_directories);
+    let mut expanded_directories = directories.clone();
+    for dir in &directories {
+        insert_missing_paths_with_ancestors(dir, &mut expanded_directories);
     }
 
     let mut sorted_directories: Vec<PathBuf> = expanded_directories.into_iter().collect();
@@ -512,11 +512,7 @@ fn apply_plan_with_writer(
     let mut created_files = Vec::new();
     for file in &plan.files {
         if let Err(err) = writer(&file.destination, &file.contents) {
-            let mut rollback_files = created_files.clone();
-            if fs::symlink_metadata(&file.destination).is_ok() {
-                rollback_files.push(file.destination.clone());
-            }
-            rollback_created_paths(&rollback_files, &created_dirs);
+            rollback_created_paths(&created_files, &created_dirs);
             return Err(err);
         }
         created_files.push(file.destination.clone());
@@ -962,6 +958,38 @@ mod tests {
         cleanup(&cwd);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rejects_existing_symlink_directory_in_output_tree() {
+        use std::os::unix::fs::symlink;
+
+        let cwd = temp_dir("rejects-symlink-directory");
+        let output_dir = cwd.join("svc");
+        fs::create_dir_all(&output_dir).expect("output dir should be created");
+        let outside = cwd.join("outside-src");
+        fs::create_dir_all(&outside).expect("outside dir should be created");
+        symlink(&outside, output_dir.join("src")).expect("symlink should be created");
+
+        let err = run_inner_with_prompts(
+            InitArgs {
+                path: Some(PathBuf::from("svc")),
+                template: Some("rust".to_string()),
+            },
+            &cwd,
+            false,
+            ".",
+            "unused",
+        )
+        .expect_err("symlinked directory should be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("refusing to overwrite existing path"),
+            "unexpected error: {err}"
+        );
+        cleanup(&cwd);
+    }
+
     #[test]
     fn apply_plan_rolls_back_created_files_on_write_failure() {
         let cwd = temp_dir("rollback-on-write-failure");
@@ -1002,8 +1030,8 @@ mod tests {
     }
 
     #[test]
-    fn apply_plan_rolls_back_partial_file_when_writer_fails_after_create() {
-        let cwd = temp_dir("rollback-partial-file");
+    fn apply_plan_does_not_remove_race_created_destination_file() {
+        let cwd = temp_dir("rollback-race-created-file");
         let output_dir = cwd.join("svc");
         let template = detected_templates()
             .expect("templates should load")
@@ -1019,34 +1047,30 @@ mod tests {
                 call_count += 1;
                 return write_file_create_new(destination, contents);
             }
-
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(destination)
-                .expect("second file should be creatable");
-            file.write_all(b"partial")
-                .expect("partial file write should succeed");
-            Err(anyhow!("injected failure after create"))
+            fs::write(destination, b"raced").expect("simulated race file should be created");
+            write_file_create_new(destination, contents)
         };
 
         let err = apply_plan_with_writer(&plan, &mut writer)
-            .expect_err("writer failure after create should fail");
+            .expect_err("writer should fail when raced file already exists");
         assert!(
-            err.to_string().contains("injected failure after create"),
+            err.to_string()
+                .contains("refusing to overwrite existing path"),
             "unexpected error: {err}"
         );
 
-        for file in &plan.files {
-            assert!(
-                !file.destination.exists(),
-                "file should be rolled back: {}",
-                file.destination.display()
-            );
-        }
+        let raced_destination = &plan.files[1].destination;
+        assert_eq!(
+            fs::read(raced_destination).expect("race-created file should remain"),
+            b"raced"
+        );
         assert!(
-            !output_dir.exists(),
-            "output directory should be removed after rollback"
+            !plan.files[0].destination.exists(),
+            "first file created by init should be rolled back"
+        );
+        assert!(
+            output_dir.exists(),
+            "output directory should remain because race-created file is preserved"
         );
         cleanup(&cwd);
     }
