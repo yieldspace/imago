@@ -12,9 +12,9 @@ This documentation is organized for quick onboarding first, then direct source r
 
 ```mermaid
 flowchart LR
-    A["imago.toml"] --> B["imago build"]
+    A["imago.toml"] --> B["imago artifact build"]
     B --> C["build/manifest.json"]
-    C --> D["imago deploy"]
+    C --> D["imago service deploy"]
     D --> E["imagod manager"]
     E --> F["runner process"]
     F --> G["Wasm component"]

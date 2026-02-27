@@ -33,10 +33,10 @@ Initialize a project:
 
 ```bash
 # Interactive (TTY)
-imago init .
+imago project init .
 
 # Non-interactive (CI/no TTY)
-imago init services/example --lang rust
+imago project init services/example --lang rust
 ```
 
 Run local example:
@@ -50,8 +50,8 @@ cargo run -p imagod -- --config imagod.toml
 ```bash
 # Terminal 2
 cd examples/local-imagod
-cargo run -p imago-cli -- deploy --target default --detach
-cargo run -p imago-cli -- logs local-imagod-app --tail 200
+cargo run -p imago-cli -- service deploy --target default --detach
+cargo run -p imago-cli -- service logs local-imagod-app --tail 200
 ```
 
 ## CLI Output Modes

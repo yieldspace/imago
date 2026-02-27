@@ -71,19 +71,24 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
         &workspace_root,
         &greeter_dir,
         &control_home,
-        &["deploy", "--target", "default", "--detach"],
+        &["service", "deploy", "--target", "default", "--detach"],
     )?;
     ensure_success("rpc-greeter deploy", &deploy_greeter)?;
     assert_command_completed("rpc-greeter deploy", &deploy_greeter)?;
 
-    let update_client = run_imago_cli(&workspace_root, &client_dir, &control_home, &["update"])?;
+    let update_client = run_imago_cli(
+        &workspace_root,
+        &client_dir,
+        &control_home,
+        &["deps", "sync"],
+    )?;
     ensure_success("cli-client update", &update_client)?;
 
     let deploy_client = run_imago_cli(
         &workspace_root,
         &client_dir,
         &control_home,
-        &["deploy", "--target", "default", "--detach"],
+        &["service", "deploy", "--target", "default", "--detach"],
     )?;
     ensure_success("cli-client deploy", &deploy_client)?;
     assert_command_completed("cli-client deploy", &deploy_client)?;
@@ -102,9 +107,9 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
         &client_dir,
         &control_home,
         &[
-            "bindings",
+            "trust",
             "cert",
-            "deploy",
+            "replicate",
             "--from",
             alice_authority.as_str(),
             "--to",
@@ -149,9 +154,9 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
         &client_dir,
         &control_home,
         &[
-            "bindings",
+            "trust",
             "cert",
-            "deploy",
+            "replicate",
             "--from",
             alice_authority.as_str(),
             "--to",
@@ -186,13 +191,13 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
         &workspace_root,
         &client_dir,
         &control_home,
-        &["stop", "cli-client", "--target", "default"],
+        &["service", "stop", "cli-client", "--target", "default"],
     );
     let _ = run_imago_cli(
         &workspace_root,
         &greeter_dir,
         &control_home,
-        &["stop", "rpc-greeter", "--target", "default"],
+        &["service", "stop", "rpc-greeter", "--target", "default"],
     );
 
     Ok(())
@@ -286,7 +291,7 @@ fn fetch_logs_once(
         workspace_root,
         project_dir,
         home,
-        &["logs", service_name, "--tail", "200"],
+        &["service", "logs", service_name, "--tail", "200"],
     )?;
     if !logs.success {
         return Ok(None);

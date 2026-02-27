@@ -174,7 +174,7 @@ impl Scenario {
     pub fn deploy_service(&self, service_name: &str, target: &str) -> TestResult<CmdOutput> {
         let service = self.service(service_name)?;
         ensure_target_exists(service, target)?;
-        let args = ["deploy", "--target", target, "--detach"];
+        let args = ["service", "deploy", "--target", target, "--detach"];
         let output = self.run_service_cli(service_name, &args)?;
         output.ensure_success(&args)?;
         Ok(output)
@@ -183,7 +183,7 @@ impl Scenario {
     pub fn stop(&self, service_name: &str, target: &str) -> TestResult<CmdOutput> {
         let service = self.service(service_name)?;
         ensure_target_exists(service, target)?;
-        let args = ["stop", service_name, "--target", target];
+        let args = ["service", "stop", service_name, "--target", target];
         let output = self.run_service_cli(service_name, &args)?;
         output.ensure_success(&args)?;
         Ok(output)
@@ -193,7 +193,13 @@ impl Scenario {
         let service = self.service(service_name)?;
         ensure_target_exists(service, target)?;
         let tail_text = tail.to_string();
-        let args = ["logs", service_name, "--tail", tail_text.as_str()];
+        let args = [
+            "service",
+            "logs",
+            service_name,
+            "--tail",
+            tail_text.as_str(),
+        ];
         let output = self.run_service_cli(service_name, &args)?;
         output.ensure_success(&args)?;
         Ok(output)
@@ -212,7 +218,7 @@ impl Scenario {
         let service = self.service(service_name)?;
         ensure_target_exists(service, via_target)?;
 
-        let args = ["bindings", "cert", "deploy", "--from", from, "--to", to];
+        let args = ["trust", "cert", "replicate", "--from", from, "--to", to];
         let output = self.run_service_cli(service_name, &args)?;
         output.ensure_success(&args)?;
         Ok(output)
