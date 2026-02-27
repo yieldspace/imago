@@ -159,24 +159,24 @@ pub(crate) async fn run_with_project_root_and_target_override(
     target_override: Option<&build::TargetConfig>,
 ) -> CommandResult {
     let started_at = Instant::now();
-    ui::command_start("logs", "starting");
+    ui::command_start("service.logs", "starting");
     match run_async_with_target_override(args, project_root, target_override).await {
         Ok(summary) => build_logs_success_result(summary, started_at),
         Err(err) => {
-            let summary_message = summarize_command_failure("logs", &err);
+            let summary_message = summarize_command_failure("service.logs", &err);
             let diagnostic_message = format_logs_error_message(&err);
-            ui::command_finish("logs", false, &summary_message);
-            CommandResult::failure("logs", started_at, diagnostic_message)
+            ui::command_finish("service.logs", false, &summary_message);
+            CommandResult::failure("service.logs", started_at, diagnostic_message)
         }
     }
 }
 
 fn format_logs_error_message(err: &anyhow::Error) -> String {
-    format_command_error("logs", err)
+    format_command_error("service.logs", err)
 }
 
 fn build_logs_success_result(summary: LogsSummary, started_at: Instant) -> CommandResult {
-    let mut result = CommandResult::success("logs", started_at);
+    let mut result = CommandResult::success("service.logs", started_at);
     result.meta.insert("name".to_string(), summary.name);
     result
         .meta
@@ -223,16 +223,20 @@ async fn run_async_with_target_override(
         build::default_target_name().to_string()
     };
     let service_name = logs_service_for_context(name.as_deref());
-    ui::command_stage("logs", "load-config", "loading target configuration");
+    ui::command_stage(
+        "service.logs",
+        "load-config",
+        "loading target configuration",
+    );
     let target = match target_override {
         Some(target) => target.clone(),
         None => build::load_target_config(&target_name, project_root)
             .context("failed to load target configuration")?,
     }
     .require_deploy_credentials()
-    .context("target settings are invalid for logs")?;
+    .context("target settings are invalid for service logs")?;
     ui::command_info(
-        "logs",
+        "service.logs",
         &format_local_context_line(
             project_root,
             service_name,
@@ -241,9 +245,9 @@ async fn run_async_with_target_override(
             target.server_name.as_deref(),
         ),
     );
-    ui::command_stage("logs", "connect", "connecting target");
+    ui::command_stage("service.logs", "connect", "connecting target");
     let connected = deploy::connect_target(&target).await?;
-    ui::command_stage("logs", "hello", "negotiating hello");
+    ui::command_stage("service.logs", "hello", "negotiating hello");
     let required_features = if with_timestamp {
         LOGS_HELLO_REQUIRED_FEATURES_WITH_TIMESTAMP.as_slice()
     } else {
@@ -253,7 +257,7 @@ async fn run_async_with_target_override(
         negotiate_hello_with_features(&connected.session, Uuid::new_v4(), required_features)
             .await?;
     ui::command_info(
-        "logs",
+        "service.logs",
         &format_peer_context_line(
             &connected.authority,
             &connected.resolved_addr.to_string(),
@@ -282,7 +286,7 @@ async fn run_async_with_target_override(
     if ack.names.is_empty() {
         return Err(anyhow!("logs.request returned no target service"));
     }
-    ui::command_clear("logs");
+    ui::command_clear("service.logs");
 
     let initial_name_width_chars = max_name_width_from_ack_names(&ack.names);
     let termination = receive_logs_datagrams(
@@ -484,7 +488,7 @@ fn detect_seq_gap(expected_seq: &mut Option<u64>, actual: u64) -> bool {
 
 fn warn_if_seq_gap(expected_seq: &mut Option<u64>, actual: u64, truncated_warned: &mut bool) {
     if detect_seq_gap(expected_seq, actual) && !*truncated_warned {
-        ui::command_warn("logs", "<<logs truncated>>");
+        ui::command_warn("service.logs", "<<logs truncated>>");
         *truncated_warned = true;
     }
 }

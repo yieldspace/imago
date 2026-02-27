@@ -30,13 +30,13 @@ cd imago
 
 ```bash
 # Interactive (TTY)
-imago init .
+imago project init .
 
 # Non-interactive (CI/no TTY): --lang is required
-imago init services/example --lang rust
+imago project init services/example --lang rust
 ```
 
-`imago init` updates `.gitignore` in the project directory and ensures `.imago` and `/build` entries exist.
+`imago project init` updates `.gitignore` in the project directory and ensures `.imago` and `/build` entries exist.
 
 ## Run Example
 
@@ -49,8 +49,8 @@ cargo run -p imagod -- --config imagod.toml
 ```bash
 # Terminal 2
 cd examples/local-imagod
-cargo run -p imago-cli -- deploy --target default --detach
-cargo run -p imago-cli -- logs local-imagod-app --tail 200
+cargo run -p imago-cli -- service deploy --target default --detach
+cargo run -p imago-cli -- service logs local-imagod-app --tail 200
 ```
 
 ## Success Check

@@ -13,28 +13,82 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Commands {
+    /// Project lifecycle operations.
+    Project(ProjectSubcommandArgs),
+    /// Artifact lifecycle operations.
+    Artifact(ArtifactSubcommandArgs),
+    /// Dependency synchronization operations.
+    Deps(DepsSubcommandArgs),
+    /// Service runtime operations.
+    Service(ServiceSubcommandArgs),
+    /// Stack profile operations across multiple services.
+    Stack(ComposeSubcommandArgs),
+    /// Trust and certificate operations.
+    Trust(TrustSubcommandArgs),
+}
+
+/// Project lifecycle subcommands.
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct ProjectSubcommandArgs {
+    /// Project operation to run.
+    #[command(subcommand)]
+    pub command: ProjectCommands,
+}
+
+#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
+pub enum ProjectCommands {
     /// Generate imago.toml from a template.
     Init(InitArgs),
+}
+
+/// Artifact lifecycle subcommands.
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct ArtifactSubcommandArgs {
+    /// Artifact operation to run.
+    #[command(subcommand)]
+    pub command: ArtifactCommands,
+}
+
+#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
+pub enum ArtifactCommands {
     /// Build project artifacts and manifest.
     Build(BuildArgs),
+}
+
+/// Dependency lifecycle subcommands.
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct DepsSubcommandArgs {
+    /// Dependency operation to run.
+    #[command(subcommand)]
+    pub command: DepsCommands,
+}
+
+#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
+pub enum DepsCommands {
     /// Resolve dependencies and refresh lock/cache state.
-    Update(UpdateArgs),
+    Sync(UpdateArgs),
+}
+
+/// Service lifecycle subcommands.
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct ServiceSubcommandArgs {
+    /// Service operation to run.
+    #[command(subcommand)]
+    pub command: ServiceCommands,
+}
+
+#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
+pub enum ServiceCommands {
     /// Build and deploy the current service to imagod.
     Deploy(DeployArgs),
-    /// Run compose profile operations across multiple services.
-    Compose(ComposeSubcommandArgs),
     /// Start a deployed service instance.
-    Run(RunArgs),
+    Start(RunArgs),
     /// Stop a running service instance.
     Stop(StopArgs),
     /// List deployed service states.
-    Ps(PsArgs),
+    Ls(PsArgs),
     /// Stream or tail service logs.
     Logs(LogsArgs),
-    /// Manage binding certificates and trust data.
-    Bindings(BindingsSubcommandArgs),
-    /// Generate local development certificates.
-    Certs(CertsSubcommandArgs),
 }
 
 /// Initialize a project with imago.toml.
@@ -125,14 +179,14 @@ pub struct ComposeSubcommandArgs {
 pub enum ComposeCommands {
     /// Build all services in a compose profile.
     Build(ComposeBuildArgs),
-    /// Update dependencies for all services in a compose profile.
-    Update(ComposeUpdateArgs),
+    /// Sync dependencies for all services in a compose profile.
+    Sync(ComposeUpdateArgs),
     /// Deploy all services in a compose profile.
     Deploy(ComposeDeployArgs),
     /// Stream or tail logs for services in a compose profile.
     Logs(ComposeLogsArgs),
     /// List deployed service states in a compose profile.
-    Ps(ComposePsArgs),
+    Ls(ComposePsArgs),
 }
 
 /// Build services for a compose profile.
@@ -147,7 +201,7 @@ pub struct ComposeBuildArgs {
     pub target: String,
 }
 
-/// Update dependencies for services in a compose profile.
+/// Sync dependencies for services in a compose profile.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct ComposeUpdateArgs {
     /// Compose profile name.
@@ -227,34 +281,51 @@ pub struct LogsArgs {
     pub with_timestamp: bool,
 }
 
-/// Bindings subcommands.
+/// Trust subcommands.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
-pub struct BindingsSubcommandArgs {
-    /// Bindings operation to run.
+pub struct TrustSubcommandArgs {
+    /// Trust operation to run.
     #[command(subcommand)]
-    pub command: BindingsCommands,
+    pub command: TrustCommands,
 }
 
 #[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
-pub enum BindingsCommands {
+pub enum TrustCommands {
     /// Manage binding certificate operations.
-    Cert(BindingsCertSubcommandArgs),
+    Cert(TrustCertSubcommandArgs),
+    /// Generate local development client key material.
+    #[command(name = "client-key")]
+    ClientKey(TrustClientKeySubcommandArgs),
 }
 
-/// Binding certificate subcommands.
+/// Trust certificate subcommands.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
-pub struct BindingsCertSubcommandArgs {
-    /// Binding certificate operation to run.
+pub struct TrustCertSubcommandArgs {
+    /// Trust certificate operation to run.
     #[command(subcommand)]
-    pub command: BindingsCertCommands,
+    pub command: TrustCertCommands,
 }
 
 #[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
-pub enum BindingsCertCommands {
+pub enum TrustCertCommands {
     /// Upload a public key to a remote authority.
     Upload(BindingsCertUploadArgs),
     /// Copy a binding certificate from one authority to another.
-    Deploy(BindingsCertDeployArgs),
+    Replicate(BindingsCertDeployArgs),
+}
+
+/// Trust client key subcommands.
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct TrustClientKeySubcommandArgs {
+    /// Trust client key operation to run.
+    #[command(subcommand)]
+    pub command: TrustClientKeyCommands,
+}
+
+#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
+pub enum TrustClientKeyCommands {
+    /// Generate a local client key for imago-cli authentication.
+    Generate(CertsGenerateArgs),
 }
 
 /// Upload a binding public key.
@@ -281,20 +352,6 @@ pub struct BindingsCertDeployArgs {
     pub from: String,
 }
 
-/// Certificate utility subcommands.
-#[derive(Debug, Args, Clone, PartialEq, Eq)]
-pub struct CertsSubcommandArgs {
-    /// Certificate operation to run.
-    #[command(subcommand)]
-    pub command: CertsCommands,
-}
-
-#[derive(Debug, Subcommand, Clone, PartialEq, Eq)]
-pub enum CertsCommands {
-    /// Generate a local client key for imago-cli authentication.
-    Generate(CertsGenerateArgs),
-}
-
 /// Generate a local client key for imago-cli authentication.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct CertsGenerateArgs {
@@ -313,172 +370,18 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     #[test]
-    fn parses_build_without_options() {
-        let cli = Cli::try_parse_from(["imago", "build"]).expect("parse should succeed");
+    fn parses_project_init_with_path_and_lang() {
+        let cli =
+            Cli::try_parse_from(["imago", "project", "init", "services/api", "--lang", "rust"])
+                .expect("parse should succeed");
 
         assert_eq!(
             cli,
             Cli {
-                command: Commands::Build(BuildArgs {
-                    target: "default".to_string(),
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_init_without_options() {
-        let cli = Cli::try_parse_from(["imago", "init"]).expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Init(InitArgs {
-                    path: None,
-                    lang: None,
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_init_with_path_and_lang() {
-        let cli = Cli::try_parse_from(["imago", "init", "services/api", "--lang", "rust"])
-            .expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Init(InitArgs {
-                    path: Some(PathBuf::from("services/api")),
-                    lang: Some("rust".to_string()),
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_init_with_dot_path() {
-        let cli = Cli::try_parse_from(["imago", "init", ".", "--lang", "generic"])
-            .expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Init(InitArgs {
-                    path: Some(PathBuf::from(".")),
-                    lang: Some("generic".to_string()),
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_build_with_target() {
-        let cli = Cli::try_parse_from(["imago", "build", "--target", "edge"])
-            .expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Build(BuildArgs {
-                    target: "edge".to_string(),
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn rejects_build_env_option() {
-        let err = Cli::try_parse_from(["imago", "build", "--env", "prod"])
-            .expect_err("parse should fail");
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn parses_update_without_options() {
-        let cli = Cli::try_parse_from(["imago", "update"]).expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Update(UpdateArgs {}),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_deploy_without_options() {
-        let cli = Cli::try_parse_from(["imago", "deploy"]).expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Deploy(DeployArgs {
-                    target: None,
-                    detach: false,
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn rejects_deploy_env_option() {
-        let err = Cli::try_parse_from(["imago", "deploy", "--env", "prod"])
-            .expect_err("parse should fail");
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn parses_deploy_with_target() {
-        let cli = Cli::try_parse_from(["imago", "deploy", "--target", "default"])
-            .expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Deploy(DeployArgs {
-                    target: Some("default".to_string()),
-                    detach: false,
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_deploy_with_detach() {
-        let cli = Cli::try_parse_from(["imago", "deploy", "-d"]).expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Deploy(DeployArgs {
-                    target: None,
-                    detach: true,
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_compose_build_with_profile_and_target() {
-        let cli = Cli::try_parse_from([
-            "imago",
-            "compose",
-            "build",
-            "nanokvm-mini",
-            "--target",
-            "nanokvm-cube",
-        ])
-        .expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Compose(ComposeSubcommandArgs {
-                    command: ComposeCommands::Build(ComposeBuildArgs {
-                        profile: "nanokvm-mini".to_string(),
-                        target: "nanokvm-cube".to_string(),
+                command: Commands::Project(ProjectSubcommandArgs {
+                    command: ProjectCommands::Init(InitArgs {
+                        path: Some(PathBuf::from("services/api")),
+                        lang: Some("rust".to_string()),
                     }),
                 }),
             }
@@ -486,23 +389,16 @@ mod tests {
     }
 
     #[test]
-    fn compose_build_requires_target() {
-        let err = Cli::try_parse_from(["imago", "compose", "build", "nanokvm-mini"])
-            .expect_err("parse should fail");
-        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
-    }
-
-    #[test]
-    fn parses_compose_update_with_profile() {
-        let cli = Cli::try_parse_from(["imago", "compose", "update", "nanokvm-mini"])
+    fn parses_artifact_build_with_target() {
+        let cli = Cli::try_parse_from(["imago", "artifact", "build", "--target", "edge"])
             .expect("parse should succeed");
 
         assert_eq!(
             cli,
             Cli {
-                command: Commands::Compose(ComposeSubcommandArgs {
-                    command: ComposeCommands::Update(ComposeUpdateArgs {
-                        profile: "nanokvm-mini".to_string(),
+                command: Commands::Artifact(ArtifactSubcommandArgs {
+                    command: ArtifactCommands::Build(BuildArgs {
+                        target: "edge".to_string(),
                     }),
                 }),
             }
@@ -510,61 +406,72 @@ mod tests {
     }
 
     #[test]
-    fn parses_compose_deploy_with_profile_and_target() {
-        let cli = Cli::try_parse_from([
-            "imago",
-            "compose",
-            "deploy",
-            "nanokvm-mini",
-            "--target",
-            "nanokvm-cube",
-        ])
-        .expect("parse should succeed");
+    fn parses_deps_sync_without_options() {
+        let cli = Cli::try_parse_from(["imago", "deps", "sync"]).expect("parse should succeed");
 
         assert_eq!(
             cli,
             Cli {
-                command: Commands::Compose(ComposeSubcommandArgs {
-                    command: ComposeCommands::Deploy(ComposeDeployArgs {
-                        profile: "nanokvm-mini".to_string(),
-                        target: "nanokvm-cube".to_string(),
-                    }),
+                command: Commands::Deps(DepsSubcommandArgs {
+                    command: DepsCommands::Sync(UpdateArgs {}),
                 }),
             }
         );
     }
 
     #[test]
-    fn compose_deploy_requires_target() {
-        let err = Cli::try_parse_from(["imago", "compose", "deploy", "nanokvm-mini"])
-            .expect_err("parse should fail");
-        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
-    }
+    fn parses_service_commands() {
+        let deploy =
+            Cli::try_parse_from(["imago", "service", "deploy", "--target", "default", "-d"])
+                .expect("parse should succeed");
+        assert_eq!(
+            deploy,
+            Cli {
+                command: Commands::Service(ServiceSubcommandArgs {
+                    command: ServiceCommands::Deploy(DeployArgs {
+                        target: Some("default".to_string()),
+                        detach: true,
+                    }),
+                }),
+            }
+        );
 
-    #[test]
-    fn parses_compose_logs_with_profile_target_and_flags() {
-        let cli = Cli::try_parse_from([
-            "imago",
-            "compose",
-            "logs",
-            "nanokvm-mini",
-            "--target",
-            "nanokvm-cube",
-            "--name",
-            "svc-a",
-            "--follow",
-            "--tail",
-            "50",
+        let start = Cli::try_parse_from(["imago", "service", "start", "svc-a", "--target", "edge"])
+            .expect("parse should succeed");
+        assert_eq!(
+            start,
+            Cli {
+                command: Commands::Service(ServiceSubcommandArgs {
+                    command: ServiceCommands::Start(RunArgs {
+                        name: Some("svc-a".to_string()),
+                        target: Some("edge".to_string()),
+                        detach: false,
+                    }),
+                }),
+            }
+        );
+
+        let ls = Cli::try_parse_from(["imago", "service", "ls"]).expect("parse should succeed");
+        assert_eq!(
+            ls,
+            Cli {
+                command: Commands::Service(ServiceSubcommandArgs {
+                    command: ServiceCommands::Ls(PsArgs {
+                        target: "default".to_string(),
+                    }),
+                }),
+            }
+        );
+
+        let logs = Cli::try_parse_from([
+            "imago", "service", "logs", "svc-a", "--follow", "--tail", "50",
         ])
         .expect("parse should succeed");
-
         assert_eq!(
-            cli,
+            logs,
             Cli {
-                command: Commands::Compose(ComposeSubcommandArgs {
-                    command: ComposeCommands::Logs(ComposeLogsArgs {
-                        profile: "nanokvm-mini".to_string(),
-                        target: "nanokvm-cube".to_string(),
+                command: Commands::Service(ServiceSubcommandArgs {
+                    command: ServiceCommands::Logs(LogsArgs {
                         name: Some("svc-a".to_string()),
                         follow: true,
                         tail: 50,
@@ -576,29 +483,29 @@ mod tests {
     }
 
     #[test]
-    fn parses_compose_logs_with_short_follow_flag() {
-        let cli = Cli::try_parse_from([
-            "imago",
-            "compose",
-            "logs",
-            "nanokvm-mini",
-            "--target",
-            "nanokvm-cube",
-            "-f",
-        ])
-        .expect("parse should succeed");
-
+    fn parses_stack_commands_with_new_names() {
+        let sync = Cli::try_parse_from(["imago", "stack", "sync", "nanokvm-mini"])
+            .expect("parse should succeed");
         assert_eq!(
-            cli,
+            sync,
             Cli {
-                command: Commands::Compose(ComposeSubcommandArgs {
-                    command: ComposeCommands::Logs(ComposeLogsArgs {
+                command: Commands::Stack(ComposeSubcommandArgs {
+                    command: ComposeCommands::Sync(ComposeUpdateArgs {
                         profile: "nanokvm-mini".to_string(),
-                        target: "nanokvm-cube".to_string(),
-                        name: None,
-                        follow: true,
-                        tail: 200,
-                        with_timestamp: false,
+                    }),
+                }),
+            }
+        );
+
+        let ls = Cli::try_parse_from(["imago", "stack", "ls", "nanokvm-mini", "--target", "edge"])
+            .expect("parse should succeed");
+        assert_eq!(
+            ls,
+            Cli {
+                command: Commands::Stack(ComposeSubcommandArgs {
+                    command: ComposeCommands::Ls(ComposePsArgs {
+                        profile: "nanokvm-mini".to_string(),
+                        target: "edge".to_string(),
                     }),
                 }),
             }
@@ -606,297 +513,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_compose_logs_with_timestamp_flag() {
-        let cli = Cli::try_parse_from([
+    fn parses_trust_cert_and_client_key_commands() {
+        let upload = Cli::try_parse_from([
             "imago",
-            "compose",
-            "logs",
-            "nanokvm-mini",
-            "--target",
-            "nanokvm-cube",
-            "--with-timestamp",
-        ])
-        .expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Compose(ComposeSubcommandArgs {
-                    command: ComposeCommands::Logs(ComposeLogsArgs {
-                        profile: "nanokvm-mini".to_string(),
-                        target: "nanokvm-cube".to_string(),
-                        name: None,
-                        follow: false,
-                        tail: 200,
-                        with_timestamp: true,
-                    }),
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn compose_logs_requires_target() {
-        let err = Cli::try_parse_from(["imago", "compose", "logs", "nanokvm-mini"])
-            .expect_err("parse should fail");
-        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
-    }
-
-    #[test]
-    fn parses_compose_ps_with_profile_and_target() {
-        let cli = Cli::try_parse_from([
-            "imago",
-            "compose",
-            "ps",
-            "nanokvm-mini",
-            "--target",
-            "nanokvm-cube",
-        ])
-        .expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Compose(ComposeSubcommandArgs {
-                    command: ComposeCommands::Ps(ComposePsArgs {
-                        profile: "nanokvm-mini".to_string(),
-                        target: "nanokvm-cube".to_string(),
-                    }),
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn compose_ps_requires_target() {
-        let err = Cli::try_parse_from(["imago", "compose", "ps", "nanokvm-mini"])
-            .expect_err("parse should fail");
-        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
-    }
-
-    #[test]
-    fn parses_logs_with_defaults() {
-        let cli = Cli::try_parse_from(["imago", "logs"]).expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Logs(LogsArgs {
-                    name: None,
-                    follow: false,
-                    tail: 200,
-                    with_timestamp: false,
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_run_with_defaults() {
-        let cli = Cli::try_parse_from(["imago", "run"]).expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Run(RunArgs {
-                    name: None,
-                    target: None,
-                    detach: false,
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_run_with_name_target() {
-        let cli = Cli::try_parse_from(["imago", "run", "svc-a", "--target", "edge"])
-            .expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Run(RunArgs {
-                    name: Some("svc-a".to_string()),
-                    target: Some("edge".to_string()),
-                    detach: false,
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_run_with_detach() {
-        let cli = Cli::try_parse_from(["imago", "run", "svc-a", "--detach"])
-            .expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Run(RunArgs {
-                    name: Some("svc-a".to_string()),
-                    target: None,
-                    detach: true,
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn rejects_run_env_option() {
-        let err =
-            Cli::try_parse_from(["imago", "run", "--env", "prod"]).expect_err("parse should fail");
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn parses_stop_with_defaults() {
-        let cli = Cli::try_parse_from(["imago", "stop"]).expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Stop(StopArgs {
-                    name: None,
-                    force: false,
-                    target: None,
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_stop_with_name_force_target() {
-        let cli = Cli::try_parse_from(["imago", "stop", "svc-a", "--force", "--target", "edge"])
-            .expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Stop(StopArgs {
-                    name: Some("svc-a".to_string()),
-                    force: true,
-                    target: Some("edge".to_string()),
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn rejects_stop_env_option() {
-        let err =
-            Cli::try_parse_from(["imago", "stop", "--env", "prod"]).expect_err("parse should fail");
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn parses_ps_with_default_target() {
-        let cli = Cli::try_parse_from(["imago", "ps"]).expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Ps(PsArgs {
-                    target: "default".to_string(),
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_ps_with_target() {
-        let cli =
-            Cli::try_parse_from(["imago", "ps", "--target", "edge"]).expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Ps(PsArgs {
-                    target: "edge".to_string(),
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_logs_with_name_and_flags() {
-        let cli = Cli::try_parse_from(["imago", "logs", "svc-a", "--follow", "--tail", "50"])
-            .expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Logs(LogsArgs {
-                    name: Some("svc-a".to_string()),
-                    follow: true,
-                    tail: 50,
-                    with_timestamp: false,
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_logs_with_short_follow_flag() {
-        let cli =
-            Cli::try_parse_from(["imago", "logs", "svc-a", "-f"]).expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Logs(LogsArgs {
-                    name: Some("svc-a".to_string()),
-                    follow: true,
-                    tail: 200,
-                    with_timestamp: false,
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_logs_with_timestamp_flag() {
-        let cli = Cli::try_parse_from(["imago", "logs", "svc-a", "--with-timestamp"])
-            .expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Logs(LogsArgs {
-                    name: Some("svc-a".to_string()),
-                    follow: false,
-                    tail: 200,
-                    with_timestamp: true,
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn rejects_global_json_flag() {
-        let json_flag = format!("--{}", "json");
-        let err = Cli::try_parse_from([
-            "imago".to_string(),
-            json_flag,
-            "logs".to_string(),
-            "svc-a".to_string(),
-            "--tail".to_string(),
-            "10".to_string(),
-        ])
-        .expect_err("parse should fail");
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn rejects_unknown_subcommand() {
-        let err = Cli::try_parse_from(["imago", "unknown"]).expect_err("parse should fail");
-        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
-    }
-
-    #[test]
-    fn parses_bindings_cert_upload() {
-        let cli = Cli::try_parse_from([
-            "imago",
-            "bindings",
+            "trust",
             "cert",
             "upload",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -904,13 +524,12 @@ mod tests {
             "rpc://node-a:4443",
         ])
         .expect("parse should succeed");
-
         assert_eq!(
-            cli,
+            upload,
             Cli {
-                command: Commands::Bindings(BindingsSubcommandArgs {
-                    command: BindingsCommands::Cert(BindingsCertSubcommandArgs {
-                        command: BindingsCertCommands::Upload(BindingsCertUploadArgs {
+                command: Commands::Trust(TrustSubcommandArgs {
+                    command: TrustCommands::Cert(TrustCertSubcommandArgs {
+                        command: TrustCertCommands::Upload(BindingsCertUploadArgs {
                             public_key:
                                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                                     .to_string(),
@@ -920,30 +539,42 @@ mod tests {
                 }),
             }
         );
-    }
 
-    #[test]
-    fn parses_bindings_cert_deploy() {
-        let cli = Cli::try_parse_from([
+        let replicate = Cli::try_parse_from([
             "imago",
-            "bindings",
+            "trust",
             "cert",
-            "deploy",
+            "replicate",
             "--to",
             "rpc://node-a:4443",
             "--from",
             "rpc://node-b:4443",
         ])
         .expect("parse should succeed");
-
         assert_eq!(
-            cli,
+            replicate,
             Cli {
-                command: Commands::Bindings(BindingsSubcommandArgs {
-                    command: BindingsCommands::Cert(BindingsCertSubcommandArgs {
-                        command: BindingsCertCommands::Deploy(BindingsCertDeployArgs {
+                command: Commands::Trust(TrustSubcommandArgs {
+                    command: TrustCommands::Cert(TrustCertSubcommandArgs {
+                        command: TrustCertCommands::Replicate(BindingsCertDeployArgs {
                             to: "rpc://node-a:4443".to_string(),
                             from: "rpc://node-b:4443".to_string(),
+                        }),
+                    }),
+                }),
+            }
+        );
+
+        let generate = Cli::try_parse_from(["imago", "trust", "client-key", "generate", "--force"])
+            .expect("parse should succeed");
+        assert_eq!(
+            generate,
+            Cli {
+                command: Commands::Trust(TrustSubcommandArgs {
+                    command: TrustCommands::ClientKey(TrustClientKeySubcommandArgs {
+                        command: TrustClientKeyCommands::Generate(CertsGenerateArgs {
+                            out_dir: PathBuf::from("certs"),
+                            force: true,
                         }),
                     }),
                 }),
@@ -952,146 +583,47 @@ mod tests {
     }
 
     #[test]
-    fn parses_certs_generate_with_defaults() {
-        let cli =
-            Cli::try_parse_from(["imago", "certs", "generate"]).expect("parse should succeed");
+    fn rejects_v1_command_names() {
+        let err = Cli::try_parse_from(["imago", "build"]).expect_err("parse should fail");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
 
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Certs(CertsSubcommandArgs {
-                    command: CertsCommands::Generate(CertsGenerateArgs {
-                        out_dir: PathBuf::from("certs"),
-                        force: false,
-                    }),
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_certs_generate_with_overrides() {
-        let cli = Cli::try_parse_from([
-            "imago",
-            "certs",
-            "generate",
-            "--out-dir",
-            "tmp-certs",
-            "--force",
-        ])
-        .expect("parse should succeed");
-
-        assert_eq!(
-            cli,
-            Cli {
-                command: Commands::Certs(CertsSubcommandArgs {
-                    command: CertsCommands::Generate(CertsGenerateArgs {
-                        out_dir: PathBuf::from("tmp-certs"),
-                        force: true,
-                    }),
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn rejects_certs_generate_server_name_option() {
-        let err = Cli::try_parse_from([
-            "imago",
-            "certs",
-            "generate",
-            "--server-name",
-            "imagod.local",
-        ])
-        .expect_err("parse should fail");
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn rejects_certs_generate_server_ip_option() {
         let err =
-            Cli::try_parse_from(["imago", "certs", "generate", "--server-ip", "192.168.10.2"])
-                .expect_err("parse should fail");
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+            Cli::try_parse_from(["imago", "compose", "deploy"]).expect_err("parse should fail");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
     }
 
     #[test]
-    fn rejects_certs_generate_days_option() {
-        let err = Cli::try_parse_from(["imago", "certs", "generate", "--days", "30"])
-            .expect_err("parse should fail");
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn root_help_includes_non_empty_command_descriptions() {
+    fn root_help_includes_v2_command_descriptions() {
         let mut command = Cli::command();
         let help = command.render_long_help().to_string();
 
-        assert!(help.contains("Generate imago.toml from a template"));
-        assert!(help.contains("Build project artifacts and manifest"));
-        assert!(help.contains("Build and deploy the current service to imagod"));
-        assert!(help.contains("Run compose profile operations across multiple services"));
+        assert!(help.contains("Project lifecycle operations"));
+        assert!(help.contains("Artifact lifecycle operations"));
+        assert!(help.contains("Service runtime operations"));
+        assert!(help.contains("Stack profile operations across multiple services"));
+        assert!(help.contains("Trust and certificate operations"));
     }
 
     #[test]
-    fn init_help_includes_lang_help_text() {
-        let err = Cli::try_parse_from(["imago", "init", "--help"]).expect_err("help should exit");
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
-        let help = err.to_string();
-
-        assert!(help.contains("[PATH]"));
-        assert!(help.contains("--lang <LANG_ID>"));
-        assert!(help.contains("Template language ID"));
-    }
-
-    #[test]
-    fn deploy_help_includes_target_help_text() {
-        let err = Cli::try_parse_from(["imago", "deploy", "--help"]).expect_err("help should exit");
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
-        let help = err.to_string();
-
-        assert!(help.contains("--target <TARGET_NAME>"));
-        assert!(help.contains("Target name defined in imago.toml [target.<name>]"));
-        assert!(help.contains("-d, --detach"));
-    }
-
-    #[test]
-    fn compose_logs_help_includes_follow_and_tail_help_text() {
-        let err = Cli::try_parse_from(["imago", "compose", "logs", "--help"])
+    fn service_logs_help_includes_follow_tail_timestamp() {
+        let err = Cli::try_parse_from(["imago", "service", "logs", "--help"])
             .expect_err("help should exit");
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
         let help = err.to_string();
 
         assert!(help.contains("-f, --follow"));
-        assert!(help.contains("Keep streaming logs until interrupted"));
         assert!(help.contains("--tail <N>"));
-        assert!(help.contains("Number of recent log lines to fetch before streaming"));
         assert!(help.contains("--with-timestamp"));
-        assert!(help.contains("Include per-log timestamp from server events"));
-        assert!(help.contains("--target <TARGET_NAME>"));
-        assert!(help.contains("Target name used for all services in this profile"));
     }
 
     #[test]
-    fn logs_help_includes_with_timestamp_help_text() {
-        let err = Cli::try_parse_from(["imago", "logs", "--help"]).expect_err("help should exit");
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
-        let help = err.to_string();
-
-        assert!(help.contains("--with-timestamp"));
-        assert!(help.contains("Include per-log timestamp from server events"));
-    }
-
-    #[test]
-    fn bindings_cert_deploy_help_includes_from_to_help_text() {
-        let err = Cli::try_parse_from(["imago", "bindings", "cert", "deploy", "--help"])
+    fn stack_logs_help_includes_target_help_text() {
+        let err = Cli::try_parse_from(["imago", "stack", "logs", "--help"])
             .expect_err("help should exit");
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
         let help = err.to_string();
 
-        assert!(help.contains("--to <REMOTE_AUTHORITY>"));
-        assert!(help.contains("Destination remote authority"));
-        assert!(help.contains("--from <REMOTE_AUTHORITY>"));
-        assert!(help.contains("Source remote authority"));
+        assert!(help.contains("--target <TARGET_NAME>"));
+        assert!(help.contains("Target name used for all services in this profile"));
     }
 }

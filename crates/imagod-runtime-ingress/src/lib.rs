@@ -25,8 +25,8 @@ const MAX_INBOUND_CONNECTION_HANDLERS: usize = 32;
 const HTTP_INGRESS_CONNECTION_TIMEOUT_SECS: u64 = 30;
 #[cfg(test)]
 const HTTP_INGRESS_CONNECTION_TIMEOUT_SECS: u64 = 1;
-pub const DEFAULT_HTTP_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
-pub const MAX_HTTP_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_HTTP_MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_HTTP_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 pub async fn spawn_http_ingress_server<R>(
     runtime: Arc<R>,

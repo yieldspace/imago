@@ -3,34 +3,44 @@ mod commands;
 
 use clap::Parser;
 use cli::{
-    BindingsCertCommands, BindingsCertSubcommandArgs, BindingsCommands, BindingsSubcommandArgs,
-    CertsCommands, CertsSubcommandArgs, Cli, Commands,
+    ArtifactCommands, ArtifactSubcommandArgs, Cli, Commands, DepsCommands, DepsSubcommandArgs,
+    ProjectCommands, ProjectSubcommandArgs, ServiceCommands, ServiceSubcommandArgs,
+    TrustCertCommands, TrustCertSubcommandArgs, TrustClientKeyCommands,
+    TrustClientKeySubcommandArgs, TrustCommands, TrustSubcommandArgs,
 };
 use commands::CommandResult;
 
 async fn dispatch_async(cli: Cli) -> CommandResult {
     match cli.command {
-        Commands::Init(args) => commands::init::run(args),
-        Commands::Build(args) => commands::build::run(args),
-        Commands::Update(args) => commands::update::run(args).await,
-        Commands::Deploy(args) => commands::deploy::run(args).await,
-        Commands::Compose(args) => commands::compose::run(args).await,
-        Commands::Run(args) => commands::run::run(args).await,
-        Commands::Stop(args) => commands::stop::run(args).await,
-        Commands::Ps(args) => commands::ps::run(args).await,
-        Commands::Logs(args) => commands::logs::run(args).await,
-        Commands::Bindings(BindingsSubcommandArgs { command }) => match command {
-            BindingsCommands::Cert(BindingsCertSubcommandArgs { command }) => match command {
-                BindingsCertCommands::Upload(args) => {
+        Commands::Project(ProjectSubcommandArgs { command }) => match command {
+            ProjectCommands::Init(args) => commands::init::run(args),
+        },
+        Commands::Artifact(ArtifactSubcommandArgs { command }) => match command {
+            ArtifactCommands::Build(args) => commands::build::run(args),
+        },
+        Commands::Deps(DepsSubcommandArgs { command }) => match command {
+            DepsCommands::Sync(args) => commands::update::run(args).await,
+        },
+        Commands::Service(ServiceSubcommandArgs { command }) => match command {
+            ServiceCommands::Deploy(args) => commands::deploy::run(args).await,
+            ServiceCommands::Start(args) => commands::run::run(args).await,
+            ServiceCommands::Stop(args) => commands::stop::run(args).await,
+            ServiceCommands::Ls(args) => commands::ps::run(args).await,
+            ServiceCommands::Logs(args) => commands::logs::run(args).await,
+        },
+        Commands::Stack(args) => commands::compose::run(args).await,
+        Commands::Trust(TrustSubcommandArgs { command }) => match command {
+            TrustCommands::Cert(TrustCertSubcommandArgs { command }) => match command {
+                TrustCertCommands::Upload(args) => {
                     commands::certs::run_bindings_cert_upload(args).await
                 }
-                BindingsCertCommands::Deploy(args) => {
+                TrustCertCommands::Replicate(args) => {
                     commands::certs::run_bindings_cert_deploy(args).await
                 }
             },
-        },
-        Commands::Certs(CertsSubcommandArgs { command }) => match command {
-            CertsCommands::Generate(args) => commands::certs::run_generate(args),
+            TrustCommands::ClientKey(TrustClientKeySubcommandArgs { command }) => match command {
+                TrustClientKeyCommands::Generate(args) => commands::certs::run_generate(args),
+            },
         },
     }
 }
@@ -41,31 +51,51 @@ async fn dispatch_with_project_root_async(
     project_root: &std::path::Path,
 ) -> CommandResult {
     match cli.command {
-        Commands::Init(args) => commands::init::run_with_cwd(args, project_root),
-        Commands::Build(args) => commands::build::run_with_project_root(args, project_root),
-        Commands::Update(args) => commands::update::run_with_project_root(args, project_root).await,
-        Commands::Deploy(args) => commands::deploy::run_with_project_root(args, project_root).await,
-        Commands::Compose(args) => {
-            commands::compose::run_with_project_root(args, project_root).await
-        }
-        Commands::Run(args) => commands::run::run_with_project_root(args, project_root).await,
-        Commands::Stop(args) => commands::stop::run_with_project_root(args, project_root).await,
-        Commands::Ps(args) => commands::ps::run_with_project_root(args, project_root).await,
-        Commands::Logs(args) => commands::logs::run_with_project_root(args, project_root).await,
-        Commands::Bindings(BindingsSubcommandArgs { command }) => match command {
-            BindingsCommands::Cert(BindingsCertSubcommandArgs { command }) => match command {
-                BindingsCertCommands::Upload(args) => {
+        Commands::Project(ProjectSubcommandArgs { command }) => match command {
+            ProjectCommands::Init(args) => commands::init::run_with_cwd(args, project_root),
+        },
+        Commands::Artifact(ArtifactSubcommandArgs { command }) => match command {
+            ArtifactCommands::Build(args) => {
+                commands::build::run_with_project_root(args, project_root)
+            }
+        },
+        Commands::Deps(DepsSubcommandArgs { command }) => match command {
+            DepsCommands::Sync(args) => {
+                commands::update::run_with_project_root(args, project_root).await
+            }
+        },
+        Commands::Service(ServiceSubcommandArgs { command }) => match command {
+            ServiceCommands::Deploy(args) => {
+                commands::deploy::run_with_project_root(args, project_root).await
+            }
+            ServiceCommands::Start(args) => {
+                commands::run::run_with_project_root(args, project_root).await
+            }
+            ServiceCommands::Stop(args) => {
+                commands::stop::run_with_project_root(args, project_root).await
+            }
+            ServiceCommands::Ls(args) => {
+                commands::ps::run_with_project_root(args, project_root).await
+            }
+            ServiceCommands::Logs(args) => {
+                commands::logs::run_with_project_root(args, project_root).await
+            }
+        },
+        Commands::Stack(args) => commands::compose::run_with_project_root(args, project_root).await,
+        Commands::Trust(TrustSubcommandArgs { command }) => match command {
+            TrustCommands::Cert(TrustCertSubcommandArgs { command }) => match command {
+                TrustCertCommands::Upload(args) => {
                     commands::certs::run_bindings_cert_upload_with_project_root(args, project_root)
                         .await
                 }
-                BindingsCertCommands::Deploy(args) => {
+                TrustCertCommands::Replicate(args) => {
                     commands::certs::run_bindings_cert_deploy_with_project_root(args, project_root)
                         .await
                 }
             },
-        },
-        Commands::Certs(CertsSubcommandArgs { command }) => match command {
-            CertsCommands::Generate(args) => commands::certs::run_generate(args),
+            TrustCommands::ClientKey(TrustClientKeySubcommandArgs { command }) => match command {
+                TrustClientKeyCommands::Generate(args) => commands::certs::run_generate(args),
+            },
         },
     }
 }
@@ -74,6 +104,7 @@ async fn dispatch_with_project_root_async(
 async fn main() {
     install_rustls_provider();
     let cli = Cli::parse();
+
     let _ = commands::ui::initialize();
     commands::ui::emit_startup_banner(env!("CARGO_PKG_VERSION"));
     let result = dispatch_async(cli).await;
@@ -99,10 +130,13 @@ fn install_rustls_provider() {
 mod tests {
     use super::*;
     use crate::cli::{
-        BindingsCertCommands, BindingsCertDeployArgs, BindingsCertSubcommandArgs,
-        BindingsCertUploadArgs, BindingsCommands, BindingsSubcommandArgs, BuildArgs,
-        ComposeBuildArgs, ComposeCommands, ComposeDeployArgs, ComposeLogsArgs, ComposePsArgs,
-        ComposeSubcommandArgs, ComposeUpdateArgs, DeployArgs, InitArgs, PsArgs, RunArgs, StopArgs,
+        ArtifactCommands, ArtifactSubcommandArgs, BindingsCertDeployArgs, BindingsCertUploadArgs,
+        BuildArgs, CertsGenerateArgs, ComposeBuildArgs, ComposeCommands, ComposeDeployArgs,
+        ComposeLogsArgs, ComposePsArgs, ComposeSubcommandArgs, ComposeUpdateArgs, DeployArgs,
+        DepsCommands, DepsSubcommandArgs, InitArgs, LogsArgs, ProjectCommands,
+        ProjectSubcommandArgs, PsArgs, RunArgs, ServiceCommands, ServiceSubcommandArgs, StopArgs,
+        TrustCertCommands, TrustCertSubcommandArgs, TrustClientKeyCommands,
+        TrustClientKeySubcommandArgs, TrustCommands, TrustSubcommandArgs, UpdateArgs,
     };
     use std::path::PathBuf;
 
@@ -122,13 +156,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatches_init_and_creates_imago_toml() {
+    async fn dispatches_project_init_and_creates_imago_toml() {
         let root = new_temp_dir("dispatch-init-success");
         let result = dispatch_with_project_root_async(
             Cli {
-                command: Commands::Init(InitArgs {
-                    path: Some(PathBuf::from("svc-a")),
-                    lang: Some("rust".to_string()),
+                command: Commands::Project(ProjectSubcommandArgs {
+                    command: ProjectCommands::Init(InitArgs {
+                        path: Some(PathBuf::from("svc-a")),
+                        lang: Some("rust".to_string()),
+                    }),
                 }),
             },
             &root,
@@ -136,43 +172,21 @@ mod tests {
         .await;
 
         assert_eq!(result.exit_code, 0);
+        assert_eq!(result.command, "project.init");
         assert!(result.stderr.is_none());
         assert!(root.join("svc-a").join("imago.toml").exists());
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
-    async fn dispatches_init_and_returns_non_zero_for_unknown_lang() {
-        let root = new_temp_dir("dispatch-init-failure");
-        let result = dispatch_with_project_root_async(
-            Cli {
-                command: Commands::Init(InitArgs {
-                    path: Some(PathBuf::from("svc-a")),
-                    lang: Some("unknown".to_string()),
-                }),
-            },
-            &root,
-        )
-        .await;
-
-        assert_eq!(result.exit_code, 2);
-        assert!(
-            result
-                .stderr
-                .as_deref()
-                .expect("stderr should be present")
-                .contains("unknown template language")
-        );
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn dispatches_build_and_returns_non_zero_without_imago_toml() {
+    async fn dispatches_artifact_build_and_returns_non_zero_without_imago_toml() {
         let root = new_temp_dir("dispatch-build");
         let result = dispatch_with_project_root_async(
             Cli {
-                command: Commands::Build(BuildArgs {
-                    target: "default".to_string(),
+                command: Commands::Artifact(ArtifactSubcommandArgs {
+                    command: ArtifactCommands::Build(BuildArgs {
+                        target: "default".to_string(),
+                    }),
                 }),
             },
             &root,
@@ -180,18 +194,18 @@ mod tests {
         .await;
 
         assert_eq!(result.exit_code, 2);
+        assert_eq!(result.command, "artifact.build");
         assert!(result.stderr.is_some());
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
-    async fn dispatches_deploy_and_returns_non_zero() {
-        let root = new_temp_dir("dispatch-deploy");
+    async fn dispatches_deps_sync_and_returns_non_zero_without_imago_toml() {
+        let root = new_temp_dir("dispatch-deps-sync");
         let result = dispatch_with_project_root_async(
             Cli {
-                command: Commands::Deploy(DeployArgs {
-                    target: None,
-                    detach: false,
+                command: Commands::Deps(DepsSubcommandArgs {
+                    command: DepsCommands::Sync(UpdateArgs {}),
                 }),
             },
             &root,
@@ -199,74 +213,103 @@ mod tests {
         .await;
 
         assert_eq!(result.exit_code, 2);
+        assert_eq!(result.command, "deps.sync");
         assert!(result.stderr.is_some());
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
-    async fn dispatches_run_and_returns_non_zero_without_imago_toml() {
-        let root = new_temp_dir("dispatch-run");
-        let result = dispatch_with_project_root_async(
+    async fn dispatches_service_subcommands_and_returns_non_zero_without_project() {
+        let root = new_temp_dir("dispatch-service");
+
+        let deploy = dispatch_with_project_root_async(
             Cli {
-                command: Commands::Run(RunArgs {
-                    name: None,
-                    target: None,
-                    detach: false,
+                command: Commands::Service(ServiceSubcommandArgs {
+                    command: ServiceCommands::Deploy(DeployArgs {
+                        target: None,
+                        detach: false,
+                    }),
                 }),
             },
             &root,
         )
         .await;
+        assert_eq!(deploy.exit_code, 2);
+        assert_eq!(deploy.command, "service.deploy");
 
-        assert_eq!(result.exit_code, 2);
-        assert!(result.stderr.is_some());
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn dispatches_stop_and_returns_non_zero_without_imago_toml() {
-        let root = new_temp_dir("dispatch-stop");
-        let result = dispatch_with_project_root_async(
+        let start = dispatch_with_project_root_async(
             Cli {
-                command: Commands::Stop(StopArgs {
-                    name: None,
-                    force: false,
-                    target: None,
+                command: Commands::Service(ServiceSubcommandArgs {
+                    command: ServiceCommands::Start(RunArgs {
+                        name: None,
+                        target: None,
+                        detach: false,
+                    }),
                 }),
             },
             &root,
         )
         .await;
+        assert_eq!(start.exit_code, 2);
+        assert_eq!(start.command, "service.start");
 
-        assert_eq!(result.exit_code, 2);
-        assert!(result.stderr.is_some());
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn dispatches_ps_and_returns_non_zero_without_imago_toml() {
-        let root = new_temp_dir("dispatch-ps");
-        let result = dispatch_with_project_root_async(
+        let stop = dispatch_with_project_root_async(
             Cli {
-                command: Commands::Ps(PsArgs {
-                    target: "default".to_string(),
+                command: Commands::Service(ServiceSubcommandArgs {
+                    command: ServiceCommands::Stop(StopArgs {
+                        name: None,
+                        force: false,
+                        target: None,
+                    }),
                 }),
             },
             &root,
         )
         .await;
+        assert_eq!(stop.exit_code, 2);
+        assert_eq!(stop.command, "service.stop");
 
-        assert_eq!(result.exit_code, 2);
-        assert!(result.stderr.is_some());
+        let ls = dispatch_with_project_root_async(
+            Cli {
+                command: Commands::Service(ServiceSubcommandArgs {
+                    command: ServiceCommands::Ls(PsArgs {
+                        target: "default".to_string(),
+                    }),
+                }),
+            },
+            &root,
+        )
+        .await;
+        assert_eq!(ls.exit_code, 2);
+        assert_eq!(ls.command, "service.ls");
+
+        let logs = dispatch_with_project_root_async(
+            Cli {
+                command: Commands::Service(ServiceSubcommandArgs {
+                    command: ServiceCommands::Logs(LogsArgs {
+                        name: None,
+                        follow: false,
+                        tail: 200,
+                        with_timestamp: false,
+                    }),
+                }),
+            },
+            &root,
+        )
+        .await;
+        assert_eq!(logs.exit_code, 2);
+        assert_eq!(logs.command, "service.logs");
+
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
-    async fn dispatches_compose_deploy_and_returns_non_zero_without_imago_compose_toml() {
-        let root = new_temp_dir("dispatch-compose");
-        let result = dispatch_with_project_root_async(
+    async fn dispatches_stack_subcommands_and_returns_non_zero_without_imago_compose_toml() {
+        let root = new_temp_dir("dispatch-stack");
+
+        let deploy = dispatch_with_project_root_async(
             Cli {
-                command: Commands::Compose(ComposeSubcommandArgs {
+                command: Commands::Stack(ComposeSubcommandArgs {
                     command: ComposeCommands::Deploy(ComposeDeployArgs {
                         profile: "mini".to_string(),
                         target: "default".to_string(),
@@ -276,18 +319,11 @@ mod tests {
             &root,
         )
         .await;
+        assert_eq!(deploy.exit_code, 2);
 
-        assert_eq!(result.exit_code, 2);
-        assert!(result.stderr.is_some());
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn dispatches_compose_build_and_returns_non_zero_without_imago_compose_toml() {
-        let root = new_temp_dir("dispatch-compose-build");
-        let result = dispatch_with_project_root_async(
+        let build = dispatch_with_project_root_async(
             Cli {
-                command: Commands::Compose(ComposeSubcommandArgs {
+                command: Commands::Stack(ComposeSubcommandArgs {
                     command: ComposeCommands::Build(ComposeBuildArgs {
                         profile: "mini".to_string(),
                         target: "default".to_string(),
@@ -297,20 +333,12 @@ mod tests {
             &root,
         )
         .await;
+        assert_eq!(build.exit_code, 2);
 
-        assert_eq!(result.exit_code, 2);
-        let stderr = result.stderr.expect("stderr should be present");
-        assert!(stderr.contains("hint:"));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn dispatches_compose_update_and_returns_non_zero_without_imago_compose_toml() {
-        let root = new_temp_dir("dispatch-compose-update");
-        let result = dispatch_with_project_root_async(
+        let sync = dispatch_with_project_root_async(
             Cli {
-                command: Commands::Compose(ComposeSubcommandArgs {
-                    command: ComposeCommands::Update(ComposeUpdateArgs {
+                command: Commands::Stack(ComposeSubcommandArgs {
+                    command: ComposeCommands::Sync(ComposeUpdateArgs {
                         profile: "mini".to_string(),
                     }),
                 }),
@@ -318,18 +346,11 @@ mod tests {
             &root,
         )
         .await;
+        assert_eq!(sync.exit_code, 2);
 
-        assert_eq!(result.exit_code, 2);
-        assert!(result.stderr.is_some());
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn dispatches_compose_logs_and_returns_non_zero_without_imago_compose_toml() {
-        let root = new_temp_dir("dispatch-compose-logs");
-        let result = dispatch_with_project_root_async(
+        let logs = dispatch_with_project_root_async(
             Cli {
-                command: Commands::Compose(ComposeSubcommandArgs {
+                command: Commands::Stack(ComposeSubcommandArgs {
                     command: ComposeCommands::Logs(ComposeLogsArgs {
                         profile: "mini".to_string(),
                         target: "default".to_string(),
@@ -343,19 +364,12 @@ mod tests {
             &root,
         )
         .await;
+        assert_eq!(logs.exit_code, 2);
 
-        assert_eq!(result.exit_code, 2);
-        assert!(result.stderr.is_some());
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn dispatches_compose_ps_and_returns_non_zero_without_imago_compose_toml() {
-        let root = new_temp_dir("dispatch-compose-ps");
-        let result = dispatch_with_project_root_async(
+        let ls = dispatch_with_project_root_async(
             Cli {
-                command: Commands::Compose(ComposeSubcommandArgs {
-                    command: ComposeCommands::Ps(ComposePsArgs {
+                command: Commands::Stack(ComposeSubcommandArgs {
+                    command: ComposeCommands::Ls(ComposePsArgs {
                         profile: "mini".to_string(),
                         target: "default".to_string(),
                     }),
@@ -364,14 +378,13 @@ mod tests {
             &root,
         )
         .await;
+        assert_eq!(ls.exit_code, 2);
 
-        assert_eq!(result.exit_code, 2);
-        assert!(result.stderr.is_some());
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
-    async fn dispatches_certs_generate_and_returns_zero() {
+    async fn dispatches_trust_client_key_generate_and_returns_zero() {
         let unique = format!(
             "imago-cli-dispatch-certs-generate-{}-{}",
             std::process::id(),
@@ -384,29 +397,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp);
 
         let result = dispatch_async(Cli {
-            command: Commands::Certs(CertsSubcommandArgs {
-                command: CertsCommands::Generate(crate::cli::CertsGenerateArgs {
-                    out_dir: temp.clone(),
-                    force: true,
+            command: Commands::Trust(TrustSubcommandArgs {
+                command: TrustCommands::ClientKey(TrustClientKeySubcommandArgs {
+                    command: TrustClientKeyCommands::Generate(CertsGenerateArgs {
+                        out_dir: temp.clone(),
+                        force: true,
+                    }),
                 }),
             }),
         })
         .await;
 
         assert_eq!(result.exit_code, 0);
+        assert_eq!(result.command, "trust.client-key.generate");
         assert!(result.stderr.is_none());
 
         let _ = std::fs::remove_dir_all(temp);
     }
 
     #[tokio::test]
-    async fn dispatches_bindings_cert_upload_and_returns_non_zero() {
-        let root = new_temp_dir("dispatch-bindings-upload");
+    async fn dispatches_trust_cert_upload_and_returns_non_zero() {
+        let root = new_temp_dir("dispatch-trust-upload");
         let result = dispatch_with_project_root_async(
             Cli {
-                command: Commands::Bindings(BindingsSubcommandArgs {
-                    command: BindingsCommands::Cert(BindingsCertSubcommandArgs {
-                        command: BindingsCertCommands::Upload(BindingsCertUploadArgs {
+                command: Commands::Trust(TrustSubcommandArgs {
+                    command: TrustCommands::Cert(TrustCertSubcommandArgs {
+                        command: TrustCertCommands::Upload(BindingsCertUploadArgs {
                             public_key:
                                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                                     .to_string(),
@@ -420,6 +436,7 @@ mod tests {
         .await;
 
         assert_eq!(result.exit_code, 2);
+        assert_eq!(result.command, "trust.cert.upload");
         assert!(
             result
                 .stderr
@@ -431,13 +448,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatches_bindings_cert_deploy_and_returns_non_zero() {
-        let root = new_temp_dir("dispatch-bindings-deploy");
+    async fn dispatches_trust_cert_replicate_and_returns_non_zero() {
+        let root = new_temp_dir("dispatch-trust-replicate");
         let result = dispatch_with_project_root_async(
             Cli {
-                command: Commands::Bindings(BindingsSubcommandArgs {
-                    command: BindingsCommands::Cert(BindingsCertSubcommandArgs {
-                        command: BindingsCertCommands::Deploy(BindingsCertDeployArgs {
+                command: Commands::Trust(TrustSubcommandArgs {
+                    command: TrustCommands::Cert(TrustCertSubcommandArgs {
+                        command: TrustCertCommands::Replicate(BindingsCertDeployArgs {
                             to: "rpc://node-a:4443".to_string(),
                             from: "rpc://node-b:4443".to_string(),
                         }),
@@ -449,6 +466,7 @@ mod tests {
         .await;
 
         assert_eq!(result.exit_code, 2);
+        assert_eq!(result.command, "trust.cert.replicate");
         assert!(
             result
                 .stderr

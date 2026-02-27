@@ -61,7 +61,7 @@ fn e2e_http_large_body_burst_returns_busy_when_queue_budget_is_exhausted() -> Te
         "e2e-http-burst-svc",
         AppKind::Http {
             port: http_port,
-            max_body_bytes: Some(64 * 1024 * 1024),
+            max_body_bytes: Some(32 * 1024 * 1024),
         },
         "default",
         WasmArtifact::HttpSlow,

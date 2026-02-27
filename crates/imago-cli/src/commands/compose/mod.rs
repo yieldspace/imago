@@ -90,17 +90,17 @@ fn compose_logs_failure_error(logs_result: &CommandResult) -> ComposeCommandErro
         .clone()
         .unwrap_or_else(|| format!("exit code {}", logs_result.exit_code));
     ComposeCommandError {
-        message: format!("compose logs failed: {detail}"),
+        message: format!("stack logs failed: {detail}"),
     }
 }
 
-fn compose_ps_failure_error(ps_result: &CommandResult) -> ComposeCommandError {
+fn compose_ls_failure_error(ps_result: &CommandResult) -> ComposeCommandError {
     let detail = ps_result
         .stderr
         .clone()
         .unwrap_or_else(|| format!("exit code {}", ps_result.exit_code));
     ComposeCommandError {
-        message: format!("compose ps failed: {detail}"),
+        message: format!("stack ls failed: {detail}"),
     }
 }
 
@@ -113,11 +113,11 @@ pub(crate) async fn run_with_project_root(
     project_root: &Path,
 ) -> CommandResult {
     let started_at = Instant::now();
-    ui::command_start("compose", "starting");
+    ui::command_start("stack", "starting");
     match run_async(args, project_root).await {
         Ok(summary) => {
-            ui::command_finish("compose", true, "");
-            let mut result = CommandResult::success("compose", started_at);
+            ui::command_finish("stack", true, "");
+            let mut result = CommandResult::success("stack", started_at);
             result
                 .meta
                 .insert("subcommand".to_string(), summary.subcommand.to_string());
@@ -129,10 +129,10 @@ pub(crate) async fn run_with_project_root(
             result
         }
         Err(err) => {
-            let summary_message = summarize_command_failure("compose", &err);
-            let diagnostic_message = format_command_error("compose", &err);
-            ui::command_finish("compose", false, &summary_message);
-            CommandResult::failure("compose", started_at, diagnostic_message)
+            let summary_message = summarize_command_failure("stack", &err);
+            let diagnostic_message = format_command_error("stack", &err);
+            ui::command_finish("stack", false, &summary_message);
+            CommandResult::failure("stack", started_at, diagnostic_message)
         }
     }
 }
@@ -143,10 +143,10 @@ async fn run_async(
 ) -> anyhow::Result<ComposeSummary> {
     match args.command {
         ComposeCommands::Build(args) => run_compose_build(args, project_root).await,
-        ComposeCommands::Update(args) => run_compose_update(args, project_root).await,
+        ComposeCommands::Sync(args) => run_compose_update(args, project_root).await,
         ComposeCommands::Deploy(args) => run_compose_deploy(args, project_root).await,
         ComposeCommands::Logs(args) => run_compose_logs(args, project_root).await,
-        ComposeCommands::Ps(args) => run_compose_ps(args, project_root).await,
+        ComposeCommands::Ls(args) => run_compose_ps(args, project_root).await,
     }
 }
 
@@ -163,14 +163,14 @@ async fn run_compose_build_inner(
     project_root: &Path,
     rich_mode: bool,
 ) -> anyhow::Result<ComposeSummary> {
-    ui::command_stage("compose", "load-config", "loading compose build profile");
+    ui::command_stage("stack", "load-config", "loading stack build profile");
     let compose_file = load_compose_file(project_root)?;
     let resolved = resolve_compose_config(&compose_file, &args.profile)?;
     ensure_compose_services_non_empty(resolved.config, &args.profile)?;
     let target = resolve_compose_target(&compose_file, &args.target, project_root)?;
     let total = resolved.config.services.len();
     ui::command_info(
-        "compose",
+        "stack",
         &format!(
             "profile={} target={} services={}",
             args.profile, args.target, total
@@ -183,7 +183,7 @@ async fn run_compose_build_inner(
             compose_build_service_stage(index + 1, total, service_name);
         } else {
             ui::command_stage(
-                "compose",
+                "stack",
                 "service",
                 &format!("build {}/{} {}", index + 1, total, service_name),
             );
@@ -234,9 +234,9 @@ async fn run_compose_build_inner(
                 if rich_mode {
                     compose_build_service_finish(service_name, false, &summary);
                 }
-                let detail = format_command_error("build", &err);
+                let detail = format_command_error("artifact.build", &err);
                 return Err(anyhow!(
-                    "compose build failed for compose.{}.services[{index}] ({}): {}",
+                    "stack build failed for compose.{}.services[{index}] ({}): {}",
                     resolved.config_name,
                     service_name,
                     detail
@@ -320,11 +320,76 @@ fn take_compose_build_ui_events() -> Vec<ComposeBuildUiEvent> {
     Vec::new()
 }
 
+#[cfg(test)]
+fn stack_ls_override_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
+fn stack_ls_command_result_override() -> &'static std::sync::Mutex<Option<CommandResult>> {
+    static OVERRIDE: std::sync::OnceLock<std::sync::Mutex<Option<CommandResult>>> =
+        std::sync::OnceLock::new();
+    OVERRIDE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(test)]
+struct StackLsCommandResultOverrideGuard;
+
+#[cfg(test)]
+impl Drop for StackLsCommandResultOverrideGuard {
+    fn drop(&mut self) {
+        let mut override_result = stack_ls_command_result_override()
+            .lock()
+            .expect("stack ls command result override lock poisoned");
+        *override_result = None;
+    }
+}
+
+#[cfg(test)]
+fn set_stack_ls_command_result_override(
+    result: CommandResult,
+) -> StackLsCommandResultOverrideGuard {
+    let mut override_result = stack_ls_command_result_override()
+        .lock()
+        .expect("stack ls command result override lock poisoned");
+    *override_result = Some(result);
+    StackLsCommandResultOverrideGuard
+}
+
+fn take_stack_ls_command_result_override() -> Option<CommandResult> {
+    #[cfg(test)]
+    {
+        let mut override_result = stack_ls_command_result_override()
+            .lock()
+            .expect("stack ls command result override lock poisoned");
+        override_result.take()
+    }
+
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
+
+async fn run_stack_ls_command(
+    args: PsArgs,
+    project_root: &Path,
+    target_override: Option<&build::TargetConfig>,
+    names_filter: Option<Vec<String>>,
+) -> CommandResult {
+    if let Some(result) = take_stack_ls_command_result_override() {
+        return result;
+    }
+    ps::run_with_project_root_and_target_override(args, project_root, target_override, names_filter)
+        .await
+}
+
 async fn run_compose_update(
     args: ComposeUpdateArgs,
     project_root: &Path,
 ) -> anyhow::Result<ComposeSummary> {
-    ui::command_stage("compose", "load-config", "loading compose update profile");
+    ui::command_stage("stack", "load-config", "loading stack sync profile");
     let compose_file = load_compose_file(project_root)?;
     let resolved = resolve_compose_config(&compose_file, &args.profile)?;
     ensure_compose_services_non_empty(resolved.config, &args.profile)?;
@@ -332,9 +397,9 @@ async fn run_compose_update(
 
     for (index, service) in resolved.config.services.iter().enumerate() {
         ui::command_stage(
-            "compose",
+            "stack",
             "service",
-            &format!("update {}/{} {}", index + 1, total, service.imago),
+            &format!("sync {}/{} {}", index + 1, total, service.imago),
         );
         let service_project_root = resolve_service_project_root(project_root, &service.imago)
             .with_context(|| {
@@ -352,7 +417,7 @@ async fn run_compose_update(
                 .stderr
                 .unwrap_or_else(|| format!("exit code {}", update_result.exit_code));
             return Err(anyhow!(
-                "compose update failed for compose.{}.services[{index}] ({}): {}",
+                "stack sync failed for compose.{}.services[{index}] ({}): {}",
                 resolved.config_name,
                 service.imago,
                 detail
@@ -361,7 +426,7 @@ async fn run_compose_update(
     }
 
     Ok(ComposeSummary {
-        subcommand: "update",
+        subcommand: "sync",
         profile: args.profile,
         target: "-".to_string(),
         services: total,
@@ -372,13 +437,13 @@ async fn run_compose_deploy(
     args: ComposeDeployArgs,
     project_root: &Path,
 ) -> anyhow::Result<ComposeSummary> {
-    ui::command_stage("compose", "load-config", "loading compose deploy profile");
+    ui::command_stage("stack", "load-config", "loading stack deploy profile");
     let compose_file = load_compose_file(project_root)?;
     let resolved = resolve_compose_config(&compose_file, &args.profile)?;
     ensure_compose_services_non_empty(resolved.config, &args.profile)?;
     let target = resolve_compose_target(&compose_file, &args.target, project_root)?;
     ui::command_info(
-        "compose",
+        "stack",
         &format!(
             "profile={} target={} services={}",
             args.profile,
@@ -390,7 +455,7 @@ async fn run_compose_deploy(
 
     for (index, service) in resolved.config.services.iter().enumerate() {
         ui::command_stage(
-            "compose",
+            "stack",
             "service",
             &format!("deploy {}/{} {}", index + 1, total, service.imago),
         );
@@ -417,7 +482,7 @@ async fn run_compose_deploy(
                 .stderr
                 .unwrap_or_else(|| format!("exit code {}", deploy_result.exit_code));
             return Err(anyhow!(
-                "compose deploy failed for compose.{}.services[{index}] ({}): {}",
+                "stack deploy failed for compose.{}.services[{index}] ({}): {}",
                 resolved.config_name,
                 service.imago,
                 detail
@@ -437,7 +502,7 @@ async fn run_compose_logs(
     args: ComposeLogsArgs,
     project_root: &Path,
 ) -> anyhow::Result<ComposeSummary> {
-    ui::command_stage("compose", "load-config", "loading compose logs profile");
+    ui::command_stage("stack", "load-config", "loading stack logs profile");
     let compose_file = load_compose_file(project_root)?;
     let resolved = resolve_compose_config(&compose_file, &args.profile)?;
     ensure_compose_services_non_empty(resolved.config, &args.profile)?;
@@ -446,7 +511,7 @@ async fn run_compose_logs(
     if let Some(name) = &args.name
         && name.trim().is_empty()
     {
-        return Err(anyhow!("compose logs --name must not be empty"));
+        return Err(anyhow!("stack logs --name must not be empty"));
     }
 
     let logs_result = logs::run_with_project_root_and_target_override(
@@ -477,7 +542,7 @@ async fn run_compose_ps(
     args: ComposePsArgs,
     project_root: &Path,
 ) -> anyhow::Result<ComposeSummary> {
-    ui::command_stage("compose", "load-config", "loading compose ps profile");
+    ui::command_stage("stack", "load-config", "loading stack ls profile");
     let compose_file = load_compose_file(project_root)?;
     let resolved = resolve_compose_config(&compose_file, &args.profile)?;
     ensure_compose_services_non_empty(resolved.config, &args.profile)?;
@@ -485,7 +550,7 @@ async fn run_compose_ps(
     let services = names.len();
     let target = resolve_compose_target(&compose_file, &args.target, project_root)?;
 
-    let ps_result = ps::run_with_project_root_and_target_override(
+    let ls_result = run_stack_ls_command(
         PsArgs {
             target: args.target.clone(),
         },
@@ -494,12 +559,12 @@ async fn run_compose_ps(
         Some(names),
     )
     .await;
-    if ps_result.exit_code != 0 {
-        return Err(compose_ps_failure_error(&ps_result).into());
+    if ls_result.exit_code != 0 {
+        return Err(compose_ls_failure_error(&ls_result).into());
     }
 
     Ok(ComposeSummary {
-        subcommand: "ps",
+        subcommand: "ls",
         profile: args.profile,
         target: args.target,
         services,
@@ -755,7 +820,7 @@ config = "missing"
 
         let result = run_with_project_root(
             ComposeSubcommandArgs {
-                command: ComposeCommands::Update(ComposeUpdateArgs {
+                command: ComposeCommands::Sync(ComposeUpdateArgs {
                     profile: "prod".to_string(),
                 }),
             },
@@ -857,8 +922,8 @@ type = "cli"
 
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.expect("stderr should be present");
-        assert!(stderr.contains("compose deploy failed"));
-        assert!(stderr.contains("target settings are invalid for deploy"));
+        assert!(stderr.contains("stack deploy failed"));
+        assert!(stderr.contains("target settings are invalid for service deploy"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -950,7 +1015,7 @@ type = "cli"
 
         let result = run_with_project_root(
             ComposeSubcommandArgs {
-                command: ComposeCommands::Ps(ComposePsArgs {
+                command: ComposeCommands::Ls(ComposePsArgs {
                     profile: "dev".to_string(),
                     target: "default".to_string(),
                 }),
@@ -1045,7 +1110,7 @@ type = "cli"
 
         let result = run_with_project_root(
             ComposeSubcommandArgs {
-                command: ComposeCommands::Update(ComposeUpdateArgs {
+                command: ComposeCommands::Sync(ComposeUpdateArgs {
                     profile: "dev".to_string(),
                 }),
             },
@@ -1054,8 +1119,88 @@ type = "cli"
         .await;
 
         assert_eq!(result.exit_code, 0);
+        assert_eq!(result.command, "stack");
+        assert_eq!(
+            result.meta.get("subcommand").map(String::as_str),
+            Some("sync")
+        );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn compose_ls_reports_stack_command_metadata() {
+        let _lock = stack_ls_override_test_lock().lock().await;
+        let root = new_temp_dir("ls-stack-command-metadata");
+        write_file(
+            &root.join(COMPOSE_FILE_NAME),
+            br#"
+[[compose.stack.services]]
+imago = "services/svc-a/imago.toml"
+
+[profile.dev]
+config = "stack"
+
+[target.default]
+remote = "127.0.0.1:4443"
+client_key = "certs/client.key"
+"#,
+        );
+        write_file(
+            &root.join("services/svc-a/imago.toml"),
+            br#"
+name = "svc-a"
+main = "build/app.wasm"
+type = "cli"
+"#,
+        );
+        write_file(&root.join("certs/client.key"), b"dummy-client-key");
+
+        let _guard = set_stack_ls_command_result_override(CommandResult {
+            command: "service.ls".to_string(),
+            exit_code: 0,
+            stderr: None,
+            duration_ms: 0,
+            meta: BTreeMap::new(),
+        });
+
+        let result = run_with_project_root(
+            ComposeSubcommandArgs {
+                command: ComposeCommands::Ls(ComposePsArgs {
+                    profile: "dev".to_string(),
+                    target: "default".to_string(),
+                }),
+            },
+            &root,
+        )
+        .await;
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.command, "stack");
+        assert_eq!(
+            result.meta.get("subcommand").map(String::as_str),
+            Some("ls")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn compose_ls_override_guard_clears_override_on_panic() {
+        let _lock = stack_ls_override_test_lock().lock().await;
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = set_stack_ls_command_result_override(CommandResult {
+                command: "service.ls".to_string(),
+                exit_code: 1,
+                stderr: Some("injected failure".to_string()),
+                duration_ms: 0,
+                meta: BTreeMap::new(),
+            });
+            panic!("intentional panic");
+        });
+
+        let result = take_stack_ls_command_result_override();
+        assert!(result.is_none(), "override must be cleared by guard drop");
     }
 
     #[tokio::test]

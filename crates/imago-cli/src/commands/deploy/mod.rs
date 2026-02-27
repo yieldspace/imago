@@ -180,7 +180,7 @@ fn deploy_phase_detail(phase: u8, detail: &str) -> String {
 }
 
 fn deploy_stage(phase: u8, stage: &str, detail: &str) {
-    ui::command_stage("deploy", stage, &deploy_phase_detail(phase, detail));
+    ui::command_stage("service.deploy", stage, &deploy_phase_detail(phase, detail));
 }
 
 fn format_deploy_build_preview(line: &build::BuildCommandLogLine) -> String {
@@ -423,11 +423,11 @@ pub(crate) async fn run_with_project_root_and_target_override(
     target_override: Option<&build::TargetConfig>,
 ) -> CommandResult {
     let started_at = Instant::now();
-    ui::command_start("deploy", "starting");
+    ui::command_start("service.deploy", "starting");
     match run_async_with_target_override(args, project_root, target_override).await {
         Ok(summary) => {
-            ui::command_finish("deploy", true, "");
-            let mut result = CommandResult::success("deploy", started_at);
+            ui::command_finish("service.deploy", true, "");
+            let mut result = CommandResult::success("service.deploy", started_at);
             result
                 .meta
                 .insert("service".to_string(), summary.service_name);
@@ -447,10 +447,10 @@ pub(crate) async fn run_with_project_root_and_target_override(
             result
         }
         Err(err) => {
-            let summary = error_diagnostics::summarize_command_failure("deploy", &err);
-            ui::command_finish("deploy", false, &summary);
-            let message = error_diagnostics::format_command_error("deploy", &err);
-            CommandResult::failure("deploy", started_at, message)
+            let summary = error_diagnostics::summarize_command_failure("service.deploy", &err);
+            ui::command_finish("service.deploy", false, &summary);
+            let message = error_diagnostics::format_command_error("service.deploy", &err);
+            CommandResult::failure("service.deploy", started_at, message)
         }
     }
 }
@@ -476,7 +476,7 @@ async fn run_async_with_target_override(
         context_target.and_then(|target| target.require_deploy_credentials())
     {
         ui::command_info(
-            "deploy",
+            "service.deploy",
             &command_common::format_local_context_line(
                 project_root,
                 &service_name,
@@ -492,7 +492,11 @@ async fn run_async_with_target_override(
         if ui::current_mode() != ui::UiMode::Rich {
             return;
         }
-        ui::command_stage("deploy", "build", &format_deploy_build_preview(line));
+        ui::command_stage(
+            "service.deploy",
+            "build",
+            &format_deploy_build_preview(line),
+        );
     };
     let build_output = match build::build_project_with_target_override_for_deploy(
         &target_name,
@@ -519,7 +523,7 @@ async fn run_async_with_target_override(
     let target = build_output
         .target
         .require_deploy_credentials()
-        .context("target settings are invalid for deploy")?;
+        .context("target settings are invalid for service deploy")?;
 
     deploy_stage(
         DEPLOY_PHASE_BUNDLE,
@@ -671,8 +675,8 @@ async fn follow_logs_after_deploy(
             .stderr
             .unwrap_or_else(|| format!("exit code {}", logs_result.exit_code));
         ui::command_warn(
-            "deploy",
-            &format!("logs --follow failed after deploy succeeded: {detail}"),
+            "service.deploy",
+            &format!("service logs --follow failed after service deploy succeeded: {detail}"),
         );
     }
 }
@@ -693,7 +697,7 @@ async fn run_upload_phase_with_resume<C: network::TargetConnector>(
 
                 let backoff = retry_backoff_duration(attempt);
                 ui::command_warn(
-                    "deploy",
+                    "service.deploy",
                     &format_retry_log_message(
                         attempt,
                         UPLOAD_MAX_ATTEMPTS,
@@ -744,7 +748,7 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
     command_common::ensure_hello_protocol_compatibility(&hello_response)?;
     let hello_summary = hello_summary_from_response(&hello_response);
     ui::command_info(
-        "deploy",
+        "service.deploy",
         &command_common::format_peer_context_line(
             &connected.authority,
             &connected.resolved_addr.to_string(),
@@ -785,7 +789,7 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
             .iter()
             .fold(0u64, |acc, range| acc.saturating_add(range.length));
         let upload_detail = deploy_phase_detail(DEPLOY_PHASE_UPLOAD, "uploading artifact");
-        ui::command_upload_start("deploy", upload_total_bytes, &upload_detail);
+        ui::command_upload_start("service.deploy", upload_total_bytes, &upload_detail);
         let upload_context = UploadRequestContext {
             session: &session,
             correlation_id: inputs.correlation_id,
@@ -801,7 +805,7 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
             upload_limits,
         )
         .await?;
-        ui::command_upload_finish("deploy");
+        ui::command_upload_finish("service.deploy");
     } else {
         deploy_stage(
             DEPLOY_PHASE_UPLOAD,
@@ -1430,7 +1434,7 @@ async fn request_events_with_retry_policy(
                     return Err(err.context(detail));
                 };
                 ui::command_warn(
-                    "deploy",
+                    "service.deploy",
                     &format_request_stream_retry_log_message(
                         attempt,
                         request_stream_max_attempts(retry_policy),
@@ -1655,7 +1659,7 @@ async fn push_artifact_ranges(
                 .await
                 .ok_or_else(|| anyhow!("upload task set was unexpectedly empty"))?;
             let uploaded = completed.map_err(|err| anyhow!("upload task join failed: {err}"))??;
-            ui::command_upload_inc("deploy", uploaded);
+            ui::command_upload_inc("service.deploy", uploaded);
         }
 
         let mut chunk = vec![0u8; chunk_len];
@@ -1695,7 +1699,7 @@ async fn push_artifact_ranges(
 
     while let Some(completed) = uploads.join_next().await {
         let uploaded = completed.map_err(|err| anyhow!("upload task join failed: {err}"))??;
-        ui::command_upload_inc("deploy", uploaded);
+        ui::command_upload_inc("service.deploy", uploaded);
     }
 
     Ok(())
@@ -2531,7 +2535,7 @@ mod tests {
             "unexpected error: {err:#}"
         );
         assert!(
-            err_chain.contains("imago update"),
+            err_chain.contains("imago deps sync"),
             "unexpected error: {err:#}"
         );
 

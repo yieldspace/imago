@@ -1,9 +1,10 @@
 use anyhow::Error;
+use std::borrow::Cow;
 
 const HINT_UNAUTHORIZED: &str =
     "Verify target.client_key, ~/.imago/known_hosts, and server_name/remote settings, then retry.";
 const HINT_BUILD_FAILED: &str =
-    "Run `imago build` first and fix build.command errors before retrying deploy.";
+    "Run `imago artifact build` first and fix build.command errors before retrying service deploy.";
 const HINT_TARGET_CONFIG: &str =
     "Check `imago.toml` target settings (remote, server_name, client_key) and fix invalid values.";
 const HINT_REMOTE_PARSE: &str =
@@ -11,7 +12,7 @@ const HINT_REMOTE_PARSE: &str =
 const HINT_TRANSPORT_CONNECT: &str =
     "Check target reachability/TLS settings, then retry the QUIC/WebTransport connection.";
 const HINT_BUSY: &str = "The target is busy. Wait for in-flight operations to finish and retry.";
-const HINT_COMMAND_START_STREAM_INTERRUPTED: &str = "The command.start stream was interrupted. The command may still be running on target; inspect target state/logs before retrying deploy/run/stop.";
+const HINT_COMMAND_START_STREAM_INTERRUPTED: &str = "The command.start stream was interrupted. The command may still be running on target; inspect target state/logs before retrying service deploy/service start/service stop.";
 const HINT_STORAGE_QUOTA: &str =
     "The target reported storage quota exhaustion. Free disk space or increase quota.";
 const HINT_PRECONDITION_FAILED: &str =
@@ -31,8 +32,9 @@ pub fn format_command_error(command: &str, err: &Error) -> String {
     let mut hints = Vec::new();
     append_hints(err, &mut hints);
     if hints.is_empty() {
+        let retry_command = retry_command_hint(command);
         hints.push(format!(
-            "Inspect the causes above and retry `{command}` after fixing the root issue."
+            "Inspect the causes above and retry `{retry_command}` after fixing the root issue."
         ));
     }
 
@@ -50,6 +52,24 @@ pub fn format_command_error(command: &str, err: &Error) -> String {
         formatted.push_str(&hint);
     }
     formatted
+}
+
+fn retry_command_hint(command: &str) -> Cow<'_, str> {
+    match command {
+        "project.init" => Cow::Borrowed("imago project init"),
+        "artifact.build" => Cow::Borrowed("imago artifact build"),
+        "deps.sync" => Cow::Borrowed("imago deps sync"),
+        "service.deploy" => Cow::Borrowed("imago service deploy"),
+        "service.start" => Cow::Borrowed("imago service start"),
+        "service.stop" => Cow::Borrowed("imago service stop"),
+        "service.ls" => Cow::Borrowed("imago service ls"),
+        "service.logs" => Cow::Borrowed("imago service logs"),
+        "stack" => Cow::Borrowed("imago stack <subcommand>"),
+        "trust.cert.upload" => Cow::Borrowed("imago trust cert upload"),
+        "trust.cert.replicate" => Cow::Borrowed("imago trust cert replicate"),
+        "trust.client-key.generate" => Cow::Borrowed("imago trust client-key generate"),
+        _ => Cow::Borrowed(command),
+    }
 }
 
 pub fn summarize_command_failure(_command: &str, err: &Error) -> String {
@@ -196,7 +216,7 @@ mod tests {
     #[test]
     fn formats_summary_causes_and_hints_sections() {
         let err = anyhow!("simple failure");
-        let formatted = format_command_error("build", &err);
+        let formatted = format_command_error("artifact.build", &err);
 
         assert!(formatted.starts_with("error: simple failure\ncaused by:\n  - "));
         assert!(formatted.contains("\nhint:\n  - "));
@@ -208,7 +228,7 @@ mod tests {
             .context("middle cause")
             .context("top summary");
 
-        let formatted = format_command_error("deploy", &err);
+        let formatted = format_command_error("service.deploy", &err);
         assert!(formatted.starts_with("error: top summary"));
         assert!(formatted.contains("  - middle cause"));
         assert!(formatted.contains("  - root cause"));
@@ -218,7 +238,7 @@ mod tests {
     fn includes_unauthorized_hint_when_error_code_exists() {
         let err = anyhow!("server error: auth failed (E_UNAUTHORIZED) at transport.connect");
 
-        let formatted = format_command_error("run", &err);
+        let formatted = format_command_error("service.start", &err);
         assert!(formatted.contains("target.client_key"));
         assert!(formatted.contains("known_hosts"));
     }
@@ -227,7 +247,7 @@ mod tests {
     fn includes_unauthorized_hint_for_plain_unauthorized_text() {
         let err = anyhow!("request rejected: Unauthorized at transport.connect");
 
-        let formatted = format_command_error("run", &err);
+        let formatted = format_command_error("service.start", &err);
         assert!(formatted.contains("target.client_key"));
         assert!(formatted.contains("known_hosts"));
     }
@@ -236,11 +256,20 @@ mod tests {
     fn includes_fallback_hint_when_no_rule_matches() {
         let err = anyhow!("unexpected checksum mismatch in local cache");
 
-        let formatted = format_command_error("stop", &err);
-        assert!(
-            formatted
-                .contains("Inspect the causes above and retry `stop` after fixing the root issue."),
-        );
+        let formatted = format_command_error("service.stop", &err);
+        assert!(formatted.contains(
+            "Inspect the causes above and retry `imago service stop` after fixing the root issue.",
+        ),);
+    }
+
+    #[test]
+    fn keeps_unknown_command_in_fallback_hint() {
+        let err = anyhow!("unexpected failure");
+
+        let formatted = format_command_error("custom.command", &err);
+        assert!(formatted.contains(
+            "Inspect the causes above and retry `custom.command` after fixing the root issue.",
+        ));
     }
 
     #[test]
@@ -248,15 +277,15 @@ mod tests {
         let err = anyhow!("request stream read timed out after 15000 ms")
             .context("command.start request stream failed; command may still be running on target");
 
-        let formatted = format_command_error("deploy", &err);
+        let formatted = format_command_error("service.deploy", &err);
         assert!(formatted.contains("command.start stream was interrupted"));
         assert!(formatted.contains("may still be running on target"));
     }
 
     #[test]
     fn strips_redundant_command_prefix_from_summary() {
-        let err = anyhow!("root").context("deploy failed: root");
-        let formatted = format_command_error("deploy", &err);
+        let err = anyhow!("root").context("service.deploy failed: root");
+        let formatted = format_command_error("service.deploy", &err);
         assert!(formatted.starts_with("error: root"));
     }
 
@@ -264,7 +293,7 @@ mod tests {
     fn summarize_command_failure_reports_build_stage() {
         let err = anyhow!("build.command failed with exit code 1");
         assert_eq!(
-            summarize_command_failure("deploy", &err),
+            summarize_command_failure("service.deploy", &err),
             "build stage failed"
         );
     }
@@ -272,12 +301,18 @@ mod tests {
     #[test]
     fn summarize_command_failure_reports_hello_stage() {
         let err = anyhow!("hello.negotiate was rejected by server");
-        assert_eq!(summarize_command_failure("run", &err), "hello stage failed");
+        assert_eq!(
+            summarize_command_failure("service.start", &err),
+            "hello stage failed"
+        );
     }
 
     #[test]
     fn summarize_command_failure_uses_fallback() {
         let err = anyhow!("unexpected failure");
-        assert_eq!(summarize_command_failure("run", &err), "operation failed");
+        assert_eq!(
+            summarize_command_failure("service.start", &err),
+            "operation failed"
+        );
     }
 }

@@ -48,11 +48,11 @@ pub(crate) async fn run_with_project_root_and_target_override(
     names_filter: Option<Vec<String>>,
 ) -> CommandResult {
     let started_at = Instant::now();
-    ui::command_start("ps", "starting");
+    ui::command_start("service.ls", "starting");
     match run_async_with_target_override(args, project_root, target_override, names_filter).await {
         Ok(summary) => {
-            ui::command_finish("ps", true, "");
-            let mut result = CommandResult::success("ps", started_at);
+            ui::command_finish("service.ls", true, "");
+            let mut result = CommandResult::success("service.ls", started_at);
             result
                 .meta
                 .insert("target".to_string(), summary.target_name);
@@ -62,10 +62,10 @@ pub(crate) async fn run_with_project_root_and_target_override(
             result
         }
         Err(err) => {
-            let summary_message = summarize_command_failure("ps", &err);
-            let diagnostic_message = format_command_error("ps", &err);
-            ui::command_finish("ps", false, &summary_message);
-            CommandResult::failure("ps", started_at, diagnostic_message)
+            let summary_message = summarize_command_failure("service.ls", &err);
+            let diagnostic_message = format_command_error("service.ls", &err);
+            ui::command_finish("service.ls", false, &summary_message);
+            CommandResult::failure("service.ls", started_at, diagnostic_message)
         }
     }
 }
@@ -81,18 +81,18 @@ async fn run_async_with_target_override(
     } else {
         args.target.clone()
     };
-    ui::command_stage("ps", "load-config", "loading target configuration");
+    ui::command_stage("service.ls", "load-config", "loading target configuration");
     let target = match target_override {
         Some(target) => target.clone(),
         None => build::load_target_config(&args.target, project_root)
             .context("failed to load target configuration")?,
     }
     .require_deploy_credentials()
-    .context("target settings are invalid for ps")?;
+    .context("target settings are invalid for service ls")?;
 
     let service_context = ps_service_context(names_filter.as_deref());
     ui::command_info(
-        "ps",
+        "service.ls",
         &format_local_context_line(
             project_root,
             &service_context,
@@ -102,11 +102,11 @@ async fn run_async_with_target_override(
         ),
     );
 
-    ui::command_stage("ps", "connect", "connecting target");
+    ui::command_stage("service.ls", "connect", "connecting target");
     let connected = deploy::connect_target(&target).await?;
 
     let correlation_id = Uuid::new_v4();
-    ui::command_stage("ps", "hello", "negotiating hello");
+    ui::command_stage("service.ls", "hello", "negotiating hello");
     let hello = negotiate_hello_with_features(
         &connected.session,
         correlation_id,
@@ -114,7 +114,7 @@ async fn run_async_with_target_override(
     )
     .await?;
     ui::command_info(
-        "ps",
+        "service.ls",
         &format_peer_context_line(
             &connected.authority,
             &connected.resolved_addr.to_string(),
@@ -122,7 +122,7 @@ async fn run_async_with_target_override(
         ),
     );
 
-    ui::command_stage("ps", "services.list", "requesting service states");
+    ui::command_stage("service.ls", "services.list", "requesting service states");
     let response = request_services_list(&connected.session, correlation_id, names_filter).await?;
     let services = response.services.len();
     render_services(&response.services)?;

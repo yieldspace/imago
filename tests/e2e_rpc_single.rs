@@ -62,19 +62,24 @@ fn e2e_rpc_single_node_local_flow() -> TestResult {
         &workspace_root,
         &greeter_dir,
         &control_home,
-        &["deploy", "--target", "default", "--detach"],
+        &["service", "deploy", "--target", "default", "--detach"],
     )?;
     ensure_success("rpc-greeter deploy", &deploy_greeter)?;
     assert_command_completed("rpc-greeter deploy", &deploy_greeter)?;
 
-    let update_client = run_imago_cli(&workspace_root, &client_dir, &control_home, &["update"])?;
-    ensure_success("rpc-caller update", &update_client)?;
+    let deps_sync_client = run_imago_cli(
+        &workspace_root,
+        &client_dir,
+        &control_home,
+        &["deps", "sync"],
+    )?;
+    ensure_success("rpc-caller deps sync", &deps_sync_client)?;
 
     let deploy_client = run_imago_cli(
         &workspace_root,
         &client_dir,
         &control_home,
-        &["deploy", "--target", "default", "--detach"],
+        &["service", "deploy", "--target", "default", "--detach"],
     )?;
     ensure_success("rpc-caller deploy", &deploy_client)?;
     assert_command_completed("rpc-caller deploy", &deploy_client)?;
@@ -96,13 +101,13 @@ fn e2e_rpc_single_node_local_flow() -> TestResult {
         &workspace_root,
         &client_dir,
         &control_home,
-        &["stop", "rpc-caller", "--target", "default"],
+        &["service", "stop", "rpc-caller", "--target", "default"],
     );
     let _ = run_imago_cli(
         &workspace_root,
         &greeter_dir,
         &control_home,
-        &["stop", "rpc-greeter", "--target", "default"],
+        &["service", "stop", "rpc-greeter", "--target", "default"],
     );
 
     Ok(())
@@ -157,7 +162,7 @@ fn fetch_logs_once(
         workspace_root,
         project_dir,
         home,
-        &["logs", "rpc-caller", "--tail", "200"],
+        &["service", "logs", "rpc-caller", "--tail", "200"],
     )?;
     if !logs.success {
         return Ok(None);

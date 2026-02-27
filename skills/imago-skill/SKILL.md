@@ -1,21 +1,21 @@
 ---
 name: imago-skill
-description: Explain imago fundamentals and guide both core imago workflows (init/build/update/deploy/run/stop/ps/logs/bindings/certs) and imago compose workflows (build/update/deploy/logs/ps) for this repository. Use when users ask how imago works, how to operate single-service or multi-service deployments, or how to structure imago.toml and imago-compose.toml.
+description: Explain imago fundamentals and guide both core imago workflows (project init/artifact build/deps sync/service deploy/service start/service stop/service ls/service logs/trust cert/trust client-key) and imago stack workflows (build/sync/deploy/logs/ls) for this repository. Use when users ask how imago works, how to operate single-service or multi-service deployments, or how to structure imago.toml and imago-compose.toml.
 ---
 
 # Imago Skill
 
 ## Overview
 
-Teach imago fundamentals and operational workflows for both single-service (`imago` core commands) and multi-service (`imago compose`) use cases.
+Teach imago fundamentals and operational workflows for both single-service (`imago` core commands) and multi-service (`imago stack`) use cases.
 Route each request to the shortest reliable command sequence, then diagnose failures by matching structural constraints first.
 
 ## Command families and when to use
 
-- Use core imago commands (`init/build/update/deploy/run/stop/ps/logs`) when the user is working on one service project rooted by one `imago.toml`.
-- Use `compose` commands (`compose build/update/deploy/logs/ps`) when the user is orchestrating multiple services via `imago-compose.toml`.
-- Use `bindings cert` commands when trust data must be uploaded or copied between authorities.
-- Use `certs generate` when the user needs a local client key for `imago` authentication.
+- Use core imago commands (`project init/artifact build/deps sync/service deploy/service start/service stop/service ls/service logs`) when the user is working on one service project rooted by one `imago.toml`.
+- Use `stack` commands (`stack build/sync/deploy/logs/ls`) when the user is orchestrating multiple services via `imago-compose.toml`.
+- Use `trust cert` commands when trust data must be uploaded or copied between authorities.
+- Use `trust client-key generate` when the user needs a local client key for `imago` authentication.
 
 ## Concept model (imago.toml vs imago-compose.toml)
 
@@ -45,41 +45,41 @@ Route each request to the shortest reliable command sequence, then diagnose fail
 
 4. Execute minimal safe sequence.
 - First deployment default:
-  - core: `update -> build -> deploy -> ps/logs`
-  - compose: `compose update -> compose build -> compose deploy -> compose ps/logs`
+  - core: `deps sync -> artifact build -> service deploy -> service ls/service logs`
+  - compose: `stack sync -> stack build -> stack deploy -> stack ls/logs`
 
 ## Core imago playbooks
 
 ### Playbook A: initialize a service project
 
 ```bash
-imago init .
-imago init services/example --lang rust
+imago project init .
+imago project init services/example --lang rust
 ```
 
 ### Playbook B: first deployment for one service
 
 ```bash
-imago update
-imago build --target <target>
-imago deploy --target <target> --detach
-imago ps --target <target>
-imago logs <service-name> --tail 200
+imago deps sync
+imago artifact build --target <target>
+imago service deploy --target <target> --detach
+imago service ls --target <target>
+imago service logs <service-name> --tail 200
 ```
 
 ### Playbook C: lifecycle operations
 
 ```bash
-imago run <service-name> --target <target> --detach
-imago stop <service-name> --target <target>
+imago service start <service-name> --target <target> --detach
+imago service stop <service-name> --target <target>
 ```
 
 ### Playbook D: certificate and trust operations
 
 ```bash
-imago certs generate --out-dir certs
-imago bindings cert upload <public_key_hex> --to <remote-authority>
-imago bindings cert deploy --from <remote-authority> --to <remote-authority>
+imago trust client-key generate --out-dir certs
+imago trust cert upload <public_key_hex> --to <remote-authority>
+imago trust cert replicate --from <remote-authority> --to <remote-authority>
 ```
 
 ## Compose playbooks
@@ -87,19 +87,19 @@ imago bindings cert deploy --from <remote-authority> --to <remote-authority>
 ### Playbook E: initial deployment of a profile
 
 ```bash
-imago compose update <profile>
-imago compose build <profile> --target <target>
-imago compose deploy <profile> --target <target>
-imago compose ps <profile> --target <target>
-imago compose logs <profile> --target <target> --tail 200
+imago stack sync <profile>
+imago stack build <profile> --target <target>
+imago stack deploy <profile> --target <target>
+imago stack ls <profile> --target <target>
+imago stack logs <profile> --target <target> --tail 200
 ```
 
 ### Playbook F: inspect status and logs only
 
 ```bash
-imago compose ps <profile> --target <target>
-imago compose logs <profile> --target <target> --name <service-name> --tail 200
-imago compose logs <profile> --target <target> --follow --tail 200
+imago stack ls <profile> --target <target>
+imago stack logs <profile> --target <target> --name <service-name> --tail 200
+imago stack logs <profile> --target <target> --follow --tail 200
 ```
 
 ## Troubleshooting matrix
@@ -111,18 +111,18 @@ imago compose logs <profile> --target <target> --follow --tail 200
 - Core imago common errors:
   - Missing/invalid `imago.toml` context.
   - Unknown target in `[target.<name>]`.
-  - Authentication failures requiring `certs`/`bindings` updates.
+  - Authentication failures requiring `trust client-key`/`trust cert` updates.
 
 - Compose common errors:
   - `failed to read compose file` / `failed to parse compose file`.
   - `profile '<name>' is not defined` / `compose config '<name>' is not defined`.
   - `service.imago must point to imago.toml` / `service.imago file does not exist`.
   - `target '<name>' is not defined` / `target '<name>' is missing required key: remote`.
-  - `compose logs --name must not be empty`.
+  - `stack logs --name must not be empty`.
 
 - Trust/cert hints:
-  - Use `certs generate` to create local client key material.
-  - Use `bindings cert upload/deploy` to align authority trust.
+  - Use `trust client-key generate` to create local client key material.
+  - Use `trust cert upload/replicate` to align authority trust.
 
 ## When to read references
 

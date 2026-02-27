@@ -78,13 +78,15 @@ fn e2e_cli_unknown_target_fails_via_run_service_cli() -> TestResult {
         WasmArtifact::CliBase,
     )?;
 
-    let deploy_unknown =
-        scenario.run_service_cli(service.name(), &["deploy", "--target", "unknown"])?;
+    let deploy_unknown = scenario.run_service_cli(
+        service.name(),
+        &["service", "deploy", "--target", "unknown"],
+    )?;
     assert_unknown_target_failure("deploy unknown target", &deploy_unknown)?;
 
     let stop_unknown = scenario.run_service_cli(
         service.name(),
-        &["stop", service.name(), "--target", "unknown"],
+        &["service", "stop", service.name(), "--target", "unknown"],
     )?;
     assert_unknown_target_failure("stop unknown target", &stop_unknown)?;
 

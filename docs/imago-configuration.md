@@ -36,7 +36,7 @@ These keys are read from the root TOML table and are not nested under a `[packag
 name = "example-service"
 ```
 
-- Validation error notes: missing, empty, or invalid characters cause `imago build` to fail.
+- Validation error notes: missing, empty, or invalid characters cause `imago artifact build` to fail.
 
 ### The `main` field
 
@@ -50,7 +50,7 @@ name = "example-service"
 main = "build/app.wasm"
 ```
 
-- Validation error notes: missing file or unsafe path causes `imago build` to fail.
+- Validation error notes: missing file or unsafe path causes `imago artifact build` to fail.
 
 ### The `type` field
 
@@ -83,7 +83,7 @@ restart = "always"
 <a id="the-build-section"></a>
 ## The [build] section
 
-This section configures the local build command used by `imago build`.
+This section configures the local build command used by `imago artifact build`.
 
 ### The `command` field
 
@@ -138,7 +138,7 @@ server_name = "node-a.example.com"
 ### The `client_key` field
 
 - Type: `string` (path)
-- Required/Optional: Optional for `imago build`; required for deploy/run/stop/logs/ps paths.
+- Required/Optional: Optional for `imago artifact build`; required for service deploy/start/stop/logs/ls paths.
 - Accepted values / Constraints: non-empty; no path traversal; no backslashes; no Windows drive prefix; relative paths resolve from project root; absolute paths are allowed.
 - Default: none.
 - Example:
@@ -195,14 +195,14 @@ port = 8080
 
 - Type: `integer`
 - Required/Optional: Optional.
-- Accepted values / Constraints: `1..=67108864` (64 MiB).
-- Default: `8388608` (8 MiB).
+- Accepted values / Constraints: `1..=33554432` (32 MiB).
+- Default: `4194304` (4 MiB).
 - Example:
 
 ```toml
 [http]
 port = 8080
-max_body_bytes = 8388608
+max_body_bytes = 4194304
 ```
 
 - Validation error notes: out-of-range values fail validation.
@@ -495,11 +495,11 @@ wit = "file://wit/interfaces/rpc/package.wit"
 
 - Validation error notes: unsupported schemes fail validation. Legacy `"<package>/<interface>"` format is not supported and fails validation.
 
-### The `imago update` expansion behavior
+### The `imago deps sync` expansion behavior
 
 - Type: behavior note
 - Required/Optional: Applies whenever `[[bindings]]` is configured.
-- Accepted values / Constraints: `imago update` resolves the referenced WIT package and expands all interfaces into `manifest.bindings[]` entries in the form `{ "name": "<service>", "wit": "<package>/<interface>" }`.
+- Accepted values / Constraints: `imago deps sync` resolves the referenced WIT package and expands all interfaces into `manifest.bindings[]` entries in the form `{ "name": "<service>", "wit": "<package>/<interface>" }`.
 - Default: if omitted, `manifest.bindings=[]` and runtime authorization is deny-by-default.
 - Example:
 
@@ -626,7 +626,7 @@ registry = "wasi.dev"
 
 - Type: `string`
 - Required/Optional: Optional.
-- Accepted values / Constraints: sha256 digest string checked by `imago update` when provided.
+- Accepted values / Constraints: sha256 digest string checked by `imago deps sync` when provided.
 - Default: none.
 - Example:
 
@@ -657,10 +657,10 @@ wasi = true
 - Type: behavior note
 - Required/Optional: Applies whenever `[[dependencies]]` is present.
 - Accepted values / Constraints:
-  - `imago update` resolves dependency WIT/component inputs and stores artifacts under `.imago/deps/<sanitized dependency>/`.
-  - `imago update` regenerates `wit/deps/` and writes lock metadata into `imago.lock` (`version = 1`).
-  - `imago build` requires matching lock/cache state and rebuilds `wit/deps/` from `.imago/deps` before validation.
-  - `imago deploy` uses component metadata from `imago.lock` plus `.imago/deps` caches.
+  - `imago deps sync` resolves dependency WIT/component inputs and stores artifacts under `.imago/deps/<sanitized dependency>/`.
+  - `imago deps sync` regenerates `wit/deps/` and writes lock metadata into `imago.lock` (`version = 1`).
+  - `imago artifact build` requires matching lock/cache state and rebuilds `wit/deps/` from `.imago/deps` before validation.
+  - `imago service deploy` uses component metadata from `imago.lock` plus `.imago/deps` caches.
 - Default: not applicable.
 - Example:
 
@@ -675,7 +675,7 @@ wit = "warg://acme:plugin/example@0.1.0"
 - Validation error notes:
   - `dependencies[].wit.source = "file://..."` pointing into `wit/deps` is rejected.
   - Multiple dependencies resolving to the same `wit/deps` output path are rejected.
-  - Missing or mismatched `imago.lock` entries (`wit_*`, `component_*`, `wit_packages`) fail build/deploy and require `imago update`.
+  - Missing or mismatched `imago.lock` entries (`wit_*`, `component_*`, `wit_packages`) fail build/deploy and require `imago deps sync`.
   - For remote inputs, resolved top-level package names must match `dependencies[].name`.
 
 <a id="the-namespace_registries-section"></a>

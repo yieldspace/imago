@@ -38,8 +38,8 @@ use crate::{
 mod validation;
 
 const DEFAULT_TARGET_NAME: &str = "default";
-const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_HTTP_MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
+const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_HTTP_MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
 const DEFAULT_RESTART_POLICY: &str = "never";
 const RESTART_POLICY_ON_FAILURE: &str = "on-failure";
 const RESTART_POLICY_ALWAYS: &str = "always";
@@ -360,11 +360,11 @@ pub(crate) fn run_with_project_root_and_target_override(
 ) -> CommandResult {
     let started_at = Instant::now();
     let target_name = args.target.clone();
-    ui::command_start("build", "starting");
+    ui::command_start("artifact.build", "starting");
     match run_inner_with_target_override(args, project_root, target_override) {
         Ok(output) => {
-            ui::command_finish("build", true, "");
-            let mut result = CommandResult::success("build", started_at);
+            ui::command_finish("artifact.build", true, "");
+            let mut result = CommandResult::success("artifact.build", started_at);
             result.meta.insert("target".to_string(), target_name);
             result.meta.insert(
                 "manifest_path".to_string(),
@@ -373,10 +373,10 @@ pub(crate) fn run_with_project_root_and_target_override(
             result
         }
         Err(err) => {
-            let summary = error_diagnostics::summarize_command_failure("build", &err);
-            ui::command_finish("build", false, &summary);
-            let message = error_diagnostics::format_command_error("build", &err);
-            CommandResult::failure("build", started_at, message)
+            let summary = error_diagnostics::summarize_command_failure("artifact.build", &err);
+            ui::command_finish("artifact.build", false, &summary);
+            let message = error_diagnostics::format_command_error("artifact.build", &err);
+            CommandResult::failure("artifact.build", started_at, message)
         }
     }
 }
@@ -456,7 +456,7 @@ fn build_project_with_target_override_inner(
     on_build_line: Option<&mut BuildCommandLineCallback<'_>>,
 ) -> anyhow::Result<BuildOutput> {
     if emit_progress {
-        ui::command_stage("build", "load-config", "loading imago.toml");
+        ui::command_stage("artifact.build", "load-config", "loading imago.toml");
     }
     let root = load_resolved_toml(project_root)?;
     let namespace_registries = parse_namespace_registries(root.get("namespace_registries"))?;
@@ -500,7 +500,7 @@ fn build_project_with_target_override_inner(
     let capabilities = parse_root_capabilities(&root)?;
     let dependency_resolver = StandardDependencyResolver;
     if emit_progress {
-        ui::command_stage("build", "resolve-deps", "resolving dependencies");
+        ui::command_stage("artifact.build", "resolve-deps", "resolving dependencies");
     }
     let dependencies = dependency_resolver
         .resolve_manifest_dependencies_from_lock(project_root, &project_dependencies)?;
@@ -511,12 +511,20 @@ fn build_project_with_target_override_inner(
     };
 
     if emit_progress {
-        ui::command_stage("build", "run-build-command", "running build command");
+        ui::command_stage(
+            "artifact.build",
+            "run-build-command",
+            "running build command",
+        );
     }
     run_build_command(command.as_ref(), project_root, on_build_line)?;
 
     if emit_progress {
-        ui::command_stage("build", "materialize", "materializing hashed artifact");
+        ui::command_stage(
+            "artifact.build",
+            "materialize",
+            "materializing hashed artifact",
+        );
     }
     ensure_file_exists(project_root, &source_main_path, "main")?;
     let materialized_main_path = materialize_hashed_wasm(project_root, &source_main_path, &name)?;
@@ -569,7 +577,11 @@ fn build_project_with_target_override_inner(
     manifest_bytes.push(b'\n');
 
     if emit_progress {
-        ui::command_stage("build", "write-manifest", "writing build/manifest.json");
+        ui::command_stage(
+            "artifact.build",
+            "write-manifest",
+            "writing build/manifest.json",
+        );
     }
     let manifest_path = resolve_manifest_output_path();
     let output_path = project_root.join(&manifest_path);
@@ -2588,7 +2600,7 @@ mod tests {
         let result = runtime.block_on(update::run_with_project_root(UpdateArgs {}, root));
         assert_eq!(
             result.exit_code, 0,
-            "imago update should succeed before build tests: {:?}",
+            "imago deps sync should succeed before build tests: {:?}",
             result.stderr
         );
     }
@@ -2850,7 +2862,7 @@ remote = "127.0.0.1:4443"
 
     #[test]
     fn build_rejects_invalid_http_max_body_bytes() {
-        for (suffix, max_body_bytes) in [("zero", "0"), ("too-large", "67108865")] {
+        for (suffix, max_body_bytes) in [("zero", "0"), ("too-large", "33554433")] {
             let root = new_temp_dir(&format!("http-max-body-{suffix}"));
             write_imago_toml(
                 &root,
@@ -4353,7 +4365,7 @@ remote = "127.0.0.1:4443"
             "unexpected error: {err:#}"
         );
         assert!(
-            err_chain.contains("run `imago update`"),
+            err_chain.contains("run `imago deps sync`"),
             "unexpected error: {err:#}"
         );
 

@@ -36,14 +36,14 @@ Supported WIT source schemes:
 - `warg://`
 - `oci://`
 
-`imago update` resolves sources into project cache and lock data. `imago build` and `imago deploy` consume the resolved lock/cache state instead of resolving from remote paths during execution.
+`imago deps sync` resolves sources into project cache and lock data. `imago artifact build` and `imago service deploy` consume the resolved lock/cache state instead of resolving from remote paths during execution.
 
 ## Resolution and Locking
 
 - Resolved WIT data is materialized under project cache paths.
 - `wit/deps` is regenerated from lock/cache state.
 - `imago.lock` is the source of truth for resolved digests and transitive package records.
-- Missing or mismatched cache/lock data requires running `imago update`.
+- Missing or mismatched cache/lock data requires running `imago deps sync`.
 
 ## Native Plugin WIT Publishing
 

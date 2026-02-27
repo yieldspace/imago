@@ -40,8 +40,8 @@ flowchart TD
 
 ## Data Flow
 
-1. `imago build` validates `imago.toml` and generates `build/manifest.json`.
-2. `imago deploy` negotiates protocol limits and transfers artifacts.
+1. `imago artifact build` validates `imago.toml` and generates `build/manifest.json`.
+2. `imago service deploy` negotiates protocol limits and transfers artifacts.
 3. `imagod` verifies digests, promotes release state, and launches a runner.
 4. Runner executes the component and reports control-plane events.
 5. Logs, status, and RPC invocations are served through protocol APIs.

@@ -1,4 +1,4 @@
-//! Dependency and binding resolution pipeline for `imago update`.
+//! Dependency and binding resolution pipeline for `imago deps sync`.
 //!
 //! The update flow resolves WIT/component sources, rewrites `wit/deps`,
 //! and persists lock metadata consumed by build/deploy operations.
@@ -58,11 +58,11 @@ pub async fn run(args: UpdateArgs) -> CommandResult {
 
 pub(crate) async fn run_with_project_root(_args: UpdateArgs, project_root: &Path) -> CommandResult {
     let started_at = Instant::now();
-    ui::command_start("update", "starting");
+    ui::command_start("deps.sync", "starting");
     match run_inner_async(project_root).await {
         Ok(summary) => {
-            ui::command_finish("update", true, "");
-            let mut result = CommandResult::success("update", started_at);
+            ui::command_finish("deps.sync", true, "");
+            let mut result = CommandResult::success("deps.sync", started_at);
             result
                 .meta
                 .insert("dependencies".to_string(), summary.dependencies.to_string());
@@ -72,10 +72,10 @@ pub(crate) async fn run_with_project_root(_args: UpdateArgs, project_root: &Path
             result
         }
         Err(err) => {
-            let summary_message = summarize_command_failure("update", &err);
-            let diagnostic_message = format_command_error("update", &err);
-            ui::command_finish("update", false, &summary_message);
-            CommandResult::failure("update", started_at, diagnostic_message)
+            let summary_message = summarize_command_failure("deps.sync", &err);
+            let diagnostic_message = format_command_error("deps.sync", &err);
+            ui::command_finish("deps.sync", false, &summary_message);
+            CommandResult::failure("deps.sync", started_at, diagnostic_message)
         }
     }
 }
@@ -156,7 +156,7 @@ fn validate_wit_sources_outside_wit_deps(
                 .any(|wit_deps_root| candidate.starts_with(wit_deps_root))
         }) {
             return Err(anyhow!(
-                "{} {} '{}' points under wit/deps, which `imago update` resets; move the source outside wit/deps",
+                "{} {} '{}' points under wit/deps, which `imago deps sync` resets; move the source outside wit/deps",
                 subject_name,
                 source_label,
                 source
@@ -403,7 +403,7 @@ async fn resolve_binding_wits(
                 )?;
                 let lock_entry = lock_by_name.get(package_name.as_str()).ok_or_else(|| {
                     anyhow!(
-                        "dependency '{}' is not resolved in imago.lock; run `imago update`",
+                        "dependency '{}' is not resolved in imago.lock; run `imago deps sync`",
                         package_name
                     )
                 })?;
@@ -758,7 +758,7 @@ fn ensure_interface_contains_no_resource(
             FunctionKind::Freestanding | FunctionKind::AsyncFreestanding
         ) {
             return Err(anyhow!(
-                "binding WIT '{}/{}' contains resource methods; `imago update` does not support resources",
+                "binding WIT '{}/{}' contains resource methods; `imago deps sync` does not support resources",
                 dependency_name,
                 interface_name
             ));
@@ -766,7 +766,7 @@ fn ensure_interface_contains_no_resource(
         for param in &function.params {
             if type_contains_resource(resolve, &param.ty, &mut BTreeSet::new()) {
                 return Err(anyhow!(
-                    "binding WIT '{}/{}' contains resource types; `imago update` does not support resources",
+                    "binding WIT '{}/{}' contains resource types; `imago deps sync` does not support resources",
                     dependency_name,
                     interface_name
                 ));
@@ -776,7 +776,7 @@ fn ensure_interface_contains_no_resource(
             && type_contains_resource(resolve, result, &mut BTreeSet::new())
         {
             return Err(anyhow!(
-                "binding WIT '{}/{}' contains resource types; `imago update` does not support resources",
+                "binding WIT '{}/{}' contains resource types; `imago deps sync` does not support resources",
                 dependency_name,
                 interface_name
             ));
@@ -785,7 +785,7 @@ fn ensure_interface_contains_no_resource(
     for type_id in interface.types.values() {
         if type_id_contains_resource(resolve, *type_id, &mut BTreeSet::new()) {
             return Err(anyhow!(
-                "binding WIT '{}/{}' contains resource definitions; `imago update` does not support resources",
+                "binding WIT '{}/{}' contains resource definitions; `imago deps sync` does not support resources",
                 dependency_name,
                 interface_name
             ));
@@ -1018,7 +1018,11 @@ fn remove_other_wit_files(root: &Path, keep: &Path) -> anyhow::Result<()> {
 }
 
 async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
-    ui::command_stage("update", "load-input", "loading dependencies and bindings");
+    ui::command_stage(
+        "deps.sync",
+        "load-input",
+        "loading dependencies and bindings",
+    );
     let namespace_registries = build::load_namespace_registries(project_root)?;
     let dependency_resolver = StandardDependencyResolver;
     let dependencies = build::load_project_dependencies_with_namespace_registries(
@@ -1036,7 +1040,7 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
     let mut lock_entries = Vec::with_capacity(dependencies.len());
     let mut transitive_records = Vec::new();
 
-    ui::command_stage("update", "refresh-cache", "refreshing dependency cache");
+    ui::command_stage("deps.sync", "refresh-cache", "refreshing dependency cache");
     for dependency in &dependencies {
         let cache_entry = cache::load_or_refresh_cache_entry(
             &dependency_resolver,
@@ -1071,7 +1075,7 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
         });
     }
 
-    ui::command_stage("update", "hydrate-wit", "hydrating wit/deps");
+    ui::command_stage("deps.sync", "hydrate-wit", "hydrating wit/deps");
     dependency_cache::hydrate_project_wit_deps(
         project_root,
         &dependencies,
@@ -1142,7 +1146,7 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
         wit_packages: collect_wit_packages(transitive_records),
         binding_wits,
     };
-    ui::command_stage("update", "write-lock", "writing imago.lock");
+    ui::command_stage("deps.sync", "write-lock", "writing imago.lock");
     save_to_project_root(project_root, &lock)?;
 
     Ok(UpdateSummary {
