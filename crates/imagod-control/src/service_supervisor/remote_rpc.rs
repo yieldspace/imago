@@ -28,7 +28,7 @@ use semver::{Version, VersionReq};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::net::lookup_host;
-use url::Url;
+use url::{Host, Url};
 use uuid::Uuid;
 use web_transport_quinn::{Session, proto::ConnectRequest};
 
@@ -630,12 +630,14 @@ fn parse_rpc_authority(authority: &str) -> Result<RemoteAuthority, ImagodError> 
             "rpc authority must not contain a path",
         ));
     }
-    let host = parsed
-        .host_str()
+    let host = match parsed
+        .host()
         .ok_or_else(|| remote_error(ErrorCode::BadRequest, "rpc authority host is required"))?
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_ascii_lowercase();
+    {
+        Host::Ipv6(ip) => ip.to_string(),
+        Host::Ipv4(ip) => ip.to_string(),
+        Host::Domain(domain) => domain.to_ascii_lowercase(),
+    };
     let port = parsed.port().unwrap_or(DEFAULT_RPC_PORT);
     if port == 0 {
         return Err(remote_error(
