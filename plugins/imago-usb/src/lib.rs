@@ -530,6 +530,9 @@ fn parse_usb_resources_config(
             .as_str()
             .ok_or_else(|| format!("resources.usb.paths[{index}] must be a string"))?;
         let normalized = normalize_usb_path(raw)?;
+        parse_usbfs_bus_and_address(&normalized).map_err(|err| {
+            format!("resources.usb.paths[{index}] must match /dev/bus/usb/<bus>/<address>: {err}")
+        })?;
         if !allowlist.insert(normalized.clone()) {
             return Err(format!(
                 "resources.usb.paths[{index}] duplicates normalized path: {normalized}"
@@ -2253,6 +2256,15 @@ mod tests {
             err.contains("duplicates normalized path"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn parse_usb_resources_rejects_non_usbfs_paths() {
+        let err = parse_usb_resources_config(&resources_with_usb(json!({
+            "paths": ["/tmp/device"]
+        })))
+        .expect_err("non-usbfs path must fail");
+        assert!(err.contains("/dev/bus/usb"), "unexpected error: {err}");
     }
 
     #[test]
