@@ -1135,11 +1135,13 @@ fn perform_iso_transfer(
 
     let deadline = Instant::now() + timeout;
     let context = state.handle.context().clone();
+    let mut timed_out = false;
+    let mut event_error_code = None;
 
     while !unsafe { (*completed_ptr).load(Ordering::Acquire) } {
         let now = Instant::now();
         if now >= deadline {
-            let _ = unsafe { ffi::libusb_cancel_transfer(transfer) };
+            timed_out = true;
             break;
         }
 
@@ -1154,39 +1156,33 @@ fn perform_iso_transfer(
             ffi::libusb_handle_events_timeout_completed(context.as_raw(), &tv, std::ptr::null_mut())
         };
         if rc < 0 && rc != LIBUSB_ERROR_INTERRUPTED {
-            unsafe {
-                drop(Box::from_raw(completed_ptr));
-                ffi::libusb_free_transfer(transfer);
-            }
-            return Err(map_libusb_error_code(rc));
+            event_error_code = Some(rc);
+            break;
         }
     }
 
-    if !unsafe { (*completed_ptr).load(Ordering::Acquire) } {
-        for _ in 0..10 {
+    if timed_out || event_error_code.is_some() {
+        let _ = unsafe { ffi::libusb_cancel_transfer(transfer) };
+
+        // libusb_cancel_transfer is asynchronous. Keep pumping events until callback completion
+        // before freeing transfer-owned buffers to avoid use-after-free.
+        while !unsafe { (*completed_ptr).load(Ordering::Acquire) } {
             let tv = libc::timeval {
                 tv_sec: 0,
                 tv_usec: 10_000,
             };
-            let _ = unsafe {
+            let rc = unsafe {
                 ffi::libusb_handle_events_timeout_completed(
                     context.as_raw(),
                     &tv,
                     std::ptr::null_mut(),
                 )
             };
-            if unsafe { (*completed_ptr).load(Ordering::Acquire) } {
-                break;
+            if rc < 0 && rc != LIBUSB_ERROR_INTERRUPTED {
+                event_error_code.get_or_insert(rc);
+                thread::sleep(Duration::from_millis(1));
             }
         }
-    }
-
-    if !unsafe { (*completed_ptr).load(Ordering::Acquire) } {
-        unsafe {
-            drop(Box::from_raw(completed_ptr));
-            ffi::libusb_free_transfer(transfer);
-        }
-        return Err(UsbError::Timeout);
     }
 
     let (status, actual_len) = unsafe {
@@ -1198,6 +1194,13 @@ fn perform_iso_transfer(
     unsafe {
         drop(Box::from_raw(completed_ptr));
         ffi::libusb_free_transfer(transfer);
+    }
+
+    if timed_out {
+        return Err(UsbError::Timeout);
+    }
+    if let Some(code) = event_error_code {
+        return Err(map_libusb_error_code(code));
     }
 
     let result = match status {
