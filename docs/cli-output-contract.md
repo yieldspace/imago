@@ -43,6 +43,15 @@ This document defines the user-facing output contract for `imago` CLI commands.
   - what was deployed (`service`, `deploy_id`)
   - where it was deployed (`target`, `authority`, `resolved`)
   - when deployment completed (`deployed_at`)
+- When `service.deploy` delegates to `service logs --follow`, `service.deploy` progress spinners must be cleared before streamed log lines begin.
+
+### service.start
+
+- When `service.start` delegates to `service logs --follow`, `service.start` progress spinners must be cleared before streamed log lines begin.
+
+### stack logs
+
+- `stack logs` must clear the `stack` progress spinner before delegating to `service.logs` so streamed log lines are not interleaved with parent spinner redraws.
 
 ### service.logs
 

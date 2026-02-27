@@ -104,6 +104,10 @@ fn compose_ls_failure_error(ps_result: &CommandResult) -> ComposeCommandError {
     }
 }
 
+fn should_clear_stack_spinner_before_logs(_follow: bool) -> bool {
+    true
+}
+
 pub async fn run(args: ComposeSubcommandArgs) -> CommandResult {
     run_with_project_root(args, Path::new(".")).await
 }
@@ -512,6 +516,10 @@ async fn run_compose_logs(
         && name.trim().is_empty()
     {
         return Err(anyhow!("stack logs --name must not be empty"));
+    }
+
+    if should_clear_stack_spinner_before_logs(args.follow) {
+        ui::command_clear("stack");
     }
 
     let logs_result = logs::run_with_project_root_and_target_override(
@@ -975,6 +983,16 @@ type = "cli"
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clear_stack_spinner_before_logs_when_follow_enabled() {
+        assert!(should_clear_stack_spinner_before_logs(true));
+    }
+
+    #[test]
+    fn clear_stack_spinner_before_logs_when_follow_disabled() {
+        assert!(should_clear_stack_spinner_before_logs(false));
     }
 
     #[tokio::test]

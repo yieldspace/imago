@@ -216,6 +216,10 @@ fn print_build_failure_logs(err: &anyhow::Error) {
     println!("{}", build_failure_footer_line());
 }
 
+fn should_clear_deploy_spinner_before_follow(detach: bool) -> bool {
+    !detach
+}
+
 fn format_deploy_structured_error(error: &StructuredError) -> String {
     let mut formatted = format!("{} ({:?}) at {}", error.message, error.code, error.stage);
     append_wasm_log_section(&mut formatted, error, DETAIL_WASM_STDOUT, "wasm stdout");
@@ -626,7 +630,8 @@ async fn run_async_with_target_override(
         terminal.ok_or_else(|| anyhow!("command.event terminal event was not received"))?;
     match terminal.event_type {
         CommandEventType::Succeeded => {
-            if !detach {
+            if should_clear_deploy_spinner_before_follow(detach) {
+                ui::command_clear("service.deploy");
                 follow_logs_after_deploy(project_root, &target_config_for_logs, &manifest.name)
                     .await;
             }
@@ -3012,6 +3017,16 @@ mod tests {
             deploy_phase_detail(DEPLOY_PHASE_COMMAND, "remote progress"),
             "phase 8/8 remote progress"
         );
+    }
+
+    #[test]
+    fn clear_deploy_spinner_before_follow_when_not_detached() {
+        assert!(should_clear_deploy_spinner_before_follow(false));
+    }
+
+    #[test]
+    fn keep_deploy_spinner_when_detached() {
+        assert!(!should_clear_deploy_spinner_before_follow(true));
     }
 
     #[test]

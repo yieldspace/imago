@@ -20,6 +20,10 @@ use crate::{
 
 const AUTO_FOLLOW_TAIL_LINES: u32 = 200;
 
+fn should_clear_start_spinner_before_follow(detach: bool) -> bool {
+    !detach
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunSummary {
     service_name: String,
@@ -120,7 +124,8 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<RunSumm
     )
     .await?;
     handle_terminal_event("service.start", responses)?;
-    if !detach {
+    if should_clear_start_spinner_before_follow(detach) {
+        ui::command_clear("service.start");
         follow_logs_after_run(project_root, &target_config, &service_name).await;
     }
     Ok(RunSummary {
@@ -159,6 +164,7 @@ async fn follow_logs_after_run(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::commands::command_common::resolve_service_name;
     use std::{
         fs,
@@ -248,5 +254,15 @@ remote = "127.0.0.1:4443"
         assert_eq!(name, "svc-default");
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clear_start_spinner_before_follow_when_not_detached() {
+        assert!(should_clear_start_spinner_before_follow(false));
+    }
+
+    #[test]
+    fn keep_start_spinner_when_detached() {
+        assert!(!should_clear_start_spinner_before_follow(true));
     }
 }
