@@ -51,17 +51,45 @@ struct DynamicPublicKeys {
 static DYNAMIC_PUBLIC_KEYS: OnceLock<RwLock<DynamicPublicKeys>> = OnceLock::new();
 #[cfg(test)]
 static DYNAMIC_PUBLIC_KEYS_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(test)]
+thread_local! {
+    static DYNAMIC_PUBLIC_KEYS_TEST_LOCK_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 fn dynamic_public_keys() -> &'static RwLock<DynamicPublicKeys> {
     DYNAMIC_PUBLIC_KEYS.get_or_init(|| RwLock::new(DynamicPublicKeys::default()))
 }
 
 #[cfg(test)]
-pub(crate) fn lock_dynamic_public_keys_for_tests() -> std::sync::MutexGuard<'static, ()> {
-    match DYNAMIC_PUBLIC_KEYS_TEST_MUTEX.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
+pub(crate) struct DynamicPublicKeysTestGuard {
+    _lock: Option<std::sync::MutexGuard<'static, ()>>,
+}
+
+#[cfg(test)]
+impl Drop for DynamicPublicKeysTestGuard {
+    fn drop(&mut self) {
+        DYNAMIC_PUBLIC_KEYS_TEST_LOCK_DEPTH.with(|depth| {
+            let current = depth.get();
+            depth.set(current.saturating_sub(1));
+        });
     }
+}
+
+#[cfg(test)]
+pub(crate) fn lock_dynamic_public_keys_for_tests() -> DynamicPublicKeysTestGuard {
+    let is_outermost = DYNAMIC_PUBLIC_KEYS_TEST_LOCK_DEPTH.with(|depth| {
+        let current = depth.get();
+        depth.set(current + 1);
+        current == 0
+    });
+    if is_outermost {
+        let lock = match DYNAMIC_PUBLIC_KEYS_TEST_MUTEX.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        return DynamicPublicKeysTestGuard { _lock: Some(lock) };
+    }
+    DynamicPublicKeysTestGuard { _lock: None }
 }
 
 fn parse_configured_public_keys(
@@ -85,6 +113,9 @@ fn parse_configured_public_keys(
 pub(crate) fn sync_dynamic_public_keys_from_config(
     config: &ImagodConfig,
 ) -> Result<(), ImagodError> {
+    #[cfg(test)]
+    let _test_guard = lock_dynamic_public_keys_for_tests();
+
     let updated = DynamicPublicKeys {
         admin_keys: parse_configured_public_keys(
             &config.tls.admin_public_keys,
@@ -104,6 +135,9 @@ pub(crate) fn sync_dynamic_public_keys_from_config(
 }
 
 pub(crate) fn upsert_dynamic_client_public_key(public_key_hex: &str) -> Result<bool, ImagodError> {
+    #[cfg(test)]
+    let _test_guard = lock_dynamic_public_keys_for_tests();
+
     let key = parse_ed25519_raw_public_key_hex(public_key_hex).map_err(|reason| {
         ImagodError::new(
             ErrorCode::BadRequest,
@@ -119,6 +153,9 @@ pub(crate) fn upsert_dynamic_client_public_key(public_key_hex: &str) -> Result<b
 }
 
 pub(crate) fn resolve_dynamic_client_role(public_key: &[u8; 32]) -> DynamicClientRole {
+    #[cfg(test)]
+    let _test_guard = lock_dynamic_public_keys_for_tests();
+
     let guard = match dynamic_public_keys().read() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -133,6 +170,9 @@ pub(crate) fn resolve_dynamic_client_role(public_key: &[u8; 32]) -> DynamicClien
 }
 
 pub(crate) fn is_tls_client_key_allowlisted(public_key: &[u8; 32]) -> bool {
+    #[cfg(test)]
+    let _test_guard = lock_dynamic_public_keys_for_tests();
+
     let guard = match dynamic_public_keys().read() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -145,6 +185,8 @@ pub(crate) fn replace_dynamic_public_keys_for_tests(
     admin_keys: &[[u8; 32]],
     client_keys: &[[u8; 32]],
 ) {
+    let _test_guard = lock_dynamic_public_keys_for_tests();
+
     let mut guard = match dynamic_public_keys().write() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
