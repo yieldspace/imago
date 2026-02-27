@@ -98,7 +98,7 @@ pub fn invoke_connection(
     target_service: &str,
     interface_id: &str,
     function: &str,
-    args_cbor: &[u8],
+    args_cbor: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
     let connection = lookup_connection(connection_rep)
         .ok_or_else(|| format!("rpc connection {connection_rep} is not available"))?;
@@ -235,7 +235,7 @@ fn invoke_local_uds(
     target_service: &str,
     interface_id: &str,
     function: &str,
-    args_cbor: &[u8],
+    args_cbor: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
     let manager_auth_proof =
         compute_manager_auth_proof(context.manager_auth_secret(), context.runner_id())
@@ -268,7 +268,7 @@ fn invoke_local_uds(
         &RunnerInboundRequest::Invoke {
             interface_id: interface_id.to_string(),
             function: function.to_string(),
-            payload_cbor: args_cbor.to_vec(),
+            payload_cbor: args_cbor,
             token,
         },
     )?;
@@ -288,7 +288,7 @@ fn invoke_remote_via_manager(
     target_service: &str,
     interface_id: &str,
     function: &str,
-    args_cbor: &[u8],
+    args_cbor: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
     let manager_auth_proof =
         compute_manager_auth_proof(context.manager_auth_secret(), context.runner_id())
@@ -302,7 +302,7 @@ fn invoke_remote_via_manager(
             target_service: target_service.to_string(),
             interface_id: interface_id.to_string(),
             function: function.to_string(),
-            args_cbor: args_cbor.to_vec(),
+            args_cbor,
         },
     )?;
     match response {
@@ -448,7 +448,7 @@ mod tests {
             "svc-target",
             "yieldspace:svc/invoke",
             "call",
-            &[0x01, 0x02],
+            vec![0x01, 0x02],
         )
         .expect("local invoke should succeed");
         assert_eq!(actual, vec![0xAA, 0xBB]);

@@ -114,7 +114,7 @@ impl RemoteRpcManager {
         target_service: &str,
         interface_id: &str,
         function: &str,
-        args_cbor: &[u8],
+        args_cbor: Vec<u8>,
     ) -> Result<Vec<u8>, ImagodError> {
         invoke_remote_authority(
             config_path,
@@ -197,7 +197,7 @@ async fn invoke_remote_authority(
     target_service: &str,
     interface_id: &str,
     function: &str,
-    args_cbor: &[u8],
+    args_cbor: Vec<u8>,
 ) -> Result<Vec<u8>, ImagodError> {
     let session = connect_remote_session(config_path, authority).await?;
     let correlation_id = Uuid::new_v4();
@@ -210,7 +210,7 @@ async fn invoke_remote_authority(
         &RpcInvokeRequest {
             interface_id: interface_id.to_string(),
             function: function.to_string(),
-            args_cbor: args_cbor.to_vec(),
+            args_cbor,
             target_service: RpcInvokeTargetService {
                 name: target_service.to_string(),
             },

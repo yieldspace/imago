@@ -418,7 +418,7 @@ impl WasmRuntime {
         bindings: &[ServiceBinding],
         interface_id: &str,
         function: &str,
-        payload_cbor: &[u8],
+        payload_cbor: Vec<u8>,
     ) -> Result<Vec<u8>, ImagodError> {
         let component = Component::from_file(&self.engine, component_path).map_err(|e| {
             map_runtime_error(format!(
@@ -479,7 +479,7 @@ impl WasmRuntime {
 
         if let Ok(typed_func) = func.typed::<(Vec<u8>,), (Vec<u8>,)>(&store) {
             let (result_bytes,) = typed_func
-                .call_async(&mut store, (payload_cbor.to_vec(),))
+                .call_async(&mut store, (payload_cbor,))
                 .await
                 .map_err(|e| map_runtime_error(format!("rpc invoke trap: {e}")))?;
             return Ok(result_bytes);
@@ -487,7 +487,7 @@ impl WasmRuntime {
 
         if let Ok(typed_func) = func.typed::<(Vec<u8>,), (Result<Vec<u8>, String>,)>(&store) {
             let (result_value,) = typed_func
-                .call_async(&mut store, (payload_cbor.to_vec(),))
+                .call_async(&mut store, (payload_cbor,))
                 .await
                 .map_err(|e| map_runtime_error(format!("rpc invoke trap: {e}")))?;
             return match result_value {
@@ -501,7 +501,7 @@ impl WasmRuntime {
         let func_ty = func.ty(&store);
         let param_types = func_ty.params().map(|(_, ty)| ty).collect::<Vec<_>>();
         let result_types = func_ty.results().collect::<Vec<_>>();
-        let params = decode_payload_values(payload_cbor, &param_types).map_err(|err| {
+        let params = decode_payload_values(&payload_cbor, &param_types).map_err(|err| {
             map_runtime_error(format!(
                 "failed to decode rpc payload for '{}.{}': {}",
                 interface_id, function, err.message
@@ -572,7 +572,7 @@ impl WasmRuntime {
             &bindings,
             &interface_id,
             &function,
-            &payload_cbor,
+            payload_cbor,
         )
         .await
     }
@@ -867,8 +867,10 @@ mod tests {
     use std::{
         collections::BTreeMap,
         fs,
+        hint::black_box,
         net::SocketAddr,
         path::{Path, PathBuf},
+        time::Instant,
     };
     use tempfile::{Builder as TempDirBuilder, TempDir};
     use wit_component::{ComponentEncoder, StringEncoding, dummy_module};
@@ -900,6 +902,21 @@ mod tests {
         }
     }
 
+    fn p95_micros(samples: &mut [u128]) -> u128 {
+        assert!(!samples.is_empty(), "samples must not be empty");
+        samples.sort_unstable();
+        let index = (samples.len() - 1) * 95 / 100;
+        samples[index]
+    }
+
+    fn legacy_prepare_payload(payload: &[u8]) -> Vec<u8> {
+        payload.to_vec()
+    }
+
+    fn optimized_prepare_payload(payload: Vec<u8>) -> Vec<u8> {
+        payload
+    }
+
     #[test]
     fn http_request_queue_capacity_uses_configured_queue_capacity_only() {
         assert_eq!(http_request_queue_capacity(1, 4), 4);
@@ -907,6 +924,39 @@ mod tests {
         assert_eq!(
             http_request_queue_capacity(0, 0),
             HTTP_REQUEST_QUEUE_CAPACITY
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn rpc_payload_move_perf_compare() {
+        const PAYLOAD_BYTES: usize = 1024 * 1024;
+        const ITERATIONS: usize = 64;
+        let payloads = (0..ITERATIONS)
+            .map(|_| vec![0xCD; PAYLOAD_BYTES])
+            .collect::<Vec<_>>();
+
+        let mut legacy_samples = Vec::with_capacity(ITERATIONS);
+        for payload in &payloads {
+            let started = Instant::now();
+            let prepared = legacy_prepare_payload(payload);
+            black_box(prepared);
+            legacy_samples.push(started.elapsed().as_micros());
+        }
+
+        let mut optimized_samples = Vec::with_capacity(ITERATIONS);
+        for payload in payloads {
+            let started = Instant::now();
+            let prepared = optimized_prepare_payload(payload);
+            black_box(prepared);
+            optimized_samples.push(started.elapsed().as_micros());
+        }
+
+        let legacy_p95 = p95_micros(&mut legacy_samples);
+        let optimized_p95 = p95_micros(&mut optimized_samples);
+        eprintln!(
+            "rpc_payload_move_perf_compare payload_bytes={} iterations={} optimized_p95_us={} legacy_p95_us={}",
+            PAYLOAD_BYTES, ITERATIONS, optimized_p95, legacy_p95
         );
     }
 

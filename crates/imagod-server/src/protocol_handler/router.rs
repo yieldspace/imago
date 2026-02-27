@@ -219,14 +219,15 @@ impl ProtocolHandler {
             .validate()
             .map_err(|e| bad_request("rpc.invoke", e.to_string()))?;
 
+        let RpcInvokeRequest {
+            interface_id,
+            function,
+            args_cbor,
+            target_service,
+        } = payload;
         let response = match self
             .orchestrator
-            .invoke(
-                &payload.target_service.name,
-                &payload.interface_id,
-                &payload.function,
-                &payload.args_cbor,
-            )
+            .invoke(&target_service.name, &interface_id, &function, args_cbor)
             .await
         {
             Ok(result_cbor) => RpcInvokeResponse::from_result(result_cbor),
