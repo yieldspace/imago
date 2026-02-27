@@ -321,6 +321,12 @@ fn take_compose_build_ui_events() -> Vec<ComposeBuildUiEvent> {
 }
 
 #[cfg(test)]
+fn stack_ls_override_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
 fn stack_ls_command_result_override() -> &'static std::sync::Mutex<Option<CommandResult>> {
     static OVERRIDE: std::sync::OnceLock<std::sync::Mutex<Option<CommandResult>>> =
         std::sync::OnceLock::new();
@@ -1124,6 +1130,7 @@ type = "cli"
 
     #[tokio::test]
     async fn compose_ls_reports_stack_command_metadata() {
+        let _lock = stack_ls_override_test_lock().lock().await;
         let root = new_temp_dir("ls-stack-command-metadata");
         write_file(
             &root.join(COMPOSE_FILE_NAME),
@@ -1178,8 +1185,9 @@ type = "cli"
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn compose_ls_override_guard_clears_override_on_panic() {
+    #[tokio::test]
+    async fn compose_ls_override_guard_clears_override_on_panic() {
+        let _lock = stack_ls_override_test_lock().lock().await;
         let _ = std::panic::catch_unwind(|| {
             let _guard = set_stack_ls_command_result_override(CommandResult {
                 command: "service.ls".to_string(),
