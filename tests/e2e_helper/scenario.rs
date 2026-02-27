@@ -205,7 +205,7 @@ impl Scenario {
         Ok(output)
     }
 
-    pub fn bindings_cert_deploy(
+    pub fn trust_cert_replicate(
         &self,
         from: &str,
         to: &str,

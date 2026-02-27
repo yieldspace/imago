@@ -180,15 +180,13 @@ pub enum ComposeCommands {
     /// Build all services in a compose profile.
     Build(ComposeBuildArgs),
     /// Update dependencies for all services in a compose profile.
-    #[command(name = "sync")]
-    Update(ComposeUpdateArgs),
+    Sync(ComposeUpdateArgs),
     /// Deploy all services in a compose profile.
     Deploy(ComposeDeployArgs),
     /// Stream or tail logs for services in a compose profile.
     Logs(ComposeLogsArgs),
     /// List deployed service states in a compose profile.
-    #[command(name = "ls")]
-    Ps(ComposePsArgs),
+    Ls(ComposePsArgs),
 }
 
 /// Build services for a compose profile.
@@ -313,8 +311,7 @@ pub enum TrustCertCommands {
     /// Upload a public key to a remote authority.
     Upload(BindingsCertUploadArgs),
     /// Copy a binding certificate from one authority to another.
-    #[command(name = "replicate")]
-    Deploy(BindingsCertDeployArgs),
+    Replicate(BindingsCertDeployArgs),
 }
 
 /// Trust client key subcommands.
@@ -493,7 +490,7 @@ mod tests {
             sync,
             Cli {
                 command: Commands::Stack(ComposeSubcommandArgs {
-                    command: ComposeCommands::Update(ComposeUpdateArgs {
+                    command: ComposeCommands::Sync(ComposeUpdateArgs {
                         profile: "nanokvm-mini".to_string(),
                     }),
                 }),
@@ -506,7 +503,7 @@ mod tests {
             ls,
             Cli {
                 command: Commands::Stack(ComposeSubcommandArgs {
-                    command: ComposeCommands::Ps(ComposePsArgs {
+                    command: ComposeCommands::Ls(ComposePsArgs {
                         profile: "nanokvm-mini".to_string(),
                         target: "edge".to_string(),
                     }),
@@ -559,7 +556,7 @@ mod tests {
             Cli {
                 command: Commands::Trust(TrustSubcommandArgs {
                     command: TrustCommands::Cert(TrustCertSubcommandArgs {
-                        command: TrustCertCommands::Deploy(BindingsCertDeployArgs {
+                        command: TrustCertCommands::Replicate(BindingsCertDeployArgs {
                             to: "rpc://node-a:4443".to_string(),
                             from: "rpc://node-b:4443".to_string(),
                         }),

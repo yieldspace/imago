@@ -67,13 +67,13 @@ fn e2e_rpc_single_node_local_flow() -> TestResult {
     ensure_success("rpc-greeter deploy", &deploy_greeter)?;
     assert_command_completed("rpc-greeter deploy", &deploy_greeter)?;
 
-    let update_client = run_imago_cli(
+    let deps_sync_client = run_imago_cli(
         &workspace_root,
         &client_dir,
         &control_home,
         &["deps", "sync"],
     )?;
-    ensure_success("rpc-caller update", &update_client)?;
+    ensure_success("rpc-caller deps sync", &deps_sync_client)?;
 
     let deploy_client = run_imago_cli(
         &workspace_root,

@@ -34,7 +34,7 @@ async fn dispatch_async(cli: Cli) -> CommandResult {
                 TrustCertCommands::Upload(args) => {
                     commands::certs::run_bindings_cert_upload(args).await
                 }
-                TrustCertCommands::Deploy(args) => {
+                TrustCertCommands::Replicate(args) => {
                     commands::certs::run_bindings_cert_deploy(args).await
                 }
             },
@@ -88,7 +88,7 @@ async fn dispatch_with_project_root_async(
                     commands::certs::run_bindings_cert_upload_with_project_root(args, project_root)
                         .await
                 }
-                TrustCertCommands::Deploy(args) => {
+                TrustCertCommands::Replicate(args) => {
                     commands::certs::run_bindings_cert_deploy_with_project_root(args, project_root)
                         .await
                 }
@@ -295,7 +295,7 @@ mod tests {
         let sync = dispatch_with_project_root_async(
             Cli {
                 command: Commands::Stack(ComposeSubcommandArgs {
-                    command: ComposeCommands::Update(ComposeUpdateArgs {
+                    command: ComposeCommands::Sync(ComposeUpdateArgs {
                         profile: "mini".to_string(),
                     }),
                 }),
@@ -326,7 +326,7 @@ mod tests {
         let ls = dispatch_with_project_root_async(
             Cli {
                 command: Commands::Stack(ComposeSubcommandArgs {
-                    command: ComposeCommands::Ps(ComposePsArgs {
+                    command: ComposeCommands::Ls(ComposePsArgs {
                         profile: "mini".to_string(),
                         target: "default".to_string(),
                     }),
@@ -409,7 +409,7 @@ mod tests {
             Cli {
                 command: Commands::Trust(TrustSubcommandArgs {
                     command: TrustCommands::Cert(TrustCertSubcommandArgs {
-                        command: TrustCertCommands::Deploy(BindingsCertDeployArgs {
+                        command: TrustCertCommands::Replicate(BindingsCertDeployArgs {
                             to: "rpc://node-a:4443".to_string(),
                             from: "rpc://node-b:4443".to_string(),
                         }),
