@@ -160,6 +160,7 @@ struct ClaimedInterfaceHandle {
 struct HotplugManager {
     queue: Arc<(Mutex<VecDeque<DeviceConnectionEvent>>, Condvar)>,
     stop: Arc<AtomicBool>,
+    init_error_message: Arc<Mutex<Option<String>>>,
     thread_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 }
 
@@ -1055,7 +1056,7 @@ fn open_handle_for_bus_address(
         }
     }
 
-    Err(UsbError::NotAllowed)
+    Err(UsbError::Disconnected)
 }
 
 fn ensure_interface_claimed(state: &DeviceThreadState, interface: u8) -> Result<(), UsbError> {
@@ -1670,16 +1671,40 @@ async fn shutdown_device_runtime(handle: &DeviceRuntimeHandle) {
     }
 }
 
+fn set_hotplug_init_error_message(
+    init_error_message: &Arc<Mutex<Option<String>>>,
+    message: String,
+) {
+    if let Ok(mut guard) = init_error_message.lock()
+        && guard.is_none()
+    {
+        *guard = Some(message);
+    }
+}
+
+fn read_hotplug_init_error_message(
+    init_error_message: &Arc<Mutex<Option<String>>>,
+) -> Result<Option<UsbError>, UsbError> {
+    let guard = init_error_message
+        .lock()
+        .map_err(|_| UsbError::Other("hotplug init state lock poisoned".to_string()))?;
+    Ok(guard
+        .as_ref()
+        .map(|message| UsbError::Other(message.clone())))
+}
+
 fn create_hotplug_manager(
     cache_key: &str,
     allowlist: BTreeSet<String>,
 ) -> Result<Arc<HotplugManager>, UsbError> {
     let queue = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
     let stop = Arc::new(AtomicBool::new(false));
+    let init_error_message = Arc::new(Mutex::new(None));
 
     let thread_name = format!("imago-usb-hotplug-{}", cache_key.replace('\u{1f}', "_"));
     let thread_queue = queue.clone();
     let thread_stop = stop.clone();
+    let thread_init_error_message = init_error_message.clone();
 
     let thread_handle = thread::Builder::new()
         .name(thread_name)
@@ -1687,7 +1712,13 @@ fn create_hotplug_manager(
         .spawn(move || {
             let context = match rusb::Context::new() {
                 Ok(context) => context,
-                Err(_) => return,
+                Err(err) => {
+                    set_hotplug_init_error_message(
+                        &thread_init_error_message,
+                        format!("failed to initialize usb hotplug context: {err}"),
+                    );
+                    return;
+                }
             };
 
             let callback = HotplugCallback {
@@ -1699,7 +1730,13 @@ fn create_hotplug_manager(
                 .register(&context, Box::new(callback))
             {
                 Ok(registration) => registration,
-                Err(_) => return,
+                Err(err) => {
+                    set_hotplug_init_error_message(
+                        &thread_init_error_message,
+                        format!("failed to register usb hotplug callback: {err}"),
+                    );
+                    return;
+                }
             };
 
             while !thread_stop.load(Ordering::Acquire) {
@@ -1713,6 +1750,7 @@ fn create_hotplug_manager(
     Ok(Arc::new(HotplugManager {
         queue,
         stop,
+        init_error_message,
         thread_handle: Arc::new(Mutex::new(Some(thread_handle))),
     }))
 }
@@ -1803,13 +1841,23 @@ impl imago_usb_plugin_bindings::imago::usb::provider::Host for WasiState {
         let resources = load_usb_resources_for_state(self)?;
         let timeout = validate_poll_timeout(timeout_ms, &resources.limits)?;
         let manager = get_hotplug_manager_for_state(self, &resources)?;
+        if let Some(err) = read_hotplug_init_error_message(&manager.init_error_message)? {
+            return Err(err);
+        }
         let queue = manager.queue.clone();
 
         let event = tokio::task::spawn_blocking(move || poll_hotplug_event(&queue, timeout))
             .await
             .map_err(|err| UsbError::Other(format!("hotplug polling task failed: {err}")))?;
 
-        Ok(event.unwrap_or(DeviceConnectionEvent::Pending))
+        if let Some(event) = event {
+            return Ok(event);
+        }
+        if let Some(err) = read_hotplug_init_error_message(&manager.init_error_message)? {
+            return Err(err);
+        }
+
+        Ok(DeviceConnectionEvent::Pending)
     }
 
     async fn get_limits(&mut self) -> Limits {
@@ -2510,12 +2558,32 @@ mod tests {
         let manager = HotplugManager {
             queue,
             stop: stop.clone(),
+            init_error_message: Arc::new(Mutex::new(None)),
             thread_handle: Arc::new(Mutex::new(Some(thread_handle))),
         };
         drop(manager);
 
         assert!(stop.load(Ordering::Acquire));
         assert!(exited.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn read_hotplug_init_error_message_returns_error_when_set() {
+        let init_error_message = Arc::new(Mutex::new(Some("init failed".to_string())));
+        let err = read_hotplug_init_error_message(&init_error_message)
+            .expect("lock should succeed")
+            .expect("error should exist");
+        assert!(matches!(err, UsbError::Other(message) if message == "init failed"));
+    }
+
+    #[test]
+    fn read_hotplug_init_error_message_returns_none_when_unset() {
+        let init_error_message = Arc::new(Mutex::new(None));
+        assert!(
+            read_hotplug_init_error_message(&init_error_message)
+                .expect("lock should succeed")
+                .is_none()
+        );
     }
 
     #[test]
