@@ -1,4 +1,5 @@
 use anyhow::Error;
+use std::borrow::Cow;
 
 const HINT_UNAUTHORIZED: &str =
     "Verify target.client_key, ~/.imago/known_hosts, and server_name/remote settings, then retry.";
@@ -31,8 +32,9 @@ pub fn format_command_error(command: &str, err: &Error) -> String {
     let mut hints = Vec::new();
     append_hints(err, &mut hints);
     if hints.is_empty() {
+        let retry_command = retry_command_hint(command);
         hints.push(format!(
-            "Inspect the causes above and retry `{command}` after fixing the root issue."
+            "Inspect the causes above and retry `{retry_command}` after fixing the root issue."
         ));
     }
 
@@ -50,6 +52,24 @@ pub fn format_command_error(command: &str, err: &Error) -> String {
         formatted.push_str(&hint);
     }
     formatted
+}
+
+fn retry_command_hint(command: &str) -> Cow<'_, str> {
+    match command {
+        "project.init" => Cow::Borrowed("imago project init"),
+        "artifact.build" => Cow::Borrowed("imago artifact build"),
+        "deps.sync" => Cow::Borrowed("imago deps sync"),
+        "service.deploy" => Cow::Borrowed("imago service deploy"),
+        "service.start" => Cow::Borrowed("imago service start"),
+        "service.stop" => Cow::Borrowed("imago service stop"),
+        "service.ls" => Cow::Borrowed("imago service ls"),
+        "service.logs" => Cow::Borrowed("imago service logs"),
+        "stack" => Cow::Borrowed("imago stack <subcommand>"),
+        "trust.cert.upload" => Cow::Borrowed("imago trust cert upload"),
+        "trust.cert.replicate" => Cow::Borrowed("imago trust cert replicate"),
+        "trust.client-key.generate" => Cow::Borrowed("imago trust client-key generate"),
+        _ => Cow::Borrowed(command),
+    }
 }
 
 pub fn summarize_command_failure(_command: &str, err: &Error) -> String {
@@ -238,8 +258,18 @@ mod tests {
 
         let formatted = format_command_error("service.stop", &err);
         assert!(formatted.contains(
-            "Inspect the causes above and retry `service.stop` after fixing the root issue.",
+            "Inspect the causes above and retry `imago service stop` after fixing the root issue.",
         ),);
+    }
+
+    #[test]
+    fn keeps_unknown_command_in_fallback_hint() {
+        let err = anyhow!("unexpected failure");
+
+        let formatted = format_command_error("custom.command", &err);
+        assert!(formatted.contains(
+            "Inspect the causes above and retry `custom.command` after fixing the root issue.",
+        ));
     }
 
     #[test]
