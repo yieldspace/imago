@@ -290,7 +290,7 @@ pub(super) async fn handle_control_request_impl(
                 &target_service,
                 &interface_id,
                 &function,
-                &args_cbor,
+                args_cbor,
             )
             .await
             {

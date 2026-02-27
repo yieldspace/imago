@@ -994,7 +994,7 @@ impl ServiceSupervisor {
         target_service_name: &str,
         interface_id: &str,
         function: &str,
-        payload_cbor: &[u8],
+        payload_cbor: Vec<u8>,
     ) -> Result<Vec<u8>, ImagodError> {
         let (runner_endpoint, invocation_secret) = {
             let inner = self.inner.read().await;
@@ -1032,7 +1032,7 @@ impl ServiceSupervisor {
             &RunnerInboundRequest::Invoke {
                 interface_id: interface_id.to_string(),
                 function: function.to_string(),
-                payload_cbor: payload_cbor.to_vec(),
+                payload_cbor,
                 token,
             },
         )
@@ -2908,7 +2908,7 @@ mod tests {
                 target_service_name,
                 "yieldspace:service/invoke",
                 "call",
-                b"",
+                Vec::new(),
             )
             .await
             .expect_err("not-ready target should be rejected");
@@ -2983,7 +2983,7 @@ mod tests {
                 target_service_name,
                 "yieldspace:service/invoke",
                 "call",
-                &payload,
+                payload.clone(),
             )
             .await
             .expect("invoke should succeed");

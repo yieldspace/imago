@@ -468,7 +468,7 @@ impl Orchestrator {
         target_service_name: &str,
         interface_id: &str,
         function: &str,
-        args_cbor: &[u8],
+        args_cbor: Vec<u8>,
     ) -> Result<Vec<u8>, ImagodError> {
         self.supervisor
             .invoke(target_service_name, interface_id, function, args_cbor)

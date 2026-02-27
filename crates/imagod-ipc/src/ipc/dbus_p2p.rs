@@ -1,5 +1,6 @@
 //! DBus-like peer-to-peer transport backed by Unix domain sockets and CBOR frames.
 
+use std::any::Any;
 use std::path::Path;
 
 use imago_protocol::{ErrorCode, Validate};
@@ -44,7 +45,7 @@ impl DbusP2pTransport {
     /// Reads one length-prefixed CBOR message from a stream.
     pub async fn read_message<T>(stream: &mut UnixStream) -> Result<T, ImagodError>
     where
-        T: DeserializeOwned,
+        T: DeserializeOwned + 'static,
     {
         let bytes = read_frame(stream).await?;
         let message = imago_protocol::from_cbor::<T>(&bytes).map_err(|e| {
@@ -54,7 +55,7 @@ impl DbusP2pTransport {
                 format!("ipc message decode failed: {e}"),
             )
         })?;
-        validate_received_message::<T>(&bytes)?;
+        validate_received_message(&message)?;
         Ok(message)
     }
 
@@ -92,7 +93,7 @@ impl InvocationTransport for DbusP2pTransport {
 async fn call<Req, Resp>(endpoint: &Path, request: &Req) -> Result<Resp, ImagodError>
 where
     Req: Serialize,
-    Resp: DeserializeOwned,
+    Resp: DeserializeOwned + 'static,
 {
     let mut stream = UnixStream::connect(endpoint).await.map_err(|e| {
         ImagodError::new(
@@ -125,46 +126,27 @@ where
     })
 }
 
-fn validate_received_message<T>(bytes: &[u8]) -> Result<(), ImagodError>
+fn validate_received_message<T>(message: &T) -> Result<(), ImagodError>
 where
-    T: DeserializeOwned,
+    T: 'static,
 {
-    let message_type = std::any::type_name::<T>();
-
-    if message_type == std::any::type_name::<ControlRequest>() {
-        let message = decode_for_validation::<ControlRequest>(bytes)?;
-        return validate_message(&message);
+    if let Some(message) = (message as &dyn Any).downcast_ref::<ControlRequest>() {
+        return validate_message(message);
     }
 
-    if message_type == std::any::type_name::<ControlResponse>() {
-        let message = decode_for_validation::<ControlResponse>(bytes)?;
-        return validate_message(&message);
+    if let Some(message) = (message as &dyn Any).downcast_ref::<ControlResponse>() {
+        return validate_message(message);
     }
 
-    if message_type == std::any::type_name::<RunnerInboundRequest>() {
-        let message = decode_for_validation::<RunnerInboundRequest>(bytes)?;
-        return validate_message(&message);
+    if let Some(message) = (message as &dyn Any).downcast_ref::<RunnerInboundRequest>() {
+        return validate_message(message);
     }
 
-    if message_type == std::any::type_name::<RunnerInboundResponse>() {
-        let message = decode_for_validation::<RunnerInboundResponse>(bytes)?;
-        return validate_message(&message);
+    if let Some(message) = (message as &dyn Any).downcast_ref::<RunnerInboundResponse>() {
+        return validate_message(message);
     }
 
     Ok(())
-}
-
-fn decode_for_validation<T>(bytes: &[u8]) -> Result<T, ImagodError>
-where
-    T: DeserializeOwned,
-{
-    imago_protocol::from_cbor(bytes).map_err(|e| {
-        ImagodError::new(
-            ErrorCode::BadRequest,
-            STAGE,
-            format!("ipc message decode failed: {e}"),
-        )
-    })
 }
 
 /// Writes one big-endian length-prefixed frame.
@@ -239,6 +221,8 @@ async fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>, ImagodError> {
 
 #[cfg(test)]
 mod tests {
+    use std::{hint::black_box, time::Instant};
+
     use tokio::io::AsyncWriteExt;
     use tokio::net::UnixListener;
     use tokio::net::UnixStream;
@@ -247,6 +231,36 @@ mod tests {
     use crate::ipc::{
         ControlRequest, ControlResponse, RunnerInboundRequest, RunnerInboundResponse,
     };
+
+    fn p95_micros(samples: &mut [u128]) -> u128 {
+        assert!(!samples.is_empty(), "samples must not be empty");
+        samples.sort_unstable();
+        let index = (samples.len() - 1) * 95 / 100;
+        samples[index]
+    }
+
+    fn decode_request(bytes: &[u8]) -> Result<RunnerInboundRequest, ImagodError> {
+        imago_protocol::from_cbor::<RunnerInboundRequest>(bytes).map_err(|e| {
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                STAGE,
+                format!("ipc message decode failed: {e}"),
+            )
+        })
+    }
+
+    fn decode_then_validate_legacy(bytes: &[u8]) -> Result<RunnerInboundRequest, ImagodError> {
+        let message = decode_request(bytes)?;
+        let for_validation = decode_request(bytes)?;
+        validate_message(&for_validation)?;
+        Ok(message)
+    }
+
+    fn decode_then_validate_optimized(bytes: &[u8]) -> Result<RunnerInboundRequest, ImagodError> {
+        let message = decode_request(bytes)?;
+        validate_received_message(&message)?;
+        Ok(message)
+    }
 
     #[tokio::test]
     async fn call_control_round_trip() {
@@ -393,5 +407,44 @@ mod tests {
         assert_eq!(err.code, ErrorCode::BadRequest);
         assert_eq!(err.stage, STAGE);
         assert!(err.message.contains("validation failed"));
+    }
+
+    #[test]
+    #[ignore]
+    fn read_message_decode_perf_compare() {
+        const PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+        const ITERATIONS: usize = 64;
+        let request = RunnerInboundRequest::Invoke {
+            interface_id: "yieldspace:svc/invoke".to_string(),
+            function: "call".to_string(),
+            payload_cbor: vec![0xAB; PAYLOAD_BYTES],
+            token: "token-1".to_string(),
+        };
+        let encoded = imago_protocol::to_cbor(&request).expect("request should encode");
+
+        let mut legacy_samples = Vec::with_capacity(ITERATIONS);
+        for _ in 0..ITERATIONS {
+            let started = Instant::now();
+            let decoded =
+                decode_then_validate_legacy(&encoded).expect("legacy decode should succeed");
+            black_box(decoded);
+            legacy_samples.push(started.elapsed().as_micros());
+        }
+
+        let mut optimized_samples = Vec::with_capacity(ITERATIONS);
+        for _ in 0..ITERATIONS {
+            let started = Instant::now();
+            let decoded =
+                decode_then_validate_optimized(&encoded).expect("optimized decode should succeed");
+            black_box(decoded);
+            optimized_samples.push(started.elapsed().as_micros());
+        }
+
+        let legacy_p95 = p95_micros(&mut legacy_samples);
+        let optimized_p95 = p95_micros(&mut optimized_samples);
+        eprintln!(
+            "read_message_decode_perf_compare payload_bytes={} iterations={} optimized_p95_us={} legacy_p95_us={}",
+            PAYLOAD_BYTES, ITERATIONS, optimized_p95, legacy_p95
+        );
     }
 }

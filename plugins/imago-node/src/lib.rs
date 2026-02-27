@@ -122,7 +122,7 @@ impl imago_node_plugin_bindings::imago::node::rpc::HostConnection for WasiState 
             &target_service,
             &interface_id,
             &function,
-            &args_cbor,
+            args_cbor,
         )
     }
 
@@ -364,7 +364,7 @@ mod tests {
             "svc-target",
             "yieldspace:svc/invoke",
             "call",
-            &[0x01, 0x02],
+            vec![0x01, 0x02],
         )
         .expect("local invoke should succeed");
         assert_eq!(actual, vec![0xAA, 0xBB]);

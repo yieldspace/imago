@@ -626,7 +626,7 @@ fn register_binding_import_shims(
                         &target_service,
                         &interface_id,
                         &function_name,
-                        &args_cbor,
+                        args_cbor,
                     );
 
                     results[0] = match invoke_result {
