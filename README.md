@@ -7,6 +7,10 @@ Start with the documentation landing page:
 
 - [Documentation Home](docs/README.md)
 
+## Important Notice
+
+imago is under development and currently intended for use on private networks.
+
 ## Highlights
 
 - Wasm Component as the deployable unit
@@ -16,43 +20,7 @@ Start with the documentation landing page:
 
 ## Quickstart
 
-```bash
-curl -sSf https://install.imago.sh | sh
-```
-
-```bash
-cargo install imago-cli --git https://github.com/yieldspace/imago
-```
-
-```bash
-git clone https://github.com/yieldspace/imago
-cd imago
-```
-
-Initialize a project:
-
-```bash
-# Interactive (TTY)
-imago project init .
-
-# Non-interactive (CI/no TTY)
-imago project init services/example --lang rust
-```
-
-Run local example:
-
-```bash
-# Terminal 1
-cd examples/local-imagod
-cargo run -p imagod -- --config imagod.toml
-```
-
-```bash
-# Terminal 2
-cd examples/local-imagod
-cargo run -p imago-cli -- service deploy --target default --detach
-cargo run -p imago-cli -- service logs local-imagod-app --tail 200
-```
+See [QUICKSTART.md](QUICKSTART.md) for step-by-step setup and local example execution.
 
 ## CLI Output Modes
 

@@ -1,20 +1,34 @@
 # QUICKSTART
 
+## Goal
+
+This guide helps you:
+
+1. Set up the required toolchain and Imago CLI.
+2. Initialize `imago.toml`.
+3. Run `examples/local-imagod` and confirm the service starts.
+
+Run commands from the repository root (`imago/`) unless a step says otherwise.
+
 ## Prerequisites
 
 - Rust toolchain
-- `wasm32-wasip2` target
+- `wasm32-wasip2` target:
 
 ```bash
 rustup target add wasm32-wasip2
 ```
 
-- Imago CLI
+## Install Imago CLI
 
+Choose one installation method:
+
+Option A:
 ```bash
 curl -sSf https://install.imago.sh | sh
 ```
 
+Option B:
 ```bash
 cargo install imago-cli --git https://github.com/yieldspace/imago
 ```
@@ -26,28 +40,30 @@ git clone https://github.com/yieldspace/imago
 cd imago
 ```
 
-## Initialize `imago.toml`
+## Initialize Project
 
 ```bash
-# Interactive (TTY)
+# From the repository root, interactive (TTY)
 imago project init .
 
-# Non-interactive (CI/no TTY): --lang is required
+# From the repository root, non-interactive (CI/no TTY): --lang is required
 imago project init services/example --lang rust
 ```
 
 `imago project init` updates `.gitignore` in the project directory and ensures `.imago` and `/build` entries exist.
 
-## Run Example
+## Run Local Example
 
 ```bash
 # Terminal 1
+# Start daemon
 cd examples/local-imagod
 cargo run -p imagod -- --config imagod.toml
 ```
 
 ```bash
 # Terminal 2
+# Deploy and stream logs
 cd examples/local-imagod
 cargo run -p imago-cli -- service deploy --target default --detach
 cargo run -p imago-cli -- service logs local-imagod-app --tail 200
@@ -55,20 +71,17 @@ cargo run -p imago-cli -- service logs local-imagod-app --tail 200
 
 ## Success Check
 
-In rich/plain output, success includes a log line similar to:
+After running the log command, confirm output includes a line similar to:
 
 ```text
 local-imagod-app stdout | local-imagod-app started
 ```
 
-## More Examples
+## Next Steps
 
-See [examples/README.md](examples/README.md).
-
-## Documentation And Code References
-
+- More runnable examples: [examples/README.md](examples/README.md)
 - Documentation index: [docs/README.md](docs/README.md)
-- Generated API docs:
+- Generate API docs:
 
 ```bash
 cargo doc --workspace --no-deps
