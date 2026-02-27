@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/yieldspace/imago/tree/main/docs
+    about: Read the guides and references before opening an issue.

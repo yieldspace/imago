@@ -1,0 +1,44 @@
+name: Feature request
+description: Propose an improvement to imago.
+title: "[feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem are you trying to solve?
+      placeholder: Describe the limitation or pain point.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the expected behavior or API shape.
+      placeholder: Outline your preferred solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any alternatives or trade-offs you evaluated.
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Resource impact
+      description: Expected CPU, memory, or binary-size impact for embedded targets.
+      placeholder: Note if impact is unknown.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I checked for similar existing issues.
+          required: true

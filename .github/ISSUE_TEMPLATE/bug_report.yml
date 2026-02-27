@@ -1,0 +1,75 @@
+name: Bug report
+description: Report a reproducible defect in imago.
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please provide enough detail for us to reproduce and verify the fix.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A concise description of the bug.
+      placeholder: Describe the unexpected behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include exact commands, inputs, and environment details.
+      placeholder: |
+        1. Run ...
+        2. Deploy ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened, including logs or error messages.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: imago / imagod version (or commit SHA).
+      placeholder: v0.0.0 or abc1234
+    validations:
+      required: true
+
+  - type: dropdown
+    id: target
+    attributes:
+      label: Target environment
+      description: Choose the environment where the issue occurs.
+      options:
+        - local-imagod example
+        - embedded Linux target
+        - CI
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Links, screenshots, or other context.
