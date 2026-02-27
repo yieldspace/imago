@@ -530,15 +530,15 @@ fn parse_usb_resources_config(
             .as_str()
             .ok_or_else(|| format!("resources.usb.paths[{index}] must be a string"))?;
         let normalized = normalize_usb_path(raw)?;
-        parse_usbfs_bus_and_address(&normalized).map_err(|err| {
+        let canonical = canonicalize_usbfs_path(&normalized).map_err(|err| {
             format!("resources.usb.paths[{index}] must match /dev/bus/usb/<bus>/<address>: {err}")
         })?;
-        if !allowlist.insert(normalized.clone()) {
+        if !allowlist.insert(canonical.clone()) {
             return Err(format!(
-                "resources.usb.paths[{index}] duplicates normalized path: {normalized}"
+                "resources.usb.paths[{index}] duplicates normalized path: {canonical}"
             ));
         }
-        paths.push(normalized);
+        paths.push(canonical);
     }
 
     let max_transfer_bytes = parse_u64_field(usb_table, USB_RESOURCE_MAX_TRANSFER_BYTES_KEY)?
@@ -981,6 +981,11 @@ fn parse_usbfs_bus_and_address(path: &str) -> Result<(u8, u8), String> {
     }
 
     Ok((bus, address))
+}
+
+fn canonicalize_usbfs_path(path: &str) -> Result<String, String> {
+    let (bus, address) = parse_usbfs_bus_and_address(path)?;
+    Ok(usbfs_path(bus, address))
 }
 
 fn enumerate_openable_devices(
@@ -1873,14 +1878,15 @@ impl imago_usb_plugin_bindings::imago::usb::provider::Host for WasiState {
 
         let resources = load_usb_resources_for_state(self)?;
         let normalized = normalize_usb_path(&path).map_err(|_| UsbError::InvalidArgument)?;
-        if !resources.allowlist.contains(&normalized) {
+        let (bus, address) =
+            parse_usbfs_bus_and_address(&normalized).map_err(|_| UsbError::InvalidArgument)?;
+        let canonical = usbfs_path(bus, address);
+        if !resources.allowlist.contains(&canonical) {
             return Err(UsbError::NotAllowed);
         }
 
-        let (bus, address) =
-            parse_usbfs_bus_and_address(&normalized).map_err(|_| UsbError::InvalidArgument)?;
         let runtime_handle =
-            start_device_runtime(normalized.clone(), bus, address, resources.limits).await?;
+            start_device_runtime(canonical.clone(), bus, address, resources.limits).await?;
 
         let rep = register_device_handle(runtime_handle).map_err(map_lookup_error)?;
         Ok(Resource::new_own(rep))
@@ -2256,6 +2262,17 @@ mod tests {
             err.contains("duplicates normalized path"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn parse_usb_resources_canonicalizes_usbfs_paths() {
+        let config = parse_usb_resources_config(&resources_with_usb(json!({
+            "paths": ["/dev/bus/usb/1/2"]
+        })))
+        .expect("usbfs path should parse");
+        assert_eq!(config.paths, vec!["/dev/bus/usb/001/002".to_string()]);
+        assert!(config.allowlist.contains("/dev/bus/usb/001/002"));
+        assert!(!config.allowlist.contains("/dev/bus/usb/1/2"));
     }
 
     #[test]
