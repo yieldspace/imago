@@ -827,6 +827,20 @@ fn map_libusb_error_code(code: i32) -> UsbError {
     }
 }
 
+fn map_libusb_transfer_status(status: i32, label: &str) -> Result<(), UsbError> {
+    use rusb::ffi::constants::*;
+
+    match status {
+        LIBUSB_TRANSFER_COMPLETED => Ok(()),
+        LIBUSB_TRANSFER_CANCELLED | LIBUSB_TRANSFER_TIMED_OUT => Err(UsbError::Timeout),
+        LIBUSB_TRANSFER_NO_DEVICE => Err(UsbError::Disconnected),
+        LIBUSB_TRANSFER_STALL | LIBUSB_TRANSFER_ERROR | LIBUSB_TRANSFER_OVERFLOW => {
+            Err(UsbError::TransferFault)
+        }
+        _ => Err(UsbError::Other(format!("{label} status code: {status}"))),
+    }
+}
+
 fn map_version(version: rusb::Version) -> VersionRecord {
     VersionRecord {
         major: version.major(),
@@ -1194,10 +1208,25 @@ fn perform_iso_transfer(
         }
     }
 
-    let (status, actual_len) = unsafe {
+    let (status, actual_len, first_packet_status_error) = unsafe {
         let status = (*transfer).status;
         let actual_len = usize::try_from((*transfer).actual_length.max(0)).unwrap_or(0);
-        (status, actual_len)
+        let first_packet_status_error = if status == LIBUSB_TRANSFER_COMPLETED {
+            let descriptor_ptr = std::ptr::addr_of!((*transfer).iso_packet_desc)
+                .cast::<ffi::libusb_iso_packet_descriptor>();
+            let mut packet_error = None;
+            for index in 0..usize::from(packets) {
+                let packet_status = (*descriptor_ptr.add(index)).status;
+                if packet_status != LIBUSB_TRANSFER_COMPLETED {
+                    packet_error = Some(packet_status);
+                    break;
+                }
+            }
+            packet_error
+        } else {
+            None
+        };
+        (status, actual_len, first_packet_status_error)
     };
 
     unsafe {
@@ -1211,18 +1240,11 @@ fn perform_iso_transfer(
     if let Some(code) = event_error_code {
         return Err(map_libusb_error_code(code));
     }
-
-    let result = match status {
-        LIBUSB_TRANSFER_COMPLETED => Ok(actual_len),
-        LIBUSB_TRANSFER_CANCELLED | LIBUSB_TRANSFER_TIMED_OUT => Err(UsbError::Timeout),
-        LIBUSB_TRANSFER_NO_DEVICE => Err(UsbError::Disconnected),
-        LIBUSB_TRANSFER_STALL | LIBUSB_TRANSFER_ERROR | LIBUSB_TRANSFER_OVERFLOW => {
-            Err(UsbError::TransferFault)
-        }
-        _ => Err(UsbError::Other(format!(
-            "iso transfer status code: {status}"
-        ))),
-    }?;
+    map_libusb_transfer_status(status, "iso transfer")?;
+    if let Some(packet_status) = first_packet_status_error {
+        map_libusb_transfer_status(packet_status, "iso packet")?;
+    }
+    let result = actual_len;
 
     if endpoint & 0x80 != 0 {
         buffer.truncate(result);
@@ -2436,6 +2458,25 @@ mod tests {
         assert!(matches!(
             map_rusb_error(rusb::Error::Timeout),
             UsbError::Timeout
+        ));
+    }
+
+    #[test]
+    fn map_libusb_transfer_status_maps_expected_errors() {
+        use rusb::ffi::constants::*;
+
+        assert!(map_libusb_transfer_status(LIBUSB_TRANSFER_COMPLETED, "test").is_ok());
+        assert!(matches!(
+            map_libusb_transfer_status(LIBUSB_TRANSFER_TIMED_OUT, "test"),
+            Err(UsbError::Timeout)
+        ));
+        assert!(matches!(
+            map_libusb_transfer_status(LIBUSB_TRANSFER_NO_DEVICE, "test"),
+            Err(UsbError::Disconnected)
+        ));
+        assert!(matches!(
+            map_libusb_transfer_status(LIBUSB_TRANSFER_ERROR, "test"),
+            Err(UsbError::TransferFault)
         ));
     }
 
