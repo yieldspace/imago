@@ -44,13 +44,14 @@ cd imago
 
 ```bash
 # From the repository root, interactive (TTY)
-imago project init .
+imago project init
 
-# From the repository root, non-interactive (CI/no TTY): --lang is required
-imago project init services/example --lang rust
+# From the repository root, non-interactive (CI/no TTY): PATH and --template are required
+imago project init services/example --template rust
 ```
 
-`imago project init` updates `.gitignore` in the project directory and ensures `.imago` and `/build` entries exist.
+`imago project init` copies files from the selected embedded template directory.
+It never overwrites existing paths. If any conflict is detected, it exits without changes.
 
 ## Run Local Example
 

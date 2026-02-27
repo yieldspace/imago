@@ -163,7 +163,7 @@ mod tests {
                 command: Commands::Project(ProjectSubcommandArgs {
                     command: ProjectCommands::Init(InitArgs {
                         path: Some(PathBuf::from("svc-a")),
-                        lang: Some("rust".to_string()),
+                        template: Some("rust".to_string()),
                     }),
                 }),
             },

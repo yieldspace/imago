@@ -1,0 +1,31 @@
+version = 1
+revision = 3
+requires-python = ">=3.14"
+
+[[package]]
+name = "componentize-py"
+version = "0.21.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a9/d0/ca5880d1013e3542480c78a62b39773bcd29cad48ec480896764a710a735/componentize_py-0.21.0.tar.gz", hash = "sha256:695f88bd845fe95fea94181ee0b78b0d2a5c76bc701fbf541a85f083c0389205", size = 176379, upload-time = "2026-02-12T23:17:51.197Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/11/3c/4537d45a3341ea2ff2ec04056cfca431a044b9eaed5f966f13e03a84c0d0/componentize_py-0.21.0-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:ecc0815b0df630a1bbeb7978e1a070e0a46d70b596ac9526b4625c4978c1bcd6", size = 23320429, upload-time = "2026-02-12T23:17:16.165Z" },
+    { url = "https://files.pythonhosted.org/packages/46/d4/7693c9b2b3c6e4e1e1fbad1ebc662be4facc3889d4634aeabf93c59c29eb/componentize_py-0.21.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:b633a1252408619f9bbf7ff6c33b7890d9edb2f3d784d72f588a4ba8eaa2e893", size = 22519562, upload-time = "2026-02-12T23:17:26.407Z" },
+    { url = "https://files.pythonhosted.org/packages/08/27/356f2aa8aecd10274500583d84d7a6eef647a2411c5865781d567d249260/componentize_py-0.21.0-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:0e0e18c3c439329eb9ae547cb831bfa3257dbbbdf4b7a5d9dd5420aad43eba66", size = 23414266, upload-time = "2026-02-12T23:17:32.865Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/a5/316e2187870a97032e7a59a2183b49a6cb2a336ca2eb30fd3c8f5a62b199/componentize_py-0.21.0-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:cdc45de3b4b06ed90250dc96c2c11f993e0b8936975e156d239d94c2fa9eca14", size = 24008760, upload-time = "2026-02-12T23:17:39.362Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/bd/ee1ffcc1d656cc93eabbd826bccba3b235068fb9cba89749a24b4a32f6f6/componentize_py-0.21.0-cp39-abi3-win_amd64.whl", hash = "sha256:ef38862a8bdb3574b46848f8f8cb7c6c4cd85067f844fad7b24c08ed022e227c", size = 22154053, upload-time = "2026-02-12T23:17:46.149Z" },
+]
+
+[[package]]
+name = "imago-with-componentize-py"
+version = "0.1.0"
+source = { virtual = "." }
+
+[package.dev-dependencies]
+dev = [
+    { name = "componentize-py" },
+]
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [{ name = "componentize-py", specifier = ">=0.21.0" }]

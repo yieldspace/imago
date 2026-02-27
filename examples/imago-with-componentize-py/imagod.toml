@@ -1,0 +1,17 @@
+listen_addr = "127.0.0.1:4443"
+storage_root = ".imagod-data"
+server_version = "imagod/local-example"
+
+[tls]
+server_key = "certs/server.key"
+admin_public_keys = ["ea756c5b94feafa539f963a4958f404c16650056aa22361ca0401d616399a8c0"]
+client_public_keys = ["7d3cae515bbbaa34ac26e63da23d42bb3d2d84014fd4cefb32d7efd5cbd6c4af"]
+
+[runtime]
+chunk_size = 1048576
+max_inflight_chunks = 16
+upload_session_ttl_secs = 900
+stop_grace_timeout_secs = 30
+runner_ready_timeout_secs = 60
+runner_log_buffer_bytes = 262144
+epoch_tick_interval_ms = 50
