@@ -93,7 +93,7 @@ pub(crate) fn resolve_manifest_dependencies_from_lock(
     for dependency in dependencies {
         let entry = resolved_by_name.get(&dependency.name).ok_or_else(|| {
             anyhow!(
-                "dependency '{}' is not resolved in imago.lock; run `imago update`",
+                "dependency '{}' is not resolved in imago.lock; run `imago deps sync`",
                 dependency.name
             )
         })?;
@@ -103,7 +103,7 @@ pub(crate) fn resolve_manifest_dependencies_from_lock(
             ManifestDependencyKind::Wasm => {
                 let lock_component_sha = entry.component_sha256.as_ref().ok_or_else(|| {
                     anyhow!(
-                        "dependency '{}' component sha256 is missing in imago.lock; run `imago update`",
+                        "dependency '{}' component sha256 is missing in imago.lock; run `imago deps sync`",
                         dependency.name
                     )
                 })?;
@@ -186,31 +186,31 @@ pub(crate) fn resolve_dependency_component_sources(
 
         let component = dependency.component.as_ref().ok_or_else(|| {
             anyhow!(
-                "manifest dependency '{}' is missing component; run `imago update`",
+                "manifest dependency '{}' is missing component; run `imago deps sync`",
                 dependency.name
             )
         })?;
         let lock_entry = lock_by_name.get(&dependency.name).ok_or_else(|| {
             anyhow!(
-                "dependency '{}' is not resolved in imago.lock; run `imago update`",
+                "dependency '{}' is not resolved in imago.lock; run `imago deps sync`",
                 dependency.name
             )
         })?;
         lock_entry.component_source.as_deref().ok_or_else(|| {
             anyhow!(
-                "dependency '{}' component source is missing in imago.lock; run `imago update`",
+                "dependency '{}' component source is missing in imago.lock; run `imago deps sync`",
                 dependency.name
             )
         })?;
         let sha = lock_entry.component_sha256.as_deref().ok_or_else(|| {
             anyhow!(
-                "dependency '{}' component sha256 is missing in imago.lock; run `imago update`",
+                "dependency '{}' component sha256 is missing in imago.lock; run `imago deps sync`",
                 dependency.name
             )
         })?;
         if component.sha256 != sha {
             return Err(anyhow!(
-                "dependency '{}' component hash mismatch (manifest='{}', lock='{}'); run `imago update`",
+                "dependency '{}' component hash mismatch (manifest='{}', lock='{}'); run `imago deps sync`",
                 dependency.name,
                 component.sha256,
                 sha

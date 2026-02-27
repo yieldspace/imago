@@ -15,7 +15,7 @@ For single-service behavior, read `imago-core-concepts.md`.
   2. Resolve compose `config` via `profile.<name>.config`.
   3. Iterate `compose.<config>.services[*].imago`.
   4. Resolve target from `target.<name>`.
-  5. Execute compose command (`build`, `update`, `deploy`, `logs`, `ps`).
+  5. Execute stack command (`build`, `sync`, `deploy`, `logs`, `ls`).
 
 ## Minimal `imago-compose.toml`
 
@@ -46,7 +46,7 @@ client_key = "certs/client.key"
   - exist on disk.
 - `target.<name>.remote` is required and must be non-empty.
 - `target.<name>.server_name` and `target.<name>.client_key` are optional but must be non-empty if present.
-- `compose ps` requires unique resolved service names; duplicate service names in the same profile fail.
+- `stack ls` requires unique resolved service names; duplicate service names in the same profile fail.
 
 ## Targeting Model
 
@@ -54,15 +54,15 @@ client_key = "certs/client.key"
 - For multi-imagod scenarios, run separate commands for each target/profile pair.
 - Do not assume one compose command can deploy to multiple targets at once.
 
-## Compose Command Set
+## Stack Command Set
 
-- `compose build <profile> --target <target>`
-- `compose update <profile>`
-- `compose deploy <profile> --target <target>`
-- `compose logs <profile> --target <target> [--name <service>] [--follow] [--tail N]`
-- `compose ps <profile> --target <target>`
+- `stack build <profile> --target <target>`
+- `stack sync <profile>`
+- `stack deploy <profile> --target <target>`
+- `stack logs <profile> --target <target> [--name <service>] [--follow] [--tail N]`
+- `stack ls <profile> --target <target>`
 
-`<profile>` is a profile name defined under `[profile.<name>]` (for example `prepare`, `dev`, `client`, `greeter`), not a compose subcommand.
+`<profile>` is a profile name defined under `[profile.<name>]` (for example `prepare`, `dev`, `client`, `greeter`), not a stack subcommand.
 
 ## Practical Teaching Pattern
 

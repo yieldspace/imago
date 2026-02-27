@@ -27,7 +27,7 @@ use crate::{
 pub fn load_from_project_root(project_root: &Path) -> anyhow::Result<ImagoLock> {
     let lock_path = project_root.join("imago.lock");
     let lock_raw = fs::read_to_string(&lock_path)
-        .with_context(|| "imago.lock is missing; run `imago update`".to_string())?;
+        .with_context(|| "imago.lock is missing; run `imago deps sync`".to_string())?;
     let lock: ImagoLock = toml::from_str(&lock_raw).context("failed to parse imago.lock")?;
     ensure_supported_lock_version(lock.version)?;
     Ok(lock)
@@ -81,7 +81,7 @@ fn resolve_dependencies_with(
             .is_some()
         {
             return Err(anyhow!(
-                "imago.lock contains duplicate dependency '{}'; run `imago update`",
+                "imago.lock contains duplicate dependency '{}'; run `imago deps sync`",
                 entry.name
             ));
         }
@@ -98,13 +98,13 @@ fn resolve_dependencies_with(
         }
         let entry = by_name.get(&expected.name).ok_or_else(|| {
             anyhow!(
-                "dependency '{}' is not resolved in imago.lock; run `imago update`",
+                "dependency '{}' is not resolved in imago.lock; run `imago deps sync`",
                 expected.name
             )
         })?;
         if entry.version != expected.version {
             return Err(anyhow!(
-                "dependency '{}@{}' does not match lock version '{}'; run `imago update`",
+                "dependency '{}@{}' does not match lock version '{}'; run `imago deps sync`",
                 expected.name,
                 expected.version,
                 entry.version
@@ -112,7 +112,7 @@ fn resolve_dependencies_with(
         }
         if entry.wit_source != expected.wit_source {
             return Err(anyhow!(
-                "dependency '{}' wit source mismatch (lock='{}', config='{}'); run `imago update`",
+                "dependency '{}' wit source mismatch (lock='{}', config='{}'); run `imago deps sync`",
                 expected.name,
                 entry.wit_source,
                 expected.wit_source
@@ -120,7 +120,7 @@ fn resolve_dependencies_with(
         }
         if entry.wit_registry != expected.wit_registry {
             return Err(anyhow!(
-                "dependency '{}' wit registry mismatch (lock='{}', config='{}'); run `imago update`",
+                "dependency '{}' wit registry mismatch (lock='{}', config='{}'); run `imago deps sync`",
                 expected.name,
                 entry.wit_registry.as_deref().unwrap_or(""),
                 expected.wit_registry.as_deref().unwrap_or("")
@@ -147,7 +147,7 @@ fn resolve_dependencies_with(
             })?;
         if digest != entry.wit_digest {
             return Err(anyhow!(
-                "dependency '{}' lock digest mismatch; run `imago update`",
+                "dependency '{}' lock digest mismatch; run `imago deps sync`",
                 expected.name
             ));
         }
@@ -157,13 +157,13 @@ fn resolve_dependencies_with(
             Some(component_expected) => {
                 let lock_component_source = entry.component_source.as_ref().ok_or_else(|| {
                     anyhow!(
-                        "dependency '{}' component source is missing in imago.lock; run `imago update`",
+                        "dependency '{}' component source is missing in imago.lock; run `imago deps sync`",
                         expected.name
                     )
                 })?;
                 if lock_component_source != &component_expected.source {
                     return Err(anyhow!(
-                        "dependency '{}' component source mismatch (lock='{}', config='{}'); run `imago update`",
+                        "dependency '{}' component source mismatch (lock='{}', config='{}'); run `imago deps sync`",
                         expected.name,
                         lock_component_source,
                         component_expected.source
@@ -171,7 +171,7 @@ fn resolve_dependencies_with(
                 }
                 if entry.component_registry != component_expected.registry {
                     return Err(anyhow!(
-                        "dependency '{}' component registry mismatch (lock='{}', config='{}'); run `imago update`",
+                        "dependency '{}' component registry mismatch (lock='{}', config='{}'); run `imago deps sync`",
                         expected.name,
                         entry.component_registry.as_deref().unwrap_or(""),
                         component_expected.registry.as_deref().unwrap_or("")
@@ -179,7 +179,7 @@ fn resolve_dependencies_with(
                 }
                 let lock_component_sha = entry.component_sha256.as_ref().ok_or_else(|| {
                     anyhow!(
-                        "dependency '{}' component sha256 is missing in imago.lock; run `imago update`",
+                        "dependency '{}' component sha256 is missing in imago.lock; run `imago deps sync`",
                         expected.name
                     )
                 })?;
@@ -194,7 +194,7 @@ fn resolve_dependencies_with(
                     && !lock_component_sha.eq_ignore_ascii_case(expected_sha)
                 {
                     return Err(anyhow!(
-                        "dependency '{}' component sha256 mismatch (lock='{}', config='{}'); run `imago update`",
+                        "dependency '{}' component sha256 mismatch (lock='{}', config='{}'); run `imago deps sync`",
                         expected.name,
                         lock_component_sha,
                         expected_sha
@@ -246,7 +246,7 @@ fn resolve_binding_wits_with(
             .is_some()
         {
             return Err(anyhow!(
-                "imago.lock contains duplicate binding_wits entry (name='{}', source='{}', registry='{}'); run `imago update`",
+                "imago.lock contains duplicate binding_wits entry (name='{}', source='{}', registry='{}'); run `imago deps sync`",
                 lock_key.0,
                 lock_key.1,
                 lock_key.2.as_deref().unwrap_or("")
@@ -273,7 +273,7 @@ fn resolve_binding_wits_with(
 
         let entry = by_key.get(&expected_key).ok_or_else(|| {
             anyhow!(
-                "binding wit (name='{}', source='{}', registry='{}') is not resolved in imago.lock; run `imago update`",
+                "binding wit (name='{}', source='{}', registry='{}') is not resolved in imago.lock; run `imago deps sync`",
                 expected_key.0,
                 expected_key.1,
                 expected_key.2.as_deref().unwrap_or("")
@@ -305,7 +305,7 @@ fn resolve_binding_wits_with(
             })?;
         if digest != entry.wit_digest {
             return Err(anyhow!(
-                "binding wit '{}' lock digest mismatch; run `imago update`",
+                "binding wit '{}' lock digest mismatch; run `imago deps sync`",
                 entry.name
             ));
         }
@@ -379,7 +379,7 @@ fn binding_wit_key(
 fn validate_binding_interfaces(entry: &ResolvedBindingWit) -> anyhow::Result<()> {
     if entry.interfaces.is_empty() {
         return Err(anyhow!(
-            "imago.lock.binding_wits['{}'].interfaces must not be empty; run `imago update`",
+            "imago.lock.binding_wits['{}'].interfaces must not be empty; run `imago deps sync`",
             entry.name
         ));
     }
@@ -395,13 +395,13 @@ fn validate_binding_interfaces(entry: &ResolvedBindingWit) -> anyhow::Result<()>
 fn validate_binding_interface_format(interface: &str, field_name: &str) -> anyhow::Result<()> {
     let Some((package, interface_name)) = interface.split_once('/') else {
         return Err(anyhow!(
-            "{field_name} must be in '<package>/<interface>' format; run `imago update`"
+            "{field_name} must be in '<package>/<interface>' format; run `imago deps sync`"
         ));
     };
     if package.trim().is_empty() || interface_name.trim().is_empty() || interface_name.contains('/')
     {
         return Err(anyhow!(
-            "{field_name} must be in '<package>/<interface>' format; run `imago update`"
+            "{field_name} must be in '<package>/<interface>' format; run `imago deps sync`"
         ));
     }
     Ok(())
@@ -410,7 +410,7 @@ fn validate_binding_interface_format(interface: &str, field_name: &str) -> anyho
 fn ensure_supported_lock_version(version: u32) -> anyhow::Result<()> {
     if version != IMAGO_LOCK_VERSION {
         return Err(anyhow!(
-            "imago.lock version '{}' is not supported; run `imago update`",
+            "imago.lock version '{}' is not supported; run `imago deps sync`",
             version
         ));
     }
@@ -436,12 +436,12 @@ fn verify_wit_packages_lock(
     for wit_package in wit_packages {
         if wit_package.name.trim().is_empty() {
             return Err(anyhow!(
-                "imago.lock.wit_packages[].name must not be empty; run `imago update`"
+                "imago.lock.wit_packages[].name must not be empty; run `imago deps sync`"
             ));
         }
         if wit_package.versions.is_empty() {
             return Err(anyhow!(
-                "imago.lock.wit_packages['{}'].versions must not be empty; run `imago update`",
+                "imago.lock.wit_packages['{}'].versions must not be empty; run `imago deps sync`",
                 wit_package.name
             ));
         }
@@ -449,19 +449,19 @@ fn verify_wit_packages_lock(
         for version_entry in &wit_package.versions {
             if version_entry.requirement.trim().is_empty() {
                 return Err(anyhow!(
-                    "imago.lock.wit_packages['{}'].versions[].requirement must not be empty; run `imago update`",
+                    "imago.lock.wit_packages['{}'].versions[].requirement must not be empty; run `imago deps sync`",
                     wit_package.name
                 ));
             }
             if version_entry.path.trim().is_empty() {
                 return Err(anyhow!(
-                    "imago.lock.wit_packages['{}'].versions[].path must not be empty; run `imago update`",
+                    "imago.lock.wit_packages['{}'].versions[].path must not be empty; run `imago deps sync`",
                     wit_package.name
                 ));
             }
             if version_entry.via.is_empty() {
                 return Err(anyhow!(
-                    "imago.lock.wit_packages['{}'].versions[].via must not be empty; run `imago update`",
+                    "imago.lock.wit_packages['{}'].versions[].via must not be empty; run `imago deps sync`",
                     wit_package.name
                 ));
             }
@@ -469,7 +469,7 @@ fn verify_wit_packages_lock(
             for via in &version_entry.via {
                 if !direct_dependency_names.contains(via) {
                     return Err(anyhow!(
-                        "imago.lock.wit_packages['{}'].versions[].via contains unknown dependency '{}'; run `imago update`",
+                        "imago.lock.wit_packages['{}'].versions[].via contains unknown dependency '{}'; run `imago deps sync`",
                         wit_package.name,
                         via
                     ));
@@ -487,14 +487,14 @@ fn verify_wit_packages_lock(
                 if source.starts_with("warg://") {
                     let lock_version = version_entry.version.as_deref().ok_or_else(|| {
                         anyhow!(
-                            "imago.lock.wit_packages['{}'].versions[].version is required for warg source; run `imago update`",
+                            "imago.lock.wit_packages['{}'].versions[].version is required for warg source; run `imago deps sync`",
                             wit_package.name
                         )
                     })?;
                     let expected_source = format!("warg://{}@{lock_version}", wit_package.name);
                     if source != expected_source {
                         return Err(anyhow!(
-                            "imago.lock.wit_packages['{}'].versions[].source mismatch (lock='{}', expected='{}'); run `imago update`",
+                            "imago.lock.wit_packages['{}'].versions[].source mismatch (lock='{}', expected='{}'); run `imago deps sync`",
                             wit_package.name,
                             source,
                             expected_source
@@ -528,7 +528,7 @@ fn verify_wit_packages_lock(
             let package_wit_file = project_root.join(relative_package_path).join("package.wit");
             if !package_wit_file.is_file() {
                 return Err(anyhow!(
-                    "transitive wit package '{}' is missing package.wit at '{}'; run `imago update`",
+                    "transitive wit package '{}' is missing package.wit at '{}'; run `imago deps sync`",
                     wit_package.name,
                     package_wit_file.display()
                 ));
@@ -545,7 +545,7 @@ fn verify_wit_packages_lock(
                 })?;
             if !actual_digest.eq_ignore_ascii_case(expected_digest_hex) {
                 return Err(anyhow!(
-                    "lock digest mismatch for transitive wit package '{}'; run `imago update`",
+                    "lock digest mismatch for transitive wit package '{}'; run `imago deps sync`",
                     wit_package.name
                 ));
             }

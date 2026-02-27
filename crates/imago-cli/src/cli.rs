@@ -179,7 +179,7 @@ pub struct ComposeSubcommandArgs {
 pub enum ComposeCommands {
     /// Build all services in a compose profile.
     Build(ComposeBuildArgs),
-    /// Update dependencies for all services in a compose profile.
+    /// Sync dependencies for all services in a compose profile.
     Sync(ComposeUpdateArgs),
     /// Deploy all services in a compose profile.
     Deploy(ComposeDeployArgs),
@@ -201,7 +201,7 @@ pub struct ComposeBuildArgs {
     pub target: String,
 }
 
-/// Update dependencies for services in a compose profile.
+/// Sync dependencies for services in a compose profile.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct ComposeUpdateArgs {
     /// Compose profile name.

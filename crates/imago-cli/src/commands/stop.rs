@@ -31,11 +31,11 @@ pub async fn run(args: StopArgs) -> CommandResult {
 
 pub(crate) async fn run_with_project_root(args: StopArgs, project_root: &Path) -> CommandResult {
     let started_at = Instant::now();
-    ui::command_start("stop", "starting");
+    ui::command_start("service.stop", "starting");
     match run_async(args, project_root).await {
         Ok(summary) => {
-            ui::command_finish("stop", true, "");
-            let mut result = CommandResult::success("stop", started_at);
+            ui::command_finish("service.stop", true, "");
+            let mut result = CommandResult::success("service.stop", started_at);
             result
                 .meta
                 .insert("service".to_string(), summary.service_name);
@@ -48,16 +48,20 @@ pub(crate) async fn run_with_project_root(args: StopArgs, project_root: &Path) -
             result
         }
         Err(err) => {
-            let summary = summarize_command_failure("stop", &err);
-            ui::command_finish("stop", false, &summary);
-            let message = error_diagnostics::format_command_error("stop", &err);
-            CommandResult::failure("stop", started_at, message)
+            let summary = summarize_command_failure("service.stop", &err);
+            ui::command_finish("service.stop", false, &summary);
+            let message = error_diagnostics::format_command_error("service.stop", &err);
+            CommandResult::failure("service.stop", started_at, message)
         }
     }
 }
 
 async fn run_async(args: StopArgs, project_root: &Path) -> anyhow::Result<StopSummary> {
-    ui::command_stage("stop", "load-config", "loading target configuration");
+    ui::command_stage(
+        "service.stop",
+        "load-config",
+        "loading target configuration",
+    );
     let target_name = args
         .target
         .clone()
@@ -65,11 +69,11 @@ async fn run_async(args: StopArgs, project_root: &Path) -> anyhow::Result<StopSu
     let target = build::load_target_config(&target_name, project_root)
         .context("failed to load target configuration")?
         .require_deploy_credentials()
-        .context("target settings are invalid for stop")?;
+        .context("target settings are invalid for service stop")?;
     let service_name = resolve_service_name(args.name.as_deref(), project_root)
-        .context("failed to resolve service name for stop")?;
+        .context("failed to resolve service name for service stop")?;
     ui::command_info(
-        "stop",
+        "service.stop",
         &format_local_context_line(
             project_root,
             &service_name,
@@ -79,13 +83,13 @@ async fn run_async(args: StopArgs, project_root: &Path) -> anyhow::Result<StopSu
         ),
     );
 
-    ui::command_stage("stop", "connect", "connecting target");
+    ui::command_stage("service.stop", "connect", "connecting target");
     let connected = deploy::connect_target(&target).await?;
     let correlation_id = Uuid::new_v4();
-    ui::command_stage("stop", "hello", "negotiating hello");
+    ui::command_stage("service.stop", "hello", "negotiating hello");
     let hello = negotiate_hello(&connected.session, correlation_id).await?;
     ui::command_info(
-        "stop",
+        "service.stop",
         &format_peer_context_line(
             &connected.authority,
             &connected.resolved_addr.to_string(),
@@ -95,7 +99,7 @@ async fn run_async(args: StopArgs, project_root: &Path) -> anyhow::Result<StopSu
     let command_stream_timeout =
         deploy::resolve_command_stream_timeout_from_hello_limits(&hello.limits);
 
-    ui::command_stage("stop", "command.start", "sending stop request");
+    ui::command_stage("service.stop", "command.start", "sending stop request");
     let command = deploy::build_command_start_envelope(
         correlation_id,
         Uuid::new_v4(),
@@ -111,7 +115,7 @@ async fn run_async(args: StopArgs, project_root: &Path) -> anyhow::Result<StopSu
         command_stream_timeout,
     )
     .await?;
-    handle_terminal_event("stop", responses).map(|_| StopSummary {
+    handle_terminal_event("service.stop", responses).map(|_| StopSummary {
         service_name,
         target_name,
         force: args.force,

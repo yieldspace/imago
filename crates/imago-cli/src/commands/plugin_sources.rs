@@ -1048,7 +1048,7 @@ fn materialize_plain_wit_text(
             .any(|nested| !nested.foreign_deps.is_empty());
     if has_foreign_deps {
         return Err(anyhow!(
-            "{} source '{}@{}' contains foreign imports in plain .wit form; publish/use a WIT package so `imago update` can resolve transitive dependencies",
+            "{} source '{}@{}' contains foreign imports in plain .wit form; publish/use a WIT package so `imago deps sync` can resolve transitive dependencies",
             scheme,
             request.package,
             request.version

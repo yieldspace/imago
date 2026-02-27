@@ -76,13 +76,13 @@ pub(crate) fn parse_prefixed_sha256<'a>(
 pub(crate) fn validate_safe_wit_path(path: &str, field_name: &str) -> anyhow::Result<PathBuf> {
     if path.trim().is_empty() {
         return Err(anyhow!(
-            "{field_name} must not be empty; run `imago update`"
+            "{field_name} must not be empty; run `imago deps sync`"
         ));
     }
     let raw = Path::new(path);
     if raw.is_absolute() {
         return Err(anyhow!(
-            "{field_name} must be a relative path under wit/deps; run `imago update`"
+            "{field_name} must be a relative path under wit/deps; run `imago deps sync`"
         ));
     }
 
@@ -92,7 +92,7 @@ pub(crate) fn validate_safe_wit_path(path: &str, field_name: &str) -> anyhow::Re
             Component::Normal(part) => normalized.push(part),
             _ => {
                 return Err(anyhow!(
-                    "{field_name} contains invalid path components; run `imago update`"
+                    "{field_name} contains invalid path components; run `imago deps sync`"
                 ));
             }
         }
@@ -105,7 +105,7 @@ pub(crate) fn validate_safe_wit_path(path: &str, field_name: &str) -> anyhow::Re
         || !matches!(second, Some(Component::Normal(v)) if v == "deps")
     {
         return Err(anyhow!(
-            "{field_name} must be under wit/deps; run `imago update`"
+            "{field_name} must be under wit/deps; run `imago deps sync`"
         ));
     }
 
@@ -121,7 +121,7 @@ pub(crate) fn ensure_no_symlink_in_relative_path(
     for component in relative.components() {
         let Component::Normal(part) = component else {
             return Err(anyhow!(
-                "{field_name} contains invalid path components; run `imago update`"
+                "{field_name} contains invalid path components; run `imago deps sync`"
             ));
         };
         current.push(part);
@@ -132,7 +132,7 @@ pub(crate) fn ensure_no_symlink_in_relative_path(
             .with_context(|| format!("failed to inspect path {}", current.display()))?;
         if metadata.file_type().is_symlink() {
             return Err(anyhow!(
-                "{field_name} resolves through symlink '{}'; run `imago update`",
+                "{field_name} resolves through symlink '{}'; run `imago deps sync`",
                 current.display()
             ));
         }

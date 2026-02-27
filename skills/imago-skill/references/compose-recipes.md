@@ -12,25 +12,25 @@ Run from `examples/imago-compose-bindings`.
 
 ### Terminal A
 
-`prepare` in `compose build prepare --target default` is a profile argument to the `build` subcommand, not a separate top-level compose command.
+`prepare` in `stack build prepare --target default` is a profile argument to the `build` subcommand, not a separate top-level stack command.
 
 ```bash
-imago compose build prepare --target default
-imago compose update dev
-imago compose build dev --target default
+imago stack build prepare --target default
+imago stack sync dev
+imago stack build dev --target default
 imagod --config imagod.toml
 ```
 
 ### Terminal B
 
 ```bash
-imago compose deploy dev --target default
-imago compose logs dev --target default --name cli-client --tail 200
+imago stack deploy dev --target default
+imago stack logs dev --target default --name cli-client --tail 200
 ```
 
 ### Success signal
 
-- `compose logs ... --name cli-client` contains `acme:clock/api.now =>`.
+- `stack logs ... --name cli-client` contains `acme:clock/api.now =>`.
 
 ## Recipe 2: Docker cross-imagod compose flow (alice/bob)
 
@@ -48,15 +48,15 @@ docker compose --project-name imago-compose-bindings-alice-bob-e2e up --build -d
 ```bash
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  imago compose update greeter
+  imago stack sync greeter
 
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  imago compose build greeter --target bob
+  imago stack build greeter --target bob
 
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  imago compose deploy greeter --target bob
+  imago stack deploy greeter --target bob
 ```
 
 ### Deploy client to alice
@@ -64,15 +64,15 @@ docker compose --project-name imago-compose-bindings-alice-bob-e2e \
 ```bash
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  imago compose update client
+  imago stack sync client
 
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  imago compose build client --target alice
+  imago stack build client --target alice
 
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  imago compose deploy client --target alice
+  imago stack deploy client --target alice
 ```
 
 ### Inspect logs before and after trust distribution
@@ -80,21 +80,21 @@ docker compose --project-name imago-compose-bindings-alice-bob-e2e \
 ```bash
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  imago compose logs client --target alice --name cli-client --tail 200
+  imago stack logs client --target alice --name cli-client --tail 200
 
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  imago bindings cert deploy --from imagod-alice:4443 --to imagod-bob:4443
+  imago trust cert replicate --from imagod-alice:4443 --to imagod-bob:4443
 
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  imago compose logs client --target alice --name cli-client --tail 200
+  imago stack logs client --target alice --name cli-client --tail 200
 ```
 
 ### Success signal
 
 - Before cert deployment: connection failure is expected.
-- After `bindings cert deploy`: logs contain `acme:clock/api.now =>`.
+- After `trust cert replicate`: logs contain `acme:clock/api.now =>`.
 
 ### Teardown
 
@@ -116,7 +116,7 @@ docker compose --project-name imago-compose-bindings-alice-bob-e2e down --remove
 - `service.imago must point to imago.toml`:
   - Fix `[[compose.<config>.services]].imago` to a valid `imago.toml` path.
 
-- `compose logs --name must not be empty`:
+- `stack logs --name must not be empty`:
   - Provide non-empty `--name` or remove `--name`.
 
 - TOFU pin mismatch for `localhost:4443`:
@@ -125,5 +125,5 @@ docker compose --project-name imago-compose-bindings-alice-bob-e2e down --remove
 ## Teaching Notes
 
 - Prefer profile-specific commands over broad guesses.
-- Repeat target context in every compose command explanation.
+- Repeat target context in every stack command explanation.
 - Keep guidance deterministic: `read config -> choose profile/target -> run sequence -> verify logs`.

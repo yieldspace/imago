@@ -18,7 +18,7 @@ Rust toolchain と `wasm32-wasip2` target を用意します（未導入なら `
 
 ```bash
 cd examples/local-imagod-plugin-native-experimental-gpio
-cargo run -p imago-cli -- update
+cargo run -p imago-cli -- deps sync
 cargo run -p imagod -- --config "$(pwd)/imagod.toml"
 ```
 
@@ -26,8 +26,8 @@ cargo run -p imagod -- --config "$(pwd)/imagod.toml"
 
 ```bash
 cd examples/local-imagod-plugin-native-experimental-gpio
-cargo run -p imago-cli -- deploy --target default --detach
-cargo run -p imago-cli -- logs local-imagod-plugin-native-experimental-gpio-app --tail 200
+cargo run -p imago-cli -- service deploy --target default --detach
+cargo run -p imago-cli -- service logs local-imagod-plugin-native-experimental-gpio-app --tail 200
 ```
 
 ## 成功判定

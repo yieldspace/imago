@@ -133,10 +133,10 @@ mod tests {
         ArtifactCommands, ArtifactSubcommandArgs, BindingsCertDeployArgs, BindingsCertUploadArgs,
         BuildArgs, CertsGenerateArgs, ComposeBuildArgs, ComposeCommands, ComposeDeployArgs,
         ComposeLogsArgs, ComposePsArgs, ComposeSubcommandArgs, ComposeUpdateArgs, DeployArgs,
-        DepsCommands, DepsSubcommandArgs, InitArgs, ProjectCommands, ProjectSubcommandArgs, PsArgs,
-        RunArgs, ServiceCommands, ServiceSubcommandArgs, StopArgs, TrustCertCommands,
-        TrustCertSubcommandArgs, TrustClientKeyCommands, TrustClientKeySubcommandArgs,
-        TrustCommands, TrustSubcommandArgs, UpdateArgs,
+        DepsCommands, DepsSubcommandArgs, InitArgs, LogsArgs, ProjectCommands,
+        ProjectSubcommandArgs, PsArgs, RunArgs, ServiceCommands, ServiceSubcommandArgs, StopArgs,
+        TrustCertCommands, TrustCertSubcommandArgs, TrustClientKeyCommands,
+        TrustClientKeySubcommandArgs, TrustCommands, TrustSubcommandArgs, UpdateArgs,
     };
     use std::path::PathBuf;
 
@@ -172,6 +172,7 @@ mod tests {
         .await;
 
         assert_eq!(result.exit_code, 0);
+        assert_eq!(result.command, "project.init");
         assert!(result.stderr.is_none());
         assert!(root.join("svc-a").join("imago.toml").exists());
         let _ = std::fs::remove_dir_all(root);
@@ -193,6 +194,7 @@ mod tests {
         .await;
 
         assert_eq!(result.exit_code, 2);
+        assert_eq!(result.command, "artifact.build");
         assert!(result.stderr.is_some());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -233,6 +235,7 @@ mod tests {
         )
         .await;
         assert_eq!(deploy.exit_code, 2);
+        assert_eq!(deploy.command, "service.deploy");
 
         let start = dispatch_with_project_root_async(
             Cli {
@@ -264,6 +267,7 @@ mod tests {
         )
         .await;
         assert_eq!(stop.exit_code, 2);
+        assert_eq!(stop.command, "service.stop");
 
         let ls = dispatch_with_project_root_async(
             Cli {
@@ -278,6 +282,23 @@ mod tests {
         .await;
         assert_eq!(ls.exit_code, 2);
         assert_eq!(ls.command, "service.ls");
+
+        let logs = dispatch_with_project_root_async(
+            Cli {
+                command: Commands::Service(ServiceSubcommandArgs {
+                    command: ServiceCommands::Logs(LogsArgs {
+                        name: None,
+                        follow: false,
+                        tail: 200,
+                        with_timestamp: false,
+                    }),
+                }),
+            },
+            &root,
+        )
+        .await;
+        assert_eq!(logs.exit_code, 2);
+        assert_eq!(logs.command, "service.logs");
 
         let _ = std::fs::remove_dir_all(root);
     }

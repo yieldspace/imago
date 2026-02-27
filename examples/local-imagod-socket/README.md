@@ -2,7 +2,7 @@
 
 ## 目的
 
-同一マシンで `type=socket` の UDP echo アプリを deploy し、疎通確認するサンプルです。
+同一マシンで `type=socket` の UDP echo アプリを service deploy し、疎通確認するサンプルです。
 
 ## 前提
 
@@ -20,16 +20,16 @@ cargo run -p imagod -- --config imagod.toml
 # ターミナル2
 cd examples/local-imagod-socket
 # ターミナル1 で imagod が起動したことを確認してから実行
-cargo run -p imago-cli -- deploy --target default --detach
-cargo run -p imago-cli -- logs local-imagod-socket-app --tail 200
+cargo run -p imago-cli -- service deploy --target default --detach
+cargo run -p imago-cli -- service logs local-imagod-socket-app --tail 200
 ```
 
 ## 成功判定
 
-`imago-cli logs` の出力に `local-imagod-socket-app listening on udp://0.0.0.0:5000` が含まれていれば成功です。
+`imago-cli service logs` の出力に `local-imagod-socket-app listening on udp://0.0.0.0:5000` が含まれていれば成功です。
 
 ## Troubleshooting
 
-### known_hosts の古いエントリで deploy が失敗する
+### known_hosts の古いエントリで service deploy が失敗する
 
-`certificate mismatch` などで `deploy` が失敗する場合のみ、`~/.imago/known_hosts` から `localhost:4443` / `127.0.0.1:4443` の行を削除して再実行してください。
+`certificate mismatch` などで `service deploy` が失敗する場合のみ、`~/.imago/known_hosts` から `localhost:4443` / `127.0.0.1:4443` の行を削除して再実行してください。

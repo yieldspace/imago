@@ -14,7 +14,7 @@ use crate::commands::{
 };
 
 const CACHE_ROOT_REL: &str = ".imago/deps";
-const MISSING_CACHE_HINT: &str = "run `imago update`";
+const MISSING_CACHE_HINT: &str = "run `imago deps sync`";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct DependencyCacheEntry {

@@ -152,7 +152,7 @@ async fn follow_logs_after_run(
             .unwrap_or_else(|| format!("exit code {}", logs_result.exit_code));
         ui::command_warn(
             "service.start",
-            &format!("logs --follow failed after service start succeeded: {detail}"),
+            &format!("service logs --follow failed after service start succeeded: {detail}"),
         );
     }
 }

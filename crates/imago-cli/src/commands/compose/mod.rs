@@ -234,7 +234,7 @@ async fn run_compose_build_inner(
                 if rich_mode {
                     compose_build_service_finish(service_name, false, &summary);
                 }
-                let detail = format_command_error("build", &err);
+                let detail = format_command_error("artifact.build", &err);
                 return Err(anyhow!(
                     "stack build failed for compose.{}.services[{index}] ({}): {}",
                     resolved.config_name,
@@ -321,34 +321,58 @@ fn take_compose_build_ui_events() -> Vec<ComposeBuildUiEvent> {
 }
 
 #[cfg(test)]
-fn compose_ps_command_result_override() -> &'static std::sync::Mutex<Option<CommandResult>> {
+fn stack_ls_command_result_override() -> &'static std::sync::Mutex<Option<CommandResult>> {
     static OVERRIDE: std::sync::OnceLock<std::sync::Mutex<Option<CommandResult>>> =
         std::sync::OnceLock::new();
     OVERRIDE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 #[cfg(test)]
-fn set_compose_ps_command_result_override(result: CommandResult) {
-    if let Ok(mut override_result) = compose_ps_command_result_override().lock() {
-        *override_result = Some(result);
+struct StackLsCommandResultOverrideGuard;
+
+#[cfg(test)]
+impl Drop for StackLsCommandResultOverrideGuard {
+    fn drop(&mut self) {
+        let mut override_result = stack_ls_command_result_override()
+            .lock()
+            .expect("stack ls command result override lock poisoned");
+        *override_result = None;
     }
 }
 
-fn take_compose_ps_command_result_override() -> Option<CommandResult> {
+#[cfg(test)]
+fn set_stack_ls_command_result_override(
+    result: CommandResult,
+) -> StackLsCommandResultOverrideGuard {
+    let mut override_result = stack_ls_command_result_override()
+        .lock()
+        .expect("stack ls command result override lock poisoned");
+    *override_result = Some(result);
+    StackLsCommandResultOverrideGuard
+}
+
+fn take_stack_ls_command_result_override() -> Option<CommandResult> {
     #[cfg(test)]
-    if let Ok(mut override_result) = compose_ps_command_result_override().lock() {
-        return override_result.take();
+    {
+        let mut override_result = stack_ls_command_result_override()
+            .lock()
+            .expect("stack ls command result override lock poisoned");
+        override_result.take()
     }
-    None
+
+    #[cfg(not(test))]
+    {
+        None
+    }
 }
 
-async fn run_compose_ps_command(
+async fn run_stack_ls_command(
     args: PsArgs,
     project_root: &Path,
     target_override: Option<&build::TargetConfig>,
     names_filter: Option<Vec<String>>,
 ) -> CommandResult {
-    if let Some(result) = take_compose_ps_command_result_override() {
+    if let Some(result) = take_stack_ls_command_result_override() {
         return result;
     }
     ps::run_with_project_root_and_target_override(args, project_root, target_override, names_filter)
@@ -520,7 +544,7 @@ async fn run_compose_ps(
     let services = names.len();
     let target = resolve_compose_target(&compose_file, &args.target, project_root)?;
 
-    let ps_result = run_compose_ps_command(
+    let ls_result = run_stack_ls_command(
         PsArgs {
             target: args.target.clone(),
         },
@@ -529,8 +553,8 @@ async fn run_compose_ps(
         Some(names),
     )
     .await;
-    if ps_result.exit_code != 0 {
-        return Err(compose_ls_failure_error(&ps_result).into());
+    if ls_result.exit_code != 0 {
+        return Err(compose_ls_failure_error(&ls_result).into());
     }
 
     Ok(ComposeSummary {
@@ -893,7 +917,7 @@ type = "cli"
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.expect("stderr should be present");
         assert!(stderr.contains("stack deploy failed"));
-        assert!(stderr.contains("target settings are invalid for deploy"));
+        assert!(stderr.contains("target settings are invalid for service deploy"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1125,8 +1149,8 @@ type = "cli"
         );
         write_file(&root.join("certs/client.key"), b"dummy-client-key");
 
-        set_compose_ps_command_result_override(CommandResult {
-            command: "ps".to_string(),
+        let _guard = set_stack_ls_command_result_override(CommandResult {
+            command: "service.ls".to_string(),
             exit_code: 0,
             stderr: None,
             duration_ms: 0,
@@ -1152,6 +1176,23 @@ type = "cli"
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compose_ls_override_guard_clears_override_on_panic() {
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = set_stack_ls_command_result_override(CommandResult {
+                command: "service.ls".to_string(),
+                exit_code: 1,
+                stderr: Some("injected failure".to_string()),
+                duration_ms: 0,
+                meta: BTreeMap::new(),
+            });
+            panic!("intentional panic");
+        });
+
+        let result = take_stack_ls_command_result_override();
+        assert!(result.is_none(), "override must be cleared by guard drop");
     }
 
     #[tokio::test]

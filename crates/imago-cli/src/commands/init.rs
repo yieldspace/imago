@@ -17,7 +17,7 @@ use crate::{
     },
 };
 
-const INIT_COMMAND: &str = "init";
+const INIT_COMMAND: &str = "project.init";
 const INIT_FILE_NAME: &str = "imago.toml";
 const GITIGNORE_FILE_NAME: &str = ".gitignore";
 const GITIGNORE_REQUIRED_ENTRIES: [&str; 2] = [".imago", "/build"];

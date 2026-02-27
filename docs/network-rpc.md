@@ -30,7 +30,7 @@ sequenceDiagram
 
 - Daemon-side client keys are validated against allowlists.
 - Known-host pinning protects remote manager identity checks.
-- Certificate/key distribution helpers are available via bindings cert commands.
+- Certificate/key distribution helpers are available via trust cert commands.
 
 ## Operational Notes
 
