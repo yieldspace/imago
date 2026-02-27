@@ -685,6 +685,21 @@ fn duration_to_libusb_timeout_ms(timeout: Duration) -> Result<u32, UsbError> {
     u32::try_from(timeout.as_millis()).map_err(|_| UsbError::InvalidArgument)
 }
 
+fn compute_iso_packet_lengths(total_len: usize, packets: u16) -> Result<Vec<u32>, UsbError> {
+    validate_iso_packets(packets)?;
+
+    let packet_count = usize::from(packets);
+    let base_len = total_len / packet_count;
+    let remainder = total_len % packet_count;
+    let mut lengths = Vec::with_capacity(packet_count);
+
+    for index in 0..packet_count {
+        let len = base_len + usize::from(index < remainder);
+        lengths.push(u32::try_from(len).map_err(|_| UsbError::InvalidArgument)?);
+    }
+    Ok(lengths)
+}
+
 fn validate_transfer_len(length: u32, limits: &UsbLimitsConfig) -> Result<usize, UsbError> {
     let length = usize::try_from(length).map_err(|_| UsbError::InvalidArgument)?;
     if length > limits.max_transfer_bytes {
@@ -1061,6 +1076,7 @@ fn perform_iso_transfer(
     use rusb::ffi::constants::*;
 
     validate_iso_packets(packets)?;
+    let packet_lengths = compute_iso_packet_lengths(buffer.len(), packets)?;
 
     let packet_count = i32::from(packets);
     let total_len = i32::try_from(buffer.len()).map_err(|_| UsbError::InvalidArgument)?;
@@ -1086,13 +1102,6 @@ fn perform_iso_transfer(
         }
     }
 
-    let packet_len = if packet_count > 0 {
-        let base = usize::try_from(total_len).unwrap_or(0);
-        u32::try_from(base / usize::try_from(packet_count).unwrap_or(1)).unwrap_or(u32::MAX)
-    } else {
-        0
-    };
-
     unsafe {
         ffi::libusb_fill_iso_transfer(
             transfer,
@@ -1105,7 +1114,14 @@ fn perform_iso_transfer(
             completed_ptr.cast::<c_void>(),
             timeout_ms,
         );
-        ffi::libusb_set_iso_packet_lengths(transfer, packet_len);
+
+        // Distribute remainder bytes across packet descriptors so scheduled packet
+        // lengths always sum to the requested transfer length.
+        let descriptor_ptr = std::ptr::addr_of_mut!((*transfer).iso_packet_desc)
+            .cast::<ffi::libusb_iso_packet_descriptor>();
+        for (index, length) in packet_lengths.iter().copied().enumerate() {
+            (*descriptor_ptr.add(index)).length = length;
+        }
     }
 
     let submit_result = unsafe { ffi::libusb_submit_transfer(transfer) };
@@ -1620,6 +1636,16 @@ async fn send_shutdown_command(
     }
 }
 
+async fn send_release_interface_no_reply_command(sender: &mpsc::Sender<DeviceCommand>, number: u8) {
+    match sender.try_send(DeviceCommand::ReleaseInterfaceNoReply { number }) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Closed(_)) => {}
+        Err(mpsc::error::TrySendError::Full(command)) => {
+            let _ = sender.send(command).await;
+        }
+    }
+}
+
 async fn shutdown_device_runtime(handle: &DeviceRuntimeHandle) {
     let (reply_tx, reply_rx) = oneshot::channel();
     let shutdown_sent = send_shutdown_command(&handle.sender, reply_tx).await;
@@ -2097,11 +2123,7 @@ impl imago_usb_plugin_bindings::imago::usb::usb_interface::HostClaimedInterface 
 
     async fn drop(&mut self, resource: Resource<ClaimedInterfaceResource>) -> wasmtime::Result<()> {
         if let Ok(handle) = lookup_claimed_interface_handle(resource.rep()) {
-            let _ = handle
-                .sender
-                .try_send(DeviceCommand::ReleaseInterfaceNoReply {
-                    number: handle.number,
-                });
+            send_release_interface_no_reply_command(&handle.sender, handle.number).await;
         }
         remove_claimed_interface_handle(resource.rep());
         Ok(())
@@ -2281,6 +2303,15 @@ mod tests {
     }
 
     #[test]
+    fn compute_iso_packet_lengths_distributes_remainder_bytes() {
+        let lengths = compute_iso_packet_lengths(1025, 8).expect("packet lengths should compute");
+        assert_eq!(lengths.len(), 8);
+        assert_eq!(lengths[0], 129);
+        assert!(lengths.iter().skip(1).all(|len| *len == 128));
+        assert_eq!(lengths.iter().map(|len| u64::from(*len)).sum::<u64>(), 1025);
+    }
+
+    #[test]
     fn validate_transfer_len_enforces_bounds() {
         let limits = UsbLimitsConfig::default();
         assert_eq!(
@@ -2362,6 +2393,38 @@ mod tests {
             assert!(send_shutdown_command(&sender, reply_tx).await);
             assert!(reply_rx.await.is_ok());
             assert!(recv_task.await.expect("receiver task must complete"));
+        });
+    }
+
+    #[test]
+    fn send_release_interface_no_reply_command_falls_back_when_queue_is_full() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime must build");
+
+        runtime.block_on(async {
+            let (sender, mut receiver) = mpsc::channel::<DeviceCommand>(1);
+            sender
+                .try_send(DeviceCommand::Shutdown {
+                    reply: oneshot::channel().0,
+                })
+                .expect("channel should accept first command");
+
+            let recv_task = tokio::spawn(async move {
+                let _ = receiver.recv().await;
+                let Some(DeviceCommand::ReleaseInterfaceNoReply { number }) = receiver.recv().await
+                else {
+                    return None;
+                };
+                Some(number)
+            });
+
+            send_release_interface_no_reply_command(&sender, 7).await;
+            assert_eq!(
+                recv_task.await.expect("receiver task must complete"),
+                Some(7)
+            );
         });
     }
 
