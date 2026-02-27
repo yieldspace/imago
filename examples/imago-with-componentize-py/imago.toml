@@ -1,0 +1,14 @@
+name = "imago-with-python"
+main = "cli.wasm"
+type = "cli"
+
+[build]
+command = "uv run componentize-py -d wit -w wasi:cli/command@0.2.0 componentize main -o cli.wasm"
+
+[capabilities]
+wasi = true
+
+[target.default]
+remote = "127.0.0.1:4443"
+server_name = "localhost"
+client_key = "certs/client.key"

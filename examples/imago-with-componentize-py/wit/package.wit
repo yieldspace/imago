@@ -1,0 +1,5 @@
+package example:python;
+
+world exports {
+    include wasi:cli/command@0.2.0;
+}
