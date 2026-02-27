@@ -53,3 +53,76 @@ impl FrameCodec for LengthPrefixedFrameCodec {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+    #![allow(dead_code)]
+    use super::{FrameCodec, LengthPrefixedFrameCodec};
+
+    #[test]
+    fn given_single_payload__when_encode_and_decode__then_round_trip_succeeds() {
+        let codec = LengthPrefixedFrameCodec;
+        let payload = b"hello-imagod";
+
+        let frame = codec.encode_frame(payload);
+        let decoded = codec.decode_frames(&frame).expect("decode should succeed");
+
+        assert_eq!(decoded, vec![payload.to_vec()]);
+    }
+
+    #[test]
+    fn given_multiple_frames__when_decode_frames__then_each_frame_is_recovered() {
+        let codec = LengthPrefixedFrameCodec;
+        let mut bytes = Vec::new();
+        bytes.extend(codec.encode_frame(b"first"));
+        bytes.extend(codec.encode_frame(b"second"));
+        bytes.extend(codec.encode_frame(&[0x01, 0x02, 0x03]));
+
+        let decoded = codec
+            .decode_frames(&bytes)
+            .expect("multi frame decode should succeed");
+
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded[0], b"first");
+        assert_eq!(decoded[1], b"second");
+        assert_eq!(decoded[2], vec![0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn given_truncated_header__when_decode_frames__then_bad_request_is_returned() {
+        let codec = LengthPrefixedFrameCodec;
+        let err = codec
+            .decode_frames(&[0x00, 0x00, 0x00])
+            .expect_err("truncated header must fail");
+
+        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.stage, "protocol");
+        assert_eq!(err.message, "truncated frame header");
+    }
+
+    #[test]
+    fn given_truncated_payload__when_decode_frames__then_bad_request_is_returned() {
+        let codec = LengthPrefixedFrameCodec;
+        let mut frame = vec![0, 0, 0, 5];
+        frame.extend_from_slice(b"abc");
+
+        let err = codec
+            .decode_frames(&frame)
+            .expect_err("truncated payload must fail");
+
+        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.stage, "protocol");
+        assert_eq!(err.message, "truncated frame payload");
+    }
+
+    #[test]
+    fn given_empty_stream__when_decode_frames__then_empty_list_is_returned() {
+        let codec = LengthPrefixedFrameCodec;
+        let decoded = codec
+            .decode_frames(&[])
+            .expect("empty stream should decode as empty list");
+
+        assert!(decoded.is_empty());
+    }
+}

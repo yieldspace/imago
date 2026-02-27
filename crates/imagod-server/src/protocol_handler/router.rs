@@ -611,11 +611,24 @@ pub(crate) async fn finalize_operation_after_terminal_event(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_logs_request_service_names;
+    #![allow(non_snake_case)]
+    #![allow(dead_code)]
+
+    use std::sync::atomic::AtomicBool;
+
+    use imago_protocol::{ArtifactPushChunkHeader, ArtifactPushRequest, CommandState, CommandType};
+    use imagod_control::OperationManager;
+    use uuid::Uuid;
+
+    use super::{
+        ensure_command_start_allowed, ensure_command_start_request_id_match,
+        finalize_operation_after_terminal_event, protocol_compatibility_announcement,
+        resolve_logs_request_service_names, validate_push_payload,
+    };
     use imago_protocol::ErrorCode;
 
     #[test]
-    fn logs_request_name_none_uses_loggable_service_names() {
+    fn given_name_is_none__when_loggable_names_exist__then_resolve_logs_uses_all_names() {
         let names = resolve_logs_request_service_names(
             None,
             vec!["svc-running".to_string(), "svc-retained".to_string()],
@@ -625,10 +638,113 @@ mod tests {
     }
 
     #[test]
-    fn logs_request_name_none_rejects_when_no_loggable_services_exist() {
+    fn given_name_is_none__when_no_loggable_service_exists__then_not_found_is_returned() {
         let err = resolve_logs_request_service_names(None, Vec::new())
             .expect_err("empty loggable names should be rejected");
         assert_eq!(err.code, ErrorCode::NotFound);
         assert_eq!(err.message, "no loggable services are available");
+    }
+
+    #[test]
+    fn given_name_is_specified__when_resolve_logs_request_service_names__then_requested_name_is_used()
+     {
+        let names = resolve_logs_request_service_names(
+            Some("svc-explicit".to_string()),
+            vec!["svc-running".to_string()],
+        )
+        .expect("name=Some should be accepted");
+        assert_eq!(names, vec!["svc-explicit"]);
+    }
+
+    #[test]
+    fn given_protocol_version__when_protocol_compatibility_announcement__then_supported_is_none_and_unsupported_is_some()
+     {
+        assert!(
+            protocol_compatibility_announcement("0.1.0").is_none(),
+            "supported version should not emit announcement"
+        );
+        let unsupported = protocol_compatibility_announcement("0.2.0")
+            .expect("unsupported version should emit announcement");
+        assert!(unsupported.contains("not supported"));
+
+        let invalid = protocol_compatibility_announcement("not-semver")
+            .expect("invalid version should emit announcement");
+        assert!(invalid.contains("invalid"));
+    }
+
+    #[test]
+    fn given_command_start_ids__when_ids_match_or_mismatch__then_validation_matches_contract() {
+        let request_id = Uuid::new_v4();
+        ensure_command_start_request_id_match(request_id, request_id)
+            .expect("matching request ids should pass");
+
+        let err = ensure_command_start_request_id_match(request_id, Uuid::new_v4())
+            .expect_err("mismatched request ids must fail");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert_eq!(err.stage, "command.start");
+    }
+
+    #[test]
+    fn given_shutdown_flag__when_ensure_command_start_allowed__then_shutdown_is_rejected() {
+        let accepting = AtomicBool::new(false);
+        ensure_command_start_allowed(&accepting).expect("non-shutdown should pass");
+
+        let shutting_down = AtomicBool::new(true);
+        let err = ensure_command_start_allowed(&shutting_down)
+            .expect_err("shutdown should reject command.start");
+        assert_eq!(err.code, ErrorCode::Busy);
+        assert_eq!(err.stage, "command.start");
+        assert_eq!(err.message, "server is shutting down");
+    }
+
+    #[test]
+    fn given_invalid_artifact_push_payload__when_validate_push_payload__then_bad_request_is_returned()
+     {
+        let payload = ArtifactPushRequest {
+            header: ArtifactPushChunkHeader {
+                deploy_id: "deploy-1".to_string(),
+                offset: 0,
+                length: 4,
+                chunk_sha256: "abcd".to_string(),
+                upload_token: "token-1".to_string(),
+            },
+            chunk_b64: String::new(),
+        };
+        let err = validate_push_payload(&payload).expect_err("empty chunk_b64 should fail");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert_eq!(err.stage, "artifact.push");
+    }
+
+    #[tokio::test]
+    async fn given_terminal_event_write_error__when_finalize_operation_after_terminal_event__then_operation_is_removed()
+     {
+        let operations = OperationManager::new();
+        let request_id = Uuid::new_v4();
+        operations
+            .start(request_id, CommandType::Deploy)
+            .await
+            .expect("start should succeed");
+        operations
+            .set_state(&request_id, CommandState::Running, "running")
+            .await
+            .expect("set_state should succeed");
+
+        let write_error =
+            imagod_common::ImagodError::new(ErrorCode::Internal, "session.write", "stream closed");
+        let result = finalize_operation_after_terminal_event(
+            &operations,
+            &request_id,
+            CommandState::Failed,
+            "failed",
+            Err(write_error),
+        )
+        .await;
+
+        assert!(result.is_err(), "write error should be returned");
+        let snapshot = operations.snapshot_running(&request_id).await;
+        assert!(
+            snapshot.is_err(),
+            "operation should be removed even on write error"
+        );
     }
 }

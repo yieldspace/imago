@@ -29,3 +29,82 @@ pub fn build_server(config: &ImagodConfig) -> Result<Server, ImagodError> {
 
     Ok(web_transport_quinn::Server::new(endpoint))
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+    #![allow(dead_code)]
+    use std::{collections::BTreeMap, net::UdpSocket, path::PathBuf};
+
+    use imagod_config::{ImagodConfig, RuntimeConfig, TlsConfig};
+
+    use super::build_server;
+
+    fn test_server_key_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/local-imagod-plugin-hello/certs/server.key")
+    }
+
+    fn sample_config(listen_addr: String) -> ImagodConfig {
+        ImagodConfig {
+            listen_addr,
+            tls: TlsConfig {
+                server_key: test_server_key_path(),
+                admin_public_keys: Vec::new(),
+                client_public_keys: Vec::new(),
+                known_public_keys: BTreeMap::new(),
+            },
+            storage_root: PathBuf::from("/tmp/imago-test-storage"),
+            runtime: RuntimeConfig::default(),
+            server_version: "imagod/test".to_string(),
+        }
+    }
+
+    #[test]
+    fn given_invalid_listen_addr__when_build_server__then_bad_request_is_returned() {
+        let config = sample_config("not-an-addr".to_string());
+
+        let err = match build_server(&config) {
+            Ok(_) => panic!("invalid listen_addr must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.stage, super::STAGE_TRANSPORT);
+        assert!(err.message.contains("listen_addr parse failed"));
+    }
+
+    #[test]
+    fn given_valid_config__when_build_server__then_server_is_created() {
+        let config = sample_config("127.0.0.1:0".to_string());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime should build");
+        runtime.block_on(async {
+            let server = build_server(&config).expect("valid config should build server");
+            drop(server);
+        });
+    }
+
+    #[test]
+    fn given_port_already_bound__when_build_server__then_internal_error_is_returned() {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("udp bind should succeed");
+        let addr = socket.local_addr().expect("bound addr should be available");
+        let config = sample_config(addr.to_string());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime should build");
+        runtime.block_on(async {
+            let err = match build_server(&config) {
+                Ok(_) => panic!("quic endpoint bind should fail"),
+                Err(err) => err,
+            };
+            assert_eq!(err.code, imago_protocol::ErrorCode::Internal);
+            assert_eq!(err.stage, super::STAGE_TRANSPORT);
+            assert!(err.message.contains("endpoint bind failed"));
+        });
+    }
+}

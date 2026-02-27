@@ -239,10 +239,14 @@ async fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>, ImagodError> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::AsyncWriteExt;
     use tokio::net::UnixListener;
+    use tokio::net::UnixStream;
 
     use super::*;
-    use crate::ipc::{ControlRequest, ControlResponse};
+    use crate::ipc::{
+        ControlRequest, ControlResponse, RunnerInboundRequest, RunnerInboundResponse,
+    };
 
     #[tokio::test]
     async fn call_control_round_trip() {
@@ -281,5 +285,113 @@ mod tests {
 
         server.await.expect("server task should finish");
         let _ = std::fs::remove_file(socket_path);
+    }
+
+    #[tokio::test]
+    async fn call_runner_round_trip() {
+        let socket_path = std::path::PathBuf::from(format!(
+            "/tmp/imago-runner-{}.sock",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ));
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("listener bind should succeed");
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept should succeed");
+            let req = DbusP2pTransport::read_message::<RunnerInboundRequest>(&mut stream)
+                .await
+                .expect("request should decode");
+            match req {
+                RunnerInboundRequest::ShutdownRunner { .. } => {
+                    DbusP2pTransport::write_message(&mut stream, &RunnerInboundResponse::Ack)
+                        .await
+                        .expect("response write should succeed");
+                }
+                _ => panic!("unexpected request"),
+            }
+        });
+
+        let response = DbusP2pTransport::call_runner(
+            &socket_path,
+            &RunnerInboundRequest::ShutdownRunner {
+                manager_auth_proof: "proof".to_string(),
+            },
+        )
+        .await
+        .expect("call should succeed");
+        assert!(matches!(response, RunnerInboundResponse::Ack));
+
+        server.await.expect("server task should finish");
+        let _ = std::fs::remove_file(socket_path);
+    }
+
+    #[tokio::test]
+    async fn write_frame_rejects_payload_larger_than_limit() {
+        let (mut writer, mut _reader) = UnixStream::pair().expect("pair should succeed");
+        let payload = vec![0u8; MAX_FRAME_BYTES + 1];
+        let err = write_frame(&mut writer, &payload)
+            .await
+            .expect_err("oversized payload should be rejected");
+
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert_eq!(err.stage, STAGE);
+        assert!(err.message.contains("ipc frame too large"));
+    }
+
+    #[tokio::test]
+    async fn read_frame_rejects_length_prefix_larger_than_limit() {
+        let (mut writer, mut reader) = UnixStream::pair().expect("pair should succeed");
+        let oversized_len = (MAX_FRAME_BYTES as u32).saturating_add(1).to_be_bytes();
+        writer
+            .write_all(&oversized_len)
+            .await
+            .expect("length prefix write should succeed");
+        drop(writer);
+
+        let err = read_frame(&mut reader)
+            .await
+            .expect_err("oversized length should be rejected");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert_eq!(err.stage, STAGE);
+        assert!(err.message.contains("ipc frame too large"));
+    }
+
+    #[tokio::test]
+    async fn read_message_rejects_invalid_cbor_payload() {
+        let (mut writer, mut reader) = UnixStream::pair().expect("pair should succeed");
+        let invalid = vec![0xff, 0x00, 0x01];
+        write_frame(&mut writer, &invalid)
+            .await
+            .expect("frame write should succeed");
+        drop(writer);
+
+        let err = DbusP2pTransport::read_message::<ControlRequest>(&mut reader)
+            .await
+            .expect_err("invalid cbor should be rejected");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert_eq!(err.stage, STAGE);
+        assert!(err.message.contains("decode failed"));
+    }
+
+    #[tokio::test]
+    async fn read_message_rejects_decoded_message_that_fails_validation() {
+        let (mut writer, mut reader) = UnixStream::pair().expect("pair should succeed");
+        let invalid_request = ControlRequest::Heartbeat {
+            runner_id: "".to_string(),
+            manager_auth_proof: "".to_string(),
+        };
+        let encoded =
+            imago_protocol::to_cbor(&invalid_request).expect("request encoding should succeed");
+        write_frame(&mut writer, &encoded)
+            .await
+            .expect("frame write should succeed");
+        drop(writer);
+
+        let err = DbusP2pTransport::read_message::<ControlRequest>(&mut reader)
+            .await
+            .expect_err("decoded invalid message should be rejected");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert_eq!(err.stage, STAGE);
+        assert!(err.message.contains("validation failed"));
     }
 }

@@ -534,3 +534,355 @@ pub(crate) fn log_error_from_imagod_error(err: &ImagodError) -> LogError {
         message: err.message.clone(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+    #![allow(dead_code)]
+
+    use std::{
+        any::Any,
+        collections::VecDeque,
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    use async_trait::async_trait;
+    use imago_protocol::{ErrorCode, from_cbor};
+    use imagod_control::{ServiceLogEvent, ServiceLogStream, ServiceLogSubscription};
+    use tokio::sync::{Notify, broadcast};
+
+    use super::*;
+    use crate::protocol_handler::session_loop::ProtocolSession;
+
+    struct FakeProtocolSession {
+        max_datagram_size: usize,
+        send_outcomes: Mutex<VecDeque<Result<(), String>>>,
+        sent_datagrams: Mutex<Vec<Vec<u8>>>,
+        send_attempts: AtomicUsize,
+        close_notify: Notify,
+    }
+
+    impl FakeProtocolSession {
+        fn new(max_datagram_size: usize, send_outcomes: Vec<Result<(), String>>) -> Self {
+            Self {
+                max_datagram_size,
+                send_outcomes: Mutex::new(send_outcomes.into()),
+                sent_datagrams: Mutex::new(Vec::new()),
+                send_attempts: AtomicUsize::new(0),
+                close_notify: Notify::new(),
+            }
+        }
+
+        fn sent_datagrams(&self) -> Vec<Vec<u8>> {
+            self.sent_datagrams
+                .lock()
+                .expect("sent_datagrams lock should succeed")
+                .clone()
+        }
+
+        fn send_attempts(&self) -> usize {
+            self.send_attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ProtocolSession for FakeProtocolSession {
+        async fn accept_bi(
+            &self,
+        ) -> Option<(
+            web_transport_quinn::SendStream,
+            web_transport_quinn::RecvStream,
+        )> {
+            None
+        }
+
+        fn max_datagram_size(&self) -> usize {
+            self.max_datagram_size
+        }
+
+        fn send_datagram(&self, payload: Vec<u8>) -> Result<(), ImagodError> {
+            self.send_attempts.fetch_add(1, Ordering::SeqCst);
+            self.sent_datagrams
+                .lock()
+                .expect("sent_datagrams lock should succeed")
+                .push(payload);
+
+            let outcome = self
+                .send_outcomes
+                .lock()
+                .expect("send_outcomes lock should succeed")
+                .pop_front()
+                .unwrap_or(Ok(()));
+            match outcome {
+                Ok(()) => Ok(()),
+                Err(message) => Err(ImagodError::new(
+                    ErrorCode::Internal,
+                    "logs.datagram",
+                    message,
+                )),
+            }
+        }
+
+        fn peer_identity(&self) -> Option<Box<dyn Any>> {
+            None
+        }
+
+        async fn closed(&self) {
+            self.close_notify.notified().await;
+        }
+    }
+
+    fn sample_subscription(name: &str, snapshot_bytes: &[u8]) -> ServiceLogSubscription {
+        ServiceLogSubscription {
+            service_name: name.to_string(),
+            snapshot_bytes: snapshot_bytes.to_vec(),
+            snapshot_events: vec![ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: snapshot_bytes.to_vec(),
+                timestamp_unix_ms: 123,
+            }],
+            receiver: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn given_retryable_datagram_error__when_send_datagram_with_retry__then_second_attempt_succeeds()
+     {
+        let session =
+            FakeProtocolSession::new(1200, vec![Err("first failure".to_string()), Ok(())]);
+
+        send_datagram_with_retry(&session, vec![0x01, 0x02])
+            .await
+            .expect("second attempt should succeed");
+        assert_eq!(session.send_attempts(), 2);
+    }
+
+    #[tokio::test]
+    async fn given_datagram_send_failures__when_send_datagram_with_retry__then_last_error_is_returned()
+     {
+        let session = FakeProtocolSession::new(
+            1200,
+            vec![
+                Err("e1".to_string()),
+                Err("e2".to_string()),
+                Err("e3".to_string()),
+                Err("e4".to_string()),
+            ],
+        );
+
+        let err = send_datagram_with_retry(&session, vec![0x0a])
+            .await
+            .expect_err("all attempts should fail");
+        assert_eq!(session.send_attempts(), 4);
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert_eq!(err.stage, "logs.datagram");
+        assert!(err.message.contains("e4"));
+    }
+
+    #[tokio::test]
+    async fn given_small_datagram_limit__when_send_datagram_envelope__then_internal_size_error_is_returned()
+     {
+        let session = FakeProtocolSession::new(64, vec![Ok(())]);
+        let request_id = Uuid::new_v4();
+        let correlation_id = Uuid::new_v4();
+        let chunk = LogChunk {
+            request_id,
+            seq: 0,
+            name: "svc-a".to_string(),
+            stream_kind: LogStreamKind::Composite,
+            bytes: vec![0x41; 512],
+            is_last: false,
+            timestamp_unix_ms: None,
+        };
+        let envelope =
+            ProtocolEnvelope::new(MessageType::LogsChunk, request_id, correlation_id, chunk);
+
+        let err = send_datagram_envelope(&session, &envelope, 64)
+            .await
+            .expect_err("payload larger than max datagram should fail");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert_eq!(err.stage, "logs.datagram");
+        assert!(err.message.contains("datagram payload too large"));
+    }
+
+    #[tokio::test]
+    async fn given_snapshot_subscription__when_run_logs_forwarder__then_chunk_and_end_datagrams_are_emitted()
+     {
+        let session = Arc::new(FakeProtocolSession::new(2048, vec![Ok(()), Ok(()), Ok(())]));
+        let request_id = Uuid::new_v4();
+        let correlation_id = Uuid::new_v4();
+        let subscriptions = vec![sample_subscription("svc-a", b"hello-log")];
+
+        run_logs_forwarder(
+            session.clone(),
+            request_id,
+            correlation_id,
+            subscriptions,
+            false,
+        )
+        .await;
+
+        let sent = session.sent_datagrams();
+        assert_eq!(sent.len(), 3, "snapshot chunk + terminal chunk + logs.end");
+
+        let first = from_cbor::<ProtocolEnvelope<LogChunk>>(&sent[0]).expect("first chunk decode");
+        assert_eq!(first.message_type, MessageType::LogsChunk);
+        assert_eq!(first.payload.name, "svc-a");
+        assert_eq!(first.payload.bytes, b"hello-log".to_vec());
+        assert!(!first.payload.is_last);
+        assert_eq!(first.payload.timestamp_unix_ms, None);
+
+        let second =
+            from_cbor::<ProtocolEnvelope<LogChunk>>(&sent[1]).expect("second chunk decode");
+        assert_eq!(second.message_type, MessageType::LogsChunk);
+        assert_eq!(second.payload.name, "svc-a");
+        assert!(second.payload.bytes.is_empty());
+        assert!(second.payload.is_last);
+
+        let end = from_cbor::<ProtocolEnvelope<LogEnd>>(&sent[2]).expect("logs.end decode");
+        assert_eq!(end.message_type, MessageType::LogsEnd);
+        assert_eq!(end.payload.request_id, request_id);
+        assert!(end.payload.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn given_too_small_datagram_capacity__when_run_logs_forwarder__then_forwarding_aborts_without_datagram()
+     {
+        let session = Arc::new(FakeProtocolSession::new(1, vec![Ok(())]));
+        let request_id = Uuid::new_v4();
+        let correlation_id = Uuid::new_v4();
+        let subscriptions = vec![sample_subscription("svc-a", b"x")];
+
+        run_logs_forwarder(
+            session.clone(),
+            request_id,
+            correlation_id,
+            subscriptions,
+            true,
+        )
+        .await;
+
+        let sent = session.sent_datagrams();
+        assert!(
+            sent.is_empty(),
+            "max_datagram_size=1 cannot encode even logs.end envelope"
+        );
+        assert_eq!(session.send_attempts(), 0);
+    }
+
+    #[test]
+    fn given_directional_stream_and_error_code__when_mapping_helpers__then_protocol_values_are_stable()
+     {
+        assert_eq!(
+            service_log_stream_to_protocol(ServiceLogStream::Stdout),
+            LogStreamKind::Stdout
+        );
+        assert_eq!(
+            service_log_stream_to_protocol(ServiceLogStream::Stderr),
+            LogStreamKind::Stderr
+        );
+
+        let not_found = ImagodError::new(ErrorCode::NotFound, "logs.request", "missing");
+        assert_eq!(
+            log_error_from_imagod_error(&not_found).code,
+            LogErrorCode::ProcessNotFound
+        );
+        let unauthorized = ImagodError::new(ErrorCode::Unauthorized, "logs.request", "denied");
+        assert_eq!(
+            log_error_from_imagod_error(&unauthorized).code,
+            LogErrorCode::PermissionDenied
+        );
+        let internal = ImagodError::new(ErrorCode::Internal, "logs.request", "oops");
+        assert_eq!(
+            log_error_from_imagod_error(&internal).code,
+            LogErrorCode::Internal
+        );
+    }
+
+    #[test]
+    fn given_lagged_event_count__when_advance_seq_for_lagged__then_seq_uses_saturating_add() {
+        let mut seq = u64::MAX - 1;
+        advance_seq_for_lagged(&mut seq, 10);
+        assert_eq!(seq, u64::MAX);
+    }
+
+    #[test]
+    fn given_datagram_budget_and_service_names__when_fixed_log_chunk_size__then_limits_and_errors_follow_contract()
+     {
+        let request_id = Uuid::new_v4();
+        let correlation_id = Uuid::new_v4();
+        let names = vec!["svc-a".to_string(), "service-with-longer-name".to_string()];
+        let chunk_size = fixed_log_chunk_size(request_id, correlation_id, 2048, &names, true)
+            .expect("chunk size should be computed");
+        assert!(chunk_size > 0);
+        assert!(chunk_size <= LOG_DATAGRAM_TARGET_BYTES);
+
+        let err = fixed_log_chunk_size(request_id, correlation_id, 1, &names, false)
+            .expect_err("too-small datagram budget should fail");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert_eq!(err.stage, "logs.datagram");
+        assert!(err.message.contains("too small"));
+    }
+
+    #[tokio::test]
+    async fn given_empty_subscriptions__when_run_logs_forwarder__then_no_datagram_is_sent() {
+        let session = Arc::new(FakeProtocolSession::new(1200, vec![Ok(())]));
+        run_logs_forwarder(
+            session.clone(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Vec::new(),
+            false,
+        )
+        .await;
+        assert!(
+            session.sent_datagrams().is_empty(),
+            "no subscriptions should skip forwarding"
+        );
+    }
+
+    #[tokio::test]
+    async fn given_follow_receiver_with_lagged_events__when_stream_logs_datagrams__then_seq_advances_and_events_are_forwarded()
+     {
+        let session = FakeProtocolSession::new(2048, vec![Ok(()), Ok(()), Ok(())]);
+        let request_id = Uuid::new_v4();
+        let correlation_id = Uuid::new_v4();
+        let sender = LogsDatagramSender::new(&session, request_id, correlation_id, 2048, 512, true);
+        let mut seq = 0u64;
+        let mut last_name = None;
+
+        let (tx, rx) = broadcast::channel::<ServiceLogEvent>(1);
+        tx.send(ServiceLogEvent {
+            stream: ServiceLogStream::Stdout,
+            bytes: b"first".to_vec(),
+            timestamp_unix_ms: 10,
+        })
+        .expect("first send should succeed");
+        tx.send(ServiceLogEvent {
+            stream: ServiceLogStream::Stderr,
+            bytes: b"second".to_vec(),
+            timestamp_unix_ms: 11,
+        })
+        .expect("second send should succeed");
+        drop(tx);
+
+        let subscriptions = vec![ServiceLogSubscription {
+            service_name: "svc-follow".to_string(),
+            snapshot_bytes: Vec::new(),
+            snapshot_events: Vec::new(),
+            receiver: Some(rx),
+        }];
+        stream_logs_datagrams(&session, &sender, subscriptions, &mut seq, &mut last_name)
+            .await
+            .expect("streaming should succeed");
+
+        assert!(
+            seq >= 2,
+            "lagged + at least one forwarded event should advance sequence"
+        );
+        assert_eq!(last_name.as_deref(), Some("svc-follow"));
+    }
+}
