@@ -384,6 +384,75 @@ guest_path = "/app/readonly"
 
 - Validation error notes: non-absolute or duplicate guest path fails validation.
 
+### The `usb.paths` field
+
+- Type: `array(string)`
+- Required/Optional: Required when using `imago:usb` native plugin.
+- Accepted values / Constraints: absolute paths only; empty strings and NUL are rejected; duplicate entries after path normalization are rejected.
+- Default: none (missing field fails validation).
+- Example:
+
+```toml
+[resources.usb]
+paths = ["/dev/bus/usb/001/001", "/dev/bus/usb/001/002"]
+```
+
+- Validation error notes: missing field, wrong type, non-absolute paths, or normalized duplicates fail runtime startup validation.
+
+### The `usb.max_transfer_bytes` field
+
+- Type: `integer`
+- Required/Optional: Optional.
+- Accepted values / Constraints: `1..=8388608`.
+- Default: `1048576`.
+- Example:
+
+```toml
+[resources.usb]
+max_transfer_bytes = 1048576
+```
+
+- Validation error notes: out-of-range values fail runtime startup validation.
+
+### The `usb.max_timeout_ms` field
+
+- Type: `integer`
+- Required/Optional: Optional.
+- Accepted values / Constraints: `1..=120000`.
+- Default: `30000`.
+- Example:
+
+```toml
+[resources.usb]
+max_timeout_ms = 30000
+```
+
+- Validation error notes: out-of-range values fail runtime startup validation.
+
+### The `usb.max_paths` field
+
+- Type: `integer`
+- Required/Optional: Optional.
+- Accepted values / Constraints: `0..=256`; `usb.paths` entry count must not exceed this value.
+- Default: `128`.
+- Example:
+
+```toml
+[resources.usb]
+max_paths = 128
+```
+
+- Validation error notes: out-of-range values or `paths` overflow fail runtime startup validation.
+
+### USB runtime behavior (`imago:usb`)
+
+- `provider.list-openable-paths` returns the normalized allowlist defined by `resources.usb.paths`.
+- `provider.list-openable-devices` returns currently connected devices whose Linux path is allowlisted.
+- `provider.poll-device-event(timeout-ms)` returns only allowlisted connection events (`pending`, `connected`, `disconnected`); non-allowlisted events are dropped internally.
+- `provider.open-device(path)` rejects non-allowlisted paths before backend open attempts.
+- Per-device worker channels are bounded; saturated workers can return `usb-error.busy`.
+- All transfer APIs (`control`, `bulk`, `interrupt`, `isochronous`) enforce `usb.max_transfer_bytes` and `usb.max_timeout_ms`.
+
 ### The `<custom_key>` field
 
 - Type: any TOML value (`boolean`, `string`, `integer`, `float`, `array`, `table`, datetime)
@@ -404,9 +473,13 @@ mode = "strict"
 digital_pins = [
   { label = "GPIO17", value_path = "/sys/class/gpio/gpio17/value", supports_input = true, supports_output = true, default_active_level = "active-high", allow_pull_resistor = true }
 ]
+
+[resources.usb]
+paths = ["/dev/bus/usb/001/001"]
+max_transfer_bytes = 1048576
 ```
 
-- Validation error notes: empty keys fail validation. `resources.gpio.digital_pins` rejects duplicated `label` and duplicated `value_path` during runtime startup.
+- Validation error notes: empty keys fail validation. `resources.gpio.digital_pins` rejects duplicated `label` and duplicated `value_path`; `resources.usb` rejects invalid path/limit settings during runtime startup.
 
 <a id="the-capabilities-section"></a>
 ## The [capabilities] section

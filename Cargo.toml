@@ -65,6 +65,7 @@ hyper = "1.8.1"
 hyper-util = "0.1.18"
 libc = "0.2.177"
 linux-embedded-hal = "0.4.0"
+rusb = "0.9.4"
 quinn = "0.11.9"
 quote = "1.0.42"
 rcgen = "0.14.7"
@@ -100,6 +101,7 @@ imago-plugin-imago-admin = { path = "plugins/imago-admin", version = "0.1.0" }
 imago-plugin-imago-experimental-gpio = { path = "plugins/imago-experimental-gpio", version = "0.1.0" }
 imago-plugin-imago-experimental-i2c = { path = "plugins/imago-experimental-i2c", version = "0.1.0" }
 imago-plugin-imago-node = { path = "plugins/imago-node", version = "0.1.0" }
+imago-plugin-imago-usb = { path = "plugins/imago-usb", version = "0.1.0" }
 imago-plugin-nanokvm-plugin = { path = "plugins/imago-plugin-nanokvm-plugin", version = "0.1.0" }
 imago-lockfile = { path = "crates/imago-lockfile", version = "0.1.0" }
 imago-plugin-macros = { path = "crates/imago-plugin-macros", version = "0.1.0" }
