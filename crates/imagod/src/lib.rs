@@ -6,6 +6,7 @@ use imago_plugin_imago_admin::ImagoAdminPlugin;
 use imago_plugin_imago_experimental_gpio::ImagoExperimentalGpioPlugin;
 use imago_plugin_imago_experimental_i2c::ImagoExperimentalI2cPlugin;
 use imago_plugin_imago_node::ImagoNodePlugin;
+use imago_plugin_imago_usb::ImagoUsbPlugin;
 
 mod manager_runtime;
 mod runner_runtime;
@@ -66,6 +67,9 @@ pub fn register_builtin_native_plugins(
         .map_err(anyhow::Error::new)?;
     builder
         .register_plugin(Arc::new(ImagoExperimentalI2cPlugin))
+        .map_err(anyhow::Error::new)?;
+    builder
+        .register_plugin(Arc::new(ImagoUsbPlugin))
         .map_err(anyhow::Error::new)?;
     Ok(())
 }
@@ -196,6 +200,7 @@ mod tests {
             assert!(registry.has_plugin("imago:node"));
             assert!(registry.has_plugin("imago:experimental-gpio"));
             assert!(registry.has_plugin("imago:experimental-i2c"));
+            assert!(registry.has_plugin("imago:usb"));
         }
 
         #[test]
@@ -211,6 +216,7 @@ mod tests {
             assert!(registry.has_plugin("imago:node"));
             assert!(registry.has_plugin("imago:experimental-gpio"));
             assert!(registry.has_plugin("imago:experimental-i2c"));
+            assert!(registry.has_plugin("imago:usb"));
             assert!(registry.has_plugin("test:custom"));
         }
 
