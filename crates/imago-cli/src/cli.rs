@@ -98,9 +98,9 @@ pub struct InitArgs {
     #[arg(value_name = "PATH")]
     pub path: Option<PathBuf>,
 
-    /// Template language ID (for example: rust, generic).
-    #[arg(long, value_name = "LANG_ID")]
-    pub lang: Option<String>,
+    /// Template ID (for example: rust, python).
+    #[arg(long, value_name = "TEMPLATE_ID")]
+    pub template: Option<String>,
 }
 
 /// Build artifacts for a service project.
@@ -370,10 +370,16 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     #[test]
-    fn parses_project_init_with_path_and_lang() {
-        let cli =
-            Cli::try_parse_from(["imago", "project", "init", "services/api", "--lang", "rust"])
-                .expect("parse should succeed");
+    fn parses_project_init_with_path_and_template() {
+        let cli = Cli::try_parse_from([
+            "imago",
+            "project",
+            "init",
+            "services/api",
+            "--template",
+            "rust",
+        ])
+        .expect("parse should succeed");
 
         assert_eq!(
             cli,
@@ -381,11 +387,35 @@ mod tests {
                 command: Commands::Project(ProjectSubcommandArgs {
                     command: ProjectCommands::Init(InitArgs {
                         path: Some(PathBuf::from("services/api")),
-                        lang: Some("rust".to_string()),
+                        template: Some("rust".to_string()),
                     }),
                 }),
             }
         );
+    }
+
+    #[test]
+    fn parses_project_init_without_arguments() {
+        let cli = Cli::try_parse_from(["imago", "project", "init"]).expect("parse should succeed");
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: Commands::Project(ProjectSubcommandArgs {
+                    command: ProjectCommands::Init(InitArgs {
+                        path: None,
+                        template: None,
+                    }),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_project_init_with_legacy_lang_option() {
+        let err = Cli::try_parse_from(["imago", "project", "init", "--lang", "rust"])
+            .expect_err("--lang should be rejected");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
