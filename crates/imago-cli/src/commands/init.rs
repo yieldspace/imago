@@ -402,13 +402,37 @@ fn build_init_plan(output_dir: &Path, template: &InitTemplate) -> InitPlan {
         });
     }
 
-    let mut sorted_directories: Vec<PathBuf> = directories.into_iter().collect();
+    let mut expanded_directories = BTreeSet::new();
+    for dir in directories {
+        insert_missing_paths_with_ancestors(&dir, &mut expanded_directories);
+    }
+
+    let mut sorted_directories: Vec<PathBuf> = expanded_directories.into_iter().collect();
     sorted_directories.sort_by(|a, b| path_depth(a).cmp(&path_depth(b)).then_with(|| a.cmp(b)));
 
     InitPlan {
         output_dir: output_dir.to_path_buf(),
         directories: sorted_directories,
         files,
+    }
+}
+
+fn insert_missing_paths_with_ancestors(path: &Path, directories: &mut BTreeSet<PathBuf>) {
+    let mut missing = Vec::new();
+    let mut current = Some(path);
+    while let Some(dir) = current {
+        match fs::symlink_metadata(dir) {
+            Ok(_) => break,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                missing.push(dir.to_path_buf());
+                current = dir.parent();
+            }
+            Err(_) => break,
+        }
+    }
+
+    for dir in missing.into_iter().rev() {
+        directories.insert(dir);
     }
 }
 
@@ -488,7 +512,11 @@ fn apply_plan_with_writer(
     let mut created_files = Vec::new();
     for file in &plan.files {
         if let Err(err) = writer(&file.destination, &file.contents) {
-            rollback_created_paths(&created_files, &created_dirs);
+            let mut rollback_files = created_files.clone();
+            if fs::symlink_metadata(&file.destination).is_ok() {
+                rollback_files.push(file.destination.clone());
+            }
+            rollback_created_paths(&rollback_files, &created_dirs);
             return Err(err);
         }
         created_files.push(file.destination.clone());
@@ -527,9 +555,15 @@ fn write_file_create_new(destination: &Path, contents: &[u8]) -> anyhow::Result<
     };
 
     file.write_all(contents)
-        .with_context(|| format!("failed to write template file {}", destination.display()))?;
+        .with_context(|| format!("failed to write template file {}", destination.display()))
+        .inspect_err(|_| {
+            let _ = fs::remove_file(destination);
+        })?;
     file.flush()
-        .with_context(|| format!("failed to flush template file {}", destination.display()))?;
+        .with_context(|| format!("failed to flush template file {}", destination.display()))
+        .inspect_err(|_| {
+            let _ = fs::remove_file(destination);
+        })?;
     Ok(())
 }
 
@@ -824,6 +858,37 @@ mod tests {
     }
 
     #[test]
+    fn creates_ancestor_directories_for_nested_output_path() {
+        let cwd = temp_dir("creates-ancestor-directories");
+        let template = detected_templates()
+            .expect("templates should load")
+            .into_iter()
+            .find(|template| !template.files.is_empty())
+            .expect("at least one template should contain files");
+
+        let nested = PathBuf::from("services/example");
+        let output = run_inner_with_prompts(
+            InitArgs {
+                path: Some(nested.clone()),
+                template: Some(template.id.clone()),
+            },
+            &cwd,
+            false,
+            ".",
+            "unused",
+        )
+        .expect("init should succeed for nested output path");
+
+        assert_eq!(output.output_dir, cwd.join(&nested));
+        assert!(cwd.join("services").is_dir());
+        assert!(output.output_dir.is_dir());
+        for file in &template.files {
+            assert!(output.output_dir.join(&file.relative_path).is_file());
+        }
+        cleanup(&cwd);
+    }
+
+    #[test]
     fn dot_path_writes_files_into_cwd() {
         let cwd = temp_dir("dot-path");
         let template = detected_templates()
@@ -921,6 +986,56 @@ mod tests {
         let err =
             apply_plan_with_writer(&plan, &mut writer).expect_err("write failure should fail");
         assert!(err.to_string().contains("injected write failure"));
+
+        for file in &plan.files {
+            assert!(
+                !file.destination.exists(),
+                "file should be rolled back: {}",
+                file.destination.display()
+            );
+        }
+        assert!(
+            !output_dir.exists(),
+            "output directory should be removed after rollback"
+        );
+        cleanup(&cwd);
+    }
+
+    #[test]
+    fn apply_plan_rolls_back_partial_file_when_writer_fails_after_create() {
+        let cwd = temp_dir("rollback-partial-file");
+        let output_dir = cwd.join("svc");
+        let template = detected_templates()
+            .expect("templates should load")
+            .into_iter()
+            .find(|template| template.files.len() >= 2)
+            .expect("at least one template should contain two files");
+        let plan = build_init_plan(&output_dir, &template);
+        ensure_no_conflicts(&plan).expect("plan should have no conflicts");
+
+        let mut call_count = 0usize;
+        let mut writer = |destination: &Path, contents: &[u8]| -> anyhow::Result<()> {
+            if call_count == 0 {
+                call_count += 1;
+                return write_file_create_new(destination, contents);
+            }
+
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(destination)
+                .expect("second file should be creatable");
+            file.write_all(b"partial")
+                .expect("partial file write should succeed");
+            Err(anyhow!("injected failure after create"))
+        };
+
+        let err = apply_plan_with_writer(&plan, &mut writer)
+            .expect_err("writer failure after create should fail");
+        assert!(
+            err.to_string().contains("injected failure after create"),
+            "unexpected error: {err}"
+        );
 
         for file in &plan.files {
             assert!(
