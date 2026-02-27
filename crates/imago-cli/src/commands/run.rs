@@ -33,11 +33,11 @@ pub async fn run(args: RunArgs) -> CommandResult {
 
 pub(crate) async fn run_with_project_root(args: RunArgs, project_root: &Path) -> CommandResult {
     let started_at = Instant::now();
-    ui::command_start("run", "starting");
+    ui::command_start("service.start", "starting");
     match run_async(args, project_root).await {
         Ok(summary) => {
-            ui::command_finish("run", true, "");
-            let mut result = CommandResult::success("run", started_at);
+            ui::command_finish("service.start", true, "");
+            let mut result = CommandResult::success("service.start", started_at);
             result
                 .meta
                 .insert("service".to_string(), summary.service_name);
@@ -50,10 +50,10 @@ pub(crate) async fn run_with_project_root(args: RunArgs, project_root: &Path) ->
             result
         }
         Err(err) => {
-            let summary = summarize_command_failure("run", &err);
-            ui::command_finish("run", false, &summary);
-            let message = error_diagnostics::format_command_error("run", &err);
-            CommandResult::failure("run", started_at, message)
+            let summary = summarize_command_failure("service.start", &err);
+            ui::command_finish("service.start", false, &summary);
+            let message = error_diagnostics::format_command_error("service.start", &err);
+            CommandResult::failure("service.start", started_at, message)
         }
     }
 }
@@ -64,17 +64,21 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<RunSumm
         target,
         detach,
     } = args;
-    ui::command_stage("run", "load-config", "loading target configuration");
+    ui::command_stage(
+        "service.start",
+        "load-config",
+        "loading target configuration",
+    );
     let target_name = target.unwrap_or_else(|| build::default_target_name().to_string());
     let target_config = build::load_target_config(&target_name, project_root)
         .context("failed to load target configuration")?;
     let target = target_config
         .require_deploy_credentials()
-        .context("target settings are invalid for run")?;
+        .context("target settings are invalid for service start")?;
     let service_name = resolve_service_name(name.as_deref(), project_root)
-        .context("failed to resolve service name for run")?;
+        .context("failed to resolve service name for service start")?;
     ui::command_info(
-        "run",
+        "service.start",
         &format_local_context_line(
             project_root,
             &service_name,
@@ -84,13 +88,13 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<RunSumm
         ),
     );
 
-    ui::command_stage("run", "connect", "connecting target");
+    ui::command_stage("service.start", "connect", "connecting target");
     let connected = deploy::connect_target(&target).await?;
     let correlation_id = Uuid::new_v4();
-    ui::command_stage("run", "hello", "negotiating hello");
+    ui::command_stage("service.start", "hello", "negotiating hello");
     let hello = negotiate_hello(&connected.session, correlation_id).await?;
     ui::command_info(
-        "run",
+        "service.start",
         &format_peer_context_line(
             &connected.authority,
             &connected.resolved_addr.to_string(),
@@ -100,7 +104,7 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<RunSumm
     let command_stream_timeout =
         deploy::resolve_command_stream_timeout_from_hello_limits(&hello.limits);
 
-    ui::command_stage("run", "command.start", "sending run request");
+    ui::command_stage("service.start", "command.start", "sending run request");
     let command = deploy::build_command_start_envelope(
         correlation_id,
         Uuid::new_v4(),
@@ -115,7 +119,7 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<RunSumm
         command_stream_timeout,
     )
     .await?;
-    handle_terminal_event("run", responses)?;
+    handle_terminal_event("service.start", responses)?;
     if !detach {
         follow_logs_after_run(project_root, &target_config, &service_name).await;
     }
@@ -147,8 +151,8 @@ async fn follow_logs_after_run(
             .stderr
             .unwrap_or_else(|| format!("exit code {}", logs_result.exit_code));
         ui::command_warn(
-            "run",
-            &format!("logs --follow failed after run succeeded: {detail}"),
+            "service.start",
+            &format!("logs --follow failed after service start succeeded: {detail}"),
         );
     }
 }

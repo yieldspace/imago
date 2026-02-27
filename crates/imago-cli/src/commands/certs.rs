@@ -60,8 +60,12 @@ struct BindingsCertDeploySummary {
 
 pub fn run_generate(args: CertsGenerateArgs) -> CommandResult {
     let started_at = Instant::now();
-    ui::command_start("certs.generate", "starting");
-    ui::command_stage("certs.generate", "generate", "creating key material");
+    ui::command_start("trust.client-key.generate", "starting");
+    ui::command_stage(
+        "trust.client-key.generate",
+        "generate",
+        "creating key material",
+    );
     match run_generate_inner(args) {
         Ok(output) => {
             println!("generated key material:");
@@ -73,20 +77,20 @@ pub fn run_generate(args: CertsGenerateArgs) -> CommandResult {
             );
             println!("private keys are sensitive. do not commit or share them.");
 
-            ui::command_finish("certs.generate", true, "");
+            ui::command_finish("trust.client-key.generate", true, "");
             success_generate_result(started_at, output.client_public_key_hex)
         }
         Err(err) => {
-            let summary_message = summarize_command_failure("certs.generate", &err);
-            let diagnostic_message = format_command_error("certs.generate", &err);
-            ui::command_finish("certs.generate", false, &summary_message);
-            CommandResult::failure("certs.generate", started_at, diagnostic_message)
+            let summary_message = summarize_command_failure("trust.client-key.generate", &err);
+            let diagnostic_message = format_command_error("trust.client-key.generate", &err);
+            ui::command_finish("trust.client-key.generate", false, &summary_message);
+            CommandResult::failure("trust.client-key.generate", started_at, diagnostic_message)
         }
     }
 }
 
 fn success_generate_result(started_at: Instant, client_public_key_hex: String) -> CommandResult {
-    let mut result = CommandResult::success("certs.generate", started_at);
+    let mut result = CommandResult::success("trust.client-key.generate", started_at);
     result
         .meta
         .insert("client_public_key_hex".to_string(), client_public_key_hex);
@@ -102,11 +106,11 @@ pub(crate) async fn run_bindings_cert_upload_with_project_root(
     project_root: &Path,
 ) -> CommandResult {
     let started_at = Instant::now();
-    ui::command_start("bindings.cert.upload", "starting");
+    ui::command_start("trust.cert.upload", "starting");
     match run_bindings_cert_upload_async(args, project_root).await {
         Ok(summary) => {
-            ui::command_finish("bindings.cert.upload", true, "");
-            let mut result = CommandResult::success("bindings.cert.upload", started_at);
+            ui::command_finish("trust.cert.upload", true, "");
+            let mut result = CommandResult::success("trust.cert.upload", started_at);
             result
                 .meta
                 .insert("authority".to_string(), summary.authority);
@@ -114,10 +118,10 @@ pub(crate) async fn run_bindings_cert_upload_with_project_root(
             result
         }
         Err(err) => {
-            let summary_message = summarize_command_failure("bindings.cert.upload", &err);
-            let diagnostic_message = format_command_error("bindings.cert.upload", &err);
-            ui::command_finish("bindings.cert.upload", false, &summary_message);
-            CommandResult::failure("bindings.cert.upload", started_at, diagnostic_message)
+            let summary_message = summarize_command_failure("trust.cert.upload", &err);
+            let diagnostic_message = format_command_error("trust.cert.upload", &err);
+            ui::command_finish("trust.cert.upload", false, &summary_message);
+            CommandResult::failure("trust.cert.upload", started_at, diagnostic_message)
         }
     }
 }
@@ -131,11 +135,11 @@ pub(crate) async fn run_bindings_cert_deploy_with_project_root(
     project_root: &Path,
 ) -> CommandResult {
     let started_at = Instant::now();
-    ui::command_start("bindings.cert.deploy", "starting");
+    ui::command_start("trust.cert.replicate", "starting");
     match run_bindings_cert_deploy_async(args, project_root).await {
         Ok(summary) => {
-            ui::command_finish("bindings.cert.deploy", true, "");
-            let mut result = CommandResult::success("bindings.cert.deploy", started_at);
+            ui::command_finish("trust.cert.replicate", true, "");
+            let mut result = CommandResult::success("trust.cert.replicate", started_at);
             result
                 .meta
                 .insert("from".to_string(), summary.from_authority);
@@ -143,10 +147,10 @@ pub(crate) async fn run_bindings_cert_deploy_with_project_root(
             result
         }
         Err(err) => {
-            let summary_message = summarize_command_failure("bindings.cert.deploy", &err);
-            let diagnostic_message = format_command_error("bindings.cert.deploy", &err);
-            ui::command_finish("bindings.cert.deploy", false, &summary_message);
-            CommandResult::failure("bindings.cert.deploy", started_at, diagnostic_message)
+            let summary_message = summarize_command_failure("trust.cert.replicate", &err);
+            let diagnostic_message = format_command_error("trust.cert.replicate", &err);
+            ui::command_finish("trust.cert.replicate", false, &summary_message);
+            CommandResult::failure("trust.cert.replicate", started_at, diagnostic_message)
         }
     }
 }
@@ -156,20 +160,20 @@ async fn run_bindings_cert_upload_async(
     project_root: &Path,
 ) -> anyhow::Result<BindingsCertUploadSummary> {
     ui::command_stage(
-        "bindings.cert.upload",
+        "trust.cert.upload",
         "load-config",
         "loading target credentials",
     );
     let public_key_hex = normalize_ed25519_public_key_hex(&args.public_key)
-        .context("invalid PUBLIC_KEY_HEX for bindings cert upload")?;
+        .context("invalid PUBLIC_KEY_HEX for trust cert upload")?;
     let authority = normalize_known_hosts_authority(&args.to)
         .with_context(|| format!("failed to normalize --to authority: {}", args.to))?;
     let client_key = load_bindings_client_key(project_root)?;
     ui::command_info(
-        "bindings.cert.upload",
+        "trust.cert.upload",
         &format_local_context_line(
             project_root,
-            "bindings.cert.upload",
+            "trust.cert.upload",
             build::default_target_name(),
             &args.to,
             None,
@@ -177,7 +181,7 @@ async fn run_bindings_cert_upload_async(
     );
 
     upload_public_key_to_remote(
-        "bindings.cert.upload",
+        "trust.cert.upload",
         &args.to,
         &public_key_hex,
         &authority,
@@ -196,17 +200,17 @@ async fn run_bindings_cert_deploy_async(
     project_root: &Path,
 ) -> anyhow::Result<BindingsCertDeploySummary> {
     ui::command_stage(
-        "bindings.cert.deploy",
+        "trust.cert.replicate",
         "load-config",
         "loading target credentials",
     );
     let client_key = load_bindings_client_key(project_root)?;
     let mut from_failures = Vec::new();
     ui::command_info(
-        "bindings.cert.deploy",
+        "trust.cert.replicate",
         &format_local_context_line(
             project_root,
-            "bindings.cert.deploy.from",
+            "trust.cert.replicate.from",
             build::default_target_name(),
             &args.from,
             None,
@@ -215,7 +219,7 @@ async fn run_bindings_cert_deploy_async(
 
     match connect_remote(&args.from, &client_key).await {
         Ok(connected) => {
-            ui::command_stage("bindings.cert.deploy", "hello", "negotiating hello (from)");
+            ui::command_stage("trust.cert.replicate", "hello", "negotiating hello (from)");
             let correlation_id = Uuid::new_v4();
             match negotiate_bindings_cert_hello(
                 &connected.session,
@@ -226,7 +230,7 @@ async fn run_bindings_cert_deploy_async(
             {
                 Ok(hello) => {
                     ui::command_info(
-                        "bindings.cert.deploy",
+                        "trust.cert.replicate",
                         &format_peer_context_line(
                             &connected.authority,
                             &connected.resolved_addr.to_string(),
@@ -235,7 +239,7 @@ async fn run_bindings_cert_deploy_async(
                     );
                     connected
                         .session
-                        .close(0, b"bindings cert deploy from probe complete");
+                        .close(0, b"trust cert replicate from probe complete");
                 }
                 Err(err) => from_failures.push(format!("hello failed: {err}")),
             }
@@ -262,17 +266,17 @@ async fn run_bindings_cert_deploy_async(
 
     let to_error = if let Some(public_key_hex) = from_public_key_hex.as_deref() {
         ui::command_info(
-            "bindings.cert.deploy",
+            "trust.cert.replicate",
             &format_local_context_line(
                 project_root,
-                "bindings.cert.deploy.to",
+                "trust.cert.replicate.to",
                 build::default_target_name(),
                 &args.to,
                 None,
             ),
         );
         upload_public_key_to_remote(
-            "bindings.cert.deploy",
+            "trust.cert.replicate",
             &args.to,
             public_key_hex,
             &from_authority,
@@ -309,7 +313,7 @@ fn load_bindings_client_key(project_root: &Path) -> anyhow::Result<PathBuf> {
     let target = build::load_target_config(build::default_target_name(), project_root)
         .context("failed to load target configuration")?
         .require_deploy_credentials()
-        .context("target settings are invalid for bindings cert commands")?;
+        .context("target settings are invalid for trust cert commands")?;
     Ok(target.client_key)
 }
 
@@ -358,7 +362,7 @@ async fn upload_public_key_to_remote(
         authority,
     )
     .await?;
-    connected.session.close(0, b"bindings cert upload complete");
+    connected.session.close(0, b"trust cert upload complete");
 
     Ok(())
 }
@@ -525,7 +529,7 @@ fn normalize_ed25519_public_key_hex(value: &str) -> anyhow::Result<String> {
 }
 
 fn format_bindings_cert_deploy_result(from_error: Option<&str>, to_error: Option<&str>) -> String {
-    let mut lines = vec!["bindings cert deploy completed with errors:".to_string()];
+    let mut lines = vec!["trust cert replicate completed with errors:".to_string()];
     lines.push(match from_error {
         Some(err) => format!("from: {err}"),
         None => "from: ok".to_string(),

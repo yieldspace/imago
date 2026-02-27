@@ -133,9 +133,10 @@ mod tests {
         ArtifactCommands, ArtifactSubcommandArgs, BindingsCertDeployArgs, BindingsCertUploadArgs,
         BuildArgs, CertsGenerateArgs, ComposeBuildArgs, ComposeCommands, ComposeDeployArgs,
         ComposeLogsArgs, ComposePsArgs, ComposeSubcommandArgs, ComposeUpdateArgs, DeployArgs,
-        InitArgs, ProjectCommands, ProjectSubcommandArgs, PsArgs, RunArgs, ServiceCommands,
-        ServiceSubcommandArgs, StopArgs, TrustCertCommands, TrustCertSubcommandArgs,
-        TrustClientKeyCommands, TrustClientKeySubcommandArgs, TrustCommands, TrustSubcommandArgs,
+        DepsCommands, DepsSubcommandArgs, InitArgs, ProjectCommands, ProjectSubcommandArgs, PsArgs,
+        RunArgs, ServiceCommands, ServiceSubcommandArgs, StopArgs, TrustCertCommands,
+        TrustCertSubcommandArgs, TrustClientKeyCommands, TrustClientKeySubcommandArgs,
+        TrustCommands, TrustSubcommandArgs, UpdateArgs,
     };
     use std::path::PathBuf;
 
@@ -197,6 +198,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatches_deps_sync_and_returns_non_zero_without_imago_toml() {
+        let root = new_temp_dir("dispatch-deps-sync");
+        let result = dispatch_with_project_root_async(
+            Cli {
+                command: Commands::Deps(DepsSubcommandArgs {
+                    command: DepsCommands::Sync(UpdateArgs {}),
+                }),
+            },
+            &root,
+        )
+        .await;
+
+        assert_eq!(result.exit_code, 2);
+        assert_eq!(result.command, "deps.sync");
+        assert!(result.stderr.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn dispatches_service_subcommands_and_returns_non_zero_without_project() {
         let root = new_temp_dir("dispatch-service");
 
@@ -228,6 +248,7 @@ mod tests {
         )
         .await;
         assert_eq!(start.exit_code, 2);
+        assert_eq!(start.command, "service.start");
 
         let stop = dispatch_with_project_root_async(
             Cli {
@@ -256,6 +277,7 @@ mod tests {
         )
         .await;
         assert_eq!(ls.exit_code, 2);
+        assert_eq!(ls.command, "service.ls");
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -366,6 +388,7 @@ mod tests {
         .await;
 
         assert_eq!(result.exit_code, 0);
+        assert_eq!(result.command, "trust.client-key.generate");
         assert!(result.stderr.is_none());
 
         let _ = std::fs::remove_dir_all(temp);
@@ -392,6 +415,7 @@ mod tests {
         .await;
 
         assert_eq!(result.exit_code, 2);
+        assert_eq!(result.command, "trust.cert.upload");
         assert!(
             result
                 .stderr
@@ -421,6 +445,7 @@ mod tests {
         .await;
 
         assert_eq!(result.exit_code, 2);
+        assert_eq!(result.command, "trust.cert.replicate");
         assert!(
             result
                 .stderr
