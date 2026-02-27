@@ -220,15 +220,14 @@ mod tests {
     #![allow(non_snake_case)]
     #![allow(dead_code)]
 
-    use std::{collections::BTreeMap, path::Path, path::PathBuf, sync::Mutex, time::Duration};
+    use std::{collections::BTreeMap, path::Path, path::PathBuf, time::Duration};
 
     use super::*;
     use crate::protocol_handler::{
-        replace_dynamic_public_keys_for_tests, upsert_dynamic_client_public_key,
+        lock_dynamic_public_keys_for_tests, replace_dynamic_public_keys_for_tests,
+        upsert_dynamic_client_public_key,
     };
     use imagod_config::{ImagodConfig, RuntimeConfig, TlsConfig};
-
-    static DYNAMIC_KEYS_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     fn ed25519_spki_from_raw(raw: [u8; 32]) -> Vec<u8> {
         let mut spki = ED25519_SPKI_PREFIX.to_vec();
@@ -285,9 +284,7 @@ mod tests {
 
     #[test]
     fn verifier_accepts_allowlisted_client_key() {
-        let _guard = DYNAMIC_KEYS_TEST_MUTEX
-            .lock()
-            .expect("mutex lock should succeed");
+        let _guard = lock_dynamic_public_keys_for_tests();
         let key = [0x11u8; 32];
         replace_dynamic_public_keys_for_tests(&[], &[key]);
 
@@ -308,9 +305,7 @@ mod tests {
 
     #[test]
     fn verifier_rejects_non_allowlisted_client_key() {
-        let _guard = DYNAMIC_KEYS_TEST_MUTEX
-            .lock()
-            .expect("mutex lock should succeed");
+        let _guard = lock_dynamic_public_keys_for_tests();
         replace_dynamic_public_keys_for_tests(&[], &[[0x11u8; 32]]);
 
         let verifier = RawPublicKeyClientVerifier::new(
@@ -335,9 +330,7 @@ mod tests {
 
     #[test]
     fn verifier_reflects_dynamic_allowlist_update() {
-        let _guard = DYNAMIC_KEYS_TEST_MUTEX
-            .lock()
-            .expect("mutex lock should succeed");
+        let _guard = lock_dynamic_public_keys_for_tests();
         replace_dynamic_public_keys_for_tests(&[], &[]);
 
         let verifier = RawPublicKeyClientVerifier::new(
@@ -366,9 +359,7 @@ mod tests {
 
     #[test]
     fn verifier_rejects_non_ed25519_client_key() {
-        let _guard = DYNAMIC_KEYS_TEST_MUTEX
-            .lock()
-            .expect("mutex lock should succeed");
+        let _guard = lock_dynamic_public_keys_for_tests();
         replace_dynamic_public_keys_for_tests(&[], &[[0x11u8; 32]]);
 
         let verifier = RawPublicKeyClientVerifier::new(
@@ -396,9 +387,7 @@ mod tests {
 
     #[test]
     fn verifier_supports_only_ed25519_signature_scheme() {
-        let _guard = DYNAMIC_KEYS_TEST_MUTEX
-            .lock()
-            .expect("mutex lock should succeed");
+        let _guard = lock_dynamic_public_keys_for_tests();
         replace_dynamic_public_keys_for_tests(&[], &[[0x11u8; 32]]);
 
         let verifier = RawPublicKeyClientVerifier::new(
@@ -412,9 +401,7 @@ mod tests {
 
     #[test]
     fn given_intermediate_certs__when_verify_client_cert__then_rejected() {
-        let _guard = DYNAMIC_KEYS_TEST_MUTEX
-            .lock()
-            .expect("mutex lock should succeed");
+        let _guard = lock_dynamic_public_keys_for_tests();
         let key = [0x11u8; 32];
         replace_dynamic_public_keys_for_tests(&[], &[key]);
         let verifier = RawPublicKeyClientVerifier::new(

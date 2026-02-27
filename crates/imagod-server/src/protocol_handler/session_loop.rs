@@ -439,15 +439,14 @@ pub(crate) fn stream_read_timeout_error() -> ImagodError {
 mod tests {
     #![allow(non_snake_case)]
     #![allow(dead_code)]
-    use std::{any::Any, sync::Mutex, time::Duration};
+    use std::{any::Any, time::Duration};
 
     use super::*;
     use crate::protocol_handler::{
-        Envelope, replace_dynamic_public_keys_for_tests, upsert_dynamic_client_public_key,
+        Envelope, lock_dynamic_public_keys_for_tests, replace_dynamic_public_keys_for_tests,
+        upsert_dynamic_client_public_key,
     };
     use async_trait::async_trait;
-
-    static DYNAMIC_KEYS_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     fn hex_32(byte: u8) -> String {
         let mut out = String::with_capacity(64);
@@ -506,9 +505,7 @@ mod tests {
 
     #[test]
     fn resolve_client_role_observes_dynamic_updates() {
-        let _guard = DYNAMIC_KEYS_TEST_MUTEX
-            .lock()
-            .expect("mutex lock should succeed");
+        let _guard = lock_dynamic_public_keys_for_tests();
         replace_dynamic_public_keys_for_tests(&[], &[]);
         let key = [0x33u8; 32];
 
@@ -699,9 +696,7 @@ mod tests {
     #[test]
     fn given_known_and_unknown_keys__when_resolve_session_auth_context__then_role_and_hex_are_set()
     {
-        let _guard = DYNAMIC_KEYS_TEST_MUTEX
-            .lock()
-            .expect("mutex lock should succeed");
+        let _guard = lock_dynamic_public_keys_for_tests();
         replace_dynamic_public_keys_for_tests(&[], &[]);
         upsert_dynamic_client_public_key(&hex_32(0x44)).expect("dynamic key upsert should succeed");
 

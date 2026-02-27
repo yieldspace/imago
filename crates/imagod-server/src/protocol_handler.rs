@@ -49,9 +49,19 @@ struct DynamicPublicKeys {
 }
 
 static DYNAMIC_PUBLIC_KEYS: OnceLock<RwLock<DynamicPublicKeys>> = OnceLock::new();
+#[cfg(test)]
+static DYNAMIC_PUBLIC_KEYS_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn dynamic_public_keys() -> &'static RwLock<DynamicPublicKeys> {
     DYNAMIC_PUBLIC_KEYS.get_or_init(|| RwLock::new(DynamicPublicKeys::default()))
+}
+
+#[cfg(test)]
+pub(crate) fn lock_dynamic_public_keys_for_tests() -> std::sync::MutexGuard<'static, ()> {
+    match DYNAMIC_PUBLIC_KEYS_TEST_MUTEX.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 fn parse_configured_public_keys(
