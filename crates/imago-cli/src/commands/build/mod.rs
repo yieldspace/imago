@@ -38,8 +38,8 @@ use crate::{
 mod validation;
 
 const DEFAULT_TARGET_NAME: &str = "default";
-const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_HTTP_MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
+const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_HTTP_MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
 const DEFAULT_RESTART_POLICY: &str = "never";
 const RESTART_POLICY_ON_FAILURE: &str = "on-failure";
 const RESTART_POLICY_ALWAYS: &str = "always";
@@ -2850,7 +2850,7 @@ remote = "127.0.0.1:4443"
 
     #[test]
     fn build_rejects_invalid_http_max_body_bytes() {
-        for (suffix, max_body_bytes) in [("zero", "0"), ("too-large", "67108865")] {
+        for (suffix, max_body_bytes) in [("zero", "0"), ("too-large", "33554433")] {
             let root = new_temp_dir(&format!("http-max-body-{suffix}"));
             write_imago_toml(
                 &root,

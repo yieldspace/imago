@@ -50,8 +50,8 @@ const RESTART_POLICY_ON_FAILURE: &str = "on-failure";
 const RESTART_POLICY_ALWAYS: &str = "always";
 const RESTART_POLICY_UNLESS_STOPPED: &str = "unless-stopped";
 const RESTART_POLICY_FILE_NAME: &str = "restart_policy";
-const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_HTTP_MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
+const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_HTTP_MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
 const STOPPED_SERVICE_STARTED_AT: &str = "";
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -2513,7 +2513,7 @@ mod tests {
             .expect("http manifest without max_body_bytes should parse");
         assert_eq!(
             manifest.http.map(|http| http.max_body_bytes),
-            Some(8 * 1024 * 1024)
+            Some(4 * 1024 * 1024)
         );
     }
 

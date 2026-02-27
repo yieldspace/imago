@@ -98,9 +98,9 @@ port = 8080
 # key: http.max_body_bytes
 # required: optional when type="http"
 # type: integer
-# constraints: 1..=67108864 (64 MiB)
-# default: 8388608 (8 MiB)
-# max_body_bytes = 8388608
+# constraints: 1..=33554432 (32 MiB)
+# default: 4194304 (4 MiB)
+# max_body_bytes = 4194304
 
 # [socket] (required when type="socket"; forbidden for other type values)
 # [socket]
