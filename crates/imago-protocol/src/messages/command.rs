@@ -56,6 +56,21 @@ pub enum CommandState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Request payload for `command.start`.
+///
+/// # Examples
+/// ```rust
+/// use uuid::Uuid;
+/// use imago_protocol::{messages::{CommandPayload, CommandStartRequest, CommandType, RunCommandPayload}, Validate};
+///
+/// let request = CommandStartRequest {
+///     request_id: Uuid::new_v4(),
+///     command_type: CommandType::Run,
+///     payload: CommandPayload::Run(RunCommandPayload {
+///         name: "svc-a".to_string(),
+///     }),
+/// };
+/// request.validate().expect("payload must match command_type");
+/// ```
 pub struct CommandStartRequest {
     pub request_id: Uuid,
     pub command_type: CommandType,
@@ -163,6 +178,22 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Event payload emitted during command execution.
+///
+/// # Examples
+/// ```rust
+/// use uuid::Uuid;
+/// use imago_protocol::{messages::{CommandEvent, CommandEventType, CommandType}, Validate};
+///
+/// let event = CommandEvent {
+///     event_type: CommandEventType::Progress,
+///     request_id: Uuid::new_v4(),
+///     command_type: CommandType::Deploy,
+///     timestamp: "1735689600".to_string(),
+///     stage: Some("starting".to_string()),
+///     error: None,
+/// };
+/// event.validate().expect("progress event requires non-empty stage");
+/// ```
 pub struct CommandEvent {
     pub event_type: CommandEventType,
     pub request_id: Uuid,
@@ -211,6 +242,20 @@ impl Validate for StateRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Poll response payload for in-flight command state.
+///
+/// # Examples
+/// ```rust
+/// use uuid::Uuid;
+/// use imago_protocol::{messages::{CommandState, StateResponse}, Validate};
+///
+/// let response = StateResponse {
+///     request_id: Uuid::new_v4(),
+///     state: CommandState::Running,
+///     stage: "running".to_string(),
+///     updated_at: "1735689600".to_string(),
+/// };
+/// response.validate().expect("state.response must stay non-terminal");
+/// ```
 pub struct StateResponse {
     pub request_id: Uuid,
     pub state: CommandState,
@@ -257,5 +302,143 @@ pub struct CommandCancelResponse {
 impl Validate for CommandCancelResponse {
     fn validate(&self) -> Result<(), ValidationError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+    #![allow(dead_code)]
+    use uuid::Uuid;
+
+    use super::{
+        CommandCancelRequest, CommandEvent, CommandEventType, CommandPayload, CommandStartRequest,
+        CommandState, CommandType, DeployCommandPayload, RunCommandPayload, StateResponse,
+        StopCommandPayload,
+    };
+    use crate::Validate;
+
+    #[test]
+    fn given_command_start_cases__when_validate__then_payload_must_match_command_type() {
+        let valid = CommandStartRequest {
+            request_id: Uuid::new_v4(),
+            command_type: CommandType::Run,
+            payload: CommandPayload::Run(RunCommandPayload {
+                name: "svc-a".to_string(),
+            }),
+        };
+        valid.validate().expect("run payload should match run type");
+
+        let mismatch = CommandStartRequest {
+            request_id: Uuid::new_v4(),
+            command_type: CommandType::Run,
+            payload: CommandPayload::Deploy(DeployCommandPayload {
+                deploy_id: "deploy-1".to_string(),
+                expected_current_release: "rel-1".to_string(),
+                restart_policy: "never".to_string(),
+                auto_rollback: true,
+            }),
+        };
+        let err = mismatch
+            .validate()
+            .expect_err("payload mismatch should fail");
+        assert!(
+            err.to_string()
+                .contains("payload does not match command_type")
+        );
+    }
+
+    #[test]
+    fn given_command_payload_variants__when_validate__then_required_names_are_checked() {
+        let invalid_run = RunCommandPayload {
+            name: "".to_string(),
+        };
+        assert!(invalid_run.validate().is_err());
+
+        let invalid_stop = StopCommandPayload {
+            name: "".to_string(),
+            force: false,
+        };
+        assert!(invalid_stop.validate().is_err());
+    }
+
+    #[test]
+    fn given_command_event_cases__when_validate__then_progress_and_failed_require_required_context()
+    {
+        let progress_missing_stage = CommandEvent {
+            event_type: CommandEventType::Progress,
+            request_id: Uuid::new_v4(),
+            command_type: CommandType::Deploy,
+            timestamp: "1735689600".to_string(),
+            stage: None,
+            error: None,
+        };
+        assert!(progress_missing_stage.validate().is_err());
+
+        let failed_missing_error = CommandEvent {
+            event_type: CommandEventType::Failed,
+            request_id: Uuid::new_v4(),
+            command_type: CommandType::Deploy,
+            timestamp: "1735689600".to_string(),
+            stage: Some("failed".to_string()),
+            error: None,
+        };
+        assert!(failed_missing_error.validate().is_err());
+
+        let valid_progress = CommandEvent {
+            event_type: CommandEventType::Progress,
+            request_id: Uuid::new_v4(),
+            command_type: CommandType::Deploy,
+            timestamp: "1735689600".to_string(),
+            stage: Some("running".to_string()),
+            error: None,
+        };
+        valid_progress
+            .validate()
+            .expect("progress with stage should pass");
+    }
+
+    #[test]
+    fn given_state_response_cases__when_validate__then_terminal_states_are_rejected() {
+        let terminal_states = [
+            CommandState::Succeeded,
+            CommandState::Failed,
+            CommandState::Canceled,
+        ];
+        for state in terminal_states {
+            let response = StateResponse {
+                request_id: Uuid::new_v4(),
+                state,
+                stage: "done".to_string(),
+                updated_at: "1735689600".to_string(),
+            };
+            assert!(
+                response.validate().is_err(),
+                "terminal state {state:?} should be rejected"
+            );
+        }
+
+        let non_terminal = StateResponse {
+            request_id: Uuid::new_v4(),
+            state: CommandState::Running,
+            stage: "running".to_string(),
+            updated_at: "1735689600".to_string(),
+        };
+        non_terminal
+            .validate()
+            .expect("running state response should pass");
+    }
+
+    #[test]
+    fn given_cancel_request__when_validate__then_request_id_must_be_non_nil() {
+        let invalid = CommandCancelRequest {
+            request_id: Uuid::nil(),
+        };
+        assert!(invalid.validate().is_err());
+
+        let valid = CommandCancelRequest {
+            request_id: Uuid::new_v4(),
+        };
+        valid.validate().expect("non-nil request_id should pass");
     }
 }

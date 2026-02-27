@@ -1716,4 +1716,121 @@ mod tests {
         assert_eq!(err.code, ErrorCode::Unauthorized);
         assert!(err.message.contains("too large"));
     }
+
+    #[test]
+    fn runner_socket_protocol_and_direction_allow_helpers_cover_all_variants() {
+        assert!(RunnerSocketProtocol::Udp.allows_udp());
+        assert!(!RunnerSocketProtocol::Udp.allows_tcp());
+        assert!(!RunnerSocketProtocol::Tcp.allows_udp());
+        assert!(RunnerSocketProtocol::Tcp.allows_tcp());
+        assert!(RunnerSocketProtocol::Both.allows_udp());
+        assert!(RunnerSocketProtocol::Both.allows_tcp());
+
+        assert!(RunnerSocketDirection::Inbound.allows_inbound());
+        assert!(!RunnerSocketDirection::Inbound.allows_outbound());
+        assert!(!RunnerSocketDirection::Outbound.allows_inbound());
+        assert!(RunnerSocketDirection::Outbound.allows_outbound());
+        assert!(RunnerSocketDirection::Both.allows_inbound());
+        assert!(RunnerSocketDirection::Both.allows_outbound());
+    }
+
+    #[test]
+    fn runner_socket_config_validate_requires_port_only_when_inbound_is_enabled() {
+        let inbound = RunnerSocketConfig {
+            protocol: RunnerSocketProtocol::Tcp,
+            direction: RunnerSocketDirection::Inbound,
+            listen_addr: "127.0.0.1".to_string(),
+            listen_port: 0,
+        };
+        let err = inbound
+            .validate()
+            .expect_err("inbound socket config with port=0 should fail");
+        assert!(err.to_string().contains("listen_port"));
+
+        let outbound_only = RunnerSocketConfig {
+            protocol: RunnerSocketProtocol::Tcp,
+            direction: RunnerSocketDirection::Outbound,
+            listen_addr: "127.0.0.1".to_string(),
+            listen_port: 0,
+        };
+        outbound_only
+            .validate()
+            .expect("outbound-only config may keep listen_port=0");
+    }
+
+    #[test]
+    fn verify_manager_auth_proof_rejects_invalid_secret_encoding() {
+        let err = verify_manager_auth_proof("not-hex", "runner-1", "deadbeef")
+            .expect_err("invalid secret encoding should fail");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert_eq!(err.stage, STAGE_TOKEN);
+        assert!(err.message.contains("secret decode failed"));
+    }
+
+    #[test]
+    fn issue_invocation_token_rejects_invalid_claims() {
+        let secret = random_secret_hex();
+        let claims = InvocationTokenClaims {
+            source_service: "".to_string(),
+            target_service: "svc-b".to_string(),
+            wit: "pkg:iface/callable".to_string(),
+            exp: now_unix_secs() + 60,
+            nonce: uuid::Uuid::new_v4().to_string(),
+        };
+        let err =
+            issue_invocation_token(&secret, claims).expect_err("invalid claims should fail issue");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert_eq!(err.stage, STAGE_TOKEN);
+        assert!(err.message.contains("source_service"));
+    }
+
+    #[test]
+    fn verify_invocation_token_rejects_malformed_signature_mismatch_and_expired() {
+        let secret = random_secret_hex();
+        let claims = InvocationTokenClaims {
+            source_service: "svc-a".to_string(),
+            target_service: "svc-b".to_string(),
+            wit: "pkg:iface/callable".to_string(),
+            exp: now_unix_secs() + 60,
+            nonce: uuid::Uuid::new_v4().to_string(),
+        };
+        let token =
+            issue_invocation_token(&secret, claims).expect("token issue should succeed first");
+
+        let malformed = verify_invocation_token(&secret, "%%%not-base64%%%")
+            .expect_err("malformed token should fail");
+        assert_eq!(malformed.code, ErrorCode::Unauthorized);
+        assert_eq!(malformed.stage, STAGE_TOKEN);
+        assert!(malformed.message.contains("token decode failed"));
+
+        let wrong_secret = random_secret_hex();
+        let mismatch = verify_invocation_token(&wrong_secret, &token)
+            .expect_err("signature mismatch should fail");
+        assert_eq!(mismatch.code, ErrorCode::Unauthorized);
+        assert_eq!(mismatch.stage, STAGE_TOKEN);
+        assert!(mismatch.message.contains("token signature mismatch"));
+
+        let expired_claims = InvocationTokenClaims {
+            source_service: "svc-a".to_string(),
+            target_service: "svc-b".to_string(),
+            wit: "pkg:iface/callable".to_string(),
+            exp: now_unix_secs().saturating_sub(1),
+            nonce: uuid::Uuid::new_v4().to_string(),
+        };
+        let expired_token = issue_invocation_token(&secret, expired_claims)
+            .expect("expired token payload still signs successfully");
+        let expired = verify_invocation_token(&secret, &expired_token)
+            .expect_err("expired token should fail verification");
+        assert_eq!(expired.code, ErrorCode::Unauthorized);
+        assert_eq!(expired.stage, STAGE_TOKEN);
+        assert!(expired.message.contains("token expired"));
+    }
+
+    #[test]
+    fn map_ipc_error_adds_ipc_stage_prefix() {
+        let err = map_ipc_error("write", "io error");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert_eq!(err.stage, "ipc.write");
+        assert_eq!(err.message, "io error");
+    }
 }

@@ -75,7 +75,7 @@ pub(crate) async fn run_session_loop<S>(
 where
     S: ProtocolSession + 'static,
 {
-    let auth_context = resolve_session_auth_context(handler, session.as_ref())?;
+    let auth_context = resolve_session_auth_context(session.as_ref())?;
     let mut stream_tasks = tokio::task::JoinSet::new();
     let mut first_error = None;
     loop {
@@ -232,10 +232,7 @@ where
     Ok(())
 }
 
-fn resolve_session_auth_context<S>(
-    _handler: &ProtocolHandler,
-    session: &S,
-) -> Result<SessionAuthContext, ImagodError>
+fn resolve_session_auth_context<S>(session: &S) -> Result<SessionAuthContext, ImagodError>
 where
     S: ProtocolSession + ?Sized,
 {
@@ -440,12 +437,15 @@ pub(crate) fn stream_read_timeout_error() -> ImagodError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    #![allow(non_snake_case)]
+    #![allow(dead_code)]
+    use std::{any::Any, sync::Mutex, time::Duration};
 
     use super::*;
     use crate::protocol_handler::{
         Envelope, replace_dynamic_public_keys_for_tests, upsert_dynamic_client_public_key,
     };
+    use async_trait::async_trait;
 
     static DYNAMIC_KEYS_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
@@ -455,6 +455,53 @@ mod tests {
             out.push_str(&format!("{byte:02x}"));
         }
         out
+    }
+
+    fn ed25519_spki_from_raw(raw: [u8; 32]) -> Vec<u8> {
+        let mut spki = ED25519_SPKI_PREFIX.to_vec();
+        spki.extend_from_slice(&raw);
+        spki
+    }
+
+    enum FakePeerIdentity {
+        Missing,
+        WrongType,
+        EmptyChain,
+        Ed25519([u8; 32]),
+    }
+
+    struct FakeProtocolSession {
+        identity: FakePeerIdentity,
+    }
+
+    #[async_trait]
+    impl ProtocolSession for FakeProtocolSession {
+        async fn accept_bi(&self) -> Option<(SendStream, RecvStream)> {
+            None
+        }
+
+        fn max_datagram_size(&self) -> usize {
+            1200
+        }
+
+        fn send_datagram(&self, _payload: Vec<u8>) -> Result<(), ImagodError> {
+            Ok(())
+        }
+
+        fn peer_identity(&self) -> Option<Box<dyn Any>> {
+            match self.identity {
+                FakePeerIdentity::Missing => None,
+                FakePeerIdentity::WrongType => Some(Box::new("not-a-cert-chain".to_string())),
+                FakePeerIdentity::EmptyChain => {
+                    Some(Box::new(Vec::<CertificateDer<'static>>::new()))
+                }
+                FakePeerIdentity::Ed25519(raw) => Some(Box::new(vec![CertificateDer::from(
+                    ed25519_spki_from_raw(raw),
+                )])),
+            }
+        }
+
+        async fn closed(&self) {}
     }
 
     #[test]
@@ -587,5 +634,212 @@ mod tests {
             "wasi cli run trap: failed to create capture session",
         );
         assert!(!should_wrap_command_start_error(&post_accept));
+    }
+
+    #[test]
+    fn given_spki_encoding__when_extract_ed25519_public_key__then_valid_and_invalid_cases_match_contract()
+     {
+        let raw = [0x5au8; 32];
+        let spki = ed25519_spki_from_raw(raw);
+        let parsed =
+            extract_ed25519_public_key(&spki).expect("valid ed25519 spki should be accepted");
+        assert_eq!(parsed, raw);
+
+        let short = vec![0u8; ED25519_SPKI_PREFIX.len() + 31];
+        let err = extract_ed25519_public_key(&short).expect_err("short spki should fail");
+        assert_eq!(err.code, ErrorCode::Unauthorized);
+        assert_eq!(err.stage, "session.auth");
+        assert!(
+            err.message
+                .contains("must contain an ed25519 raw public key")
+        );
+
+        let mut wrong_prefix = ed25519_spki_from_raw(raw);
+        wrong_prefix[8] = 0x71;
+        let err = extract_ed25519_public_key(&wrong_prefix).expect_err("wrong algorithm must fail");
+        assert_eq!(err.code, ErrorCode::Unauthorized);
+        assert_eq!(err.stage, "session.auth");
+        assert!(err.message.contains("is not ed25519"));
+    }
+
+    #[test]
+    fn given_peer_identity_variants__when_extract_peer_public_key__then_errors_and_success_are_explicit()
+     {
+        let missing = FakeProtocolSession {
+            identity: FakePeerIdentity::Missing,
+        };
+        let err = extract_peer_public_key(&missing).expect_err("missing identity should fail");
+        assert_eq!(err.code, ErrorCode::Unauthorized);
+        assert_eq!(err.stage, "session.auth");
+        assert_eq!(err.message, "peer identity is missing");
+
+        let wrong_type = FakeProtocolSession {
+            identity: FakePeerIdentity::WrongType,
+        };
+        let err = extract_peer_public_key(&wrong_type).expect_err("wrong type should fail");
+        assert_eq!(err.code, ErrorCode::Unauthorized);
+        assert_eq!(err.stage, "session.auth");
+        assert_eq!(err.message, "peer identity type is not certificate chain");
+
+        let empty_chain = FakeProtocolSession {
+            identity: FakePeerIdentity::EmptyChain,
+        };
+        let err = extract_peer_public_key(&empty_chain).expect_err("empty chain should fail");
+        assert_eq!(err.code, ErrorCode::Unauthorized);
+        assert_eq!(err.stage, "session.auth");
+        assert_eq!(err.message, "peer certificate chain is empty");
+
+        let valid = FakeProtocolSession {
+            identity: FakePeerIdentity::Ed25519([0x7bu8; 32]),
+        };
+        let key = extract_peer_public_key(&valid).expect("valid chain should succeed");
+        assert_eq!(key, [0x7bu8; 32]);
+    }
+
+    #[test]
+    fn given_known_and_unknown_keys__when_resolve_session_auth_context__then_role_and_hex_are_set()
+    {
+        let _guard = DYNAMIC_KEYS_TEST_MUTEX
+            .lock()
+            .expect("mutex lock should succeed");
+        replace_dynamic_public_keys_for_tests(&[], &[]);
+        upsert_dynamic_client_public_key(&hex_32(0x44)).expect("dynamic key upsert should succeed");
+
+        let client = FakeProtocolSession {
+            identity: FakePeerIdentity::Ed25519([0x44u8; 32]),
+        };
+        let context = resolve_session_auth_context(&client).expect("auth context should resolve");
+        assert_eq!(context.role, DynamicClientRole::Client);
+        assert_eq!(context.public_key_hex, hex_32(0x44));
+    }
+
+    #[test]
+    fn given_client_role_denial__when_ensure_message_type_allowed__then_details_are_populated() {
+        let request = Envelope::new(
+            MessageType::CommandCancel,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            serde_json::json!({}),
+        );
+        let context = SessionAuthContext {
+            role: DynamicClientRole::Client,
+            public_key_hex: hex_32(0x11),
+        };
+
+        let err =
+            ensure_message_type_allowed(&request, &context).expect_err("client should be denied");
+        assert_eq!(err.code, ErrorCode::Unauthorized);
+        assert_eq!(err.stage, "session.authorize");
+        assert_eq!(err.details.get("role").map(String::as_str), Some("client"));
+        assert_eq!(
+            err.details.get("message_type").map(String::as_str),
+            Some("command.cancel")
+        );
+        assert_eq!(
+            err.details.get("client_public_key").map(String::as_str),
+            Some(hex_32(0x11).as_str())
+        );
+    }
+
+    #[test]
+    fn given_unknown_role_denial__when_ensure_message_type_allowed__then_unknown_role_details_are_set()
+     {
+        let request = Envelope::new(
+            MessageType::HelloNegotiate,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            serde_json::json!({}),
+        );
+        let context = SessionAuthContext {
+            role: DynamicClientRole::Unknown,
+            public_key_hex: hex_32(0x22),
+        };
+
+        let err = ensure_message_type_allowed(&request, &context)
+            .expect_err("unknown role should be denied");
+        assert_eq!(err.code, ErrorCode::Unauthorized);
+        assert_eq!(err.stage, "session.authorize");
+        assert_eq!(err.details.get("role").map(String::as_str), Some("unknown"));
+        assert_eq!(
+            err.details.get("message_type").map(String::as_str),
+            Some("hello.negotiate")
+        );
+    }
+
+    #[test]
+    fn given_message_types__when_message_type_name__then_protocol_names_are_stable() {
+        let cases = [
+            (MessageType::HelloNegotiate, "hello.negotiate"),
+            (MessageType::DeployPrepare, "deploy.prepare"),
+            (MessageType::ArtifactPush, "artifact.push"),
+            (MessageType::ArtifactCommit, "artifact.commit"),
+            (MessageType::CommandStart, "command.start"),
+            (MessageType::CommandEvent, "command.event"),
+            (MessageType::StateRequest, "state.request"),
+            (MessageType::StateResponse, "state.response"),
+            (MessageType::ServicesList, "services.list"),
+            (MessageType::CommandCancel, "command.cancel"),
+            (MessageType::LogsRequest, "logs.request"),
+            (MessageType::LogsChunk, "logs.chunk"),
+            (MessageType::LogsEnd, "logs.end"),
+            (MessageType::RpcInvoke, "rpc.invoke"),
+            (MessageType::BindingsCertUpload, "bindings.cert.upload"),
+        ];
+
+        for (message_type, expected) in cases {
+            assert_eq!(message_type_name(message_type), expected);
+        }
+    }
+
+    #[test]
+    fn given_join_results__when_collect_stream_task_result__then_first_error_is_preserved() {
+        let mut first_error = None;
+        collect_stream_task_result(None, &mut first_error);
+        assert!(first_error.is_none(), "none should not change first_error");
+
+        collect_stream_task_result(Some(Ok(Ok(()))), &mut first_error);
+        assert!(first_error.is_none(), "ok result should not set error");
+
+        let stream_err = ImagodError::new(ErrorCode::Internal, "session.stream", "failed");
+        collect_stream_task_result(Some(Ok(Err(stream_err))), &mut first_error);
+        let err = first_error.expect("stream error should be captured");
+        assert_eq!(err.stage, "session.stream");
+    }
+
+    #[tokio::test]
+    async fn given_read_future_errors_or_times_out__when_read_stream_with_timeout__then_errors_are_mapped()
+     {
+        let err = read_stream_with_timeout(
+            async { Err::<Vec<u8>, _>(std::io::Error::other("boom")) },
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("read failure should be mapped");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert_eq!(err.stage, "session.read");
+        assert!(err.message.contains("failed to read stream"));
+
+        let timeout_err = read_stream_with_timeout(
+            std::future::pending::<Result<Vec<u8>, std::io::Error>>(),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect_err("pending future should timeout");
+        assert_eq!(timeout_err.code, ErrorCode::OperationTimeout);
+        assert_eq!(timeout_err.stage, "session.read");
+        assert!(timeout_err.message.contains("timed out"));
+    }
+
+    #[test]
+    fn given_raw_key_bytes__when_encode_hex__then_lower_hex_is_emitted() {
+        let encoded = encode_hex(&[
+            0x00, 0x11, 0xAA, 0xFF, 0x01, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90,
+            0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF1,
+            0x23, 0x45, 0x67, 0x89,
+        ]);
+        assert_eq!(
+            encoded,
+            "0011aaff01102030405060708090a0b0c0d0e0f0123456789abcdef123456789"
+        );
     }
 }

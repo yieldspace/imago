@@ -217,12 +217,16 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, ImagodError> 
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Mutex, time::Duration};
+    #![allow(non_snake_case)]
+    #![allow(dead_code)]
+
+    use std::{collections::BTreeMap, path::Path, path::PathBuf, sync::Mutex, time::Duration};
 
     use super::*;
     use crate::protocol_handler::{
         replace_dynamic_public_keys_for_tests, upsert_dynamic_client_public_key,
     };
+    use imagod_config::{ImagodConfig, RuntimeConfig, TlsConfig};
 
     static DYNAMIC_KEYS_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
@@ -238,6 +242,26 @@ mod tests {
             out.push_str(&format!("{byte:02x}"));
         }
         out
+    }
+
+    fn test_server_key_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/local-imagod-plugin-hello/certs/server.key")
+    }
+
+    fn sample_config_with_server_key(path: PathBuf) -> ImagodConfig {
+        ImagodConfig {
+            listen_addr: "127.0.0.1:4443".to_string(),
+            tls: TlsConfig {
+                server_key: path,
+                admin_public_keys: Vec::new(),
+                client_public_keys: Vec::new(),
+                known_public_keys: BTreeMap::new(),
+            },
+            storage_root: PathBuf::from("/tmp/imago-test-storage"),
+            runtime: RuntimeConfig::default(),
+            server_version: "imagod/test".to_string(),
+        }
     }
 
     #[test]
@@ -384,5 +408,120 @@ mod tests {
         let schemes =
             rustls::server::danger::ClientCertVerifier::supported_verify_schemes(&verifier);
         assert_eq!(schemes, vec![rustls::SignatureScheme::ED25519]);
+    }
+
+    #[test]
+    fn given_intermediate_certs__when_verify_client_cert__then_rejected() {
+        let _guard = DYNAMIC_KEYS_TEST_MUTEX
+            .lock()
+            .expect("mutex lock should succeed");
+        let key = [0x11u8; 32];
+        replace_dynamic_public_keys_for_tests(&[], &[key]);
+        let verifier = RawPublicKeyClientVerifier::new(
+            web_transport_quinn::crypto::default_provider().signature_verification_algorithms,
+        );
+        let cert = CertificateDer::from(ed25519_spki_from_raw(key));
+        let intermediate = CertificateDer::from(ed25519_spki_from_raw([0x22u8; 32]));
+        let now = UnixTime::since_unix_epoch(Duration::from_secs(0));
+
+        let err = rustls::server::danger::ClientCertVerifier::verify_client_cert(
+            &verifier,
+            &cert,
+            &[intermediate],
+            now,
+        )
+        .expect_err("intermediates should be rejected");
+        match err {
+            rustls::Error::General(message) => {
+                assert!(message.contains("does not accept intermediates"))
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn given_verifier__when_query_root_hints_and_raw_key_requirement__then_empty_hints_and_true() {
+        let verifier = RawPublicKeyClientVerifier::new(
+            web_transport_quinn::crypto::default_provider().signature_verification_algorithms,
+        );
+        let hints = rustls::server::danger::ClientCertVerifier::root_hint_subjects(&verifier);
+        assert!(
+            hints.is_empty(),
+            "raw public key auth should not use DN hints"
+        );
+        assert!(rustls::server::danger::ClientCertVerifier::requires_raw_public_keys(&verifier));
+    }
+
+    #[test]
+    fn given_valid_server_key__when_build_tls_server_config__then_alpn_and_early_data_are_configured()
+     {
+        let config = sample_config_with_server_key(test_server_key_path());
+        let tls = build_tls_server_config(&config).expect("tls config build should succeed");
+
+        assert_eq!(tls.max_early_data_size, 0);
+        assert_eq!(
+            tls.alpn_protocols,
+            vec![web_transport_quinn::ALPN.as_bytes()]
+        );
+    }
+
+    #[test]
+    fn given_missing_server_key_file__when_build_tls_server_config__then_bad_request_is_returned() {
+        let config = sample_config_with_server_key(PathBuf::from("/no/such/server.key"));
+        let err = build_tls_server_config(&config).expect_err("missing key file must fail");
+
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert_eq!(err.stage, STAGE_TRANSPORT);
+        assert!(
+            err.message.contains("failed to open key"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn given_malformed_or_missing_private_key__when_load_private_key__then_bad_request_is_returned()
+    {
+        let missing = load_private_key(Path::new("/no/such/private-key.pem"))
+            .expect_err("missing key should fail");
+        assert_eq!(missing.code, ErrorCode::BadRequest);
+        assert_eq!(missing.stage, STAGE_TRANSPORT);
+        assert!(missing.message.contains("failed to open key"));
+
+        let malformed_path = std::env::temp_dir().join(format!(
+            "imagod-tls-material-malformed-key-{}.pem",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &malformed_path,
+            "-----BEGIN PRIVATE KEY-----\nnot-base64\n-----END PRIVATE KEY-----\n",
+        )
+        .expect("malformed key write should succeed");
+        let malformed = load_private_key(&malformed_path)
+            .expect_err("malformed key should fail to parse or be treated as missing");
+        assert_eq!(malformed.code, ErrorCode::BadRequest);
+        assert_eq!(malformed.stage, STAGE_TRANSPORT);
+        assert!(
+            malformed.message.contains("failed to parse key")
+                || malformed.message.contains("private key is missing"),
+            "unexpected malformed-key message: {}",
+            malformed.message
+        );
+        let _ = std::fs::remove_file(malformed_path);
+    }
+
+    #[test]
+    fn given_invalid_spki_shape__when_extract_ed25519_raw_public_key__then_error_mentions_expected_format()
+     {
+        let short = vec![0u8; ED25519_SPKI_PREFIX.len() + 31];
+        let short_err = extract_ed25519_raw_public_key(&short, "client raw public key")
+            .expect_err("short key must be rejected");
+        assert!(short_err.contains("expected 32-byte raw key"));
+
+        let mut wrong_prefix = ed25519_spki_from_raw([0x33u8; 32]);
+        wrong_prefix[8] = 0x71;
+        let prefix_err = extract_ed25519_raw_public_key(&wrong_prefix, "client raw public key")
+            .expect_err("wrong prefix must be rejected");
+        assert!(prefix_err.contains("must be ed25519"));
     }
 }

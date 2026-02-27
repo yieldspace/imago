@@ -422,6 +422,8 @@ pub(super) fn is_binding_allowed(
 
 #[cfg(test)]
 mod tests {
+    #![allow(non_snake_case)]
+    #![allow(dead_code)]
     use super::*;
     use imagod_ipc::{compute_manager_auth_proof, random_secret_hex};
     use std::{process::Stdio, sync::Arc};
@@ -583,6 +585,285 @@ mod tests {
             }
             other => panic!("unexpected response: {other:?}"),
         }
+
+        stop_running_service_best_effort(&inner, service_name).await;
+    }
+
+    #[test]
+    fn given_binding_list__when_is_binding_allowed__then_exact_service_and_wit_match_is_required() {
+        let bindings = vec![
+            imagod_ipc::ServiceBinding {
+                name: "svc-a".to_string(),
+                wit: "pkg:iface/a".to_string(),
+            },
+            imagod_ipc::ServiceBinding {
+                name: "svc-b".to_string(),
+                wit: "pkg:iface/b".to_string(),
+            },
+        ];
+
+        assert!(is_binding_allowed(&bindings, "svc-a", "pkg:iface/a"));
+        assert!(!is_binding_allowed(&bindings, "svc-a", "pkg:iface/b"));
+        assert!(!is_binding_allowed(&bindings, "svc-c", "pkg:iface/a"));
+    }
+
+    #[test]
+    fn given_control_error_inputs__when_control_error__then_stage_and_message_are_stable() {
+        let response = control_error(ErrorCode::BadRequest, "metadata mismatch");
+        match response {
+            ControlResponse::Error(err) => {
+                assert_eq!(err.code, ErrorCode::BadRequest);
+                assert_eq!(err.stage, super::super::STAGE_CONTROL);
+                assert_eq!(err.message, "metadata mismatch");
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn given_manager_auth_proof__when_validate_manager_auth__then_valid_and_invalid_cases_are_mapped()
+     {
+        let secret = random_secret_hex();
+        let runner_id = "runner-auth-check";
+        let valid = compute_manager_auth_proof(&secret, runner_id)
+            .expect("valid proof generation should succeed");
+        validate_manager_auth(&secret, runner_id, &valid).expect("valid proof should pass");
+
+        let mismatch = validate_manager_auth(&secret, runner_id, "deadbeef")
+            .expect_err("mismatch should fail");
+        assert_eq!(mismatch.code, ErrorCode::Unauthorized);
+        assert_eq!(mismatch.stage, super::super::STAGE_CONTROL);
+        assert_eq!(mismatch.message, "manager auth proof mismatch");
+
+        let malformed = validate_manager_auth(&secret, runner_id, "not-hex")
+            .expect_err("malformed should fail");
+        assert_eq!(malformed.code, ErrorCode::Unauthorized);
+        assert_eq!(malformed.stage, super::super::STAGE_CONTROL);
+        assert_eq!(malformed.message, "manager auth proof mismatch");
+    }
+
+    #[tokio::test]
+    async fn given_unknown_runner__when_handle_control_request_impl__then_not_found_is_returned_for_each_request_kind()
+     {
+        let inner: Arc<RwLock<BTreeMap<String, super::super::RunningService>>> =
+            Arc::new(RwLock::new(BTreeMap::new()));
+        let pending_ready: Arc<Mutex<super::super::PendingReadyMap>> =
+            Arc::new(Mutex::new(BTreeMap::new()));
+        let handler =
+            DefaultManagerControlHandler::new(PathBuf::from("/tmp/imagod-control-test.toml"));
+
+        let requests = vec![
+            ControlRequest::RegisterRunner {
+                runner_id: "missing-runner".to_string(),
+                service_name: "svc".to_string(),
+                release_hash: "release".to_string(),
+                runner_endpoint: PathBuf::from("/tmp/missing.sock"),
+                manager_auth_proof: "proof".to_string(),
+            },
+            ControlRequest::RunnerReady {
+                runner_id: "missing-runner".to_string(),
+                manager_auth_proof: "proof".to_string(),
+            },
+            ControlRequest::Heartbeat {
+                runner_id: "missing-runner".to_string(),
+                manager_auth_proof: "proof".to_string(),
+            },
+            ControlRequest::ResolveInvocationTarget {
+                runner_id: "missing-runner".to_string(),
+                manager_auth_proof: "proof".to_string(),
+                target_service: "svc-b".to_string(),
+                wit: "pkg:iface/call".to_string(),
+            },
+            ControlRequest::RpcConnectRemote {
+                runner_id: "missing-runner".to_string(),
+                manager_auth_proof: "proof".to_string(),
+                authority: "rpc://example.com".to_string(),
+            },
+            ControlRequest::RpcInvokeRemote {
+                runner_id: "missing-runner".to_string(),
+                manager_auth_proof: "proof".to_string(),
+                connection_id: "c1".to_string(),
+                target_service: "svc-b".to_string(),
+                interface_id: "pkg:iface/call".to_string(),
+                function: "run".to_string(),
+                args_cbor: vec![],
+            },
+            ControlRequest::RpcDisconnectRemote {
+                runner_id: "missing-runner".to_string(),
+                manager_auth_proof: "proof".to_string(),
+                connection_id: "c1".to_string(),
+            },
+        ];
+
+        for request in requests {
+            let response =
+                handle_control_request_impl(&inner, &pending_ready, &handler, request).await;
+            match response {
+                ControlResponse::Error(err) => assert_eq!(err.code, ErrorCode::NotFound),
+                other => panic!("unexpected response: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn given_register_runner_metadata_mismatch__when_handle_control_request_impl__then_bad_request_is_returned()
+     {
+        let inner: Arc<RwLock<BTreeMap<String, super::super::RunningService>>> =
+            Arc::new(RwLock::new(BTreeMap::new()));
+        let pending_ready: Arc<Mutex<super::super::PendingReadyMap>> =
+            Arc::new(Mutex::new(BTreeMap::new()));
+        let service_name = "svc-register";
+        let runner_id = "runner-register";
+        let manager_auth_secret = random_secret_hex();
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("runner child should spawn");
+        let service =
+            new_running_service(child, runner_id, manager_auth_secret.clone(), Vec::new());
+        {
+            let mut guard = inner.write().await;
+            guard.insert(service_name.to_string(), service);
+        }
+
+        let proof = compute_manager_auth_proof(&manager_auth_secret, runner_id)
+            .expect("proof generation should succeed");
+        let handler =
+            DefaultManagerControlHandler::new(PathBuf::from("/tmp/imagod-control-test.toml"));
+        let response = handle_control_request_impl(
+            &inner,
+            &pending_ready,
+            &handler,
+            ControlRequest::RegisterRunner {
+                runner_id: runner_id.to_string(),
+                service_name: "other-service".to_string(),
+                release_hash: "release-test".to_string(),
+                runner_endpoint: PathBuf::from(format!("/tmp/{runner_id}.sock")),
+                manager_auth_proof: proof,
+            },
+        )
+        .await;
+
+        match response {
+            ControlResponse::Error(err) => {
+                assert_eq!(err.code, ErrorCode::BadRequest);
+                assert_eq!(err.message, "register_runner metadata mismatch");
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        stop_running_service_best_effort(&inner, service_name).await;
+    }
+
+    #[tokio::test]
+    async fn given_register_runner_endpoint_mismatch__when_handle_control_request_impl__then_bad_request_is_returned()
+     {
+        let inner: Arc<RwLock<BTreeMap<String, super::super::RunningService>>> =
+            Arc::new(RwLock::new(BTreeMap::new()));
+        let pending_ready: Arc<Mutex<super::super::PendingReadyMap>> =
+            Arc::new(Mutex::new(BTreeMap::new()));
+        let service_name = "svc-endpoint";
+        let runner_id = "runner-endpoint";
+        let manager_auth_secret = random_secret_hex();
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("runner child should spawn");
+        let service =
+            new_running_service(child, runner_id, manager_auth_secret.clone(), Vec::new());
+        {
+            let mut guard = inner.write().await;
+            guard.insert(service_name.to_string(), service);
+        }
+
+        let proof = compute_manager_auth_proof(&manager_auth_secret, runner_id)
+            .expect("proof generation should succeed");
+        let handler =
+            DefaultManagerControlHandler::new(PathBuf::from("/tmp/imagod-control-test.toml"));
+        let response = handle_control_request_impl(
+            &inner,
+            &pending_ready,
+            &handler,
+            ControlRequest::RegisterRunner {
+                runner_id: runner_id.to_string(),
+                service_name: service_name.to_string(),
+                release_hash: "release-test".to_string(),
+                runner_endpoint: PathBuf::from("/tmp/another.sock"),
+                manager_auth_proof: proof,
+            },
+        )
+        .await;
+
+        match response {
+            ControlResponse::Error(err) => {
+                assert_eq!(err.code, ErrorCode::BadRequest);
+                assert_eq!(err.message, "register_runner endpoint mismatch");
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        stop_running_service_best_effort(&inner, service_name).await;
+    }
+
+    #[tokio::test]
+    async fn given_runner_ready_with_pending_waiter__when_handle_control_request_impl__then_ack_and_notify_are_returned()
+     {
+        let inner: Arc<RwLock<BTreeMap<String, super::super::RunningService>>> =
+            Arc::new(RwLock::new(BTreeMap::new()));
+        let pending_ready: Arc<Mutex<super::super::PendingReadyMap>> =
+            Arc::new(Mutex::new(BTreeMap::new()));
+        let service_name = "svc-ready";
+        let runner_id = "runner-ready";
+        let manager_auth_secret = random_secret_hex();
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("runner child should spawn");
+        let mut service =
+            new_running_service(child, runner_id, manager_auth_secret.clone(), Vec::new());
+        service.is_ready = false;
+        {
+            let mut guard = inner.write().await;
+            guard.insert(service_name.to_string(), service);
+        }
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        pending_ready.lock().await.insert(runner_id.to_string(), tx);
+
+        let proof = compute_manager_auth_proof(&manager_auth_secret, runner_id)
+            .expect("proof generation should succeed");
+        let handler =
+            DefaultManagerControlHandler::new(PathBuf::from("/tmp/imagod-control-test.toml"));
+        let response = handle_control_request_impl(
+            &inner,
+            &pending_ready,
+            &handler,
+            ControlRequest::RunnerReady {
+                runner_id: runner_id.to_string(),
+                manager_auth_proof: proof,
+            },
+        )
+        .await;
+
+        assert!(matches!(response, ControlResponse::Ack));
+        let notified = rx.await.expect("waiter should be notified");
+        assert!(notified.is_ok(), "ready waiter should receive success");
+
+        let guard = inner.read().await;
+        let service = guard
+            .get(service_name)
+            .expect("service should remain registered");
+        assert!(service.is_ready, "service should be marked ready");
+        drop(guard);
 
         stop_running_service_best_effort(&inner, service_name).await;
     }
