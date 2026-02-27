@@ -163,6 +163,17 @@ struct HotplugManager {
     thread_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 }
 
+impl Drop for HotplugManager {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Ok(mut guard) = self.thread_handle.lock()
+            && let Some(handle) = guard.take()
+        {
+            let _ = handle.join();
+        }
+    }
+}
+
 #[derive(Clone)]
 struct HotplugCallback {
     allowlist: BTreeSet<String>,
@@ -422,6 +433,23 @@ fn remove_claimed_interface_handle(rep: u32) {
     remove_rep(claimed_interface_registry(), rep);
 }
 
+fn retain_claimed_interfaces_for_other_senders(
+    registry: &mut BTreeMap<u32, ClaimedInterfaceHandle>,
+    sender: &mpsc::Sender<DeviceCommand>,
+) -> usize {
+    let before = registry.len();
+    registry.retain(|_, handle| !handle.sender.same_channel(sender));
+    before.saturating_sub(registry.len())
+}
+
+fn remove_claimed_interface_handles_for_sender(sender: &mpsc::Sender<DeviceCommand>) -> usize {
+    let mut removed = 0;
+    if let Ok(mut guard) = claimed_interface_registry().lock() {
+        removed = retain_claimed_interfaces_for_other_senders(&mut guard, sender);
+    }
+    removed
+}
+
 fn map_lookup_error(err: String) -> UsbError {
     UsbError::Other(err)
 }
@@ -577,6 +605,20 @@ fn usb_resources_cache_key(service_name: &str, release_hash: &str, runner_id: &s
     format!("{service_name}\u{1f}{release_hash}\u{1f}{runner_id}")
 }
 
+fn is_hotplug_cache_key_in_scope(cache_key: &str, service_name: &str, runner_id: &str) -> bool {
+    let mut parts = cache_key.split('\u{1f}');
+    let Some(service) = parts.next() else {
+        return false;
+    };
+    let Some(_release_hash) = parts.next() else {
+        return false;
+    };
+    let Some(runner) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none() && service == service_name && runner == runner_id
+}
+
 fn load_usb_resources_for_state(state: &WasiState) -> Result<UsbResourcesConfig, UsbError> {
     let context = state.native_plugin_context();
     let cache_key = usb_resources_cache_key(
@@ -639,6 +681,10 @@ fn validate_poll_timeout(timeout_ms: u32, limits: &UsbLimitsConfig) -> Result<Du
     Ok(Duration::from_millis(u64::from(timeout_ms)))
 }
 
+fn duration_to_libusb_timeout_ms(timeout: Duration) -> Result<u32, UsbError> {
+    u32::try_from(timeout.as_millis()).map_err(|_| UsbError::InvalidArgument)
+}
+
 fn validate_transfer_len(length: u32, limits: &UsbLimitsConfig) -> Result<usize, UsbError> {
     let length = usize::try_from(length).map_err(|_| UsbError::InvalidArgument)?;
     if length > limits.max_transfer_bytes {
@@ -655,6 +701,8 @@ fn validate_transfer_data_len(len: usize, limits: &UsbLimitsConfig) -> Result<()
 }
 
 fn validate_endpoint_in_address(endpoint: u8) -> Result<(), UsbError> {
+    // This validator is used by bulk/interrupt/iso transfers only.
+    // Endpoint 0 is reserved for control transfers and intentionally rejected here.
     if endpoint & 0x80 == 0 || (endpoint & 0x0f) == 0 {
         return Err(UsbError::InvalidArgument);
     }
@@ -662,6 +710,8 @@ fn validate_endpoint_in_address(endpoint: u8) -> Result<(), UsbError> {
 }
 
 fn validate_endpoint_out_address(endpoint: u8) -> Result<(), UsbError> {
+    // This validator is used by bulk/interrupt/iso transfers only.
+    // Endpoint 0 is reserved for control transfers and intentionally rejected here.
     if endpoint & 0x80 != 0 || (endpoint & 0x0f) == 0 {
         return Err(UsbError::InvalidArgument);
     }
@@ -1014,7 +1064,7 @@ fn perform_iso_transfer(
 
     let packet_count = i32::from(packets);
     let total_len = i32::try_from(buffer.len()).map_err(|_| UsbError::InvalidArgument)?;
-    let timeout_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+    let timeout_ms = duration_to_libusb_timeout_ms(timeout)?;
 
     let transfer = unsafe { ffi::libusb_alloc_transfer(packet_count) };
     if transfer.is_null() {
@@ -1559,12 +1609,23 @@ fn map_channel_send_error<T>(err: mpsc::error::TrySendError<T>) -> UsbError {
     }
 }
 
+async fn send_shutdown_command(
+    sender: &mpsc::Sender<DeviceCommand>,
+    reply: oneshot::Sender<()>,
+) -> bool {
+    match sender.try_send(DeviceCommand::Shutdown { reply }) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+        Err(mpsc::error::TrySendError::Full(command)) => sender.send(command).await.is_ok(),
+    }
+}
+
 async fn shutdown_device_runtime(handle: &DeviceRuntimeHandle) {
     let (reply_tx, reply_rx) = oneshot::channel();
-    let _ = handle
-        .sender
-        .try_send(DeviceCommand::Shutdown { reply: reply_tx });
-    let _ = reply_rx.await;
+    let shutdown_sent = send_shutdown_command(&handle.sender, reply_tx).await;
+    if shutdown_sent {
+        let _ = reply_rx.await;
+    }
 
     let join_handle = handle
         .thread_handle
@@ -1642,12 +1703,32 @@ fn get_hotplug_manager_for_state(
         .lock()
         .map_err(|_| UsbError::Other("hotplug manager cache lock poisoned".to_string()))?;
 
+    let stale_keys: Vec<_> = cache
+        .keys()
+        .filter(|key| {
+            *key != &cache_key
+                && is_hotplug_cache_key_in_scope(key, context.service_name(), context.runner_id())
+        })
+        .cloned()
+        .collect();
+    let mut stale_managers = Vec::new();
+    for key in stale_keys {
+        if let Some(manager) = cache.remove(&key) {
+            stale_managers.push(manager);
+        }
+    }
+
     if let Some(manager) = cache.get(&cache_key) {
-        return Ok(manager.clone());
+        let manager = manager.clone();
+        drop(cache);
+        drop(stale_managers);
+        return Ok(manager);
     }
 
     let manager = create_hotplug_manager(&cache_key, resources.allowlist.clone())?;
     cache.insert(cache_key, manager.clone());
+    drop(cache);
+    drop(stale_managers);
     Ok(manager)
 }
 
@@ -1693,12 +1774,6 @@ impl imago_usb_plugin_bindings::imago::usb::provider::Host for WasiState {
         let resources = load_usb_resources_for_state(self)?;
         let timeout = validate_poll_timeout(timeout_ms, &resources.limits)?;
         let manager = get_hotplug_manager_for_state(self, &resources)?;
-        let _ = manager.stop.load(Ordering::Relaxed);
-        let _ = manager
-            .thread_handle
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|_| ()));
         let queue = manager.queue.clone();
 
         let event = tokio::task::spawn_blocking(move || poll_hotplug_event(&queue, timeout))
@@ -1829,6 +1904,7 @@ impl imago_usb_plugin_bindings::imago::usb::device::HostDevice for WasiState {
 
     async fn drop(&mut self, resource: Resource<DeviceResource>) -> wasmtime::Result<()> {
         if let Ok(handle) = lookup_device_handle(resource.rep()) {
+            let _ = remove_claimed_interface_handles_for_sender(&handle.sender);
             shutdown_device_runtime(&handle).await;
         }
         remove_device_handle(resource.rep());
@@ -2193,6 +2269,18 @@ mod tests {
     }
 
     #[test]
+    fn duration_to_libusb_timeout_ms_rejects_overflow() {
+        assert_eq!(
+            duration_to_libusb_timeout_ms(Duration::from_millis(1_000))
+                .expect("timeout should fit"),
+            1_000
+        );
+
+        let overflow = Duration::from_millis(u64::from(u32::MAX) + 1);
+        assert!(duration_to_libusb_timeout_ms(overflow).is_err());
+    }
+
+    #[test]
     fn validate_transfer_len_enforces_bounds() {
         let limits = UsbLimitsConfig::default();
         assert_eq!(
@@ -2222,7 +2310,7 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_direction_validation_rejects_invalid_addresses() {
+    fn endpoint_direction_validation_rejects_control_endpoint_zero_for_non_control_transfers() {
         assert!(validate_endpoint_in_address(0x81).is_ok());
         assert!(validate_endpoint_out_address(0x01).is_ok());
 
@@ -2249,10 +2337,119 @@ mod tests {
     }
 
     #[test]
+    fn send_shutdown_command_falls_back_when_queue_is_full() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime must build");
+
+        runtime.block_on(async {
+            let (sender, mut receiver) = mpsc::channel::<DeviceCommand>(1);
+            sender
+                .try_send(DeviceCommand::ReleaseInterfaceNoReply { number: 1 })
+                .expect("channel should accept first command");
+
+            let recv_task = tokio::spawn(async move {
+                let _ = receiver.recv().await;
+                let Some(DeviceCommand::Shutdown { reply }) = receiver.recv().await else {
+                    return false;
+                };
+                let _ = reply.send(());
+                true
+            });
+
+            let (reply_tx, reply_rx) = oneshot::channel();
+            assert!(send_shutdown_command(&sender, reply_tx).await);
+            assert!(reply_rx.await.is_ok());
+            assert!(recv_task.await.expect("receiver task must complete"));
+        });
+    }
+
+    #[test]
     fn cache_key_is_runner_scoped() {
         let key_a = usb_resources_cache_key("svc", "release-a", "runner-1");
         let key_b = usb_resources_cache_key("svc", "release-b", "runner-1");
         assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn hotplug_cache_scope_matches_service_and_runner() {
+        let key = usb_resources_cache_key("svc", "release-a", "runner-1");
+        assert!(is_hotplug_cache_key_in_scope(&key, "svc", "runner-1"));
+        assert!(!is_hotplug_cache_key_in_scope(&key, "svc", "runner-2"));
+        assert!(!is_hotplug_cache_key_in_scope(&key, "other", "runner-1"));
+        assert!(!is_hotplug_cache_key_in_scope(
+            "invalid-cache-key",
+            "svc",
+            "runner-1"
+        ));
+    }
+
+    #[test]
+    fn retain_claimed_interfaces_removes_matching_sender() {
+        let (sender_a, _receiver_a) = mpsc::channel::<DeviceCommand>(2);
+        let (sender_b, _receiver_b) = mpsc::channel::<DeviceCommand>(2);
+
+        let mut registry = BTreeMap::new();
+        registry.insert(
+            1,
+            ClaimedInterfaceHandle {
+                number: 1,
+                sender: sender_a.clone(),
+            },
+        );
+        registry.insert(
+            2,
+            ClaimedInterfaceHandle {
+                number: 2,
+                sender: sender_b.clone(),
+            },
+        );
+        registry.insert(
+            3,
+            ClaimedInterfaceHandle {
+                number: 3,
+                sender: sender_a.clone(),
+            },
+        );
+
+        let removed = retain_claimed_interfaces_for_other_senders(&mut registry, &sender_a);
+        assert_eq!(removed, 2);
+        assert_eq!(registry.len(), 1);
+        assert!(
+            registry
+                .values()
+                .all(|handle| handle.sender.same_channel(&sender_b))
+        );
+    }
+
+    #[test]
+    fn hotplug_manager_drop_sets_stop_and_joins_thread() {
+        let queue = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let exited = Arc::new(AtomicBool::new(false));
+
+        let thread_stop = stop.clone();
+        let thread_exited = exited.clone();
+        let thread_handle = thread::Builder::new()
+            .name("hotplug-drop-test".to_string())
+            .spawn(move || {
+                while !thread_stop.load(Ordering::Acquire) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                thread_exited.store(true, Ordering::Release);
+            })
+            .expect("thread should spawn");
+
+        let manager = HotplugManager {
+            queue,
+            stop: stop.clone(),
+            thread_handle: Arc::new(Mutex::new(Some(thread_handle))),
+        };
+        drop(manager);
+
+        assert!(stop.load(Ordering::Acquire));
+        assert!(exited.load(Ordering::Acquire));
     }
 
     #[test]
