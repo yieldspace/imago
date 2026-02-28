@@ -146,7 +146,6 @@ impl CompositeLogBuffer {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_log_drain<R>(
     mut reader: R,
-    buffer: Arc<Mutex<BoundedLogBuffer>>,
     composite_buffer: Arc<Mutex<CompositeLogBuffer>>,
     sender: broadcast::Sender<ServiceLogEvent>,
     service_name: String,
@@ -170,10 +169,6 @@ pub(super) fn spawn_log_drain<R>(
             };
             if read == 0 {
                 break;
-            }
-            {
-                let mut guard = buffer.lock().await;
-                guard.push(&chunk[..read]);
             }
             let timestamp_unix_ms = unix_timestamp_ms_now();
             let event = ServiceLogEvent {
@@ -230,7 +225,6 @@ mod tests {
     async fn spawn_log_drain_updates_buffers_and_broadcast_stream() {
         let stream_bytes = b"hello-from-wasm\nline-2\n";
         let expected = stream_bytes.to_vec();
-        let per_stream = Arc::new(Mutex::new(BoundedLogBuffer::new(256)));
         let composite = Arc::new(Mutex::new(CompositeLogBuffer::new(256)));
         let (sender, _) = broadcast::channel(16);
         let mut receiver = sender.subscribe();
@@ -238,7 +232,6 @@ mod tests {
 
         spawn_log_drain(
             reader,
-            per_stream.clone(),
             composite.clone(),
             sender,
             "svc-test".to_string(),
@@ -273,13 +266,9 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                let per_stream_snapshot = { per_stream.lock().await.snapshot() };
                 let (composite_snapshot, composite_events_snapshot) =
                     { composite.lock().await.snapshot() };
-                if per_stream_snapshot == expected
-                    && composite_snapshot == expected
-                    && !composite_events_snapshot.is_empty()
-                {
+                if composite_snapshot == expected && !composite_events_snapshot.is_empty() {
                     break;
                 }
                 tokio::task::yield_now().await;
