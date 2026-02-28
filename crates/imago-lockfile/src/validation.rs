@@ -39,20 +39,31 @@ impl PathVerifier for StrictPathVerifier {
 }
 
 pub(crate) fn validate_wit_source(source: &str, field_name: &str) -> anyhow::Result<()> {
-    if source.starts_with("file://")
-        || source.starts_with("warg://")
-        || source.starts_with("oci://")
-    {
-        return Ok(());
+    let source = source.trim();
+    if source.is_empty() {
+        return Err(anyhow!("{field_name} must not be empty"));
     }
-    if source.starts_with("https://wa.dev/") {
+    if source.contains('\n') || source.contains('\r') {
+        return Err(anyhow!("{field_name} must not contain newline"));
+    }
+    if source.starts_with("warg://") || source.starts_with("oci://") {
         return Err(anyhow!(
-            "{field_name} no longer accepts https://wa.dev shorthand; use warg://<package>@<version>"
+            "{field_name} must not use warg:// or oci:// prefixes"
         ));
     }
-    Err(anyhow!(
-        "{field_name} must start with one of: file://, warg://, oci://"
-    ))
+    if source.starts_with("https://wa.dev/") || source.starts_with("http://wa.dev/") {
+        return Err(anyhow!(
+            "{field_name} no longer accepts wa.dev shorthand URL"
+        ));
+    }
+    if let Some((scheme, _rest)) = source.split_once("://")
+        && !matches!(scheme, "http" | "https" | "file")
+    {
+        return Err(anyhow!(
+            "{field_name} URL scheme '{scheme}' is not supported; use file/http/https or plain source"
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_sha256_hex(value: &str, field_name: &str) -> anyhow::Result<()> {

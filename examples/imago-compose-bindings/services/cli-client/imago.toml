@@ -6,10 +6,14 @@ type = "cli"
 command = "cargo build --target wasm32-wasip2 --release"
 
 [[dependencies]]
-name = "imago:node"
 version = "0.1.0"
 kind = "native"
-wit = "file://../../../../plugins/imago-node/wit"
+path = "../../../../plugins/imago-node/wit"
+
+[[dependencies]]
+version = "0.1.0"
+kind = "native"
+path = "../rpc-greeter/wit"
 
 [capabilities]
 privileged = false
@@ -21,4 +25,5 @@ wasi = true
 
 [[bindings]]
 name = "rpc-greeter"
-wit = "file://../rpc-greeter/wit/world.wit"
+version = "0.1.0"
+path = "../rpc-greeter/wit"

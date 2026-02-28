@@ -12,4 +12,7 @@ from ..imports import types
 
 
 def get_directories() -> List[Tuple[types.Descriptor, str]]:
+    """
+    Return the set of preopened directories, and their path.
+    """
     raise NotImplementedError

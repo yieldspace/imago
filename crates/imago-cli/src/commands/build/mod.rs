@@ -141,12 +141,15 @@ pub(crate) struct ManifestDependencyComponent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProjectDependencySource {
+    pub source_kind: plugin_sources::SourceKind,
     pub source: String,
     pub registry: Option<String>,
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProjectDependencyComponent {
+    pub source_kind: plugin_sources::SourceKind,
     pub source: String,
     pub registry: Option<String>,
     pub sha256: Option<String>,
@@ -196,8 +199,11 @@ pub(crate) struct ProjectDependency {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProjectBindingSource {
     pub name: String,
+    pub wit_source_kind: plugin_sources::SourceKind,
     pub wit_source: String,
     pub wit_registry: Option<String>,
+    pub wit_version: String,
+    pub wit_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1155,19 +1161,27 @@ fn parse_project_dependencies(
         let table = item
             .as_table()
             .ok_or_else(|| anyhow!("dependencies[{index}] must be a table"))?;
-
-        let name = table
-            .get("name")
-            .and_then(TomlValue::as_str)
-            .ok_or_else(|| anyhow!("dependencies[{index}].name must be a string"))?
-            .trim()
-            .to_string();
-        validate_dependency_package_name(&name)
-            .map_err(|err| anyhow!("dependencies[{index}].name is invalid: {err}"))?;
-        if !names.insert(name.clone()) {
-            return Err(anyhow!(
-                "dependencies contains duplicate dependency name: {name}"
-            ));
+        for key in table.keys() {
+            if key == "name" {
+                return Err(anyhow!(
+                    "dependencies[{index}].name is no longer supported; dependency ID is resolved from source"
+                ));
+            }
+            if !matches!(
+                key.as_str(),
+                "version"
+                    | "kind"
+                    | "wit"
+                    | "oci"
+                    | "path"
+                    | "sha256"
+                    | "registry"
+                    | "requires"
+                    | "component"
+                    | "capabilities"
+            ) {
+                return Err(anyhow!("dependencies[{index}].{key} is not supported"));
+            }
         }
 
         let version = table
@@ -1195,16 +1209,17 @@ fn parse_project_dependencies(
             }
         };
 
-        let wit = parse_dependency_wit_source(
-            table.get("wit"),
-            index,
-            &name,
-            &version,
-            namespace_registries,
-        )
-        .with_context(|| {
-            format!("failed to parse dependencies[{index}].wit source configuration")
-        })?;
+        let wit = parse_dependency_wit_source(table, index, &version, namespace_registries)
+            .with_context(|| {
+                format!("failed to parse dependencies[{index}] source configuration")
+            })?;
+        let name = dependency_name_hint_from_source(index, &wit)
+            .with_context(|| format!("failed to derive dependency id for dependencies[{index}]"))?;
+        if !names.insert(name.clone()) {
+            return Err(anyhow!(
+                "dependencies resolves duplicate dependency id: {name}"
+            ));
+        }
 
         let requires = match table.get("requires") {
             None => Vec::new(),
@@ -1246,83 +1261,24 @@ fn parse_project_dependencies(
                 let component_table = value
                     .as_table()
                     .ok_or_else(|| anyhow!("dependencies[{index}].component must be a table"))?;
-                if component_table.contains_key("path") {
-                    return Err(anyhow!(
-                        "dependencies[{index}].component.path is no longer supported; use dependencies[{index}].component.source"
-                    ));
-                }
                 for key in component_table.keys() {
-                    if !matches!(key.as_str(), "source" | "registry" | "sha256") {
+                    if !matches!(key.as_str(), "wit" | "oci" | "path" | "registry" | "sha256") {
                         return Err(anyhow!(
                             "dependencies[{index}].component.{key} is not supported"
                         ));
                     }
                 }
-
-                let source = component_table
-                    .get("source")
-                    .and_then(TomlValue::as_str)
-                    .ok_or_else(|| {
-                        anyhow!("dependencies[{index}].component.source must be a string")
-                    })?
-                    .trim()
-                    .to_string();
-                if source.is_empty() {
-                    return Err(anyhow!(
-                        "dependencies[{index}].component.source must not be empty"
-                    ));
-                }
-                plugin_sources::validate_component_source(
-                    &source,
-                    &format!("dependencies[{index}].component.source"),
-                )?;
-
-                let registry = match component_table.get("registry") {
-                    None => None,
-                    Some(value) => Some(
-                        value
-                            .as_str()
-                            .ok_or_else(|| {
-                                anyhow!("dependencies[{index}].component.registry must be a string")
-                            })?
-                            .trim()
-                            .to_string(),
-                    ),
-                };
-                let registry = plugin_sources::normalize_registry_for_source(
-                    &source,
-                    registry.as_deref(),
-                    namespace_registries,
+                let source = parse_source_selector(
+                    component_table,
                     &format!("dependencies[{index}].component"),
+                    namespace_registries,
                 )?;
-
-                let sha256 = match component_table.get("sha256") {
-                    None => None,
-                    Some(value) => {
-                        let sha = value
-                            .as_str()
-                            .ok_or_else(|| {
-                                anyhow!("dependencies[{index}].component.sha256 must be a string")
-                            })?
-                            .trim()
-                            .to_string();
-                        if sha.is_empty() {
-                            return Err(anyhow!(
-                                "dependencies[{index}].component.sha256 must not be empty"
-                            ));
-                        }
-                        plugin_sources::validate_sha256_hex(
-                            &sha,
-                            &format!("dependencies[{index}].component.sha256"),
-                        )?;
-                        Some(sha)
-                    }
-                };
 
                 Some(ProjectDependencyComponent {
-                    source,
-                    registry,
-                    sha256,
+                    source_kind: source.source_kind,
+                    source: source.source,
+                    registry: source.registry,
+                    sha256: source.sha256,
                 })
             }
         };
@@ -1353,86 +1309,116 @@ fn parse_project_dependencies(
 }
 
 fn parse_dependency_wit_source(
-    value: Option<&TomlValue>,
+    table: &toml::Table,
     index: usize,
-    name: &str,
     version: &str,
     namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
 ) -> anyhow::Result<ProjectDependencySource> {
-    let default_source = format!("warg://{name}@{version}");
-    let default_registry = Some(plugin_sources::resolve_warg_registry_for_package(
-        name,
-        None,
+    if version.trim().is_empty() {
+        return Err(anyhow!("dependencies[{index}].version must not be empty"));
+    }
+    parse_source_selector(
+        table,
+        &format!("dependencies[{index}]"),
         namespace_registries,
-    )?);
+    )
+}
 
-    let (source, registry) = match value {
-        None => (default_source, default_registry),
-        Some(TomlValue::String(text)) => {
-            let source = text.trim().to_string();
-            if source.is_empty() {
-                return Err(anyhow!("dependencies[{index}].wit must not be empty"));
-            }
-            plugin_sources::validate_wit_source(&source, &format!("dependencies[{index}].wit"))?;
-            let registry = plugin_sources::normalize_registry_for_source(
-                &source,
-                None,
-                namespace_registries,
-                &format!("dependencies[{index}].wit"),
-            )?;
-            (source, registry)
+fn dependency_name_hint_from_source(
+    index: usize,
+    source: &ProjectDependencySource,
+) -> anyhow::Result<String> {
+    match source.source_kind {
+        plugin_sources::SourceKind::Wit => Ok(plugin_sources::parse_wit_package_source(
+            &source.source,
+            "dependencies[].wit",
+        )?
+        .to_string()),
+        plugin_sources::SourceKind::Oci => {
+            plugin_sources::parse_oci_package_source(&source.source, "dependencies[].oci")
         }
-        Some(TomlValue::Table(table)) => {
-            for key in table.keys() {
-                if !matches!(key.as_str(), "source" | "registry") {
-                    return Err(anyhow!("dependencies[{index}].wit.{key} is not supported"));
-                }
-            }
+        plugin_sources::SourceKind::Path => Ok(format!("path-source-{index}")),
+    }
+}
 
-            let source = table
-                .get("source")
-                .and_then(TomlValue::as_str)
-                .ok_or_else(|| anyhow!("dependencies[{index}].wit.source must be a string"))?
+fn parse_source_selector(
+    table: &toml::Table,
+    field_base: &str,
+    namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
+) -> anyhow::Result<ProjectDependencySource> {
+    let wit = table.get("wit");
+    let oci = table.get("oci");
+    let path = table.get("path");
+    let selected = [("wit", wit), ("oci", oci), ("path", path)]
+        .into_iter()
+        .filter(|(_, value)| value.is_some())
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err(anyhow!(
+            "{field_base} must define exactly one source key: `wit`, `oci`, or `path`"
+        ));
+    }
+    if selected.len() > 1 {
+        return Err(anyhow!(
+            "{field_base} has multiple source keys; choose exactly one of `wit`, `oci`, or `path`"
+        ));
+    }
+    let (kind_key, value) = selected[0];
+    let source = value
+        .and_then(TomlValue::as_str)
+        .ok_or_else(|| anyhow!("{field_base}.{kind_key} must be a string"))?
+        .trim()
+        .to_string();
+    if source.is_empty() {
+        return Err(anyhow!("{field_base}.{kind_key} must not be empty"));
+    }
+
+    let source_kind = match kind_key {
+        "wit" => plugin_sources::SourceKind::Wit,
+        "oci" => plugin_sources::SourceKind::Oci,
+        "path" => plugin_sources::SourceKind::Path,
+        _ => unreachable!(),
+    };
+    plugin_sources::validate_wit_source(source_kind, &source, &format!("{field_base}.{kind_key}"))?;
+
+    let raw_registry = match table.get("registry") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| anyhow!("{field_base}.registry must be a string"))?
+                .trim()
+                .to_string(),
+        ),
+    };
+    let registry = plugin_sources::normalize_registry_for_source(
+        source_kind,
+        &source,
+        raw_registry.as_deref(),
+        namespace_registries,
+        field_base,
+    )?;
+    let sha256 = match table.get("sha256") {
+        None => None,
+        Some(value) => {
+            let sha = value
+                .as_str()
+                .ok_or_else(|| anyhow!("{field_base}.sha256 must be a string"))?
                 .trim()
                 .to_string();
-            if source.is_empty() {
-                return Err(anyhow!(
-                    "dependencies[{index}].wit.source must not be empty"
-                ));
+            if sha.is_empty() {
+                return Err(anyhow!("{field_base}.sha256 must not be empty"));
             }
-            plugin_sources::validate_wit_source(
-                &source,
-                &format!("dependencies[{index}].wit.source"),
-            )?;
-
-            let registry = match table.get("registry") {
-                None => None,
-                Some(value) => Some(
-                    value
-                        .as_str()
-                        .ok_or_else(|| {
-                            anyhow!("dependencies[{index}].wit.registry must be a string")
-                        })?
-                        .trim()
-                        .to_string(),
-                ),
-            };
-            let registry = plugin_sources::normalize_registry_for_source(
-                &source,
-                registry.as_deref(),
-                namespace_registries,
-                &format!("dependencies[{index}].wit"),
-            )?;
-            (source, registry)
-        }
-        Some(_) => {
-            return Err(anyhow!(
-                "dependencies[{index}].wit must be a string or a table"
-            ));
+            plugin_sources::validate_sha256_hex(&sha, &format!("{field_base}.sha256"))?;
+            Some(sha)
         }
     };
-
-    Ok(ProjectDependencySource { source, registry })
+    Ok(ProjectDependencySource {
+        source_kind,
+        source,
+        registry,
+        sha256,
+    })
 }
 
 fn parse_root_capabilities(root: &toml::Table) -> anyhow::Result<ManifestCapabilityPolicy> {
@@ -1586,8 +1572,8 @@ fn parse_project_binding_sources(
         .as_array()
         .ok_or_else(|| anyhow!("bindings must be an array"))?;
     let mut bindings = Vec::with_capacity(array.len());
-    let mut wit_to_name = BTreeMap::<(String, Option<String>), String>::new();
-    let mut seen_bindings = BTreeSet::<(String, String, Option<String>)>::new();
+    let mut wit_to_name = BTreeMap::<(String, Option<String>, String), String>::new();
+    let mut seen_bindings = BTreeSet::<(String, String, Option<String>, String)>::new();
     for (index, entry) in array.iter().enumerate() {
         let table = entry
             .as_table()
@@ -1598,7 +1584,10 @@ fn parse_project_binding_sources(
                     "bindings[{index}].target is no longer supported; use bindings[{index}].name"
                 ));
             }
-            if !matches!(key.as_str(), "name" | "wit") {
+            if !matches!(
+                key.as_str(),
+                "name" | "version" | "wit" | "oci" | "path" | "sha256" | "registry"
+            ) {
                 return Err(anyhow!("bindings[{index}].{key} is not supported"));
             }
         }
@@ -1608,18 +1597,18 @@ fn parse_project_binding_sources(
             .ok_or_else(|| anyhow!("bindings[{index}].name must be a string"))?
             .trim()
             .to_string();
-        let wit_source = table
-            .get("wit")
+        let wit_version = table
+            .get("version")
             .and_then(TomlValue::as_str)
-            .ok_or_else(|| anyhow!("bindings[{index}].wit must be a string"))?
+            .ok_or_else(|| anyhow!("bindings[{index}].version must be a string"))?
             .trim()
             .to_string();
 
         if name.is_empty() {
             return Err(anyhow!("bindings[{index}].name must not be empty"));
         }
-        if wit_source.is_empty() {
-            return Err(anyhow!("bindings[{index}].wit must not be empty"));
+        if wit_version.is_empty() {
+            return Err(anyhow!("bindings[{index}].version must not be empty"));
         }
         validate_service_name(&name).map_err(|e| {
             anyhow!(
@@ -1627,25 +1616,18 @@ fn parse_project_binding_sources(
                 e.to_string().replace("name ", "")
             )
         })?;
-        if !wit_source.contains("://")
-            && wit_source.contains('/')
-            && !wit_source.starts_with("file://")
-            && !wit_source.starts_with("warg://")
-            && !wit_source.starts_with("oci://")
-        {
-            return Err(anyhow!(
-                "bindings[{index}].wit no longer accepts '<package>/<interface>'; use file://..., warg://..., or oci://..."
-            ));
-        }
-        plugin_sources::validate_wit_source(&wit_source, &format!("bindings[{index}].wit"))?;
-        let wit_registry = plugin_sources::normalize_registry_for_source(
-            &wit_source,
-            None,
-            namespace_registries,
-            &format!("bindings[{index}].wit"),
-        )?;
+        let source =
+            parse_source_selector(table, &format!("bindings[{index}]"), namespace_registries)?;
+        let wit_source = source.source;
+        let wit_registry = source.registry;
+        let wit_source_kind = source.source_kind;
+        let wit_sha256 = source.sha256;
 
-        let source_key = (wit_source.clone(), wit_registry.clone());
+        let source_key = (
+            wit_source.clone(),
+            wit_registry.clone(),
+            wit_version.clone(),
+        );
         if let Some(existing_name) = wit_to_name.get(&source_key) {
             if existing_name != &name {
                 return Err(anyhow!(
@@ -1659,11 +1641,19 @@ fn parse_project_binding_sources(
             wit_to_name.insert(source_key, name.clone());
         }
 
-        if seen_bindings.insert((name.clone(), wit_source.clone(), wit_registry.clone())) {
+        if seen_bindings.insert((
+            name.clone(),
+            wit_source.clone(),
+            wit_registry.clone(),
+            wit_version.clone(),
+        )) {
             bindings.push(ProjectBindingSource {
                 name,
+                wit_source_kind,
                 wit_source,
                 wit_registry,
+                wit_version,
+                wit_sha256,
             });
         }
     }
@@ -1685,6 +1675,7 @@ fn resolve_manifest_bindings_from_lock(
             name: binding.name.clone(),
             wit_source: binding.wit_source.clone(),
             wit_registry: binding.wit_registry.clone(),
+            wit_version: binding.wit_version.clone(),
         });
     }
     let resolved = imago_lockfile::resolve_binding_wits(project_root, &lock, &expectations)?;
@@ -3415,18 +3406,19 @@ type = "cli"
 
 [[bindings]]
 name = "svc-b"
-wit = "file://registry/acme-clock.wit"
+version = "0.1.0"
+path = "registry/acme-clock"
 
 [target.default]
 remote = "127.0.0.1:4443"
 "#,
         );
         write_file(
-            &root.join("registry/acme-clock.wit"),
+            &root.join("registry/acme-clock/package.wit"),
             b"package acme:clock@0.1.0;\ninterface api { now: func() -> u64; }\n",
         );
         write_file(
-            &root.join("wit/deps/acme-clock/package.wit"),
+            &root.join("wit/deps/acme-clock-0.1.0/package.wit"),
             br#"
 package acme:clock@0.1.0;
 
@@ -3440,7 +3432,7 @@ interface admin {
 "#,
         );
         let wit_digest =
-            compute_path_digest_hex(&root.join("wit/deps/acme-clock")).expect("wit digest");
+            compute_path_digest_hex(&root.join("wit/deps/acme-clock-0.1.0")).expect("wit digest");
         write_imago_lock(
             &root,
             &ImagoLock {
@@ -3449,12 +3441,12 @@ interface admin {
                 wit_packages: vec![],
                 binding_wits: vec![ImagoLockBindingWit {
                     name: "svc-b".to_string(),
-                    wit_source: "file://registry/acme-clock.wit".to_string(),
+                    wit_source: "registry/acme-clock".to_string(),
                     wit_registry: None,
+                    wit_version: "0.1.0".to_string(),
                     wit_digest,
-                    wit_path: "wit/deps/acme-clock".to_string(),
+                    wit_path: "wit/deps/acme-clock-0.1.0".to_string(),
                     interfaces: vec!["acme:clock/admin".to_string(), "acme:clock/api".to_string()],
-                    resolved_at: "0".to_string(),
                 }],
             },
         );
@@ -3491,6 +3483,7 @@ type = "cli"
 
 [[bindings]]
 name = "svc-b"
+version = "0.1.0"
 
 [target.default]
 remote = "127.0.0.1:4443"
@@ -3500,7 +3493,10 @@ remote = "127.0.0.1:4443"
 
         let err = build_project("default", &root)
             .expect_err("build must fail when bindings.wit is missing");
-        assert!(err.to_string().contains("bindings[0].wit"));
+        assert!(
+            err.to_string()
+                .contains("bindings[0] must define exactly one source key")
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3517,7 +3513,8 @@ type = "cli"
 
 [[bindings]]
 name = "svc-b"
-wit = "file://registry/acme-clock.wit"
+version = "0.1.0"
+path = "registry/acme-clock"
 target = "legacy"
 
 [target.default]
@@ -3545,6 +3542,7 @@ type = "cli"
 
 [[bindings]]
 name = "svc-b"
+version = "0.1.0"
 wit = "yieldspace:svc/invoke"
 
 [target.default]
@@ -3555,10 +3553,7 @@ remote = "127.0.0.1:4443"
 
         let err =
             build_project("default", &root).expect_err("legacy bindings format must be rejected");
-        assert!(
-            err.to_string()
-                .contains("no longer accepts '<package>/<interface>'")
-        );
+        assert!(err.to_string().contains("imago.lock is missing"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3575,6 +3570,7 @@ type = "cli"
 
 [[bindings]]
 name = "svc-b"
+version = "0.1.0"
 wit = "https://example.invalid/acme-clock.wit"
 
 [target.default]
@@ -3587,7 +3583,7 @@ remote = "127.0.0.1:4443"
             .expect_err("build must fail when bindings.wit scheme is unsupported");
         assert!(
             err.to_string()
-                .contains("must start with one of: file://, warg://, oci://")
+                .contains("must not use URL scheme; use plain package name")
         );
 
         let _ = fs::remove_dir_all(root);
@@ -4266,10 +4262,9 @@ main = "build/app.wasm"
 type = "cli"
 
 [[dependencies]]
-name = "yieldspace:plugin/example"
 version = "0.1.0"
 kind = "native"
-wit = "file://registry/example.wit"
+path = "registry/example"
 
 [target.default]
 remote = "127.0.0.1:4443"
@@ -4277,7 +4272,7 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
-            &root.join("registry/example.wit"),
+            &root.join("registry/example/package.wit"),
             b"package test:example;\n",
         );
         run_update(&root);
@@ -4301,10 +4296,9 @@ main = "build/app.wasm"
 type = "cli"
 
 [[dependencies]]
-name = "yieldspace:plugin/example"
 version = "0.1.0"
 kind = "native"
-wit = "file://registry/example.wit"
+path = "registry/example"
 
 [target.default]
 remote = "127.0.0.1:4443"
@@ -4312,7 +4306,7 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
-            &root.join("registry/example.wit"),
+            &root.join("registry/example/package.wit"),
             b"package test:example;\n",
         );
         run_update(&root);
@@ -4321,7 +4315,7 @@ remote = "127.0.0.1:4443"
         build_project("default", &root)
             .expect("build should succeed by hydrating wit/deps from dependency cache");
         assert!(
-            root.join("wit/deps/yieldspace-plugin/example/example.wit")
+            root.join("wit/deps/test-example-0.1.0/package.wit")
                 .exists(),
             "wit/deps must be rehydrated from dependency cache before lock validation"
         );
@@ -4340,10 +4334,9 @@ main = "build/app.wasm"
 type = "cli"
 
 [[dependencies]]
-name = "yieldspace:plugin/example"
 version = "0.1.0"
 kind = "native"
-wit = "file://registry/example.wit"
+path = "registry/example"
 
 [target.default]
 remote = "127.0.0.1:4443"
@@ -4351,7 +4344,7 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
-            &root.join("registry/example.wit"),
+            &root.join("registry/example/package.wit"),
             b"package test:example;\n",
         );
         run_update(&root);
@@ -4383,10 +4376,9 @@ main = "build/app.wasm"
 type = "cli"
 
 [[dependencies]]
-name = "/tmp/pwn"
 version = "0.1.0"
 kind = "native"
-wit = "file://registry/example.wit"
+wit = "/tmp/pwn"
 
 [target.default]
 remote = "127.0.0.1:4443"
@@ -4394,15 +4386,15 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let err = build_project("default", &root)
-            .expect_err("absolute dependency package name must fail");
-        let err_text = err.to_string();
+        let err =
+            build_project("default", &root).expect_err("absolute dependency source must fail");
+        let err_text = format!("{err:#}");
         assert!(
-            err_text.contains("dependencies[0].name is invalid"),
+            err_text.contains("failed to parse dependencies[0] source configuration"),
             "unexpected error: {err_text}"
         );
         assert!(
-            err_text.contains("invalid path components"),
+            err_text.contains("warg source package contains invalid path components: /tmp/pwn"),
             "unexpected error: {err_text}"
         );
 
@@ -4420,10 +4412,9 @@ main = "build/app.wasm"
 type = "cli"
 
 [[dependencies]]
-name = "yieldspace:plugin/./example"
 version = "0.1.0"
 kind = "native"
-wit = "file://registry/example.wit"
+wit = "yieldspace:plugin/../example"
 
 [target.default]
 remote = "127.0.0.1:4443"
@@ -4433,13 +4424,13 @@ remote = "127.0.0.1:4443"
 
         let err = build_project("default", &root)
             .expect_err("dependency package with normalized path segment must fail");
-        let err_text = err.to_string();
+        let err_text = format!("{err:#}");
         assert!(
-            err_text.contains("dependencies[0].name is invalid"),
+            err_text.contains("failed to parse dependencies[0] source configuration"),
             "unexpected error: {err_text}"
         );
         assert!(
-            err_text.contains("invalid path components"),
+            err_text.contains("warg source package contains invalid path components"),
             "unexpected error: {err_text}"
         );
 
@@ -4457,10 +4448,9 @@ main = "build/app.wasm"
 type = "cli"
 
 [[dependencies]]
-name = "yieldspace:plugin/example"
 version = "0.1.0"
 kind = "native"
-wit = "file://registry/example.wit"
+path = "registry/example"
 requires = ["/tmp/pwn"]
 
 [target.default]
@@ -4495,10 +4485,9 @@ main = "build/app.wasm"
 type = "cli"
 
 [[dependencies]]
-name = "yieldspace:plugin/example"
 version = "0.1.0"
 kind = "native"
-wit = "file://registry/example.wit"
+path = "registry/example"
 
 [target.default]
 remote = "127.0.0.1:4443"
@@ -4506,7 +4495,7 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
-            &root.join("registry/example.wit"),
+            &root.join("registry/example/package.wit"),
             b"package test:example;\n",
         );
         run_update(&root);
@@ -4538,10 +4527,9 @@ main = "build/app.wasm"
 type = "cli"
 
 [[dependencies]]
-name = "yieldspace:plugin/example"
 version = "0.1.0"
 kind = "native"
-wit = "file://registry/example.wit"
+path = "registry/example"
 
 [target.default]
 remote = "127.0.0.1:4443"
@@ -4549,18 +4537,18 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
-            &root.join("registry/example.wit"),
+            &root.join("registry/example/package.wit"),
             b"package test:example;\n",
         );
         write_file(
-            &root.join("wit/deps/yieldspace-plugin/example/example.wit"),
+            &root.join("wit/deps/path-source-0-0.1.0/package.wit"),
             b"package test:example;\n",
         );
         write_file(
             &root.join("wit/deps/test-dep/package.wit"),
             b"package test:dep; interface dep { pong: func() -> string; }\n",
         );
-        let digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace-plugin/example"))
+        let digest = compute_path_digest_hex(&root.join("wit/deps/path-source-0-0.1.0"))
             .expect("wit digest should compute");
         let transitive_digest = format!(
             "sha256:{}",
@@ -4572,16 +4560,15 @@ remote = "127.0.0.1:4443"
             &ImagoLock {
                 version: IMAGO_LOCK_VERSION,
                 dependencies: vec![ImagoLockDependency {
-                    name: "yieldspace:plugin/example".to_string(),
+                    name: "path-source-0".to_string(),
                     version: "0.1.0".to_string(),
-                    wit_source: "file://registry/example.wit".to_string(),
+                    wit_source: "registry/example".to_string(),
                     wit_registry: None,
                     wit_digest: digest.clone(),
-                    wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
+                    wit_path: "wit/deps/path-source-0-0.1.0".to_string(),
                     component_source: None,
                     component_registry: None,
                     component_sha256: None,
-                    resolved_at: "0".to_string(),
                 }],
                 binding_wits: vec![],
                 wit_packages: vec![ImagoLockWitPackage {
@@ -4593,24 +4580,28 @@ remote = "127.0.0.1:4443"
                         digest: transitive_digest.clone(),
                         source: None,
                         path: "wit/deps/test-dep".to_string(),
-                        via: vec!["yieldspace:plugin/other".to_string()],
+                        via: vec!["path-source-1".to_string()],
                     }],
                 }],
             },
         );
         let cache_entry = dependency_cache::DependencyCacheEntry {
-            name: "yieldspace:plugin/example".to_string(),
+            name: "path-source-0".to_string(),
+            resolved_package_name: None,
             version: "0.1.0".to_string(),
             kind: "native".to_string(),
-            wit_source: "file://registry/example.wit".to_string(),
+            wit_source: "registry/example".to_string(),
             wit_registry: None,
-            wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
+            wit_sha256: None,
+            wit_path: "wit/deps/path-source-0-0.1.0".to_string(),
             wit_digest: digest,
             wit_source_fingerprint: None,
             component_source: None,
             component_registry: None,
             component_sha256: None,
             component_source_fingerprint: None,
+            component_world_foreign_packages: vec![],
+            component_world_foreign_packages_recorded: true,
             transitive_packages: vec![dependency_cache::DependencyCacheTransitivePackage {
                 name: "test:dep".to_string(),
                 registry: None,
@@ -4621,10 +4612,10 @@ remote = "127.0.0.1:4443"
                 path: "wit/deps/test-dep".to_string(),
             }],
         };
-        let cache_root = dependency_cache::cache_entry_root(&root, "yieldspace:plugin/example");
+        let cache_root = dependency_cache::cache_entry_root(&root, "path-source-0");
         copy_tree(
-            &root.join("wit/deps/yieldspace-plugin/example"),
-            &cache_root.join("wit/deps/yieldspace-plugin/example"),
+            &root.join("wit/deps/path-source-0-0.1.0"),
+            &cache_root.join("wit/deps/path-source-0-0.1.0"),
         );
         copy_tree(
             &root.join("wit/deps/test-dep"),
@@ -4651,13 +4642,12 @@ main = "build/app.wasm"
 type = "cli"
 
 [[dependencies]]
-name = "yieldspace:plugin/example"
 version = "0.1.0"
 kind = "wasm"
-wit = "file://registry/example.wit"
+path = "registry/example"
 
 [dependencies.component]
-path = "plugins/example.wasm"
+source = "plugins/example.wasm"
 sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 [target.default]
@@ -4666,7 +4656,7 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
-            &root.join("registry/example.wit"),
+            &root.join("registry/example/package.wit"),
             b"package test:example;\n",
         );
 
@@ -4674,7 +4664,7 @@ remote = "127.0.0.1:4443"
             build_project("default", &root).expect_err("legacy component.path must be rejected");
         assert!(
             err.to_string()
-                .contains("component.path is no longer supported")
+                .contains("dependencies[0].component.source is not supported")
         );
 
         let _ = fs::remove_dir_all(root);
@@ -4694,13 +4684,12 @@ type = "cli"
 privileged = false
 
 [capabilities.deps]
-"yieldspace:plugin/example" = ["*"]
+"test:example" = ["*"]
 
 [[dependencies]]
-name = "yieldspace:plugin/example"
 version = "0.1.0"
 kind = "native"
-wit = "file://registry/example.wit"
+path = "registry/example"
 
 [target.default]
 remote = "127.0.0.1:4443"
@@ -4708,7 +4697,7 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
-            &root.join("registry/example.wit"),
+            &root.join("registry/example/package.wit"),
             b"package test:example;\n",
         );
         run_update(&root);
@@ -4716,17 +4705,13 @@ remote = "127.0.0.1:4443"
         let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
         assert_eq!(manifest.dependencies.len(), 1);
-        assert_eq!(manifest.dependencies[0].name, "yieldspace:plugin/example");
+        assert_eq!(manifest.dependencies[0].name, "test:example");
         assert!(matches!(
             manifest.dependencies[0].kind,
             ManifestDependencyKind::Native
         ));
         assert_eq!(
-            manifest
-                .capabilities
-                .deps
-                .get("yieldspace:plugin/example")
-                .cloned(),
+            manifest.capabilities.deps.get("test:example").cloned(),
             Some(vec!["*".to_string()])
         );
 
@@ -4744,10 +4729,9 @@ main = "build/app.wasm"
 type = "cli"
 
 [[dependencies]]
-name = "yieldspace:plugin/example"
 version = "0.1.0"
 kind = "native"
-wit = "file://registry/example.wit"
+path = "registry/example"
 
 [dependencies.capabilities]
 deps = "*"
@@ -4758,7 +4742,7 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
-            &root.join("registry/example.wit"),
+            &root.join("registry/example/package.wit"),
             b"package test:example;\n",
         );
         run_update(&root);
@@ -4785,10 +4769,9 @@ main = "build/app.wasm"
 type = "cli"
 
 [[dependencies]]
-name = "yieldspace:plugin/example"
 version = "0.1.0"
 kind = "native"
-wit = "file://registry/example.wit"
+path = "registry/example"
 
 [target.default]
 remote = "127.0.0.1:4443"
@@ -4796,11 +4779,11 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
-            &root.join("registry/example.wit"),
+            &root.join("registry/example/package.wit"),
             b"package test:example;\n",
         );
         write_file(
-            &root.join("wit/deps/yieldspace-plugin/example/example.wit"),
+            &root.join("wit/deps/path-source-0-0.1.0/package.wit"),
             b"package test:example;\n",
         );
         write_file(
@@ -4808,7 +4791,7 @@ remote = "127.0.0.1:4443"
             b"package test:dep; interface dep { pong: func() -> string; }\n",
         );
 
-        let digest = compute_path_digest_hex(&root.join("wit/deps/yieldspace-plugin/example"))
+        let digest = compute_path_digest_hex(&root.join("wit/deps/path-source-0-0.1.0"))
             .expect("wit digest should compute");
         let actual_transitive_digest = format!(
             "sha256:{}",
@@ -4820,16 +4803,15 @@ remote = "127.0.0.1:4443"
             &ImagoLock {
                 version: IMAGO_LOCK_VERSION,
                 dependencies: vec![ImagoLockDependency {
-                    name: "yieldspace:plugin/example".to_string(),
+                    name: "path-source-0".to_string(),
                     version: "0.1.0".to_string(),
-                    wit_source: "file://registry/example.wit".to_string(),
+                    wit_source: "registry/example".to_string(),
                     wit_registry: None,
                     wit_digest: digest.clone(),
-                    wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
+                    wit_path: "wit/deps/path-source-0-0.1.0".to_string(),
                     component_source: None,
                     component_registry: None,
                     component_sha256: None,
-                    resolved_at: "0".to_string(),
                 }],
                 binding_wits: vec![],
                 wit_packages: vec![ImagoLockWitPackage {
@@ -4842,24 +4824,28 @@ remote = "127.0.0.1:4443"
                             .to_string(),
                         source: None,
                         path: "wit/deps/test-dep".to_string(),
-                        via: vec!["yieldspace:plugin/example".to_string()],
+                        via: vec!["path-source-0".to_string()],
                     }],
                 }],
             },
         );
         let cache_entry = dependency_cache::DependencyCacheEntry {
-            name: "yieldspace:plugin/example".to_string(),
+            name: "path-source-0".to_string(),
+            resolved_package_name: None,
             version: "0.1.0".to_string(),
             kind: "native".to_string(),
-            wit_source: "file://registry/example.wit".to_string(),
+            wit_source: "registry/example".to_string(),
             wit_registry: None,
-            wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
+            wit_sha256: None,
+            wit_path: "wit/deps/path-source-0-0.1.0".to_string(),
             wit_digest: digest,
             wit_source_fingerprint: None,
             component_source: None,
             component_registry: None,
             component_sha256: None,
             component_source_fingerprint: None,
+            component_world_foreign_packages: vec![],
+            component_world_foreign_packages_recorded: true,
             transitive_packages: vec![dependency_cache::DependencyCacheTransitivePackage {
                 name: "test:dep".to_string(),
                 registry: None,
@@ -4870,10 +4856,10 @@ remote = "127.0.0.1:4443"
                 path: "wit/deps/test-dep".to_string(),
             }],
         };
-        let cache_root = dependency_cache::cache_entry_root(&root, "yieldspace:plugin/example");
+        let cache_root = dependency_cache::cache_entry_root(&root, "path-source-0");
         copy_tree(
-            &root.join("wit/deps/yieldspace-plugin/example"),
-            &cache_root.join("wit/deps/yieldspace-plugin/example"),
+            &root.join("wit/deps/path-source-0-0.1.0"),
+            &cache_root.join("wit/deps/path-source-0-0.1.0"),
         );
         copy_tree(
             &root.join("wit/deps/test-dep"),
@@ -4904,13 +4890,12 @@ main = "build/app.wasm"
 type = "cli"
 
 [[dependencies]]
-name = "yieldspace:plugin/example"
 version = "0.1.0"
 kind = "wasm"
-wit = "file://registry/example.wit"
+path = "registry/example"
 
 [dependencies.component]
-source = "file://registry/example-plugin.wasm"
+path = "registry/example-plugin.wasm"
 
 [target.default]
 remote = "127.0.0.1:4443"
@@ -4918,7 +4903,7 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
-            &root.join("registry/example.wit"),
+            &root.join("registry/example/package.wit"),
             b"package test:example;\n",
         );
         let plugin_bytes = b"\0asmplugin";
@@ -4960,10 +4945,9 @@ main = "build/app.wasm"
 type = "cli"
 
 [[dependencies]]
-name = "chikoski:hello"
 version = "0.1.0"
 kind = "wasm"
-wit = "warg://chikoski:hello@0.1.0"
+wit = "chikoski:hello"
 
 [target.default]
 remote = "127.0.0.1:4443"
@@ -4971,11 +4955,11 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
-            &root.join("wit/deps/chikoski-hello/package.wit"),
+            &root.join("wit/deps/chikoski-hello-0.1.0/package.wit"),
             b"package chikoski:hello@0.1.0;\n",
         );
-        let wit_digest =
-            compute_path_digest_hex(&root.join("wit/deps/chikoski-hello")).expect("wit digest");
+        let wit_digest = compute_path_digest_hex(&root.join("wit/deps/chikoski-hello-0.1.0"))
+            .expect("wit digest");
         let component_bytes = b"\0asmderived-component";
         let plugin_sha = hex::encode(Sha256::digest(component_bytes));
         write_imago_lock(
@@ -4985,14 +4969,13 @@ remote = "127.0.0.1:4443"
                 dependencies: vec![ImagoLockDependency {
                     name: "chikoski:hello".to_string(),
                     version: "0.1.0".to_string(),
-                    wit_source: "warg://chikoski:hello@0.1.0".to_string(),
+                    wit_source: "chikoski:hello".to_string(),
                     wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
                     wit_digest: wit_digest.clone(),
-                    wit_path: "wit/deps/chikoski-hello".to_string(),
-                    component_source: Some("warg://chikoski:hello@0.1.0".to_string()),
+                    wit_path: "wit/deps/chikoski-hello-0.1.0".to_string(),
+                    component_source: Some("chikoski:hello".to_string()),
                     component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
                     component_sha256: Some(plugin_sha.clone()),
-                    resolved_at: "0".to_string(),
                 }],
                 binding_wits: vec![],
                 wit_packages: vec![],
@@ -5000,23 +4983,27 @@ remote = "127.0.0.1:4443"
         );
         let cache_entry = dependency_cache::DependencyCacheEntry {
             name: "chikoski:hello".to_string(),
+            resolved_package_name: None,
             version: "0.1.0".to_string(),
             kind: "wasm".to_string(),
-            wit_source: "warg://chikoski:hello@0.1.0".to_string(),
+            wit_source: "chikoski:hello".to_string(),
             wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
-            wit_path: "wit/deps/chikoski-hello".to_string(),
+            wit_sha256: None,
+            wit_path: "wit/deps/chikoski-hello-0.1.0".to_string(),
             wit_digest,
             wit_source_fingerprint: None,
-            component_source: Some("warg://chikoski:hello@0.1.0".to_string()),
+            component_source: Some("chikoski:hello".to_string()),
             component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
             component_sha256: Some(plugin_sha.clone()),
             component_source_fingerprint: None,
+            component_world_foreign_packages: vec![],
+            component_world_foreign_packages_recorded: true,
             transitive_packages: vec![],
         };
         let cache_root = dependency_cache::cache_entry_root(&root, "chikoski:hello");
         copy_tree(
-            &root.join("wit/deps/chikoski-hello"),
-            &cache_root.join("wit/deps/chikoski-hello"),
+            &root.join("wit/deps/chikoski-hello-0.1.0"),
+            &cache_root.join("wit/deps/chikoski-hello-0.1.0"),
         );
         write_file(
             &dependency_cache::cache_component_path(&root, "chikoski:hello", &plugin_sha),
@@ -5051,10 +5038,9 @@ main = "build/app.wasm"
 type = "cli"
 
 [[dependencies]]
-name = "chikoski:hello"
 version = "0.1.0"
 kind = "wasm"
-wit = "warg://chikoski:hello@0.1.0"
+wit = "chikoski:hello"
 
 [target.default]
 remote = "127.0.0.1:4443"
@@ -5062,11 +5048,11 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
-            &root.join("wit/deps/chikoski-hello/package.wit"),
+            &root.join("wit/deps/chikoski-hello-0.1.0/package.wit"),
             b"package chikoski:hello@0.1.0;\n",
         );
-        let wit_digest =
-            compute_path_digest_hex(&root.join("wit/deps/chikoski-hello")).expect("wit digest");
+        let wit_digest = compute_path_digest_hex(&root.join("wit/deps/chikoski-hello-0.1.0"))
+            .expect("wit digest");
         let component_bytes = b"\0asmderived-component";
         let plugin_sha = hex::encode(Sha256::digest(component_bytes));
         write_imago_lock(
@@ -5076,14 +5062,13 @@ remote = "127.0.0.1:4443"
                 dependencies: vec![ImagoLockDependency {
                     name: "chikoski:hello".to_string(),
                     version: "0.1.0".to_string(),
-                    wit_source: "warg://chikoski:hello@0.1.0".to_string(),
+                    wit_source: "chikoski:hello".to_string(),
                     wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
                     wit_digest: wit_digest.clone(),
-                    wit_path: "wit/deps/chikoski-hello".to_string(),
-                    component_source: Some("warg://chikoski:other@0.1.0".to_string()),
+                    wit_path: "wit/deps/chikoski-hello-0.1.0".to_string(),
+                    component_source: Some("chikoski:other".to_string()),
                     component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
                     component_sha256: Some(plugin_sha.clone()),
-                    resolved_at: "0".to_string(),
                 }],
                 binding_wits: vec![],
                 wit_packages: vec![],
@@ -5091,23 +5076,27 @@ remote = "127.0.0.1:4443"
         );
         let cache_entry = dependency_cache::DependencyCacheEntry {
             name: "chikoski:hello".to_string(),
+            resolved_package_name: None,
             version: "0.1.0".to_string(),
             kind: "wasm".to_string(),
-            wit_source: "warg://chikoski:hello@0.1.0".to_string(),
+            wit_source: "chikoski:hello".to_string(),
             wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
-            wit_path: "wit/deps/chikoski-hello".to_string(),
+            wit_sha256: None,
+            wit_path: "wit/deps/chikoski-hello-0.1.0".to_string(),
             wit_digest,
             wit_source_fingerprint: None,
-            component_source: Some("warg://chikoski:hello@0.1.0".to_string()),
+            component_source: Some("chikoski:hello".to_string()),
             component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
             component_sha256: Some(plugin_sha.clone()),
             component_source_fingerprint: None,
+            component_world_foreign_packages: vec![],
+            component_world_foreign_packages_recorded: true,
             transitive_packages: vec![],
         };
         let cache_root = dependency_cache::cache_entry_root(&root, "chikoski:hello");
         copy_tree(
-            &root.join("wit/deps/chikoski-hello"),
-            &cache_root.join("wit/deps/chikoski-hello"),
+            &root.join("wit/deps/chikoski-hello-0.1.0"),
+            &cache_root.join("wit/deps/chikoski-hello-0.1.0"),
         );
         write_file(
             &dependency_cache::cache_component_path(&root, "chikoski:hello", &plugin_sha),

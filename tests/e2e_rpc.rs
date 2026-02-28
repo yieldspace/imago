@@ -386,16 +386,12 @@ fn write_cli_client_imago_toml(
         .join("plugins")
         .join("imago-node")
         .join("wit");
-    let rpc_greeter_world = workspace_root
-        .join("e2e")
-        .join("wit")
-        .join("rpc-greeter")
-        .join("world.wit");
+    let rpc_greeter_wit_dir = workspace_root.join("e2e").join("wit").join("rpc-greeter");
     let body = format!(
-        "name = \"cli-client\"\nmain = \"components/{}\"\ntype = \"cli\"\n\n[[dependencies]]\nname = \"imago:node\"\nversion = \"0.1.0\"\nkind = \"native\"\nwit = \"file://{}\"\n\n[capabilities]\nprivileged = false\nwasi = true\n\n[capabilities.deps]\n\"acme:clock\" = [\"*\"]\n\"imago:node\" = [\"*\"]\n\n[[bindings]]\nname = \"rpc-greeter\"\nwit = \"file://{}\"\n\n[resources.env]\nIMAGO_RPC_ADDR = \"{}\"\n\n[target.default]\nremote = \"{}\"\nserver_name = \"{}\"\nclient_key = \"{}\"\n",
+        "name = \"cli-client\"\nmain = \"components/{}\"\ntype = \"cli\"\n\n[[dependencies]]\nversion = \"0.1.0\"\nkind = \"native\"\npath = \"{}\"\n\n[capabilities]\nprivileged = false\nwasi = true\n\n[capabilities.deps]\n\"acme:clock\" = [\"*\"]\n\"imago:node\" = [\"*\"]\n\n[[bindings]]\nname = \"rpc-greeter\"\nversion = \"0.1.0\"\npath = \"{}\"\n\n[resources.env]\nIMAGO_RPC_ADDR = \"{}\"\n\n[target.default]\nremote = \"{}\"\nserver_name = \"{}\"\nclient_key = \"{}\"\n",
         toml_escape(main_wasm_file),
         toml_escape(imago_node_wit.to_string_lossy().as_ref()),
-        toml_escape(rpc_greeter_world.to_string_lossy().as_ref()),
+        toml_escape(rpc_greeter_wit_dir.to_string_lossy().as_ref()),
         toml_escape(rpc_addr),
         toml_escape(&target.remote),
         toml_escape(&target.server_name),

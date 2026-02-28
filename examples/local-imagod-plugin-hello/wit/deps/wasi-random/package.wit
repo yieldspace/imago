@@ -1,6 +1,0 @@
-package wasi:random@0.2.6;
-
-interface insecure-seed {
-  insecure-seed: func() -> tuple<u64, u64>;
-}
-

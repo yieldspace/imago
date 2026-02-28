@@ -3,10 +3,9 @@ version = 1
 [[dependencies]]
 name = "imago:experimental-gpio"
 version = "0.1.0"
-wit_source = "file://../../plugins/imago-experimental-gpio/wit"
+wit_source = "../../plugins/imago-experimental-gpio/wit"
 wit_digest = "a8c94d050c2b4fccd40bb4b4cecbb4118c5a221f0d2b0b62d24caaefb5aaf1ef"
-wit_path = "wit/deps/imago-experimental-gpio"
-resolved_at = "1772096295"
+wit_path = "wit/deps/imago-experimental-gpio-0.1.0"
 
 [[wit_packages]]
 name = "wasi:io"
@@ -15,5 +14,17 @@ name = "wasi:io"
 requirement = "=0.2.6"
 version = "0.2.6"
 digest = "sha256:b98b06c04cffa5eaf00b071e23cc856ae7e648506748a06b802972ee3cc38590"
-path = "wit/deps/wasi-io"
+path = "wit/deps/wasi-io-0.2.6"
 via = ["imago:experimental-gpio"]
+
+[[wit_packages]]
+name = "wasi:io"
+registry = "wasi.dev"
+
+[[wit_packages.versions]]
+requirement = "=0.2.6"
+version = "0.2.6"
+digest = "sha256:b98b06c04cffa5eaf00b071e23cc856ae7e648506748a06b802972ee3cc38590"
+source = "wasi:io"
+path = "wit/deps/wasi-io-0.2.6"
+via = []
