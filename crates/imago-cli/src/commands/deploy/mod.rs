@@ -1426,7 +1426,7 @@ async fn request_events_with_retry_policy_framed(
     let mut first_failure_reason: Option<String> = None;
     let read_timeout = request_stream_read_timeout(retry_policy, stream_timeout);
     let response_bytes = loop {
-        match request_events_once(session, &framed, stream_timeout, read_timeout).await {
+        match request_events_once(session, framed, stream_timeout, read_timeout).await {
             Ok(response_bytes) => break response_bytes,
             Err(err) => {
                 let reason = summarize_retry_error(&err);
