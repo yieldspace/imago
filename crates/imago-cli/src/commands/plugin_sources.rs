@@ -405,6 +405,12 @@ pub(crate) async fn materialize_wit_source(
                             .map(ToString::to_string),
                     });
                 }
+                if !directory_contains_wit_files(&path)? {
+                    return Err(anyhow!(
+                        "path source directory '{}' does not contain any .wit files",
+                        path.display()
+                    ));
+                }
                 copy_wit_tree(&path, destination_dir)?;
                 return Ok(MaterializedWitSource::default());
             }
@@ -771,6 +777,34 @@ fn ensure_wit_dir_has_no_symlink_entries(path: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn directory_contains_wit_files(path: &Path) -> anyhow::Result<bool> {
+    for entry in fs::read_dir(path)
+        .with_context(|| format!("failed to read directory: {}", path.display()))?
+    {
+        let entry = entry
+            .with_context(|| format!("failed to read directory entry in {}", path.display()))?;
+        let entry_path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect source path: {}", entry_path.display()))?;
+        if file_type.is_dir() {
+            if directory_contains_wit_files(&entry_path)? {
+                return Ok(true);
+            }
+            continue;
+        }
+        if file_type.is_file()
+            && entry_path
+                .extension()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("wit"))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn parse_local_wit_package_dir(path: &Path) -> anyhow::Result<(Resolve, wit_parser::PackageId)> {

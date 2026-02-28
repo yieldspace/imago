@@ -195,7 +195,13 @@ fn resolve_dependencies_with(
             }
         }
 
-        resolved_dependency_names.insert(entry.name.clone());
+        if !resolved_dependency_names.insert(entry.name.clone()) {
+            return Err(anyhow!(
+                "dependency '{}' resolves to lock dependency '{}' that is already matched by another dependency; run `imago deps sync`",
+                expected.name,
+                entry.name
+            ));
+        }
         resolved.insert(expected.name.clone(), entry.clone());
     }
 

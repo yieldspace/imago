@@ -4097,8 +4097,8 @@ remote = "127.0.0.1:4443"
         let first = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(first.exit_code, 0, "first update should succeed: {first:?}");
 
-        fs::remove_file(root.join("registry/example/package.wit"))
-            .expect("source should be removable");
+        fs::remove_dir_all(root.join("registry/example"))
+            .expect("source directory should be removable");
         fs::remove_dir_all(root.join("wit/deps")).expect("wit/deps should be removable");
 
         let second = run_with_project_root(UpdateArgs {}, &root).await;
@@ -4111,6 +4111,52 @@ remote = "127.0.0.1:4443"
             root.join("wit/deps/test-example-0.1.0/package.wit")
                 .exists(),
             "wit/deps should be hydrated from dependency cache"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_empty_path_source_directory_after_cache_warmup() {
+        let root = new_temp_dir("file-source-empty-directory-refresh");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+version = "0.1.0"
+kind = "native"
+path = "registry/example"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write(
+            &root.join("registry/example/package.wit"),
+            b"package test:example@0.1.0;\n",
+        );
+
+        let first = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(first.exit_code, 0, "first update should succeed: {first:?}");
+
+        fs::remove_file(root.join("registry/example/package.wit"))
+            .expect("source file should be removable");
+        fs::remove_dir_all(root.join("wit/deps")).expect("wit/deps should be removable");
+
+        let second = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_ne!(
+            second.exit_code, 0,
+            "second update must fail for empty path source directory: {second:?}"
+        );
+        assert!(
+            !root
+                .join("wit/deps/test-example-0.1.0/package.wit")
+                .exists(),
+            "stale cache must not rehydrate when source directory exists but is empty"
         );
 
         let _ = fs::remove_dir_all(root);

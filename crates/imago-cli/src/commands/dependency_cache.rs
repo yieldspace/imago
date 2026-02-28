@@ -671,17 +671,6 @@ fn resolve_existing_file_source_path(
             resolved.display()
         ));
     }
-    if metadata.is_dir() {
-        let mut entries = fs::read_dir(&resolved).with_context(|| {
-            format!(
-                "failed to inspect path source directory {}",
-                resolved.display()
-            )
-        })?;
-        if entries.next().is_none() {
-            return Ok(None);
-        }
-    }
     Ok(Some(resolved))
 }
 

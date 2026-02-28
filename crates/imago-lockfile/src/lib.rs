@@ -498,6 +498,62 @@ mod tests {
     }
 
     #[test]
+    fn resolve_dependencies_rejects_reusing_lock_entry_for_multiple_path_expectations() {
+        let root = new_temp_dir("path-expectation-lock-reuse");
+        write(
+            &root.join("wit/deps/actual-pkg/package.wit"),
+            b"package actual:pkg@0.1.0;\n",
+        );
+        let direct_digest =
+            compute_path_digest_hex(&root.join("wit/deps/actual-pkg")).expect("digest");
+        let lock = ImagoLock {
+            version: IMAGO_LOCK_VERSION,
+            dependencies: vec![ImagoLockDependency {
+                name: "actual:pkg".to_string(),
+                version: "0.1.0".to_string(),
+                wit_source: "registry/example".to_string(),
+                wit_registry: None,
+                wit_digest: direct_digest,
+                wit_path: "wit/deps/actual-pkg".to_string(),
+                component_source: None,
+                component_registry: None,
+                component_sha256: None,
+            }],
+            binding_wits: vec![],
+            wit_packages: vec![],
+        };
+
+        let err = resolve_dependencies(
+            &root,
+            &lock,
+            &[
+                DependencyExpectation {
+                    name: "path-source-0".to_string(),
+                    version: "0.1.0".to_string(),
+                    wit_source: "registry/example".to_string(),
+                    wit_registry: None,
+                    component: None,
+                },
+                DependencyExpectation {
+                    name: "path-source-1".to_string(),
+                    version: "0.1.0".to_string(),
+                    wit_source: "registry/example".to_string(),
+                    wit_registry: None,
+                    component: None,
+                },
+            ],
+        )
+        .expect_err("must fail when one lock dependency is matched more than once");
+        assert!(
+            err.to_string()
+                .contains("already matched by another dependency")
+        );
+        assert!(err.to_string().contains("actual:pkg"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn resolve_dependencies_accepts_empty_via_for_auto_wasi_records() {
         let root = new_temp_dir("empty-via-allowed");
         write(
