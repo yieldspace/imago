@@ -3,7 +3,6 @@ version = 1
 [[dependencies]]
 name = "imago:admin"
 version = "0.1.0"
-wit_source = "file://../../plugins/imago-admin/wit"
-wit_digest = "5087af2905eb9fed9e3a813f7d339dbdc700862334047583eb70634f9f269d91"
+wit_source = "../../plugins/imago-admin/wit"
+wit_digest = "5fe23e6427ea101645eae20c420bc0715d4b2470f65486ea6339d042ed6d0ce7"
 wit_path = "wit/deps/imago-admin"
-resolved_at = "1771768419"

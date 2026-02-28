@@ -6,10 +6,9 @@ type = "cli"
 command = "CARGO_TARGET_DIR=target cargo build --target wasm32-wasip2 --release"
 
 [[dependencies]]
-name = "sizumita:ferris"
 version = "0.1.0"
 kind = "wasm"
-wit = "warg://sizumita:ferris@0.1.0"
+wit = "sizumita:ferris"
 
 [capabilities]
 privileged = false

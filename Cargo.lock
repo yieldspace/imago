@@ -2313,6 +2313,7 @@ dependencies = [
  "time",
  "tokio",
  "toml 1.0.3+spec-1.1.0",
+ "ureq",
  "url",
  "uuid",
  "wasm-pkg-client",

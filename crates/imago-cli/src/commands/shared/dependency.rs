@@ -10,7 +10,10 @@ use imago_lockfile::{ComponentExpectation, DependencyExpectation};
 
 use crate::commands::{
     build::{self, ManifestDependencyKind},
-    dependency_cache::{self, DependencyCacheEntry, DependencyCacheTransitivePackage},
+    dependency_cache::{
+        self, DependencyCacheComponentWorldForeignPackage, DependencyCacheEntry,
+        DependencyCacheTransitivePackage,
+    },
     plugin_sources,
 };
 
@@ -115,7 +118,7 @@ pub(crate) fn resolve_manifest_dependencies_from_lock(
         };
 
         manifest_dependencies.push(build::ManifestDependency {
-            name: dependency.name.clone(),
+            name: entry.name.clone(),
             version: dependency.version.clone(),
             kind: dependency.kind,
             wit: dependency.wit.source.clone(),
@@ -142,7 +145,9 @@ pub(crate) fn expected_component_for_dependency(
                 }));
             }
             let (source, registry) = plugin_sources::expected_component_identity_from_wit_source(
+                dependency.wit.source_kind,
                 &dependency.wit.source,
+                Some(&dependency.version),
                 dependency.wit.registry.as_deref(),
             )
             .with_context(|| {
@@ -259,12 +264,20 @@ pub(crate) async fn load_or_refresh_cache_entry(
         )
     })?;
 
+    let expected_package = if dependency.wit.source_kind == plugin_sources::SourceKind::Path {
+        None
+    } else {
+        Some(dependency.name.as_str())
+    };
     let materialized = plugin_sources::materialize_wit_source(
         project_root,
+        dependency.wit.source_kind,
         &dependency.wit.source,
+        Some(&dependency.version),
         dependency.wit.registry.as_deref(),
         namespace_registries,
-        Some(dependency.name.as_str()),
+        expected_package,
+        dependency.wit.sha256.as_deref(),
         &cache_wit_target,
     )
     .await
@@ -295,7 +308,9 @@ pub(crate) async fn load_or_refresh_cache_entry(
                 {
                     let digest = plugin_sources::resolve_component_sha256(
                         project_root,
+                        component.source_kind,
                         &component.source,
+                        Some(&dependency.version),
                         component.registry.as_deref(),
                         component.sha256.as_deref(),
                     )
@@ -325,7 +340,12 @@ pub(crate) async fn load_or_refresh_cache_entry(
                     dependency_cache::cache_component_path(project_root, &dependency.name, &sha256);
                 plugin_sources::materialize_component_file(
                     project_root,
+                    match dependency.component.as_ref() {
+                        Some(component) => component.source_kind,
+                        None => dependency.wit.source_kind,
+                    },
                     &source,
+                    Some(&dependency.version),
                     registry.as_deref(),
                     &sha256,
                     &cache_component_path,
@@ -352,6 +372,7 @@ pub(crate) async fn load_or_refresh_cache_entry(
 
     let entry = DependencyCacheEntry {
         name: dependency.name.clone(),
+        resolved_package_name: materialized.top_package_name.clone(),
         version: dependency.version.clone(),
         kind: match dependency.kind {
             ManifestDependencyKind::Native => "native".to_string(),
@@ -359,6 +380,7 @@ pub(crate) async fn load_or_refresh_cache_entry(
         },
         wit_source: dependency.wit.source.clone(),
         wit_registry: dependency.wit.registry.clone(),
+        wit_sha256: dependency.wit.sha256.clone(),
         wit_path: dependency_cache::dependency_wit_path(&dependency.name),
         wit_digest: cache_wit_digest,
         wit_source_fingerprint,
@@ -366,6 +388,17 @@ pub(crate) async fn load_or_refresh_cache_entry(
         component_registry,
         component_sha256,
         component_source_fingerprint,
+        component_world_foreign_packages: materialized
+            .component_world_foreign_packages
+            .iter()
+            .map(|package| DependencyCacheComponentWorldForeignPackage {
+                name: package.name.clone(),
+                version: package.version.clone(),
+                interfaces: package.interfaces.clone(),
+                interfaces_recorded: true,
+            })
+            .collect(),
+        component_world_foreign_packages_recorded: true,
         transitive_packages: materialized
             .transitive_packages
             .iter()

@@ -536,220 +536,74 @@ wasi = true
 
 This section defines allowed service-to-service interface bindings.
 
-### The `name` field
+### Required fields
 
-- Type: `string`
-- Required/Optional: Required in each `[[bindings]]` entry.
-- Accepted values / Constraints: service name with the same character rules as top-level `name`.
-- Default: none.
-- Example:
+- `name` (`string`): service name (same validation as top-level `name`).
+- `version` (`string`): required; source text must not embed `@version`.
+- Exactly one source key: `wit`, `oci`, or `path`.
 
-```toml
-[[bindings]]
-name = "rpc-provider"
-wit = "warg://acme:rpc-api@0.1.0"
-```
+### Source keys
 
-- Validation error notes: missing or invalid target name fails validation.
+- `wit` (`string`): plain package name only (example: `acme:rpc-api`).
+  - `warg://` prefix is not allowed.
+  - `@version` is not allowed.
+- `oci` (`string`): `<registry>/<namespace>/<name...>` (example: `ghcr.io/acme/plugins/rpc-api`).
+  - `oci://` prefix is not allowed.
+  - `@version` is not allowed.
+- `path` (`string`): local path / `file://...` path / `http(s)://...` URL.
+- `registry` (`string`, optional): allowed only when `wit` is used.
+- `sha256` (`string`, optional): 64 hex chars. If present, `deps sync` verifies source bytes.
 
-### The `wit` field
+### Expansion behavior
 
-- Type: `string`
-- Required/Optional: Required in each `[[bindings]]` entry.
-- Accepted values / Constraints: must use one of `file://`, `warg://`, or `oci://`.
-- Default: none.
-- Example:
-
-```toml
-[[bindings]]
-name = "rpc-provider"
-wit = "file://wit/interfaces/rpc/package.wit"
-```
-
-- Validation error notes: unsupported schemes fail validation. Legacy `"<package>/<interface>"` format is not supported and fails validation.
-
-### The `imago deps sync` expansion behavior
-
-- Type: behavior note
-- Required/Optional: Applies whenever `[[bindings]]` is configured.
-- Accepted values / Constraints: `imago deps sync` resolves the referenced WIT package and expands all interfaces into `manifest.bindings[]` entries in the form `{ "name": "<service>", "wit": "<package>/<interface>" }`.
-- Default: if omitted, `manifest.bindings=[]` and runtime authorization is deny-by-default.
-- Example:
-
-```toml
-[[bindings]]
-name = "rpc-provider"
-wit = "warg://acme:rpc-api@0.1.0"
-```
-
-- Validation error notes: for remote sources (`warg://`, `oci://`), package verification uses the resolved top-level package name rather than the literal package token in the URL.
+- `imago deps sync` resolves each binding source, writes hydrated WIT under `wit/deps`, then expands interfaces into `manifest.bindings[]` as `{ "name": "<service>", "wit": "<package>/<interface>" }`.
+- If omitted, `manifest.bindings=[]` (deny-by-default).
 
 <a id="the-dependencies-section"></a>
 ## The [[dependencies]] section
 
 This section defines plugin dependencies and their resolution sources.
 
-### The `name` field
+### Required fields
 
-- Type: `string`
-- Required/Optional: Required in each `[[dependencies]]` entry.
-- Accepted values / Constraints: ASCII letters/digits plus `.`, `_`, `-`, `:`, `/`; path components must be normal (no absolute prefix, `./`, `../`, or drive prefix).
-- Default: none.
-- Example:
+- `version` (`string`, required)
+- `kind` (`native` or `wasm`, required)
+- Exactly one source key: `wit`, `oci`, or `path` (required)
 
-```toml
-[[dependencies]]
-name = "acme:plugin/example"
-version = "0.1.0"
-kind = "wasm"
-```
+`dependencies[].name` is removed. Dependency identity is the resolved top-level package name.
 
-- Validation error notes: invalid path-like components fail validation.
+### Source keys
 
-### The `version` field
+- `wit` (`string`): plain package name only (example: `acme:plugin/example`).
+  - `warg://` prefix is not allowed.
+  - `@version` is not allowed.
+- `oci` (`string`): `<registry>/<namespace>/<name...>` (example: `ghcr.io/acme/plugins/example`).
+  - `oci://` prefix is not allowed.
+  - `@version` is not allowed.
+- `path` (`string`): local path / `file://...` path / `http(s)://...` URL.
+- `registry` (`string`, optional): allowed only with `wit`.
+- `sha256` (`string`, optional): 64 hex chars. If present, `deps sync` verifies source bytes.
 
-- Type: `string`
-- Required/Optional: Required in each `[[dependencies]]` entry.
-- Accepted values / Constraints: semantic version string used by resolution workflows.
-- Default: none.
-- Example:
+### Additional fields
 
-```toml
-version = "0.1.0"
-```
+- `requires` (`array(string)`, optional): resolved package names.
+- `[dependencies.capabilities]` (optional): same shape as top-level `[capabilities]`.
 
-- Validation error notes: missing version fails validation.
+### `[dependencies.component]` (optional, `kind="wasm"` only)
 
-### The `kind` field
+- Source keys: exactly one of `wit`, `oci`, or `path`.
+- `registry` is allowed only with `component.wit`.
+- `sha256` is optional (64 hex chars) and verified when provided.
 
-- Type: `string` enum
-- Required/Optional: Required in each `[[dependencies]]` entry.
-- Accepted values / Constraints: one of `native` or `wasm`.
-- Default: none.
-- Example:
+### Resolution and lock behavior
 
-```toml
-kind = "wasm"
-```
-
-- Validation error notes: unknown values fail validation.
-
-### The `wit` field
-
-- Type: `string` or `table`
-- Required/Optional: Optional.
-- Accepted values / Constraints:
-  - String form accepts `file://`, `warg://`, `oci://`.
-  - Table form accepts `wit.source` (required) and `wit.registry` (optional, `warg://` only).
-  - If omitted, source defaults to `warg://{name}@{version}`.
-- Default: `warg://{name}@{version}` plus registry fallback resolution.
-- Example:
-
-```toml
-wit = "warg://acme:plugin/example@0.1.0"
-```
-
-- Validation error notes: `https://wa.dev/...` shorthand is rejected; `wit.registry` with `oci://` sources is rejected.
-
-### The `requires` field
-
-- Type: `array(string)`
-- Required/Optional: Optional.
-- Accepted values / Constraints: each item follows the same package-name constraints as `name`.
-- Default: empty array.
-- Example:
-
-```toml
-requires = ["acme:shared/runtime"]
-```
-
-- Validation error notes: invalid package-name path components fail validation.
-
-### The `component.source` field
-
-- Type: `string`
-- Required/Optional: Optional for `kind = "wasm"`; required when `wit` does not resolve to a component.
-- Accepted values / Constraints: `file://`, `warg://`, or `oci://`.
-- Default: none.
-- Example:
-
-```toml
-[dependencies.component]
-source = "oci://registry.example.com/acme/plugins/example@0.1.0"
-```
-
-- Validation error notes: missing component source for non-component WIT inputs fails update/deploy workflows.
-
-### The `component.registry` field
-
-- Type: `string`
-- Required/Optional: Optional.
-- Accepted values / Constraints: registry override for `warg://` component sources only.
-- Default: registry fallback resolution.
-- Example:
-
-```toml
-[dependencies.component]
-registry = "wasi.dev"
-```
-
-- Validation error notes: using this field with `oci://` component sources fails validation.
-
-### The `component.sha256` field
-
-- Type: `string`
-- Required/Optional: Optional.
-- Accepted values / Constraints: sha256 digest string checked by `imago deps sync` when provided.
-- Default: none.
-- Example:
-
-```toml
-[dependencies.component]
-sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-```
-
-- Validation error notes: digest mismatch fails dependency resolution.
-
-### The `capabilities` field
-
-- Type: table
-- Required/Optional: Optional.
-- Accepted values / Constraints: dependency-scoped capability rules for plugin call behavior.
-- Default: none.
-- Example:
-
-```toml
-[dependencies.capabilities]
-wasi = true
-```
-
-- Validation error notes: invalid capability schema fails validation.
-
-### Resolution, lockfile, and cache behavior
-
-- Type: behavior note
-- Required/Optional: Applies whenever `[[dependencies]]` is present.
-- Accepted values / Constraints:
-  - `imago deps sync` resolves dependency WIT/component inputs and stores artifacts under `.imago/deps/<sanitized dependency>/`.
-  - `imago deps sync` regenerates `wit/deps/` and writes lock metadata into `imago.lock` (`version = 1`).
-  - `imago artifact build` requires matching lock/cache state and rebuilds `wit/deps/` from `.imago/deps` before validation.
-  - `imago service deploy` uses component metadata from `imago.lock` plus `.imago/deps` caches.
-- Default: not applicable.
-- Example:
-
-```toml
-[[dependencies]]
-name = "acme:plugin/example"
-version = "0.1.0"
-kind = "wasm"
-wit = "warg://acme:plugin/example@0.1.0"
-```
-
-- Validation error notes:
-  - `dependencies[].wit.source = "file://..."` pointing into `wit/deps` is rejected.
-  - Multiple dependencies resolving to the same `wit/deps` output path are rejected.
-  - Missing or mismatched `imago.lock` entries (`wit_*`, `component_*`, `wit_packages`) fail build/deploy and require `imago deps sync`.
-  - For remote inputs, resolved top-level package names must match `dependencies[].name`.
+- `imago deps sync` resolves dependencies and writes cache under `.imago/deps`.
+- `wit/deps` is regenerated on each sync.
+- Component-decoded `root:component` is not emitted into `wit/deps`.
+- Component world `non-wasi` refs must match declared dependencies by resolved package name and version.
+- `wasi:*` refs are merged from component world refs and top-level `wit/*.wit` refs, resolved from `wasi.dev`, and materialized into `wit/deps`.
+- `imago.lock.wit_packages[*].versions[*].via` may be empty (`[]`) for auto-hydrated records.
+- `resolved_at` is removed from lock entries; lockfiles containing it are rejected.
 
 <a id="the-namespace_registries-section"></a>
 ## The [namespace_registries] section
@@ -769,7 +623,7 @@ This section overrides WARG registry hosts by namespace.
 wasi = "wasi.dev"
 ```
 
-- Validation error notes: values must be strings. This table applies only when a `warg://` source omits its registry.
+- Validation error notes: values must be strings. This table applies only when a `wit = "<namespace>:<pkg>"` source omits its registry.
 
 <a id="legacy-sections"></a>
 ## Legacy sections
