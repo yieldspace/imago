@@ -70,7 +70,7 @@ mod tests {
             Uuid::nil(),
             sample_uuid(),
             HelloNegotiateRequest {
-                client_version: "0.1.0".to_string(),
+                client_version: "0.2.0".to_string(),
                 required_features: vec![],
             },
         );

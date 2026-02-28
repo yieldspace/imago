@@ -9,7 +9,6 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
-use base64::Engine;
 use imago_protocol::{
     ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushChunkHeader, ArtifactPushRequest,
     ArtifactStatus, ByteRange, CommandEvent, CommandEventType, CommandPayload, CommandStartRequest,
@@ -1715,7 +1714,6 @@ async fn push_single_artifact_chunk(
     stream_timeout: Duration,
 ) -> anyhow::Result<()> {
     let chunk_hash = hex::encode(Sha256::digest(&chunk));
-    let chunk_b64 = base64::engine::general_purpose::STANDARD.encode(&chunk);
     let length = u64::try_from(chunk.len()).context("chunk length conversion failed")?;
 
     let request = request_envelope(
@@ -1730,7 +1728,7 @@ async fn push_single_artifact_chunk(
                 chunk_sha256: chunk_hash,
                 upload_token: upload_token.as_ref().to_string(),
             },
-            chunk_b64,
+            chunk,
         },
     )?;
 
@@ -2590,8 +2588,8 @@ mod tests {
         let response = HelloNegotiateResponse {
             accepted: true,
             server_version: "imagod-test".to_string(),
-            server_protocol_version: "0.1.0".to_string(),
-            supported_protocol_version_range: ">=0.1.0,<0.2.0".to_string(),
+            server_protocol_version: "0.2.0".to_string(),
+            supported_protocol_version_range: ">=0.2.0,<0.3.0".to_string(),
             compatibility_announcement: None,
             features: vec![],
             limits: BTreeMap::from([
@@ -2617,8 +2615,8 @@ mod tests {
         let response = HelloNegotiateResponse {
             accepted: true,
             server_version: "imagod-test".to_string(),
-            server_protocol_version: "0.1.0".to_string(),
-            supported_protocol_version_range: ">=0.1.0,<0.2.0".to_string(),
+            server_protocol_version: "0.2.0".to_string(),
+            supported_protocol_version_range: ">=0.2.0,<0.3.0".to_string(),
             compatibility_announcement: None,
             features: vec![],
             limits: BTreeMap::from([("chunk_size".to_string(), "0".to_string())]),
@@ -3080,8 +3078,8 @@ mod tests {
         let response = HelloNegotiateResponse {
             accepted: true,
             server_version: "imagod/0.2.0".to_string(),
-            server_protocol_version: "0.1.0".to_string(),
-            supported_protocol_version_range: ">=0.1.0,<0.2.0".to_string(),
+            server_protocol_version: "0.2.0".to_string(),
+            supported_protocol_version_range: ">=0.2.0,<0.3.0".to_string(),
             compatibility_announcement: None,
             features: vec!["logs.request".to_string()],
             limits: BTreeMap::from([

@@ -245,8 +245,8 @@ mod tests {
         HelloNegotiateResponse {
             accepted: true,
             server_version: "imagod/0.1.0".to_string(),
-            server_protocol_version: "0.1.0".to_string(),
-            supported_protocol_version_range: ">=0.1.0,<0.2.0".to_string(),
+            server_protocol_version: "0.2.0".to_string(),
+            supported_protocol_version_range: ">=0.2.0,<0.3.0".to_string(),
             compatibility_announcement: None,
             features: vec!["hello.negotiate".to_string()],
             limits: BTreeMap::new(),
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn ensure_hello_protocol_compatibility_rejects_unsupported_server_version() {
         let mut response = sample_hello_response();
-        response.server_protocol_version = "0.2.0".to_string();
+        response.server_protocol_version = "0.1.0".to_string();
         let err = ensure_hello_protocol_compatibility(&response)
             .expect_err("unsupported server protocol should fail");
         assert!(err.to_string().contains("not supported"));

@@ -7,8 +7,6 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 #[cfg(test)]
 use imago_protocol::ArtifactStatus;
 use imago_protocol::{
@@ -93,6 +91,8 @@ pub struct ArtifactStore {
     session_store: InMemoryUploadSessionStore,
     chunk_sink: FileChunkSink,
     upload_session_ttl_secs: u64,
+    committed_session_ttl_secs: u64,
+    max_committed_sessions: usize,
     max_chunk_size: usize,
     max_inflight_chunks: usize,
     max_artifact_size_bytes: u64,
@@ -103,6 +103,8 @@ impl ArtifactStore {
     pub async fn new(
         root: impl AsRef<Path>,
         upload_session_ttl_secs: u64,
+        committed_session_ttl_secs: u64,
+        max_committed_sessions: usize,
         max_chunk_size: usize,
         max_inflight_chunks: usize,
         max_artifact_size_bytes: u64,
@@ -118,10 +120,35 @@ impl ArtifactStore {
             session_store: InMemoryUploadSessionStore,
             chunk_sink: FileChunkSink,
             upload_session_ttl_secs: upload_session_ttl_secs.max(1),
+            committed_session_ttl_secs: committed_session_ttl_secs.max(1),
+            max_committed_sessions: max_committed_sessions.max(1),
             max_chunk_size: max_chunk_size.max(1),
             max_inflight_chunks: max_inflight_chunks.max(1),
             max_artifact_size_bytes: max_artifact_size_bytes.max(1),
         })
+    }
+
+    fn collect_session_cleanup_locked(
+        &self,
+        state: &mut StoreState,
+        now_epoch_secs: u64,
+        keep_deploy_id: Option<&str>,
+    ) -> CleanupPlan {
+        let mut cleanup_plan = CleanupPlan::default();
+        cleanup_plan.merge(self.session_store.collect_expired_sessions(
+            state,
+            now_epoch_secs,
+            self.upload_session_ttl_secs,
+        ));
+        cleanup_plan.merge(self.session_store.collect_orphan_committed_sessions(
+            state,
+            now_epoch_secs,
+            self.committed_session_ttl_secs,
+            self.max_committed_sessions,
+            keep_deploy_id,
+        ));
+        self.session_store.cleanup_orphan_idempotency(state);
+        cleanup_plan
     }
 
     /// Handles `deploy.prepare` by creating or resuming an upload session.
@@ -160,12 +187,7 @@ impl ArtifactStore {
 
         let decision: Result<PrepareDecision, ImagodError> = {
             let mut state = self.state.lock().await;
-            cleanup_plan.merge(self.session_store.collect_expired_sessions(
-                &mut state,
-                now,
-                self.upload_session_ttl_secs,
-            ));
-            self.session_store.cleanup_orphan_idempotency(&mut state);
+            cleanup_plan.merge(self.collect_session_cleanup_locked(&mut state, now, None));
 
             if let Some(existing_id) = state.idempotency.get(&request.idempotency_key).cloned()
                 && let Some(existing) = state.sessions.get_mut(&existing_id)
@@ -242,12 +264,11 @@ impl ArtifactStore {
                 let mut session_candidate = session_candidate;
                 let result = {
                     let mut state = self.state.lock().await;
-                    cleanup_plan.merge(self.session_store.collect_expired_sessions(
+                    cleanup_plan.merge(self.collect_session_cleanup_locked(
                         &mut state,
                         now_after_io,
-                        self.upload_session_ttl_secs,
+                        None,
                     ));
-                    self.session_store.cleanup_orphan_idempotency(&mut state);
 
                     if let Some(existing_id) = state
                         .idempotency
@@ -299,7 +320,7 @@ impl ArtifactStore {
     /// Handles `artifact.push` by validating and writing one chunk.
     pub async fn push(&self, request: ArtifactPushRequest) -> Result<ArtifactPushAck, ImagodError> {
         let now = now_epoch_secs();
-        let header = request.header;
+        let ArtifactPushRequest { header, chunk } = request;
         let max_chunk_size = u64::try_from(self.max_chunk_size).unwrap_or(u64::MAX);
         if header.length > max_chunk_size {
             return Err(ImagodError::new(
@@ -311,27 +332,6 @@ impl ArtifactStore {
             .with_detail("chunk_size", max_chunk_size.to_string()));
         }
 
-        let max_chunk_b64_len = max_base64_len_for_decoded_len(header.length).ok_or_else(|| {
-            ImagodError::new(
-                ErrorCode::RangeInvalid,
-                STAGE_PUSH,
-                "chunk length is too large to validate base64 payload",
-            )
-        })?;
-        if request.chunk_b64.len() > max_chunk_b64_len {
-            return Err(ImagodError::new(
-                ErrorCode::RangeInvalid,
-                STAGE_PUSH,
-                "chunk_b64 length exceeds declared header.length",
-            )
-            .with_detail("chunk_b64_len", request.chunk_b64.len().to_string())
-            .with_detail("max_chunk_b64_len", max_chunk_b64_len.to_string())
-            .with_detail("chunk_length", header.length.to_string()));
-        }
-
-        let chunk = STANDARD
-            .decode(request.chunk_b64.as_bytes())
-            .map_err(|e| map_bad_request(STAGE_PUSH, format!("chunk_b64 decode failed: {e}")))?;
         if chunk.len() as u64 != header.length {
             return Err(ImagodError::new(
                 ErrorCode::RangeInvalid,
@@ -356,12 +356,7 @@ impl ArtifactStore {
         let mut cleanup_plan = CleanupPlan::default();
         let prepare_write = {
             let mut state = self.state.lock().await;
-            cleanup_plan.merge(self.session_store.collect_expired_sessions(
-                &mut state,
-                now,
-                self.upload_session_ttl_secs,
-            ));
-            self.session_store.cleanup_orphan_idempotency(&mut state);
+            cleanup_plan.merge(self.collect_session_cleanup_locked(&mut state, now, None));
 
             let session = state.sessions.get_mut(&header.deploy_id).ok_or_else(|| {
                 ImagodError::new(ErrorCode::NotFound, STAGE_PUSH, "deploy_id is not found")
@@ -467,12 +462,7 @@ impl ArtifactStore {
 
         let prepare_commit = {
             let mut state = self.state.lock().await;
-            cleanup_plan.merge(self.session_store.collect_expired_sessions(
-                &mut state,
-                now,
-                self.upload_session_ttl_secs,
-            ));
-            self.session_store.cleanup_orphan_idempotency(&mut state);
+            cleanup_plan.merge(self.collect_session_cleanup_locked(&mut state, now, None));
 
             let session = state.sessions.get_mut(&request.deploy_id).ok_or_else(|| {
                 ImagodError::new(ErrorCode::NotFound, STAGE_COMMIT, "deploy_id is not found")
@@ -550,14 +540,13 @@ impl ArtifactStore {
             }
 
             session.committed = true;
-            let service_name = session.service_name.clone();
             let current_deploy_id = session.deploy_id.clone();
             let artifact_id = session.artifact_digest.clone();
 
-            cleanup_plan.merge(self.session_store.collect_old_committed_sessions(
+            cleanup_plan.merge(self.collect_session_cleanup_locked(
                 &mut state,
-                &service_name,
-                &current_deploy_id,
+                now,
+                Some(&current_deploy_id),
             ));
 
             Ok(ArtifactCommitResponse {
@@ -580,12 +569,11 @@ impl ArtifactStore {
 
         let result = {
             let mut state = self.state.lock().await;
-            cleanup_plan.merge(self.session_store.collect_expired_sessions(
+            cleanup_plan.merge(self.collect_session_cleanup_locked(
                 &mut state,
                 now,
-                self.upload_session_ttl_secs,
+                Some(deploy_id),
             ));
-            self.session_store.cleanup_orphan_idempotency(&mut state);
 
             let session = state.sessions.get_mut(deploy_id).ok_or_else(|| {
                 ImagodError::new(
@@ -623,12 +611,11 @@ impl ArtifactStore {
 
         let result = {
             let mut state = self.state.lock().await;
-            cleanup_plan.merge(self.session_store.collect_expired_sessions(
+            cleanup_plan.merge(self.collect_session_cleanup_locked(
                 &mut state,
                 now,
-                self.upload_session_ttl_secs,
+                Some(deploy_id),
             ));
-            self.session_store.cleanup_orphan_idempotency(&mut state);
 
             let session = state.sessions.get_mut(deploy_id).ok_or_else(|| {
                 ImagodError::new(
@@ -652,6 +639,28 @@ impl ArtifactStore {
 
         apply_cleanup_plan(cleanup_plan).await;
         result
+    }
+
+    /// Removes upload session state and temp file for one deploy id.
+    pub async fn purge_deploy_session(&self, deploy_id: &str) -> Result<(), ImagodError> {
+        let now = now_epoch_secs();
+        let mut cleanup_plan = CleanupPlan::default();
+
+        {
+            let mut state = self.state.lock().await;
+            cleanup_plan.merge(self.collect_session_cleanup_locked(
+                &mut state,
+                now,
+                Some(deploy_id),
+            ));
+            cleanup_plan.merge(
+                self.session_store
+                    .collect_sessions_by_deploy_ids(&mut state, vec![deploy_id.to_string()]),
+            );
+        }
+
+        apply_cleanup_plan(cleanup_plan).await;
+        Ok(())
     }
 }
 
@@ -715,12 +724,6 @@ fn map_fingerprint_fragment(map: &BTreeMap<String, String>) -> String {
     fragment
 }
 
-fn max_base64_len_for_decoded_len(decoded_len: u64) -> Option<usize> {
-    let groups = decoded_len.checked_add(2)?.checked_div(3)?;
-    let encoded_len = groups.checked_mul(4)?;
-    usize::try_from(encoded_len).ok()
-}
-
 fn now_epoch_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -730,10 +733,6 @@ fn now_epoch_secs() -> u64 {
 
 fn map_internal(stage: &str, message: String) -> ImagodError {
     ImagodError::new(ErrorCode::Internal, stage, message).with_retryable(true)
-}
-
-fn map_bad_request(stage: &str, message: String) -> ImagodError {
-    ImagodError::new(ErrorCode::BadRequest, stage, message)
 }
 
 #[cfg(test)]
@@ -800,8 +799,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keeps_latest_committed_artifact_per_service() {
-        let (store, root) = new_store("keeps_latest_committed_artifact_per_service", 60).await;
+    async fn keeps_committed_artifacts_until_explicit_cleanup() {
+        let (store, root) = new_store("keeps_committed_artifacts_until_explicit_cleanup", 60).await;
 
         let first = prepare_push_commit(&store, "svc-c", b"artifact-v1", "idem-v1").await;
         let first_path = root
@@ -814,17 +813,133 @@ mod tests {
             .join("sessions")
             .join(format!("{}.artifact", second.deploy_id));
 
-        assert!(!first_path.exists());
+        assert!(first_path.exists());
         assert!(second_path.exists());
 
-        let old = store.committed_artifact(&first.deploy_id).await;
-        assert!(old.is_err());
+        let old = store
+            .committed_artifact(&first.deploy_id)
+            .await
+            .expect("first committed artifact should remain");
+        assert_eq!(old.deploy_id, first.deploy_id);
 
         let latest = store
             .committed_artifact(&second.deploy_id)
             .await
             .expect("latest artifact should remain");
         assert_eq!(latest.deploy_id, second.deploy_id);
+
+        cleanup_root(root);
+    }
+
+    #[tokio::test]
+    async fn purge_deploy_session_removes_committed_state_and_file() {
+        let (store, root) =
+            new_store("purge_deploy_session_removes_committed_state_and_file", 60).await;
+        let commit = prepare_push_commit(&store, "svc-purge", b"artifact-v1", "idem-purge").await;
+        let committed_path = root
+            .join("sessions")
+            .join(format!("{}.artifact", commit.deploy_id));
+        assert!(
+            committed_path.exists(),
+            "committed artifact file should exist"
+        );
+
+        store
+            .purge_deploy_session(&commit.deploy_id)
+            .await
+            .expect("purge should succeed");
+        assert!(
+            !committed_path.exists(),
+            "purged artifact file should be removed"
+        );
+
+        let err = store
+            .committed_artifact(&commit.deploy_id)
+            .await
+            .expect_err("purged deploy should be removed");
+        assert_eq!(err.code, ErrorCode::NotFound);
+
+        cleanup_root(root);
+    }
+
+    #[tokio::test]
+    async fn committed_orphan_cleanup_enforces_max_sessions() {
+        let (store, root) = new_store_with_session_limits(
+            "committed_orphan_cleanup_enforces_max_sessions",
+            60,
+            600,
+            2,
+            TEST_CHUNK_SIZE,
+            TEST_MAX_INFLIGHT,
+            TEST_MAX_ARTIFACT_SIZE,
+        )
+        .await;
+        let first = prepare_push_commit(&store, "svc-1", b"artifact-1", "idem-1").await;
+        let second = prepare_push_commit(&store, "svc-2", b"artifact-2", "idem-2").await;
+        let third = prepare_push_commit(&store, "svc-3", b"artifact-3", "idem-3").await;
+
+        let first_artifact = store.committed_artifact(&first.deploy_id).await.ok();
+        let second_artifact = store.committed_artifact(&second.deploy_id).await.ok();
+        let third_artifact = store
+            .committed_artifact(&third.deploy_id)
+            .await
+            .expect("newest committed session should remain");
+        assert_eq!(third_artifact.deploy_id, third.deploy_id);
+        let retained_count = usize::from(first_artifact.is_some())
+            + usize::from(second_artifact.is_some())
+            + usize::from(true);
+        assert_eq!(
+            retained_count, 2,
+            "max_committed_sessions=2 should keep exactly two committed sessions"
+        );
+
+        cleanup_root(root);
+    }
+
+    #[tokio::test]
+    async fn committed_orphan_cleanup_expires_sessions_after_ttl() {
+        let (store, root) = new_store_with_session_limits(
+            "committed_orphan_cleanup_expires_sessions_after_ttl",
+            60,
+            1,
+            16,
+            TEST_CHUNK_SIZE,
+            TEST_MAX_INFLIGHT,
+            TEST_MAX_ARTIFACT_SIZE,
+        )
+        .await;
+        let first =
+            prepare_push_commit(&store, "svc-expire", b"artifact-expire", "idem-expire").await;
+        let first_path = root
+            .join("sessions")
+            .join(format!("{}.artifact", first.deploy_id));
+        assert!(first_path.exists(), "committed artifact file should exist");
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let _ = store
+            .prepare(DeployPrepareRequest {
+                name: "svc-trigger".to_string(),
+                app_type: "cli".to_string(),
+                target: BTreeMap::new(),
+                artifact_digest: hex::encode(Sha256::digest(b"artifact-trigger")),
+                artifact_size: b"artifact-trigger".len() as u64,
+                manifest_digest: hex::encode(Sha256::digest(b"manifest-trigger")),
+                idempotency_key: "idem-trigger".to_string(),
+                policy: BTreeMap::new(),
+            })
+            .await
+            .expect("prepare should trigger committed session cleanup");
+
+        assert!(
+            !first_path.exists(),
+            "expired committed artifact file should be removed"
+        );
+        let err = store
+            .committed_artifact(&first.deploy_id)
+            .await
+            .expect_err("expired committed session should be removed");
+        assert_eq!(err.code, ErrorCode::NotFound);
 
         cleanup_root(root);
     }
@@ -1066,7 +1181,7 @@ mod tests {
                     chunk_sha256: hex::encode(Sha256::digest(artifact)),
                     upload_token: prepare.upload_token,
                 },
-                chunk_b64: STANDARD.encode(artifact),
+                chunk: artifact.to_vec(),
             })
             .await
             .expect_err("push should fail when chunk exceeds configured limit");
@@ -1121,7 +1236,7 @@ mod tests {
                     chunk_sha256: hex::encode(Sha256::digest(artifact)),
                     upload_token: prepare.upload_token,
                 },
-                chunk_b64: STANDARD.encode(artifact),
+                chunk: artifact.to_vec(),
             })
             .await
             .expect_err("push should fail when max_inflight_chunks is reached");
@@ -1131,9 +1246,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_rejects_oversized_base64_payload_before_decode() {
+    async fn push_rejects_chunk_length_mismatch() {
         let (store, root) = new_store_with_limits(
-            "push_rejects_oversized_base64_payload_before_decode",
+            "push_rejects_chunk_length_mismatch",
             60,
             TEST_CHUNK_SIZE,
             TEST_MAX_INFLIGHT,
@@ -1167,12 +1282,11 @@ mod tests {
                     chunk_sha256: "irrelevant".to_string(),
                     upload_token: prepare.upload_token,
                 },
-                chunk_b64: "A".repeat(1024),
+                chunk: artifact.to_vec(),
             })
             .await
-            .expect_err("oversized base64 payload should be rejected before decode");
+            .expect_err("chunk length mismatch should be rejected");
         assert_eq!(err.code, ErrorCode::RangeInvalid);
-        assert!(err.to_string().contains("chunk_b64"));
 
         cleanup_root(root);
     }
@@ -1259,7 +1373,7 @@ mod tests {
                     chunk_sha256: chunk_hash,
                     upload_token: prepare.upload_token,
                 },
-                chunk_b64: STANDARD.encode(artifact),
+                chunk: artifact.to_vec(),
             })
             .await
             .expect("push should succeed");
@@ -1281,9 +1395,11 @@ mod tests {
     }
 
     async fn new_store(test_name: &str, ttl_secs: u64) -> (ArtifactStore, PathBuf) {
-        new_store_with_limits(
+        new_store_with_session_limits(
             test_name,
             ttl_secs,
+            120,
+            16,
             TEST_CHUNK_SIZE,
             TEST_MAX_INFLIGHT,
             TEST_MAX_ARTIFACT_SIZE,
@@ -1298,6 +1414,27 @@ mod tests {
         max_inflight_chunks: usize,
         max_artifact_size_bytes: u64,
     ) -> (ArtifactStore, PathBuf) {
+        new_store_with_session_limits(
+            test_name,
+            ttl_secs,
+            120,
+            16,
+            chunk_size,
+            max_inflight_chunks,
+            max_artifact_size_bytes,
+        )
+        .await
+    }
+
+    async fn new_store_with_session_limits(
+        test_name: &str,
+        ttl_secs: u64,
+        committed_session_ttl_secs: u64,
+        max_committed_sessions: usize,
+        chunk_size: usize,
+        max_inflight_chunks: usize,
+        max_artifact_size_bytes: u64,
+    ) -> (ArtifactStore, PathBuf) {
         let root = std::env::temp_dir().join(format!(
             "imagod-artifact-store-tests-{}-{}",
             test_name,
@@ -1306,6 +1443,8 @@ mod tests {
         let store = ArtifactStore::new(
             &root,
             ttl_secs,
+            committed_session_ttl_secs,
+            max_committed_sessions,
             chunk_size,
             max_inflight_chunks,
             max_artifact_size_bytes,

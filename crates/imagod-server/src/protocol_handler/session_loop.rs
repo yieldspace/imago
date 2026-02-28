@@ -10,7 +10,7 @@ use web_transport_quinn::{RecvStream, SendStream, Session};
 use super::{
     DynamicClientRole, MAX_STREAM_BYTES, ProtocolHandler, STREAM_READ_TIMEOUT_SECS,
     envelope_io::{
-        ensure_single_request_envelope, error_envelope, finish_stream, parse_stream_envelopes,
+        error_envelope, finish_stream, parse_single_request_envelope,
         response_message_type_for_request, write_envelope,
     },
     resolve_dynamic_client_role,
@@ -142,7 +142,7 @@ where
         }
     };
 
-    let envelopes = match parse_stream_envelopes(&buf, handler.frame_codec.as_ref()) {
+    let parsed = match parse_single_request_envelope(&buf, handler.frame_codec.as_ref()) {
         Ok(v) => v,
         Err(err) => {
             let envelope = error_envelope(
@@ -156,31 +156,20 @@ where
             return Ok(());
         }
     };
-
-    if envelopes.is_empty() {
+    let Some(parsed) = parsed else {
         finish_stream(&mut send)?;
         return Ok(());
-    }
-
-    if let Err(err) = ensure_single_request_envelope(&envelopes) {
-        let first = &envelopes[0];
-        let response = error_envelope(
-            response_message_type_for_request(first.message_type),
-            first.request_id,
-            first.correlation_id,
-            err.to_structured(),
-        );
-        write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
-        finish_stream(&mut send)?;
-        return Ok(());
-    }
-
-    let request = envelopes[0].clone();
+    };
+    let request = parsed.request;
+    let typed_push = parsed.typed_push;
+    let request_id = request.request_id;
+    let correlation_id = request.correlation_id;
+    let request_message_type = request.message_type;
     if let Err(err) = ensure_message_type_allowed(&request, &auth_context) {
         let response = error_envelope(
-            response_message_type_for_request(request.message_type),
-            request.request_id,
-            request.correlation_id,
+            response_message_type_for_request(request_message_type),
+            request_id,
+            correlation_id,
             err.to_structured(),
         );
         write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
@@ -188,9 +177,41 @@ where
         return Ok(());
     }
 
-    if request.message_type == MessageType::CommandStart {
-        let request_id = request.request_id;
-        let correlation_id = request.correlation_id;
+    if request_message_type == MessageType::ArtifactPush {
+        let Some(payload) = typed_push else {
+            let response = error_envelope(
+                MessageType::ArtifactPush,
+                request_id,
+                correlation_id,
+                ImagodError::new(
+                    ErrorCode::BadRequest,
+                    "protocol",
+                    "request payload decode failed: missing artifact.push payload",
+                )
+                .to_structured(),
+            );
+            write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
+            finish_stream(&mut send)?;
+            return Ok(());
+        };
+        let response = match handler
+            .handle_push_typed(request_id, correlation_id, payload)
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) => error_envelope(
+                MessageType::ArtifactPush,
+                request_id,
+                correlation_id,
+                err.to_structured(),
+            ),
+        };
+        write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
+        finish_stream(&mut send)?;
+        return Ok(());
+    }
+
+    if request_message_type == MessageType::CommandStart {
         if let Err(err) = handler.handle_command_start(request, &mut send).await {
             if !should_wrap_command_start_error(&err) {
                 return Err(err);
@@ -201,15 +222,15 @@ where
         finish_stream(&mut send)?;
         return Ok(());
     }
-    if request.message_type == MessageType::LogsRequest {
+    if request_message_type == MessageType::LogsRequest {
         if let Err(err) = handler
-            .handle_logs_request(session.clone(), request.clone(), &mut send)
+            .handle_logs_request(session.clone(), request, &mut send)
             .await
         {
             let response = error_envelope(
                 MessageType::LogsRequest,
-                request.request_id,
-                request.correlation_id,
+                request_id,
+                correlation_id,
                 err.to_structured(),
             );
             write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
@@ -218,12 +239,12 @@ where
         return Ok(());
     }
 
-    let response = match handler.handle_single(request.clone()).await {
+    let response = match handler.handle_single(request).await {
         Ok(resp) => resp,
         Err(err) => error_envelope(
-            response_message_type_for_request(request.message_type),
-            request.request_id,
-            request.correlation_id,
+            response_message_type_for_request(request_message_type),
+            request_id,
+            correlation_id,
             err.to_structured(),
         ),
     };

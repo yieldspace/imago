@@ -110,6 +110,30 @@ pub(crate) fn validate(config: &ImagodConfig) -> Result<(), ImagodError> {
         ));
     }
 
+    if config.runtime.retained_logs_capacity_bytes == 0 {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.load",
+            "runtime.retained_logs_capacity_bytes must be greater than 0",
+        ));
+    }
+
+    if config.runtime.committed_session_ttl_secs == 0 {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.load",
+            "runtime.committed_session_ttl_secs must be greater than 0",
+        ));
+    }
+
+    if config.runtime.max_committed_sessions == 0 {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.load",
+            "runtime.max_committed_sessions must be greater than 0",
+        ));
+    }
+
     if !(1..=4).contains(&config.runtime.http_worker_count) {
         return Err(ImagodError::new(
             ErrorCode::BadRequest,

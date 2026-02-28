@@ -26,7 +26,7 @@ mod tests {
     #[test]
     fn hello_negotiate_round_trip_and_validate() {
         let request = HelloNegotiateRequest {
-            client_version: "0.1.0".to_string(),
+            client_version: "0.2.0".to_string(),
             required_features: vec!["resumable-upload".to_string()],
         };
 
@@ -44,7 +44,7 @@ mod tests {
     #[test]
     fn hello_negotiate_rejects_missing_required_field() {
         let encoded = to_cbor(&HelloNegotiateMissingRequiredFeatures {
-            client_version: "0.1.0",
+            client_version: "0.2.0",
         })
         .expect("encoding should succeed");
 
@@ -62,7 +62,7 @@ mod tests {
     #[test]
     fn hello_negotiate_rejects_legacy_compatibility_date_field() {
         let encoded = to_cbor(&HelloNegotiateWithLegacyField {
-            client_version: "0.1.0",
+            client_version: "0.2.0",
             required_features: vec![],
             compatibility_date: "2026-02-10",
         })
@@ -140,7 +140,7 @@ mod tests {
                 chunk_sha256: "abcd".to_string(),
                 upload_token: "token".to_string(),
             },
-            chunk_b64: "AQIDBA==".to_string(),
+            chunk: vec![1, 2, 3, 4],
         };
 
         request.validate().expect("request should be valid");
@@ -165,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_push_request_rejects_missing_chunk_b64() {
+    fn artifact_push_request_rejects_missing_chunk() {
         let encoded = to_cbor(&ArtifactPushRequestMissingChunk {
             header: ArtifactPushChunkHeaderBorrowed {
                 deploy_id: "dep-1",
@@ -174,6 +174,30 @@ mod tests {
                 chunk_sha256: "abcd",
                 upload_token: "token",
             },
+        })
+        .expect("encoding should succeed");
+        let decoded = from_cbor::<ArtifactPushRequest>(&encoded);
+        assert!(decoded.is_err());
+    }
+
+    #[derive(Debug, Serialize)]
+    struct ArtifactPushRequestLegacyChunkB64<'a> {
+        #[serde(flatten)]
+        header: ArtifactPushChunkHeaderBorrowed<'a>,
+        chunk_b64: &'a str,
+    }
+
+    #[test]
+    fn artifact_push_request_rejects_legacy_chunk_b64_field() {
+        let encoded = to_cbor(&ArtifactPushRequestLegacyChunkB64 {
+            header: ArtifactPushChunkHeaderBorrowed {
+                deploy_id: "dep-1",
+                offset: 0,
+                length: 4,
+                chunk_sha256: "abcd",
+                upload_token: "token",
+            },
+            chunk_b64: "AQIDBA==",
         })
         .expect("encoding should succeed");
         let decoded = from_cbor::<ArtifactPushRequest>(&encoded);

@@ -322,6 +322,7 @@ impl ServiceSupervisor {
             http_worker_count,
             http_worker_queue_capacity,
             runner_log_buffer_bytes,
+            runner_log_buffer_bytes.saturating_mul(2),
             epoch_tick_interval_ms,
             default_config_path,
         )
@@ -338,6 +339,7 @@ impl ServiceSupervisor {
         http_worker_count: u32,
         http_worker_queue_capacity: u32,
         runner_log_buffer_bytes: usize,
+        retained_logs_capacity_bytes: usize,
         epoch_tick_interval_ms: u64,
         config_path: impl AsRef<Path>,
     ) -> Result<Self, ImagodError> {
@@ -349,6 +351,7 @@ impl ServiceSupervisor {
         let manager_control_read_timeout =
             Duration::from_millis(manager_control_read_timeout_ms.max(1));
         let runner_log_buffer_bytes = runner_log_buffer_bytes.max(1024);
+        let retained_logs_capacity_bytes = retained_logs_capacity_bytes.max(1);
 
         std::fs::create_dir_all(&runtime_root).map_err(|e| {
             ImagodError::new(
@@ -388,7 +391,7 @@ impl ServiceSupervisor {
 
         let inner = Arc::new(RwLock::new(BTreeMap::new()));
         let retained_logs = Arc::new(Mutex::new(RetainedServiceLogRing::new(
-            runner_log_buffer_bytes.saturating_mul(2),
+            retained_logs_capacity_bytes,
         )));
         let stopping_services = Arc::new(StdMutex::new(BTreeMap::new()));
         let pending_ready = Arc::new(Mutex::new(BTreeMap::new()));

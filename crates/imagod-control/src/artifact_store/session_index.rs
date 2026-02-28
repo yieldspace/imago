@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use imago_protocol::{ArtifactStatus, DeployPrepareResponse};
 
 use super::{CleanupPlan, StoreState, UploadSession, commit};
@@ -64,28 +66,77 @@ impl InMemoryUploadSessionStore {
         collect_sessions_for_removal_locked(state, expired_ids)
     }
 
-    pub(super) fn collect_old_committed_sessions(
+    pub(super) fn collect_orphan_committed_sessions(
         &self,
         state: &mut StoreState,
-        service_name: &str,
-        keep_deploy_id: &str,
+        now_epoch_secs: u64,
+        committed_session_ttl_secs: u64,
+        max_committed_sessions: usize,
+        keep_deploy_id: Option<&str>,
     ) -> CleanupPlan {
-        let old_ids = state
+        let keep_deploy_id = keep_deploy_id.filter(|id| !id.is_empty());
+        let keep_present = keep_deploy_id.is_some_and(|deploy_id| {
+            state
+                .sessions
+                .get(deploy_id)
+                .is_some_and(|session| session.committed)
+        });
+        let mut remove_ids = state
             .sessions
             .iter()
             .filter_map(|(deploy_id, session)| {
-                if session.committed
-                    && session.service_name == service_name
-                    && deploy_id.as_str() != keep_deploy_id
-                {
-                    Some(deploy_id.clone())
-                } else {
+                if !session.committed || session.inflight_writes > 0 || session.commit_in_progress {
                     None
+                } else if keep_deploy_id.is_some_and(|keep| keep == deploy_id.as_str()) {
+                    None
+                } else {
+                    let age = now_epoch_secs.saturating_sub(session.updated_at_epoch_secs);
+                    if age >= committed_session_ttl_secs {
+                        Some(deploy_id.clone())
+                    } else {
+                        None
+                    }
                 }
             })
             .collect::<Vec<_>>();
+        let removed_ids = remove_ids.iter().cloned().collect::<HashSet<_>>();
+        let mut survivors = state
+            .sessions
+            .iter()
+            .filter_map(|(deploy_id, session)| {
+                if !session.committed || session.inflight_writes > 0 || session.commit_in_progress {
+                    return None;
+                }
+                if keep_deploy_id.is_some_and(|keep| keep == deploy_id.as_str()) {
+                    return None;
+                }
+                if removed_ids.contains(deploy_id) {
+                    return None;
+                }
+                Some((deploy_id.clone(), session.updated_at_epoch_secs))
+            })
+            .collect::<Vec<_>>();
+        let allowed_non_keep = max_committed_sessions.saturating_sub(usize::from(keep_present));
+        if survivors.len() > allowed_non_keep {
+            survivors.sort_by_key(|(_, updated_at_epoch_secs)| *updated_at_epoch_secs);
+            let overflow = survivors.len() - allowed_non_keep;
+            remove_ids.extend(
+                survivors
+                    .into_iter()
+                    .take(overflow)
+                    .map(|(deploy_id, _)| deploy_id),
+            );
+        }
 
-        collect_sessions_for_removal_locked(state, old_ids)
+        collect_sessions_for_removal_locked(state, remove_ids)
+    }
+
+    pub(super) fn collect_sessions_by_deploy_ids(
+        &self,
+        state: &mut StoreState,
+        deploy_ids: Vec<String>,
+    ) -> CleanupPlan {
+        collect_sessions_for_removal_locked(state, deploy_ids)
     }
 
     pub(super) fn cleanup_orphan_idempotency(&self, state: &mut StoreState) {

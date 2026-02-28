@@ -26,6 +26,8 @@ pub(crate) async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyh
     let artifacts = ArtifactStore::new(
         &artifact_root,
         config.runtime.upload_session_ttl_secs,
+        config.runtime.committed_session_ttl_secs,
+        config.runtime.max_committed_sessions,
         config.runtime.chunk_size,
         config.runtime.max_inflight_chunks,
         config.runtime.max_artifact_size_bytes,
@@ -41,6 +43,7 @@ pub(crate) async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyh
         config.runtime.http_worker_count,
         config.runtime.http_worker_queue_capacity,
         config.runtime.runner_log_buffer_bytes,
+        config.runtime.retained_logs_capacity_bytes,
         config.runtime.epoch_tick_interval_ms,
         &config_path,
     )
