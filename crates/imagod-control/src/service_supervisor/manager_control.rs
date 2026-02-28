@@ -450,12 +450,6 @@ mod tests {
             invocation_secret: random_secret_hex(),
             bindings,
             child,
-            _stdout_log: Arc::new(Mutex::new(super::super::log_buffer::BoundedLogBuffer::new(
-                64,
-            ))),
-            _stderr_log: Arc::new(Mutex::new(super::super::log_buffer::BoundedLogBuffer::new(
-                64,
-            ))),
             composite_log: Arc::new(Mutex::new(
                 super::super::log_buffer::CompositeLogBuffer::new(128),
             )),

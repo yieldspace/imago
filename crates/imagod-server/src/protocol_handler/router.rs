@@ -24,7 +24,7 @@ use web_transport_quinn::SendStream;
 
 use super::{
     Envelope, ProtocolHandler,
-    envelope_io::{bad_request, event_envelope, payload_as, response_envelope, write_envelope},
+    envelope_io::{bad_request, event_envelope, payload_take, response_envelope, write_envelope},
     logs_forwarder::LogsForwarder,
     session_loop::ProtocolSession,
     upsert_dynamic_client_public_key,
@@ -51,8 +51,10 @@ impl ProtocolHandler {
         }
     }
 
-    fn handle_hello(&self, request: Envelope) -> Result<Envelope, ImagodError> {
-        let payload: imago_protocol::HelloNegotiateRequest = payload_as(&request)?;
+    fn handle_hello(&self, mut request: Envelope) -> Result<Envelope, ImagodError> {
+        let request_id = request.request_id;
+        let correlation_id = request.correlation_id;
+        let payload: imago_protocol::HelloNegotiateRequest = payload_take(&mut request)?;
         payload
             .validate()
             .map_err(|e| bad_request("hello.negotiate", e.to_string()))?;
@@ -84,8 +86,8 @@ impl ProtocolHandler {
 
         response_envelope(
             MessageType::HelloNegotiate,
-            request.request_id,
-            request.correlation_id,
+            request_id,
+            correlation_id,
             &imago_protocol::HelloNegotiateResponse {
                 accepted,
                 server_version: self.config.server_version.clone(),
@@ -114,8 +116,10 @@ impl ProtocolHandler {
         )
     }
 
-    async fn handle_prepare(&self, request: Envelope) -> Result<Envelope, ImagodError> {
-        let payload: DeployPrepareRequest = payload_as(&request)?;
+    async fn handle_prepare(&self, mut request: Envelope) -> Result<Envelope, ImagodError> {
+        let request_id = request.request_id;
+        let correlation_id = request.correlation_id;
+        let payload: DeployPrepareRequest = payload_take(&mut request)?;
         payload
             .validate()
             .map_err(|e| bad_request("deploy.prepare", e.to_string()))?;
@@ -123,27 +127,41 @@ impl ProtocolHandler {
         let response = self.artifacts.prepare(payload).await?;
         response_envelope(
             MessageType::DeployPrepare,
-            request.request_id,
-            request.correlation_id,
+            request_id,
+            correlation_id,
             &response,
         )
     }
 
-    async fn handle_push(&self, request: Envelope) -> Result<Envelope, ImagodError> {
-        let payload: ArtifactPushRequest = payload_as(&request)?;
+    async fn handle_push(&self, mut request: Envelope) -> Result<Envelope, ImagodError> {
+        let request_id = request.request_id;
+        let correlation_id = request.correlation_id;
+        let payload: ArtifactPushRequest = payload_take(&mut request)?;
+        self.handle_push_typed(request_id, correlation_id, payload)
+            .await
+    }
+
+    pub(crate) async fn handle_push_typed(
+        &self,
+        request_id: uuid::Uuid,
+        correlation_id: uuid::Uuid,
+        payload: ArtifactPushRequest,
+    ) -> Result<Envelope, ImagodError> {
         validate_push_payload(&payload)?;
 
         let response = self.artifacts.push(payload).await?;
         response_envelope(
             MessageType::ArtifactPush,
-            request.request_id,
-            request.correlation_id,
+            request_id,
+            correlation_id,
             &response,
         )
     }
 
-    async fn handle_commit(&self, request: Envelope) -> Result<Envelope, ImagodError> {
-        let payload: imago_protocol::ArtifactCommitRequest = payload_as(&request)?;
+    async fn handle_commit(&self, mut request: Envelope) -> Result<Envelope, ImagodError> {
+        let request_id = request.request_id;
+        let correlation_id = request.correlation_id;
+        let payload: imago_protocol::ArtifactCommitRequest = payload_take(&mut request)?;
         payload
             .validate()
             .map_err(|e| bad_request("artifact.commit", e.to_string()))?;
@@ -151,14 +169,16 @@ impl ProtocolHandler {
         let response = self.artifacts.commit(payload).await?;
         response_envelope(
             MessageType::ArtifactCommit,
-            request.request_id,
-            request.correlation_id,
+            request_id,
+            correlation_id,
             &response,
         )
     }
 
-    async fn handle_state_request(&self, request: Envelope) -> Result<Envelope, ImagodError> {
-        let payload: StateRequest = payload_as(&request)?;
+    async fn handle_state_request(&self, mut request: Envelope) -> Result<Envelope, ImagodError> {
+        let request_id = request.request_id;
+        let correlation_id = request.correlation_id;
+        let payload: StateRequest = payload_take(&mut request)?;
         payload
             .validate()
             .map_err(|e| bad_request("state.request", e.to_string()))?;
@@ -169,14 +189,16 @@ impl ProtocolHandler {
             .await?;
         response_envelope(
             MessageType::StateResponse,
-            request.request_id,
-            request.correlation_id,
+            request_id,
+            correlation_id,
             &response,
         )
     }
 
-    async fn handle_services_list(&self, request: Envelope) -> Result<Envelope, ImagodError> {
-        let payload: ServiceListRequest = payload_as(&request)?;
+    async fn handle_services_list(&self, mut request: Envelope) -> Result<Envelope, ImagodError> {
+        let request_id = request.request_id;
+        let correlation_id = request.correlation_id;
+        let payload: ServiceListRequest = payload_take(&mut request)?;
         payload
             .validate()
             .map_err(|e| bad_request("services.list", e.to_string()))?;
@@ -192,14 +214,16 @@ impl ProtocolHandler {
             .map_err(|e| bad_request("services.list", e.to_string()))?;
         response_envelope(
             MessageType::ServicesList,
-            request.request_id,
-            request.correlation_id,
+            request_id,
+            correlation_id,
             &response,
         )
     }
 
-    async fn handle_command_cancel(&self, request: Envelope) -> Result<Envelope, ImagodError> {
-        let payload: CommandCancelRequest = payload_as(&request)?;
+    async fn handle_command_cancel(&self, mut request: Envelope) -> Result<Envelope, ImagodError> {
+        let request_id = request.request_id;
+        let correlation_id = request.correlation_id;
+        let payload: CommandCancelRequest = payload_take(&mut request)?;
         payload
             .validate()
             .map_err(|e| bad_request("command.cancel", e.to_string()))?;
@@ -207,14 +231,16 @@ impl ProtocolHandler {
         let response = self.operations.request_cancel(&payload.request_id).await?;
         response_envelope(
             MessageType::CommandCancel,
-            request.request_id,
-            request.correlation_id,
+            request_id,
+            correlation_id,
             &response,
         )
     }
 
-    async fn handle_rpc_invoke(&self, request: Envelope) -> Result<Envelope, ImagodError> {
-        let payload: RpcInvokeRequest = payload_as(&request)?;
+    async fn handle_rpc_invoke(&self, mut request: Envelope) -> Result<Envelope, ImagodError> {
+        let request_id = request.request_id;
+        let correlation_id = request.correlation_id;
+        let payload: RpcInvokeRequest = payload_take(&mut request)?;
         payload
             .validate()
             .map_err(|e| bad_request("rpc.invoke", e.to_string()))?;
@@ -236,14 +262,16 @@ impl ProtocolHandler {
 
         response_envelope(
             MessageType::RpcInvoke,
-            request.request_id,
-            request.correlation_id,
+            request_id,
+            correlation_id,
             &response,
         )
     }
 
-    fn handle_bindings_cert_upload(&self, request: Envelope) -> Result<Envelope, ImagodError> {
-        let payload: BindingsCertUploadRequest = payload_as(&request)?;
+    fn handle_bindings_cert_upload(&self, mut request: Envelope) -> Result<Envelope, ImagodError> {
+        let request_id = request.request_id;
+        let correlation_id = request.correlation_id;
+        let payload: BindingsCertUploadRequest = payload_take(&mut request)?;
         payload
             .validate()
             .map_err(|e| bad_request("bindings.cert.upload", e.to_string()))?;
@@ -265,8 +293,8 @@ impl ProtocolHandler {
 
         response_envelope(
             MessageType::BindingsCertUpload,
-            request.request_id,
-            request.correlation_id,
+            request_id,
+            correlation_id,
             &BindingsCertUploadResponse { updated, detail },
         )
     }
@@ -275,13 +303,15 @@ impl ProtocolHandler {
     pub(crate) async fn handle_logs_request<S>(
         &self,
         session: Arc<S>,
-        request: Envelope,
+        mut request: Envelope,
         send: &mut SendStream,
     ) -> Result<(), ImagodError>
     where
         S: ProtocolSession + 'static,
     {
-        let payload: imago_protocol::LogRequest = payload_as(&request)?;
+        let request_id = request.request_id;
+        let correlation_id = request.correlation_id;
+        let payload: imago_protocol::LogRequest = payload_take(&mut request)?;
         payload
             .validate()
             .map_err(|e| bad_request("logs.request", e.to_string()))?;
@@ -317,8 +347,8 @@ impl ProtocolHandler {
 
         let ack = response_envelope(
             MessageType::LogsRequest,
-            request.request_id,
-            request.correlation_id,
+            request_id,
+            correlation_id,
             &LogsRequestAck {
                 accepted: true,
                 names: service_names,
@@ -332,8 +362,8 @@ impl ProtocolHandler {
             logs_forwarder
                 .forward(
                     session,
-                    request.request_id,
-                    request.correlation_id,
+                    request_id,
+                    correlation_id,
                     subscriptions,
                     with_timestamp,
                 )
@@ -346,17 +376,27 @@ impl ProtocolHandler {
     /// Handles `command.start` and emits accepted/progress/terminal events.
     pub(crate) async fn handle_command_start(
         &self,
-        request: Envelope,
+        mut request: Envelope,
         send: &mut SendStream,
     ) -> Result<(), ImagodError> {
-        let payload: CommandStartRequest = payload_as(&request)?;
+        let request_id = request.request_id;
+        let correlation_id = request.correlation_id;
+        let payload: CommandStartRequest = payload_take(&mut request)?;
         payload
             .validate()
             .map_err(|e| bad_request("command.start", e.to_string()))?;
 
-        ensure_command_start_request_id_match(request.request_id, payload.request_id)?;
+        ensure_command_start_request_id_match(request_id, payload.request_id)?;
         ensure_command_start_allowed(&self.shutdown_requested)?;
-        let operation_id = request.request_id;
+        let operation_id = request_id;
+        let deploy_id_for_cleanup = if payload.command_type == CommandType::Deploy {
+            match &payload.payload {
+                CommandPayload::Deploy(deploy_payload) => Some(deploy_payload.deploy_id.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         self.operations
             .start(operation_id, payload.command_type)
@@ -364,8 +404,8 @@ impl ProtocolHandler {
 
         let accepted = response_envelope(
             MessageType::CommandStart,
-            request.request_id,
-            request.correlation_id,
+            request_id,
+            correlation_id,
             &CommandStartResponse { accepted: true },
         )?;
         write_envelope(send, &accepted, self.frame_codec.as_ref()).await?;
@@ -373,7 +413,7 @@ impl ProtocolHandler {
         let accepted_event = event_envelope(
             self.clock.as_ref(),
             operation_id,
-            request.correlation_id,
+            correlation_id,
             CommandEventType::Accepted,
             payload.command_type,
             None,
@@ -387,7 +427,7 @@ impl ProtocolHandler {
         let running_event = event_envelope(
             self.clock.as_ref(),
             operation_id,
-            request.correlation_id,
+            correlation_id,
             CommandEventType::Progress,
             payload.command_type,
             Some("starting".to_string()),
@@ -403,21 +443,28 @@ impl ProtocolHandler {
             let canceled = event_envelope(
                 self.clock.as_ref(),
                 operation_id,
-                request.correlation_id,
+                correlation_id,
                 CommandEventType::Canceled,
                 payload.command_type,
                 Some("canceled".to_string()),
                 None,
             )?;
             let canceled_write = write_envelope(send, &canceled, self.frame_codec.as_ref()).await;
-            finalize_operation_after_terminal_event(
+            let finalize_result = finalize_operation_after_terminal_event(
                 &self.operations,
                 &operation_id,
                 CommandState::Canceled,
                 "canceled",
                 canceled_write,
             )
-            .await?;
+            .await;
+            self.purge_deploy_session_if_needed(
+                deploy_id_for_cleanup.as_deref(),
+                CommandState::Canceled,
+                None,
+            )
+            .await;
+            finalize_result?;
             return Ok(());
         }
 
@@ -461,7 +508,7 @@ impl ProtocolHandler {
                 let progress = event_envelope(
                     self.clock.as_ref(),
                     operation_id,
-                    request.correlation_id,
+                    correlation_id,
                     CommandEventType::Progress,
                     payload.command_type,
                     Some(progress_stage),
@@ -472,7 +519,7 @@ impl ProtocolHandler {
                 let succeeded = event_envelope(
                     self.clock.as_ref(),
                     operation_id,
-                    request.correlation_id,
+                    correlation_id,
                     CommandEventType::Succeeded,
                     payload.command_type,
                     Some(success_stage_for_event),
@@ -480,38 +527,72 @@ impl ProtocolHandler {
                 )?;
                 let succeeded_write =
                     write_envelope(send, &succeeded, self.frame_codec.as_ref()).await;
-                finalize_operation_after_terminal_event(
+                let finalize_result = finalize_operation_after_terminal_event(
                     &self.operations,
                     &operation_id,
                     CommandState::Succeeded,
                     success_stage,
                     succeeded_write,
                 )
-                .await?;
+                .await;
+                self.purge_deploy_session_if_needed(
+                    deploy_id_for_cleanup.as_deref(),
+                    CommandState::Succeeded,
+                    None,
+                )
+                .await;
+                finalize_result?;
             }
             Err(err) => {
                 let failed = event_envelope(
                     self.clock.as_ref(),
                     operation_id,
-                    request.correlation_id,
+                    correlation_id,
                     CommandEventType::Failed,
                     payload.command_type,
                     Some("failed".to_string()),
                     Some(err.to_structured()),
                 )?;
                 let failed_write = write_envelope(send, &failed, self.frame_codec.as_ref()).await;
-                finalize_operation_after_terminal_event(
+                let finalize_result = finalize_operation_after_terminal_event(
                     &self.operations,
                     &operation_id,
                     CommandState::Failed,
                     "failed",
                     failed_write,
                 )
-                .await?;
+                .await;
+                self.purge_deploy_session_if_needed(
+                    deploy_id_for_cleanup.as_deref(),
+                    CommandState::Failed,
+                    Some(&err),
+                )
+                .await;
+                finalize_result?;
             }
         }
 
         Ok(())
+    }
+
+    async fn purge_deploy_session_if_needed(
+        &self,
+        deploy_id: Option<&str>,
+        terminal_state: CommandState,
+        terminal_error: Option<&ImagodError>,
+    ) {
+        let Some(deploy_id) = deploy_id else {
+            return;
+        };
+        if !should_purge_deploy_session_after_terminal(terminal_state, terminal_error) {
+            return;
+        }
+        if let Err(err) = self.artifacts.purge_deploy_session(deploy_id).await {
+            eprintln!(
+                "artifact session purge failed deploy_id={} code={:?} stage={} message={}",
+                deploy_id, err.code, err.stage, err.message
+            );
+        }
     }
 }
 
@@ -580,6 +661,19 @@ pub(crate) fn validate_push_payload(payload: &ArtifactPushRequest) -> Result<(),
         .map_err(|e| bad_request("artifact.push", e.to_string()))
 }
 
+fn should_purge_deploy_session_after_terminal(
+    terminal_state: CommandState,
+    terminal_error: Option<&ImagodError>,
+) -> bool {
+    match terminal_state {
+        CommandState::Succeeded => true,
+        CommandState::Canceled => false,
+        CommandState::Failed => terminal_error
+            .is_some_and(|err| err.code != imago_protocol::ErrorCode::Busy && !err.retryable),
+        _ => false,
+    }
+}
+
 fn resolve_logs_request_service_names(
     requested_name: Option<String>,
     loggable_names: Vec<String>,
@@ -624,7 +718,8 @@ mod tests {
     use super::{
         ensure_command_start_allowed, ensure_command_start_request_id_match,
         finalize_operation_after_terminal_event, protocol_compatibility_announcement,
-        resolve_logs_request_service_names, validate_push_payload,
+        resolve_logs_request_service_names, should_purge_deploy_session_after_terminal,
+        validate_push_payload,
     };
     use imago_protocol::ErrorCode;
 
@@ -709,11 +804,54 @@ mod tests {
                 chunk_sha256: "abcd".to_string(),
                 upload_token: "token-1".to_string(),
             },
-            chunk_b64: String::new(),
+            chunk: Vec::new(),
         };
-        let err = validate_push_payload(&payload).expect_err("empty chunk_b64 should fail");
+        let err = validate_push_payload(&payload).expect_err("empty chunk should fail");
         assert_eq!(err.code, ErrorCode::BadRequest);
         assert_eq!(err.stage, "artifact.push");
+    }
+
+    #[test]
+    fn given_terminal_result__when_should_purge_deploy_session_after_terminal__then_policy_matches_contract()
+     {
+        assert!(
+            should_purge_deploy_session_after_terminal(CommandState::Succeeded, None),
+            "succeeded deploy should purge committed artifact session"
+        );
+        assert!(
+            !should_purge_deploy_session_after_terminal(CommandState::Canceled, None),
+            "canceled deploy should keep committed artifact session for retry"
+        );
+
+        let retryable_err =
+            imagod_common::ImagodError::new(ErrorCode::Internal, "orchestration", "retryable")
+                .with_retryable(true);
+        assert!(
+            !should_purge_deploy_session_after_terminal(CommandState::Failed, Some(&retryable_err)),
+            "retryable failure should keep committed artifact session for retry"
+        );
+
+        let busy_non_retryable =
+            imagod_common::ImagodError::new(ErrorCode::Busy, "command.start", "busy")
+                .with_retryable(false);
+        assert!(
+            !should_purge_deploy_session_after_terminal(
+                CommandState::Failed,
+                Some(&busy_non_retryable)
+            ),
+            "busy failure should keep committed artifact session for retry"
+        );
+
+        let non_retryable_err =
+            imagod_common::ImagodError::new(ErrorCode::Internal, "orchestration", "fatal")
+                .with_retryable(false);
+        assert!(
+            should_purge_deploy_session_after_terminal(
+                CommandState::Failed,
+                Some(&non_retryable_err)
+            ),
+            "non-retryable failure should purge committed artifact session"
+        );
     }
 
     #[tokio::test]

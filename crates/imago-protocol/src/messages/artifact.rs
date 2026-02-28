@@ -161,20 +161,24 @@ impl Validate for ArtifactPushChunkHeader {
 ///         chunk_sha256: "abcd".to_string(),
 ///         upload_token: "token-1".to_string(),
 ///     },
-///     chunk_b64: "AQIDBA==".to_string(),
+///     chunk: vec![1, 2, 3, 4],
 /// };
-/// request.validate().expect("chunk_b64 is required");
+/// request.validate().expect("chunk is required");
 /// ```
 pub struct ArtifactPushRequest {
     #[serde(flatten)]
     pub header: ArtifactPushChunkHeader,
-    pub chunk_b64: String,
+    #[serde(with = "serde_bytes")]
+    pub chunk: Vec<u8>,
 }
 
 impl Validate for ArtifactPushRequest {
     fn validate(&self) -> Result<(), ValidationError> {
         self.header.validate()?;
-        ensure_non_empty(&self.chunk_b64, "chunk_b64")
+        if self.chunk.is_empty() {
+            return Err(ValidationError::empty("chunk"));
+        }
+        Ok(())
     }
 }
 
@@ -303,16 +307,16 @@ mod tests {
                 chunk_sha256: "abcd".to_string(),
                 upload_token: "token".to_string(),
             },
-            chunk_b64: "AQIDBA==".to_string(),
+            chunk: vec![1, 2, 3, 4],
         };
         valid.validate().expect("valid push request should pass");
 
         let invalid = ArtifactPushRequest {
-            chunk_b64: String::new(),
+            chunk: Vec::new(),
             ..valid
         };
-        let err = invalid.validate().expect_err("empty chunk_b64 should fail");
-        assert!(err.to_string().contains("chunk_b64"));
+        let err = invalid.validate().expect_err("empty chunk should fail");
+        assert!(err.to_string().contains("chunk"));
     }
 
     #[test]
@@ -352,7 +356,7 @@ mod tests {
                 chunk_sha256: "abcd".to_string(),
                 upload_token: "token".to_string(),
             },
-            chunk_b64: "AQIDBA==".to_string(),
+            chunk: vec![1, 2, 3, 4],
         };
         let encoded = to_cbor(&request).expect("encode should succeed");
         let decoded = from_cbor::<ArtifactPushRequest>(&encoded).expect("decode should succeed");

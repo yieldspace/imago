@@ -2476,6 +2476,7 @@ dependencies = [
  "rustls-pemfile",
  "semver",
  "serde",
+ "serde_bytes",
  "serde_json",
  "sha2",
  "tar",

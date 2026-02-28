@@ -85,6 +85,15 @@ pub struct RuntimeConfig {
     #[serde(default = "default_runner_log_buffer_bytes")]
     /// Total per-runner log ring capacity in bytes.
     pub runner_log_buffer_bytes: usize,
+    #[serde(default = "default_retained_logs_capacity_bytes")]
+    /// Total capacity for retained logs from stopped services in bytes.
+    pub retained_logs_capacity_bytes: usize,
+    #[serde(default = "default_committed_session_ttl_secs")]
+    /// TTL for committed upload sessions that have not been consumed by deploy.
+    pub committed_session_ttl_secs: u64,
+    #[serde(default = "default_max_committed_sessions")]
+    /// Upper bound for committed upload sessions retained in manager memory.
+    pub max_committed_sessions: usize,
     #[serde(default = "default_epoch_tick_interval_ms")]
     /// Runner epoch-tick interval in milliseconds.
     pub epoch_tick_interval_ms: u64,
@@ -130,6 +139,9 @@ impl Default for RuntimeConfig {
             stop_grace_timeout_secs: default_stop_grace_timeout_secs(),
             runner_ready_timeout_secs: default_runner_ready_timeout_secs(),
             runner_log_buffer_bytes: default_runner_log_buffer_bytes(),
+            retained_logs_capacity_bytes: default_retained_logs_capacity_bytes(),
+            committed_session_ttl_secs: default_committed_session_ttl_secs(),
+            max_committed_sessions: default_max_committed_sessions(),
             epoch_tick_interval_ms: default_epoch_tick_interval_ms(),
             http_worker_count: default_http_worker_count(),
             http_worker_queue_capacity: default_http_worker_queue_capacity(),
@@ -702,6 +714,18 @@ fn default_runner_log_buffer_bytes() -> usize {
     256 * 1024
 }
 
+fn default_retained_logs_capacity_bytes() -> usize {
+    default_runner_log_buffer_bytes().saturating_mul(2)
+}
+
+fn default_committed_session_ttl_secs() -> u64 {
+    120
+}
+
+fn default_max_committed_sessions() -> usize {
+    16
+}
+
 fn default_epoch_tick_interval_ms() -> u64 {
     50
 }
@@ -810,6 +834,9 @@ client_public_keys = ["111111111111111111111111111111111111111111111111111111111
         assert_eq!(config.runtime.max_artifact_size_bytes, 64 * 1024 * 1024);
         assert_eq!(config.runtime.runner_ready_timeout_secs, 3);
         assert_eq!(config.runtime.runner_log_buffer_bytes, 256 * 1024);
+        assert_eq!(config.runtime.retained_logs_capacity_bytes, 512 * 1024);
+        assert_eq!(config.runtime.committed_session_ttl_secs, 120);
+        assert_eq!(config.runtime.max_committed_sessions, 16);
         assert_eq!(config.runtime.http_worker_count, 2);
         assert_eq!(config.runtime.http_worker_queue_capacity, 4);
         assert_eq!(
@@ -1307,6 +1334,87 @@ runner_log_buffer_bytes = 0
         let err = ImagodConfig::load(&path)
             .expect_err("config should reject zero runner_log_buffer_bytes");
         assert!(err.to_string().contains("runtime.runner_log_buffer_bytes"));
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_zero_retained_logs_capacity_bytes() {
+        let path = write_temp_config(
+            "rejects_zero_retained_logs_capacity_bytes",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+
+[runtime]
+retained_logs_capacity_bytes = 0
+"#,
+        );
+
+        let err = ImagodConfig::load(&path)
+            .expect_err("config should reject zero retained_logs_capacity_bytes");
+        assert!(
+            err.to_string()
+                .contains("runtime.retained_logs_capacity_bytes")
+        );
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_zero_committed_session_ttl_secs() {
+        let path = write_temp_config(
+            "rejects_zero_committed_session_ttl_secs",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+
+[runtime]
+committed_session_ttl_secs = 0
+"#,
+        );
+
+        let err = ImagodConfig::load(&path)
+            .expect_err("config should reject zero committed_session_ttl_secs");
+        assert!(
+            err.to_string()
+                .contains("runtime.committed_session_ttl_secs")
+        );
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_zero_max_committed_sessions() {
+        let path = write_temp_config(
+            "rejects_zero_max_committed_sessions",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+
+[runtime]
+max_committed_sessions = 0
+"#,
+        );
+
+        let err = ImagodConfig::load(&path)
+            .expect_err("config should reject zero max_committed_sessions");
+        assert!(err.to_string().contains("runtime.max_committed_sessions"));
 
         cleanup_temp_path(path);
     }

@@ -2,6 +2,8 @@ use imagod_common::ImagodError;
 
 pub(crate) trait FrameCodec: Send + Sync {
     fn encode_frame(&self, payload: &[u8]) -> Vec<u8>;
+    fn decode_frame_slices<'a>(&self, value: &'a [u8]) -> Result<Vec<&'a [u8]>, ImagodError>;
+    #[allow(dead_code)]
     fn decode_frames(&self, value: &[u8]) -> Result<Vec<Vec<u8>>, ImagodError>;
 }
 
@@ -16,42 +18,55 @@ impl FrameCodec for LengthPrefixedFrameCodec {
         frame
     }
 
+    fn decode_frame_slices<'a>(&self, value: &'a [u8]) -> Result<Vec<&'a [u8]>, ImagodError> {
+        let ranges = decode_frame_ranges(value)?;
+        Ok(ranges
+            .into_iter()
+            .map(|(start, end)| &value[start..end])
+            .collect())
+    }
+
     fn decode_frames(&self, value: &[u8]) -> Result<Vec<Vec<u8>>, ImagodError> {
-        let mut out = Vec::new();
-        let mut offset = 0usize;
+        let frames = self.decode_frame_slices(value)?;
+        Ok(frames.into_iter().map(|frame| frame.to_vec()).collect())
+    }
+}
 
-        while offset < value.len() {
-            if value.len() - offset < 4 {
-                return Err(ImagodError::new(
-                    imago_protocol::ErrorCode::BadRequest,
-                    "protocol",
-                    "truncated frame header",
-                ));
-            }
+fn decode_frame_ranges(value: &[u8]) -> Result<Vec<(usize, usize)>, ImagodError> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
 
-            let len = u32::from_be_bytes(value[offset..offset + 4].try_into().map_err(|_| {
-                ImagodError::new(
-                    imago_protocol::ErrorCode::BadRequest,
-                    "protocol",
-                    "invalid frame header",
-                )
-            })?) as usize;
-            offset += 4;
-
-            if value.len() - offset < len {
-                return Err(ImagodError::new(
-                    imago_protocol::ErrorCode::BadRequest,
-                    "protocol",
-                    "truncated frame payload",
-                ));
-            }
-
-            out.push(value[offset..offset + len].to_vec());
-            offset += len;
+    while offset < value.len() {
+        if value.len() - offset < 4 {
+            return Err(ImagodError::new(
+                imago_protocol::ErrorCode::BadRequest,
+                "protocol",
+                "truncated frame header",
+            ));
         }
 
-        Ok(out)
+        let len = u32::from_be_bytes(value[offset..offset + 4].try_into().map_err(|_| {
+            ImagodError::new(
+                imago_protocol::ErrorCode::BadRequest,
+                "protocol",
+                "invalid frame header",
+            )
+        })?) as usize;
+        offset += 4;
+
+        if value.len() - offset < len {
+            return Err(ImagodError::new(
+                imago_protocol::ErrorCode::BadRequest,
+                "protocol",
+                "truncated frame payload",
+            ));
+        }
+
+        out.push((offset, offset + len));
+        offset += len;
     }
+
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -90,10 +105,28 @@ mod tests {
     }
 
     #[test]
-    fn given_truncated_header__when_decode_frames__then_bad_request_is_returned() {
+    fn given_multiple_frames__when_decode_frame_slices__then_each_slice_is_recovered() {
+        let codec = LengthPrefixedFrameCodec;
+        let mut bytes = Vec::new();
+        bytes.extend(codec.encode_frame(b"first"));
+        bytes.extend(codec.encode_frame(b"second"));
+        bytes.extend(codec.encode_frame(&[0x01, 0x02, 0x03]));
+
+        let decoded = codec
+            .decode_frame_slices(&bytes)
+            .expect("multi frame decode should succeed");
+
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded[0], b"first");
+        assert_eq!(decoded[1], b"second");
+        assert_eq!(decoded[2], [0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn given_truncated_header__when_decode_frame_slices__then_bad_request_is_returned() {
         let codec = LengthPrefixedFrameCodec;
         let err = codec
-            .decode_frames(&[0x00, 0x00, 0x00])
+            .decode_frame_slices(&[0x00, 0x00, 0x00])
             .expect_err("truncated header must fail");
 
         assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
@@ -102,13 +135,13 @@ mod tests {
     }
 
     #[test]
-    fn given_truncated_payload__when_decode_frames__then_bad_request_is_returned() {
+    fn given_truncated_payload__when_decode_frame_slices__then_bad_request_is_returned() {
         let codec = LengthPrefixedFrameCodec;
         let mut frame = vec![0, 0, 0, 5];
         frame.extend_from_slice(b"abc");
 
         let err = codec
-            .decode_frames(&frame)
+            .decode_frame_slices(&frame)
             .expect_err("truncated payload must fail");
 
         assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);

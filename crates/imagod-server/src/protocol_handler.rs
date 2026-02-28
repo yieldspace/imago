@@ -426,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_chunk_b64_in_handle_push_validation() {
+    fn rejects_empty_chunk_in_handle_push_validation() {
         let payload = ArtifactPushRequest {
             header: ArtifactPushChunkHeader {
                 deploy_id: "deploy-1".to_string(),
@@ -435,9 +435,9 @@ mod tests {
                 chunk_sha256: "abcd".to_string(),
                 upload_token: "token-1".to_string(),
             },
-            chunk_b64: String::new(),
+            chunk: Vec::new(),
         };
-        let err = validate_push_payload(&payload).expect_err("empty chunk_b64 should be rejected");
+        let err = validate_push_payload(&payload).expect_err("empty chunk should be rejected");
         assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
     }
 
