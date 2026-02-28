@@ -860,11 +860,8 @@ impl ServiceSupervisor {
             ));
         }
 
-        let (retained_snapshot, retained_events) = {
-            let retained = self.retained_logs.lock().await;
-            retained.snapshot(service_name)
-        }?
-        .ok_or_else(|| {
+        let retained_snapshot = self.read_retained_snapshot(service_name).await?;
+        let (retained_snapshot, retained_events) = retained_snapshot.ok_or_else(|| {
             ImagodError::new(
                 ErrorCode::NotFound,
                 STAGE_LOGS,
@@ -1258,16 +1255,54 @@ impl ServiceSupervisor {
         };
 
         if let Err(err) = self
-            .retained_logs
-            .lock()
+            .write_retained_snapshot(service_name.to_string(), snapshot_events)
             .await
-            .upsert(service_name, &snapshot_events)
         {
             eprintln!(
                 "service retained log snapshot write failed name={} error={}",
                 service_name, err
             );
         }
+    }
+
+    async fn read_retained_snapshot(
+        &self,
+        service_name: &str,
+    ) -> Result<Option<(Vec<u8>, Vec<ServiceLogEvent>)>, ImagodError> {
+        let retained_logs = self.retained_logs.clone();
+        let service_name = service_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let retained = retained_logs.blocking_lock();
+            retained.snapshot(&service_name)
+        })
+        .await
+        .map_err(|err| {
+            ImagodError::new(
+                ErrorCode::Internal,
+                STAGE_LOGS,
+                format!("retained log snapshot task failed: {err}"),
+            )
+        })?
+    }
+
+    async fn write_retained_snapshot(
+        &self,
+        service_name: String,
+        snapshot_events: Vec<ServiceLogEvent>,
+    ) -> Result<(), ImagodError> {
+        let retained_logs = self.retained_logs.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut retained = retained_logs.blocking_lock();
+            retained.upsert(&service_name, &snapshot_events)
+        })
+        .await
+        .map_err(|err| {
+            ImagodError::new(
+                ErrorCode::Internal,
+                STAGE_LOGS,
+                format!("retained log write task failed: {err}"),
+            )
+        })?
     }
 
     async fn take_running(&self, service_name: &str) -> Result<RunningService, ImagodError> {

@@ -1413,6 +1413,15 @@ async fn request_events_with_retry_policy(
 ) -> anyhow::Result<Vec<Envelope>> {
     let payload = to_cbor(envelope)?;
     let framed = encode_frame(&payload);
+    request_events_with_retry_policy_framed(session, &framed, stream_timeout, retry_policy).await
+}
+
+async fn request_events_with_retry_policy_framed(
+    session: &web_transport_quinn::Session,
+    framed: &[u8],
+    stream_timeout: Duration,
+    retry_policy: RequestStreamRetryPolicy,
+) -> anyhow::Result<Vec<Envelope>> {
     let mut attempt = 1usize;
     let mut first_failure_reason: Option<String> = None;
     let read_timeout = request_stream_read_timeout(retry_policy, stream_timeout);
@@ -1716,11 +1725,10 @@ async fn push_single_artifact_chunk(
     let chunk_hash = hex::encode(Sha256::digest(&chunk));
     let length = u64::try_from(chunk.len()).context("chunk length conversion failed")?;
 
-    let request = request_envelope(
-        MessageType::ArtifactPush,
+    let framed = encode_artifact_push_request_frame(
         Uuid::new_v4(),
         correlation_id,
-        &ArtifactPushRequest {
+        ArtifactPushRequest {
             header: ArtifactPushChunkHeader {
                 deploy_id: deploy_id.as_ref().to_string(),
                 offset,
@@ -1731,10 +1739,35 @@ async fn push_single_artifact_chunk(
             chunk,
         },
     )?;
-
-    let _ack: imago_protocol::ArtifactPushAck =
-        response_payload(request_response_with_timeout(&session, &request, stream_timeout).await?)?;
+    let mut responses = request_events_with_retry_policy_framed(
+        &session,
+        &framed,
+        stream_timeout,
+        RequestStreamRetryPolicy::Standard,
+    )
+    .await?;
+    let response = responses
+        .drain(..)
+        .next()
+        .ok_or_else(|| anyhow!("empty response stream"))?;
+    let _ack: imago_protocol::ArtifactPushAck = response_payload(response)?;
     Ok(())
+}
+
+fn encode_artifact_push_request_frame(
+    request_id: Uuid,
+    correlation_id: Uuid,
+    payload: ArtifactPushRequest,
+) -> anyhow::Result<Vec<u8>> {
+    let envelope = ProtocolEnvelope {
+        message_type: MessageType::ArtifactPush,
+        request_id,
+        correlation_id,
+        payload,
+        error: None,
+    };
+    let payload = to_cbor(&envelope)?;
+    Ok(encode_frame(&payload))
 }
 
 pub(crate) fn response_payload<T: serde::de::DeserializeOwned>(
@@ -2581,6 +2614,54 @@ mod tests {
         let payload: CommandStartRequest =
             serde_json::from_value(envelope.payload).expect("payload should deserialize");
         assert_eq!(payload.request_id, request_id);
+    }
+
+    #[test]
+    fn artifact_push_frame_encodes_chunk_as_compact_cbor_bytes() {
+        let chunk = vec![u8::MAX; 8192];
+        let request_id = Uuid::new_v4();
+        let correlation_id = Uuid::new_v4();
+        let typed_framed = encode_artifact_push_request_frame(
+            request_id,
+            correlation_id,
+            ArtifactPushRequest {
+                header: ArtifactPushChunkHeader {
+                    deploy_id: "deploy-1".to_string(),
+                    offset: 0,
+                    length: u64::try_from(chunk.len()).expect("chunk length should fit u64"),
+                    chunk_sha256: hex::encode(Sha256::digest(&chunk)),
+                    upload_token: "token-1".to_string(),
+                },
+                chunk: chunk.clone(),
+            },
+        )
+        .expect("typed push frame should encode");
+
+        let legacy = request_envelope(
+            MessageType::ArtifactPush,
+            request_id,
+            correlation_id,
+            &ArtifactPushRequest {
+                header: ArtifactPushChunkHeader {
+                    deploy_id: "deploy-1".to_string(),
+                    offset: 0,
+                    length: u64::try_from(chunk.len()).expect("chunk length should fit u64"),
+                    chunk_sha256: hex::encode(Sha256::digest(&chunk)),
+                    upload_token: "token-1".to_string(),
+                },
+                chunk,
+            },
+        )
+        .expect("legacy envelope should encode");
+        let legacy_payload = to_cbor(&legacy).expect("legacy payload should encode");
+        let legacy_framed = encode_frame(&legacy_payload);
+
+        assert!(
+            typed_framed.len() + 4096 < legacy_framed.len(),
+            "typed frame should be much smaller than legacy JSON-value frame (typed={} legacy={})",
+            typed_framed.len(),
+            legacy_framed.len()
+        );
     }
 
     #[test]
