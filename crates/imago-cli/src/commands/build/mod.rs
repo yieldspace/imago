@@ -4315,8 +4315,7 @@ remote = "127.0.0.1:4443"
         build_project("default", &root)
             .expect("build should succeed by hydrating wit/deps from dependency cache");
         assert!(
-            root.join("wit/deps/test-example/package.wit")
-                .exists(),
+            root.join("wit/deps/test-example/package.wit").exists(),
             "wit/deps must be rehydrated from dependency cache before lock validation"
         );
 
@@ -4386,7 +4385,8 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
-        let err = build_project("default", &root).expect_err("absolute dependency source must fail");
+        let err =
+            build_project("default", &root).expect_err("absolute dependency source must fail");
         let err_text = format!("{err:#}");
         assert!(
             err_text.contains("failed to parse dependencies[0] source configuration"),
@@ -4710,11 +4710,7 @@ remote = "127.0.0.1:4443"
             ManifestDependencyKind::Native
         ));
         assert_eq!(
-            manifest
-                .capabilities
-                .deps
-                .get("test:example")
-                .cloned(),
+            manifest.capabilities.deps.get("test:example").cloned(),
             Some(vec!["*".to_string()])
         );
 

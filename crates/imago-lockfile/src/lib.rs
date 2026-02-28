@@ -442,7 +442,8 @@ mod tests {
             &root.join("wit/deps/transitive/package.wit"),
             b"package transitive:dep;\n",
         );
-        let direct_digest = compute_path_digest_hex(&root.join("wit/deps/actual-pkg")).expect("digest");
+        let direct_digest =
+            compute_path_digest_hex(&root.join("wit/deps/actual-pkg")).expect("digest");
         let transitive_digest = format!(
             "sha256:{}",
             compute_sha256_hex(&root.join("wit/deps/transitive/package.wit")).expect("digest")

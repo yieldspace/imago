@@ -701,7 +701,12 @@ fn plain_wit_top_package_metadata_from_bytes(bytes: &[u8]) -> (Option<String>, O
             "{}:{}",
             unresolved.main.name.namespace, unresolved.main.name.name
         )),
-        unresolved.main.name.version.as_ref().map(ToString::to_string),
+        unresolved
+            .main
+            .name
+            .version
+            .as_ref()
+            .map(ToString::to_string),
     )
 }
 
@@ -2855,7 +2860,10 @@ interface api {
             destination.join("example.wit").is_file(),
             "plain wit source must be copied"
         );
-        assert_eq!(materialized.top_package_name.as_deref(), Some("acme:example"));
+        assert_eq!(
+            materialized.top_package_name.as_deref(),
+            Some("acme:example")
+        );
         assert_eq!(materialized.top_package_version.as_deref(), Some("0.1.0"));
         assert!(materialized.transitive_packages.is_empty());
 

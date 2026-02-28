@@ -2099,13 +2099,7 @@ remote = "127.0.0.1:4443"
 "#,
         );
         write(
-            &local_oci_file_path(
-                &root,
-                "ghcr.io",
-                "yieldspace:nanokvm",
-                "1.2.3",
-                "wit.wit",
-            ),
+            &local_oci_file_path(&root, "ghcr.io", "yieldspace:nanokvm", "1.2.3", "wit.wit"),
             b"package yieldspace:nanokvm@1.2.3;\n",
         );
 
@@ -2189,13 +2183,7 @@ remote = "127.0.0.1:4443"
 "#,
         );
         write(
-            &local_oci_file_path(
-                &root,
-                "ghcr.io",
-                "yieldspace:nanokvm",
-                "1.2.3",
-                "wit.wit",
-            ),
+            &local_oci_file_path(&root, "ghcr.io", "yieldspace:nanokvm", "1.2.3", "wit.wit"),
             b"package yieldspace:other@1.2.3;\n",
         );
 
@@ -2331,7 +2319,9 @@ remote = "127.0.0.1:4443"
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.unwrap_or_default();
         assert!(
-            stderr.contains("dependencies[0].component.registry is not allowed when source kind is `oci`"),
+            stderr.contains(
+                "dependencies[0].component.registry is not allowed when source kind is `oci`"
+            ),
             "unexpected stderr: {stderr}"
         );
 
@@ -2392,8 +2382,7 @@ remote = "127.0.0.1:4443"
             Some(component_sha.as_str())
         );
         assert!(
-            root.join(".imago/deps/path-source-0/meta.toml")
-                .exists(),
+            root.join(".imago/deps/path-source-0/meta.toml").exists(),
             "dependency cache metadata must be written"
         );
         assert!(
@@ -3880,10 +3869,7 @@ remote = "127.0.0.1:4443"
             "update should succeed: {:?}",
             result.stderr
         );
-        assert!(
-            root.join("wit/deps/test-example/package.wit")
-                .exists()
-        );
+        assert!(root.join("wit/deps/test-example/package.wit").exists());
         assert!(root.join("imago.lock").exists());
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
@@ -3920,7 +3906,8 @@ remote = "127.0.0.1:4443"
         let first = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(first.exit_code, 0, "first update should succeed: {first:?}");
 
-        fs::remove_file(root.join("registry/example/package.wit")).expect("source should be removable");
+        fs::remove_file(root.join("registry/example/package.wit"))
+            .expect("source should be removable");
         fs::remove_dir_all(root.join("wit/deps")).expect("wit/deps should be removable");
 
         let second = run_with_project_root(UpdateArgs {}, &root).await;
@@ -3930,8 +3917,7 @@ remote = "127.0.0.1:4443"
             second.stderr
         );
         assert!(
-            root.join("wit/deps/test-example/package.wit")
-                .exists(),
+            root.join("wit/deps/test-example/package.wit").exists(),
             "wit/deps should be hydrated from dependency cache"
         );
 
