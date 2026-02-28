@@ -3,10 +3,9 @@ version = 1
 [[dependencies]]
 name = "imago:experimental-gpio"
 version = "0.1.0"
-wit_source = "file://../../plugins/imago-experimental-gpio/wit"
+wit_source = "../../plugins/imago-experimental-gpio/wit"
 wit_digest = "a8c94d050c2b4fccd40bb4b4cecbb4118c5a221f0d2b0b62d24caaefb5aaf1ef"
 wit_path = "wit/deps/imago-experimental-gpio"
-resolved_at = "1772096295"
 
 [[wit_packages]]
 name = "wasi:io"

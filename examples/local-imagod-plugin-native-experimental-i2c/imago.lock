@@ -3,7 +3,6 @@ version = 1
 [[dependencies]]
 name = "imago:experimental-i2c"
 version = "0.1.0"
-wit_source = "file://../../plugins/imago-experimental-i2c/wit"
-wit_digest = "e834c3d972c18e03f5e45980a4cf454d4d288549ad3cf81c0d00acad264c252a"
+wit_source = "../../plugins/imago-experimental-i2c/wit"
+wit_digest = "2d32039fbe35e07e9ea53b00ae15cdb3ed527628511390a68e1a7ff9412c261e"
 wit_path = "wit/deps/imago-experimental-i2c"
-resolved_at = "1772042766"

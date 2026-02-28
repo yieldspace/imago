@@ -3,103 +3,100 @@ package imago:experimental-i2c@0.1.0;
 /// Inter-Integrated Circuit (I2C) API based on `wasi:i2c@0.2.0-draft`.
 @since(version = 0.1.0)
 interface i2c {
-    /// Device address used by I2C operations.
+  /// Device address used by I2C operations.
+  @since(version = 0.1.0)
+  type address = u16;
+
+  /// Source kind for no-acknowledge errors.
+  @since(version = 0.1.0)
+  enum no-acknowledge-source {
+    /// Address byte was not acknowledged.
+    address,
+    /// Data byte was not acknowledged.
+    data,
+    /// The exact no-ack source is unknown.
+    unknown,
+  }
+
+  /// Error codes returned by I2C operations.
+  @since(version = 0.1.0)
+  variant error-code {
+    /// Bus-level failure.
+    bus,
+    /// Arbitration was lost.
+    arbitration-loss,
+    /// No-acknowledge was observed.
+    no-acknowledge(no-acknowledge-source),
+    /// Receive/transmit overrun occurred.
+    overrun,
+    /// Any other implementation-defined error.
+    other,
+  }
+
+  /// Single operation entry for `transaction`.
+  @since(version = 0.1.0)
+  variant operation {
+    /// Read `len` bytes.
+    read(u64),
+    /// Write provided bytes.
+    write(list<u8>),
+  }
+
+  /// Open I2C bus handle.
+  @since(version = 0.1.0)
+  resource i2c {
+    /// Execute operations in order and return data for read operations.
     @since(version = 0.1.0)
-    type address = u16;
-
-    /// Source kind for no-acknowledge errors.
+    transaction: func(address: address, operations: list<operation>) -> result<list<list<u8>>, error-code>;
+    /// Read `len` bytes from `address`.
     @since(version = 0.1.0)
-    enum no-acknowledge-source {
-        /// Address byte was not acknowledged.
-        address,
-        /// Data byte was not acknowledged.
-        data,
-        /// The exact no-ack source is unknown.
-        unknown,
-    }
-
-    /// Error codes returned by I2C operations.
+    read: func(address: address, len: u64) -> result<list<u8>, error-code>;
+    /// Write bytes to `address`.
     @since(version = 0.1.0)
-    variant error-code {
-        /// Bus-level failure.
-        bus,
-        /// Arbitration was lost.
-        arbitration-loss,
-        /// No-acknowledge was observed.
-        no-acknowledge(no-acknowledge-source),
-        /// Receive/transmit overrun occurred.
-        overrun,
-        /// Any other implementation-defined error.
-        other,
-    }
-
-    /// Single operation entry for `transaction`.
+    write: func(address: address, data: list<u8>) -> result<_, error-code>;
+    /// Write bytes then read `read-len` bytes in sequence.
     @since(version = 0.1.0)
-    variant operation {
-        /// Read `len` bytes.
-        read(u64),
-        /// Write provided bytes.
-        write(list<u8>),
-    }
-
-    /// Open I2C bus handle.
-    @since(version = 0.1.0)
-    resource i2c {
-        /// Execute operations in order and return data for read operations.
-        @since(version = 0.1.0)
-        transaction: func(address: address, operations: list<operation>) -> result<list<list<u8>>, error-code>;
-
-        /// Read `len` bytes from `address`.
-        @since(version = 0.1.0)
-        read: func(address: address, len: u64) -> result<list<u8>, error-code>;
-
-        /// Write bytes to `address`.
-        @since(version = 0.1.0)
-        write: func(address: address, data: list<u8>) -> result<_, error-code>;
-
-        /// Write bytes then read `read-len` bytes in sequence.
-        @since(version = 0.1.0)
-        write-read: func(address: address, write: list<u8>, read-len: u64) -> result<list<u8>, error-code>;
-    }
+    write-read: func(address: address, write: list<u8>, read-len: u64) -> result<list<u8>, error-code>;
+  }
 }
 
 /// Delay API based on `wasi:i2c@0.2.0-draft`.
 @since(version = 0.1.0)
 interface delay {
-    /// Delay capability handle.
+  /// Delay capability handle.
+  @since(version = 0.1.0)
+  resource delay {
+    /// Suspend execution for at least `ns` nanoseconds.
     @since(version = 0.1.0)
-    resource delay {
-        /// Suspend execution for at least `ns` nanoseconds.
-        @since(version = 0.1.0)
-        delay-ns: func(ns: u32);
-    }
+    delay-ns: func(ns: u32);
+  }
 }
 
 /// Provider interface to allocate I2C and delay resources.
 @since(version = 0.1.0)
 interface provider {
-    @since(version = 0.1.0)
-    use i2c.{i2c};
-    @since(version = 0.1.0)
-    use delay.{delay};
+  @since(version = 0.1.0)
+  use i2c.{i2c};
+  @since(version = 0.1.0)
+  use delay.{delay};
 
-    /// Open an I2C handle with an explicit bus path (for example `/dev/i2c-1`).
-    @since(version = 0.1.0)
-    open-i2c: func(bus: string) -> result<i2c, string>;
+  /// Open an I2C handle with an explicit bus path (for example `/dev/i2c-1`).
+  @since(version = 0.1.0)
+  open-i2c: func(bus: string) -> result<i2c, string>;
 
-    /// Open an I2C handle using the default bus path.
-    @since(version = 0.1.0)
-    open-default-i2c: func() -> result<i2c, string>;
+  /// Open an I2C handle using the default bus path.
+  @since(version = 0.1.0)
+  open-default-i2c: func() -> result<i2c, string>;
 
-    /// Open a delay handle.
-    @since(version = 0.1.0)
-    open-delay: func() -> delay;
+  /// Open a delay handle.
+  @since(version = 0.1.0)
+  open-delay: func() -> delay;
 }
 
 /// Host world for experimental I2C native plugin imports.
 @since(version = 0.1.0)
 world host {
-    import i2c;
-    import delay;
-    import provider;
+  import i2c;
+  import delay;
+  import provider;
 }

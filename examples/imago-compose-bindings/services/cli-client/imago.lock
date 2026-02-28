@@ -3,15 +3,14 @@ version = 1
 [[dependencies]]
 name = "imago:node"
 version = "0.1.0"
-wit_source = "file://../../../../plugins/imago-node/wit"
-wit_digest = "afd158df175111189eecfb42dbd250610b43990e9ac517fe762a4def2bee679d"
+wit_source = "../../../../plugins/imago-node/wit"
+wit_digest = "56e28dc690ecd9b1138815fb1ad637a472fa245b5167dd420b0f039f833ec47f"
 wit_path = "wit/deps/imago-node"
-resolved_at = "1771768363"
 
 [[binding_wits]]
 name = "rpc-greeter"
-wit_source = "file://../rpc-greeter/wit/world.wit"
+wit_source = "../rpc-greeter/wit/world.wit"
+wit_version = "0.1.0"
 wit_digest = "1f30762356393fa00052cfe54fec4a6d95817bff29efcf00af08c17246b45acd"
 wit_path = "wit/deps/acme-clock"
 interfaces = ["acme:clock/api"]
-resolved_at = "1771768363"
