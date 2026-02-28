@@ -14,6 +14,7 @@ use super::{STAGE_LOGS, ServiceLogEvent, ServiceLogStream};
 
 const STORE_FILE_EXTENSION: &str = "cbor";
 const STORED_RETAINED_LOG_VERSION: u32 = 1;
+type RetainedSnapshot = (Vec<u8>, Vec<ServiceLogEvent>);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct StoredRetainedLog {
@@ -155,7 +156,7 @@ impl RetainedFileLogStore {
     pub(super) fn snapshot(
         &self,
         service_name: &str,
-    ) -> Result<Option<(Vec<u8>, Vec<ServiceLogEvent>)>, ImagodError> {
+    ) -> Result<Option<RetainedSnapshot>, ImagodError> {
         let Some(entry) = self.entries.get(service_name) else {
             return Ok(None);
         };

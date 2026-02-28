@@ -85,9 +85,11 @@ impl InMemoryUploadSessionStore {
             .sessions
             .iter()
             .filter_map(|(deploy_id, session)| {
-                if !session.committed || session.inflight_writes > 0 || session.commit_in_progress {
-                    None
-                } else if keep_deploy_id.is_some_and(|keep| keep == deploy_id.as_str()) {
+                if !session.committed
+                    || session.inflight_writes > 0
+                    || session.commit_in_progress
+                    || keep_deploy_id.is_some_and(|keep| keep == deploy_id.as_str())
+                {
                     None
                 } else {
                     let age = now_epoch_secs.saturating_sub(session.updated_at_epoch_secs);
