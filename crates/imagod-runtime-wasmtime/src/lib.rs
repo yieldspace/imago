@@ -21,7 +21,7 @@ use wasmtime_wasi_http::{
 };
 
 pub use native_plugins::{NativePlugin, NativePluginRegistry, NativePluginRegistryBuilder};
-pub use runtime_entry::WasmRuntime;
+pub use runtime_entry::{WasmEngineTuning, WasmRuntime};
 
 pub(crate) const STAGE_RUNTIME: &str = "runtime.start";
 pub(crate) const HTTP_REQUEST_QUEUE_CAPACITY: usize = 32;

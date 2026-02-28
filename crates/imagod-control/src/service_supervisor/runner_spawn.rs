@@ -26,6 +26,7 @@ impl DefaultRunnerSpawner {
         })?;
         let mut cmd = Command::new(exe);
         cmd.arg("--runner");
+        cmd.env("TOKIO_WORKER_THREADS", "1");
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());

@@ -686,6 +686,14 @@ pub struct RunnerBootstrap {
     pub invocation_secret: String,
     /// Epoch tick interval used by the runner runtime loop.
     pub epoch_tick_interval_ms: u64,
+    /// Wasmtime linear-memory reservation size in bytes.
+    pub wasm_memory_reservation_bytes: u64,
+    /// Wasmtime extra reservation size for linear-memory growth in bytes.
+    pub wasm_memory_reservation_for_growth_bytes: u64,
+    /// Wasmtime linear-memory guard size in bytes.
+    pub wasm_memory_guard_size_bytes: u64,
+    /// Whether Wasmtime reserves a guard region before linear memory.
+    pub wasm_guard_before_linear_memory: bool,
 }
 
 impl Validate for RunnerBootstrap {
@@ -701,6 +709,14 @@ impl Validate for RunnerBootstrap {
         validate_non_empty_path(&self.manager_control_endpoint, "manager_control_endpoint")?;
         validate_non_empty_path(&self.runner_endpoint, "runner_endpoint")?;
         validate_positive_u64(self.epoch_tick_interval_ms, "epoch_tick_interval_ms")?;
+        validate_positive_u64(
+            self.wasm_memory_reservation_bytes,
+            "wasm_memory_reservation_bytes",
+        )?;
+        validate_positive_u64(
+            self.wasm_memory_reservation_for_growth_bytes,
+            "wasm_memory_reservation_for_growth_bytes",
+        )?;
         if !(1..=4).contains(&self.http_worker_count) {
             return Err(ValidationError::invalid(
                 "http_worker_count",
@@ -1349,6 +1365,10 @@ mod tests {
             manager_auth_secret: random_secret_hex(),
             invocation_secret: random_secret_hex(),
             epoch_tick_interval_ms: 50,
+            wasm_memory_reservation_bytes: 64 * 1024 * 1024,
+            wasm_memory_reservation_for_growth_bytes: 16 * 1024 * 1024,
+            wasm_memory_guard_size_bytes: 64 * 1024,
+            wasm_guard_before_linear_memory: false,
         }
     }
 
@@ -1428,6 +1448,10 @@ mod tests {
             manager_auth_secret: random_secret_hex(),
             invocation_secret: random_secret_hex(),
             epoch_tick_interval_ms: 50,
+            wasm_memory_reservation_bytes: 64 * 1024 * 1024,
+            wasm_memory_reservation_for_growth_bytes: 16 * 1024 * 1024,
+            wasm_memory_guard_size_bytes: 64 * 1024,
+            wasm_guard_before_linear_memory: false,
         };
         let encoded = imago_protocol::to_cbor(&bootstrap).expect("bootstrap encoding should work");
         let decoded = imago_protocol::from_cbor::<RunnerBootstrap>(&encoded)
@@ -1470,6 +1494,13 @@ mod tests {
         );
         assert_eq!(decoded.http_worker_count, 2);
         assert_eq!(decoded.http_worker_queue_capacity, 4);
+        assert_eq!(decoded.wasm_memory_reservation_bytes, 64 * 1024 * 1024);
+        assert_eq!(
+            decoded.wasm_memory_reservation_for_growth_bytes,
+            16 * 1024 * 1024
+        );
+        assert_eq!(decoded.wasm_memory_guard_size_bytes, 64 * 1024);
+        assert!(!decoded.wasm_guard_before_linear_memory);
     }
 
     #[test]
@@ -1507,6 +1538,31 @@ mod tests {
             .validate()
             .expect_err("bootstrap should reject out-of-range http_worker_queue_capacity");
         assert!(err.to_string().contains("http_worker_queue_capacity"));
+    }
+
+    #[test]
+    fn runner_bootstrap_validate_rejects_zero_wasm_memory_reservation() {
+        let mut bootstrap = valid_http_bootstrap();
+        bootstrap.wasm_memory_reservation_bytes = 0;
+
+        let err = bootstrap
+            .validate()
+            .expect_err("bootstrap should reject zero wasm_memory_reservation_bytes");
+        assert!(err.to_string().contains("wasm_memory_reservation_bytes"));
+    }
+
+    #[test]
+    fn runner_bootstrap_validate_rejects_zero_wasm_memory_reservation_for_growth() {
+        let mut bootstrap = valid_http_bootstrap();
+        bootstrap.wasm_memory_reservation_for_growth_bytes = 0;
+
+        let err = bootstrap
+            .validate()
+            .expect_err("bootstrap should reject zero wasm_memory_reservation_for_growth_bytes");
+        assert!(
+            err.to_string()
+                .contains("wasm_memory_reservation_for_growth_bytes")
+        );
     }
 
     #[test]

@@ -97,6 +97,18 @@ pub struct RuntimeConfig {
     #[serde(default = "default_epoch_tick_interval_ms")]
     /// Runner epoch-tick interval in milliseconds.
     pub epoch_tick_interval_ms: u64,
+    #[serde(default = "default_wasm_memory_reservation_bytes")]
+    /// Wasmtime linear-memory reservation size in bytes.
+    pub wasm_memory_reservation_bytes: u64,
+    #[serde(default = "default_wasm_memory_reservation_for_growth_bytes")]
+    /// Wasmtime extra reservation size for linear-memory growth in bytes.
+    pub wasm_memory_reservation_for_growth_bytes: u64,
+    #[serde(default = "default_wasm_memory_guard_size_bytes")]
+    /// Wasmtime linear-memory guard size in bytes.
+    pub wasm_memory_guard_size_bytes: u64,
+    #[serde(default = "default_wasm_guard_before_linear_memory")]
+    /// Whether Wasmtime reserves a guard region before linear memory.
+    pub wasm_guard_before_linear_memory: bool,
     #[serde(default = "default_http_worker_count")]
     /// Compatibility knob forwarded to runner bootstrap (runtime currently uses one worker task).
     pub http_worker_count: u32,
@@ -143,6 +155,11 @@ impl Default for RuntimeConfig {
             committed_session_ttl_secs: default_committed_session_ttl_secs(),
             max_committed_sessions: default_max_committed_sessions(),
             epoch_tick_interval_ms: default_epoch_tick_interval_ms(),
+            wasm_memory_reservation_bytes: default_wasm_memory_reservation_bytes(),
+            wasm_memory_reservation_for_growth_bytes:
+                default_wasm_memory_reservation_for_growth_bytes(),
+            wasm_memory_guard_size_bytes: default_wasm_memory_guard_size_bytes(),
+            wasm_guard_before_linear_memory: default_wasm_guard_before_linear_memory(),
             http_worker_count: default_http_worker_count(),
             http_worker_queue_capacity: default_http_worker_queue_capacity(),
             http_queue_memory_budget_bytes: default_http_queue_memory_budget_bytes(),
@@ -730,6 +747,22 @@ fn default_epoch_tick_interval_ms() -> u64 {
     50
 }
 
+fn default_wasm_memory_reservation_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+
+fn default_wasm_memory_reservation_for_growth_bytes() -> u64 {
+    16 * 1024 * 1024
+}
+
+fn default_wasm_memory_guard_size_bytes() -> u64 {
+    64 * 1024
+}
+
+fn default_wasm_guard_before_linear_memory() -> bool {
+    false
+}
+
 fn default_http_worker_count() -> u32 {
     2
 }
@@ -837,6 +870,16 @@ client_public_keys = ["111111111111111111111111111111111111111111111111111111111
         assert_eq!(config.runtime.retained_logs_capacity_bytes, 512 * 1024);
         assert_eq!(config.runtime.committed_session_ttl_secs, 120);
         assert_eq!(config.runtime.max_committed_sessions, 16);
+        assert_eq!(
+            config.runtime.wasm_memory_reservation_bytes,
+            64 * 1024 * 1024
+        );
+        assert_eq!(
+            config.runtime.wasm_memory_reservation_for_growth_bytes,
+            16 * 1024 * 1024
+        );
+        assert_eq!(config.runtime.wasm_memory_guard_size_bytes, 64 * 1024);
+        assert!(!config.runtime.wasm_guard_before_linear_memory);
         assert_eq!(config.runtime.http_worker_count, 2);
         assert_eq!(config.runtime.http_worker_queue_capacity, 4);
         assert_eq!(
@@ -1362,6 +1405,87 @@ retained_logs_capacity_bytes = 0
             err.to_string()
                 .contains("runtime.retained_logs_capacity_bytes")
         );
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_zero_wasm_memory_reservation_bytes() {
+        let path = write_temp_config(
+            "rejects_zero_wasm_memory_reservation_bytes",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+
+[runtime]
+wasm_memory_reservation_bytes = 0
+"#,
+        );
+
+        let err = ImagodConfig::load(&path)
+            .expect_err("config should reject zero wasm_memory_reservation_bytes");
+        assert!(
+            err.to_string()
+                .contains("runtime.wasm_memory_reservation_bytes")
+        );
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_zero_wasm_memory_reservation_for_growth_bytes() {
+        let path = write_temp_config(
+            "rejects_zero_wasm_memory_reservation_for_growth_bytes",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+
+[runtime]
+wasm_memory_reservation_for_growth_bytes = 0
+"#,
+        );
+
+        let err = ImagodConfig::load(&path)
+            .expect_err("config should reject zero wasm_memory_reservation_for_growth_bytes");
+        assert!(
+            err.to_string()
+                .contains("runtime.wasm_memory_reservation_for_growth_bytes")
+        );
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn accepts_zero_wasm_memory_guard_size_bytes() {
+        let path = write_temp_config(
+            "accepts_zero_wasm_memory_guard_size_bytes",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+
+[runtime]
+wasm_memory_guard_size_bytes = 0
+"#,
+        );
+
+        let config =
+            ImagodConfig::load(&path).expect("config should allow zero wasm_memory_guard_size");
+        assert_eq!(config.runtime.wasm_memory_guard_size_bytes, 0);
 
         cleanup_temp_path(path);
     }

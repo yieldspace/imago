@@ -439,6 +439,10 @@ mod tests {
             manager_auth_secret: random_secret_hex(),
             invocation_secret: random_secret_hex(),
             epoch_tick_interval_ms: 50,
+            wasm_memory_reservation_bytes: 64 * 1024 * 1024,
+            wasm_memory_reservation_for_growth_bytes: 16 * 1024 * 1024,
+            wasm_memory_guard_size_bytes: 64 * 1024,
+            wasm_guard_before_linear_memory: false,
         }
     }
 

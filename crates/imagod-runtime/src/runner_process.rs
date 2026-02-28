@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
-use imagod_ipc::RunnerAppType;
+use imagod_ipc::{RunnerAppType, RunnerBootstrap};
 use imagod_runtime_bootstrap::{
     STAGE_RUNNER, SocketCleanupGuard, prepare_socket_path, read_runner_bootstrap,
 };
@@ -25,11 +25,11 @@ use tokio::{
 };
 
 use crate::NativePluginRegistry;
-#[cfg(feature = "runtime-wasmtime")]
-use crate::WasmRuntime;
 use crate::runtime::{ComponentRuntime, RuntimeInvoker, RuntimeRunRequest};
 #[cfg(not(feature = "runtime-wasmtime"))]
 use crate::runtime::{RuntimeHttpRequest, RuntimeHttpResponse, RuntimeInvokeRequest};
+#[cfg(feature = "runtime-wasmtime")]
+use crate::{WasmEngineTuning, WasmRuntime};
 
 const STARTUP_CONFIRM_WINDOW_ENV: &str = "IMAGOD_RUNNER_STARTUP_CONFIRM_WINDOW_MS";
 const STARTUP_CONFIRM_WINDOW_DEFAULT_MS: u64 = 200;
@@ -134,7 +134,7 @@ pub async fn run_runner_from_stdin_with_registry(
     })?;
     let _socket_cleanup_guard = SocketCleanupGuard::new(bootstrap.runner_endpoint.clone());
 
-    let runtime = create_runtime_backend(&native_plugin_registry)?;
+    let runtime = create_runtime_backend(&native_plugin_registry, &bootstrap)?;
     runtime.validate_component(&bootstrap.component_path)?;
 
     let manager_client = DbusRunnerManagerClient;
@@ -314,17 +314,26 @@ pub async fn run_runner_from_stdin_with_registry(
 
 fn create_runtime_backend(
     native_plugin_registry: &NativePluginRegistry,
+    bootstrap: &RunnerBootstrap,
 ) -> Result<Arc<RuntimeBackend>, ImagodError> {
     #[cfg(feature = "runtime-wasmtime")]
     {
-        Ok(Arc::new(WasmRuntime::new_with_native_plugins(
+        let tuning = WasmEngineTuning {
+            memory_reservation_bytes: bootstrap.wasm_memory_reservation_bytes,
+            memory_reservation_for_growth_bytes: bootstrap.wasm_memory_reservation_for_growth_bytes,
+            memory_guard_size_bytes: bootstrap.wasm_memory_guard_size_bytes,
+            guard_before_linear_memory: bootstrap.wasm_guard_before_linear_memory,
+        };
+        Ok(Arc::new(WasmRuntime::new_with_native_plugins_and_tuning(
             native_plugin_registry.clone(),
+            tuning,
         )?))
     }
 
     #[cfg(not(feature = "runtime-wasmtime"))]
     {
         let _ = native_plugin_registry;
+        let _ = bootstrap;
         Err(runtime_backend_unavailable_error())
     }
 }
@@ -421,12 +430,46 @@ mod tests {
     use tokio::sync::oneshot;
 
     #[cfg(not(feature = "runtime-wasmtime"))]
+    fn sample_bootstrap() -> RunnerBootstrap {
+        RunnerBootstrap {
+            runner_id: "runner-a".to_string(),
+            service_name: "svc-a".to_string(),
+            release_hash: "release-a".to_string(),
+            app_type: RunnerAppType::Cli,
+            http_port: None,
+            http_max_body_bytes: None,
+            http_worker_count: 2,
+            http_worker_queue_capacity: 4,
+            socket: None,
+            component_path: std::path::PathBuf::from("/tmp/component.wasm"),
+            args: vec![],
+            envs: std::collections::BTreeMap::new(),
+            wasi_mounts: vec![],
+            wasi_http_outbound: vec![],
+            resources: std::collections::BTreeMap::new(),
+            bindings: vec![],
+            plugin_dependencies: vec![],
+            capabilities: imagod_ipc::CapabilityPolicy::default(),
+            manager_control_endpoint: std::path::PathBuf::from("/tmp/manager.sock"),
+            runner_endpoint: std::path::PathBuf::from("/tmp/runner.sock"),
+            manager_auth_secret: imagod_ipc::random_secret_hex(),
+            invocation_secret: imagod_ipc::random_secret_hex(),
+            epoch_tick_interval_ms: 50,
+            wasm_memory_reservation_bytes: 64 * 1024 * 1024,
+            wasm_memory_reservation_for_growth_bytes: 16 * 1024 * 1024,
+            wasm_memory_guard_size_bytes: 64 * 1024,
+            wasm_guard_before_linear_memory: false,
+        }
+    }
+
+    #[cfg(not(feature = "runtime-wasmtime"))]
     #[test]
     fn runtime_backend_disabled_returns_explicit_error() {
-        let err = match create_runtime_backend(&NativePluginRegistry::default()) {
-            Ok(_) => panic!("backend creation should fail when runtime-wasmtime is disabled"),
-            Err(err) => err,
-        };
+        let err =
+            match create_runtime_backend(&NativePluginRegistry::default(), &sample_bootstrap()) {
+                Ok(_) => panic!("backend creation should fail when runtime-wasmtime is disabled"),
+                Err(err) => err,
+            };
         assert_eq!(err.code, ErrorCode::Internal);
         assert_eq!(err.stage, STAGE_RUNNER);
         assert!(

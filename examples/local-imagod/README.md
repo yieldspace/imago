@@ -24,6 +24,15 @@ cargo run -p imago-cli -- service deploy --target default --detach
 cargo run -p imago-cli -- service logs local-imagod-app --tail 200
 ```
 
+## メモリ計測
+
+runner の実メモリ計測は debug ではなく release で実施してください。
+
+```bash
+cd /path/to/imago
+./scripts/measure_runner_memory.sh examples/local-imagod
+```
+
 ## 成功判定
 
 `imago-cli service logs` の出力に `local-imagod-app started` が含まれていれば成功です。

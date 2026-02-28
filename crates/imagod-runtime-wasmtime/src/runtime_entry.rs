@@ -44,6 +44,39 @@ use crate::{
     rpc_values::{decode_payload_values, encode_payload_values, placeholder_values},
 };
 
+/// Wasmtime engine-level memory tuning knobs propagated from manager runtime config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WasmEngineTuning {
+    /// Wasmtime linear-memory reservation size in bytes.
+    pub memory_reservation_bytes: u64,
+    /// Wasmtime extra reservation size for linear-memory growth in bytes.
+    pub memory_reservation_for_growth_bytes: u64,
+    /// Wasmtime linear-memory guard size in bytes.
+    pub memory_guard_size_bytes: u64,
+    /// Whether Wasmtime reserves a guard region before linear memory.
+    pub guard_before_linear_memory: bool,
+}
+
+impl Default for WasmEngineTuning {
+    fn default() -> Self {
+        Self {
+            memory_reservation_bytes: 64 * 1024 * 1024,
+            memory_reservation_for_growth_bytes: 16 * 1024 * 1024,
+            memory_guard_size_bytes: 64 * 1024,
+            guard_before_linear_memory: false,
+        }
+    }
+}
+
+impl WasmEngineTuning {
+    fn apply_to_config(self, config: &mut Config) {
+        config.memory_reservation(self.memory_reservation_bytes);
+        config.memory_reservation_for_growth(self.memory_reservation_for_growth_bytes);
+        config.memory_guard_size(self.memory_guard_size_bytes);
+        config.guard_before_linear_memory(self.guard_before_linear_memory);
+    }
+}
+
 /// Runner-local wrapper around a configured Wasmtime engine.
 pub struct WasmRuntime {
     engine: Arc<Engine>,
@@ -68,18 +101,35 @@ impl Clone for WasmRuntime {
 impl WasmRuntime {
     /// Creates a runtime with component model, async support, and epoch interruption enabled.
     pub fn new() -> Result<Self, ImagodError> {
-        Self::new_with_native_plugins(NativePluginRegistry::default())
+        Self::new_with_native_plugins_and_tuning(
+            NativePluginRegistry::default(),
+            WasmEngineTuning::default(),
+        )
+    }
+
+    /// Creates a runtime with explicit Wasmtime engine memory tuning.
+    pub fn new_with_tuning(tuning: WasmEngineTuning) -> Result<Self, ImagodError> {
+        Self::new_with_native_plugins_and_tuning(NativePluginRegistry::default(), tuning)
     }
 
     /// Creates a runtime with a native plugin registry injected by manager build.
     pub fn new_with_native_plugins(
         native_plugins: NativePluginRegistry,
     ) -> Result<Self, ImagodError> {
+        Self::new_with_native_plugins_and_tuning(native_plugins, WasmEngineTuning::default())
+    }
+
+    /// Creates a runtime with native plugins and explicit Wasmtime engine memory tuning.
+    pub fn new_with_native_plugins_and_tuning(
+        native_plugins: NativePluginRegistry,
+        tuning: WasmEngineTuning,
+    ) -> Result<Self, ImagodError> {
         Self::new_with_runtime_contracts(
             native_plugins,
             Arc::new(DefaultPluginResolver),
             Arc::new(DefaultHttpComponentSupervisor::new()),
             Arc::new(DefaultCapabilityChecker),
+            tuning,
         )
     }
 
@@ -88,10 +138,12 @@ impl WasmRuntime {
         plugin_resolver: Arc<DefaultPluginResolver>,
         http_supervisor: Arc<DefaultHttpComponentSupervisor>,
         capability_checker: Arc<DefaultCapabilityChecker>,
+        tuning: WasmEngineTuning,
     ) -> Result<Self, ImagodError> {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.epoch_interruption(true);
+        tuning.apply_to_config(&mut config);
 
         let engine = Engine::new(&config)
             .map_err(|e| map_runtime_error(format!("engine init failed: {e}")))?;
@@ -915,6 +967,28 @@ mod tests {
 
     fn optimized_prepare_payload(payload: Vec<u8>) -> Vec<u8> {
         payload
+    }
+
+    #[test]
+    fn wasm_engine_tuning_default_matches_runtime_defaults() {
+        let tuning = WasmEngineTuning::default();
+        assert_eq!(tuning.memory_reservation_bytes, 64 * 1024 * 1024);
+        assert_eq!(tuning.memory_reservation_for_growth_bytes, 16 * 1024 * 1024);
+        assert_eq!(tuning.memory_guard_size_bytes, 64 * 1024);
+        assert!(!tuning.guard_before_linear_memory);
+    }
+
+    #[test]
+    fn runtime_initializes_with_custom_wasm_engine_tuning() {
+        let tuning = WasmEngineTuning {
+            memory_reservation_bytes: 8 * 1024 * 1024,
+            memory_reservation_for_growth_bytes: 4 * 1024 * 1024,
+            memory_guard_size_bytes: 0,
+            guard_before_linear_memory: false,
+        };
+        let runtime = WasmRuntime::new_with_tuning(tuning)
+            .expect("runtime should initialize with custom tuning");
+        runtime.increment_epoch();
     }
 
     #[test]
