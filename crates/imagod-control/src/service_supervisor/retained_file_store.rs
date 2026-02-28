@@ -1,3 +1,10 @@
+//! File-backed retained logs for stopped services.
+//!
+//! Runtime behavior:
+//! - one retained snapshot file per service
+//! - atomic replace on update (`tmp -> rename`)
+//! - startup rebuilds index from existing files and removes stale temp files
+
 use std::{
     collections::BTreeMap,
     fs,
@@ -19,6 +26,8 @@ type RetainedSnapshot = (Vec<u8>, Vec<ServiceLogEvent>);
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct StoredRetainedLog {
     version: u32,
+    #[serde(default)]
+    service_name: String,
     events: Vec<StoredEvent>,
 }
 
@@ -75,12 +84,15 @@ impl RetainedFileLogStore {
     pub(super) fn new(storage_root: &Path, capacity_bytes: usize) -> Result<Self, ImagodError> {
         let retained_dir = storage_root.join("runtime").join("retained-logs");
         initialize_retained_dir(&retained_dir)?;
-        Ok(Self {
+        let mut store = Self {
             retained_dir,
             capacity_bytes: capacity_bytes.max(1),
             total_bytes: 0,
             entries: BTreeMap::new(),
-        })
+        };
+        store.rebuild_index_from_disk()?;
+        store.evict_if_needed()?;
+        Ok(store)
     }
 
     #[cfg(test)]
@@ -99,6 +111,7 @@ impl RetainedFileLogStore {
     ) -> Result<(), ImagodError> {
         let stored_log = StoredRetainedLog {
             version: STORED_RETAINED_LOG_VERSION,
+            service_name: service_name.to_string(),
             events: snapshot_events
                 .iter()
                 .map(|event| StoredEvent {
@@ -213,6 +226,82 @@ impl RetainedFileLogStore {
         self.total_bytes
     }
 
+    fn rebuild_index_from_disk(&mut self) -> Result<(), ImagodError> {
+        self.entries.clear();
+        self.total_bytes = 0;
+
+        let read_dir = fs::read_dir(&self.retained_dir).map_err(|err| {
+            retained_store_error(format!(
+                "failed to read retained logs dir {}: {err}",
+                self.retained_dir.display()
+            ))
+        })?;
+
+        for entry_result in read_dir {
+            let entry = entry_result.map_err(|err| {
+                retained_store_error(format!(
+                    "failed to read entry in retained logs dir {}: {err}",
+                    self.retained_dir.display()
+                ))
+            })?;
+            let path = entry.path();
+            if !is_retained_store_file(&path) {
+                continue;
+            }
+
+            let payload = fs::read(&path).map_err(|err| {
+                retained_store_error(format!(
+                    "failed to read retained logs file {}: {err}",
+                    path.display()
+                ))
+            })?;
+            let stored: StoredRetainedLog = match from_cbor(&payload) {
+                Ok(stored) => stored,
+                Err(_) => {
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+            };
+            if stored.version != STORED_RETAINED_LOG_VERSION {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+            let Some(service_name) = stored_service_name(&stored, &path) else {
+                let _ = fs::remove_file(&path);
+                continue;
+            };
+
+            let metadata = fs::metadata(&path).map_err(|err| {
+                retained_store_error(format!(
+                    "failed to stat retained logs file {}: {err}",
+                    path.display()
+                ))
+            })?;
+            let file_size_bytes = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+            let updated_at_unix_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+                .unwrap_or_else(now_unix_ms);
+
+            if let Some(previous) = self.entries.insert(
+                service_name.clone(),
+                RetainedFileEntry {
+                    service_name,
+                    file_path: path,
+                    file_size_bytes,
+                    updated_at_unix_ms,
+                },
+            ) {
+                self.total_bytes = self.total_bytes.saturating_sub(previous.file_size_bytes);
+            }
+            self.total_bytes = self.total_bytes.saturating_add(file_size_bytes);
+        }
+
+        Ok(())
+    }
+
     fn evict_if_needed(&mut self) -> Result<(), ImagodError> {
         while self.total_bytes > self.capacity_bytes {
             let Some(oldest_service_name) = self
@@ -261,20 +350,69 @@ impl RetainedFileLogStore {
 }
 
 fn initialize_retained_dir(dir: &Path) -> Result<(), ImagodError> {
-    if dir.exists() {
-        fs::remove_dir_all(dir).map_err(|err| {
-            retained_store_error(format!(
-                "failed to clear retained logs dir {}: {err}",
-                dir.display()
-            ))
-        })?;
-    }
     fs::create_dir_all(dir).map_err(|err| {
         retained_store_error(format!(
             "failed to create retained logs dir {}: {err}",
             dir.display()
         ))
-    })
+    })?;
+    let read_dir = fs::read_dir(dir).map_err(|err| {
+        retained_store_error(format!(
+            "failed to read retained logs dir {}: {err}",
+            dir.display()
+        ))
+    })?;
+    for entry_result in read_dir {
+        let entry = entry_result.map_err(|err| {
+            retained_store_error(format!(
+                "failed to read entry in retained logs dir {}: {err}",
+                dir.display()
+            ))
+        })?;
+        let file_name = entry.file_name();
+        let file_name_str = file_name.to_string_lossy();
+        if !file_name_str.contains(".tmp-") {
+            continue;
+        }
+
+        let path = entry.path();
+        if path.is_dir() {
+            fs::remove_dir_all(&path).map_err(|err| {
+                retained_store_error(format!(
+                    "failed to remove temporary retained logs dir {}: {err}",
+                    path.display()
+                ))
+            })?;
+        } else {
+            fs::remove_file(&path).map_err(|err| {
+                retained_store_error(format!(
+                    "failed to remove temporary retained log file {}: {err}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn is_retained_store_file(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|ext| ext == STORE_FILE_EXTENSION)
+}
+
+fn stored_service_name(stored: &StoredRetainedLog, path: &Path) -> Option<String> {
+    if !stored.service_name.trim().is_empty() {
+        return Some(stored.service_name.clone());
+    }
+    let stem = path.file_stem()?.to_string_lossy();
+    let (legacy_name, _) = stem.rsplit_once('.')?;
+    if legacy_name.trim().is_empty() {
+        return None;
+    }
+    Some(legacy_name.to_string())
 }
 
 fn stable_service_file_stem(service_name: &str) -> String {
@@ -416,6 +554,7 @@ mod tests {
         let root = new_test_root("evict");
         let sample_payload_size = to_cbor(&StoredRetainedLog {
             version: STORED_RETAINED_LOG_VERSION,
+            service_name: "size".to_string(),
             events: sample_events("size", 1)
                 .into_iter()
                 .map(|event| StoredEvent {
@@ -456,6 +595,64 @@ mod tests {
         assert!(
             store.total_bytes() <= store.capacity_bytes(),
             "store should stay within configured capacity"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn restart_rebuilds_index_from_existing_retained_files() {
+        let root = new_test_root("restart-rebuild");
+        {
+            let mut store = RetainedFileLogStore::new(&root, 4096).expect("store should init");
+            store
+                .upsert("svc-persist", &sample_events("persist", 10))
+                .expect("upsert should persist snapshot");
+        }
+
+        let store = RetainedFileLogStore::new(&root, 4096).expect("store should re-init");
+        let names = store.service_names();
+        assert_eq!(names, vec!["svc-persist".to_string()]);
+        let (bytes, events) = store
+            .snapshot("svc-persist")
+            .expect("snapshot read should succeed")
+            .expect("snapshot should exist");
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("persist-out"),
+            "persisted bytes should be available after restart"
+        );
+        assert_eq!(events, sample_events("persist", 10));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn startup_cleans_tmp_files_but_keeps_retained_files() {
+        let root = new_test_root("cleanup-tmp");
+        let retained_dir = root.join("runtime").join("retained-logs");
+        fs::create_dir_all(&retained_dir).expect("retained dir should exist");
+
+        let mut store = RetainedFileLogStore::new(&root, 4096).expect("store should init");
+        store
+            .upsert("svc-a", &sample_events("stable", 1))
+            .expect("upsert should succeed");
+
+        let dangling_tmp_file = retained_dir.join(".dangling.tmp-test.cbor");
+        fs::write(&dangling_tmp_file, b"tmp").expect("tmp file should be creatable");
+        let dangling_tmp_dir = retained_dir.join(".dangling.tmp-dir");
+        fs::create_dir_all(&dangling_tmp_dir).expect("tmp dir should be creatable");
+
+        let store = RetainedFileLogStore::new(&root, 4096).expect("store should re-init");
+        assert!(
+            !dangling_tmp_file.exists() && !dangling_tmp_dir.exists(),
+            "startup should remove dangling tmp artifacts"
+        );
+        assert!(
+            store
+                .snapshot("svc-a")
+                .expect("snapshot read should succeed")
+                .is_some(),
+            "retained snapshot should survive startup cleanup"
         );
 
         let _ = fs::remove_dir_all(root);

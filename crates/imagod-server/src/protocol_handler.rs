@@ -329,12 +329,12 @@ mod tests {
 
     #[test]
     fn accepts_supported_protocol_version() {
-        assert!(protocol_compatibility_announcement("0.2.0").is_none());
+        assert!(protocol_compatibility_announcement("0.1.0").is_none());
     }
 
     #[test]
     fn rejects_unsupported_protocol_version() {
-        let message = protocol_compatibility_announcement("0.1.0")
+        let message = protocol_compatibility_announcement("0.2.0")
             .expect("unsupported version should return announcement");
         assert!(message.contains("not supported"));
     }

@@ -867,8 +867,8 @@ mod tests {
         let with_announcement = HelloNegotiateResponse {
             accepted: false,
             server_version: "imagod/test".to_string(),
-            server_protocol_version: "0.2.0".to_string(),
-            supported_protocol_version_range: "^0.2.0".to_string(),
+            server_protocol_version: "0.1.0".to_string(),
+            supported_protocol_version_range: "^0.1.0".to_string(),
             compatibility_announcement: Some("upgrade required".to_string()),
             features: vec![],
             limits: BTreeMap::new(),
@@ -893,8 +893,8 @@ mod tests {
         let supported = HelloNegotiateResponse {
             accepted: true,
             server_version: "imagod/test".to_string(),
-            server_protocol_version: "0.2.0".to_string(),
-            supported_protocol_version_range: "^0.2.0".to_string(),
+            server_protocol_version: "0.1.0".to_string(),
+            supported_protocol_version_range: "^0.1.0".to_string(),
             compatibility_announcement: None,
             features: vec!["rpc.invoke".to_string()],
             limits: BTreeMap::new(),

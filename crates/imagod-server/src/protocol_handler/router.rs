@@ -728,10 +728,10 @@ mod tests {
     fn given_protocol_version__when_protocol_compatibility_announcement__then_supported_is_none_and_unsupported_is_some()
      {
         assert!(
-            protocol_compatibility_announcement("0.2.0").is_none(),
+            protocol_compatibility_announcement("0.1.0").is_none(),
             "supported version should not emit announcement"
         );
-        let unsupported = protocol_compatibility_announcement("0.1.0")
+        let unsupported = protocol_compatibility_announcement("0.2.0")
             .expect("unsupported version should emit announcement");
         assert!(unsupported.contains("not supported"));
 

@@ -715,7 +715,7 @@ fn default_runner_log_buffer_bytes() -> usize {
 }
 
 fn default_retained_logs_capacity_bytes() -> usize {
-    256 * 1024
+    default_runner_log_buffer_bytes().saturating_mul(2)
 }
 
 fn default_committed_session_ttl_secs() -> u64 {
@@ -834,7 +834,7 @@ client_public_keys = ["111111111111111111111111111111111111111111111111111111111
         assert_eq!(config.runtime.max_artifact_size_bytes, 64 * 1024 * 1024);
         assert_eq!(config.runtime.runner_ready_timeout_secs, 3);
         assert_eq!(config.runtime.runner_log_buffer_bytes, 256 * 1024);
-        assert_eq!(config.runtime.retained_logs_capacity_bytes, 256 * 1024);
+        assert_eq!(config.runtime.retained_logs_capacity_bytes, 512 * 1024);
         assert_eq!(config.runtime.committed_session_ttl_secs, 120);
         assert_eq!(config.runtime.max_committed_sessions, 16);
         assert_eq!(config.runtime.http_worker_count, 2);

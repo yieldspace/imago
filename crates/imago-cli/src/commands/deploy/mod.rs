@@ -2588,8 +2588,8 @@ mod tests {
         let response = HelloNegotiateResponse {
             accepted: true,
             server_version: "imagod-test".to_string(),
-            server_protocol_version: "0.2.0".to_string(),
-            supported_protocol_version_range: ">=0.2.0,<0.3.0".to_string(),
+            server_protocol_version: "0.1.0".to_string(),
+            supported_protocol_version_range: ">=0.1.0,<0.2.0".to_string(),
             compatibility_announcement: None,
             features: vec![],
             limits: BTreeMap::from([
@@ -2615,8 +2615,8 @@ mod tests {
         let response = HelloNegotiateResponse {
             accepted: true,
             server_version: "imagod-test".to_string(),
-            server_protocol_version: "0.2.0".to_string(),
-            supported_protocol_version_range: ">=0.2.0,<0.3.0".to_string(),
+            server_protocol_version: "0.1.0".to_string(),
+            supported_protocol_version_range: ">=0.1.0,<0.2.0".to_string(),
             compatibility_announcement: None,
             features: vec![],
             limits: BTreeMap::from([("chunk_size".to_string(), "0".to_string())]),
@@ -3077,9 +3077,9 @@ mod tests {
     fn hello_summary_from_response_reflects_server_limits() {
         let response = HelloNegotiateResponse {
             accepted: true,
-            server_version: "imagod/0.2.0".to_string(),
-            server_protocol_version: "0.2.0".to_string(),
-            supported_protocol_version_range: ">=0.2.0,<0.3.0".to_string(),
+            server_version: "imagod/0.1.0".to_string(),
+            server_protocol_version: "0.1.0".to_string(),
+            supported_protocol_version_range: ">=0.1.0,<0.2.0".to_string(),
             compatibility_announcement: None,
             features: vec!["logs.request".to_string()],
             limits: BTreeMap::from([
@@ -3090,7 +3090,7 @@ mod tests {
         };
         let summary = hello_summary_from_response(&response);
 
-        assert_eq!(summary.server_version, "imagod/0.2.0");
+        assert_eq!(summary.server_version, "imagod/0.1.0");
         assert_eq!(
             summary.limits.get("chunk_size").map(String::as_str),
             Some("4096")
