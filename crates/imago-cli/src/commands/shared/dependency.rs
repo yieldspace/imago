@@ -255,8 +255,10 @@ pub(crate) async fn load_or_refresh_cache_entry(
         })?;
     }
 
-    let cache_wit_target =
-        cache_entry_root.join(dependency_cache::dependency_wit_path(&dependency.name));
+    let cache_wit_target = cache_entry_root.join(dependency_cache::dependency_wit_path(
+        &dependency.name,
+        &dependency.version,
+    ));
     fs::create_dir_all(&cache_wit_target).with_context(|| {
         format!(
             "failed to create dependency cache wit dir: {}",
@@ -381,7 +383,7 @@ pub(crate) async fn load_or_refresh_cache_entry(
         wit_source: dependency.wit.source.clone(),
         wit_registry: dependency.wit.registry.clone(),
         wit_sha256: dependency.wit.sha256.clone(),
-        wit_path: dependency_cache::dependency_wit_path(&dependency.name),
+        wit_path: dependency_cache::dependency_wit_path(&dependency.name, &dependency.version),
         wit_digest: cache_wit_digest,
         wit_source_fingerprint,
         component_source,

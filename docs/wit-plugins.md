@@ -47,10 +47,13 @@ Rules:
 
 - Resolved WIT data is materialized under project cache paths.
 - `wit/deps` is regenerated from lock/cache state.
-- Component-decoded `root:component` metadata is used for validation/materialization planning, but `root:component` itself is not written to `wit/deps`.
+- Direct dependency outputs and transitive outputs in `wit/deps` use versioned directory names (for example `wit/deps/wasi-cli-0.2.6`).
+- `root:component` dependencies are written to `wit/deps` as export-only WIT (world imports are removed and only exported interfaces are emitted).
 - For component-sourced dependencies, non-`wasi:*` refs discovered from component world `import`/`export`/`include` must be present in `[[dependencies]]` with exact resolved package `name+version`.
-- `imago deps sync` inspects top-level `wit/*.wit` files and merges discovered `wasi:*@<version>` refs with component-world discovered `wasi:*@<version>` refs.
-- Merged `wasi:*` refs are resolved with `registry = "wasi.dev"` and materialized into `wit/deps`; version conflicts fail closed.
+- `imago deps sync` recursively tracks foreign package refs from component-world refs and from the `wit/` package dir closure.
+- Auto-fetch is only for `wasi:*`; these packages are always resolved from `wasi.dev` and materialized into `wit/deps`.
+- Non-`wasi` refs are never auto-fetched; they must already exist in declared dependencies with matching `name+version`.
+- Version conflicts for the same package fail closed.
 - `imago.lock` is the source of truth for resolved digests and transitive package records.
 - `imago.lock.wit_packages[*].versions[*].via` may be empty (`[]`) for auto-hydrated records.
 - `resolved_at` is removed from lock dependency/binding entries; older lockfiles with that field are rejected.

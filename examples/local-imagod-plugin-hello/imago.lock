@@ -6,7 +6,7 @@ version = "0.1.0"
 wit_source = "sizumita:ferris"
 wit_registry = "wa.dev"
 wit_digest = "52a26fa11868e3ba234c438d8c4d946e9cec82f667948f098ae1fba59ed7bb77"
-wit_path = "wit/deps/sizumita-ferris"
+wit_path = "wit/deps/sizumita-ferris-0.1.0"
 component_source = "sizumita:ferris"
 component_registry = "wa.dev"
 component_sha256 = "040ba9bf6aec60ae0667b34f41890df8c0597a323fe76a8e6588666f2b8c8b41"
@@ -20,7 +20,31 @@ requirement = "=0.2.6"
 version = "0.2.6"
 digest = "sha256:db75b71f0dfc8915e5cf6534dc150ff2c9c8d509873d054d47ff1863efc4e64d"
 source = "wasi:cli"
-path = "wit/deps/wasi-cli"
+path = "wit/deps/wasi-cli-0.2.6"
+via = []
+
+[[wit_packages]]
+name = "wasi:clocks"
+registry = "wasi.dev"
+
+[[wit_packages.versions]]
+requirement = "=0.2.6"
+version = "0.2.6"
+digest = "sha256:a8251bb0878e8d546eb399c500a0e6b0f2b1cde1d16a9529a157861bd333bc5d"
+source = "wasi:clocks"
+path = "wit/deps/wasi-clocks-0.2.6"
+via = []
+
+[[wit_packages]]
+name = "wasi:filesystem"
+registry = "wasi.dev"
+
+[[wit_packages.versions]]
+requirement = "=0.2.6"
+version = "0.2.6"
+digest = "sha256:6542c609ef56df7712b06f6480df33347c04173095d113f1153c6e4d78c181b9"
+source = "wasi:filesystem"
+path = "wit/deps/wasi-filesystem-0.2.6"
 via = []
 
 [[wit_packages]]
@@ -32,7 +56,7 @@ requirement = "=0.2.6"
 version = "0.2.6"
 digest = "sha256:b98b06c04cffa5eaf00b071e23cc856ae7e648506748a06b802972ee3cc38590"
 source = "wasi:io"
-path = "wit/deps/wasi-io"
+path = "wit/deps/wasi-io-0.2.6"
 via = []
 
 [[wit_packages]]
@@ -44,5 +68,17 @@ requirement = "=0.2.6"
 version = "0.2.6"
 digest = "sha256:2e8a87a15b17729cb45744439d053d90e2eb282b8e26876c5d5df3504acd9d94"
 source = "wasi:random"
-path = "wit/deps/wasi-random"
+path = "wit/deps/wasi-random-0.2.6"
+via = []
+
+[[wit_packages]]
+name = "wasi:sockets"
+registry = "wasi.dev"
+
+[[wit_packages.versions]]
+requirement = "=0.2.6"
+version = "0.2.6"
+digest = "sha256:42c3038a068755d15be40f627bd94d322a1156fa5e791038b47927230a808c41"
+source = "wasi:sockets"
+path = "wit/deps/wasi-sockets-0.2.6"
 via = []

@@ -1,22 +1,15 @@
 version = 1
 
 [[dependencies]]
-name = "acme:clock"
-version = "0.1.0"
-wit_source = "../rpc-greeter/wit"
-wit_digest = "439e8671b6584319dbea2e4630bbd1acf329fb9cdd7acdc1bfd052e4218612b5"
-wit_path = "wit/deps/acme-clock-0.1.0"
-
-[[dependencies]]
 name = "imago:node"
 version = "0.1.0"
-wit_source = "../../../../plugins/imago-node/wit"
+wit_source = "../../../../../plugins/imago-node/wit"
 wit_digest = "56e28dc690ecd9b1138815fb1ad637a472fa245b5167dd420b0f039f833ec47f"
 wit_path = "wit/deps/imago-node-0.1.0"
 
 [[binding_wits]]
 name = "rpc-greeter"
-wit_source = "../rpc-greeter/wit"
+wit_source = "../../../services/rpc-greeter/wit/world.wit"
 wit_version = "0.1.0"
 wit_digest = "439e8671b6584319dbea2e4630bbd1acf329fb9cdd7acdc1bfd052e4218612b5"
 wit_path = "wit/deps/acme-clock-0.1.0"

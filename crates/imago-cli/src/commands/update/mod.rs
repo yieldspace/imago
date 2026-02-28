@@ -4,7 +4,7 @@
 //! and persists lock metadata consumed by build/deploy operations.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     path::{Path, PathBuf},
     time::Instant,
@@ -67,7 +67,7 @@ struct ComponentWorldNonWasiInterfaceRequirement {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct ComponentWorldReferenceSummary {
-    wasi_versions: BTreeMap<String, String>,
+    referenced_package_versions: BTreeMap<String, String>,
     non_wasi_interface_requirements: Vec<ComponentWorldNonWasiInterfaceRequirement>,
 }
 
@@ -221,7 +221,8 @@ fn validate_wit_output_path_collisions(
 ) -> anyhow::Result<()> {
     let mut targets: Vec<(PathBuf, &str)> = Vec::with_capacity(dependencies.len());
     for dependency in dependencies {
-        let target_rel = dependency_cache::dependency_wit_target_rel(&dependency.name);
+        let target_rel =
+            dependency_cache::dependency_wit_target_rel(&dependency.name, &dependency.version);
         for (existing_target, existing_dependency) in &targets {
             if existing_target == &target_rel {
                 return Err(anyhow!(
@@ -495,7 +496,7 @@ async fn resolve_binding_wits(
                     interface_names: hydrated_interface_names,
                 });
             } else {
-                dependency_cache::dependency_wit_path(&package_name)
+                plugin_sources::wit_deps_path(&package_name, package_version.as_deref())
             };
 
             if let Some(existing_package) = path_to_package.get(&wit_path)
@@ -1096,7 +1097,37 @@ fn has_top_level_wit_files(wit_dir: &Path) -> anyhow::Result<bool> {
     Ok(false)
 }
 
-fn collect_wasi_package_versions_from_wit_dir(
+fn collect_foreign_package_versions_from_unresolved(
+    unresolved: &UnresolvedPackageGroup,
+    source_label: &str,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    let mut package_versions = BTreeMap::<String, String>::new();
+    for package in std::iter::once(&unresolved.main).chain(unresolved.nested.iter()) {
+        for foreign_package in package.foreign_deps.keys() {
+            let package_name = format!("{}:{}", foreign_package.namespace, foreign_package.name);
+            let version = foreign_package
+                .version
+                .as_ref()
+                .map(ToString::to_string)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "{} references package '{}' without explicit version; add '@<version>' to import/export/include",
+                        source_label,
+                        package_name
+                    )
+                })?;
+            merge_foreign_package_version(
+                &mut package_versions,
+                &package_name,
+                &version,
+                source_label,
+            )?;
+        }
+    }
+    Ok(package_versions)
+}
+
+fn collect_foreign_package_versions_from_wit_dir(
     wit_dir: &Path,
 ) -> anyhow::Result<BTreeMap<String, String>> {
     let unresolved = UnresolvedPackageGroup::parse_dir(wit_dir).with_context(|| {
@@ -1105,43 +1136,13 @@ fn collect_wasi_package_versions_from_wit_dir(
             wit_dir.display()
         )
     })?;
-    let mut package_versions = BTreeMap::<String, String>::new();
-    for package in std::iter::once(&unresolved.main).chain(unresolved.nested.iter()) {
-        for foreign_package in package.foreign_deps.keys() {
-            if foreign_package.namespace != "wasi" {
-                continue;
-            }
-            let package_name = format!("{}:{}", foreign_package.namespace, foreign_package.name);
-            let version = foreign_package
-                .version
-                .as_ref()
-                .map(ToString::to_string)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "WIT package directory '{}' references wasi package '{}' without explicit version; add '@<version>' to import/export/include",
-                        wit_dir.display(),
-                        package_name
-                    )
-                })?;
-            if let Some(existing_version) = package_versions.get(&package_name) {
-                if existing_version != &version {
-                    return Err(anyhow!(
-                        "WIT package directory '{}' references wasi package '{}' with conflicting versions '{}' and '{}'",
-                        wit_dir.display(),
-                        package_name,
-                        existing_version,
-                        version
-                    ));
-                }
-                continue;
-            }
-            package_versions.insert(package_name, version);
-        }
-    }
-    Ok(package_versions)
+    collect_foreign_package_versions_from_unresolved(
+        &unresolved,
+        &format!("WIT package directory '{}'", wit_dir.display()),
+    )
 }
 
-fn merge_wasi_package_version(
+fn merge_foreign_package_version(
     versions: &mut BTreeMap<String, String>,
     package: &str,
     version: &str,
@@ -1168,7 +1169,7 @@ fn collect_component_world_wasi_packages_and_validate_non_wasi_references(
     cache_entries_by_dependency: &BTreeMap<String, dependency_cache::DependencyCacheEntry>,
     dependency_versions_by_effective_name: &BTreeMap<String, String>,
 ) -> anyhow::Result<ComponentWorldReferenceSummary> {
-    let mut wasi_versions = BTreeMap::<String, String>::new();
+    let mut referenced_package_versions = BTreeMap::<String, String>::new();
     let mut non_wasi_interfaces_by_key =
         BTreeMap::<(String, String, String), BTreeSet<String>>::new();
 
@@ -1189,20 +1190,20 @@ fn collect_component_world_wasi_packages_and_validate_non_wasi_references(
                     package.name
                 )
             })?;
+            merge_foreign_package_version(
+                &mut referenced_package_versions,
+                &package.name,
+                version,
+                &format!(
+                    "component world package in dependency '{}'",
+                    dependency.name
+                ),
+            )?;
             if package
                 .name
                 .split_once(':')
                 .is_some_and(|(namespace, _)| namespace == "wasi")
             {
-                merge_wasi_package_version(
-                    &mut wasi_versions,
-                    &package.name,
-                    version,
-                    &format!(
-                        "component world package in dependency '{}'",
-                        dependency.name
-                    ),
-                )?;
                 continue;
             }
 
@@ -1244,7 +1245,7 @@ fn collect_component_world_wasi_packages_and_validate_non_wasi_references(
     }
 
     Ok(ComponentWorldReferenceSummary {
-        wasi_versions,
+        referenced_package_versions,
         non_wasi_interface_requirements: non_wasi_interfaces_by_key
             .into_iter()
             .map(|((dependency_name, package_name, version), interfaces)| {
@@ -1264,31 +1265,47 @@ struct HydratedWitPackageMetadata {
     package_name: String,
     package_version: Option<String>,
     interface_names: BTreeSet<String>,
+    foreign_packages: BTreeMap<String, String>,
 }
 
 fn read_hydrated_wit_package_metadata(
     project_root: &Path,
     package_name: &str,
+    package_version: &str,
 ) -> anyhow::Result<HydratedWitPackageMetadata> {
-    let package_root = project_root
-        .join("wit")
-        .join("deps")
-        .join(plugin_sources::sanitize_wit_deps_name(package_name));
-    let package_wit = package_root.join("package.wit");
-    if !package_wit.is_file() {
+    let package_root =
+        project_root
+            .join("wit")
+            .join("deps")
+            .join(plugin_sources::wit_deps_dir_name(
+                package_name,
+                Some(package_version),
+            ));
+    if !has_top_level_wit_files(&package_root)? {
         return Err(anyhow!(
-            "hydrated dependency WIT for package '{}' is missing at {}",
+            "hydrated dependency WIT for package '{}@{}' is missing at {}",
             package_name,
-            package_wit.display()
+            package_version,
+            package_root.display()
         ));
     }
-    let unresolved = UnresolvedPackageGroup::parse_file(&package_wit).with_context(|| {
+    let unresolved = UnresolvedPackageGroup::parse_dir(&package_root).with_context(|| {
         format!(
-            "failed to parse hydrated WIT package '{}' at {}",
+            "failed to parse hydrated WIT package '{}@{}' in {}",
             package_name,
-            package_wit.display()
+            package_version,
+            package_root.display()
         )
     })?;
+    let foreign_packages = collect_foreign_package_versions_from_unresolved(
+        &unresolved,
+        &format!(
+            "hydrated WIT package '{}@{}' in {}",
+            package_name,
+            package_version,
+            package_root.display()
+        ),
+    )?;
     Ok(HydratedWitPackageMetadata {
         package_name: format!(
             "{}:{}",
@@ -1306,6 +1323,7 @@ fn read_hydrated_wit_package_metadata(
             .iter()
             .filter_map(|(_, interface)| interface.name.clone())
             .collect(),
+        foreign_packages,
     })
 }
 
@@ -1316,16 +1334,23 @@ fn validate_component_world_non_wasi_interface_requirements(
     if requirements.is_empty() {
         return Ok(());
     }
-    let mut metadata_by_package = BTreeMap::<String, HydratedWitPackageMetadata>::new();
+    let mut metadata_by_package = BTreeMap::<(String, String), HydratedWitPackageMetadata>::new();
     for requirement in requirements {
-        let metadata = if let Some(metadata) = metadata_by_package.get(&requirement.package_name) {
+        let metadata_key = (
+            requirement.package_name.clone(),
+            requirement.version.clone(),
+        );
+        let metadata = if let Some(metadata) = metadata_by_package.get(&metadata_key) {
             metadata
         } else {
-            let metadata =
-                read_hydrated_wit_package_metadata(project_root, &requirement.package_name)?;
-            metadata_by_package.insert(requirement.package_name.clone(), metadata);
+            let metadata = read_hydrated_wit_package_metadata(
+                project_root,
+                &requirement.package_name,
+                &requirement.version,
+            )?;
+            metadata_by_package.insert(metadata_key.clone(), metadata);
             metadata_by_package
-                .get(&requirement.package_name)
+                .get(&metadata_key)
                 .expect("just inserted")
         };
         if metadata.package_name != requirement.package_name {
@@ -1352,15 +1377,18 @@ fn validate_component_world_non_wasi_interface_requirements(
         for interface in &requirement.interfaces {
             if !metadata.interface_names.contains(interface) {
                 return Err(anyhow!(
-                    "component world package in dependency '{}' references non-wasi interface '{}/{}@{}' but hydrated WIT package at '{}/package.wit' does not define that interface",
+                    "component world package in dependency '{}' references non-wasi interface '{}/{}@{}' but hydrated WIT package in '{}' does not define that interface",
                     requirement.dependency_name,
                     requirement.package_name,
                     interface,
                     requirement.version,
                     plugin_sources::path_to_manifest_string(
-                        &PathBuf::from("wit").join("deps").join(
-                            plugin_sources::sanitize_wit_deps_name(&requirement.package_name)
-                        )
+                        &PathBuf::from("wit")
+                            .join("deps")
+                            .join(plugin_sources::wit_deps_dir_name(
+                                &requirement.package_name,
+                                Some(requirement.version.as_str())
+                            ))
                     ),
                 ));
             }
@@ -1371,14 +1399,15 @@ fn validate_component_world_non_wasi_interface_requirements(
 
 async fn hydrate_wasi_packages_from_component_and_wit_package_dir(
     project_root: &Path,
-    mut component_world_wasi_versions: BTreeMap<String, String>,
+    mut referenced_package_versions: BTreeMap<String, String>,
+    dependency_versions_by_effective_name: &BTreeMap<String, String>,
 ) -> anyhow::Result<Vec<TransitivePackageRecord>> {
     let wit_dir = project_root.join("wit");
     if has_top_level_wit_files(&wit_dir)? {
-        let wit_dir_versions = collect_wasi_package_versions_from_wit_dir(&wit_dir)?;
+        let wit_dir_versions = collect_foreign_package_versions_from_wit_dir(&wit_dir)?;
         for (package, version) in wit_dir_versions {
-            merge_wasi_package_version(
-                &mut component_world_wasi_versions,
+            merge_foreign_package_version(
+                &mut referenced_package_versions,
                 &package,
                 &version,
                 &format!("WIT package directory '{}'", wit_dir.display()),
@@ -1386,7 +1415,7 @@ async fn hydrate_wasi_packages_from_component_and_wit_package_dir(
         }
     }
 
-    if component_world_wasi_versions.is_empty() {
+    if referenced_package_versions.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -1394,9 +1423,103 @@ async fn hydrate_wasi_packages_from_component_and_wit_package_dir(
     fs::create_dir_all(&deps_root)
         .with_context(|| format!("failed to create {}", deps_root.display()))?;
     let mut records = Vec::new();
-    for (package, version) in component_world_wasi_versions {
+
+    let mut queue: VecDeque<(String, String, String)> = referenced_package_versions
+        .iter()
+        .map(|(package, version)| {
+            (
+                package.clone(),
+                version.clone(),
+                "seed package reference".to_string(),
+            )
+        })
+        .collect();
+    let mut visited_wasi = BTreeSet::<(String, String)>::new();
+    let mut visited_non_wasi = BTreeSet::<(String, String)>::new();
+
+    while let Some((package, version, source_label)) = queue.pop_front() {
+        let namespace = package.split_once(':').map(|(ns, _)| ns).ok_or_else(|| {
+            anyhow!(
+                "{} references package '{}' with invalid package name format",
+                source_label,
+                package
+            )
+        })?;
+        if namespace != "wasi" {
+            let Some(expected_version) = dependency_versions_by_effective_name.get(&package) else {
+                return Err(anyhow!(
+                    "{} references non-wasi package '{}@{}' which is not declared in [[dependencies]]",
+                    source_label,
+                    package,
+                    version
+                ));
+            };
+            if expected_version != &version {
+                return Err(anyhow!(
+                    "{} references non-wasi package '{}@{}' but [[dependencies]] declares '{}@{}'",
+                    source_label,
+                    package,
+                    version,
+                    package,
+                    expected_version
+                ));
+            }
+            if !visited_non_wasi.insert((package.clone(), version.clone())) {
+                continue;
+            }
+            let metadata =
+                read_hydrated_wit_package_metadata(project_root, &package, version.as_str())?;
+            if metadata.package_name != package {
+                return Err(anyhow!(
+                    "{} references non-wasi package '{}@{}' but hydrated package is '{}'",
+                    source_label,
+                    package,
+                    version,
+                    metadata.package_name
+                ));
+            }
+            if metadata.package_version.as_deref() != Some(version.as_str()) {
+                return Err(anyhow!(
+                    "{} references non-wasi package '{}@{}' but hydrated package version is '{}'",
+                    source_label,
+                    package,
+                    version,
+                    metadata
+                        .package_version
+                        .as_deref()
+                        .unwrap_or("<unspecified>")
+                ));
+            }
+            for (foreign_package, foreign_version) in metadata.foreign_packages {
+                merge_foreign_package_version(
+                    &mut referenced_package_versions,
+                    &foreign_package,
+                    &foreign_version,
+                    &format!(
+                        "transitive dependency of non-wasi package '{}@{}'",
+                        package, version
+                    ),
+                )?;
+                queue.push_back((
+                    foreign_package,
+                    foreign_version,
+                    format!(
+                        "transitive dependency of non-wasi package '{}@{}'",
+                        package, version
+                    ),
+                ));
+            }
+            continue;
+        }
+        if !visited_wasi.insert((package.clone(), version.clone())) {
+            continue;
+        }
+
         let source = package.to_string();
-        let destination = deps_root.join(plugin_sources::sanitize_wit_deps_name(&package));
+        let destination = deps_root.join(plugin_sources::wit_deps_dir_name(
+            &package,
+            Some(version.as_str()),
+        ));
         let temp_root =
             std::env::temp_dir().join(format!("imago-update-wasi-{}", uuid::Uuid::new_v4()));
         let temp_destination = temp_root.join("package");
@@ -1406,7 +1529,7 @@ async fn hydrate_wasi_packages_from_component_and_wit_package_dir(
                 temp_destination.display()
             )
         })?;
-        let materialize_result = plugin_sources::materialize_wit_source(
+        let materialized = plugin_sources::materialize_wit_source(
             project_root,
             plugin_sources::SourceKind::Wit,
             &source,
@@ -1420,15 +1543,10 @@ async fn hydrate_wasi_packages_from_component_and_wit_package_dir(
         .await
         .with_context(|| {
             format!(
-                "failed to materialize wasi package '{}' referenced from WIT package directory '{}'",
-                package,
-                wit_dir.display()
+                "failed to materialize wasi package '{}@{}' ({})",
+                package, version, source_label
             )
-        });
-        if let Err(err) = materialize_result {
-            let _ = fs::remove_dir_all(&temp_root);
-            return Err(err);
-        }
+        })?;
         let temp_package_wit_path = temp_destination.join("package.wit");
         if !temp_package_wit_path.is_file() {
             let _ = fs::remove_dir_all(&temp_root);
@@ -1470,6 +1588,35 @@ async fn hydrate_wasi_packages_from_component_and_wit_package_dir(
                 package_wit_path.display()
             ));
         }
+
+        for transitive in materialized.transitive_packages {
+            let transitive_version = transitive.version.ok_or_else(|| {
+                anyhow!(
+                    "wasi package '{}@{}' references transitive package '{}' without explicit version",
+                    package,
+                    version,
+                    transitive.name
+                )
+            })?;
+            merge_foreign_package_version(
+                &mut referenced_package_versions,
+                &transitive.name,
+                &transitive_version,
+                &format!(
+                    "transitive dependency of wasi package '{}@{}'",
+                    package, version
+                ),
+            )?;
+            queue.push_back((
+                transitive.name.clone(),
+                transitive_version.clone(),
+                format!(
+                    "transitive dependency of wasi package '{}@{}'",
+                    package, version
+                ),
+            ));
+        }
+
         let digest = format!("sha256:{}", hex::encode(Sha256::digest(package_wit_bytes)));
         records.push(TransitivePackageRecord {
             name: package.clone(),
@@ -1478,11 +1625,7 @@ async fn hydrate_wasi_packages_from_component_and_wit_package_dir(
             version: Some(version.clone()),
             digest,
             source: Some(source),
-            path: plugin_sources::path_to_manifest_string(
-                &PathBuf::from("wit")
-                    .join("deps")
-                    .join(plugin_sources::sanitize_wit_deps_name(&package)),
-            ),
+            path: plugin_sources::wit_deps_path(&package, Some(version.as_str())),
             via: String::new(),
         });
     }
@@ -1565,6 +1708,7 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
                     .resolved_package_name
                     .clone()
                     .unwrap_or_else(|| dependency.name.clone()),
+                &dependency.version,
             ),
             component_source: cache_entry.component_source,
             component_registry: cache_entry.component_registry,
@@ -1591,7 +1735,10 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
     );
     let mut auto_wasi_records = hydrate_wasi_packages_from_component_and_wit_package_dir(
         project_root,
-        component_world_reference_summary.wasi_versions.clone(),
+        component_world_reference_summary
+            .referenced_package_versions
+            .clone(),
+        &dependency_versions_by_effective_name,
     )
     .await?;
     transitive_records.append(&mut auto_wasi_records);
@@ -1839,7 +1986,7 @@ remote = "127.0.0.1:4443"
         assert_eq!(entry.name, "test:example");
         assert_eq!(entry.wit_source, "registry/example");
         assert_eq!(entry.wit_registry, None);
-        assert_eq!(entry.wit_path, "wit/deps/test-example");
+        assert_eq!(entry.wit_path, "wit/deps/test-example-0.1.0");
         assert!(root.join(&entry.wit_path).exists());
         assert!(entry.component_source.is_none());
         assert!(entry.component_sha256.is_none());
@@ -1894,7 +2041,10 @@ remote = "127.0.0.1:4443"
             lock.dependencies[0].wit_registry,
             Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string())
         );
-        assert_eq!(lock.dependencies[0].wit_path, "wit/deps/yieldspace-example");
+        assert_eq!(
+            lock.dependencies[0].wit_path,
+            "wit/deps/yieldspace-example-1.2.3"
+        );
         assert!(root.join(&lock.dependencies[0].wit_path).exists());
 
         let _ = fs::remove_dir_all(root);
@@ -2032,7 +2182,7 @@ remote = "127.0.0.1:4443"
         let entry = &lock.dependencies[0];
         assert_eq!(entry.wit_source, "ghcr.io/chikoski/advent-of-spin");
         assert_eq!(entry.wit_registry, None);
-        assert_eq!(entry.wit_path, "wit/deps/chikoski-advent-of-spin");
+        assert_eq!(entry.wit_path, "wit/deps/chikoski-advent-of-spin-0.2.0");
         assert!(root.join(&entry.wit_path).exists());
 
         let _ = fs::remove_dir_all(root);
@@ -2073,7 +2223,7 @@ remote = "127.0.0.1:4443"
         assert_eq!(lock.dependencies.len(), 1);
         let entry = &lock.dependencies[0];
         assert_eq!(entry.wit_source, "yieldspace:nanokvm".to_string());
-        assert_eq!(entry.wit_path, "wit/deps/yieldspace-nanokvm");
+        assert_eq!(entry.wit_path, "wit/deps/yieldspace-nanokvm-1.2.3");
         assert!(root.join(&entry.wit_path).exists());
 
         let _ = fs::remove_dir_all(root);
@@ -2114,7 +2264,7 @@ remote = "127.0.0.1:4443"
         assert_eq!(lock.dependencies.len(), 1);
         let entry = &lock.dependencies[0];
         assert_eq!(entry.wit_source, "ghcr.io/yieldspace/nanokvm".to_string());
-        assert_eq!(entry.wit_path, "wit/deps/yieldspace-nanokvm");
+        assert_eq!(entry.wit_path, "wit/deps/yieldspace-nanokvm-1.2.3");
         assert!(root.join(&entry.wit_path).exists());
 
         let _ = fs::remove_dir_all(root);
@@ -2250,7 +2400,10 @@ interface greet {
             lock.binding_wits[0].interfaces,
             vec!["yieldspace:other/greet".to_string()]
         );
-        assert!(root.join("wit/deps/yieldspace-other/package.wit").exists());
+        assert!(
+            root.join("wit/deps/yieldspace-other-0.1.0/package.wit")
+                .exists()
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2468,7 +2621,10 @@ world plugin {
                 .exists(),
             "derived component bytes must be stored in dependency cache"
         );
-        assert!(root.join("wit/deps/root-component/package.wit").exists());
+        assert!(
+            root.join("wit/deps/root-component-0.1.0/package.wit")
+                .exists()
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2556,8 +2712,9 @@ interface name-provider {
             result.stderr
         );
 
-        let package_text = fs::read_to_string(root.join("wit/deps/root-component/package.wit"))
-            .expect("root:component package.wit should exist");
+        let package_text =
+            fs::read_to_string(root.join("wit/deps/root-component-0.1.0/package.wit"))
+                .expect("root:component package.wit should exist");
         assert!(
             package_text.contains("interface exported"),
             "exported interface must remain: {package_text}"
@@ -2582,7 +2739,7 @@ interface name-provider {
     fn validate_component_world_non_wasi_interface_requirements_rejects_missing_interface() {
         let root = new_temp_dir("component-world-non-wasi-interface-missing");
         write(
-            &root.join("wit/deps/chikoski-name/package.wit"),
+            &root.join("wit/deps/chikoski-name-0.1.0/package.wit"),
             br#"
 package chikoski:name@0.1.0;
 
@@ -2644,11 +2801,15 @@ interface random {
         let records = hydrate_wasi_packages_from_component_and_wit_package_dir(
             &root,
             BTreeMap::from([("wasi:random".to_string(), "0.2.6".to_string())]),
+            &BTreeMap::new(),
         )
         .await
         .expect("wasi hydration should succeed");
 
-        assert!(root.join("wit/deps/wasi-random/package.wit").is_file());
+        assert!(
+            root.join("wit/deps/wasi-random-0.2.6/package.wit")
+                .is_file()
+        );
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].name, "wasi:random");
         assert!(records[0].via.is_empty());
@@ -2686,7 +2847,7 @@ interface random {
                 wit_source: "warg://root:component@0.1.0".to_string(),
                 wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
                 wit_sha256: None,
-                wit_path: "wit/deps/root-component".to_string(),
+                wit_path: "wit/deps/root-component-0.1.0".to_string(),
                 wit_digest: "deadbeef".to_string(),
                 wit_source_fingerprint: None,
                 component_source: Some("warg://root:component@0.1.0".to_string()),
@@ -2761,7 +2922,7 @@ interface random {
                 wit_source: "warg://root:component@0.1.0".to_string(),
                 wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
                 wit_sha256: None,
-                wit_path: "wit/deps/root-component".to_string(),
+                wit_path: "wit/deps/root-component-0.1.0".to_string(),
                 wit_digest: "deadbeef".to_string(),
                 wit_source_fingerprint: None,
                 component_source: Some("warg://root:component@0.1.0".to_string()),
@@ -2819,6 +2980,7 @@ world plugin {
         let err = hydrate_wasi_packages_from_component_and_wit_package_dir(
             &root,
             BTreeMap::from([("wasi:random".to_string(), "0.2.6".to_string())]),
+            &BTreeMap::new(),
         )
         .await
         .expect_err("conflicting component/wit-dir wasi versions must fail");
@@ -2996,7 +3158,7 @@ kind = "native"
 wit = "foo-bar:baz"
 
 [[dependencies]]
-version = "0.2.0"
+version = "0.1.0"
 kind = "native"
 wit = "foo:bar-baz"
 
@@ -3013,7 +3175,7 @@ remote = "127.0.0.1:4443"
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.unwrap_or_default();
         assert!(
-            stderr.contains("both resolve to 'wit/deps/foo-bar-baz'"),
+            stderr.contains("both resolve to 'wit/deps/foo-bar-baz-0.1.0'"),
             "unexpected stderr: {stderr}"
         );
         assert!(
@@ -3038,12 +3200,12 @@ type = "cli"
 [[dependencies]]
 version = "0.1.0"
 kind = "native"
-wit = "foo:bar"
+wit = "foo-bar:baz"
 
 [[dependencies]]
 version = "0.1.0"
 kind = "native"
-wit = "foo:bar/baz"
+wit = "foo:bar-baz"
 
 [target.default]
 remote = "127.0.0.1:4443"
@@ -3058,7 +3220,7 @@ remote = "127.0.0.1:4443"
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.unwrap_or_default();
         assert!(
-            stderr.contains("overlapping WIT output paths"),
+            stderr.contains("both resolve to 'wit/deps/foo-bar-baz-0.1.0'"),
             "unexpected stderr: {stderr}"
         );
         assert!(
@@ -3095,27 +3257,29 @@ remote = "127.0.0.1:4443"
 "#,
         );
         write(&root.join("build/app.wasm"), b"\0asm");
-        let cache_wit_root_a = dependency_cache::cache_entry_root(&root, "path-source-0")
-            .join(dependency_cache::dependency_wit_path("path-source-0"));
+        let cache_wit_root_a = dependency_cache::cache_entry_root(&root, "path-source-0").join(
+            dependency_cache::dependency_wit_path("path-source-0", "0.1.0"),
+        );
         write(
             &cache_wit_root_a.join("package.wit"),
-            b"package foo:bar@0.1.0;\ninterface api { ping: func(); }\n",
+            b"package foo-bar:baz@0.1.0;\ninterface api { ping: func(); }\n",
         );
-        let cache_wit_root_b = dependency_cache::cache_entry_root(&root, "path-source-1")
-            .join(dependency_cache::dependency_wit_path("path-source-1"));
+        let cache_wit_root_b = dependency_cache::cache_entry_root(&root, "path-source-1").join(
+            dependency_cache::dependency_wit_path("path-source-1", "0.1.0"),
+        );
         write(
             &cache_wit_root_b.join("package.wit"),
             b"package placeholder:pkg@0.1.0;\ninterface api { pong: func(); }\n",
         );
         let entry_a = dependency_cache::DependencyCacheEntry {
             name: "path-source-0".to_string(),
-            resolved_package_name: Some("foo:bar".to_string()),
+            resolved_package_name: Some("foo-bar:baz".to_string()),
             version: "0.1.0".to_string(),
             kind: "native".to_string(),
             wit_source: "registry/a".to_string(),
             wit_registry: None,
             wit_sha256: None,
-            wit_path: dependency_cache::dependency_wit_path("path-source-0"),
+            wit_path: dependency_cache::dependency_wit_path("path-source-0", "0.1.0"),
             wit_digest: build::compute_path_digest_hex(&cache_wit_root_a).expect("digest"),
             wit_source_fingerprint: None,
             component_source: None,
@@ -3129,13 +3293,13 @@ remote = "127.0.0.1:4443"
         dependency_cache::save_entry(&root, &entry_a).expect("cache entry A should be saved");
         let entry_b = dependency_cache::DependencyCacheEntry {
             name: "path-source-1".to_string(),
-            resolved_package_name: Some("foo:bar/baz".to_string()),
+            resolved_package_name: Some("foo:bar-baz".to_string()),
             version: "0.1.0".to_string(),
             kind: "native".to_string(),
             wit_source: "registry/b".to_string(),
             wit_registry: None,
             wit_sha256: None,
-            wit_path: dependency_cache::dependency_wit_path("path-source-1"),
+            wit_path: dependency_cache::dependency_wit_path("path-source-1", "0.1.0"),
             wit_digest: build::compute_path_digest_hex(&cache_wit_root_b).expect("digest"),
             wit_source_fingerprint: None,
             component_source: None,
@@ -3156,7 +3320,7 @@ remote = "127.0.0.1:4443"
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.unwrap_or_default();
         assert!(
-            stderr.contains("overlapping WIT output paths"),
+            stderr.contains("both resolve to 'wit/deps/foo-bar-baz-0.1.0'"),
             "unexpected stderr: {stderr}"
         );
         assert!(
@@ -3412,16 +3576,18 @@ interface name-provider {
             "wit/deps must be reset before resolving"
         );
         assert!(
-            root.join("wit/deps/chikoski-hello/package.wit").exists(),
+            root.join("wit/deps/chikoski-hello-0.1.0/package.wit")
+                .exists(),
             "top-level package should be materialized"
         );
         assert!(
-            root.join("wit/deps/chikoski-name/package.wit").exists(),
+            root.join("wit/deps/chikoski-name-0.1.0/package.wit")
+                .exists(),
             "transitive package should be materialized"
         );
         assert!(
             !root
-                .join("wit/deps/chikoski-hello/.imago_transitive")
+                .join("wit/deps/chikoski-hello-0.1.0/.imago_transitive")
                 .exists()
         );
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
@@ -3438,7 +3604,7 @@ interface name-provider {
         assert_eq!(version.requirement, "=0.1.0");
         assert_eq!(version.version.as_deref(), Some("0.1.0"));
         assert_eq!(version.source.as_deref(), Some("chikoski:name"));
-        assert_eq!(version.path, "wit/deps/chikoski-name");
+        assert_eq!(version.path, "wit/deps/chikoski-name-0.1.0");
         assert_eq!(version.via, vec!["chikoski:hello".to_string()]);
         assert!(version.digest.starts_with("sha256:"));
 
@@ -3707,7 +3873,10 @@ interface greet {
             "update should succeed: {:?}",
             result.stderr
         );
-        assert!(root.join("wit/deps/chikoski-hello/package.wit").exists());
+        assert!(
+            root.join("wit/deps/chikoski-hello-0.1.0/package.wit")
+                .exists()
+        );
         assert!(root.join("imago.lock").exists());
 
         let _ = fs::remove_dir_all(root);
@@ -3821,7 +3990,7 @@ interface name-provider {
         assert!(root.join("wit/deps/chikoski-name/package.wit").exists());
         assert!(
             !root
-                .join("wit/deps/chikoski-hello/.imago_transitive")
+                .join("wit/deps/chikoski-hello-0.1.0/.imago_transitive")
                 .exists()
         );
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
@@ -3869,7 +4038,10 @@ remote = "127.0.0.1:4443"
             "update should succeed: {:?}",
             result.stderr
         );
-        assert!(root.join("wit/deps/test-example/package.wit").exists());
+        assert!(
+            root.join("wit/deps/test-example-0.1.0/package.wit")
+                .exists()
+        );
         assert!(root.join("imago.lock").exists());
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
@@ -3917,7 +4089,8 @@ remote = "127.0.0.1:4443"
             second.stderr
         );
         assert!(
-            root.join("wit/deps/test-example/package.wit").exists(),
+            root.join("wit/deps/test-example-0.1.0/package.wit")
+                .exists(),
             "wit/deps should be hydrated from dependency cache"
         );
 
@@ -3976,7 +4149,7 @@ remote = "127.0.0.1:4443"
             "wit digest must change after source update"
         );
         let cached_wit = fs::read_to_string(
-            root.join(".imago/deps/path-source-0/wit/deps/path-source-0/package.wit"),
+            root.join(".imago/deps/path-source-0/wit/deps/path-source-0-0.1.0/package.wit"),
         )
         .expect("cached wit should exist");
         assert!(
@@ -4039,7 +4212,10 @@ interface greet {
             "second update should succeed from dependency cache: {:?}",
             second.stderr
         );
-        assert!(root.join("wit/deps/chikoski-hello/package.wit").exists());
+        assert!(
+            root.join("wit/deps/chikoski-hello-0.1.0/package.wit")
+                .exists()
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -4137,7 +4313,7 @@ interface untouched {
             result.stderr
         );
 
-        let rewritten = fs::read_to_string(root.join("wit/deps/chikoski-hello/package.wit"))
+        let rewritten = fs::read_to_string(root.join("wit/deps/chikoski-hello-0.1.0/package.wit"))
             .expect("rewritten package.wit should exist");
         assert!(
             rewritten.contains("use imago:node/rpc@0.1.0.{connection};"),
@@ -4167,8 +4343,9 @@ interface untouched {
             "second update should keep rewrite idempotent: {:?}",
             second.stderr
         );
-        let rewritten_second = fs::read_to_string(root.join("wit/deps/chikoski-hello/package.wit"))
-            .expect("rewritten package.wit should exist");
+        let rewritten_second =
+            fs::read_to_string(root.join("wit/deps/chikoski-hello-0.1.0/package.wit"))
+                .expect("rewritten package.wit should exist");
         let use_count = rewritten_second
             .matches("use imago:node/rpc@0.1.0.{connection};")
             .count();
@@ -4235,7 +4412,7 @@ interface greet {
             result.stderr
         );
 
-        let rewritten = fs::read_to_string(root.join("wit/deps/chikoski-hello/package.wit"))
+        let rewritten = fs::read_to_string(root.join("wit/deps/chikoski-hello-0.1.0/package.wit"))
             .expect("binding-only package.wit should exist");
         assert!(
             rewritten
@@ -4476,8 +4653,11 @@ interface wall-clock {
             "update should succeed: {:?}",
             result.stderr
         );
-        assert!(root.join("wit/deps/wasi-io/package.wit").is_file());
-        assert!(root.join("wit/deps/wasi-clocks/package.wit").is_file());
+        assert!(root.join("wit/deps/wasi-io-0.2.6/package.wit").is_file());
+        assert!(
+            root.join("wit/deps/wasi-clocks-0.2.6/package.wit")
+                .is_file()
+        );
 
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
@@ -4624,7 +4804,7 @@ remote = "127.0.0.1:4443"
         );
         assert!(root.join("imago.lock").is_file());
         assert!(
-            !root.join("wit/deps/wasi-io").exists(),
+            !root.join("wit/deps/wasi-io-0.2.6").exists(),
             "wasi packages should not be materialized without top-level .wit files"
         );
 
@@ -4684,7 +4864,7 @@ interface streams {
             "update should succeed: {:?}",
             result.stderr
         );
-        assert!(root.join("wit/deps/wasi-io/package.wit").is_file());
+        assert!(root.join("wit/deps/wasi-io-0.2.6/package.wit").is_file());
 
         let _ = fs::remove_dir_all(root);
     }

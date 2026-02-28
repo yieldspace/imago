@@ -3418,7 +3418,7 @@ remote = "127.0.0.1:4443"
             b"package acme:clock@0.1.0;\ninterface api { now: func() -> u64; }\n",
         );
         write_file(
-            &root.join("wit/deps/acme-clock/package.wit"),
+            &root.join("wit/deps/acme-clock-0.1.0/package.wit"),
             br#"
 package acme:clock@0.1.0;
 
@@ -3432,7 +3432,7 @@ interface admin {
 "#,
         );
         let wit_digest =
-            compute_path_digest_hex(&root.join("wit/deps/acme-clock")).expect("wit digest");
+            compute_path_digest_hex(&root.join("wit/deps/acme-clock-0.1.0")).expect("wit digest");
         write_imago_lock(
             &root,
             &ImagoLock {
@@ -3445,7 +3445,7 @@ interface admin {
                     wit_registry: None,
                     wit_version: "0.1.0".to_string(),
                     wit_digest,
-                    wit_path: "wit/deps/acme-clock".to_string(),
+                    wit_path: "wit/deps/acme-clock-0.1.0".to_string(),
                     interfaces: vec!["acme:clock/admin".to_string(), "acme:clock/api".to_string()],
                 }],
             },
@@ -4315,7 +4315,8 @@ remote = "127.0.0.1:4443"
         build_project("default", &root)
             .expect("build should succeed by hydrating wit/deps from dependency cache");
         assert!(
-            root.join("wit/deps/test-example/package.wit").exists(),
+            root.join("wit/deps/test-example-0.1.0/package.wit")
+                .exists(),
             "wit/deps must be rehydrated from dependency cache before lock validation"
         );
 
@@ -4540,14 +4541,14 @@ remote = "127.0.0.1:4443"
             b"package test:example;\n",
         );
         write_file(
-            &root.join("wit/deps/path-source-0/package.wit"),
+            &root.join("wit/deps/path-source-0-0.1.0/package.wit"),
             b"package test:example;\n",
         );
         write_file(
             &root.join("wit/deps/test-dep/package.wit"),
             b"package test:dep; interface dep { pong: func() -> string; }\n",
         );
-        let digest = compute_path_digest_hex(&root.join("wit/deps/path-source-0"))
+        let digest = compute_path_digest_hex(&root.join("wit/deps/path-source-0-0.1.0"))
             .expect("wit digest should compute");
         let transitive_digest = format!(
             "sha256:{}",
@@ -4564,7 +4565,7 @@ remote = "127.0.0.1:4443"
                     wit_source: "registry/example".to_string(),
                     wit_registry: None,
                     wit_digest: digest.clone(),
-                    wit_path: "wit/deps/path-source-0".to_string(),
+                    wit_path: "wit/deps/path-source-0-0.1.0".to_string(),
                     component_source: None,
                     component_registry: None,
                     component_sha256: None,
@@ -4592,7 +4593,7 @@ remote = "127.0.0.1:4443"
             wit_source: "registry/example".to_string(),
             wit_registry: None,
             wit_sha256: None,
-            wit_path: "wit/deps/path-source-0".to_string(),
+            wit_path: "wit/deps/path-source-0-0.1.0".to_string(),
             wit_digest: digest,
             wit_source_fingerprint: None,
             component_source: None,
@@ -4613,8 +4614,8 @@ remote = "127.0.0.1:4443"
         };
         let cache_root = dependency_cache::cache_entry_root(&root, "path-source-0");
         copy_tree(
-            &root.join("wit/deps/path-source-0"),
-            &cache_root.join("wit/deps/path-source-0"),
+            &root.join("wit/deps/path-source-0-0.1.0"),
+            &cache_root.join("wit/deps/path-source-0-0.1.0"),
         );
         copy_tree(
             &root.join("wit/deps/test-dep"),
@@ -4782,7 +4783,7 @@ remote = "127.0.0.1:4443"
             b"package test:example;\n",
         );
         write_file(
-            &root.join("wit/deps/path-source-0/package.wit"),
+            &root.join("wit/deps/path-source-0-0.1.0/package.wit"),
             b"package test:example;\n",
         );
         write_file(
@@ -4790,7 +4791,7 @@ remote = "127.0.0.1:4443"
             b"package test:dep; interface dep { pong: func() -> string; }\n",
         );
 
-        let digest = compute_path_digest_hex(&root.join("wit/deps/path-source-0"))
+        let digest = compute_path_digest_hex(&root.join("wit/deps/path-source-0-0.1.0"))
             .expect("wit digest should compute");
         let actual_transitive_digest = format!(
             "sha256:{}",
@@ -4807,7 +4808,7 @@ remote = "127.0.0.1:4443"
                     wit_source: "registry/example".to_string(),
                     wit_registry: None,
                     wit_digest: digest.clone(),
-                    wit_path: "wit/deps/path-source-0".to_string(),
+                    wit_path: "wit/deps/path-source-0-0.1.0".to_string(),
                     component_source: None,
                     component_registry: None,
                     component_sha256: None,
@@ -4836,7 +4837,7 @@ remote = "127.0.0.1:4443"
             wit_source: "registry/example".to_string(),
             wit_registry: None,
             wit_sha256: None,
-            wit_path: "wit/deps/path-source-0".to_string(),
+            wit_path: "wit/deps/path-source-0-0.1.0".to_string(),
             wit_digest: digest,
             wit_source_fingerprint: None,
             component_source: None,
@@ -4857,8 +4858,8 @@ remote = "127.0.0.1:4443"
         };
         let cache_root = dependency_cache::cache_entry_root(&root, "path-source-0");
         copy_tree(
-            &root.join("wit/deps/path-source-0"),
-            &cache_root.join("wit/deps/path-source-0"),
+            &root.join("wit/deps/path-source-0-0.1.0"),
+            &cache_root.join("wit/deps/path-source-0-0.1.0"),
         );
         copy_tree(
             &root.join("wit/deps/test-dep"),
@@ -4954,11 +4955,11 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
-            &root.join("wit/deps/chikoski-hello/package.wit"),
+            &root.join("wit/deps/chikoski-hello-0.1.0/package.wit"),
             b"package chikoski:hello@0.1.0;\n",
         );
-        let wit_digest =
-            compute_path_digest_hex(&root.join("wit/deps/chikoski-hello")).expect("wit digest");
+        let wit_digest = compute_path_digest_hex(&root.join("wit/deps/chikoski-hello-0.1.0"))
+            .expect("wit digest");
         let component_bytes = b"\0asmderived-component";
         let plugin_sha = hex::encode(Sha256::digest(component_bytes));
         write_imago_lock(
@@ -4971,7 +4972,7 @@ remote = "127.0.0.1:4443"
                     wit_source: "chikoski:hello".to_string(),
                     wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
                     wit_digest: wit_digest.clone(),
-                    wit_path: "wit/deps/chikoski-hello".to_string(),
+                    wit_path: "wit/deps/chikoski-hello-0.1.0".to_string(),
                     component_source: Some("chikoski:hello".to_string()),
                     component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
                     component_sha256: Some(plugin_sha.clone()),
@@ -4988,7 +4989,7 @@ remote = "127.0.0.1:4443"
             wit_source: "chikoski:hello".to_string(),
             wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
             wit_sha256: None,
-            wit_path: "wit/deps/chikoski-hello".to_string(),
+            wit_path: "wit/deps/chikoski-hello-0.1.0".to_string(),
             wit_digest,
             wit_source_fingerprint: None,
             component_source: Some("chikoski:hello".to_string()),
@@ -5001,8 +5002,8 @@ remote = "127.0.0.1:4443"
         };
         let cache_root = dependency_cache::cache_entry_root(&root, "chikoski:hello");
         copy_tree(
-            &root.join("wit/deps/chikoski-hello"),
-            &cache_root.join("wit/deps/chikoski-hello"),
+            &root.join("wit/deps/chikoski-hello-0.1.0"),
+            &cache_root.join("wit/deps/chikoski-hello-0.1.0"),
         );
         write_file(
             &dependency_cache::cache_component_path(&root, "chikoski:hello", &plugin_sha),
@@ -5047,11 +5048,11 @@ remote = "127.0.0.1:4443"
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
-            &root.join("wit/deps/chikoski-hello/package.wit"),
+            &root.join("wit/deps/chikoski-hello-0.1.0/package.wit"),
             b"package chikoski:hello@0.1.0;\n",
         );
-        let wit_digest =
-            compute_path_digest_hex(&root.join("wit/deps/chikoski-hello")).expect("wit digest");
+        let wit_digest = compute_path_digest_hex(&root.join("wit/deps/chikoski-hello-0.1.0"))
+            .expect("wit digest");
         let component_bytes = b"\0asmderived-component";
         let plugin_sha = hex::encode(Sha256::digest(component_bytes));
         write_imago_lock(
@@ -5064,7 +5065,7 @@ remote = "127.0.0.1:4443"
                     wit_source: "chikoski:hello".to_string(),
                     wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
                     wit_digest: wit_digest.clone(),
-                    wit_path: "wit/deps/chikoski-hello".to_string(),
+                    wit_path: "wit/deps/chikoski-hello-0.1.0".to_string(),
                     component_source: Some("chikoski:other".to_string()),
                     component_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
                     component_sha256: Some(plugin_sha.clone()),
@@ -5081,7 +5082,7 @@ remote = "127.0.0.1:4443"
             wit_source: "chikoski:hello".to_string(),
             wit_registry: Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string()),
             wit_sha256: None,
-            wit_path: "wit/deps/chikoski-hello".to_string(),
+            wit_path: "wit/deps/chikoski-hello-0.1.0".to_string(),
             wit_digest,
             wit_source_fingerprint: None,
             component_source: Some("chikoski:hello".to_string()),
@@ -5094,8 +5095,8 @@ remote = "127.0.0.1:4443"
         };
         let cache_root = dependency_cache::cache_entry_root(&root, "chikoski:hello");
         copy_tree(
-            &root.join("wit/deps/chikoski-hello"),
-            &cache_root.join("wit/deps/chikoski-hello"),
+            &root.join("wit/deps/chikoski-hello-0.1.0"),
+            &cache_root.join("wit/deps/chikoski-hello-0.1.0"),
         );
         write_file(
             &dependency_cache::cache_component_path(&root, "chikoski:hello", &plugin_sha),

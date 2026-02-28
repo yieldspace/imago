@@ -599,9 +599,12 @@ This section defines plugin dependencies and their resolution sources.
 
 - `imago deps sync` resolves dependencies and writes cache under `.imago/deps`.
 - `wit/deps` is regenerated on each sync.
-- Component-decoded `root:component` is not emitted into `wit/deps`.
+- `wit/deps` directory names include package version when available (for example `wit/deps/wasi-io-0.2.6`).
+- `root:component` dependencies are emitted as export-only WIT (imports removed; exported interfaces only).
 - Component world `non-wasi` refs must match declared dependencies by resolved package name and version.
-- `wasi:*` refs are merged from component world refs and top-level `wit/*.wit` refs, resolved from `wasi.dev`, and materialized into `wit/deps`.
+- `deps sync` recursively tracks foreign package refs from component world refs and the `wit/` package dir closure.
+- `wasi:*` refs are resolved from `wasi.dev` and materialized into `wit/deps`.
+- Non-`wasi` refs are not auto-fetched; declared dependencies must provide matching `name+version`.
 - `imago.lock.wit_packages[*].versions[*].via` may be empty (`[]`) for auto-hydrated records.
 - `resolved_at` is removed from lock entries; lockfiles containing it are rejected.
 

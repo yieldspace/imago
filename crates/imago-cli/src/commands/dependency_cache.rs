@@ -121,7 +121,7 @@ impl DependencyCacheEntry {
                 dependency.wit.sha256.as_deref().unwrap_or("")
             ));
         }
-        let expected_wit_path = dependency_wit_path(&dependency.name);
+        let expected_wit_path = dependency_wit_path(&dependency.name, &dependency.version);
         if self.wit_path != expected_wit_path {
             return Err(anyhow!(
                 "cache wit path mismatch (cache='{}', expected='{}')",
@@ -232,14 +232,17 @@ impl DependencyCacheEntry {
     }
 }
 
-pub(crate) fn dependency_wit_target_rel(dependency_name: &str) -> PathBuf {
+pub(crate) fn dependency_wit_target_rel(dependency_name: &str, version: &str) -> PathBuf {
     PathBuf::from("wit")
         .join("deps")
-        .join(plugin_sources::sanitize_wit_deps_name(dependency_name))
+        .join(plugin_sources::wit_deps_dir_name(
+            dependency_name,
+            Some(version),
+        ))
 }
 
-pub(crate) fn dependency_wit_path(dependency_name: &str) -> String {
-    plugin_sources::path_to_manifest_string(&dependency_wit_target_rel(dependency_name))
+pub(crate) fn dependency_wit_path(dependency_name: &str, version: &str) -> String {
+    plugin_sources::path_to_manifest_string(&dependency_wit_target_rel(dependency_name, version))
 }
 
 pub(crate) fn cache_entry_root(project_root: &Path, dependency_name: &str) -> PathBuf {
@@ -387,7 +390,7 @@ pub(crate) fn hydrate_project_wit_deps(
             .resolved_package_name
             .as_deref()
             .unwrap_or(dependency.name.as_str());
-        let hydrated_wit_path = dependency_wit_path(hydrated_dependency_name);
+        let hydrated_wit_path = dependency_wit_path(hydrated_dependency_name, &dependency.version);
         hydrated_targets.push((dependency.name.clone(), PathBuf::from(&hydrated_wit_path)));
         entries.push((dependency.name.clone(), entry, hydrated_wit_path));
     }
@@ -454,7 +457,7 @@ pub(crate) fn verify_project_dependency_cache(
             .resolved_package_name
             .as_deref()
             .unwrap_or(dependency.name.as_str());
-        let hydrated_wit_path = dependency_wit_path(hydrated_dependency_name);
+        let hydrated_wit_path = dependency_wit_path(hydrated_dependency_name, &dependency.version);
         hydrated_targets.push((dependency.name.clone(), PathBuf::from(&hydrated_wit_path)));
         entries.push((dependency.name.clone(), entry));
     }

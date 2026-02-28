@@ -10,6 +10,11 @@ version = "0.1.0"
 kind = "native"
 path = "../../../../plugins/imago-node/wit"
 
+[[dependencies]]
+version = "0.1.0"
+kind = "native"
+path = "../rpc-greeter/wit"
+
 [capabilities]
 privileged = false
 wasi = true
@@ -21,4 +26,4 @@ wasi = true
 [[bindings]]
 name = "rpc-greeter"
 version = "0.1.0"
-path = "../rpc-greeter/wit/world.wit"
+path = "../rpc-greeter/wit"

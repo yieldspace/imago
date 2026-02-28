@@ -116,8 +116,32 @@ impl RemoteSourceProtocol {
 }
 
 pub(crate) fn sanitize_wit_deps_name(name: &str) -> String {
-    // Keep dependency path naming compatible with wkg.
-    name.replace([':', '@'], "-")
+    // Keep dependency path naming compatible with wkg while avoiding path-unsafe chars.
+    name.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn wit_deps_dir_name(package: &str, version: Option<&str>) -> String {
+    let base = match version {
+        Some(version) if !version.trim().is_empty() => format!("{package}-{version}"),
+        _ => package.to_string(),
+    };
+    sanitize_wit_deps_name(&base)
+}
+
+pub(crate) fn wit_deps_path(package: &str, version: Option<&str>) -> String {
+    path_to_manifest_string(
+        &PathBuf::from("wit")
+            .join("deps")
+            .join(wit_deps_dir_name(package, version)),
+    )
 }
 
 pub(crate) fn warg_local_package_key(package: &str) -> String {
@@ -1990,7 +2014,9 @@ fn render_wit_package(
 }
 
 fn sanitize_wit_package_name(name: &wit_parser::PackageName) -> String {
-    sanitize_wit_deps_name(&format!("{}:{}", name.namespace, name.name))
+    let package_name = format!("{}:{}", name.namespace, name.name);
+    let version = name.version.as_ref().map(ToString::to_string);
+    wit_deps_dir_name(&package_name, version.as_deref())
 }
 
 fn write_or_verify_identical_wit_file(path: &Path, contents: &str) -> anyhow::Result<()> {
@@ -2827,12 +2853,16 @@ interface poll {
             "top-level package.wit must be written"
         );
         assert!(
-            root.join("dest/wit/deps/wasi-io/package.wit").is_file(),
+            root.join("dest/wit/deps/wasi-io-0.2.6/package.wit")
+                .is_file(),
             "transitive package must be materialized at wit/deps root"
         );
         assert_eq!(materialized.transitive_packages.len(), 1);
         assert_eq!(materialized.transitive_packages[0].name, "wasi:io");
-        assert_eq!(materialized.transitive_packages[0].path, "wit/deps/wasi-io");
+        assert_eq!(
+            materialized.transitive_packages[0].path,
+            "wit/deps/wasi-io-0.2.6"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
