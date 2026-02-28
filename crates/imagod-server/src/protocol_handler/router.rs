@@ -458,14 +458,12 @@ impl ProtocolHandler {
                 canceled_write,
             )
             .await;
-            if let Some(deploy_id) = deploy_id_for_cleanup.as_deref()
-                && let Err(err) = self.artifacts.purge_deploy_session(deploy_id).await
-            {
-                eprintln!(
-                    "artifact session purge failed deploy_id={} code={:?} stage={} message={}",
-                    deploy_id, err.code, err.stage, err.message
-                );
-            }
+            self.purge_deploy_session_if_needed(
+                deploy_id_for_cleanup.as_deref(),
+                CommandState::Canceled,
+                None,
+            )
+            .await;
             finalize_result?;
             return Ok(());
         }
@@ -537,14 +535,12 @@ impl ProtocolHandler {
                     succeeded_write,
                 )
                 .await;
-                if let Some(deploy_id) = deploy_id_for_cleanup.as_deref()
-                    && let Err(err) = self.artifacts.purge_deploy_session(deploy_id).await
-                {
-                    eprintln!(
-                        "artifact session purge failed deploy_id={} code={:?} stage={} message={}",
-                        deploy_id, err.code, err.stage, err.message
-                    );
-                }
+                self.purge_deploy_session_if_needed(
+                    deploy_id_for_cleanup.as_deref(),
+                    CommandState::Succeeded,
+                    None,
+                )
+                .await;
                 finalize_result?;
             }
             Err(err) => {
@@ -566,19 +562,37 @@ impl ProtocolHandler {
                     failed_write,
                 )
                 .await;
-                if let Some(deploy_id) = deploy_id_for_cleanup.as_deref()
-                    && let Err(err) = self.artifacts.purge_deploy_session(deploy_id).await
-                {
-                    eprintln!(
-                        "artifact session purge failed deploy_id={} code={:?} stage={} message={}",
-                        deploy_id, err.code, err.stage, err.message
-                    );
-                }
+                self.purge_deploy_session_if_needed(
+                    deploy_id_for_cleanup.as_deref(),
+                    CommandState::Failed,
+                    Some(&err),
+                )
+                .await;
                 finalize_result?;
             }
         }
 
         Ok(())
+    }
+
+    async fn purge_deploy_session_if_needed(
+        &self,
+        deploy_id: Option<&str>,
+        terminal_state: CommandState,
+        terminal_error: Option<&ImagodError>,
+    ) {
+        let Some(deploy_id) = deploy_id else {
+            return;
+        };
+        if !should_purge_deploy_session_after_terminal(terminal_state, terminal_error) {
+            return;
+        }
+        if let Err(err) = self.artifacts.purge_deploy_session(deploy_id).await {
+            eprintln!(
+                "artifact session purge failed deploy_id={} code={:?} stage={} message={}",
+                deploy_id, err.code, err.stage, err.message
+            );
+        }
     }
 }
 
@@ -647,6 +661,18 @@ pub(crate) fn validate_push_payload(payload: &ArtifactPushRequest) -> Result<(),
         .map_err(|e| bad_request("artifact.push", e.to_string()))
 }
 
+fn should_purge_deploy_session_after_terminal(
+    terminal_state: CommandState,
+    terminal_error: Option<&ImagodError>,
+) -> bool {
+    match terminal_state {
+        CommandState::Succeeded => true,
+        CommandState::Canceled => false,
+        CommandState::Failed => terminal_error.is_some_and(|err| !err.retryable),
+        _ => false,
+    }
+}
+
 fn resolve_logs_request_service_names(
     requested_name: Option<String>,
     loggable_names: Vec<String>,
@@ -691,7 +717,8 @@ mod tests {
     use super::{
         ensure_command_start_allowed, ensure_command_start_request_id_match,
         finalize_operation_after_terminal_event, protocol_compatibility_announcement,
-        resolve_logs_request_service_names, validate_push_payload,
+        resolve_logs_request_service_names, should_purge_deploy_session_after_terminal,
+        validate_push_payload,
     };
     use imago_protocol::ErrorCode;
 
@@ -781,6 +808,38 @@ mod tests {
         let err = validate_push_payload(&payload).expect_err("empty chunk should fail");
         assert_eq!(err.code, ErrorCode::BadRequest);
         assert_eq!(err.stage, "artifact.push");
+    }
+
+    #[test]
+    fn given_terminal_result__when_should_purge_deploy_session_after_terminal__then_policy_matches_contract()
+     {
+        assert!(
+            should_purge_deploy_session_after_terminal(CommandState::Succeeded, None),
+            "succeeded deploy should purge committed artifact session"
+        );
+        assert!(
+            !should_purge_deploy_session_after_terminal(CommandState::Canceled, None),
+            "canceled deploy should keep committed artifact session for retry"
+        );
+
+        let retryable_err =
+            imagod_common::ImagodError::new(ErrorCode::Internal, "orchestration", "retryable")
+                .with_retryable(true);
+        assert!(
+            !should_purge_deploy_session_after_terminal(CommandState::Failed, Some(&retryable_err)),
+            "retryable failure should keep committed artifact session for retry"
+        );
+
+        let non_retryable_err =
+            imagod_common::ImagodError::new(ErrorCode::Internal, "orchestration", "fatal")
+                .with_retryable(false);
+        assert!(
+            should_purge_deploy_session_after_terminal(
+                CommandState::Failed,
+                Some(&non_retryable_err)
+            ),
+            "non-retryable failure should purge committed artifact session"
+        );
     }
 
     #[tokio::test]

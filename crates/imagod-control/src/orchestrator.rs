@@ -480,6 +480,7 @@ impl Orchestrator {
         &self,
         payload: &DeployCommandPayload,
     ) -> Result<StagedRelease, ImagodError> {
+        let _deploy_pin_guard = self.artifact_store.pin_deploy_session(&payload.deploy_id);
         let committed = self
             .artifact_store
             .committed_artifact(&payload.deploy_id)

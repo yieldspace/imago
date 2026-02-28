@@ -1,9 +1,9 @@
 //! Artifact upload session management and commit verification logic.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::UNIX_EPOCH,
 };
 
@@ -88,6 +88,7 @@ impl CleanupPlan {
 pub struct ArtifactStore {
     root: Arc<PathBuf>,
     state: Arc<Mutex<StoreState>>,
+    pinned_deploy_ids: Arc<StdMutex<BTreeMap<String, usize>>>,
     session_store: InMemoryUploadSessionStore,
     chunk_sink: FileChunkSink,
     upload_session_ttl_secs: u64,
@@ -96,6 +97,27 @@ pub struct ArtifactStore {
     max_chunk_size: usize,
     max_inflight_chunks: usize,
     max_artifact_size_bytes: u64,
+}
+
+/// RAII guard for one pinned deploy session.
+pub struct DeploySessionPinGuard {
+    deploy_id: String,
+    pinned_deploy_ids: Arc<StdMutex<BTreeMap<String, usize>>>,
+}
+
+impl Drop for DeploySessionPinGuard {
+    fn drop(&mut self) {
+        let mut pinned = match self.pinned_deploy_ids.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(count) = pinned.get_mut(&self.deploy_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                pinned.remove(&self.deploy_id);
+            }
+        }
+    }
 }
 
 impl ArtifactStore {
@@ -117,6 +139,7 @@ impl ArtifactStore {
         Ok(Self {
             root: Arc::new(root),
             state: Arc::new(Mutex::new(StoreState::default())),
+            pinned_deploy_ids: Arc::new(StdMutex::new(BTreeMap::new())),
             session_store: InMemoryUploadSessionStore,
             chunk_sink: FileChunkSink,
             upload_session_ttl_secs: upload_session_ttl_secs.max(1),
@@ -128,12 +151,30 @@ impl ArtifactStore {
         })
     }
 
+    /// Pins one deploy session from orphan cleanup while the returned guard is alive.
+    pub fn pin_deploy_session(&self, deploy_id: &str) -> DeploySessionPinGuard {
+        let mut pinned = match self.pinned_deploy_ids.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let count = pinned.entry(deploy_id.to_string()).or_insert(0);
+        *count = count.saturating_add(1);
+        DeploySessionPinGuard {
+            deploy_id: deploy_id.to_string(),
+            pinned_deploy_ids: self.pinned_deploy_ids.clone(),
+        }
+    }
+
     fn collect_session_cleanup_locked(
         &self,
         state: &mut StoreState,
         now_epoch_secs: u64,
         keep_deploy_id: Option<&str>,
     ) -> CleanupPlan {
+        let mut protected_deploy_ids = self.pinned_deploy_ids_snapshot();
+        if let Some(deploy_id) = keep_deploy_id.filter(|id| !id.is_empty()) {
+            protected_deploy_ids.insert(deploy_id.to_string());
+        }
         let mut cleanup_plan = CleanupPlan::default();
         cleanup_plan.merge(self.session_store.collect_expired_sessions(
             state,
@@ -145,10 +186,18 @@ impl ArtifactStore {
             now_epoch_secs,
             self.committed_session_ttl_secs,
             self.max_committed_sessions,
-            keep_deploy_id,
+            &protected_deploy_ids,
         ));
         self.session_store.cleanup_orphan_idempotency(state);
         cleanup_plan
+    }
+
+    fn pinned_deploy_ids_snapshot(&self) -> HashSet<String> {
+        let pinned = match self.pinned_deploy_ids.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        pinned.keys().cloned().collect()
     }
 
     /// Handles `deploy.prepare` by creating or resuming an upload session.
@@ -892,6 +941,58 @@ mod tests {
             retained_count, 2,
             "max_committed_sessions=2 should keep exactly two committed sessions"
         );
+
+        cleanup_root(root);
+    }
+
+    #[tokio::test]
+    async fn pinned_deploy_session_is_excluded_from_orphan_cleanup() {
+        let (store, root) = new_store_with_session_limits(
+            "pinned_deploy_session_is_excluded_from_orphan_cleanup",
+            60,
+            600,
+            1,
+            TEST_CHUNK_SIZE,
+            TEST_MAX_INFLIGHT,
+            TEST_MAX_ARTIFACT_SIZE,
+        )
+        .await;
+        let pinned =
+            prepare_push_commit(&store, "svc-pinned", b"artifact-pinned", "idem-pinned").await;
+        let _pin_guard = store.pin_deploy_session(&pinned.deploy_id);
+        let unpinned = prepare_push_commit(
+            &store,
+            "svc-unpinned",
+            b"artifact-unpinned",
+            "idem-unpinned",
+        )
+        .await;
+
+        let _ = store
+            .prepare(DeployPrepareRequest {
+                name: "svc-trigger".to_string(),
+                app_type: "cli".to_string(),
+                target: BTreeMap::new(),
+                artifact_digest: hex::encode(Sha256::digest(b"artifact-trigger")),
+                artifact_size: b"artifact-trigger".len() as u64,
+                manifest_digest: hex::encode(Sha256::digest(b"manifest-trigger")),
+                idempotency_key: "idem-trigger".to_string(),
+                policy: BTreeMap::new(),
+            })
+            .await
+            .expect("prepare should trigger orphan cleanup");
+
+        let kept = store
+            .committed_artifact(&pinned.deploy_id)
+            .await
+            .expect("pinned deploy should be protected from orphan cleanup");
+        assert_eq!(kept.deploy_id, pinned.deploy_id);
+
+        let removed = store
+            .committed_artifact(&unpinned.deploy_id)
+            .await
+            .expect_err("unpinned deploy should be evicted by orphan cleanup");
+        assert_eq!(removed.code, ErrorCode::NotFound);
 
         cleanup_root(root);
     }

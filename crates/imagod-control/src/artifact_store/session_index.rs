@@ -72,15 +72,15 @@ impl InMemoryUploadSessionStore {
         now_epoch_secs: u64,
         committed_session_ttl_secs: u64,
         max_committed_sessions: usize,
-        keep_deploy_id: Option<&str>,
+        protected_deploy_ids: &HashSet<String>,
     ) -> CleanupPlan {
-        let keep_deploy_id = keep_deploy_id.filter(|id| !id.is_empty());
-        let keep_present = keep_deploy_id.is_some_and(|deploy_id| {
-            state
-                .sessions
-                .get(deploy_id)
-                .is_some_and(|session| session.committed)
-        });
+        let protected_committed_count = state
+            .sessions
+            .iter()
+            .filter(|(deploy_id, session)| {
+                session.committed && protected_deploy_ids.contains(deploy_id.as_str())
+            })
+            .count();
         let mut remove_ids = state
             .sessions
             .iter()
@@ -88,7 +88,7 @@ impl InMemoryUploadSessionStore {
                 if !session.committed
                     || session.inflight_writes > 0
                     || session.commit_in_progress
-                    || keep_deploy_id.is_some_and(|keep| keep == deploy_id.as_str())
+                    || protected_deploy_ids.contains(deploy_id.as_str())
                 {
                     None
                 } else {
@@ -109,7 +109,7 @@ impl InMemoryUploadSessionStore {
                 if !session.committed || session.inflight_writes > 0 || session.commit_in_progress {
                     return None;
                 }
-                if keep_deploy_id.is_some_and(|keep| keep == deploy_id.as_str()) {
+                if protected_deploy_ids.contains(deploy_id.as_str()) {
                     return None;
                 }
                 if removed_ids.contains(deploy_id) {
@@ -118,10 +118,11 @@ impl InMemoryUploadSessionStore {
                 Some((deploy_id.clone(), session.updated_at_epoch_secs))
             })
             .collect::<Vec<_>>();
-        let allowed_non_keep = max_committed_sessions.saturating_sub(usize::from(keep_present));
-        if survivors.len() > allowed_non_keep {
+        let allowed_non_protected =
+            max_committed_sessions.saturating_sub(protected_committed_count);
+        if survivors.len() > allowed_non_protected {
             survivors.sort_by_key(|(_, updated_at_epoch_secs)| *updated_at_epoch_secs);
-            let overflow = survivors.len() - allowed_non_keep;
+            let overflow = survivors.len() - allowed_non_protected;
             remove_ids.extend(
                 survivors
                     .into_iter()
