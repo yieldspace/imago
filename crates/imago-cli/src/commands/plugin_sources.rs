@@ -319,6 +319,7 @@ pub(crate) fn validate_sha256_hex(value: &str, field_name: &str) -> anyhow::Resu
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn materialize_wit_source(
     project_root: &Path,
     source_kind: SourceKind,
@@ -815,6 +816,7 @@ pub(crate) async fn resolve_component_sha256(
     Ok(digest)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn materialize_component_file(
     project_root: &Path,
     source_kind: SourceKind,
@@ -1738,13 +1740,10 @@ fn render_root_component_export_only_wit_package(
             WorldItem::Interface { id, .. } => {
                 if resolve.interfaces[*id].package == Some(top_package)
                     && let Some(interface_name) =
-                        resolve.interfaces[*id]
-                            .name
-                            .as_ref()
-                            .or_else(|| match export_key {
-                                wit_parser::WorldKey::Name(name) => Some(name),
-                                wit_parser::WorldKey::Interface(_) => None,
-                            })
+                        resolve.interfaces[*id].name.as_ref().or(match export_key {
+                            wit_parser::WorldKey::Name(name) => Some(name),
+                            wit_parser::WorldKey::Interface(_) => None,
+                        })
                 {
                     local_exported_interfaces.insert(interface_name.to_string());
                 }
