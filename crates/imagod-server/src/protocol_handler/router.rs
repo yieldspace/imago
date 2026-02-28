@@ -668,7 +668,8 @@ fn should_purge_deploy_session_after_terminal(
     match terminal_state {
         CommandState::Succeeded => true,
         CommandState::Canceled => false,
-        CommandState::Failed => terminal_error.is_some_and(|err| !err.retryable),
+        CommandState::Failed => terminal_error
+            .is_some_and(|err| err.code != imago_protocol::ErrorCode::Busy && !err.retryable),
         _ => false,
     }
 }
@@ -828,6 +829,17 @@ mod tests {
         assert!(
             !should_purge_deploy_session_after_terminal(CommandState::Failed, Some(&retryable_err)),
             "retryable failure should keep committed artifact session for retry"
+        );
+
+        let busy_non_retryable =
+            imagod_common::ImagodError::new(ErrorCode::Busy, "command.start", "busy")
+                .with_retryable(false);
+        assert!(
+            !should_purge_deploy_session_after_terminal(
+                CommandState::Failed,
+                Some(&busy_non_retryable)
+            ),
+            "busy failure should keep committed artifact session for retry"
         );
 
         let non_retryable_err =
