@@ -1840,7 +1840,7 @@ fn collect_component_world_foreign_packages(
     source_desc: &str,
 ) -> anyhow::Result<Vec<MaterializedComponentWorldForeignPackage>> {
     let world_package = component_world_package_id(resolve, world, source_desc)?;
-    let world_text = render_wit_package(resolve, world_package)?;
+    let world_text = render_component_world_only_package(resolve, world, world_package)?;
     let unresolved = UnresolvedPackageGroup::parse("component-world.wit", &world_text)
         .with_context(|| {
             format!("failed to parse component world package metadata from {source_desc}")
@@ -1889,7 +1889,7 @@ fn collect_component_world_foreign_packages(
             .name
             .as_ref()
             .map(ToString::to_string)
-            .or_else(|| match world_key {
+            .or(match world_key {
                 wit_parser::WorldKey::Name(name) => Some(name.to_string()),
                 wit_parser::WorldKey::Interface(_) => None,
             });
@@ -1911,6 +1911,19 @@ fn collect_component_world_foreign_packages(
             },
         )
         .collect())
+}
+
+fn render_component_world_only_package(
+    resolve: &wit_parser::Resolve,
+    world: wit_parser::WorldId,
+    world_package: wit_parser::PackageId,
+) -> anyhow::Result<String> {
+    let mut world_only_resolve = resolve.clone();
+    let world_name = world_only_resolve.worlds[world].name.clone();
+    let package = &mut world_only_resolve.packages[world_package];
+    package.worlds.clear();
+    package.worlds.insert(world_name, world);
+    render_wit_package(&world_only_resolve, world_package)
 }
 
 fn merge_component_world_foreign_package(
@@ -3018,6 +3031,10 @@ world component {
     import chikoski:name/name-provider@0.1.0;
     export wasi:clocks/wall-clock@0.2.6;
 }
+
+world diagnostics {
+    import chikoski:unused/unused-api@0.1.0;
+}
 "#,
         );
         write(
@@ -3057,10 +3074,9 @@ interface unused-api {
             .expect("WIT package dir should parse");
         let world = resolve.packages[top_package]
             .worlds
-            .iter()
-            .next()
-            .map(|(_, world)| *world)
-            .expect("top package should define a world");
+            .get("component")
+            .copied()
+            .expect("component world should exist");
 
         let foreign_packages =
             super::collect_component_world_foreign_packages(&resolve, world, "test source")
@@ -3081,7 +3097,7 @@ interface unused-api {
             foreign_packages
                 .iter()
                 .all(|package| package.name != "chikoski:unused"),
-            "unreferenced package must not be collected"
+            "packages referenced only by non-selected worlds must not be collected"
         );
 
         let _ = fs::remove_dir_all(root);
