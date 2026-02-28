@@ -42,6 +42,7 @@ const IMAGO_NODE_CONNECTION_USE: &str = "use imago:node/rpc@0.1.0.{connection};"
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedBindingWit {
     name: String,
+    wit_source_kind: plugin_sources::SourceKind,
     wit_source: String,
     wit_registry: Option<String>,
     wit_version: String,
@@ -281,11 +282,12 @@ fn validate_binding_dependency_collision(
     package_version: Option<&str>,
     dependency: &build::ProjectDependency,
 ) -> anyhow::Result<()> {
-    if dependency.wit.source != binding.wit_source
+    if dependency.wit.source_kind != binding.wit_source_kind
+        || dependency.wit.source != binding.wit_source
         || dependency.wit.registry != binding.wit_registry
     {
         return Err(anyhow!(
-            "binding '{}' points to package '{}' but dependency '{}' has different wit source/registry; align bindings.wit with dependencies.wit or remove one side",
+            "binding '{}' points to package '{}' but dependency '{}' has different wit source kind/source/registry; align bindings.wit with dependencies.wit or remove one side",
             binding.name,
             package_name,
             dependency.name
@@ -339,6 +341,14 @@ async fn materialize_binding_wit_source(
     Ok(())
 }
 
+fn source_kind_sort_key(kind: plugin_sources::SourceKind) -> u8 {
+    match kind {
+        plugin_sources::SourceKind::Wit => 0,
+        plugin_sources::SourceKind::Oci => 1,
+        plugin_sources::SourceKind::Path => 2,
+    }
+}
+
 async fn resolve_binding_wits(
     project_root: &Path,
     dependencies: &[build::ProjectDependency],
@@ -363,6 +373,7 @@ async fn resolve_binding_wits(
     let mut package_resolutions = BTreeMap::<
         String,
         (
+            plugin_sources::SourceKind,
             String,
             Option<String>,
             String,
@@ -411,6 +422,7 @@ async fn resolve_binding_wits(
             }
 
             if let Some((
+                existing_source_kind,
                 existing_source,
                 existing_registry,
                 existing_wit_version,
@@ -419,7 +431,8 @@ async fn resolve_binding_wits(
                 existing_interfaces,
             )) = package_resolutions.get(&package_name)
             {
-                if existing_source != &binding.wit_source
+                if existing_source_kind != &binding.wit_source_kind
+                    || existing_source != &binding.wit_source
                     || existing_registry != &binding.wit_registry
                     || existing_wit_version != &binding.wit_version
                     || existing_version != &package_version
@@ -432,6 +445,7 @@ async fn resolve_binding_wits(
                 }
                 return Ok(ResolvedBindingWit {
                     name: binding.name.clone(),
+                    wit_source_kind: binding.wit_source_kind,
                     wit_source: binding.wit_source.clone(),
                     wit_registry: binding.wit_registry.clone(),
                     wit_version: binding.wit_version.clone(),
@@ -477,6 +491,7 @@ async fn resolve_binding_wits(
                 package_resolutions.insert(
                     package_name.clone(),
                     (
+                        binding.wit_source_kind,
                         binding.wit_source.clone(),
                         binding.wit_registry.clone(),
                         binding.wit_version.clone(),
@@ -487,6 +502,7 @@ async fn resolve_binding_wits(
                 );
                 return Ok(ResolvedBindingWit {
                     name: binding.name.clone(),
+                    wit_source_kind: binding.wit_source_kind,
                     wit_source: binding.wit_source.clone(),
                     wit_registry: binding.wit_registry.clone(),
                     wit_version: binding.wit_version.clone(),
@@ -549,6 +565,7 @@ async fn resolve_binding_wits(
             package_resolutions.insert(
                 package_name.clone(),
                 (
+                    binding.wit_source_kind,
                     binding.wit_source.clone(),
                     binding.wit_registry.clone(),
                     binding.wit_version.clone(),
@@ -559,6 +576,7 @@ async fn resolve_binding_wits(
             );
             Ok(ResolvedBindingWit {
                 name: binding.name.clone(),
+                wit_source_kind: binding.wit_source_kind,
                 wit_source: binding.wit_source.clone(),
                 wit_registry: binding.wit_registry.clone(),
                 wit_version: binding.wit_version.clone(),
@@ -574,10 +592,11 @@ async fn resolve_binding_wits(
     }
 
     let mut deduped =
-        BTreeMap::<(String, String, Option<String>, String, String), ResolvedBindingWit>::new();
+        BTreeMap::<(String, u8, String, Option<String>, String, String), ResolvedBindingWit>::new();
     for binding in resolved_bindings {
         let key = (
             binding.name.clone(),
+            source_kind_sort_key(binding.wit_source_kind),
             binding.wit_source.clone(),
             binding.wit_registry.clone(),
             binding.wit_version.clone(),
@@ -4110,7 +4129,7 @@ type = "cli"
 [[dependencies]]
 version = "0.1.0"
 kind = "native"
-path = "file://registry/example"
+path = "registry/example"
 
 [target.default]
 remote = "127.0.0.1:4443"
@@ -4476,7 +4495,7 @@ interface greet { hello2: func() -> string; }
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.unwrap_or_default();
         assert!(
-            stderr.contains("different wit source/registry"),
+            stderr.contains("different wit source kind/source/registry"),
             "unexpected stderr: {stderr}"
         );
 

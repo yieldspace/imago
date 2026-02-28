@@ -292,14 +292,17 @@ pub(crate) async fn load_or_refresh_cache_entry(
                 cache_wit_target.display()
             )
         })?;
-    let wit_source_fingerprint =
-        dependency_cache::wit_source_fingerprint_if_exists(project_root, &dependency.wit.source)
-            .with_context(|| {
-                format!(
-                    "failed to fingerprint wit source for dependency '{}'",
-                    dependency.name
-                )
-            })?;
+    let wit_source_fingerprint = dependency_cache::wit_source_fingerprint_if_exists(
+        project_root,
+        &dependency.wit.source,
+        dependency.wit.source_kind,
+    )
+    .with_context(|| {
+        format!(
+            "failed to fingerprint wit source for dependency '{}'",
+            dependency.name
+        )
+    })?;
 
     let (component_source, component_registry, component_sha256, component_source_fingerprint) =
         match dependency.kind {
@@ -360,14 +363,20 @@ pub(crate) async fn load_or_refresh_cache_entry(
                         dependency.name
                     )
                 })?;
-                let source_fingerprint =
-                    dependency_cache::component_source_fingerprint_if_exists(project_root, &source)
-                        .with_context(|| {
-                            format!(
-                                "failed to fingerprint component source for dependency '{}'",
-                                dependency.name
-                            )
-                        })?;
+                let source_fingerprint = dependency_cache::component_source_fingerprint_if_exists(
+                    project_root,
+                    &source,
+                    match dependency.component.as_ref() {
+                        Some(component) => component.source_kind,
+                        None => dependency.wit.source_kind,
+                    },
+                )
+                .with_context(|| {
+                    format!(
+                        "failed to fingerprint component source for dependency '{}'",
+                        dependency.name
+                    )
+                })?;
                 (Some(source), registry, Some(sha256), source_fingerprint)
             }
         };

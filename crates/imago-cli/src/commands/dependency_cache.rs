@@ -340,16 +340,25 @@ pub(crate) fn is_cache_hit(
         return Ok(false);
     }
 
-    if let Some(actual_fingerprint) =
-        wit_source_fingerprint_if_exists(project_root, &dependency.wit.source)?
-        && entry.wit_source_fingerprint.as_deref() != Some(actual_fingerprint.as_str())
+    if let Some(actual_fingerprint) = wit_source_fingerprint_if_exists(
+        project_root,
+        &dependency.wit.source,
+        dependency.wit.source_kind,
+    )? && entry.wit_source_fingerprint.as_deref() != Some(actual_fingerprint.as_str())
     {
         return Ok(false);
     }
 
     if let Some(component_source) = entry.component_source.as_deref()
-        && let Some(actual_fingerprint) =
-            component_source_fingerprint_if_exists(project_root, component_source)?
+        && let Some(actual_fingerprint) = component_source_fingerprint_if_exists(
+            project_root,
+            component_source,
+            dependency
+                .component
+                .as_ref()
+                .map(|component| component.source_kind)
+                .unwrap_or(dependency.wit.source_kind),
+        )?
         && entry.component_source_fingerprint.as_deref() != Some(actual_fingerprint.as_str())
     {
         return Ok(false);
@@ -554,8 +563,9 @@ pub(crate) fn resolve_cached_component_path(
 pub(crate) fn wit_source_fingerprint_if_exists(
     project_root: &Path,
     source: &str,
+    source_kind: plugin_sources::SourceKind,
 ) -> anyhow::Result<Option<String>> {
-    let Some(path) = resolve_existing_file_source_path(project_root, source)? else {
+    let Some(path) = resolve_existing_file_source_path(project_root, source, source_kind)? else {
         return Ok(None);
     };
     compute_path_digest_hex(&path).map(Some)
@@ -564,15 +574,16 @@ pub(crate) fn wit_source_fingerprint_if_exists(
 pub(crate) fn component_source_fingerprint_if_exists(
     project_root: &Path,
     source: &str,
+    source_kind: plugin_sources::SourceKind,
 ) -> anyhow::Result<Option<String>> {
-    let Some(path) = resolve_existing_file_source_path(project_root, source)? else {
+    let Some(path) = resolve_existing_file_source_path(project_root, source, source_kind)? else {
         return Ok(None);
     };
     let metadata = fs::metadata(&path)
         .with_context(|| format!("failed to inspect component source {}", path.display()))?;
     if !metadata.is_file() {
         return Err(anyhow!(
-            "file:// component source must resolve to a file: {}",
+            "path component source must resolve to a file: {}",
             path.display()
         ));
     }
@@ -624,12 +635,19 @@ fn parse_prefixed_sha256<'a>(value: &'a str, field_name: &str) -> anyhow::Result
 fn resolve_existing_file_source_path(
     project_root: &Path,
     source: &str,
+    source_kind: plugin_sources::SourceKind,
 ) -> anyhow::Result<Option<PathBuf>> {
-    let Some(raw_path) = source.strip_prefix("file://") else {
+    if source_kind != plugin_sources::SourceKind::Path {
         return Ok(None);
-    };
+    }
+
+    if source.starts_with("http://") || source.starts_with("https://") {
+        return Ok(None);
+    }
+
+    let raw_path = source.strip_prefix("file://").unwrap_or(source);
     if raw_path.trim().is_empty() {
-        return Err(anyhow!("file:// source path must not be empty"));
+        return Err(anyhow!("path source must not be empty"));
     }
     let path = PathBuf::from(raw_path);
     let resolved = if path.is_absolute() {
@@ -642,16 +660,27 @@ fn resolve_existing_file_source_path(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => {
             return Err(anyhow!(
-                "failed to inspect file:// source {}: {err}",
+                "failed to inspect path source {}: {err}",
                 resolved.display()
             ));
         }
     };
     if !metadata.is_file() && !metadata.is_dir() {
         return Err(anyhow!(
-            "resolved file:// source is not a file or directory: {}",
+            "resolved path source is not a file or directory: {}",
             resolved.display()
         ));
+    }
+    if metadata.is_dir() {
+        let mut entries = fs::read_dir(&resolved).with_context(|| {
+            format!(
+                "failed to inspect path source directory {}",
+                resolved.display()
+            )
+        })?;
+        if entries.next().is_none() {
+            return Ok(None);
+        }
     }
     Ok(Some(resolved))
 }
