@@ -289,13 +289,16 @@ impl Orchestrator {
         &self,
         payload: &DeployCommandPayload,
     ) -> Result<DeploySummary, ImagodError> {
-        let mut service_name = self
-            .artifact_store
-            .service_name_for_deploy(&payload.deploy_id)
-            .await?;
-        let mut service_command_guard = Some(self.command_gate.acquire(&service_name)?);
-
-        let staged = self.prepare_release_staging(payload).await?;
+        let (mut service_name, mut service_command_guard, staged) = {
+            let _deploy_pin_guard = self.artifact_store.pin_deploy_session(&payload.deploy_id);
+            let service_name = self
+                .artifact_store
+                .service_name_for_deploy(&payload.deploy_id)
+                .await?;
+            let service_command_guard = Some(self.command_gate.acquire(&service_name)?);
+            let staged = self.prepare_release_staging(payload).await?;
+            (service_name, service_command_guard, staged)
+        };
         rebind_deploy_service_command_guard(
             &self.command_gate,
             &mut service_name,
@@ -480,7 +483,6 @@ impl Orchestrator {
         &self,
         payload: &DeployCommandPayload,
     ) -> Result<StagedRelease, ImagodError> {
-        let _deploy_pin_guard = self.artifact_store.pin_deploy_session(&payload.deploy_id);
         let committed = self
             .artifact_store
             .committed_artifact(&payload.deploy_id)
