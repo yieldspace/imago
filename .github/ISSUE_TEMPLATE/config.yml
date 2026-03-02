@@ -2,4 +2,13 @@ blank_issues_enabled: false
 contact_links:
   - name: Documentation
     url: https://github.com/yieldspace/imago/tree/main/docs
-    about: Read the guides and references before opening an issue.
+    about: Read guides and references before opening an issue.
+  - name: Contributing Guide
+    url: https://github.com/yieldspace/imago/blob/main/CONTRIBUTING.md
+    about: Review contribution workflow and required validation steps.
+  - name: Security Policy
+    url: https://github.com/yieldspace/imago/blob/main/SECURITY.md
+    about: For vulnerabilities, use private advisory reporting instead of public issues.
+  - name: Code of Conduct
+    url: https://github.com/yieldspace/imago/blob/main/CODE_OF_CONDUCT.md
+    about: Review community standards and reporting guidance.

@@ -4,6 +4,21 @@ title: "[feature] "
 labels:
   - enhancement
 body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Target component
+      description: Select the main area for this proposal.
+      options:
+        - imago-cli
+        - imagod
+        - plugin
+        - docs
+        - ci/workflow
+        - other
+    validations:
+      required: true
+
   - type: textarea
     id: problem
     attributes:
@@ -17,7 +32,7 @@ body:
     id: proposal
     attributes:
       label: Proposed solution
-      description: Describe the expected behavior or API shape.
+      description: Describe the expected behavior or interface shape.
       placeholder: Outline your preferred solution.
     validations:
       required: true
@@ -34,6 +49,13 @@ body:
       label: Resource impact
       description: Expected CPU, memory, or binary-size impact for embedded targets.
       placeholder: Note if impact is unknown.
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria (optional)
+      description: Describe completion criteria or observable outcomes for users/operators.
+      placeholder: "Example: Deploy command succeeds with <= X MiB peak RSS and updated docs."
 
   - type: checkboxes
     id: checklist
