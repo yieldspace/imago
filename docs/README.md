@@ -39,6 +39,7 @@ flowchart LR
 - release-plz workflow では `RELEASE_PLZ_TOKEN`（PAT）を利用します。
 - バイナリ添付は `imago-build.yml` が `release` イベントで既存Releaseへ追加します。
   - `imagod-v*` では `imagod-<target-triple>` と `imagod-<target-triple>.sha256` が添付されます。
+  - musl 系 target には `x86_64-unknown-linux-musl` も含まれます。
 - `scripts/install_imagod.sh` は上記 release asset を利用して `imagod` を自動導入します。
   - タグ解決優先順: `--tag` > `GITHUB_REF_NAME=imagod-v*` > API で最新 `imagod-v*`
   - libc 解決: `--libc auto|gnu|musl`（既定: `auto`）

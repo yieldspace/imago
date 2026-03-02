@@ -43,6 +43,7 @@ Defaults:
 
 - Source: GitHub Release assets (`imagod-<target-triple>` and `imagod-<target-triple>.sha256`)
 - Linux only
+- Includes both GNU and musl targets (including `x86_64-unknown-linux-musl`)
 - Install path: `/usr/local/bin` (root) or `~/.local/bin` (non-root)
 - Service setup: `systemd` first, then `init.d`, otherwise binary-only
 

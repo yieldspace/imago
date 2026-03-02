@@ -113,9 +113,9 @@ resolve_latest_imagod_tag() {
     tag="$(
       printf '%s' "${body}" \
         | tr -d '\n' \
-        | grep -o '"tag_name":"imagod-v[^"]*"' \
+        | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"imagod-v[^"]*"' \
         | head -n1 \
-        | sed -E 's/"tag_name":"([^"]+)"/\1/' \
+        | sed -E 's/"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)"/\1/' \
         || true
     )"
     if [[ -n "${tag}" ]]; then
@@ -124,7 +124,7 @@ resolve_latest_imagod_tag() {
     fi
 
     local release_count
-    release_count="$(printf '%s' "${body}" | grep -o '"tag_name":' | wc -l | tr -d ' ')"
+    release_count="$(printf '%s' "${body}" | grep -o '"tag_name"[[:space:]]*:' | wc -l | tr -d ' ')"
     if [[ "${release_count}" -lt "${per_page}" ]]; then
       break
     fi
@@ -237,6 +237,7 @@ resolve_target_triple() {
 
   case "${arch}:${libc}" in
     x86_64:gnu) printf 'x86_64-unknown-linux-gnu\n' ;;
+    x86_64:musl) printf 'x86_64-unknown-linux-musl\n' ;;
     aarch64:gnu) printf 'aarch64-unknown-linux-gnu\n' ;;
     armv7:gnu) printf 'armv7-unknown-linux-gnueabihf\n' ;;
     riscv64gc:gnu) printf 'riscv64gc-unknown-linux-gnu\n' ;;
