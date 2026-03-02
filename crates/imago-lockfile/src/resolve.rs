@@ -66,13 +66,6 @@ fn resolve_dependencies_with(
     path_verifier: &impl PathVerifier,
 ) -> anyhow::Result<BTreeMap<String, ResolvedDependency>> {
     ensure_supported_lock_version(lock.version)?;
-    verify_wit_packages_lock(
-        project_root,
-        expectations,
-        &lock.wit_packages,
-        digest_provider,
-        path_verifier,
-    )?;
 
     let mut by_name = BTreeMap::new();
     for entry in &lock.dependencies {
@@ -88,6 +81,7 @@ fn resolve_dependencies_with(
     }
 
     let mut seen_expectations = BTreeSet::new();
+    let mut resolved_dependency_names = BTreeSet::new();
     let mut resolved = BTreeMap::new();
     for expected in expectations {
         if !seen_expectations.insert(expected.name.clone()) {
@@ -96,12 +90,10 @@ fn resolve_dependencies_with(
                 expected.name
             ));
         }
-        let entry = by_name.get(&expected.name).ok_or_else(|| {
-            anyhow!(
-                "dependency '{}' is not resolved in imago.lock; run `imago deps sync`",
-                expected.name
-            )
-        })?;
+        let entry = match by_name.get(&expected.name) {
+            Some(entry) => entry,
+            None => find_lock_dependency_by_source(&by_name, expected)?,
+        };
         if entry.version != expected.version {
             return Err(anyhow!(
                 "dependency '{}@{}' does not match lock version '{}'; run `imago deps sync`",
@@ -203,10 +195,63 @@ fn resolve_dependencies_with(
             }
         }
 
+        if !resolved_dependency_names.insert(entry.name.clone()) {
+            return Err(anyhow!(
+                "dependency '{}' resolves to lock dependency '{}' that is already matched by another dependency; run `imago deps sync`",
+                expected.name,
+                entry.name
+            ));
+        }
         resolved.insert(expected.name.clone(), entry.clone());
     }
 
+    verify_wit_packages_lock(
+        project_root,
+        &resolved_dependency_names,
+        &lock.wit_packages,
+        digest_provider,
+        path_verifier,
+    )?;
+
     Ok(resolved)
+}
+
+fn find_lock_dependency_by_source<'a>(
+    by_name: &'a BTreeMap<String, ResolvedDependency>,
+    expected: &DependencyExpectation,
+) -> anyhow::Result<&'a ResolvedDependency> {
+    let matches = by_name
+        .values()
+        .filter(|entry| {
+            entry.version == expected.version
+                && entry.wit_source == expected.wit_source
+                && entry.wit_registry == expected.wit_registry
+                && match expected.component.as_ref() {
+                    Some(component_expected) => {
+                        entry.component_source.as_deref()
+                            == Some(component_expected.source.as_str())
+                            && entry.component_registry == component_expected.registry
+                    }
+                    None => true,
+                }
+        })
+        .collect::<Vec<_>>();
+
+    match matches.as_slice() {
+        [entry] => Ok(*entry),
+        [] => Err(anyhow!(
+            "dependency '{}' is not resolved in imago.lock (source='{}', version='{}'); run `imago deps sync`",
+            expected.name,
+            expected.wit_source,
+            expected.version
+        )),
+        _ => Err(anyhow!(
+            "dependency '{}' matches multiple lock dependencies by source='{}' and version='{}'; run `imago deps sync`",
+            expected.name,
+            expected.wit_source,
+            expected.version
+        )),
+    }
 }
 
 pub fn resolve_binding_wits(
@@ -240,16 +285,18 @@ fn resolve_binding_wits_with(
             &entry.name,
             &entry.wit_source,
             entry.wit_registry.as_deref(),
+            &entry.wit_version,
         );
         if by_key
             .insert(lock_key.clone(), ResolvedBindingWit::from(entry))
             .is_some()
         {
             return Err(anyhow!(
-                "imago.lock contains duplicate binding_wits entry (name='{}', source='{}', registry='{}'); run `imago deps sync`",
+                "imago.lock contains duplicate binding_wits entry (name='{}', source='{}', registry='{}', version='{}'); run `imago deps sync`",
                 lock_key.0,
                 lock_key.1,
-                lock_key.2.as_deref().unwrap_or("")
+                lock_key.2.as_deref().unwrap_or(""),
+                lock_key.3
             ));
         }
     }
@@ -261,22 +308,25 @@ fn resolve_binding_wits_with(
             &expected.name,
             &expected.wit_source,
             expected.wit_registry.as_deref(),
+            &expected.wit_version,
         );
         if !seen_expectations.insert(expected_key.clone()) {
             return Err(anyhow!(
-                "duplicate binding wit expectation (name='{}', source='{}', registry='{}')",
+                "duplicate binding wit expectation (name='{}', source='{}', registry='{}', version='{}')",
                 expected_key.0,
                 expected_key.1,
-                expected_key.2.as_deref().unwrap_or("")
+                expected_key.2.as_deref().unwrap_or(""),
+                expected_key.3
             ));
         }
 
         let entry = by_key.get(&expected_key).ok_or_else(|| {
             anyhow!(
-                "binding wit (name='{}', source='{}', registry='{}') is not resolved in imago.lock; run `imago deps sync`",
+                "binding wit (name='{}', source='{}', registry='{}', version='{}') is not resolved in imago.lock; run `imago deps sync`",
                 expected_key.0,
                 expected_key.1,
-                expected_key.2.as_deref().unwrap_or("")
+                expected_key.2.as_deref().unwrap_or(""),
+                expected_key.3
             )
         })?;
 
@@ -346,13 +396,22 @@ pub fn collect_wit_packages(
     for ((name, registry), versions) in grouped {
         let mut version_entries = Vec::with_capacity(versions.len());
         for ((requirement, version, digest, source, path), via_set) in versions {
+            let has_non_empty_via = via_set.iter().any(|via| !via.is_empty());
+            let via = if has_non_empty_via {
+                via_set
+                    .into_iter()
+                    .filter(|via| !via.is_empty())
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             version_entries.push(ImagoLockWitPackageVersion {
                 requirement,
                 version,
                 digest,
                 source,
                 path,
-                via: via_set.into_iter().collect(),
+                via,
             });
         }
         packages.push(ImagoLockWitPackage {
@@ -368,11 +427,13 @@ fn binding_wit_key(
     name: &str,
     wit_source: &str,
     wit_registry: Option<&str>,
-) -> (String, String, Option<String>) {
+    wit_version: &str,
+) -> (String, String, Option<String>, String) {
     (
         name.to_string(),
         wit_source.to_string(),
         wit_registry.map(ToString::to_string),
+        wit_version.to_string(),
     )
 }
 
@@ -419,7 +480,7 @@ fn ensure_supported_lock_version(version: u32) -> anyhow::Result<()> {
 
 fn verify_wit_packages_lock(
     project_root: &Path,
-    direct_dependencies: &[DependencyExpectation],
+    expected_dependency_names: &BTreeSet<String>,
     wit_packages: &[ImagoLockWitPackage],
     digest_provider: &impl DigestProvider,
     path_verifier: &impl PathVerifier,
@@ -427,11 +488,6 @@ fn verify_wit_packages_lock(
     if wit_packages.is_empty() {
         return Ok(());
     }
-
-    let direct_dependency_names = direct_dependencies
-        .iter()
-        .map(|dep| dep.name.clone())
-        .collect::<BTreeSet<_>>();
 
     for wit_package in wit_packages {
         if wit_package.name.trim().is_empty() {
@@ -459,15 +515,8 @@ fn verify_wit_packages_lock(
                     wit_package.name
                 ));
             }
-            if version_entry.via.is_empty() {
-                return Err(anyhow!(
-                    "imago.lock.wit_packages['{}'].versions[].via must not be empty; run `imago deps sync`",
-                    wit_package.name
-                ));
-            }
-
             for via in &version_entry.via {
-                if !direct_dependency_names.contains(via) {
+                if !expected_dependency_names.contains(via) {
                     return Err(anyhow!(
                         "imago.lock.wit_packages['{}'].versions[].via contains unknown dependency '{}'; run `imago deps sync`",
                         wit_package.name,
@@ -484,22 +533,11 @@ fn verify_wit_packages_lock(
                         wit_package.name
                     ),
                 )?;
-                if source.starts_with("warg://") {
-                    let lock_version = version_entry.version.as_deref().ok_or_else(|| {
-                        anyhow!(
-                            "imago.lock.wit_packages['{}'].versions[].version is required for warg source; run `imago deps sync`",
-                            wit_package.name
-                        )
-                    })?;
-                    let expected_source = format!("warg://{}@{lock_version}", wit_package.name);
-                    if source != expected_source {
-                        return Err(anyhow!(
-                            "imago.lock.wit_packages['{}'].versions[].source mismatch (lock='{}', expected='{}'); run `imago deps sync`",
-                            wit_package.name,
-                            source,
-                            expected_source
-                        ));
-                    }
+                if source.contains('@') {
+                    return Err(anyhow!(
+                        "imago.lock.wit_packages['{}'].versions[].source must not include '@version'; run `imago deps sync`",
+                        wit_package.name
+                    ));
                 }
             }
 

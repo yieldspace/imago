@@ -19,11 +19,15 @@ const MISSING_CACHE_HINT: &str = "run `imago deps sync`";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct DependencyCacheEntry {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_package_name: Option<String>,
     pub version: String,
     pub kind: String,
     pub wit_source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wit_registry: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wit_sha256: Option<String>,
     pub wit_path: String,
     pub wit_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -36,6 +40,10 @@ pub(crate) struct DependencyCacheEntry {
     pub component_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component_source_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub component_world_foreign_packages: Vec<DependencyCacheComponentWorldForeignPackage>,
+    #[serde(default)]
+    pub component_world_foreign_packages_recorded: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transitive_packages: Vec<DependencyCacheTransitivePackage>,
 }
@@ -52,6 +60,17 @@ pub(crate) struct DependencyCacheTransitivePackage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct DependencyCacheComponentWorldForeignPackage {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
+    #[serde(default)]
+    pub interfaces_recorded: bool,
 }
 
 impl DependencyCacheEntry {
@@ -95,7 +114,14 @@ impl DependencyCacheEntry {
                 dependency.wit.registry.as_deref().unwrap_or("")
             ));
         }
-        let expected_wit_path = dependency_wit_path(&dependency.name);
+        if self.wit_sha256 != dependency.wit.sha256 {
+            return Err(anyhow!(
+                "cache wit sha256 mismatch (cache='{}', config='{}')",
+                self.wit_sha256.as_deref().unwrap_or(""),
+                dependency.wit.sha256.as_deref().unwrap_or("")
+            ));
+        }
+        let expected_wit_path = dependency_wit_path(&dependency.name, &dependency.version);
         if self.wit_path != expected_wit_path {
             return Err(anyhow!(
                 "cache wit path mismatch (cache='{}', expected='{}')",
@@ -114,12 +140,9 @@ impl DependencyCacheEntry {
                 ));
             }
             parse_prefixed_sha256(&transitive.digest, "transitive_packages[].digest")?;
-            if dependency.wit.source.starts_with("warg://")
+            if dependency.wit.source_kind == plugin_sources::SourceKind::Wit
                 && transitive.version.is_some()
-                && transitive
-                    .source
-                    .as_deref()
-                    .is_some_and(|source| source.starts_with("warg://"))
+                && transitive.registry.is_some()
             {
                 let expected_registry =
                     plugin_sources::resolve_warg_registry_for_package_with_fallback(
@@ -142,6 +165,32 @@ impl DependencyCacheEntry {
         match dependency.kind {
             ManifestDependencyKind::Native => {}
             ManifestDependencyKind::Wasm => {
+                if !self.component_world_foreign_packages_recorded {
+                    return Err(anyhow!(
+                        "cache component world foreign package metadata is missing for wasm dependency"
+                    ));
+                }
+                for package in &self.component_world_foreign_packages {
+                    if package.name.trim().is_empty() {
+                        return Err(anyhow!(
+                            "cache component world foreign package name must not be empty"
+                        ));
+                    }
+                    if !package.interfaces_recorded {
+                        return Err(anyhow!(
+                            "cache component world foreign package interfaces are missing for '{}'",
+                            package.name
+                        ));
+                    }
+                    for interface_name in &package.interfaces {
+                        if interface_name.trim().is_empty() {
+                            return Err(anyhow!(
+                                "cache component world foreign package interface name must not be empty for '{}'",
+                                package.name
+                            ));
+                        }
+                    }
+                }
                 let cache_sha = self.component_sha256.as_ref().ok_or_else(|| {
                     anyhow!("cache component sha256 is missing for wasm dependency")
                 })?;
@@ -183,14 +232,17 @@ impl DependencyCacheEntry {
     }
 }
 
-pub(crate) fn dependency_wit_target_rel(dependency_name: &str) -> PathBuf {
+pub(crate) fn dependency_wit_target_rel(dependency_name: &str, version: &str) -> PathBuf {
     PathBuf::from("wit")
         .join("deps")
-        .join(plugin_sources::sanitize_wit_deps_name(dependency_name))
+        .join(plugin_sources::wit_deps_dir_name(
+            dependency_name,
+            Some(version),
+        ))
 }
 
-pub(crate) fn dependency_wit_path(dependency_name: &str) -> String {
-    plugin_sources::path_to_manifest_string(&dependency_wit_target_rel(dependency_name))
+pub(crate) fn dependency_wit_path(dependency_name: &str, version: &str) -> String {
+    plugin_sources::path_to_manifest_string(&dependency_wit_target_rel(dependency_name, version))
 }
 
 pub(crate) fn cache_entry_root(project_root: &Path, dependency_name: &str) -> PathBuf {
@@ -273,6 +325,11 @@ pub(crate) fn is_cache_hit(
         Ok(entry) => entry,
         Err(_) => return Ok(false),
     };
+    if dependency.wit.source_kind == plugin_sources::SourceKind::Path
+        && entry.resolved_package_name.is_none()
+    {
+        return Ok(false);
+    }
     if entry
         .validate_for_dependency(dependency, namespace_registries)
         .is_err()
@@ -283,16 +340,25 @@ pub(crate) fn is_cache_hit(
         return Ok(false);
     }
 
-    if let Some(actual_fingerprint) =
-        wit_source_fingerprint_if_exists(project_root, &dependency.wit.source)?
-        && entry.wit_source_fingerprint.as_deref() != Some(actual_fingerprint.as_str())
+    if let Some(actual_fingerprint) = wit_source_fingerprint_if_exists(
+        project_root,
+        &dependency.wit.source,
+        dependency.wit.source_kind,
+    )? && entry.wit_source_fingerprint.as_deref() != Some(actual_fingerprint.as_str())
     {
         return Ok(false);
     }
 
     if let Some(component_source) = entry.component_source.as_deref()
-        && let Some(actual_fingerprint) =
-            component_source_fingerprint_if_exists(project_root, component_source)?
+        && let Some(actual_fingerprint) = component_source_fingerprint_if_exists(
+            project_root,
+            component_source,
+            dependency
+                .component
+                .as_ref()
+                .map(|component| component.source_kind)
+                .unwrap_or(dependency.wit.source_kind),
+        )?
         && entry.component_source_fingerprint.as_deref() != Some(actual_fingerprint.as_str())
     {
         return Ok(false);
@@ -306,14 +372,8 @@ pub(crate) fn hydrate_project_wit_deps(
     dependencies: &[ProjectDependency],
     namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
 ) -> anyhow::Result<()> {
-    let wit_root = project_root.join("wit").join("deps");
-    if wit_root.exists() {
-        fs::remove_dir_all(&wit_root)
-            .with_context(|| format!("failed to reset wit root: {}", wit_root.display()))?;
-    }
-    fs::create_dir_all(&wit_root)
-        .with_context(|| format!("failed to create wit root: {}", wit_root.display()))?;
-
+    let mut hydrated_targets = Vec::with_capacity(dependencies.len());
+    let mut entries = Vec::with_capacity(dependencies.len());
     for dependency in dependencies {
         let entry = load_entry(project_root, &dependency.name)?;
         entry
@@ -335,16 +395,34 @@ pub(crate) fn hydrate_project_wit_deps(
                 MISSING_CACHE_HINT
             ));
         }
+        let hydrated_dependency_name = entry
+            .resolved_package_name
+            .as_deref()
+            .unwrap_or(dependency.name.as_str());
+        let hydrated_wit_path = dependency_wit_path(hydrated_dependency_name, &dependency.version);
+        hydrated_targets.push((dependency.name.clone(), PathBuf::from(&hydrated_wit_path)));
+        entries.push((dependency.name.clone(), entry, hydrated_wit_path));
+    }
+    validate_hydrated_wit_output_path_collisions(&hydrated_targets)?;
 
-        let entry_root = cache_entry_root(project_root, &dependency.name);
+    let wit_root = project_root.join("wit").join("deps");
+    if wit_root.exists() {
+        fs::remove_dir_all(&wit_root)
+            .with_context(|| format!("failed to reset wit root: {}", wit_root.display()))?;
+    }
+    fs::create_dir_all(&wit_root)
+        .with_context(|| format!("failed to create wit root: {}", wit_root.display()))?;
+
+    for (dependency_name, entry, hydrated_wit_path) in entries {
+        let entry_root = cache_entry_root(project_root, &dependency_name);
         copy_tree_with_conflict_check(
             &entry_root.join(&entry.wit_path),
-            &project_root.join(&entry.wit_path),
+            &project_root.join(&hydrated_wit_path),
         )
         .with_context(|| {
             format!(
                 "failed to hydrate direct wit package for dependency '{}'",
-                dependency.name
+                dependency_name
             )
         })?;
 
@@ -356,7 +434,7 @@ pub(crate) fn hydrate_project_wit_deps(
             .with_context(|| {
                 format!(
                     "failed to hydrate transitive wit package '{}' for dependency '{}'",
-                    transitive.name, dependency.name
+                    transitive.name, dependency_name
                 )
             })?;
         }
@@ -370,6 +448,8 @@ pub(crate) fn verify_project_dependency_cache(
     dependencies: &[ProjectDependency],
     namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
 ) -> anyhow::Result<()> {
+    let mut hydrated_targets = Vec::with_capacity(dependencies.len());
+    let mut entries = Vec::with_capacity(dependencies.len());
     for dependency in dependencies {
         let entry = load_entry(project_root, &dependency.name)?;
         entry
@@ -382,14 +462,53 @@ pub(crate) fn verify_project_dependency_cache(
                     MISSING_CACHE_HINT
                 )
             })?;
+        let hydrated_dependency_name = entry
+            .resolved_package_name
+            .as_deref()
+            .unwrap_or(dependency.name.as_str());
+        let hydrated_wit_path = dependency_wit_path(hydrated_dependency_name, &dependency.version);
+        hydrated_targets.push((dependency.name.clone(), PathBuf::from(&hydrated_wit_path)));
+        entries.push((dependency.name.clone(), entry));
+    }
+    validate_hydrated_wit_output_path_collisions(&hydrated_targets)?;
+    for (dependency_name, entry) in entries {
         if !entry_files_are_complete(project_root, &entry)? {
             return Err(anyhow!(
                 "dependency '{}' cache is stale under {}; {}",
-                dependency.name,
+                dependency_name,
                 CACHE_ROOT_REL,
                 MISSING_CACHE_HINT
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_hydrated_wit_output_path_collisions(
+    hydrated_targets: &[(String, PathBuf)],
+) -> anyhow::Result<()> {
+    let mut seen_targets: Vec<(String, PathBuf)> = Vec::with_capacity(hydrated_targets.len());
+    for (dependency_name, target_rel) in hydrated_targets {
+        for (existing_dependency, existing_target) in &seen_targets {
+            if existing_target == target_rel {
+                return Err(anyhow!(
+                    "dependencies '{}' and '{}' both resolve to '{}'; dependency WIT output paths must be unique",
+                    existing_dependency,
+                    dependency_name,
+                    plugin_sources::path_to_manifest_string(target_rel)
+                ));
+            }
+            if target_rel.starts_with(existing_target) || existing_target.starts_with(target_rel) {
+                return Err(anyhow!(
+                    "dependencies '{}' and '{}' have overlapping WIT output paths ('{}' and '{}'); dependency WIT output paths must be disjoint",
+                    existing_dependency,
+                    dependency_name,
+                    plugin_sources::path_to_manifest_string(existing_target),
+                    plugin_sources::path_to_manifest_string(target_rel)
+                ));
+            }
+        }
+        seen_targets.push((dependency_name.clone(), target_rel.clone()));
     }
     Ok(())
 }
@@ -444,8 +563,9 @@ pub(crate) fn resolve_cached_component_path(
 pub(crate) fn wit_source_fingerprint_if_exists(
     project_root: &Path,
     source: &str,
+    source_kind: plugin_sources::SourceKind,
 ) -> anyhow::Result<Option<String>> {
-    let Some(path) = resolve_existing_file_source_path(project_root, source)? else {
+    let Some(path) = resolve_existing_file_source_path(project_root, source, source_kind)? else {
         return Ok(None);
     };
     compute_path_digest_hex(&path).map(Some)
@@ -454,15 +574,16 @@ pub(crate) fn wit_source_fingerprint_if_exists(
 pub(crate) fn component_source_fingerprint_if_exists(
     project_root: &Path,
     source: &str,
+    source_kind: plugin_sources::SourceKind,
 ) -> anyhow::Result<Option<String>> {
-    let Some(path) = resolve_existing_file_source_path(project_root, source)? else {
+    let Some(path) = resolve_existing_file_source_path(project_root, source, source_kind)? else {
         return Ok(None);
     };
     let metadata = fs::metadata(&path)
         .with_context(|| format!("failed to inspect component source {}", path.display()))?;
     if !metadata.is_file() {
         return Err(anyhow!(
-            "file:// component source must resolve to a file: {}",
+            "path component source must resolve to a file: {}",
             path.display()
         ));
     }
@@ -514,12 +635,19 @@ fn parse_prefixed_sha256<'a>(value: &'a str, field_name: &str) -> anyhow::Result
 fn resolve_existing_file_source_path(
     project_root: &Path,
     source: &str,
+    source_kind: plugin_sources::SourceKind,
 ) -> anyhow::Result<Option<PathBuf>> {
-    let Some(raw_path) = source.strip_prefix("file://") else {
+    if source_kind != plugin_sources::SourceKind::Path {
         return Ok(None);
-    };
+    }
+
+    if source.starts_with("http://") || source.starts_with("https://") {
+        return Ok(None);
+    }
+
+    let raw_path = source.strip_prefix("file://").unwrap_or(source);
     if raw_path.trim().is_empty() {
-        return Err(anyhow!("file:// source path must not be empty"));
+        return Err(anyhow!("path source must not be empty"));
     }
     let path = PathBuf::from(raw_path);
     let resolved = if path.is_absolute() {
@@ -532,14 +660,14 @@ fn resolve_existing_file_source_path(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => {
             return Err(anyhow!(
-                "failed to inspect file:// source {}: {err}",
+                "failed to inspect path source {}: {err}",
                 resolved.display()
             ));
         }
     };
     if !metadata.is_file() && !metadata.is_dir() {
         return Err(anyhow!(
-            "resolved file:// source is not a file or directory: {}",
+            "resolved path source is not a file or directory: {}",
             resolved.display()
         ));
     }

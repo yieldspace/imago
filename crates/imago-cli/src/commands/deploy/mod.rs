@@ -2480,7 +2480,6 @@ mod tests {
                     component_source: Some("file://registry/example-component.wasm".to_string()),
                     component_registry: None,
                     component_sha256: Some(component_sha.clone()),
-                    resolved_at: "0".to_string(),
                 }],
                 binding_wits: vec![],
                 wit_packages: vec![],
@@ -2489,10 +2488,12 @@ mod tests {
 
         let cache_entry = dependency_cache::DependencyCacheEntry {
             name: "yieldspace:plugin/example".to_string(),
+            resolved_package_name: None,
             version: "0.1.0".to_string(),
             kind: "wasm".to_string(),
             wit_source: "file://registry/example.wit".to_string(),
             wit_registry: None,
+            wit_sha256: None,
             wit_path: "wit/deps/yieldspace-plugin/example".to_string(),
             wit_digest: "deadbeef".to_string(),
             wit_source_fingerprint: None,
@@ -2500,6 +2501,8 @@ mod tests {
             component_registry: None,
             component_sha256: Some(component_sha.clone()),
             component_source_fingerprint: None,
+            component_world_foreign_packages: vec![],
+            component_world_foreign_packages_recorded: true,
             transitive_packages: vec![],
         };
         dependency_cache::save_entry(&root, &cache_entry)
@@ -2553,7 +2556,6 @@ mod tests {
                     component_source: Some("file://registry/example-component.wasm".to_string()),
                     component_registry: None,
                     component_sha256: Some(component_sha.clone()),
-                    resolved_at: "0".to_string(),
                 }],
                 binding_wits: vec![],
                 wit_packages: vec![],

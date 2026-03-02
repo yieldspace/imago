@@ -36,6 +36,7 @@ time = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "net", "io-util", "time", "signal"] }
 toml = { workspace = true }
 url = { workspace = true }
+ureq = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 wasm-pkg-client = { workspace = true }
 wasm-pkg-common = { workspace = true }

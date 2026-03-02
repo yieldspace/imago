@@ -1,0 +1,10 @@
+package acme:clock@0.1.0;
+
+interface api {
+    use imago:node/rpc@0.1.0.{connection};
+  now: func(connection: borrow<connection>) -> result<string, string>;
+}
+
+world rpc-greeter {
+  export api;
+}

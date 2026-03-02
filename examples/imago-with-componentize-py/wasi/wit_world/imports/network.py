@@ -11,6 +11,11 @@ from componentize_py_types import Result, Ok, Err, Some
 
 
 class Network:
+    """
+    An opaque resource that represents access to (a subset of) the network.
+    This enables context-based security for networking.
+    There is no need for this to map 1:1 to a physical network interface.
+    """
     
     def __enter__(self) -> Self:
         """Returns self"""
@@ -24,6 +29,20 @@ class Network:
 
 
 class ErrorCode(Enum):
+    """
+    Error codes.
+    
+    In theory, every API can return any error code.
+    In practice, API's typically only return the errors documented per API
+    combined with a couple of errors that are always possible:
+    - `unknown`
+    - `access-denied`
+    - `not-supported`
+    - `out-of-memory`
+    - `concurrency-conflict`
+    
+    See each individual API for what the POSIX equivalents are. They sometimes differ per API.
+    """
     UNKNOWN = 0
     ACCESS_DENIED = 1
     NOT_SUPPORTED = 2

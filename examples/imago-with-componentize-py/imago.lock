@@ -1,2 +1,74 @@
 version = 1
 dependencies = []
+
+[[wit_packages]]
+name = "wasi:cli"
+registry = "wasi.dev"
+
+[[wit_packages.versions]]
+requirement = "=0.2.0"
+version = "0.2.0"
+digest = "sha256:7d92936c575fe3532ce8f294990c7978fc7634e344f5d451a37e9c569c114a30"
+source = "wasi:cli"
+path = "wit/deps/wasi-cli-0.2.0"
+via = []
+
+[[wit_packages]]
+name = "wasi:clocks"
+registry = "wasi.dev"
+
+[[wit_packages.versions]]
+requirement = "=0.2.0"
+version = "0.2.0"
+digest = "sha256:7f9021b14ffeb982c2747b252bc2d611c5a181c4d783edd2d5beba21928df77f"
+source = "wasi:clocks"
+path = "wit/deps/wasi-clocks-0.2.0"
+via = []
+
+[[wit_packages]]
+name = "wasi:filesystem"
+registry = "wasi.dev"
+
+[[wit_packages.versions]]
+requirement = "=0.2.0"
+version = "0.2.0"
+digest = "sha256:fdba56d19f54ceaaf67ea20ad2a6c875539f78066174d01e643153fe16c74d6d"
+source = "wasi:filesystem"
+path = "wit/deps/wasi-filesystem-0.2.0"
+via = []
+
+[[wit_packages]]
+name = "wasi:io"
+registry = "wasi.dev"
+
+[[wit_packages.versions]]
+requirement = "=0.2.0"
+version = "0.2.0"
+digest = "sha256:5f203ed2aaa9da8dc7b9732c9c5e7776222219e471dda92568ec89087e3f229d"
+source = "wasi:io"
+path = "wit/deps/wasi-io-0.2.0"
+via = []
+
+[[wit_packages]]
+name = "wasi:random"
+registry = "wasi.dev"
+
+[[wit_packages.versions]]
+requirement = "=0.2.0"
+version = "0.2.0"
+digest = "sha256:0e3b8c04dbe72b6769950d82676039ef6a57cc6b73d18983847bc15ef2dec878"
+source = "wasi:random"
+path = "wit/deps/wasi-random-0.2.0"
+via = []
+
+[[wit_packages]]
+name = "wasi:sockets"
+registry = "wasi.dev"
+
+[[wit_packages.versions]]
+requirement = "=0.2.0"
+version = "0.2.0"
+digest = "sha256:cda0059fe84e1101a87c053e23197a32bd6d5b6993e7ca1a25480155f99645fd"
+source = "wasi:sockets"
+path = "wit/deps/wasi-sockets-0.2.0"
+via = []
