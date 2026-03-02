@@ -1712,7 +1712,8 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
         &dependency_expectations,
         &binding_expectations,
         Some(&namespace_registries),
-    );
+    )
+    .context("failed to build requested lock snapshot; duplicate dependency or binding requests detected")?;
     let request_id_by_dependency_name = dependencies
         .iter()
         .zip(dependency_expectations.iter())
@@ -5213,5 +5214,71 @@ interface streams {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_duplicate_dependency_request_ids_during_requested_snapshot() {
+        let root = new_temp_dir("duplicate-dependency-request-id");
+        write(
+            &root.join("imago.toml"),
+            br#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+version = "0.1.0"
+kind = "native"
+path = "registry/example"
+
+[[dependencies]]
+version = "0.1.0"
+kind = "native"
+path = "registry/example"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(result.exit_code, 2);
+        let stderr = result.stderr.unwrap_or_default();
+        assert!(
+            stderr.contains("failed to build requested lock snapshot"),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("duplicate dependency request id"),
+            "unexpected stderr: {stderr}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn requested_snapshot_error_mentions_duplicate_binding_request_id() {
+        let binding = imago_lockfile::BindingWitExpectation {
+            name: "svc-target".to_string(),
+            source_kind: LockSourceKind::Path,
+            source: "registry/acme-bindings".to_string(),
+            registry: None,
+            version: "0.1.0".to_string(),
+            sha256: None,
+        };
+        let err = build_requested_snapshot(&[], &[binding.clone(), binding], None)
+            .context(
+                "failed to build requested lock snapshot; duplicate dependency or binding requests detected",
+            )
+            .expect_err("duplicate binding request ids must fail");
+        let err_text = format!("{err:#}");
+        assert!(
+            err_text.contains("failed to build requested lock snapshot"),
+            "unexpected error: {err_text}"
+        );
+        assert!(
+            err_text.contains("duplicate binding request id"),
+            "unexpected error: {err_text}"
+        );
     }
 }

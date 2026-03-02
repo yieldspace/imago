@@ -50,6 +50,19 @@ mod tests {
         root
     }
 
+    fn build_requested_snapshot(
+        dependency_expectations: &[DependencyExpectation],
+        binding_expectations: &[BindingWitExpectation],
+        namespace_registries: Option<&BTreeMap<String, String>>,
+    ) -> ImagoLockRequested {
+        super::build_requested_snapshot(
+            dependency_expectations,
+            binding_expectations,
+            namespace_registries,
+        )
+        .expect("requested snapshot should build")
+    }
+
     fn sample_dependency_expectation(name: &str) -> DependencyExpectation {
         DependencyExpectation {
             name: name.to_string(),
@@ -90,14 +103,12 @@ mod tests {
         let mut ns = BTreeMap::new();
         ns.insert("wasi".to_string(), "wasi.dev".to_string());
 
-        let deps_a = vec![
-            sample_dependency_expectation("a"),
-            sample_dependency_expectation("b"),
-        ];
-        let deps_b = vec![
-            sample_dependency_expectation("b"),
-            sample_dependency_expectation("a"),
-        ];
+        let mut dep_a = sample_dependency_expectation("a");
+        dep_a.source = "demo:alpha".to_string();
+        let mut dep_b = sample_dependency_expectation("b");
+        dep_b.source = "demo:beta".to_string();
+        let deps_a = vec![dep_a.clone(), dep_b.clone()];
+        let deps_b = vec![dep_b, dep_a];
 
         let requested_a = build_requested_snapshot(&deps_a, &[], Some(&ns));
         let requested_b = build_requested_snapshot(&deps_b, &[], Some(&ns));
@@ -141,6 +152,44 @@ mod tests {
         assert_ne!(
             compute_dependency_request_id(&dependency_a),
             compute_dependency_request_id(&dependency_b)
+        );
+    }
+
+    #[test]
+    fn requested_snapshot_rejects_duplicate_dependency_request_ids() {
+        let dep_a = sample_dependency_expectation("dep-a");
+        let dep_b = sample_dependency_expectation("dep-b");
+        let err = super::build_requested_snapshot(&[dep_a, dep_b], &[], None)
+            .expect_err("duplicate dependency request ids must fail");
+        assert!(
+            err.to_string().contains("duplicate dependency request id"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn requested_snapshot_rejects_duplicate_binding_request_ids() {
+        let binding_a = BindingWitExpectation {
+            name: "svc-b".to_string(),
+            source_kind: LockSourceKind::Path,
+            source: "registry/acme-clock".to_string(),
+            registry: None,
+            version: "0.1.0".to_string(),
+            sha256: None,
+        };
+        let binding_b = BindingWitExpectation {
+            name: "svc-b".to_string(),
+            source_kind: LockSourceKind::Path,
+            source: "registry/acme-clock".to_string(),
+            registry: None,
+            version: "0.1.0".to_string(),
+            sha256: None,
+        };
+        let err = super::build_requested_snapshot(&[], &[binding_a, binding_b], None)
+            .expect_err("duplicate binding request ids must fail");
+        assert!(
+            err.to_string().contains("duplicate binding request id"),
+            "unexpected error: {err:#}"
         );
     }
 
@@ -567,6 +616,37 @@ wit_path = "wit/deps/demo"
 
         let err = load_from_project_root(&root).expect_err("old shape should fail parse");
         assert!(err.to_string().contains("failed to parse imago.lock"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_from_project_root_rejects_unknown_top_level_field() {
+        let root = new_temp_dir("unknown-top-level");
+        write(
+            &root.join("imago.lock"),
+            br#"
+version = 1
+unknown = "unexpected"
+
+[requested]
+fingerprint = "f"
+dependencies = []
+bindings = []
+
+[resolved]
+dependencies = []
+bindings = []
+packages = []
+package_edges = []
+"#,
+        );
+        let err =
+            load_from_project_root(&root).expect_err("unknown top-level fields must be rejected");
+        assert!(
+            err.to_string().contains("failed to parse imago.lock"),
+            "unexpected error: {err:#}"
+        );
 
         let _ = fs::remove_dir_all(root);
     }

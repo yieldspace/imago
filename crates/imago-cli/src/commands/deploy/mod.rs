@@ -2356,7 +2356,8 @@ remote = "127.0.0.1:4443"
             }),
         };
         let request_id = compute_dependency_request_id(&expectation);
-        let requested = build_requested_snapshot(&[expectation], &[], None);
+        let requested = build_requested_snapshot(&[expectation], &[], None)
+            .expect("requested snapshot should be built");
         ImagoLock {
             version: IMAGO_LOCK_VERSION,
             requested,

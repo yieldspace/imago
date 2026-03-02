@@ -2664,7 +2664,8 @@ mod tests {
         package_edges: Vec<ImagoLockResolvedPackageEdge>,
     ) -> ImagoLock {
         let requested =
-            build_requested_snapshot(&dependency_expectations, &binding_expectations, None);
+            build_requested_snapshot(&dependency_expectations, &binding_expectations, None)
+                .expect("requested snapshot should be built");
         ImagoLock {
             version: IMAGO_LOCK_VERSION,
             requested,

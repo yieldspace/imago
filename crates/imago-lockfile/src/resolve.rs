@@ -94,7 +94,7 @@ pub fn build_requested_snapshot(
     dependency_expectations: &[DependencyExpectation],
     binding_expectations: &[BindingWitExpectation],
     namespace_registries: Option<&BTreeMap<String, String>>,
-) -> ImagoLockRequested {
+) -> anyhow::Result<ImagoLockRequested> {
     let mut dependencies = dependency_expectations
         .iter()
         .map(|expectation| ImagoLockRequestedDependency {
@@ -125,6 +125,15 @@ pub fn build_requested_snapshot(
             capabilities: normalize_capability_policy(&expectation.capabilities),
         })
         .collect::<Vec<_>>();
+    let mut seen_dependency_ids = BTreeSet::new();
+    for dependency in &dependencies {
+        if !seen_dependency_ids.insert(dependency.id.clone()) {
+            return Err(anyhow!(
+                "duplicate dependency request id '{}' in requested snapshot; remove duplicated dependency requests",
+                dependency.id
+            ));
+        }
+    }
     dependencies.sort_by(|a, b| a.id.cmp(&b.id));
 
     let mut bindings = binding_expectations
@@ -139,14 +148,23 @@ pub fn build_requested_snapshot(
             sha256: expectation.sha256.clone(),
         })
         .collect::<Vec<_>>();
+    let mut seen_binding_ids = BTreeSet::new();
+    for binding in &bindings {
+        if !seen_binding_ids.insert(binding.id.clone()) {
+            return Err(anyhow!(
+                "duplicate binding request id '{}' in requested snapshot; remove duplicated binding requests",
+                binding.id
+            ));
+        }
+    }
     bindings.sort_by(|a, b| a.id.cmp(&b.id));
 
     let fingerprint = compute_requested_fingerprint(&dependencies, &bindings, namespace_registries);
-    ImagoLockRequested {
+    Ok(ImagoLockRequested {
         fingerprint,
         dependencies,
         bindings,
-    }
+    })
 }
 
 pub fn compute_requested_fingerprint(
@@ -265,7 +283,7 @@ fn resolve_dependencies_with(
 ) -> anyhow::Result<BTreeMap<String, ResolvedDependency>> {
     ensure_supported_lock_version(lock.version)?;
 
-    let expected_requested = build_requested_snapshot(expectations, &[], None);
+    let expected_requested = build_requested_snapshot(expectations, &[], None)?;
     let mut requested_by_id = BTreeMap::new();
     for requested in &lock.requested.dependencies {
         if requested_by_id
@@ -393,7 +411,7 @@ fn resolve_binding_wits_with(
 ) -> anyhow::Result<Vec<ResolvedBindingWit>> {
     ensure_supported_lock_version(lock.version)?;
 
-    let expected_requested = build_requested_snapshot(&[], expectations, None);
+    let expected_requested = build_requested_snapshot(&[], expectations, None)?;
 
     let mut requested_by_id = BTreeMap::new();
     for requested in &lock.requested.bindings {
@@ -497,7 +515,7 @@ pub fn ensure_requested_fingerprint(
         dependency_expectations,
         binding_expectations,
         namespace_registries,
-    );
+    )?;
     if lock.requested.fingerprint != expected.fingerprint {
         return Err(anyhow!(
             "imago.lock requested fingerprint mismatch; run `imago deps sync`"

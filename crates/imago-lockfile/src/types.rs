@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub const IMAGO_LOCK_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 /// Root lockfile model persisted as `imago.lock`.
 pub struct ImagoLock {
     #[serde(default = "default_lock_version")]
