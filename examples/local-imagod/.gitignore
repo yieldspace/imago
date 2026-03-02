@@ -1,7 +1,4 @@
-/build/*
-!/build/.gitkeep
-/certs/*
-!/certs/.gitkeep
+/build
 /.imagod-data/
 /app/target/
 
