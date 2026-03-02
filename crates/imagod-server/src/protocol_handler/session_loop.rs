@@ -1,6 +1,7 @@
 use std::{any::Any, fmt::Write, future::Future, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use imago_protocol::{ErrorCode, MessageType};
 use imagod_common::ImagodError;
 use rustls::pki_types::CertificateDer;
@@ -32,7 +33,7 @@ pub(crate) trait ProtocolSession: Send + Sync {
 
     fn max_datagram_size(&self) -> usize;
 
-    fn send_datagram(&self, payload: Vec<u8>) -> Result<(), ImagodError>;
+    fn send_datagram(&self, payload: Bytes) -> Result<(), ImagodError>;
 
     fn peer_identity(&self) -> Option<Box<dyn Any>>;
 
@@ -49,8 +50,8 @@ impl ProtocolSession for Session {
         Session::max_datagram_size(self)
     }
 
-    fn send_datagram(&self, payload: Vec<u8>) -> Result<(), ImagodError> {
-        Session::send_datagram(self, payload.into()).map_err(|e| {
+    fn send_datagram(&self, payload: Bytes) -> Result<(), ImagodError> {
+        Session::send_datagram(self, payload).map_err(|e| {
             ImagodError::new(
                 ErrorCode::Internal,
                 "logs.datagram",
@@ -504,7 +505,7 @@ mod tests {
             1200
         }
 
-        fn send_datagram(&self, _payload: Vec<u8>) -> Result<(), ImagodError> {
+        fn send_datagram(&self, _payload: Bytes) -> Result<(), ImagodError> {
             Ok(())
         }
 
