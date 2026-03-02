@@ -10,13 +10,16 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
+use sha2::{Digest, Sha256};
 
 use crate::{
     hash::{DigestProvider, Sha256DigestProvider},
     types::{
         BindingWitExpectation, DependencyExpectation, IMAGO_LOCK_VERSION, ImagoLock,
-        ImagoLockWitPackage, ImagoLockWitPackageVersion, ResolvedBindingWit, ResolvedDependency,
-        TransitivePackageRecord,
+        ImagoLockRequested, ImagoLockRequestedBinding, ImagoLockRequestedDependency,
+        ImagoLockResolvedBinding, ImagoLockResolvedPackage, ImagoLockResolvedPackageEdge,
+        LockCapabilityPolicy, LockDependencyKind, LockEdgeFromKind, LockPackageEdgeReason,
+        LockSourceKind, ResolvedBindingWit, ResolvedDependency, TransitivePackageRecord,
     },
     validation::{
         PathVerifier, StrictPathVerifier, parse_prefixed_sha256, validate_sha256_hex,
@@ -40,6 +43,200 @@ pub fn save_to_project_root(project_root: &Path, lock: &ImagoLock) -> anyhow::Re
     fs::write(&lock_path, lock_bytes)
         .with_context(|| format!("failed to write {}", lock_path.display()))?;
     Ok(())
+}
+
+pub fn compute_dependency_request_id(expectation: &DependencyExpectation) -> String {
+    let mut lines = vec![
+        "kind=".to_string() + dependency_kind_label(expectation.kind),
+        "version=".to_string() + expectation.version.as_str(),
+        "source_kind=".to_string() + source_kind_label(expectation.source_kind),
+        "source=".to_string() + expectation.source.as_str(),
+        "registry=".to_string() + expectation.registry.as_deref().unwrap_or(""),
+        "sha256=".to_string() + expectation.sha256.as_deref().unwrap_or(""),
+    ];
+    if let Some(component) = expectation.component.as_ref() {
+        lines.push("component_kind=".to_string() + source_kind_label(component.source_kind));
+        lines.push("component_source=".to_string() + component.source.as_str());
+        lines.push("component_registry=".to_string() + component.registry.as_deref().unwrap_or(""));
+        lines.push("component_sha256=".to_string() + component.sha256.as_deref().unwrap_or(""));
+    }
+    for requires in normalize_string_set(expectation.requires.iter().cloned()) {
+        lines.push("declared_requires=".to_string() + requires.as_str());
+    }
+    let capabilities = normalize_capability_policy(&expectation.capabilities);
+    lines.push(format!("cap.privileged={}", capabilities.privileged));
+    for (key, values) in capabilities.deps {
+        lines.push(format!("cap.deps:{key}={}", values.join(",")));
+    }
+    for (key, values) in capabilities.wasi {
+        lines.push(format!("cap.wasi:{key}={}", values.join(",")));
+    }
+
+    let joined = lines.join("\n");
+    format!("dep:{}", sha256_hex(joined.as_bytes()))
+}
+
+pub fn compute_binding_request_id(expectation: &BindingWitExpectation) -> String {
+    let lines = [
+        "name=".to_string() + expectation.name.as_str(),
+        "version=".to_string() + expectation.version.as_str(),
+        "source_kind=".to_string() + source_kind_label(expectation.source_kind),
+        "source=".to_string() + expectation.source.as_str(),
+        "registry=".to_string() + expectation.registry.as_deref().unwrap_or(""),
+        "sha256=".to_string() + expectation.sha256.as_deref().unwrap_or(""),
+    ];
+    let joined = lines.join("\n");
+    format!("bind:{}", sha256_hex(joined.as_bytes()))
+}
+
+pub fn build_requested_snapshot(
+    dependency_expectations: &[DependencyExpectation],
+    binding_expectations: &[BindingWitExpectation],
+    namespace_registries: Option<&BTreeMap<String, String>>,
+) -> ImagoLockRequested {
+    let mut dependencies = dependency_expectations
+        .iter()
+        .map(|expectation| ImagoLockRequestedDependency {
+            id: compute_dependency_request_id(expectation),
+            kind: expectation.kind,
+            version: expectation.version.clone(),
+            source_kind: expectation.source_kind,
+            source: expectation.source.clone(),
+            registry: expectation.registry.clone(),
+            sha256: expectation.sha256.clone(),
+            declared_requires: normalize_string_set(expectation.requires.iter().cloned()),
+            component_source_kind: expectation
+                .component
+                .as_ref()
+                .map(|component| component.source_kind),
+            component_source: expectation
+                .component
+                .as_ref()
+                .map(|component| component.source.clone()),
+            component_registry: expectation
+                .component
+                .as_ref()
+                .and_then(|component| component.registry.clone()),
+            component_sha256: expectation
+                .component
+                .as_ref()
+                .and_then(|component| component.sha256.clone()),
+            capabilities: normalize_capability_policy(&expectation.capabilities),
+        })
+        .collect::<Vec<_>>();
+    dependencies.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let mut bindings = binding_expectations
+        .iter()
+        .map(|expectation| ImagoLockRequestedBinding {
+            id: compute_binding_request_id(expectation),
+            name: expectation.name.clone(),
+            version: expectation.version.clone(),
+            source_kind: expectation.source_kind,
+            source: expectation.source.clone(),
+            registry: expectation.registry.clone(),
+            sha256: expectation.sha256.clone(),
+        })
+        .collect::<Vec<_>>();
+    bindings.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let fingerprint = compute_requested_fingerprint(&dependencies, &bindings, namespace_registries);
+    ImagoLockRequested {
+        fingerprint,
+        dependencies,
+        bindings,
+    }
+}
+
+pub fn compute_requested_fingerprint(
+    dependencies: &[ImagoLockRequestedDependency],
+    bindings: &[ImagoLockRequestedBinding],
+    namespace_registries: Option<&BTreeMap<String, String>>,
+) -> String {
+    let mut lines = vec!["imago-lock-requested:v1".to_string()];
+
+    if let Some(namespace_registries) = namespace_registries {
+        for (namespace, registry) in namespace_registries {
+            lines.push(format!("ns:{namespace}={registry}"));
+        }
+    }
+
+    for dependency in dependencies {
+        lines.push(format!("dep.id={}", dependency.id));
+        lines.push(format!(
+            "dep.kind={}",
+            dependency_kind_label(dependency.kind)
+        ));
+        lines.push(format!("dep.version={}", dependency.version));
+        lines.push(format!(
+            "dep.source_kind={}",
+            source_kind_label(dependency.source_kind)
+        ));
+        lines.push(format!("dep.source={}", dependency.source));
+        lines.push(format!(
+            "dep.registry={}",
+            dependency.registry.as_deref().unwrap_or("")
+        ));
+        lines.push(format!(
+            "dep.sha256={}",
+            dependency.sha256.as_deref().unwrap_or("")
+        ));
+        lines.push(format!(
+            "dep.component_kind={}",
+            dependency
+                .component_source_kind
+                .map(source_kind_label)
+                .unwrap_or("")
+        ));
+        lines.push(format!(
+            "dep.component_source={}",
+            dependency.component_source.as_deref().unwrap_or("")
+        ));
+        lines.push(format!(
+            "dep.component_registry={}",
+            dependency.component_registry.as_deref().unwrap_or("")
+        ));
+        lines.push(format!(
+            "dep.component_sha256={}",
+            dependency.component_sha256.as_deref().unwrap_or("")
+        ));
+
+        for requires in &dependency.declared_requires {
+            lines.push(format!("dep.requires={requires}"));
+        }
+
+        lines.push(format!(
+            "dep.cap.privileged={}",
+            dependency.capabilities.privileged
+        ));
+        for (key, values) in &dependency.capabilities.deps {
+            lines.push(format!("dep.cap.deps:{key}={}", values.join(",")));
+        }
+        for (key, values) in &dependency.capabilities.wasi {
+            lines.push(format!("dep.cap.wasi:{key}={}", values.join(",")));
+        }
+    }
+
+    for binding in bindings {
+        lines.push(format!("bind.id={}", binding.id));
+        lines.push(format!("bind.name={}", binding.name));
+        lines.push(format!("bind.version={}", binding.version));
+        lines.push(format!(
+            "bind.source_kind={}",
+            source_kind_label(binding.source_kind)
+        ));
+        lines.push(format!("bind.source={}", binding.source));
+        lines.push(format!(
+            "bind.registry={}",
+            binding.registry.as_deref().unwrap_or("")
+        ));
+        lines.push(format!(
+            "bind.sha256={}",
+            binding.sha256.as_deref().unwrap_or("")
+        ));
+    }
+
+    sha256_hex(lines.join("\n").as_bytes())
 }
 
 pub fn resolve_dependencies(
@@ -67,191 +264,116 @@ fn resolve_dependencies_with(
 ) -> anyhow::Result<BTreeMap<String, ResolvedDependency>> {
     ensure_supported_lock_version(lock.version)?;
 
-    let mut by_name = BTreeMap::new();
-    for entry in &lock.dependencies {
-        if by_name
-            .insert(entry.name.clone(), ResolvedDependency::from(entry))
+    let expected_requested = build_requested_snapshot(expectations, &[], None);
+    let mut requested_by_id = BTreeMap::new();
+    for requested in &lock.requested.dependencies {
+        if requested_by_id
+            .insert(requested.id.clone(), requested)
             .is_some()
         {
             return Err(anyhow!(
-                "imago.lock contains duplicate dependency '{}'; run `imago deps sync`",
-                entry.name
+                "imago.lock.requested.dependencies contains duplicate id '{}'; run `imago deps sync`",
+                requested.id
             ));
         }
     }
 
-    let mut seen_expectations = BTreeSet::new();
-    let mut resolved_dependency_names = BTreeSet::new();
-    let mut resolved = BTreeMap::new();
-    for expected in expectations {
-        if !seen_expectations.insert(expected.name.clone()) {
+    let expected_by_id = expected_requested
+        .dependencies
+        .iter()
+        .map(|expected| (expected.id.clone(), expected))
+        .collect::<BTreeMap<_, _>>();
+
+    if requested_by_id.len() != expected_by_id.len() {
+        return Err(anyhow!(
+            "dependency request set does not match imago.lock.requested; run `imago deps sync`"
+        ));
+    }
+    for (request_id, expected) in &expected_by_id {
+        let actual = requested_by_id.get(request_id).ok_or_else(|| {
+            anyhow!(
+                "dependency request '{}' is missing in imago.lock.requested; run `imago deps sync`",
+                request_id
+            )
+        })?;
+        if actual != expected {
             return Err(anyhow!(
-                "duplicate dependency expectation '{}'",
-                expected.name
+                "dependency request '{}' differs from imago.lock.requested; run `imago deps sync`",
+                request_id
             ));
         }
-        let entry = match by_name.get(&expected.name) {
-            Some(entry) => entry,
-            None => find_lock_dependency_by_source(&by_name, expected)?,
-        };
-        if entry.version != expected.version {
+    }
+
+    let mut resolved_by_request_id = BTreeMap::new();
+    for resolved in &lock.resolved.dependencies {
+        if resolved_by_request_id
+            .insert(
+                resolved.request_id.clone(),
+                ResolvedDependency::from(resolved),
+            )
+            .is_some()
+        {
             return Err(anyhow!(
-                "dependency '{}@{}' does not match lock version '{}'; run `imago deps sync`",
-                expected.name,
-                expected.version,
-                entry.version
-            ));
-        }
-        if entry.wit_source != expected.wit_source {
-            return Err(anyhow!(
-                "dependency '{}' wit source mismatch (lock='{}', config='{}'); run `imago deps sync`",
-                expected.name,
-                entry.wit_source,
-                expected.wit_source
-            ));
-        }
-        if entry.wit_registry != expected.wit_registry {
-            return Err(anyhow!(
-                "dependency '{}' wit registry mismatch (lock='{}', config='{}'); run `imago deps sync`",
-                expected.name,
-                entry.wit_registry.as_deref().unwrap_or(""),
-                expected.wit_registry.as_deref().unwrap_or("")
+                "imago.lock.resolved.dependencies contains duplicate request_id '{}'; run `imago deps sync`",
+                resolved.request_id
             ));
         }
 
-        let relative_wit_path = path_verifier.validate_safe_wit_path(
-            &entry.wit_path,
-            &format!("imago.lock.dependencies['{}'].wit_path", expected.name),
-        )?;
-        path_verifier.ensure_no_symlink_in_relative_path(
-            project_root,
-            &relative_wit_path,
-            &format!("imago.lock.dependencies['{}'].wit_path", expected.name),
-        )?;
-        let resolved_wit_path = project_root.join(relative_wit_path);
-        let digest = digest_provider
-            .compute_path_digest_hex(&resolved_wit_path)
-            .with_context(|| {
-                format!(
-                    "failed to compute digest for '{}' from imago.lock",
-                    resolved_wit_path.display()
-                )
-            })?;
-        if digest != entry.wit_digest {
+        if !requested_by_id.contains_key(&resolved.request_id) {
             return Err(anyhow!(
-                "dependency '{}' lock digest mismatch; run `imago deps sync`",
-                expected.name
+                "imago.lock.resolved.dependencies contains unknown request_id '{}'; run `imago deps sync`",
+                resolved.request_id
             ));
         }
 
-        match expected.component.as_ref() {
-            None => {}
-            Some(component_expected) => {
-                let lock_component_source = entry.component_source.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "dependency '{}' component source is missing in imago.lock; run `imago deps sync`",
-                        expected.name
-                    )
-                })?;
-                if lock_component_source != &component_expected.source {
-                    return Err(anyhow!(
-                        "dependency '{}' component source mismatch (lock='{}', config='{}'); run `imago deps sync`",
-                        expected.name,
-                        lock_component_source,
-                        component_expected.source
-                    ));
-                }
-                if entry.component_registry != component_expected.registry {
-                    return Err(anyhow!(
-                        "dependency '{}' component registry mismatch (lock='{}', config='{}'); run `imago deps sync`",
-                        expected.name,
-                        entry.component_registry.as_deref().unwrap_or(""),
-                        component_expected.registry.as_deref().unwrap_or("")
-                    ));
-                }
-                let lock_component_sha = entry.component_sha256.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "dependency '{}' component sha256 is missing in imago.lock; run `imago deps sync`",
-                        expected.name
-                    )
-                })?;
-                validate_sha256_hex(
-                    lock_component_sha,
-                    &format!(
-                        "imago.lock.dependencies[{}].component_sha256",
-                        expected.name
-                    ),
-                )?;
-                if let Some(expected_sha) = component_expected.sha256.as_ref()
-                    && !lock_component_sha.eq_ignore_ascii_case(expected_sha)
-                {
-                    return Err(anyhow!(
-                        "dependency '{}' component sha256 mismatch (lock='{}', config='{}'); run `imago deps sync`",
-                        expected.name,
-                        lock_component_sha,
-                        expected_sha
-                    ));
-                }
+        for requires in &resolved.requires_request_ids {
+            if !requested_by_id.contains_key(requires) {
+                return Err(anyhow!(
+                    "imago.lock.resolved.dependencies['{}'].requires_request_ids contains unknown request_id '{}'; run `imago deps sync`",
+                    resolved.request_id,
+                    requires
+                ));
             }
         }
 
-        if !resolved_dependency_names.insert(entry.name.clone()) {
-            return Err(anyhow!(
-                "dependency '{}' resolves to lock dependency '{}' that is already matched by another dependency; run `imago deps sync`",
-                expected.name,
-                entry.name
-            ));
+        validate_resolved_wit_tree(
+            project_root,
+            &resolved.wit_path,
+            &resolved.wit_tree_digest,
+            &format!(
+                "imago.lock.resolved.dependencies['{}'].wit_path",
+                resolved.request_id
+            ),
+            digest_provider,
+            path_verifier,
+        )?;
+
+        if let Some(component_sha256) = resolved.component_sha256.as_deref() {
+            validate_sha256_hex(
+                component_sha256,
+                &format!(
+                    "imago.lock.resolved.dependencies['{}'].component_sha256",
+                    resolved.request_id
+                ),
+            )?;
         }
-        resolved.insert(expected.name.clone(), entry.clone());
     }
 
-    verify_wit_packages_lock(
-        project_root,
-        &resolved_dependency_names,
-        &lock.wit_packages,
-        digest_provider,
-        path_verifier,
-    )?;
+    verify_resolved_packages_and_edges(project_root, lock, digest_provider, path_verifier)?;
+
+    let mut resolved = BTreeMap::new();
+    for expectation in expectations {
+        let request_id = compute_dependency_request_id(expectation);
+        let entry = resolved_by_request_id.get(&request_id).ok_or_else(|| {
+            anyhow!(
+                "dependency '{}' is not resolved in imago.lock; run `imago deps sync`",
+                expectation.name
+            )
+        })?;
+        resolved.insert(expectation.name.clone(), entry.clone());
+    }
 
     Ok(resolved)
-}
-
-fn find_lock_dependency_by_source<'a>(
-    by_name: &'a BTreeMap<String, ResolvedDependency>,
-    expected: &DependencyExpectation,
-) -> anyhow::Result<&'a ResolvedDependency> {
-    let matches = by_name
-        .values()
-        .filter(|entry| {
-            entry.version == expected.version
-                && entry.wit_source == expected.wit_source
-                && entry.wit_registry == expected.wit_registry
-                && match expected.component.as_ref() {
-                    Some(component_expected) => {
-                        entry.component_source.as_deref()
-                            == Some(component_expected.source.as_str())
-                            && entry.component_registry == component_expected.registry
-                    }
-                    None => true,
-                }
-        })
-        .collect::<Vec<_>>();
-
-    match matches.as_slice() {
-        [entry] => Ok(*entry),
-        [] => Err(anyhow!(
-            "dependency '{}' is not resolved in imago.lock (source='{}', version='{}'); run `imago deps sync`",
-            expected.name,
-            expected.wit_source,
-            expected.version
-        )),
-        _ => Err(anyhow!(
-            "dependency '{}' matches multiple lock dependencies by source='{}' and version='{}'; run `imago deps sync`",
-            expected.name,
-            expected.wit_source,
-            expected.version
-        )),
-    }
 }
 
 pub fn resolve_binding_wits(
@@ -279,175 +401,202 @@ fn resolve_binding_wits_with(
 ) -> anyhow::Result<Vec<ResolvedBindingWit>> {
     ensure_supported_lock_version(lock.version)?;
 
-    let mut by_key = BTreeMap::new();
-    for entry in &lock.binding_wits {
-        let lock_key = binding_wit_key(
-            &entry.name,
-            &entry.wit_source,
-            entry.wit_registry.as_deref(),
-            &entry.wit_version,
-        );
-        if by_key
-            .insert(lock_key.clone(), ResolvedBindingWit::from(entry))
+    let expected_requested = build_requested_snapshot(&[], expectations, None);
+
+    let mut requested_by_id = BTreeMap::new();
+    for requested in &lock.requested.bindings {
+        if requested_by_id
+            .insert(requested.id.clone(), requested)
             .is_some()
         {
             return Err(anyhow!(
-                "imago.lock contains duplicate binding_wits entry (name='{}', source='{}', registry='{}', version='{}'); run `imago deps sync`",
-                lock_key.0,
-                lock_key.1,
-                lock_key.2.as_deref().unwrap_or(""),
-                lock_key.3
+                "imago.lock.requested.bindings contains duplicate id '{}'; run `imago deps sync`",
+                requested.id
             ));
         }
     }
 
-    let mut seen_expectations = BTreeSet::new();
-    let mut resolved = Vec::with_capacity(expectations.len());
-    for expected in expectations {
-        let expected_key = binding_wit_key(
-            &expected.name,
-            &expected.wit_source,
-            expected.wit_registry.as_deref(),
-            &expected.wit_version,
-        );
-        if !seen_expectations.insert(expected_key.clone()) {
-            return Err(anyhow!(
-                "duplicate binding wit expectation (name='{}', source='{}', registry='{}', version='{}')",
-                expected_key.0,
-                expected_key.1,
-                expected_key.2.as_deref().unwrap_or(""),
-                expected_key.3
-            ));
-        }
+    let expected_by_id = expected_requested
+        .bindings
+        .iter()
+        .map(|expected| (expected.id.clone(), expected))
+        .collect::<BTreeMap<_, _>>();
 
-        let entry = by_key.get(&expected_key).ok_or_else(|| {
+    if requested_by_id.len() != expected_by_id.len() {
+        return Err(anyhow!(
+            "binding request set does not match imago.lock.requested; run `imago deps sync`"
+        ));
+    }
+    for (request_id, expected) in &expected_by_id {
+        let actual = requested_by_id.get(request_id).ok_or_else(|| {
             anyhow!(
-                "binding wit (name='{}', source='{}', registry='{}', version='{}') is not resolved in imago.lock; run `imago deps sync`",
-                expected_key.0,
-                expected_key.1,
-                expected_key.2.as_deref().unwrap_or(""),
-                expected_key.3
+                "binding request '{}' is missing in imago.lock.requested; run `imago deps sync`",
+                request_id
             )
         })?;
-
-        validate_wit_source(
-            &entry.wit_source,
-            &format!("imago.lock.binding_wits['{}'].wit_source", entry.name),
-        )?;
-        let relative_wit_path = path_verifier.validate_safe_wit_path(
-            &entry.wit_path,
-            &format!("imago.lock.binding_wits['{}'].wit_path", entry.name),
-        )?;
-        path_verifier.ensure_no_symlink_in_relative_path(
-            project_root,
-            &relative_wit_path,
-            &format!("imago.lock.binding_wits['{}'].wit_path", entry.name),
-        )?;
-        let resolved_wit_path = project_root.join(relative_wit_path);
-        let digest = digest_provider
-            .compute_path_digest_hex(&resolved_wit_path)
-            .with_context(|| {
-                format!(
-                    "failed to compute digest for binding wit '{}' from imago.lock at '{}'",
-                    entry.name,
-                    resolved_wit_path.display()
-                )
-            })?;
-        if digest != entry.wit_digest {
+        if actual != expected {
             return Err(anyhow!(
-                "binding wit '{}' lock digest mismatch; run `imago deps sync`",
-                entry.name
+                "binding request '{}' differs from imago.lock.requested; run `imago deps sync`",
+                request_id
+            ));
+        }
+    }
+
+    let mut resolved_by_request_id = BTreeMap::new();
+    for resolved in &lock.resolved.bindings {
+        if resolved_by_request_id
+            .insert(
+                resolved.request_id.clone(),
+                ResolvedBindingWit::from(resolved),
+            )
+            .is_some()
+        {
+            return Err(anyhow!(
+                "imago.lock.resolved.bindings contains duplicate request_id '{}'; run `imago deps sync`",
+                resolved.request_id
             ));
         }
 
-        validate_binding_interfaces(entry)?;
-        resolved.push(entry.clone());
+        if !requested_by_id.contains_key(&resolved.request_id) {
+            return Err(anyhow!(
+                "imago.lock.resolved.bindings contains unknown request_id '{}'; run `imago deps sync`",
+                resolved.request_id
+            ));
+        }
+
+        validate_resolved_wit_tree(
+            project_root,
+            &resolved.wit_path,
+            &resolved.wit_tree_digest,
+            &format!(
+                "imago.lock.resolved.bindings['{}'].wit_path",
+                resolved.request_id
+            ),
+            digest_provider,
+            path_verifier,
+        )?;
+
+        validate_binding_interfaces(resolved)?;
     }
 
+    verify_resolved_packages_and_edges(project_root, lock, digest_provider, path_verifier)?;
+
+    let mut resolved = Vec::with_capacity(expectations.len());
+    for expectation in expectations {
+        let request_id = compute_binding_request_id(expectation);
+        let entry = resolved_by_request_id.get(&request_id).ok_or_else(|| {
+            anyhow!(
+                "binding '{}' is not resolved in imago.lock; run `imago deps sync`",
+                expectation.name
+            )
+        })?;
+        resolved.push(entry.clone());
+    }
     Ok(resolved)
 }
 
-pub fn collect_wit_packages(
+pub fn ensure_requested_fingerprint(
+    lock: &ImagoLock,
+    dependency_expectations: &[DependencyExpectation],
+    binding_expectations: &[BindingWitExpectation],
+    namespace_registries: Option<&BTreeMap<String, String>>,
+) -> anyhow::Result<()> {
+    let expected = build_requested_snapshot(
+        dependency_expectations,
+        binding_expectations,
+        namespace_registries,
+    );
+    if lock.requested.fingerprint != expected.fingerprint {
+        return Err(anyhow!(
+            "imago.lock requested fingerprint mismatch; run `imago deps sync`"
+        ));
+    }
+    Ok(())
+}
+
+pub fn collect_resolved_packages_and_edges(
     records: impl IntoIterator<Item = TransitivePackageRecord>,
-) -> Vec<ImagoLockWitPackage> {
-    let mut grouped = BTreeMap::<
-        (String, Option<String>),
-        BTreeMap<(String, Option<String>, String, Option<String>, String), BTreeSet<String>>,
-    >::new();
+) -> anyhow::Result<(
+    Vec<ImagoLockResolvedPackage>,
+    Vec<ImagoLockResolvedPackageEdge>,
+)> {
+    let mut packages_by_ref = BTreeMap::<String, ImagoLockResolvedPackage>::new();
+    let mut edges = BTreeSet::<(u8, String, String, LockPackageEdgeReason)>::new();
 
     for record in records {
-        let package_key = (record.name, record.registry);
-        let version_key = (
-            record.requirement,
-            record.version,
-            record.digest,
-            record.source,
-            record.path,
+        let package_ref = resolved_package_ref(
+            &record.name,
+            record.version.as_deref(),
+            record.registry.as_deref(),
         );
-        grouped
-            .entry(package_key)
-            .or_default()
-            .entry(version_key)
-            .or_default()
-            .insert(record.via);
-    }
 
-    let mut packages = Vec::with_capacity(grouped.len());
-    for ((name, registry), versions) in grouped {
-        let mut version_entries = Vec::with_capacity(versions.len());
-        for ((requirement, version, digest, source, path), via_set) in versions {
-            let has_non_empty_via = via_set.iter().any(|via| !via.is_empty());
-            let via = if has_non_empty_via {
-                via_set
-                    .into_iter()
-                    .filter(|via| !via.is_empty())
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-            version_entries.push(ImagoLockWitPackageVersion {
-                requirement,
-                version,
-                digest,
-                source,
-                path,
-                via,
-            });
+        let package = ImagoLockResolvedPackage {
+            package_ref: package_ref.clone(),
+            name: record.name,
+            version: record.version,
+            registry: record.registry,
+            requirement: record.requirement,
+            source: record.source,
+            path: record.path,
+            digest: record.digest,
+        };
+
+        if let Some(existing) = packages_by_ref.get(&package_ref) {
+            if existing != &package {
+                return Err(anyhow!(
+                    "transitive package '{}' has conflicting lock records; run `imago deps sync`",
+                    package_ref
+                ));
+            }
+        } else {
+            packages_by_ref.insert(package_ref.clone(), package);
         }
-        packages.push(ImagoLockWitPackage {
-            name,
-            registry,
-            versions: version_entries,
-        });
+
+        if let (Some(from_kind), Some(from_ref), Some(reason)) =
+            (record.from_kind, record.from_ref, record.reason)
+        {
+            if !from_ref.trim().is_empty() {
+                edges.insert((edge_kind_sort_key(from_kind), from_ref, package_ref, reason));
+            }
+        }
     }
-    packages
+
+    let packages = packages_by_ref.into_values().collect::<Vec<_>>();
+    let package_edges = edges
+        .into_iter()
+        .map(
+            |(kind, from_ref, to_package_ref, reason)| ImagoLockResolvedPackageEdge {
+                from_kind: edge_sort_key_to_kind(kind),
+                from_ref,
+                to_package_ref,
+                reason,
+            },
+        )
+        .collect::<Vec<_>>();
+
+    Ok((packages, package_edges))
 }
 
-fn binding_wit_key(
-    name: &str,
-    wit_source: &str,
-    wit_registry: Option<&str>,
-    wit_version: &str,
-) -> (String, String, Option<String>, String) {
-    (
-        name.to_string(),
-        wit_source.to_string(),
-        wit_registry.map(ToString::to_string),
-        wit_version.to_string(),
-    )
+pub fn resolved_package_ref(name: &str, version: Option<&str>, registry: Option<&str>) -> String {
+    let version = version.unwrap_or("*");
+    let registry = registry.unwrap_or("");
+    format!("{name}@{version}#{registry}")
 }
 
-fn validate_binding_interfaces(entry: &ResolvedBindingWit) -> anyhow::Result<()> {
+fn validate_binding_interfaces(entry: &ImagoLockResolvedBinding) -> anyhow::Result<()> {
     if entry.interfaces.is_empty() {
         return Err(anyhow!(
-            "imago.lock.binding_wits['{}'].interfaces must not be empty; run `imago deps sync`",
-            entry.name
+            "imago.lock.resolved.bindings['{}'].interfaces must not be empty; run `imago deps sync`",
+            entry.request_id
         ));
     }
     for interface in &entry.interfaces {
         validate_binding_interface_format(
             interface,
-            &format!("imago.lock.binding_wits['{}'].interfaces[]", entry.name),
+            &format!(
+                "imago.lock.resolved.bindings['{}'].interfaces[]",
+                entry.request_id
+            ),
         )?;
     }
     Ok(())
@@ -468,6 +617,208 @@ fn validate_binding_interface_format(interface: &str, field_name: &str) -> anyho
     Ok(())
 }
 
+fn validate_resolved_wit_tree(
+    project_root: &Path,
+    wit_path: &str,
+    expected_digest: &str,
+    field_name: &str,
+    digest_provider: &impl DigestProvider,
+    path_verifier: &impl PathVerifier,
+) -> anyhow::Result<()> {
+    let relative_wit_path = path_verifier.validate_safe_wit_path(wit_path, field_name)?;
+    path_verifier.ensure_no_symlink_in_relative_path(
+        project_root,
+        &relative_wit_path,
+        field_name,
+    )?;
+    let resolved_wit_path = project_root.join(relative_wit_path);
+    let digest = digest_provider
+        .compute_path_digest_hex(&resolved_wit_path)
+        .with_context(|| {
+            format!(
+                "failed to compute digest for '{}' from imago.lock",
+                resolved_wit_path.display()
+            )
+        })?;
+    if digest != expected_digest {
+        return Err(anyhow!(
+            "{field_name} digest mismatch; run `imago deps sync`"
+        ));
+    }
+    Ok(())
+}
+
+fn verify_resolved_packages_and_edges(
+    project_root: &Path,
+    lock: &ImagoLock,
+    digest_provider: &impl DigestProvider,
+    path_verifier: &impl PathVerifier,
+) -> anyhow::Result<()> {
+    let dependency_request_ids = lock
+        .requested
+        .dependencies
+        .iter()
+        .map(|dependency| dependency.id.clone())
+        .collect::<BTreeSet<_>>();
+    let binding_request_ids = lock
+        .requested
+        .bindings
+        .iter()
+        .map(|binding| binding.id.clone())
+        .collect::<BTreeSet<_>>();
+
+    let mut package_refs = BTreeSet::new();
+    for package in &lock.resolved.packages {
+        if package.package_ref.trim().is_empty() {
+            return Err(anyhow!(
+                "imago.lock.resolved.packages[].package_ref must not be empty; run `imago deps sync`"
+            ));
+        }
+        if !package_refs.insert(package.package_ref.clone()) {
+            return Err(anyhow!(
+                "imago.lock.resolved.packages contains duplicate package_ref '{}'; run `imago deps sync`",
+                package.package_ref
+            ));
+        }
+        let expected_package_ref = resolved_package_ref(
+            &package.name,
+            package.version.as_deref(),
+            package.registry.as_deref(),
+        );
+        if package.package_ref != expected_package_ref {
+            return Err(anyhow!(
+                "imago.lock.resolved.packages has non-canonical package_ref '{}' (expected '{}'); run `imago deps sync`",
+                package.package_ref,
+                expected_package_ref
+            ));
+        }
+        if package.requirement.trim().is_empty() {
+            return Err(anyhow!(
+                "imago.lock.resolved.packages['{}'].requirement must not be empty; run `imago deps sync`",
+                package.package_ref
+            ));
+        }
+        if package.path.trim().is_empty() {
+            return Err(anyhow!(
+                "imago.lock.resolved.packages['{}'].path must not be empty; run `imago deps sync`",
+                package.package_ref
+            ));
+        }
+
+        if let Some(source) = package.source.as_deref() {
+            validate_wit_source(
+                source,
+                &format!(
+                    "imago.lock.resolved.packages['{}'].source",
+                    package.package_ref
+                ),
+            )?;
+            if source.contains('@') {
+                return Err(anyhow!(
+                    "imago.lock.resolved.packages['{}'].source must not include '@version'; run `imago deps sync`",
+                    package.package_ref
+                ));
+            }
+        }
+
+        let expected_digest = parse_prefixed_sha256(
+            &package.digest,
+            &format!(
+                "imago.lock.resolved.packages['{}'].digest",
+                package.package_ref
+            ),
+        )?;
+        let relative_path = path_verifier.validate_safe_wit_path(
+            &package.path,
+            &format!(
+                "imago.lock.resolved.packages['{}'].path",
+                package.package_ref
+            ),
+        )?;
+        path_verifier.ensure_no_symlink_in_relative_path(
+            project_root,
+            &relative_path,
+            &format!(
+                "imago.lock.resolved.packages['{}'].path",
+                package.package_ref
+            ),
+        )?;
+
+        let package_wit_file = project_root.join(relative_path).join("package.wit");
+        if !package_wit_file.is_file() {
+            return Err(anyhow!(
+                "transitive wit package '{}' is missing package.wit at '{}'; run `imago deps sync`",
+                package.package_ref,
+                package_wit_file.display()
+            ));
+        }
+        let actual_digest = digest_provider
+            .compute_sha256_hex(&package_wit_file)
+            .with_context(|| {
+                format!(
+                    "failed to hash transitive wit package '{}' at '{}'",
+                    package.package_ref,
+                    package_wit_file.display()
+                )
+            })?;
+        if !actual_digest.eq_ignore_ascii_case(expected_digest) {
+            return Err(anyhow!(
+                "lock digest mismatch for transitive wit package '{}'; run `imago deps sync`",
+                package.package_ref
+            ));
+        }
+    }
+
+    let mut seen_edges = BTreeSet::<(u8, String, String, LockPackageEdgeReason)>::new();
+    for edge in &lock.resolved.package_edges {
+        if edge.from_ref.trim().is_empty() {
+            return Err(anyhow!(
+                "imago.lock.resolved.package_edges[].from_ref must not be empty; run `imago deps sync`"
+            ));
+        }
+        if edge.to_package_ref.trim().is_empty() {
+            return Err(anyhow!(
+                "imago.lock.resolved.package_edges[].to_package_ref must not be empty; run `imago deps sync`"
+            ));
+        }
+        if !package_refs.contains(&edge.to_package_ref) {
+            return Err(anyhow!(
+                "imago.lock.resolved.package_edges points to unknown package_ref '{}'; run `imago deps sync`",
+                edge.to_package_ref
+            ));
+        }
+
+        let from_ok = match edge.from_kind {
+            LockEdgeFromKind::Dependency => dependency_request_ids.contains(&edge.from_ref),
+            LockEdgeFromKind::Binding => binding_request_ids.contains(&edge.from_ref),
+            LockEdgeFromKind::Package => package_refs.contains(&edge.from_ref),
+        };
+        if !from_ok {
+            return Err(anyhow!(
+                "imago.lock.resolved.package_edges contains unknown from_ref '{}' for kind '{}'; run `imago deps sync`",
+                edge.from_ref,
+                edge_from_kind_label(edge.from_kind)
+            ));
+        }
+
+        let key = (
+            edge_kind_sort_key(edge.from_kind),
+            edge.from_ref.clone(),
+            edge.to_package_ref.clone(),
+            edge.reason.clone(),
+        );
+        if !seen_edges.insert(key) {
+            return Err(anyhow!(
+                "imago.lock.resolved.package_edges contains duplicate edge from '{}' to '{}'; run `imago deps sync`",
+                edge.from_ref,
+                edge.to_package_ref
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn ensure_supported_lock_version(version: u32) -> anyhow::Result<()> {
     if version != IMAGO_LOCK_VERSION {
         return Err(anyhow!(
@@ -478,117 +829,78 @@ fn ensure_supported_lock_version(version: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn verify_wit_packages_lock(
-    project_root: &Path,
-    expected_dependency_names: &BTreeSet<String>,
-    wit_packages: &[ImagoLockWitPackage],
-    digest_provider: &impl DigestProvider,
-    path_verifier: &impl PathVerifier,
-) -> anyhow::Result<()> {
-    if wit_packages.is_empty() {
-        return Ok(());
+fn normalize_capability_policy(policy: &LockCapabilityPolicy) -> LockCapabilityPolicy {
+    let mut normalized = LockCapabilityPolicy {
+        privileged: policy.privileged,
+        deps: BTreeMap::new(),
+        wasi: BTreeMap::new(),
+    };
+
+    for (key, values) in &policy.deps {
+        normalized
+            .deps
+            .insert(key.clone(), normalize_string_set(values.iter().cloned()));
     }
+    for (key, values) in &policy.wasi {
+        normalized
+            .wasi
+            .insert(key.clone(), normalize_string_set(values.iter().cloned()));
+    }
+    normalized
+}
 
-    for wit_package in wit_packages {
-        if wit_package.name.trim().is_empty() {
-            return Err(anyhow!(
-                "imago.lock.wit_packages[].name must not be empty; run `imago deps sync`"
-            ));
-        }
-        if wit_package.versions.is_empty() {
-            return Err(anyhow!(
-                "imago.lock.wit_packages['{}'].versions must not be empty; run `imago deps sync`",
-                wit_package.name
-            ));
-        }
-
-        for version_entry in &wit_package.versions {
-            if version_entry.requirement.trim().is_empty() {
-                return Err(anyhow!(
-                    "imago.lock.wit_packages['{}'].versions[].requirement must not be empty; run `imago deps sync`",
-                    wit_package.name
-                ));
-            }
-            if version_entry.path.trim().is_empty() {
-                return Err(anyhow!(
-                    "imago.lock.wit_packages['{}'].versions[].path must not be empty; run `imago deps sync`",
-                    wit_package.name
-                ));
-            }
-            for via in &version_entry.via {
-                if !expected_dependency_names.contains(via) {
-                    return Err(anyhow!(
-                        "imago.lock.wit_packages['{}'].versions[].via contains unknown dependency '{}'; run `imago deps sync`",
-                        wit_package.name,
-                        via
-                    ));
-                }
-            }
-
-            if let Some(source) = version_entry.source.as_deref() {
-                validate_wit_source(
-                    source,
-                    &format!(
-                        "imago.lock.wit_packages['{}'].versions[].source",
-                        wit_package.name
-                    ),
-                )?;
-                if source.contains('@') {
-                    return Err(anyhow!(
-                        "imago.lock.wit_packages['{}'].versions[].source must not include '@version'; run `imago deps sync`",
-                        wit_package.name
-                    ));
-                }
-            }
-
-            let expected_digest_hex = parse_prefixed_sha256(
-                &version_entry.digest,
-                &format!(
-                    "imago.lock.wit_packages['{}'].versions[].digest",
-                    wit_package.name
-                ),
-            )?;
-            let relative_package_path = path_verifier.validate_safe_wit_path(
-                &version_entry.path,
-                &format!(
-                    "imago.lock.wit_packages['{}'].versions[].path",
-                    wit_package.name
-                ),
-            )?;
-            path_verifier.ensure_no_symlink_in_relative_path(
-                project_root,
-                &relative_package_path,
-                &format!(
-                    "imago.lock.wit_packages['{}'].versions[].path",
-                    wit_package.name
-                ),
-            )?;
-            let package_wit_file = project_root.join(relative_package_path).join("package.wit");
-            if !package_wit_file.is_file() {
-                return Err(anyhow!(
-                    "transitive wit package '{}' is missing package.wit at '{}'; run `imago deps sync`",
-                    wit_package.name,
-                    package_wit_file.display()
-                ));
-            }
-
-            let actual_digest = digest_provider
-                .compute_sha256_hex(&package_wit_file)
-                .with_context(|| {
-                    format!(
-                        "failed to hash transitive wit package '{}' at '{}'",
-                        wit_package.name,
-                        package_wit_file.display()
-                    )
-                })?;
-            if !actual_digest.eq_ignore_ascii_case(expected_digest_hex) {
-                return Err(anyhow!(
-                    "lock digest mismatch for transitive wit package '{}'; run `imago deps sync`",
-                    wit_package.name
-                ));
-            }
+fn normalize_string_set(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut set = BTreeSet::new();
+    for value in values {
+        let value = value.trim();
+        if !value.is_empty() {
+            set.insert(value.to_string());
         }
     }
+    set.into_iter().collect()
+}
 
-    Ok(())
+fn source_kind_label(kind: LockSourceKind) -> &'static str {
+    match kind {
+        LockSourceKind::Wit => "wit",
+        LockSourceKind::Oci => "oci",
+        LockSourceKind::Path => "path",
+    }
+}
+
+fn dependency_kind_label(kind: LockDependencyKind) -> &'static str {
+    match kind {
+        LockDependencyKind::Native => "native",
+        LockDependencyKind::Wasm => "wasm",
+    }
+}
+
+fn edge_from_kind_label(kind: LockEdgeFromKind) -> &'static str {
+    match kind {
+        LockEdgeFromKind::Dependency => "dependency",
+        LockEdgeFromKind::Binding => "binding",
+        LockEdgeFromKind::Package => "package",
+    }
+}
+
+fn edge_kind_sort_key(kind: LockEdgeFromKind) -> u8 {
+    match kind {
+        LockEdgeFromKind::Dependency => 0,
+        LockEdgeFromKind::Binding => 1,
+        LockEdgeFromKind::Package => 2,
+    }
+}
+
+fn edge_sort_key_to_kind(key: u8) -> LockEdgeFromKind {
+    match key {
+        0 => LockEdgeFromKind::Dependency,
+        1 => LockEdgeFromKind::Binding,
+        _ => LockEdgeFromKind::Package,
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }

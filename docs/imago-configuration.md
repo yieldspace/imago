@@ -605,8 +605,18 @@ This section defines plugin dependencies and their resolution sources.
 - `deps sync` recursively tracks foreign package refs from component world refs and the `wit/` package dir closure.
 - `wasi:*` refs are resolved from `wasi.dev` and materialized into `wit/deps`.
 - Non-`wasi` refs are not auto-fetched; declared dependencies must provide matching `name+version`.
-- `imago.lock.wit_packages[*].versions[*].via` may be empty (`[]`) for auto-hydrated records.
-- `resolved_at` is removed from lock entries; lockfiles containing it are rejected.
+- `imago.lock` is split into `[requested]` and `[resolved]`.
+- `[requested]` stores normalized dependency/binding requests and a `fingerprint`.
+- `[resolved]` stores `dependencies`, `bindings`, `packages`, and `package_edges`.
+- `requested.dependencies[].id` is derived from normalized request identity (`kind/version/source/component/declared_requires/capabilities`).
+- `resolved.packages[].package_ref` must equal canonical `<name>@<version-or-*>#<registry-or-empty>`.
+- `resolved.package_edges[].reason` must be one of:
+  - `declared-requires`
+  - `wit-import`
+  - `component-world`
+  - `auto-wasi`
+  - `wit-dir-closure`
+- Build/deploy recompute `[requested].fingerprint` from `imago.toml` and fail closed on mismatch.
 
 <a id="the-namespace_registries-section"></a>
 ## The [namespace_registries] section

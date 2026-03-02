@@ -12,8 +12,10 @@ use std::{
 
 use anyhow::{Context, anyhow};
 use imago_lockfile::{
-    IMAGO_LOCK_VERSION, ImagoLock, ImagoLockBindingWit, ImagoLockDependency,
-    TransitivePackageRecord, collect_wit_packages, save_to_project_root,
+    IMAGO_LOCK_VERSION, ImagoLock, ImagoLockResolved, ImagoLockResolvedBinding,
+    ImagoLockResolvedDependency, LockEdgeFromKind, LockPackageEdgeReason, LockSourceKind,
+    TransitivePackageRecord, build_requested_snapshot, collect_resolved_packages_and_edges,
+    compute_binding_request_id, compute_dependency_request_id, save_to_project_root,
 };
 use sha2::{Digest, Sha256};
 use wit_component::WitPrinter;
@@ -30,7 +32,9 @@ use crate::{
         dependency_cache::{self},
         error_diagnostics::{format_command_error, summarize_command_failure},
         plugin_sources,
-        shared::dependency::StandardDependencyResolver,
+        shared::dependency::{
+            StandardDependencyResolver, dependency_expectation_for_project_dependency,
+        },
         ui,
     },
 };
@@ -349,10 +353,31 @@ fn source_kind_sort_key(kind: plugin_sources::SourceKind) -> u8 {
     }
 }
 
+fn lock_source_kind(kind: plugin_sources::SourceKind) -> LockSourceKind {
+    match kind {
+        plugin_sources::SourceKind::Wit => LockSourceKind::Wit,
+        plugin_sources::SourceKind::Oci => LockSourceKind::Oci,
+        plugin_sources::SourceKind::Path => LockSourceKind::Path,
+    }
+}
+
+fn binding_expectation_for_project_binding(
+    binding: &build::ProjectBindingSource,
+) -> imago_lockfile::BindingWitExpectation {
+    imago_lockfile::BindingWitExpectation {
+        name: binding.name.clone(),
+        source_kind: lock_source_kind(binding.wit_source_kind),
+        source: binding.wit_source.clone(),
+        registry: binding.wit_registry.clone(),
+        version: binding.wit_version.clone(),
+        sha256: binding.wit_sha256.clone(),
+    }
+}
+
 async fn resolve_binding_wits(
     project_root: &Path,
     dependencies: &[build::ProjectDependency],
-    lock_entries: &[ImagoLockDependency],
+    lock_entries: &[ImagoLockResolvedDependency],
     bindings: &[build::ProjectBindingSource],
     namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
 ) -> anyhow::Result<Vec<ResolvedBindingWit>> {
@@ -364,11 +389,11 @@ async fn resolve_binding_wits(
     let dependency_by_name = dependencies
         .iter()
         .zip(lock_entries.iter())
-        .map(|(dependency, lock_entry)| (lock_entry.name.as_str(), dependency))
+        .map(|(dependency, lock_entry)| (lock_entry.resolved_name.as_str(), dependency))
         .collect::<BTreeMap<_, _>>();
     let lock_by_name = lock_entries
         .iter()
-        .map(|entry| (entry.name.as_str(), entry))
+        .map(|entry| (entry.resolved_name.as_str(), entry))
         .collect::<BTreeMap<_, _>>();
     let mut package_resolutions = BTreeMap::<
         String,
@@ -384,7 +409,10 @@ async fn resolve_binding_wits(
     >::new();
     let mut path_to_package = BTreeMap::<String, String>::new();
     for lock_entry in lock_entries {
-        path_to_package.insert(lock_entry.wit_path.clone(), lock_entry.name.clone());
+        path_to_package.insert(
+            lock_entry.wit_path.clone(),
+            lock_entry.resolved_name.clone(),
+        );
     }
 
     let mut resolved_bindings = Vec::with_capacity(bindings.len());
@@ -1645,7 +1673,9 @@ async fn hydrate_wasi_packages_from_component_and_wit_package_dir(
             digest,
             source: Some(source),
             path: plugin_sources::wit_deps_path(&package, Some(version.as_str())),
-            via: String::new(),
+            from_kind: None,
+            from_ref: None,
+            reason: None,
         });
     }
     Ok(records)
@@ -1670,11 +1700,37 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
     validate_wit_sources_outside_wit_deps(project_root, &dependencies, &bindings)?;
     validate_wit_output_path_collisions(&dependencies)?;
 
+    let dependency_expectations = dependencies
+        .iter()
+        .map(dependency_expectation_for_project_dependency)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let binding_expectations = bindings
+        .iter()
+        .map(binding_expectation_for_project_binding)
+        .collect::<Vec<_>>();
+    let requested = build_requested_snapshot(
+        &dependency_expectations,
+        &binding_expectations,
+        Some(&namespace_registries),
+    );
+    let request_id_by_dependency_name = dependencies
+        .iter()
+        .zip(dependency_expectations.iter())
+        .map(|(dependency, expectation)| {
+            (
+                dependency.name.clone(),
+                compute_dependency_request_id(expectation),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut request_id_by_resolved_name = BTreeMap::<String, String>::new();
+
     let mut lock_entries = Vec::with_capacity(dependencies.len());
     let mut transitive_records = Vec::new();
     let mut cache_entries_by_dependency = BTreeMap::new();
     let mut dependency_versions_by_effective_name = BTreeMap::<String, String>::new();
     let mut dependency_by_effective_name = BTreeMap::<String, String>::new();
+    let mut pending_requires_by_request_id = Vec::<(String, Vec<String>)>::new();
 
     ui::command_stage("deps.sync", "refresh-cache", "refreshing dependency cache");
     for dependency in &dependencies {
@@ -1704,6 +1760,17 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
             effective_dependency_name.clone(),
             dependency.version.clone(),
         );
+        let request_id = request_id_by_dependency_name
+            .get(&dependency.name)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "failed to resolve request id for dependency '{}'; run `imago deps sync`",
+                    dependency.name
+                )
+            })?;
+        request_id_by_resolved_name.insert(effective_dependency_name.clone(), request_id.clone());
+        pending_requires_by_request_id.push((request_id.clone(), dependency.requires.clone()));
         transitive_records.extend(cache_entry.transitive_packages.iter().map(|transitive| {
             TransitivePackageRecord {
                 name: transitive.name.clone(),
@@ -1713,15 +1780,15 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
                 digest: transitive.digest.clone(),
                 source: transitive.source.clone(),
                 path: transitive.path.clone(),
-                via: effective_dependency_name.clone(),
+                from_kind: Some(LockEdgeFromKind::Dependency),
+                from_ref: Some(request_id.clone()),
+                reason: Some(LockPackageEdgeReason::WitImport),
             }
         }));
-        lock_entries.push(ImagoLockDependency {
-            name: effective_dependency_name,
-            version: dependency.version.clone(),
-            wit_source: dependency.wit.source.clone(),
-            wit_registry: dependency.wit.registry.clone(),
-            wit_digest: cache_entry.wit_digest,
+        lock_entries.push(ImagoLockResolvedDependency {
+            request_id,
+            resolved_name: effective_dependency_name,
+            resolved_version: dependency.version.clone(),
             wit_path: dependency_cache::dependency_wit_path(
                 &cache_entry
                     .resolved_package_name
@@ -1729,10 +1796,42 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
                     .unwrap_or_else(|| dependency.name.clone()),
                 &dependency.version,
             ),
+            wit_tree_digest: cache_entry.wit_digest,
             component_source: cache_entry.component_source,
             component_registry: cache_entry.component_registry,
             component_sha256: cache_entry.component_sha256,
+            requires_request_ids: vec![],
         });
+    }
+    for (request_id, requires) in pending_requires_by_request_id {
+        let requires_request_ids = requires
+            .into_iter()
+            .map(|required| {
+                request_id_by_resolved_name
+                    .get(&required)
+                    .or_else(|| request_id_by_dependency_name.get(&required))
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "dependency request '{}' requires unknown dependency '{}'; run `imago deps sync`",
+                            request_id,
+                            required
+                        )
+                    })
+            })
+            .collect::<anyhow::Result<BTreeSet<_>>>()?
+            .into_iter()
+            .collect::<Vec<_>>();
+        let entry = lock_entries
+            .iter_mut()
+            .find(|entry| entry.request_id == request_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "dependency request '{}' is missing from resolved lock entries; run `imago deps sync`",
+                    request_id
+                )
+            })?;
+        entry.requires_request_ids = requires_request_ids;
     }
     let component_world_reference_summary =
         collect_component_world_wasi_packages_and_validate_non_wasi_references(
@@ -1781,60 +1880,103 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
     rewrite_bound_wit_packages(project_root, &resolved_binding_wits)?;
     for entry in &mut lock_entries {
         let hydrated_path = project_root.join(&entry.wit_path);
-        entry.wit_digest = build::compute_path_digest_hex(&hydrated_path).with_context(|| {
-            format!(
-                "failed to compute hydrated wit digest for dependency '{}' at {}",
-                entry.name,
-                hydrated_path.display()
-            )
-        })?;
+        entry.wit_tree_digest =
+            build::compute_path_digest_hex(&hydrated_path).with_context(|| {
+                format!(
+                    "failed to compute hydrated wit digest for dependency '{}' at {}",
+                    entry.resolved_name,
+                    hydrated_path.display()
+                )
+            })?;
     }
 
-    let mut binding_wits = Vec::new();
-    let mut seen_binding_keys = BTreeSet::<(String, String, Option<String>, String, String)>::new();
+    let binding_request_ids = bindings
+        .iter()
+        .map(|binding| {
+            let expectation = binding_expectation_for_project_binding(binding);
+            let key = (
+                binding.name.clone(),
+                source_kind_sort_key(binding.wit_source_kind),
+                binding.wit_source.clone(),
+                binding.wit_registry.clone(),
+                binding.wit_version.clone(),
+            );
+            (key, compute_binding_request_id(&expectation))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut binding_wits = Vec::<ImagoLockResolvedBinding>::new();
+    let mut seen_binding_keys =
+        BTreeSet::<(String, u8, String, Option<String>, String, String)>::new();
     for binding in resolved_binding_wits {
         let key = (
             binding.name.clone(),
+            source_kind_sort_key(binding.wit_source_kind),
             binding.wit_source.clone(),
             binding.wit_registry.clone(),
             binding.wit_version.clone(),
-            binding.wit_path.clone(),
+            binding.package_name.clone(),
         );
         if !seen_binding_keys.insert(key) {
             continue;
         }
+        let request_id = binding_request_ids
+            .get(&(
+                binding.name.clone(),
+                source_kind_sort_key(binding.wit_source_kind),
+                binding.wit_source.clone(),
+                binding.wit_registry.clone(),
+                binding.wit_version.clone(),
+            ))
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "binding '{}' request id is missing; run `imago deps sync`",
+                    binding.name
+                )
+            })?;
         let hydrated_path = project_root.join(&binding.wit_path);
-        let wit_digest = build::compute_path_digest_hex(&hydrated_path).with_context(|| {
-            format!(
-                "failed to compute hydrated binding wit digest for '{}' at {}",
-                binding.name,
-                hydrated_path.display()
-            )
-        })?;
-        binding_wits.push(ImagoLockBindingWit {
+        let wit_tree_digest =
+            build::compute_path_digest_hex(&hydrated_path).with_context(|| {
+                format!(
+                    "failed to compute hydrated binding wit digest for '{}' at {}",
+                    binding.name,
+                    hydrated_path.display()
+                )
+            })?;
+        binding_wits.push(ImagoLockResolvedBinding {
+            request_id,
             name: binding.name,
-            wit_source: binding.wit_source,
-            wit_registry: binding.wit_registry,
-            wit_version: binding.wit_version,
-            wit_digest,
+            resolved_package: binding.package_name.clone(),
+            resolved_version: binding.package_version.clone(),
+            wit_tree_digest,
             wit_path: binding.wit_path,
             interfaces: package_interface_ids(&binding.package_name, &binding.interface_names),
         });
     }
     binding_wits.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
-            .then(a.wit_source.cmp(&b.wit_source))
+        a.request_id
+            .cmp(&b.request_id)
+            .then(a.name.cmp(&b.name))
             .then(a.wit_path.cmp(&b.wit_path))
     });
-    lock_entries.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
+    lock_entries.sort_by(|a, b| {
+        a.request_id
+            .cmp(&b.request_id)
+            .then(a.resolved_name.cmp(&b.resolved_name))
+    });
+    let (resolved_packages, package_edges) =
+        collect_resolved_packages_and_edges(transitive_records)?;
     let dependency_count = lock_entries.len();
     let binding_wits_count = binding_wits.len();
     let lock = ImagoLock {
         version: IMAGO_LOCK_VERSION,
-        dependencies: lock_entries,
-        wit_packages: collect_wit_packages(transitive_records),
-        binding_wits,
+        requested,
+        resolved: ImagoLockResolved {
+            dependencies: lock_entries,
+            bindings: binding_wits,
+            packages: resolved_packages,
+            package_edges,
+        },
     };
     ui::command_stage("deps.sync", "write-lock", "writing imago.lock");
     save_to_project_root(project_root, &lock)?;
@@ -1848,6 +1990,7 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use imago_lockfile::{ImagoLockRequestedBinding, ImagoLockRequestedDependency};
     use wit_parser::Resolve;
 
     struct CwdGuard {
@@ -1965,6 +2108,54 @@ mod tests {
             .expect("component encoding should succeed")
     }
 
+    fn dependency_entry_by_name<'a>(
+        lock: &'a ImagoLock,
+        name: &str,
+    ) -> (
+        &'a ImagoLockRequestedDependency,
+        &'a ImagoLockResolvedDependency,
+    ) {
+        let resolved = lock
+            .resolved
+            .dependencies
+            .iter()
+            .find(|entry| entry.resolved_name == name)
+            .expect("resolved dependency should exist");
+        let requested = lock
+            .requested
+            .dependencies
+            .iter()
+            .find(|entry| entry.id == resolved.request_id)
+            .expect("requested dependency should exist");
+        (requested, resolved)
+    }
+
+    fn single_dependency_entry(
+        lock: &ImagoLock,
+    ) -> (&ImagoLockRequestedDependency, &ImagoLockResolvedDependency) {
+        assert_eq!(lock.resolved.dependencies.len(), 1);
+        dependency_entry_by_name(lock, &lock.resolved.dependencies[0].resolved_name)
+    }
+
+    fn binding_entry_by_name<'a>(
+        lock: &'a ImagoLock,
+        name: &str,
+    ) -> (&'a ImagoLockRequestedBinding, &'a ImagoLockResolvedBinding) {
+        let resolved = lock
+            .resolved
+            .bindings
+            .iter()
+            .find(|entry| entry.name == name)
+            .expect("resolved binding should exist");
+        let requested = lock
+            .requested
+            .bindings
+            .iter()
+            .find(|entry| entry.id == resolved.request_id)
+            .expect("requested binding should exist");
+        (requested, resolved)
+    }
+
     #[tokio::test]
     async fn update_resolves_file_source_into_wit_and_lock() {
         let root = new_temp_dir("file-source");
@@ -1999,24 +2190,27 @@ remote = "127.0.0.1:4443"
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
         assert_eq!(lock.version, 1);
-        assert_eq!(lock.dependencies.len(), 1);
-        assert!(lock.wit_packages.is_empty());
-        let entry = &lock.dependencies[0];
-        assert_eq!(entry.name, "test:example");
-        assert_eq!(entry.wit_source, "registry/example");
-        assert_eq!(entry.wit_registry, None);
-        assert_eq!(entry.wit_path, "wit/deps/test-example-0.1.0");
-        assert!(root.join(&entry.wit_path).exists());
-        assert!(entry.component_source.is_none());
-        assert!(entry.component_sha256.is_none());
-        assert!(!entry.wit_digest.is_empty());
+        assert_eq!(lock.resolved.dependencies.len(), 1);
+        assert!(lock.resolved.packages.is_empty());
+        let (requested, resolved) = single_dependency_entry(&lock);
+        assert_eq!(resolved.resolved_name, "test:example");
+        assert_eq!(requested.source, "registry/example");
+        assert_eq!(requested.registry, None);
+        assert_eq!(resolved.wit_path, "wit/deps/test-example-0.1.0");
+        assert!(root.join(&resolved.wit_path).exists());
+        assert!(resolved.component_source.is_none());
+        assert!(resolved.component_sha256.is_none());
+        assert!(!resolved.wit_tree_digest.is_empty());
 
         let second = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(second.exit_code, 0);
         let lock_raw_2 =
             fs::read_to_string(root.join("imago.lock")).expect("lock should exist after rerun");
         let lock_2: ImagoLock = toml::from_str(&lock_raw_2).expect("lock should parse");
-        assert_eq!(lock_2.dependencies[0].wit_digest, entry.wit_digest);
+        assert_eq!(
+            lock_2.resolved.dependencies[0].wit_tree_digest,
+            resolved.wit_tree_digest
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2054,17 +2248,14 @@ remote = "127.0.0.1:4443"
 
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
-        assert_eq!(lock.dependencies.len(), 1);
-        assert_eq!(lock.dependencies[0].wit_source, "yieldspace:example");
+        let (requested, resolved) = single_dependency_entry(&lock);
+        assert_eq!(requested.source, "yieldspace:example");
         assert_eq!(
-            lock.dependencies[0].wit_registry,
+            requested.registry,
             Some(plugin_sources::DEFAULT_WARG_REGISTRY.to_string())
         );
-        assert_eq!(
-            lock.dependencies[0].wit_path,
-            "wit/deps/yieldspace-example-1.2.3"
-        );
-        assert!(root.join(&lock.dependencies[0].wit_path).exists());
+        assert_eq!(resolved.wit_path, "wit/deps/yieldspace-example-1.2.3");
+        assert!(root.join(&resolved.wit_path).exists());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2102,10 +2293,10 @@ remote = "127.0.0.1:4443"
 
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
-        assert_eq!(lock.dependencies.len(), 1);
-        assert_eq!(lock.dependencies[0].wit_source, "wasi:cli");
+        let (requested, _) = single_dependency_entry(&lock);
+        assert_eq!(requested.source, "wasi:cli");
         assert_eq!(
-            lock.dependencies[0].wit_registry.as_deref(),
+            requested.registry.as_deref(),
             Some(plugin_sources::DEFAULT_WASI_WARG_REGISTRY)
         );
 
@@ -2148,12 +2339,9 @@ remote = "127.0.0.1:4443"
 
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
-        assert_eq!(lock.dependencies.len(), 1);
-        assert_eq!(lock.dependencies[0].wit_source, "wasi:io");
-        assert_eq!(
-            lock.dependencies[0].wit_registry.as_deref(),
-            Some("custom-wasi.example")
-        );
+        let (requested, _) = single_dependency_entry(&lock);
+        assert_eq!(requested.source, "wasi:io");
+        assert_eq!(requested.registry.as_deref(), Some("custom-wasi.example"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2197,12 +2385,11 @@ remote = "127.0.0.1:4443"
 
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
-        assert_eq!(lock.dependencies.len(), 1);
-        let entry = &lock.dependencies[0];
-        assert_eq!(entry.wit_source, "ghcr.io/chikoski/advent-of-spin");
-        assert_eq!(entry.wit_registry, None);
-        assert_eq!(entry.wit_path, "wit/deps/chikoski-advent-of-spin-0.2.0");
-        assert!(root.join(&entry.wit_path).exists());
+        let (requested, resolved) = single_dependency_entry(&lock);
+        assert_eq!(requested.source, "ghcr.io/chikoski/advent-of-spin");
+        assert_eq!(requested.registry, None);
+        assert_eq!(resolved.wit_path, "wit/deps/chikoski-advent-of-spin-0.2.0");
+        assert!(root.join(&resolved.wit_path).exists());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2239,11 +2426,10 @@ remote = "127.0.0.1:4443"
         );
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
-        assert_eq!(lock.dependencies.len(), 1);
-        let entry = &lock.dependencies[0];
-        assert_eq!(entry.wit_source, "yieldspace:nanokvm".to_string());
-        assert_eq!(entry.wit_path, "wit/deps/yieldspace-nanokvm-1.2.3");
-        assert!(root.join(&entry.wit_path).exists());
+        let (requested, resolved) = single_dependency_entry(&lock);
+        assert_eq!(requested.source, "yieldspace:nanokvm".to_string());
+        assert_eq!(resolved.wit_path, "wit/deps/yieldspace-nanokvm-1.2.3");
+        assert!(root.join(&resolved.wit_path).exists());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2280,11 +2466,10 @@ remote = "127.0.0.1:4443"
         );
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
-        assert_eq!(lock.dependencies.len(), 1);
-        let entry = &lock.dependencies[0];
-        assert_eq!(entry.wit_source, "ghcr.io/yieldspace/nanokvm".to_string());
-        assert_eq!(entry.wit_path, "wit/deps/yieldspace-nanokvm-1.2.3");
-        assert!(root.join(&entry.wit_path).exists());
+        let (requested, resolved) = single_dependency_entry(&lock);
+        assert_eq!(requested.source, "ghcr.io/yieldspace/nanokvm".to_string());
+        assert_eq!(resolved.wit_path, "wit/deps/yieldspace-nanokvm-1.2.3");
+        assert!(root.join(&resolved.wit_path).exists());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2413,10 +2598,10 @@ interface greet {
         );
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
-        assert_eq!(lock.binding_wits.len(), 1);
-        assert_eq!(lock.binding_wits[0].name, "svc-target");
+        assert_eq!(lock.resolved.bindings.len(), 1);
+        assert_eq!(lock.resolved.bindings[0].name, "svc-target");
         assert_eq!(
-            lock.binding_wits[0].interfaces,
+            lock.resolved.bindings[0].interfaces,
             vec!["yieldspace:other/greet".to_string()]
         );
         assert!(
@@ -2542,8 +2727,7 @@ remote = "127.0.0.1:4443"
 
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
-        assert_eq!(lock.dependencies.len(), 1);
-        let entry = &lock.dependencies[0];
+        let (_, entry) = single_dependency_entry(&lock);
         assert_eq!(
             entry.component_source.as_deref(),
             Some("registry/example-component.wasm")
@@ -2620,11 +2804,7 @@ world plugin {
 
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
-        let entry = lock
-            .dependencies
-            .iter()
-            .find(|entry| entry.name == "root:component")
-            .expect("dependency lock entry should exist");
+        let (_, entry) = dependency_entry_by_name(&lock, "root:component");
         assert_eq!(entry.component_source.as_deref(), Some("root:component"));
         assert_eq!(
             entry.component_registry.as_deref(),
@@ -2831,7 +3011,9 @@ interface random {
         );
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].name, "wasi:random");
-        assert!(records[0].via.is_empty());
+        assert!(records[0].from_kind.is_none());
+        assert!(records[0].from_ref.is_none());
+        assert!(records[0].reason.is_none());
         assert_eq!(
             records[0].registry.as_deref(),
             Some(plugin_sources::DEFAULT_WASI_WARG_REGISTRY)
@@ -3610,22 +3792,38 @@ interface name-provider {
                 .exists()
         );
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        assert!(
+            lock_raw.contains("reason = \"wit-import\""),
+            "edge reason should be serialized as kebab-case string"
+        );
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
         assert_eq!(lock.version, 1);
-        assert_eq!(lock.wit_packages.len(), 1);
-        assert_eq!(lock.wit_packages[0].name, "chikoski:name");
+        assert_eq!(lock.resolved.packages.len(), 1);
+        let transitive = lock
+            .resolved
+            .packages
+            .iter()
+            .find(|pkg| pkg.name == "chikoski:name")
+            .expect("chikoski:name transitive package should be materialized");
         assert_eq!(
-            lock.wit_packages[0].registry.as_deref(),
+            transitive.registry.as_deref(),
             Some(plugin_sources::DEFAULT_WARG_REGISTRY)
         );
-        assert_eq!(lock.wit_packages[0].versions.len(), 1);
-        let version = &lock.wit_packages[0].versions[0];
-        assert_eq!(version.requirement, "=0.1.0");
-        assert_eq!(version.version.as_deref(), Some("0.1.0"));
-        assert_eq!(version.source.as_deref(), Some("chikoski:name"));
-        assert_eq!(version.path, "wit/deps/chikoski-name-0.1.0");
-        assert_eq!(version.via, vec!["chikoski:hello".to_string()]);
-        assert!(version.digest.starts_with("sha256:"));
+        assert_eq!(transitive.requirement, "=0.1.0");
+        assert_eq!(transitive.version.as_deref(), Some("0.1.0"));
+        assert_eq!(transitive.source.as_deref(), Some("chikoski:name"));
+        assert_eq!(transitive.path, "wit/deps/chikoski-name-0.1.0");
+        assert!(transitive.digest.starts_with("sha256:"));
+        let request_id = &lock.resolved.dependencies[0].request_id;
+        assert!(
+            lock.resolved.package_edges.iter().any(|edge| {
+                edge.from_kind == LockEdgeFromKind::Dependency
+                    && edge.from_ref == *request_id
+                    && edge.to_package_ref == transitive.package_ref
+                    && edge.reason == LockPackageEdgeReason::WitImport
+            }),
+            "transitive package edge from direct dependency must exist"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3691,7 +3889,8 @@ interface streams {
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
         let wasi_io = lock
-            .wit_packages
+            .resolved
+            .packages
             .iter()
             .find(|pkg| pkg.name == "wasi:io")
             .expect("wasi:io transitive package should be materialized");
@@ -3699,8 +3898,7 @@ interface streams {
             wasi_io.registry.as_deref(),
             Some(plugin_sources::DEFAULT_WASI_WARG_REGISTRY)
         );
-        let version = &wasi_io.versions[0];
-        assert_eq!(version.source.as_deref(), Some("wasi:io"));
+        assert_eq!(wasi_io.source.as_deref(), Some("wasi:io"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3769,7 +3967,8 @@ interface streams {
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
         let wasi_io = lock
-            .wit_packages
+            .resolved
+            .packages
             .iter()
             .find(|pkg| pkg.name == "wasi:io")
             .expect("wasi:io transitive package should be materialized");
@@ -3840,7 +4039,8 @@ interface name-provider {
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
         let transitive = lock
-            .wit_packages
+            .resolved
+            .packages
             .iter()
             .find(|pkg| pkg.name == "chikoski:name")
             .expect("chikoski:name transitive package should be materialized");
@@ -4014,15 +4214,24 @@ interface name-provider {
         );
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
-        assert_eq!(lock.wit_packages.len(), 1);
-        assert_eq!(lock.wit_packages[0].name, "chikoski:name");
-        let version = &lock.wit_packages[0].versions[0];
-        assert_eq!(version.requirement, "*");
-        assert!(version.version.is_none());
-        assert!(version.source.is_none());
-        assert_eq!(version.path, "wit/deps/chikoski-name");
-        assert_eq!(version.via, vec!["chikoski:hello".to_string()]);
-        assert!(version.digest.starts_with("sha256:"));
+        assert_eq!(lock.resolved.packages.len(), 1);
+        let transitive = &lock.resolved.packages[0];
+        assert_eq!(transitive.name, "chikoski:name");
+        assert_eq!(transitive.requirement, "*");
+        assert!(transitive.version.is_none());
+        assert!(transitive.source.is_none());
+        assert_eq!(transitive.path, "wit/deps/chikoski-name");
+        assert!(transitive.digest.starts_with("sha256:"));
+        let request_id = &lock.resolved.dependencies[0].request_id;
+        assert!(
+            lock.resolved.package_edges.iter().any(|edge| {
+                edge.from_kind == LockEdgeFromKind::Dependency
+                    && edge.from_ref == *request_id
+                    && edge.to_package_ref == transitive.package_ref
+                    && edge.reason == LockPackageEdgeReason::WitImport
+            }),
+            "transitive package edge from direct dependency must exist"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -4064,8 +4273,8 @@ remote = "127.0.0.1:4443"
         assert!(root.join("imago.lock").exists());
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
-        assert_eq!(lock.dependencies.len(), 1);
-        assert_eq!(lock.dependencies[0].name, "test:example");
+        assert_eq!(lock.resolved.dependencies.len(), 1);
+        assert_eq!(lock.resolved.dependencies[0].resolved_name, "test:example");
 
         let _ = fs::remove_dir_all(root);
     }
@@ -4192,7 +4401,7 @@ remote = "127.0.0.1:4443"
             &fs::read_to_string(root.join("imago.lock")).expect("lock should exist"),
         )
         .expect("lock should parse");
-        let digest_v1 = lock_v1.dependencies[0].wit_digest.clone();
+        let digest_v1 = lock_v1.resolved.dependencies[0].wit_tree_digest.clone();
 
         write(
             &root.join("registry/example/package.wit"),
@@ -4208,7 +4417,7 @@ remote = "127.0.0.1:4443"
             &fs::read_to_string(root.join("imago.lock")).expect("lock should exist"),
         )
         .expect("lock should parse");
-        let digest_v2 = lock_v2.dependencies[0].wit_digest.clone();
+        let digest_v2 = lock_v2.resolved.dependencies[0].wit_tree_digest.clone();
         assert_ne!(
             digest_v1, digest_v2,
             "wit digest must change after source update"
@@ -4420,14 +4629,10 @@ interface untouched {
         );
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
-        assert_eq!(lock.binding_wits.len(), 1);
-        assert_eq!(lock.binding_wits[0].name, "svc-target");
+        let (requested, resolved) = binding_entry_by_name(&lock, "svc-target");
+        assert_eq!(requested.source, "registry/hello".to_string());
         assert_eq!(
-            lock.binding_wits[0].wit_source,
-            "registry/hello".to_string()
-        );
-        assert_eq!(
-            lock.binding_wits[0].interfaces,
+            resolved.interfaces,
             vec![
                 "chikoski:hello/greet".to_string(),
                 "chikoski:hello/untouched".to_string()
@@ -4487,11 +4692,11 @@ interface greet {
 
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
-        assert!(lock.dependencies.is_empty());
-        assert_eq!(lock.binding_wits.len(), 1);
-        assert_eq!(lock.binding_wits[0].name, "svc-target");
+        assert!(lock.resolved.dependencies.is_empty());
+        assert_eq!(lock.resolved.bindings.len(), 1);
+        assert_eq!(lock.resolved.bindings[0].name, "svc-target");
         assert_eq!(
-            lock.binding_wits[0].interfaces,
+            lock.resolved.bindings[0].interfaces,
             vec!["chikoski:hello/greet".to_string()]
         );
 
@@ -4726,9 +4931,10 @@ interface wall-clock {
 
         let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
-        assert!(lock.dependencies.is_empty());
+        assert!(lock.resolved.dependencies.is_empty());
         let wasi_io = lock
-            .wit_packages
+            .resolved
+            .packages
             .iter()
             .find(|package| package.name == "wasi:io")
             .expect("wasi:io lock entry must exist");
@@ -4736,14 +4942,18 @@ interface wall-clock {
             wasi_io.registry.as_deref(),
             Some(plugin_sources::DEFAULT_WASI_WARG_REGISTRY)
         );
-        assert_eq!(wasi_io.versions.len(), 1);
         assert!(
-            wasi_io.versions[0].via.is_empty(),
-            "wit-dir origin should keep empty via"
+            !lock
+                .resolved
+                .package_edges
+                .iter()
+                .any(|edge| edge.to_package_ref == wasi_io.package_ref),
+            "wit-dir origin should not emit package edges"
         );
 
         let wasi_clocks = lock
-            .wit_packages
+            .resolved
+            .packages
             .iter()
             .find(|package| package.name == "wasi:clocks")
             .expect("wasi:clocks lock entry must exist");
@@ -4751,10 +4961,13 @@ interface wall-clock {
             wasi_clocks.registry.as_deref(),
             Some(plugin_sources::DEFAULT_WASI_WARG_REGISTRY)
         );
-        assert_eq!(wasi_clocks.versions.len(), 1);
         assert!(
-            wasi_clocks.versions[0].via.is_empty(),
-            "wit-dir origin should keep empty via"
+            !lock
+                .resolved
+                .package_edges
+                .iter()
+                .any(|edge| edge.to_package_ref == wasi_clocks.package_ref),
+            "wit-dir origin should not emit package edges"
         );
 
         let _ = fs::remove_dir_all(root);
