@@ -1,6 +1,0 @@
-*
-!.gitignore
-!server.key
-!client.key
-!server.pub.hex
-!client.pub.hex
