@@ -2474,11 +2474,13 @@ name = "imagod"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "imago-plugin-imago-admin",
  "imago-plugin-imago-experimental-gpio",
  "imago-plugin-imago-experimental-i2c",
  "imago-plugin-imago-node",
  "imago-plugin-imago-usb",
+ "imago-protocol",
  "imagod-config",
  "imagod-control",
  "imagod-runtime",
