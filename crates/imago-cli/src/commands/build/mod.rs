@@ -3570,6 +3570,78 @@ interface admin {
     }
 
     #[test]
+    fn build_rejects_binding_sha256_mismatch_with_lock_requested_fingerprint() {
+        let root = new_temp_dir("manifest-bindings-sha256-mismatch");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc-a"
+main = "build/app.wasm"
+type = "cli"
+
+[[bindings]]
+name = "svc-b"
+version = "0.1.0"
+path = "registry/acme-clock"
+sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(
+            &root.join("registry/acme-clock/package.wit"),
+            b"package acme:clock@0.1.0;\ninterface api { now: func() -> u64; }\n",
+        );
+        write_file(
+            &root.join("wit/deps/acme-clock-0.1.0/package.wit"),
+            br#"
+package acme:clock@0.1.0;
+
+interface api {
+  now: func() -> u64;
+}
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        let wit_digest =
+            compute_path_digest_hex(&root.join("wit/deps/acme-clock-0.1.0")).expect("wit digest");
+        let mut binding_expectation =
+            binding_path_expectation("svc-b", "0.1.0", "registry/acme-clock");
+        binding_expectation.sha256 =
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string());
+        let binding_request_id = compute_binding_request_id(&binding_expectation);
+        write_imago_lock(
+            &root,
+            &build_lock(
+                vec![],
+                vec![binding_expectation],
+                vec![],
+                vec![ImagoLockResolvedBinding {
+                    request_id: binding_request_id,
+                    name: "svc-b".to_string(),
+                    resolved_package: "acme:clock".to_string(),
+                    resolved_version: Some("0.1.0".to_string()),
+                    wit_tree_digest: wit_digest,
+                    wit_path: "wit/deps/acme-clock-0.1.0".to_string(),
+                    interfaces: vec!["acme:clock/api".to_string()],
+                }],
+                vec![],
+                vec![],
+            ),
+        );
+
+        let err = build_project("default", &root)
+            .expect_err("build must fail when only bindings[].sha256 drifted from lock");
+        assert!(
+            err.to_string().contains("requested fingerprint mismatch"),
+            "unexpected error: {err:#}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn build_rejects_invalid_bindings_shape() {
         let root = new_temp_dir("manifest-bindings-invalid-shape");
         write_imago_toml(

@@ -113,6 +113,18 @@ mod tests {
     }
 
     #[test]
+    fn dependency_request_id_changes_when_source_kind_changes() {
+        let dependency_a = sample_dependency_expectation("dep");
+        let mut dependency_b = sample_dependency_expectation("dep");
+        dependency_b.source_kind = LockSourceKind::Path;
+
+        assert_ne!(
+            compute_dependency_request_id(&dependency_a),
+            compute_dependency_request_id(&dependency_b)
+        );
+    }
+
+    #[test]
     fn dependency_request_id_is_stable_for_reordered_requires_and_capabilities() {
         let mut dependency_a = sample_dependency_expectation("dep");
         dependency_a.requires = vec![

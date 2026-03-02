@@ -54,6 +54,7 @@ Rules:
 - Auto-fetch is only for `wasi:*`; these packages are always resolved from `wasi.dev` and materialized into `wit/deps`.
 - Non-`wasi` refs are never auto-fetched; they must already exist in declared dependencies with matching `name+version`.
 - Version conflicts for the same package fail closed.
+- For `path = "http(s)://..."` sources that fall back to plain `.wit`, diagnostics keep the HTTP origin (`http source '...'`) and do not rewrite it to Warg placeholder metadata.
 - `imago.lock` has two sections: `[requested]` and `[resolved]`.
 - `[requested]` records normalized request identities and `fingerprint`.
 - `[resolved]` records resolved dependency/binding entries and transitive package graph (`packages` + `package_edges`).
