@@ -15,7 +15,9 @@ use super::{ServiceLogEvent, ServiceLogStream};
 /// Bounded byte ring used for per-stream runner log capture.
 pub(super) struct BoundedLogBuffer {
     max_bytes: usize,
-    bytes: VecDeque<u8>,
+    total_bytes: usize,
+    front_offset: usize,
+    chunks: VecDeque<Vec<u8>>,
 }
 
 impl BoundedLogBuffer {
@@ -23,7 +25,33 @@ impl BoundedLogBuffer {
     pub(super) fn new(max_bytes: usize) -> Self {
         Self {
             max_bytes: max_bytes.max(1),
-            bytes: VecDeque::new(),
+            total_bytes: 0,
+            front_offset: 0,
+            chunks: VecDeque::new(),
+        }
+    }
+
+    fn evict_front_bytes(&mut self, mut bytes_to_evict: usize) {
+        while bytes_to_evict > 0 {
+            let Some(front) = self.chunks.front() else {
+                break;
+            };
+            let front_len = front.len().saturating_sub(self.front_offset);
+            if front_len <= bytes_to_evict {
+                bytes_to_evict = bytes_to_evict.saturating_sub(front_len);
+                self.total_bytes = self.total_bytes.saturating_sub(front_len);
+                let _ = self.chunks.pop_front();
+                self.front_offset = 0;
+                continue;
+            }
+            self.front_offset = self.front_offset.saturating_add(bytes_to_evict);
+            self.total_bytes = self.total_bytes.saturating_sub(bytes_to_evict);
+            bytes_to_evict = 0;
+        }
+
+        if self.chunks.is_empty() {
+            self.front_offset = 0;
+            self.total_bytes = 0;
         }
     }
 
@@ -32,19 +60,93 @@ impl BoundedLogBuffer {
         if chunk.is_empty() {
             return;
         }
-        self.bytes.extend(chunk.iter().copied());
-        while self.bytes.len() > self.max_bytes {
-            let _ = self.bytes.pop_front();
+
+        if chunk.len() >= self.max_bytes {
+            self.chunks.clear();
+            self.front_offset = 0;
+            let start = chunk.len().saturating_sub(self.max_bytes);
+            self.chunks.push_back(chunk[start..].to_vec());
+            self.total_bytes = self.max_bytes;
+            return;
+        }
+
+        self.total_bytes = self.total_bytes.saturating_add(chunk.len());
+        self.chunks.push_back(chunk.to_vec());
+        if self.total_bytes > self.max_bytes {
+            self.evict_front_bytes(self.total_bytes.saturating_sub(self.max_bytes));
         }
     }
 
+    pub(super) fn bytes_from_offset(&self, offset: usize) -> Vec<u8> {
+        if offset >= self.total_bytes {
+            return Vec::new();
+        }
+        let mut remaining_skip = offset;
+        let mut out = Vec::with_capacity(self.total_bytes.saturating_sub(offset));
+        for (index, chunk) in self.chunks.iter().enumerate() {
+            let segment = if index == 0 {
+                &chunk[self.front_offset..]
+            } else {
+                chunk.as_slice()
+            };
+            if remaining_skip >= segment.len() {
+                remaining_skip = remaining_skip.saturating_sub(segment.len());
+                continue;
+            }
+            out.extend_from_slice(&segment[remaining_skip..]);
+            remaining_skip = 0;
+        }
+        out
+    }
+
+    pub(super) fn tail_start_offset_by_lines(&self, tail_lines: u32) -> usize {
+        if tail_lines == 0 || self.total_bytes == 0 {
+            return self.total_bytes;
+        }
+
+        let keep_lines = tail_lines as usize;
+        let mut recent_line_starts = VecDeque::with_capacity(keep_lines.max(1));
+        recent_line_starts.push_back(0usize);
+        let mut total_line_starts = 1usize;
+        let mut index = 0usize;
+
+        for (chunk_index, chunk) in self.chunks.iter().enumerate() {
+            let segment = if chunk_index == 0 {
+                &chunk[self.front_offset..]
+            } else {
+                chunk.as_slice()
+            };
+            for byte in segment {
+                if *byte == b'\n' && index + 1 < self.total_bytes {
+                    total_line_starts = total_line_starts.saturating_add(1);
+                    recent_line_starts.push_back(index + 1);
+                    if recent_line_starts.len() > keep_lines {
+                        let _ = recent_line_starts.pop_front();
+                    }
+                }
+                index = index.saturating_add(1);
+            }
+        }
+
+        if total_line_starts <= keep_lines {
+            0
+        } else {
+            recent_line_starts.front().copied().unwrap_or(0)
+        }
+    }
+
+    pub(super) fn tail_lines(&self, tail_lines: u32) -> Vec<u8> {
+        let offset = self.tail_start_offset_by_lines(tail_lines);
+        self.bytes_from_offset(offset)
+    }
+
     pub(super) fn snapshot(&self) -> Vec<u8> {
-        self.bytes.iter().copied().collect()
+        self.bytes_from_offset(0)
     }
 
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
-        self.bytes.len()
+        self.total_bytes
     }
 }
 
@@ -107,6 +209,58 @@ impl BoundedLogEventBuffer {
         self.events.iter().cloned().collect()
     }
 
+    pub(super) fn tail_from_offset(
+        &self,
+        mut offset: usize,
+        tailed_bytes: &[u8],
+    ) -> Vec<ServiceLogEvent> {
+        if tailed_bytes.is_empty() {
+            return Vec::new();
+        }
+
+        let mut remaining = tailed_bytes.len();
+        let mut out = Vec::new();
+        for event in &self.events {
+            if remaining == 0 {
+                break;
+            }
+            if offset >= event.bytes.len() {
+                offset = offset.saturating_sub(event.bytes.len());
+                continue;
+            }
+            let start = offset;
+            let available = event.bytes.len().saturating_sub(start);
+            let take = available.min(remaining);
+            if take > 0 {
+                out.push(ServiceLogEvent {
+                    stream: event.stream,
+                    bytes: event.bytes[start..start + take].to_vec(),
+                    timestamp_unix_ms: event.timestamp_unix_ms,
+                });
+                remaining = remaining.saturating_sub(take);
+            }
+            offset = 0;
+        }
+
+        if remaining == 0 {
+            return out;
+        }
+
+        vec![ServiceLogEvent {
+            stream: self
+                .events
+                .back()
+                .map(|event| event.stream)
+                .unwrap_or(ServiceLogStream::Stdout),
+            bytes: tailed_bytes.to_vec(),
+            timestamp_unix_ms: self
+                .events
+                .back()
+                .map(|event| event.timestamp_unix_ms)
+                .unwrap_or(0),
+        }]
+    }
+
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.events.len()
@@ -137,6 +291,13 @@ impl CompositeLogBuffer {
 
     pub(super) fn snapshot(&self) -> (Vec<u8>, Vec<ServiceLogEvent>) {
         (self.bytes.snapshot(), self.events.snapshot())
+    }
+
+    pub(super) fn tail_snapshot(&self, tail_lines: u32) -> (Vec<u8>, Vec<ServiceLogEvent>) {
+        let start_offset = self.bytes.tail_start_offset_by_lines(tail_lines);
+        let tailed_bytes = self.bytes.tail_lines(tail_lines);
+        let tailed_events = self.events.tail_from_offset(start_offset, &tailed_bytes);
+        (tailed_bytes, tailed_events)
     }
 }
 
@@ -330,5 +491,59 @@ mod tests {
             b"bcdef"
         );
         assert_eq!(buffer.len(), 2);
+    }
+
+    #[test]
+    fn bounded_log_buffer_evicts_with_chunk_aware_front_offset() {
+        let mut buffer = BoundedLogBuffer::new(5);
+        buffer.push(b"abc");
+        buffer.push(b"def");
+
+        assert_eq!(buffer.snapshot(), b"bcdef");
+        assert_eq!(buffer.len(), 5);
+        assert_eq!(buffer.front_offset, 1);
+        assert_eq!(buffer.chunks.len(), 2);
+    }
+
+    #[test]
+    fn bounded_log_buffer_large_chunk_keeps_latest_tail_only() {
+        let mut buffer = BoundedLogBuffer::new(4);
+        buffer.push(b"0123456789");
+
+        assert_eq!(buffer.snapshot(), b"6789");
+        assert_eq!(buffer.front_offset, 0);
+        assert_eq!(buffer.chunks.len(), 1);
+    }
+
+    #[test]
+    fn composite_log_buffer_tail_snapshot_aligns_bytes_and_events() {
+        let mut buffer = CompositeLogBuffer::new(32);
+        buffer.push_event(ServiceLogEvent {
+            stream: ServiceLogStream::Stdout,
+            bytes: b"line-1\n".to_vec(),
+            timestamp_unix_ms: 1,
+        });
+        buffer.push_event(ServiceLogEvent {
+            stream: ServiceLogStream::Stderr,
+            bytes: b"line-2\n".to_vec(),
+            timestamp_unix_ms: 2,
+        });
+        buffer.push_event(ServiceLogEvent {
+            stream: ServiceLogStream::Stdout,
+            bytes: b"line-3\n".to_vec(),
+            timestamp_unix_ms: 3,
+        });
+
+        let (tail_bytes, tail_events) = buffer.tail_snapshot(2);
+        assert_eq!(tail_bytes, b"line-2\nline-3\n");
+        assert_eq!(
+            tail_events
+                .iter()
+                .flat_map(|event| event.bytes.clone())
+                .collect::<Vec<_>>(),
+            tail_bytes
+        );
+        assert_eq!(tail_events[0].stream, ServiceLogStream::Stderr);
+        assert_eq!(tail_events[1].stream, ServiceLogStream::Stdout);
     }
 }

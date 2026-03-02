@@ -871,16 +871,10 @@ impl ServiceSupervisor {
         };
 
         if let Some((snapshot_source, receiver)) = running_subscription {
-            let (full_snapshot_bytes, full_snapshot_events) = {
+            let (snapshot_bytes, snapshot_events) = {
                 let buffer = snapshot_source.lock().await;
-                buffer.snapshot()
+                buffer.tail_snapshot(tail_lines)
             };
-            let snapshot_bytes = tail_lines_from_bytes(&full_snapshot_bytes, tail_lines);
-            let snapshot_events = tail_events_from_snapshot_bytes(
-                &full_snapshot_events,
-                &full_snapshot_bytes,
-                snapshot_bytes.len(),
-            );
 
             return Ok(ServiceLogSubscription {
                 service_name: service_name.to_string(),
