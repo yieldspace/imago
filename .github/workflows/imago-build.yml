@@ -49,6 +49,12 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.93.1'
+          targets: ${{ matrix.target }}
+
       - name: Build GNU target (main/PR)
         if: ${{ !(matrix.use_zig) && github.event_name != 'release' }}
         run: cargo build --locked --release --target "${{ matrix.target }}" -p imago-cli -p imagod --bin imago --bin imagod
