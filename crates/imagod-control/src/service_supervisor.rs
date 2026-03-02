@@ -1281,6 +1281,7 @@ impl ServiceSupervisor {
         };
 
         if let Some((service, exit_status)) = finished {
+            self.remove_runner_index(&service.runner_id).await;
             log_exit_outcome(
                 service_name,
                 &service.release_hash,
@@ -3767,6 +3768,48 @@ mod tests {
             .expect("single-service reap should retain logs");
         assert_eq!(subscription.snapshot_bytes, b"single-a\nsingle-b\n");
         assert!(subscription.receiver.is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn reap_finished_service_removes_runner_index_entry() {
+        let root = new_test_root("reap-single-index");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
+        let service_name = "svc-reap-single-index";
+        let runner_id = "runner-reap-single-index";
+        let runner_endpoint = root
+            .join("runtime")
+            .join("ipc")
+            .join("reap-single-index.sock");
+
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("child process should spawn");
+        let service = new_running_service(child, runner_id, runner_endpoint);
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(service_name.to_string(), service);
+        }
+        supervisor
+            .runner_index
+            .write()
+            .await
+            .insert(runner_id.to_string(), service_name.to_string());
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        supervisor.reap_finished_service(service_name).await;
+
+        assert!(
+            !supervisor.runner_index.read().await.contains_key(runner_id),
+            "runner index entry should be removed after single-service reap"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

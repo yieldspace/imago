@@ -105,7 +105,8 @@ impl BoundedLogBuffer {
         }
 
         let keep_lines = tail_lines as usize;
-        let mut recent_line_starts = VecDeque::with_capacity(keep_lines.max(1));
+        let tracked_line_starts_limit = keep_lines.min(self.total_bytes.saturating_add(1)).max(1);
+        let mut recent_line_starts = VecDeque::with_capacity(tracked_line_starts_limit);
         recent_line_starts.push_back(0usize);
         let mut total_line_starts = 1usize;
         let mut index = 0usize;
@@ -120,7 +121,7 @@ impl BoundedLogBuffer {
                 if *byte == b'\n' && index + 1 < self.total_bytes {
                     total_line_starts = total_line_starts.saturating_add(1);
                     recent_line_starts.push_back(index + 1);
-                    if recent_line_starts.len() > keep_lines {
+                    if recent_line_starts.len() > tracked_line_starts_limit {
                         let _ = recent_line_starts.pop_front();
                     }
                 }
@@ -133,11 +134,6 @@ impl BoundedLogBuffer {
         } else {
             recent_line_starts.front().copied().unwrap_or(0)
         }
-    }
-
-    pub(super) fn tail_lines(&self, tail_lines: u32) -> Vec<u8> {
-        let offset = self.tail_start_offset_by_lines(tail_lines);
-        self.bytes_from_offset(offset)
     }
 
     pub(super) fn snapshot(&self) -> Vec<u8> {
@@ -295,7 +291,7 @@ impl CompositeLogBuffer {
 
     pub(super) fn tail_snapshot(&self, tail_lines: u32) -> (Vec<u8>, Vec<ServiceLogEvent>) {
         let start_offset = self.bytes.tail_start_offset_by_lines(tail_lines);
-        let tailed_bytes = self.bytes.tail_lines(tail_lines);
+        let tailed_bytes = self.bytes.bytes_from_offset(start_offset);
         let tailed_events = self.events.tail_from_offset(start_offset, &tailed_bytes);
         (tailed_bytes, tailed_events)
     }
@@ -545,5 +541,15 @@ mod tests {
         );
         assert_eq!(tail_events[0].stream, ServiceLogStream::Stderr);
         assert_eq!(tail_events[1].stream, ServiceLogStream::Stdout);
+    }
+
+    #[test]
+    fn bounded_log_buffer_tail_lines_with_huge_request_returns_full_snapshot() {
+        let mut buffer = BoundedLogBuffer::new(64);
+        buffer.push(b"line-1\nline-2\nline-3");
+
+        let start_offset = buffer.tail_start_offset_by_lines(u32::MAX);
+        assert_eq!(start_offset, 0);
+        assert_eq!(buffer.bytes_from_offset(start_offset), buffer.snapshot());
     }
 }

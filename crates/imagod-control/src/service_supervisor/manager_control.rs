@@ -123,6 +123,7 @@ pub(super) async fn handle_control_request_impl(
             };
             let mut guard = inner.write().await;
             let Some(service) = guard.get_mut(&actual_service_name) else {
+                drop(guard);
                 runner_index.write().await.remove(&runner_id);
                 return control_error(ErrorCode::NotFound, "runner is not registered for startup");
             };
@@ -916,6 +917,53 @@ mod tests {
         }
 
         stop_running_service_best_effort(&inner, service_name).await;
+    }
+
+    #[tokio::test]
+    async fn given_register_runner_stale_index__when_handle_control_request_impl__then_not_found_without_deadlock()
+     {
+        let inner: Arc<RwLock<BTreeMap<String, super::super::RunningService>>> =
+            Arc::new(RwLock::new(BTreeMap::new()));
+        let pending_ready: Arc<Mutex<super::super::PendingReadyMap>> =
+            Arc::new(Mutex::new(BTreeMap::new()));
+        let runner_index: Arc<RwLock<super::super::RunnerServiceIndex>> =
+            Arc::new(RwLock::new(BTreeMap::new()));
+        let runner_id = "runner-register-stale";
+        runner_index
+            .write()
+            .await
+            .insert(runner_id.to_string(), "svc-stale".to_string());
+
+        let handler = DefaultManagerControlHandler::new_with_runner_index(
+            PathBuf::from("/tmp/imagod-control-test.toml"),
+            runner_index.clone(),
+        );
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            handle_control_request_impl(
+                &inner,
+                &pending_ready,
+                &handler,
+                ControlRequest::RegisterRunner {
+                    runner_id: runner_id.to_string(),
+                    service_name: "svc-stale".to_string(),
+                    release_hash: "release-test".to_string(),
+                    runner_endpoint: PathBuf::from(format!("/tmp/{runner_id}.sock")),
+                    manager_auth_proof: "proof".to_string(),
+                },
+            ),
+        )
+        .await
+        .expect("register_runner stale index path should return without deadlock");
+
+        match response {
+            ControlResponse::Error(err) => assert_eq!(err.code, ErrorCode::NotFound),
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert!(
+            !runner_index.read().await.contains_key(runner_id),
+            "stale runner index entry should be removed on register_runner NotFound"
+        );
     }
 
     #[tokio::test]
