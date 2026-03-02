@@ -1,0 +1,79 @@
+[workspace]
+release = false
+release_always = false
+publish = false
+git_only = true
+git_tag_enable = false
+git_release_enable = false
+git_release_type = "pre"
+changelog_update = false
+
+[[package]]
+name = "imago-cli"
+release = true
+git_tag_enable = true
+git_release_enable = true
+git_tag_name = "imago-v{{ version }}"
+git_release_name = "imago-v{{ version }}"
+git_release_body = """
+## CLI Release
+
+{{ changelog }}
+"""
+
+[[package]]
+name = "imagod"
+release = true
+git_tag_enable = true
+git_release_enable = true
+git_tag_name = "imagod-v{{ version }}"
+git_release_name = "imagod-v{{ version }}"
+git_release_body = """
+## Daemon Release
+
+{{ changelog }}
+"""
+
+[[package]]
+name = "imagod-common"
+release = true
+
+[[package]]
+name = "imagod-config"
+release = true
+
+[[package]]
+name = "imagod-control"
+release = true
+
+[[package]]
+name = "imagod-ipc"
+release = true
+
+[[package]]
+name = "imagod-runtime"
+release = true
+
+[[package]]
+name = "imagod-runtime-bootstrap"
+release = true
+
+[[package]]
+name = "imagod-runtime-control"
+release = true
+
+[[package]]
+name = "imagod-runtime-ingress"
+release = true
+
+[[package]]
+name = "imagod-runtime-internal"
+release = true
+
+[[package]]
+name = "imagod-runtime-wasmtime"
+release = true
+
+[[package]]
+name = "imagod-server"
+release = true

@@ -1,8 +1,13 @@
 name: imago-build.yml
+
 on:
   push:
     branches:
       - main
+  release:
+    types:
+      - published
+      - prereleased
   workflow_dispatch:
   pull_request:
     paths:
@@ -14,9 +19,11 @@ permissions:
 concurrency:
   group: ci-imago-build-${{ github.ref }}
   cancel-in-progress: true
+
 jobs:
-  build_imago:
-    name: Build Imago (${{ matrix.target }})
+  build:
+    name: Build (${{ matrix.target }})
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'imago-v') || startsWith(github.event.release.tag_name, 'imagod-v')
     runs-on: imago-cross-runner-set
     strategy:
       matrix:
@@ -40,74 +47,105 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Build GNU target ${{ matrix.target }}
-        if: matrix.use_zig == false
+      - name: Build GNU target (main/PR)
+        if: ${{ !(matrix.use_zig) && github.event_name != 'release' }}
         run: cargo build --locked --release --target "${{ matrix.target }}" -p imago-cli -p imagod --bin imago --bin imagod
 
-      - name: Build musl targets with zig
-        if: matrix.use_zig == true
+      - name: "Build GNU target (release: imago)"
+        if: ${{ !(matrix.use_zig) && github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imago-v') }}
+        run: cargo build --locked --release --target "${{ matrix.target }}" -p imago-cli --bin imago
+
+      - name: "Build GNU target (release: imagod)"
+        if: ${{ !(matrix.use_zig) && github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imagod-v') }}
+        run: cargo build --locked --release --target "${{ matrix.target }}" -p imagod --bin imagod
+
+      - name: Build musl target with zig (main/PR)
+        if: matrix.use_zig && github.event_name != 'release'
         run: cargo zigbuild --locked --release --target "${{ matrix.target }}" -p imago-cli -p imagod --bin imago --bin imagod
 
+      - name: "Build musl target with zig (release: imago)"
+        if: matrix.use_zig && github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imago-v')
+        run: cargo zigbuild --locked --release --target "${{ matrix.target }}" -p imago-cli --bin imago
+
+      - name: "Build musl target with zig (release: imagod)"
+        if: matrix.use_zig && github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imagod-v')
+        run: cargo zigbuild --locked --release --target "${{ matrix.target }}" -p imagod --bin imagod
+
       - name: Resolve binary versions
+        if: github.event_name != 'release'
         id: versions
         shell: bash
         run: |
           set -euo pipefail
-          imago_cli_pkgid="$(cargo pkgid -p imago-cli)"
-          imagod_pkgid="$(cargo pkgid -p imagod)"
-          echo "imago_version=${imago_cli_pkgid##*#}" >> "$GITHUB_OUTPUT"
-          echo "imagod_version=${imagod_pkgid##*#}" >> "$GITHUB_OUTPUT"
+          imago_cli_version="$(sed -nE 's/^version = "([^"]+)"$/\1/p' crates/imago-cli/Cargo.toml | head -n1)"
+          imagod_version="$(awk 'BEGIN{in_ws=0} /^\[workspace\.package\]/{in_ws=1;next} /^\[/{in_ws=0} in_ws && /^version = / {gsub(/"/,"",$3); print $3; exit}' Cargo.toml)"
+          echo "imago_version=${imago_cli_version}" >> "$GITHUB_OUTPUT"
+          echo "imagod_version=${imagod_version}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload imago binary
+      - name: Stage release artifact (imago)
+        if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imago-v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/imago" "dist/imago-${{ matrix.target }}"
+
+      - name: Stage release artifact (imagod)
+        if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imagod-v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/imagod" "dist/imagod-${{ matrix.target }}"
+
+      - name: Stage CI artifacts (main/PR)
+        if: github.event_name != 'release'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/imago" "dist/imago-${{ matrix.target }}-${{ steps.versions.outputs.imago_version }}"
+          cp "target/${{ matrix.target }}/release/imagod" "dist/imagod-${{ matrix.target }}-${{ steps.versions.outputs.imagod_version }}"
+
+      - name: Upload release artifacts
+        if: github.event_name == 'release'
         uses: actions/upload-artifact@v7
         with:
           if-no-files-found: error
-          name: ${{ matrix.target }}-imago-${{ steps.versions.outputs.imago_version }}-${{ github.sha }}
-          path: target/${{ matrix.target }}/release/imago
+          name: release-${{ github.event.release.tag_name }}-${{ matrix.target }}
+          path: dist/*
           retention-days: 7
 
-      - name: Upload imagod binary
+      - name: Upload CI artifacts
+        if: github.event_name != 'release'
         uses: actions/upload-artifact@v7
         with:
           if-no-files-found: error
-          name: ${{ matrix.target }}-imagod-${{ steps.versions.outputs.imagod_version }}-${{ github.sha }}
-          path: target/${{ matrix.target }}/release/imagod
+          name: ${{ matrix.target }}-binaries-${{ github.sha }}
+          path: dist/*
           retention-days: 7
 
-  build_nanokvm:
-    name: Build NanoKVM imagod
-    runs-on: imago-nanokvm-runner-set
-    env:
-      CC_riscv64gc_unknown_linux_musl: /home/runner/riscv64-unknown-linux-musl/bin/riscv64-unknown-linux-musl-gcc
-      AR_riscv64gc_unknown_linux_musl: /home/runner/riscv64-unknown-linux-musl/bin/riscv64-unknown-linux-musl-ar
-      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER: /home/runner/riscv64-unknown-linux-musl/bin/riscv64-unknown-linux-musl-gcc
+  upload-release-assets:
+    name: Upload release assets
+    needs:
+      - build
+    if: github.event_name == 'release' && (startsWith(github.event.release.tag_name, 'imago-v') || startsWith(github.event.release.tag_name, 'imagod-v')) && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
     steps:
-      - uses: actions/checkout@v6
+      - name: Download release artifacts
+        uses: actions/download-artifact@v7
         with:
-          submodules: recursive
+          path: dist
+          pattern: release-${{ github.event.release.tag_name }}-*
+          merge-multiple: true
 
-      - name: Add PATH
-        run: echo "/home/runner/riscv64-unknown-linux-musl/bin" >> "$GITHUB_PATH"
+      - name: List artifacts
+        run: ls -R dist
 
-      - name: Install toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-
-      - name: Install target
-        run: rustup target add riscv64gc-unknown-linux-musl
-
-      - name: Cache
-        if: ${{ runner.environment != 'self-hosted' }}
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build -p nanokvm-imagod --locked --release --bin imagod --target riscv64gc-unknown-linux-musl
-
-      - name: Upload NanoKVM imagod
-        uses: actions/upload-artifact@v7
-        with:
-          if-no-files-found: error
-          name: nanokvm-imagod-riscv64gc-unknown-linux-musl-${{ github.sha }}
-          path: target/riscv64gc-unknown-linux-musl/release/imagod
-          retention-days: 7
+      - name: Upload artifacts to existing GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber

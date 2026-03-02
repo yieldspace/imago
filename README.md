@@ -42,7 +42,7 @@ Mode priority:
   - [`crates/imago-cli/src/commands/build/validation.rs`](crates/imago-cli/src/commands/build/validation.rs)
 - Dependency and lock resolution:
   - [`crates/imago-cli/src/commands/update/mod.rs`](crates/imago-cli/src/commands/update/mod.rs)
-  - [`crates/imago-lockfile/src/lib.rs`](crates/imago-lockfile/src/lib.rs)
+  - [`crates/imago-cli/src/lockfile/mod.rs`](crates/imago-cli/src/lockfile/mod.rs)
 - Wire contracts and validation:
   - [`crates/imago-protocol/src/lib.rs`](crates/imago-protocol/src/lib.rs)
   - [`crates/imago-protocol/src/messages`](crates/imago-protocol/src/messages)
