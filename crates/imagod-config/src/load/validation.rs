@@ -94,6 +94,22 @@ pub(crate) fn validate(config: &ImagodConfig) -> Result<(), ImagodError> {
         ));
     }
 
+    if config.runtime.wasm_memory_reservation_bytes == 0 {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.load",
+            "runtime.wasm_memory_reservation_bytes must be greater than 0",
+        ));
+    }
+
+    if config.runtime.wasm_memory_reservation_for_growth_bytes == 0 {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.load",
+            "runtime.wasm_memory_reservation_for_growth_bytes must be greater than 0",
+        ));
+    }
+
     if config.runtime.runner_ready_timeout_secs == 0 {
         return Err(ImagodError::new(
             ErrorCode::BadRequest,

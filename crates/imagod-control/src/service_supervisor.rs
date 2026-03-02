@@ -21,7 +21,11 @@ use std::{
 };
 
 use imago_protocol::ErrorCode;
-use imagod_common::ImagodError;
+use imagod_common::{
+    DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY, DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES,
+    DEFAULT_WASM_MEMORY_RESERVATION_BYTES, DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES,
+    DEFAULT_WASM_PARALLEL_COMPILATION, ImagodError,
+};
 use imagod_ipc::{
     CapabilityPolicy, PluginDependency, ResourceMap, RunnerAppType, RunnerBootstrap,
     RunnerInboundRequest, RunnerInboundResponse, RunnerSocketConfig, RunnerWasiMount,
@@ -191,6 +195,11 @@ pub struct ServiceSupervisor {
     http_worker_count: u32,
     http_worker_queue_capacity: u32,
     http_queue_memory_budget_bytes: u64,
+    wasm_memory_reservation_bytes: u64,
+    wasm_memory_reservation_for_growth_bytes: u64,
+    wasm_memory_guard_size_bytes: u64,
+    wasm_guard_before_linear_memory: bool,
+    wasm_parallel_compilation: bool,
     runner_log_buffer_bytes: usize,
     epoch_tick_interval_ms: u64,
     manager_control_endpoint: PathBuf,
@@ -322,6 +331,12 @@ impl ServiceSupervisor {
             http_worker_count,
             http_worker_queue_capacity,
             http_queue_memory_budget_bytes: DEFAULT_HTTP_QUEUE_MEMORY_BUDGET_BYTES,
+            wasm_memory_reservation_bytes: DEFAULT_WASM_MEMORY_RESERVATION_BYTES,
+            wasm_memory_reservation_for_growth_bytes:
+                DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES,
+            wasm_memory_guard_size_bytes: DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES,
+            wasm_guard_before_linear_memory: DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY,
+            wasm_parallel_compilation: DEFAULT_WASM_PARALLEL_COMPILATION,
             runner_log_buffer_bytes,
             epoch_tick_interval_ms: epoch_tick_interval_ms.max(1),
             manager_control_endpoint,
@@ -344,6 +359,23 @@ impl ServiceSupervisor {
         http_queue_memory_budget_bytes: u64,
     ) -> Self {
         self.http_queue_memory_budget_bytes = http_queue_memory_budget_bytes;
+        self
+    }
+
+    /// Overrides Wasmtime linear-memory reservation and guard tuning for runners.
+    pub fn with_wasm_engine_tuning(
+        mut self,
+        wasm_memory_reservation_bytes: u64,
+        wasm_memory_reservation_for_growth_bytes: u64,
+        wasm_memory_guard_size_bytes: u64,
+        wasm_guard_before_linear_memory: bool,
+        wasm_parallel_compilation: bool,
+    ) -> Self {
+        self.wasm_memory_reservation_bytes = wasm_memory_reservation_bytes;
+        self.wasm_memory_reservation_for_growth_bytes = wasm_memory_reservation_for_growth_bytes;
+        self.wasm_memory_guard_size_bytes = wasm_memory_guard_size_bytes;
+        self.wasm_guard_before_linear_memory = wasm_guard_before_linear_memory;
+        self.wasm_parallel_compilation = wasm_parallel_compilation;
         self
     }
 
@@ -392,6 +424,12 @@ impl ServiceSupervisor {
                 manager_auth_secret: manager_auth_secret.clone(),
                 invocation_secret: invocation_secret.clone(),
                 epoch_tick_interval_ms: self.epoch_tick_interval_ms,
+                wasm_memory_reservation_bytes: self.wasm_memory_reservation_bytes,
+                wasm_memory_reservation_for_growth_bytes: self
+                    .wasm_memory_reservation_for_growth_bytes,
+                wasm_memory_guard_size_bytes: self.wasm_memory_guard_size_bytes,
+                wasm_guard_before_linear_memory: self.wasm_guard_before_linear_memory,
+                wasm_parallel_compilation: self.wasm_parallel_compilation,
             };
 
             let (ready_tx, mut ready_rx) = oneshot::channel::<Result<(), ImagodError>>();

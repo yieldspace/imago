@@ -1419,6 +1419,10 @@ mod tests {
             .expect("tar entry should be appended");
     }
 
+    fn minimal_component_bytes() -> Vec<u8> {
+        wat::parse_str("(component)").expect("minimal component should compile")
+    }
+
     fn committed_artifact_for_manifest(
         root: &Path,
         deploy_id: &str,
@@ -2244,10 +2248,10 @@ mod tests {
         let root = temp_dir_path("orchestrator-plugin-cache");
         fs::create_dir_all(root.join("plugins-src")).expect("plugins source dir should exist");
         fs::write(root.join("component.wasm"), b"wasm").expect("main component should exist");
-        let plugin_bytes = b"plugin-wasm-bytes";
-        fs::write(root.join("plugins-src/ffmpeg.wasm"), plugin_bytes)
+        let plugin_bytes = minimal_component_bytes();
+        fs::write(root.join("plugins-src/ffmpeg.wasm"), &plugin_bytes)
             .expect("plugin component should exist");
-        let plugin_sha = hex::encode(Sha256::digest(plugin_bytes));
+        let plugin_sha = hex::encode(Sha256::digest(&plugin_bytes));
 
         let mut manifest = valid_manifest();
         manifest.dependencies = vec![PluginDependency {
@@ -2259,6 +2263,8 @@ mod tests {
             component: Some(PluginComponent {
                 path: PathBuf::from("plugins-src/ffmpeg.wasm"),
                 sha256: plugin_sha.clone(),
+                imports: None,
+                exports: None,
             }),
             capabilities: CapabilityPolicy::default(),
         }];
@@ -2278,6 +2284,24 @@ mod tests {
                 .join(format!("{plugin_sha}.wasm"))
         );
         assert!(cached.exists(), "cached component file must exist");
+        let component = launch.plugin_dependencies[0]
+            .component
+            .as_ref()
+            .expect("plugin component should exist");
+        assert!(
+            component
+                .imports
+                .as_ref()
+                .is_some_and(|imports| imports.is_empty()),
+            "manager should embed component import metadata"
+        );
+        assert!(
+            component
+                .exports
+                .as_ref()
+                .is_some_and(|exports| exports.is_empty()),
+            "manager should embed component export metadata"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2287,10 +2311,10 @@ mod tests {
         let root = temp_dir_path("orchestrator-plugin-cache-uppercase-sha");
         fs::create_dir_all(root.join("plugins-src")).expect("plugins source dir should exist");
         fs::write(root.join("component.wasm"), b"wasm").expect("main component should exist");
-        let plugin_bytes = b"plugin-wasm-bytes-uppercase";
-        fs::write(root.join("plugins-src/ffmpeg.wasm"), plugin_bytes)
+        let plugin_bytes = minimal_component_bytes();
+        fs::write(root.join("plugins-src/ffmpeg.wasm"), &plugin_bytes)
             .expect("plugin component should exist");
-        let plugin_sha_upper = hex::encode(Sha256::digest(plugin_bytes)).to_uppercase();
+        let plugin_sha_upper = hex::encode(Sha256::digest(&plugin_bytes)).to_uppercase();
 
         let mut manifest = valid_manifest();
         manifest.dependencies = vec![PluginDependency {
@@ -2302,6 +2326,8 @@ mod tests {
             component: Some(PluginComponent {
                 path: PathBuf::from("plugins-src/ffmpeg.wasm"),
                 sha256: plugin_sha_upper.clone(),
+                imports: None,
+                exports: None,
             }),
             capabilities: CapabilityPolicy::default(),
         }];
@@ -2364,6 +2390,8 @@ mod tests {
             component: Some(PluginComponent {
                 path: PathBuf::from("plugins/components/keep.wasm"),
                 sha256: keep_sha.clone(),
+                imports: None,
+                exports: None,
             }),
             capabilities: CapabilityPolicy::default(),
         }];

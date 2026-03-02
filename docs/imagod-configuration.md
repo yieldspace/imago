@@ -130,7 +130,7 @@ known_public_keys = { "rpc://node-a:4443" = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 <a id="the-runtime-section"></a>
 ## The [runtime] section
 
-This section controls transfer limits, worker settings, and startup behavior toggles.
+This section controls transfer limits, worker settings, Wasmtime memory tuning, and startup behavior toggles.
 
 ### The `chunk_size` field
 
@@ -251,6 +251,107 @@ epoch_tick_interval_ms = 50
 ```
 
 - Validation error notes: zero fails validation.
+
+### The `wasm_memory_reservation_bytes` field
+
+- Type: `integer` (`u64`)
+- Required/Optional: Optional.
+- Accepted values / Constraints: `>= 1`.
+- Default: `67108864` (64 MiB).
+- Behavior notes:
+  - Passed to Wasmtime `Config::memory_reservation`.
+  - Lower values reduce virtual-memory reservation but can increase relocation frequency on memory growth.
+- Rollback notes:
+  - To approximate prior 64-bit Wasmtime defaults, set `4294967296` (4 GiB).
+- Example:
+
+```toml
+[runtime]
+wasm_memory_reservation_bytes = 67108864
+```
+
+- Validation error notes: zero fails validation.
+
+### The `wasm_memory_reservation_for_growth_bytes` field
+
+- Type: `integer` (`u64`)
+- Required/Optional: Optional.
+- Accepted values / Constraints: `>= 1`.
+- Default: `16777216` (16 MiB).
+- Behavior notes:
+  - Passed to Wasmtime `Config::memory_reservation_for_growth`.
+  - Controls how much adjacent reservation is appended on growth before full relocation.
+- Rollback notes:
+  - To approximate prior 64-bit Wasmtime defaults, set `2147483648` (2 GiB).
+- Example:
+
+```toml
+[runtime]
+wasm_memory_reservation_for_growth_bytes = 16777216
+```
+
+- Validation error notes: zero fails validation.
+
+### The `wasm_memory_guard_size_bytes` field
+
+- Type: `integer` (`u64`)
+- Required/Optional: Optional.
+- Accepted values / Constraints: `>= 0` (`0` is allowed).
+- Default: `65536` (64 KiB).
+- Behavior notes:
+  - Passed to Wasmtime `Config::memory_guard_size`.
+  - Smaller values reduce reserved virtual-memory address space but may reduce guard-based bounds-check elision opportunities.
+- Rollback notes:
+  - To approximate prior 64-bit Wasmtime defaults, set `33554432` (32 MiB).
+- Example:
+
+```toml
+[runtime]
+wasm_memory_guard_size_bytes = 65536
+```
+
+- Validation error notes: no additional bound check beyond TOML integer decoding.
+
+### The `wasm_guard_before_linear_memory` field
+
+- Type: `boolean`
+- Required/Optional: Optional.
+- Accepted values / Constraints: `true` or `false`.
+- Default: `false`.
+- Behavior notes:
+  - Passed to Wasmtime `Config::guard_before_linear_memory`.
+  - `false` reduces pre-linear-memory reservation footprint.
+- Rollback notes:
+  - To approximate prior 64-bit Wasmtime defaults, set `true`.
+- Example:
+
+```toml
+[runtime]
+wasm_guard_before_linear_memory = false
+```
+
+- Validation error notes: non-boolean values fail TOML decode.
+
+### The `wasm_parallel_compilation` field
+
+- Type: `boolean`
+- Required/Optional: Optional.
+- Accepted values / Constraints: `true` or `false`.
+- Default: `false`.
+- Behavior notes:
+  - Passed to Wasmtime `Config::parallel_compilation`.
+  - `false` reduces runner thread count and memory footprint by avoiding parallel compile workers.
+  - `true` may reduce startup compile latency for large components at the cost of higher memory usage.
+- Rollback notes:
+  - Set `true` to approximate the previous default behavior.
+- Example:
+
+```toml
+[runtime]
+wasm_parallel_compilation = false
+```
+
+- Validation error notes: non-boolean values fail TOML decode.
 
 ### The `http_worker_count` field
 

@@ -541,12 +541,29 @@ pub struct PluginComponent {
     pub path: PathBuf,
     /// Hex-encoded SHA-256 digest for component bytes.
     pub sha256: String,
+    /// Imported component instance interface names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imports: Option<Vec<String>>,
+    /// Exported component instance interface names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exports: Option<Vec<String>>,
 }
 
 impl Validate for PluginComponent {
     fn validate(&self) -> Result<(), ValidationError> {
         validate_non_empty_path(&self.path, "path")?;
-        validate_non_empty(&self.sha256, "sha256")
+        validate_non_empty(&self.sha256, "sha256")?;
+        if let Some(imports) = &self.imports {
+            for import in imports {
+                validate_non_empty(import, "imports")?;
+            }
+        }
+        if let Some(exports) = &self.exports {
+            for export in exports {
+                validate_non_empty(export, "exports")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -686,6 +703,16 @@ pub struct RunnerBootstrap {
     pub invocation_secret: String,
     /// Epoch tick interval used by the runner runtime loop.
     pub epoch_tick_interval_ms: u64,
+    /// Wasmtime linear-memory reservation size in bytes.
+    pub wasm_memory_reservation_bytes: u64,
+    /// Wasmtime extra reservation size for linear-memory growth in bytes.
+    pub wasm_memory_reservation_for_growth_bytes: u64,
+    /// Wasmtime linear-memory guard size in bytes.
+    pub wasm_memory_guard_size_bytes: u64,
+    /// Whether Wasmtime reserves a guard region before linear memory.
+    pub wasm_guard_before_linear_memory: bool,
+    /// Whether Wasmtime compiles modules in parallel.
+    pub wasm_parallel_compilation: bool,
 }
 
 impl Validate for RunnerBootstrap {
@@ -701,6 +728,14 @@ impl Validate for RunnerBootstrap {
         validate_non_empty_path(&self.manager_control_endpoint, "manager_control_endpoint")?;
         validate_non_empty_path(&self.runner_endpoint, "runner_endpoint")?;
         validate_positive_u64(self.epoch_tick_interval_ms, "epoch_tick_interval_ms")?;
+        validate_positive_u64(
+            self.wasm_memory_reservation_bytes,
+            "wasm_memory_reservation_bytes",
+        )?;
+        validate_positive_u64(
+            self.wasm_memory_reservation_for_growth_bytes,
+            "wasm_memory_reservation_for_growth_bytes",
+        )?;
         if !(1..=4).contains(&self.http_worker_count) {
             return Err(ValidationError::invalid(
                 "http_worker_count",
@@ -1349,6 +1384,11 @@ mod tests {
             manager_auth_secret: random_secret_hex(),
             invocation_secret: random_secret_hex(),
             epoch_tick_interval_ms: 50,
+            wasm_memory_reservation_bytes: 64 * 1024 * 1024,
+            wasm_memory_reservation_for_growth_bytes: 16 * 1024 * 1024,
+            wasm_memory_guard_size_bytes: 64 * 1024,
+            wasm_guard_before_linear_memory: false,
+            wasm_parallel_compilation: false,
         }
     }
 
@@ -1428,6 +1468,11 @@ mod tests {
             manager_auth_secret: random_secret_hex(),
             invocation_secret: random_secret_hex(),
             epoch_tick_interval_ms: 50,
+            wasm_memory_reservation_bytes: 64 * 1024 * 1024,
+            wasm_memory_reservation_for_growth_bytes: 16 * 1024 * 1024,
+            wasm_memory_guard_size_bytes: 64 * 1024,
+            wasm_guard_before_linear_memory: false,
+            wasm_parallel_compilation: false,
         };
         let encoded = imago_protocol::to_cbor(&bootstrap).expect("bootstrap encoding should work");
         let decoded = imago_protocol::from_cbor::<RunnerBootstrap>(&encoded)
@@ -1470,6 +1515,77 @@ mod tests {
         );
         assert_eq!(decoded.http_worker_count, 2);
         assert_eq!(decoded.http_worker_queue_capacity, 4);
+        assert_eq!(decoded.wasm_memory_reservation_bytes, 64 * 1024 * 1024);
+        assert_eq!(
+            decoded.wasm_memory_reservation_for_growth_bytes,
+            16 * 1024 * 1024
+        );
+        assert_eq!(decoded.wasm_memory_guard_size_bytes, 64 * 1024);
+        assert!(!decoded.wasm_guard_before_linear_memory);
+        assert!(!decoded.wasm_parallel_compilation);
+    }
+
+    #[test]
+    fn runner_bootstrap_cbor_roundtrip_preserves_plugin_component_interfaces() {
+        let mut bootstrap = valid_http_bootstrap();
+        bootstrap.plugin_dependencies = vec![PluginDependency {
+            name: "yieldspace:plugin/example".to_string(),
+            version: "0.1.0".to_string(),
+            kind: PluginKind::Wasm,
+            wit: "warg://yieldspace:plugin/example@0.1.0".to_string(),
+            requires: vec![],
+            component: Some(PluginComponent {
+                path: PathBuf::from("/tmp/plugin-component.wasm"),
+                sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_string(),
+                imports: Some(vec!["yieldspace:plugin/provider".to_string()]),
+                exports: Some(vec!["yieldspace:plugin/example".to_string()]),
+            }),
+            capabilities: CapabilityPolicy::default(),
+        }];
+
+        let encoded = imago_protocol::to_cbor(&bootstrap).expect("bootstrap encoding should work");
+        let decoded = imago_protocol::from_cbor::<RunnerBootstrap>(&encoded)
+            .expect("bootstrap decoding should work");
+
+        let decoded_component = decoded
+            .plugin_dependencies
+            .first()
+            .and_then(|dep| dep.component.as_ref())
+            .expect("decoded bootstrap should include plugin component metadata");
+        assert_eq!(
+            decoded_component.imports.as_ref(),
+            Some(&vec!["yieldspace:plugin/provider".to_string()])
+        );
+        assert_eq!(
+            decoded_component.exports.as_ref(),
+            Some(&vec!["yieldspace:plugin/example".to_string()])
+        );
+    }
+
+    #[test]
+    fn plugin_component_validate_rejects_empty_import_or_export_name() {
+        let invalid_import_component = PluginComponent {
+            path: PathBuf::from("/tmp/plugin-component.wasm"),
+            sha256: "abcdef".to_string(),
+            imports: Some(vec!["".to_string()]),
+            exports: None,
+        };
+        let err = invalid_import_component
+            .validate()
+            .expect_err("empty import should fail validation");
+        assert!(err.to_string().contains("imports"));
+
+        let invalid_export_component = PluginComponent {
+            path: PathBuf::from("/tmp/plugin-component.wasm"),
+            sha256: "abcdef".to_string(),
+            imports: None,
+            exports: Some(vec!["".to_string()]),
+        };
+        let err = invalid_export_component
+            .validate()
+            .expect_err("empty export should fail validation");
+        assert!(err.to_string().contains("exports"));
     }
 
     #[test]
@@ -1507,6 +1623,31 @@ mod tests {
             .validate()
             .expect_err("bootstrap should reject out-of-range http_worker_queue_capacity");
         assert!(err.to_string().contains("http_worker_queue_capacity"));
+    }
+
+    #[test]
+    fn runner_bootstrap_validate_rejects_zero_wasm_memory_reservation() {
+        let mut bootstrap = valid_http_bootstrap();
+        bootstrap.wasm_memory_reservation_bytes = 0;
+
+        let err = bootstrap
+            .validate()
+            .expect_err("bootstrap should reject zero wasm_memory_reservation_bytes");
+        assert!(err.to_string().contains("wasm_memory_reservation_bytes"));
+    }
+
+    #[test]
+    fn runner_bootstrap_validate_rejects_zero_wasm_memory_reservation_for_growth() {
+        let mut bootstrap = valid_http_bootstrap();
+        bootstrap.wasm_memory_reservation_for_growth_bytes = 0;
+
+        let err = bootstrap
+            .validate()
+            .expect_err("bootstrap should reject zero wasm_memory_reservation_for_growth_bytes");
+        assert!(
+            err.to_string()
+                .contains("wasm_memory_reservation_for_growth_bytes")
+        );
     }
 
     #[test]

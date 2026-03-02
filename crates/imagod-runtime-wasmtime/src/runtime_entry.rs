@@ -1,18 +1,24 @@
 use std::{
     collections::BTreeMap,
     net::{IpAddr, SocketAddr},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
 
 use async_trait::async_trait;
 use imago_protocol::ErrorCode;
-use imagod_common::ImagodError;
+use imagod_common::{
+    DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY, DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES,
+    DEFAULT_WASM_MEMORY_RESERVATION_BYTES, DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES,
+    DEFAULT_WASM_PARALLEL_COMPILATION, ImagodError,
+};
 use imagod_ipc::{
     CapabilityPolicy, PluginDependency, RunnerAppType, RunnerSocketConfig, RunnerSocketDirection,
     RunnerWasiMount, ServiceBinding, WasiHttpOutboundRule,
 };
+#[cfg(test)]
+use imagod_runtime_internal::RuntimeInvokeContext;
 use imagod_runtime_internal::{
     ComponentRuntime, HttpComponentSupervisor, PluginResolver, RuntimeHttpRequest,
     RuntimeHttpResponse, RuntimeHttpWorkItem, RuntimeInvokeRequest, RuntimeInvoker,
@@ -44,9 +50,47 @@ use crate::{
     rpc_values::{decode_payload_values, encode_payload_values, placeholder_values},
 };
 
+/// Wasmtime engine-level memory tuning knobs propagated from manager runtime config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WasmEngineTuning {
+    /// Wasmtime linear-memory reservation size in bytes.
+    pub memory_reservation_bytes: u64,
+    /// Wasmtime extra reservation size for linear-memory growth in bytes.
+    pub memory_reservation_for_growth_bytes: u64,
+    /// Wasmtime linear-memory guard size in bytes.
+    pub memory_guard_size_bytes: u64,
+    /// Whether Wasmtime reserves a guard region before linear memory.
+    pub guard_before_linear_memory: bool,
+    /// Whether Wasmtime compiles modules in parallel.
+    pub parallel_compilation: bool,
+}
+
+impl Default for WasmEngineTuning {
+    fn default() -> Self {
+        Self {
+            memory_reservation_bytes: DEFAULT_WASM_MEMORY_RESERVATION_BYTES,
+            memory_reservation_for_growth_bytes: DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES,
+            memory_guard_size_bytes: DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES,
+            guard_before_linear_memory: DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY,
+            parallel_compilation: DEFAULT_WASM_PARALLEL_COMPILATION,
+        }
+    }
+}
+
+impl WasmEngineTuning {
+    fn apply_to_config(self, config: &mut Config) {
+        config.memory_reservation(self.memory_reservation_bytes);
+        config.memory_reservation_for_growth(self.memory_reservation_for_growth_bytes);
+        config.memory_guard_size(self.memory_guard_size_bytes);
+        config.guard_before_linear_memory(self.guard_before_linear_memory);
+        config.parallel_compilation(self.parallel_compilation);
+    }
+}
+
 /// Runner-local wrapper around a configured Wasmtime engine.
 pub struct WasmRuntime {
     engine: Arc<Engine>,
+    component_cache: Arc<std::sync::RwLock<BTreeMap<PathBuf, Arc<Component>>>>,
     native_plugins: NativePluginRegistry,
     plugin_resolver: Arc<DefaultPluginResolver>,
     http_supervisor: Arc<DefaultHttpComponentSupervisor>,
@@ -57,6 +101,7 @@ impl Clone for WasmRuntime {
     fn clone(&self) -> Self {
         Self {
             engine: self.engine.clone(),
+            component_cache: self.component_cache.clone(),
             native_plugins: self.native_plugins.clone(),
             plugin_resolver: self.plugin_resolver.clone(),
             http_supervisor: self.http_supervisor.clone(),
@@ -68,18 +113,35 @@ impl Clone for WasmRuntime {
 impl WasmRuntime {
     /// Creates a runtime with component model, async support, and epoch interruption enabled.
     pub fn new() -> Result<Self, ImagodError> {
-        Self::new_with_native_plugins(NativePluginRegistry::default())
+        Self::new_with_native_plugins_and_tuning(
+            NativePluginRegistry::default(),
+            WasmEngineTuning::default(),
+        )
+    }
+
+    /// Creates a runtime with explicit Wasmtime engine memory tuning.
+    pub fn new_with_tuning(tuning: WasmEngineTuning) -> Result<Self, ImagodError> {
+        Self::new_with_native_plugins_and_tuning(NativePluginRegistry::default(), tuning)
     }
 
     /// Creates a runtime with a native plugin registry injected by manager build.
     pub fn new_with_native_plugins(
         native_plugins: NativePluginRegistry,
     ) -> Result<Self, ImagodError> {
+        Self::new_with_native_plugins_and_tuning(native_plugins, WasmEngineTuning::default())
+    }
+
+    /// Creates a runtime with native plugins and explicit Wasmtime engine memory tuning.
+    pub fn new_with_native_plugins_and_tuning(
+        native_plugins: NativePluginRegistry,
+        tuning: WasmEngineTuning,
+    ) -> Result<Self, ImagodError> {
         Self::new_with_runtime_contracts(
             native_plugins,
             Arc::new(DefaultPluginResolver),
             Arc::new(DefaultHttpComponentSupervisor::new()),
             Arc::new(DefaultCapabilityChecker),
+            tuning,
         )
     }
 
@@ -88,16 +150,19 @@ impl WasmRuntime {
         plugin_resolver: Arc<DefaultPluginResolver>,
         http_supervisor: Arc<DefaultHttpComponentSupervisor>,
         capability_checker: Arc<DefaultCapabilityChecker>,
+        tuning: WasmEngineTuning,
     ) -> Result<Self, ImagodError> {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.epoch_interruption(true);
+        tuning.apply_to_config(&mut config);
 
         let engine = Engine::new(&config)
             .map_err(|e| map_runtime_error(format!("engine init failed: {e}")))?;
 
         Ok(Self {
             engine: Arc::new(engine),
+            component_cache: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             native_plugins,
             plugin_resolver,
             http_supervisor,
@@ -111,13 +176,38 @@ impl WasmRuntime {
     }
 
     fn validate_component_loadable(&self, component_path: &Path) -> Result<(), ImagodError> {
-        Component::from_file(&self.engine, component_path).map_err(|e| {
-            map_runtime_error(format!(
-                "failed to load component {}: {e}",
-                component_path.display()
-            ))
-        })?;
+        let _ = self.load_component_cached(component_path)?;
         Ok(())
+    }
+
+    fn load_component_cached(&self, component_path: &Path) -> Result<Arc<Component>, ImagodError> {
+        if let Some(component) = self
+            .component_cache
+            .read()
+            .map_err(|_| map_runtime_error("component cache lock is poisoned".to_string()))?
+            .get(component_path)
+            .cloned()
+        {
+            return Ok(component);
+        }
+
+        let mut cache = self
+            .component_cache
+            .write()
+            .map_err(|_| map_runtime_error("component cache lock is poisoned".to_string()))?;
+        if let Some(existing) = cache.get(component_path).cloned() {
+            return Ok(existing);
+        }
+        let loaded = Arc::new(
+            Component::from_file(&self.engine, component_path).map_err(|e| {
+                map_runtime_error(format!(
+                    "failed to load component {}: {e}",
+                    component_path.display()
+                ))
+            })?,
+        );
+        cache.insert(component_path.to_path_buf(), loaded.clone());
+        Ok(loaded)
     }
 
     fn build_store(
@@ -137,7 +227,7 @@ impl WasmRuntime {
         if !envs.is_empty() {
             let vars = envs
                 .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect::<Vec<_>>();
             builder.envs(&vars);
         }
@@ -213,12 +303,7 @@ impl WasmRuntime {
         mut shutdown: watch::Receiver<bool>,
         epoch_tick_interval_ms: u64,
     ) -> Result<(), ImagodError> {
-        let component = Component::from_file(&self.engine, component_path).map_err(|e| {
-            map_runtime_error(format!(
-                "failed to load component {}: {e}",
-                component_path.display()
-            ))
-        })?;
+        let component = self.load_component_cached(component_path)?;
 
         let mut linker = self.build_component_linker()?;
 
@@ -249,7 +334,7 @@ impl WasmRuntime {
             &self.engine,
             &mut linker,
             &mut store,
-            &component,
+            component.as_ref(),
             "app",
             &explicit_dependency_names,
             capabilities,
@@ -259,7 +344,7 @@ impl WasmRuntime {
         )?;
 
         let run_future = async {
-            let command = Command::instantiate_async(&mut store, &component, &linker)
+            let command = Command::instantiate_async(&mut store, component.as_ref(), &linker)
                 .await
                 .map_err(|e| map_runtime_error(format!("component instantiate failed: {e}")))?;
             let run_result = command
@@ -306,12 +391,7 @@ impl WasmRuntime {
         http_worker_queue_capacity: u32,
         http_ready_tx: Option<oneshot::Sender<()>>,
     ) -> Result<(), ImagodError> {
-        let component = Component::from_file(&self.engine, component_path).map_err(|e| {
-            map_runtime_error(format!(
-                "failed to load component {}: {e}",
-                component_path.display()
-            ))
-        })?;
+        let component = self.load_component_cached(component_path)?;
 
         let mut linker = self.build_component_linker()?;
 
@@ -342,7 +422,7 @@ impl WasmRuntime {
             &self.engine,
             &mut linker,
             &mut store,
-            &component,
+            component.as_ref(),
             "app",
             &explicit_dependency_names,
             capabilities,
@@ -351,7 +431,7 @@ impl WasmRuntime {
             None,
         )?;
 
-        let proxy = Proxy::instantiate_async(&mut store, &component, &linker)
+        let proxy = Proxy::instantiate_async(&mut store, component.as_ref(), &linker)
             .await
             .map_err(|e| map_runtime_error(format!("http component instantiate failed: {e}")))?;
 
@@ -420,12 +500,7 @@ impl WasmRuntime {
         function: &str,
         payload_cbor: Vec<u8>,
     ) -> Result<Vec<u8>, ImagodError> {
-        let component = Component::from_file(&self.engine, component_path).map_err(|e| {
-            map_runtime_error(format!(
-                "failed to load component {}: {e}",
-                component_path.display()
-            ))
-        })?;
+        let component = self.load_component_cached(component_path)?;
 
         let mut linker = self.build_component_linker()?;
 
@@ -456,7 +531,7 @@ impl WasmRuntime {
             &self.engine,
             &mut linker,
             &mut store,
-            &component,
+            component.as_ref(),
             "app",
             &explicit_dependency_names,
             capabilities,
@@ -466,7 +541,7 @@ impl WasmRuntime {
         )?;
 
         let instance = linker
-            .instantiate_async(&mut store, &component)
+            .instantiate_async(&mut store, component.as_ref())
             .await
             .map_err(|e| map_runtime_error(format!("rpc component instantiate failed: {e}")))?;
         let func = resolve_component_export_func(&mut store, &instance, interface_id, function)
@@ -524,52 +599,38 @@ impl WasmRuntime {
         request: RuntimeInvokeRequest,
     ) -> Result<Vec<u8>, ImagodError> {
         let RuntimeInvokeRequest {
-            app_type,
-            runner_id,
-            service_name,
-            release_hash,
-            component_path,
-            args,
-            envs,
-            wasi_mounts,
-            wasi_http_outbound,
-            resources,
-            plugin_dependencies,
-            capabilities,
-            bindings,
-            manager_control_endpoint,
-            manager_auth_secret,
+            context,
             interface_id,
             function,
             payload_cbor,
         } = request;
 
-        if app_type != RunnerAppType::Rpc {
+        if context.app_type != RunnerAppType::Rpc {
             return Err(map_runtime_error(format!(
                 "rpc invoke is only allowed when app_type=rpc (got: {})",
-                app_type_text(app_type)
+                app_type_text(context.app_type)
             )));
         }
 
         let native_plugin_context = NativePluginContext::new(
-            service_name,
-            release_hash,
-            runner_id,
-            app_type,
-            manager_control_endpoint,
-            manager_auth_secret,
-            resources,
+            context.service_name.clone(),
+            context.release_hash.clone(),
+            context.runner_id.clone(),
+            context.app_type,
+            context.manager_control_endpoint.clone(),
+            context.manager_auth_secret.clone(),
+            context.resources.clone(),
         );
         self.invoke_rpc_component_async(
-            &component_path,
-            &args,
-            &envs,
-            &wasi_mounts,
-            &wasi_http_outbound,
+            &context.component_path,
+            &context.args,
+            &context.envs,
+            &context.wasi_mounts,
+            &context.wasi_http_outbound,
             native_plugin_context,
-            &plugin_dependencies,
-            &capabilities,
-            &bindings,
+            &context.plugin_dependencies,
+            &context.capabilities,
+            &context.bindings,
             &interface_id,
             &function,
             payload_cbor,
@@ -915,6 +976,96 @@ mod tests {
 
     fn optimized_prepare_payload(payload: Vec<u8>) -> Vec<u8> {
         payload
+    }
+
+    #[test]
+    fn wasm_engine_tuning_default_matches_runtime_defaults() {
+        let tuning = WasmEngineTuning::default();
+        assert_eq!(
+            tuning.memory_reservation_bytes,
+            DEFAULT_WASM_MEMORY_RESERVATION_BYTES
+        );
+        assert_eq!(
+            tuning.memory_reservation_for_growth_bytes,
+            DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES
+        );
+        assert_eq!(
+            tuning.memory_guard_size_bytes,
+            DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES
+        );
+        assert_eq!(
+            tuning.guard_before_linear_memory,
+            DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY
+        );
+        assert_eq!(
+            tuning.parallel_compilation,
+            DEFAULT_WASM_PARALLEL_COMPILATION
+        );
+    }
+
+    #[test]
+    fn runtime_initializes_with_custom_wasm_engine_tuning() {
+        let tuning = WasmEngineTuning {
+            memory_reservation_bytes: 8 * 1024 * 1024,
+            memory_reservation_for_growth_bytes: 4 * 1024 * 1024,
+            memory_guard_size_bytes: 0,
+            guard_before_linear_memory: false,
+            parallel_compilation: true,
+        };
+        let runtime = WasmRuntime::new_with_tuning(tuning)
+            .expect("runtime should initialize with custom tuning");
+        runtime.increment_epoch();
+    }
+
+    #[test]
+    fn validate_component_loadable_populates_component_cache_once() {
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let fixture = write_wasi_http_component("component-cache");
+
+        runtime
+            .validate_component_loadable(&fixture.component_path)
+            .expect("component should be loadable");
+        runtime
+            .validate_component_loadable(&fixture.component_path)
+            .expect("component should be loadable on second validation");
+
+        let cache = runtime
+            .component_cache
+            .read()
+            .expect("component cache lock should be available");
+        assert_eq!(cache.len(), 1, "component cache should deduplicate by path");
+        assert!(
+            cache.contains_key(&fixture.component_path),
+            "validated component path should be cached"
+        );
+    }
+
+    #[test]
+    fn validate_component_loadable_is_safe_under_concurrent_first_load() {
+        let runtime = Arc::new(WasmRuntime::new().expect("runtime should initialize"));
+        let fixture = write_wasi_http_component("component-cache-concurrent");
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let runtime = runtime.clone();
+                let component_path = fixture.component_path.clone();
+                scope.spawn(move || {
+                    runtime
+                        .validate_component_loadable(&component_path)
+                        .expect("component should be loadable");
+                });
+            }
+        });
+
+        let cache = runtime
+            .component_cache
+            .read()
+            .expect("component cache lock should be available");
+        assert_eq!(cache.len(), 1, "component cache should deduplicate by path");
+        assert!(
+            cache.contains_key(&fixture.component_path),
+            "validated component path should be cached"
+        );
     }
 
     #[test]
@@ -1303,21 +1454,23 @@ interface types {
 
         let err = runtime
             .invoke_component(RuntimeInvokeRequest {
-                app_type: RunnerAppType::Rpc,
-                runner_id: "runner-test".to_string(),
-                service_name: "svc-test".to_string(),
-                release_hash: "release-test".to_string(),
-                component_path: fixture.component_path.clone(),
-                args: Vec::new(),
-                envs: BTreeMap::new(),
-                wasi_mounts: Vec::new(),
-                wasi_http_outbound: Vec::new(),
-                resources: std::collections::BTreeMap::new(),
-                plugin_dependencies: Vec::new(),
-                capabilities: allow_all_wasi_capabilities(),
-                bindings: Vec::new(),
-                manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
-                manager_auth_secret: "secret".to_string(),
+                context: Arc::new(RuntimeInvokeContext {
+                    app_type: RunnerAppType::Rpc,
+                    runner_id: "runner-test".to_string(),
+                    service_name: "svc-test".to_string(),
+                    release_hash: "release-test".to_string(),
+                    component_path: fixture.component_path.clone(),
+                    args: Vec::new(),
+                    envs: BTreeMap::new(),
+                    wasi_mounts: Vec::new(),
+                    wasi_http_outbound: Vec::new(),
+                    resources: std::collections::BTreeMap::new(),
+                    plugin_dependencies: Vec::new(),
+                    capabilities: allow_all_wasi_capabilities(),
+                    bindings: Vec::new(),
+                    manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+                    manager_auth_secret: "secret".to_string(),
+                }),
                 interface_id: "missing:iface/run@0.1.0".to_string(),
                 function: "invoke".to_string(),
                 payload_cbor: Vec::new(),

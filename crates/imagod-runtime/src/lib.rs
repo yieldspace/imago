@@ -36,7 +36,7 @@ pub use imagod_runtime_internal::{
 pub use imagod_runtime_wasmtime::WasmRuntime;
 #[cfg(feature = "runtime-wasmtime")]
 pub use imagod_runtime_wasmtime::{
-    NativePlugin, NativePluginRegistry, NativePluginRegistryBuilder,
+    NativePlugin, NativePluginRegistry, NativePluginRegistryBuilder, WasmEngineTuning,
 };
 /// Runs `imagod` in runner mode using bootstrap data read from stdin.
 pub use runner_process::run_runner_from_stdin;

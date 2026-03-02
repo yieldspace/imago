@@ -7,6 +7,7 @@ use imagod_common::ImagodError;
 use imagod_ipc::{PluginDependency, PluginKind};
 use sha2::{Digest, Sha256};
 use tokio::{fs, io::AsyncReadExt};
+use wasmparser::{ComponentExternalKind, ComponentTypeRef, Parser, Payload};
 
 use super::{Manifest, manifest::ManifestValidator};
 
@@ -152,6 +153,21 @@ pub(super) async fn prepare_plugin_dependencies_for_root(
                         dep.name, component.sha256, digest
                     )));
                 }
+                let component_bytes = fs::read(&release_component_path).await.map_err(|e| {
+                    super::map_bad_manifest(format!(
+                        "failed to read plugin component bytes {}: {e}",
+                        release_component_path.display()
+                    ))
+                })?;
+                let (imports, exports) = collect_component_instance_interface_metadata(
+                    &component_bytes,
+                )
+                .map_err(|err| {
+                    super::map_bad_manifest(format!(
+                        "failed to extract plugin component metadata for '{}': {}",
+                        dep.name, err.message
+                    ))
+                })?;
 
                 let cache_path = components_root.join(format!("{}.wasm", component.sha256));
                 let cache_digest_matches = match fs::metadata(&cache_path).await {
@@ -187,6 +203,8 @@ pub(super) async fn prepare_plugin_dependencies_for_root(
                 dep.component = Some(imagod_ipc::PluginComponent {
                     path: cache_path,
                     sha256: component.sha256,
+                    imports: Some(imports),
+                    exports: Some(exports),
                 });
             }
         }
@@ -195,6 +213,58 @@ pub(super) async fn prepare_plugin_dependencies_for_root(
     }
 
     Ok(normalized)
+}
+
+fn collect_component_instance_interface_metadata(
+    component_bytes: &[u8],
+) -> Result<(Vec<String>, Vec<String>), ImagodError> {
+    let mut imports = BTreeSet::new();
+    let mut exports = BTreeSet::new();
+    let mut nested_depth = 0usize;
+
+    for payload in Parser::new(0).parse_all(component_bytes) {
+        let payload = payload.map_err(|err| {
+            super::map_bad_manifest(format!("component metadata parse failed: {err}"))
+        })?;
+        match payload {
+            Payload::ComponentImportSection(section) if nested_depth == 0 => {
+                for item in section {
+                    let import = item.map_err(|err| {
+                        super::map_bad_manifest(format!(
+                            "component import metadata decode failed: {err}"
+                        ))
+                    })?;
+                    if matches!(import.ty, ComponentTypeRef::Instance(_)) {
+                        imports.insert(import.name.0.to_string());
+                    }
+                }
+            }
+            Payload::ComponentExportSection(section) if nested_depth == 0 => {
+                for item in section {
+                    let export = item.map_err(|err| {
+                        super::map_bad_manifest(format!(
+                            "component export metadata decode failed: {err}"
+                        ))
+                    })?;
+                    if export.kind == ComponentExternalKind::Instance {
+                        exports.insert(export.name.0.to_string());
+                    }
+                }
+            }
+            Payload::ModuleSection { .. } | Payload::ComponentSection { .. } => {
+                nested_depth = nested_depth.saturating_add(1);
+            }
+            Payload::End(_) => {
+                if nested_depth == 0 {
+                    break;
+                }
+                nested_depth = nested_depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
+    Ok((imports.into_iter().collect(), exports.into_iter().collect()))
 }
 
 pub(super) fn plugin_component_cache_root(storage_root: &Path) -> PathBuf {

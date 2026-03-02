@@ -24,3 +24,7 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "proce
 url = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 web-transport-quinn = { workspace = true }
+wasmparser = { workspace = true }
+
+[dev-dependencies]
+wat = { workspace = true }
