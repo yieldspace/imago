@@ -187,6 +187,20 @@ pub(crate) fn resolve_dependency_component_sources(
         .collect::<anyhow::Result<Vec<_>>>()?;
     let resolved_by_name =
         imago_lockfile::resolve_dependencies(project_root, &lock, &expectations)?;
+    let mut project_dependency_id_by_resolved_name = BTreeMap::new();
+    for (project_dependency_id, resolved) in &resolved_by_name {
+        if let Some(existing_project_dependency_id) = project_dependency_id_by_resolved_name.insert(
+            resolved.resolved_name.clone(),
+            project_dependency_id.clone(),
+        ) {
+            return Err(anyhow!(
+                "imago.lock resolves multiple project dependency ids ('{}', '{}') to package '{}'; run `imago deps sync`",
+                existing_project_dependency_id,
+                project_dependency_id,
+                resolved.resolved_name
+            ));
+        }
+    }
 
     for dependency in dependencies {
         if dependency.kind != ManifestDependencyKind::Wasm {
@@ -199,7 +213,15 @@ pub(crate) fn resolve_dependency_component_sources(
                 dependency.name
             )
         })?;
-        let lock_entry = resolved_by_name.get(&dependency.name).ok_or_else(|| {
+        let project_dependency_id = project_dependency_id_by_resolved_name
+            .get(&dependency.name)
+            .ok_or_else(|| {
+                anyhow!(
+                    "dependency '{}' is not resolved in imago.lock; run `imago deps sync`",
+                    dependency.name
+                )
+            })?;
+        let lock_entry = resolved_by_name.get(project_dependency_id).ok_or_else(|| {
             anyhow!(
                 "dependency '{}' is not resolved in imago.lock; run `imago deps sync`",
                 dependency.name
@@ -225,14 +247,17 @@ pub(crate) fn resolve_dependency_component_sources(
                 sha
             ));
         }
-        let cache_path =
-            dependency_cache::resolve_cached_component_path(project_root, &dependency.name, sha)
-                .with_context(|| {
-                    format!(
-                        "failed to resolve cached component bytes for dependency '{}'",
-                        dependency.name
-                    )
-                })?;
+        let cache_path = dependency_cache::resolve_cached_component_path(
+            project_root,
+            project_dependency_id,
+            sha,
+        )
+        .with_context(|| {
+            format!(
+                "failed to resolve cached component bytes for dependency '{}' (project dependency id '{}')",
+                dependency.name, project_dependency_id
+            )
+        })?;
         sources.insert(dependency.name.clone(), cache_path);
     }
 

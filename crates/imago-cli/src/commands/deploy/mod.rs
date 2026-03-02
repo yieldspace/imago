@@ -2579,16 +2579,102 @@ remote = "127.0.0.1:4443"
             component_bytes,
         );
 
-        let manifest = sample_manifest_with_wasm_dependency("path-source-0", &component_sha);
+        let manifest = sample_manifest_with_wasm_dependency("test:example", &component_sha);
         let sources = resolve_dependency_component_sources(&root, &manifest)
             .await
             .expect("dependency component should resolve from cache");
         let resolved = sources
-            .get("path-source-0")
+            .get("test:example")
             .expect("resolved source should exist");
         assert_eq!(
             resolved,
             &dependency_cache::cache_component_path(&root, "path-source-0", &component_sha)
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn resolve_dependency_component_sources_uses_project_dependency_id_for_cache_lookup() {
+        let root = new_temp_dir("dependency-cache-id-lookup");
+        let component_bytes = b"\0asmcached-component";
+        let component_sha = hex::encode(Sha256::digest(component_bytes));
+        write_project_with_single_wasm_dependency(&root);
+
+        write_imago_lock(
+            &root,
+            &lock_with_single_wasm_dependency(&root, &component_sha),
+        );
+
+        let cache_entry = dependency_cache::DependencyCacheEntry {
+            name: "path-source-0".to_string(),
+            resolved_package_name: None,
+            version: "0.1.0".to_string(),
+            kind: "wasm".to_string(),
+            wit_source: "registry/example".to_string(),
+            wit_registry: None,
+            wit_sha256: None,
+            wit_path: "wit/deps/path-source-0-0.1.0".to_string(),
+            wit_digest: build::compute_path_digest_hex(&root.join("wit/deps/path-source-0-0.1.0"))
+                .expect("wit digest should compute"),
+            wit_source_fingerprint: None,
+            component_source: Some("registry/example-component.wasm".to_string()),
+            component_registry: None,
+            component_sha256: Some(component_sha.clone()),
+            component_source_fingerprint: None,
+            component_world_foreign_packages: vec![],
+            component_world_foreign_packages_recorded: true,
+            transitive_packages: vec![],
+        };
+        dependency_cache::save_entry(&root, &cache_entry)
+            .expect("dependency cache metadata should be written");
+        write_file(
+            &dependency_cache::cache_component_path(&root, "path-source-0", &component_sha),
+            component_bytes,
+        );
+
+        let manifest = sample_manifest_with_wasm_dependency("test:example", &component_sha);
+        let sources = resolve_dependency_component_sources(&root, &manifest)
+            .await
+            .expect("dependency component should resolve from cache");
+        assert!(sources.contains_key("test:example"));
+        assert!(!sources.contains_key("path-source-0"));
+        assert_eq!(
+            sources.get("test:example"),
+            Some(&dependency_cache::cache_component_path(
+                &root,
+                "path-source-0",
+                &component_sha
+            ))
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn resolve_dependency_component_sources_fails_when_manifest_dependency_name_is_not_resolved()
+     {
+        let root = new_temp_dir("dependency-name-unresolved");
+        let component_sha = "0".repeat(64);
+        write_project_with_single_wasm_dependency(&root);
+
+        write_imago_lock(
+            &root,
+            &lock_with_single_wasm_dependency(&root, &component_sha),
+        );
+
+        let manifest = sample_manifest_with_wasm_dependency("test:unknown", &component_sha);
+        let err = resolve_dependency_component_sources(&root, &manifest)
+            .await
+            .expect_err("unknown manifest dependency name must fail");
+        let err_chain = format!("{err:#}");
+        assert!(
+            err_chain.contains("dependency 'test:unknown' is not resolved in imago.lock"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            err_chain.contains("imago deps sync"),
+            "unexpected error: {err:#}"
         );
 
         let _ = fs::remove_dir_all(root);
@@ -2606,7 +2692,7 @@ remote = "127.0.0.1:4443"
             &lock_with_single_wasm_dependency(&root, &component_sha),
         );
 
-        let manifest = sample_manifest_with_wasm_dependency("path-source-0", &component_sha);
+        let manifest = sample_manifest_with_wasm_dependency("test:example", &component_sha);
         let err = resolve_dependency_component_sources(&root, &manifest)
             .await
             .expect_err("missing dependency cache must fail");
