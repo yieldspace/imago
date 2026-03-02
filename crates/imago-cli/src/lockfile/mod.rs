@@ -8,12 +8,14 @@ mod resolve;
 mod types;
 mod validation;
 
+#[allow(unused_imports)]
 pub use resolve::{
     build_requested_snapshot, collect_resolved_packages_and_edges, compute_binding_request_id,
     compute_dependency_request_id, compute_requested_fingerprint, ensure_requested_fingerprint,
     load_from_project_root, resolve_binding_wits, resolve_dependencies, resolved_package_ref,
     save_to_project_root,
 };
+#[allow(unused_imports)]
 pub use types::{
     BindingWitExpectation, ComponentExpectation, DependencyExpectation, IMAGO_LOCK_VERSION,
     ImagoLock, ImagoLockRequested, ImagoLockRequestedBinding, ImagoLockRequestedDependency,
@@ -253,7 +255,7 @@ mod tests {
                     resolved_version: "0.1.0".to_string(),
                     wit_path: "wit/deps/demo-test-0.1.0".to_string(),
                     wit_tree_digest: {
-                        use crate::hash::compute_path_digest_hex;
+                        use crate::lockfile::hash::compute_path_digest_hex;
                         compute_path_digest_hex(&root.join("wit/deps/demo-test-0.1.0"))
                             .expect("digest")
                     },
@@ -298,7 +300,7 @@ mod tests {
                     resolved_version: "0.1.0".to_string(),
                     wit_path: "wit/deps/demo-test-0.1.0".to_string(),
                     wit_tree_digest: {
-                        use crate::hash::compute_path_digest_hex;
+                        use crate::lockfile::hash::compute_path_digest_hex;
                         compute_path_digest_hex(&root.join("wit/deps/demo-test-0.1.0"))
                             .expect("digest")
                     },
@@ -344,7 +346,7 @@ mod tests {
                     resolved_version: "0.1.0".to_string(),
                     wit_path: "wit/deps/demo-test-0.1.0".to_string(),
                     wit_tree_digest: {
-                        use crate::hash::compute_path_digest_hex;
+                        use crate::lockfile::hash::compute_path_digest_hex;
                         compute_path_digest_hex(&root.join("wit/deps/demo-test-0.1.0"))
                             .expect("digest")
                     },
@@ -396,7 +398,7 @@ mod tests {
                     resolved_version: "0.1.0".to_string(),
                     wit_path: "wit/deps/demo-test-0.1.0".to_string(),
                     wit_tree_digest: {
-                        use crate::hash::compute_path_digest_hex;
+                        use crate::lockfile::hash::compute_path_digest_hex;
                         compute_path_digest_hex(&root.join("wit/deps/demo-test-0.1.0"))
                             .expect("digest")
                     },
@@ -442,7 +444,7 @@ mod tests {
                     resolved_version: "0.1.0".to_string(),
                     wit_path: "wit/deps/demo-test-0.1.0".to_string(),
                     wit_tree_digest: {
-                        use crate::hash::compute_path_digest_hex;
+                        use crate::lockfile::hash::compute_path_digest_hex;
                         compute_path_digest_hex(&root.join("wit/deps/demo-test-0.1.0"))
                             .expect("digest")
                     },
@@ -488,7 +490,7 @@ mod tests {
                     resolved_version: "0.1.0".to_string(),
                     wit_path: "wit/deps/demo-test-0.1.0".to_string(),
                     wit_tree_digest: {
-                        use crate::hash::compute_path_digest_hex;
+                        use crate::lockfile::hash::compute_path_digest_hex;
                         compute_path_digest_hex(&root.join("wit/deps/demo-test-0.1.0"))
                             .expect("digest")
                     },
@@ -531,12 +533,12 @@ mod tests {
         let request_id = compute_dependency_request_id(&expectation);
         let requested = build_requested_snapshot(std::slice::from_ref(&expectation), &[], None);
         let wit_tree_digest = {
-            use crate::hash::compute_path_digest_hex;
+            use crate::lockfile::hash::compute_path_digest_hex;
             compute_path_digest_hex(&root.join("wit/deps/demo-test-0.1.0")).expect("digest")
         };
         let transitive_digest = format!(
             "sha256:{}",
-            crate::hash::compute_sha256_hex(&root.join("wit/deps/test-dep/package.wit"))
+            crate::lockfile::hash::compute_sha256_hex(&root.join("wit/deps/test-dep/package.wit"))
                 .expect("digest")
         );
 

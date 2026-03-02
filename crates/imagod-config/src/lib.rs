@@ -708,7 +708,7 @@ fn resolve_default_storage_root(target_os: &str, build_override: Option<&str>) -
 }
 
 fn default_server_version() -> String {
-    "imagod/0.1.0".to_string()
+    format!("imagod/{}", env!("CARGO_PKG_VERSION"))
 }
 
 fn default_chunk_size() -> usize {
@@ -2006,7 +2006,7 @@ transport_max_idle_timeout_secs = 180
         assert!(path.exists());
         let expected_server_key_path = expected_generated_server_key_path(&path);
         assert_eq!(result.config.listen_addr, "[::]:4443");
-        assert_eq!(result.config.server_version, "imagod/0.1.0");
+        assert_eq!(result.config.server_version, default_server_version());
         assert_eq!(result.config.tls.server_key, expected_server_key_path);
         assert!(result.config.tls.client_public_keys.is_empty());
         let server_key = fs::read_to_string(&result.config.tls.server_key)
@@ -2089,13 +2089,14 @@ client_public_keys = ["222222222222222222222222222222222222222222222222222222222
         let root = value
             .as_table()
             .expect("generated config root should be a table");
+        let expected_server_version = default_server_version();
         assert_eq!(
             root.get("listen_addr").and_then(toml::Value::as_str),
             Some("[::]:4443")
         );
         assert_eq!(
             root.get("server_version").and_then(toml::Value::as_str),
-            Some("imagod/0.1.0")
+            Some(expected_server_version.as_str())
         );
         assert!(!root.contains_key("compatibility_date"));
         assert!(!root.contains_key("storage_root"));

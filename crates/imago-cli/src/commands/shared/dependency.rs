@@ -4,12 +4,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, anyhow};
-use async_trait::async_trait;
-use imago_lockfile::{
+use crate::lockfile::{
     ComponentExpectation, DependencyExpectation, LockCapabilityPolicy, LockDependencyKind,
     LockSourceKind,
 };
+use anyhow::{Context, anyhow};
+use async_trait::async_trait;
 
 use crate::commands::{
     build::{self, ManifestDependencyKind},
@@ -81,13 +81,13 @@ pub(crate) fn resolve_manifest_dependencies_from_lock(
         return Ok(Vec::new());
     }
 
-    let lock = imago_lockfile::load_from_project_root(project_root)?;
+    let lock = crate::lockfile::load_from_project_root(project_root)?;
     let expectations = dependencies
         .iter()
         .map(dependency_expectation_for_project_dependency)
         .collect::<anyhow::Result<Vec<_>>>()?;
     let resolved_by_name =
-        imago_lockfile::resolve_dependencies(project_root, &lock, &expectations)?;
+        crate::lockfile::resolve_dependencies(project_root, &lock, &expectations)?;
     let mut resolved_name_by_request_id = BTreeMap::new();
     let mut project_dependency_id_by_resolved_name = BTreeMap::new();
     for (project_dependency_id, entry) in &resolved_by_name {
@@ -210,13 +210,13 @@ pub(crate) fn resolve_dependency_component_sources(
         project_root,
         &build::load_namespace_registries(project_root)?,
     )?;
-    let lock = imago_lockfile::load_from_project_root(project_root)?;
+    let lock = crate::lockfile::load_from_project_root(project_root)?;
     let expectations = project_dependencies
         .iter()
         .map(dependency_expectation_for_project_dependency)
         .collect::<anyhow::Result<Vec<_>>>()?;
     let resolved_by_name =
-        imago_lockfile::resolve_dependencies(project_root, &lock, &expectations)?;
+        crate::lockfile::resolve_dependencies(project_root, &lock, &expectations)?;
     let mut project_dependency_id_by_resolved_name = BTreeMap::new();
     for (project_dependency_id, resolved) in &resolved_by_name {
         if let Some(existing_project_dependency_id) = project_dependency_id_by_resolved_name.insert(

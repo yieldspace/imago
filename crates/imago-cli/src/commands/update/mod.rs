@@ -10,13 +10,13 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{Context, anyhow};
-use imago_lockfile::{
+use crate::lockfile::{
     IMAGO_LOCK_VERSION, ImagoLock, ImagoLockResolved, ImagoLockResolvedBinding,
     ImagoLockResolvedDependency, LockEdgeFromKind, LockPackageEdgeReason, LockSourceKind,
     TransitivePackageRecord, build_requested_snapshot, collect_resolved_packages_and_edges,
     compute_binding_request_id, compute_dependency_request_id, save_to_project_root,
 };
+use anyhow::{Context, anyhow};
 use sha2::{Digest, Sha256};
 use wit_component::WitPrinter;
 use wit_parser::{
@@ -363,8 +363,8 @@ fn lock_source_kind(kind: plugin_sources::SourceKind) -> LockSourceKind {
 
 fn binding_expectation_for_project_binding(
     binding: &build::ProjectBindingSource,
-) -> imago_lockfile::BindingWitExpectation {
-    imago_lockfile::BindingWitExpectation {
+) -> crate::lockfile::BindingWitExpectation {
+    crate::lockfile::BindingWitExpectation {
         name: binding.name.clone(),
         source_kind: lock_source_kind(binding.wit_source_kind),
         source: binding.wit_source.clone(),
@@ -1991,7 +1991,7 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imago_lockfile::{ImagoLockRequestedBinding, ImagoLockRequestedDependency};
+    use crate::lockfile::{ImagoLockRequestedBinding, ImagoLockRequestedDependency};
     use wit_parser::Resolve;
 
     struct CwdGuard {
@@ -5258,7 +5258,7 @@ remote = "127.0.0.1:4443"
 
     #[test]
     fn requested_snapshot_error_mentions_duplicate_binding_request_id() {
-        let binding = imago_lockfile::BindingWitExpectation {
+        let binding = crate::lockfile::BindingWitExpectation {
             name: "svc-target".to_string(),
             source_kind: LockSourceKind::Path,
             source: "registry/acme-bindings".to_string(),

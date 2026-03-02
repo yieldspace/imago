@@ -105,7 +105,6 @@ imago-plugin-imago-experimental-i2c = { path = "plugins/imago-experimental-i2c",
 imago-plugin-imago-node = { path = "plugins/imago-node", version = "0.1.0" }
 imago-plugin-imago-usb = { path = "plugins/imago-usb", version = "0.1.0" }
 imago-plugin-nanokvm-plugin = { path = "plugins/imago-plugin-nanokvm-plugin", version = "0.1.0" }
-imago-lockfile = { path = "crates/imago-lockfile", version = "0.1.0" }
 imago-plugin-macros = { path = "crates/imago-plugin-macros", version = "0.1.0" }
 imago-protocol = { path = "crates/imago-protocol", version = "0.1.0" }
 imagod = { path = "crates/imagod", version = "0.1.0" }

@@ -18,9 +18,9 @@ use std::{
     time::Instant,
 };
 
+use crate::lockfile::{BindingWitExpectation, LockSourceKind};
 use anyhow::{Context, anyhow};
 use dotenvy::from_path_iter;
-use imago_lockfile::{BindingWitExpectation, LockSourceKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
@@ -508,7 +508,7 @@ fn build_project_with_target_override_inner(
     }
     let capabilities = parse_root_capabilities(&root)?;
     if !project_dependencies.is_empty() || !project_bindings.is_empty() {
-        let lock = imago_lockfile::load_from_project_root(project_root)?;
+        let lock = crate::lockfile::load_from_project_root(project_root)?;
         let dependency_expectations = project_dependencies
             .iter()
             .map(dependency_expectation_for_project_dependency)
@@ -517,7 +517,7 @@ fn build_project_with_target_override_inner(
             .iter()
             .map(binding_expectation_for_project_binding)
             .collect::<Vec<_>>();
-        imago_lockfile::ensure_requested_fingerprint(
+        crate::lockfile::ensure_requested_fingerprint(
             &lock,
             &dependency_expectations,
             &binding_expectations,
@@ -1688,12 +1688,12 @@ fn resolve_manifest_bindings_from_lock(
         return Ok(Vec::new());
     }
 
-    let lock = imago_lockfile::load_from_project_root(project_root)?;
+    let lock = crate::lockfile::load_from_project_root(project_root)?;
     let mut expectations = Vec::with_capacity(bindings.len());
     for binding in bindings {
         expectations.push(binding_expectation_for_project_binding(binding));
     }
-    let resolved = imago_lockfile::resolve_binding_wits(project_root, &lock, &expectations)?;
+    let resolved = crate::lockfile::resolve_binding_wits(project_root, &lock, &expectations)?;
 
     let mut expanded = BTreeSet::<(String, String)>::new();
     for binding in resolved {
@@ -2569,17 +2569,17 @@ pub fn default_target_name() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        cli::UpdateArgs,
-        commands::{dependency_cache, update},
-    };
-    use imago_lockfile::{
+    use crate::lockfile::{
         BindingWitExpectation, ComponentExpectation, DependencyExpectation, IMAGO_LOCK_VERSION,
         ImagoLock, ImagoLockResolved, ImagoLockResolvedBinding, ImagoLockResolvedDependency,
         ImagoLockResolvedPackage, ImagoLockResolvedPackageEdge, LockCapabilityPolicy,
         LockDependencyKind, LockEdgeFromKind, LockPackageEdgeReason, LockSourceKind,
         build_requested_snapshot, compute_binding_request_id, compute_dependency_request_id,
         resolved_package_ref,
+    };
+    use crate::{
+        cli::UpdateArgs,
+        commands::{dependency_cache, update},
     };
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
