@@ -15,7 +15,11 @@ use imago_protocol::ErrorCode;
 use rcgen::{KeyPair, PKCS_ED25519};
 use serde::Deserialize;
 
-use imagod_common::ImagodError;
+use imagod_common::{
+    DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY, DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES,
+    DEFAULT_WASM_MEMORY_RESERVATION_BYTES, DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES,
+    DEFAULT_WASM_PARALLEL_COMPILATION, ImagodError,
+};
 
 mod load;
 
@@ -752,23 +756,23 @@ fn default_epoch_tick_interval_ms() -> u64 {
 }
 
 fn default_wasm_memory_reservation_bytes() -> u64 {
-    64 * 1024 * 1024
+    DEFAULT_WASM_MEMORY_RESERVATION_BYTES
 }
 
 fn default_wasm_memory_reservation_for_growth_bytes() -> u64 {
-    16 * 1024 * 1024
+    DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES
 }
 
 fn default_wasm_memory_guard_size_bytes() -> u64 {
-    64 * 1024
+    DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES
 }
 
 fn default_wasm_guard_before_linear_memory() -> bool {
-    false
+    DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY
 }
 
 fn default_wasm_parallel_compilation() -> bool {
-    false
+    DEFAULT_WASM_PARALLEL_COMPILATION
 }
 
 fn default_http_worker_count() -> u32 {
@@ -880,15 +884,24 @@ client_public_keys = ["111111111111111111111111111111111111111111111111111111111
         assert_eq!(config.runtime.max_committed_sessions, 16);
         assert_eq!(
             config.runtime.wasm_memory_reservation_bytes,
-            64 * 1024 * 1024
+            DEFAULT_WASM_MEMORY_RESERVATION_BYTES
         );
         assert_eq!(
             config.runtime.wasm_memory_reservation_for_growth_bytes,
-            16 * 1024 * 1024
+            DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES
         );
-        assert_eq!(config.runtime.wasm_memory_guard_size_bytes, 64 * 1024);
-        assert!(!config.runtime.wasm_guard_before_linear_memory);
-        assert!(!config.runtime.wasm_parallel_compilation);
+        assert_eq!(
+            config.runtime.wasm_memory_guard_size_bytes,
+            DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES
+        );
+        assert_eq!(
+            config.runtime.wasm_guard_before_linear_memory,
+            DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY
+        );
+        assert_eq!(
+            config.runtime.wasm_parallel_compilation,
+            DEFAULT_WASM_PARALLEL_COMPILATION
+        );
         assert_eq!(config.runtime.http_worker_count, 2);
         assert_eq!(config.runtime.http_worker_queue_capacity, 4);
         assert_eq!(

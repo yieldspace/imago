@@ -1937,6 +1937,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 dependencies = [
  "foldhash 0.2.0",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -2483,6 +2485,8 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "wasmparser 0.245.1",
+ "wat",
  "web-transport-quinn",
 ]
 
@@ -2591,6 +2595,7 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi",
  "wasmtime-wasi-http",
+ "wat",
  "wit-component 0.245.1",
  "wit-parser 0.245.1",
 ]
@@ -6233,6 +6238,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "indexmap 2.13.0",
  "semver",
+ "serde",
 ]
 
 [[package]]

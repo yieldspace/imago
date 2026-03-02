@@ -23,5 +23,6 @@ wasmtime-wasi-http = { workspace = true }
 [dev-dependencies]
 libc = { workspace = true }
 tempfile = { workspace = true }
+wat = { workspace = true }
 wit-component = { workspace = true, features = ["dummy-module"] }
 wit-parser = { workspace = true }

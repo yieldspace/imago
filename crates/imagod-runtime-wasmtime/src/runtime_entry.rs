@@ -8,7 +8,11 @@ use std::{
 
 use async_trait::async_trait;
 use imago_protocol::ErrorCode;
-use imagod_common::ImagodError;
+use imagod_common::{
+    DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY, DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES,
+    DEFAULT_WASM_MEMORY_RESERVATION_BYTES, DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES,
+    DEFAULT_WASM_PARALLEL_COMPILATION, ImagodError,
+};
 use imagod_ipc::{
     CapabilityPolicy, PluginDependency, RunnerAppType, RunnerSocketConfig, RunnerSocketDirection,
     RunnerWasiMount, ServiceBinding, WasiHttpOutboundRule,
@@ -64,11 +68,11 @@ pub struct WasmEngineTuning {
 impl Default for WasmEngineTuning {
     fn default() -> Self {
         Self {
-            memory_reservation_bytes: 64 * 1024 * 1024,
-            memory_reservation_for_growth_bytes: 16 * 1024 * 1024,
-            memory_guard_size_bytes: 64 * 1024,
-            guard_before_linear_memory: false,
-            parallel_compilation: false,
+            memory_reservation_bytes: DEFAULT_WASM_MEMORY_RESERVATION_BYTES,
+            memory_reservation_for_growth_bytes: DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES,
+            memory_guard_size_bytes: DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES,
+            guard_before_linear_memory: DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY,
+            parallel_compilation: DEFAULT_WASM_PARALLEL_COMPILATION,
         }
     }
 }
@@ -187,6 +191,13 @@ impl WasmRuntime {
             return Ok(component);
         }
 
+        let mut cache = self
+            .component_cache
+            .write()
+            .map_err(|_| map_runtime_error("component cache lock is poisoned".to_string()))?;
+        if let Some(existing) = cache.get(component_path).cloned() {
+            return Ok(existing);
+        }
         let loaded = Arc::new(
             Component::from_file(&self.engine, component_path).map_err(|e| {
                 map_runtime_error(format!(
@@ -195,14 +206,6 @@ impl WasmRuntime {
                 ))
             })?,
         );
-
-        let mut cache = self
-            .component_cache
-            .write()
-            .map_err(|_| map_runtime_error("component cache lock is poisoned".to_string()))?;
-        if let Some(existing) = cache.get(component_path).cloned() {
-            return Ok(existing);
-        }
         cache.insert(component_path.to_path_buf(), loaded.clone());
         Ok(loaded)
     }
@@ -978,11 +981,26 @@ mod tests {
     #[test]
     fn wasm_engine_tuning_default_matches_runtime_defaults() {
         let tuning = WasmEngineTuning::default();
-        assert_eq!(tuning.memory_reservation_bytes, 64 * 1024 * 1024);
-        assert_eq!(tuning.memory_reservation_for_growth_bytes, 16 * 1024 * 1024);
-        assert_eq!(tuning.memory_guard_size_bytes, 64 * 1024);
-        assert!(!tuning.guard_before_linear_memory);
-        assert!(!tuning.parallel_compilation);
+        assert_eq!(
+            tuning.memory_reservation_bytes,
+            DEFAULT_WASM_MEMORY_RESERVATION_BYTES
+        );
+        assert_eq!(
+            tuning.memory_reservation_for_growth_bytes,
+            DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES
+        );
+        assert_eq!(
+            tuning.memory_guard_size_bytes,
+            DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES
+        );
+        assert_eq!(
+            tuning.guard_before_linear_memory,
+            DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY
+        );
+        assert_eq!(
+            tuning.parallel_compilation,
+            DEFAULT_WASM_PARALLEL_COMPILATION
+        );
     }
 
     #[test]
@@ -1010,6 +1028,34 @@ mod tests {
         runtime
             .validate_component_loadable(&fixture.component_path)
             .expect("component should be loadable on second validation");
+
+        let cache = runtime
+            .component_cache
+            .read()
+            .expect("component cache lock should be available");
+        assert_eq!(cache.len(), 1, "component cache should deduplicate by path");
+        assert!(
+            cache.contains_key(&fixture.component_path),
+            "validated component path should be cached"
+        );
+    }
+
+    #[test]
+    fn validate_component_loadable_is_safe_under_concurrent_first_load() {
+        let runtime = Arc::new(WasmRuntime::new().expect("runtime should initialize"));
+        let fixture = write_wasi_http_component("component-cache-concurrent");
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let runtime = runtime.clone();
+                let component_path = fixture.component_path.clone();
+                scope.spawn(move || {
+                    runtime
+                        .validate_component_loadable(&component_path)
+                        .expect("component should be loadable");
+                });
+            }
+        });
 
         let cache = runtime
             .component_cache

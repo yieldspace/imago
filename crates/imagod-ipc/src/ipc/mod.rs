@@ -541,12 +541,29 @@ pub struct PluginComponent {
     pub path: PathBuf,
     /// Hex-encoded SHA-256 digest for component bytes.
     pub sha256: String,
+    /// Imported component instance interface names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imports: Option<Vec<String>>,
+    /// Exported component instance interface names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exports: Option<Vec<String>>,
 }
 
 impl Validate for PluginComponent {
     fn validate(&self) -> Result<(), ValidationError> {
         validate_non_empty_path(&self.path, "path")?;
-        validate_non_empty(&self.sha256, "sha256")
+        validate_non_empty(&self.sha256, "sha256")?;
+        if let Some(imports) = &self.imports {
+            for import in imports {
+                validate_non_empty(import, "imports")?;
+            }
+        }
+        if let Some(exports) = &self.exports {
+            for export in exports {
+                validate_non_empty(export, "exports")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1506,6 +1523,69 @@ mod tests {
         assert_eq!(decoded.wasm_memory_guard_size_bytes, 64 * 1024);
         assert!(!decoded.wasm_guard_before_linear_memory);
         assert!(!decoded.wasm_parallel_compilation);
+    }
+
+    #[test]
+    fn runner_bootstrap_cbor_roundtrip_preserves_plugin_component_interfaces() {
+        let mut bootstrap = valid_http_bootstrap();
+        bootstrap.plugin_dependencies = vec![PluginDependency {
+            name: "yieldspace:plugin/example".to_string(),
+            version: "0.1.0".to_string(),
+            kind: PluginKind::Wasm,
+            wit: "warg://yieldspace:plugin/example@0.1.0".to_string(),
+            requires: vec![],
+            component: Some(PluginComponent {
+                path: PathBuf::from("/tmp/plugin-component.wasm"),
+                sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_string(),
+                imports: Some(vec!["yieldspace:plugin/provider".to_string()]),
+                exports: Some(vec!["yieldspace:plugin/example".to_string()]),
+            }),
+            capabilities: CapabilityPolicy::default(),
+        }];
+
+        let encoded = imago_protocol::to_cbor(&bootstrap).expect("bootstrap encoding should work");
+        let decoded = imago_protocol::from_cbor::<RunnerBootstrap>(&encoded)
+            .expect("bootstrap decoding should work");
+
+        let decoded_component = decoded
+            .plugin_dependencies
+            .first()
+            .and_then(|dep| dep.component.as_ref())
+            .expect("decoded bootstrap should include plugin component metadata");
+        assert_eq!(
+            decoded_component.imports.as_ref(),
+            Some(&vec!["yieldspace:plugin/provider".to_string()])
+        );
+        assert_eq!(
+            decoded_component.exports.as_ref(),
+            Some(&vec!["yieldspace:plugin/example".to_string()])
+        );
+    }
+
+    #[test]
+    fn plugin_component_validate_rejects_empty_import_or_export_name() {
+        let invalid_import_component = PluginComponent {
+            path: PathBuf::from("/tmp/plugin-component.wasm"),
+            sha256: "abcdef".to_string(),
+            imports: Some(vec!["".to_string()]),
+            exports: None,
+        };
+        let err = invalid_import_component
+            .validate()
+            .expect_err("empty import should fail validation");
+        assert!(err.to_string().contains("imports"));
+
+        let invalid_export_component = PluginComponent {
+            path: PathBuf::from("/tmp/plugin-component.wasm"),
+            sha256: "abcdef".to_string(),
+            imports: None,
+            exports: Some(vec!["".to_string()]),
+        };
+        let err = invalid_export_component
+            .validate()
+            .expect_err("empty export should fail validation");
+        assert!(err.to_string().contains("exports"));
     }
 
     #[test]

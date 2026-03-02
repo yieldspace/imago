@@ -7,6 +7,17 @@ use thiserror::Error;
 
 mod builders;
 
+/// Default Wasmtime linear-memory reservation size in bytes.
+pub const DEFAULT_WASM_MEMORY_RESERVATION_BYTES: u64 = 64 * 1024 * 1024;
+/// Default Wasmtime linear-memory growth reservation size in bytes.
+pub const DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES: u64 = 16 * 1024 * 1024;
+/// Default Wasmtime linear-memory guard size in bytes.
+pub const DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES: u64 = 64 * 1024;
+/// Default flag for guard pages before linear memory.
+pub const DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY: bool = false;
+/// Default flag for Wasmtime parallel compilation.
+pub const DEFAULT_WASM_PARALLEL_COMPILATION: bool = false;
+
 #[derive(Debug, Error)]
 #[error("{code:?} at {stage}: {message}")]
 /// Rich internal error type carried across `imagod` components.

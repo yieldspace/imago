@@ -45,6 +45,50 @@ daemon_pid=""
 manager_pid=""
 ready_timeout_secs="${IMAGOD_MEASURE_READY_TIMEOUT_SECS:-900}"
 
+find_descendant_pid_by_command() {
+  local root_pid="$1"
+  local command_substr="$2"
+
+  awk -v root_pid="$root_pid" -v command_substr="$command_substr" '
+    {
+      pid = $1;
+      ppid = $2;
+      line = $0;
+      ppid_of[pid] = ppid;
+      cmd_of[pid] = line;
+      pids[++pid_count] = pid;
+    }
+    END {
+      if (root_pid == "") {
+        exit;
+      }
+      queue_head = 1;
+      queue_tail = 1;
+      queue[queue_tail] = root_pid;
+      seen[root_pid] = 1;
+
+      while (queue_head <= queue_tail) {
+        current = queue[queue_head++];
+        for (idx = 1; idx <= pid_count; idx++) {
+          pid = pids[idx];
+          if (ppid_of[pid] != current) {
+            continue;
+          }
+          if (seen[pid]) {
+            continue;
+          }
+          seen[pid] = 1;
+          queue[++queue_tail] = pid;
+          if (index(cmd_of[pid], command_substr)) {
+            print pid;
+            exit;
+          }
+        }
+      }
+    }
+  ' < <(ps -axo pid=,ppid=,command=)
+}
+
 cleanup() {
   set +e
   if [[ -n "$manager_pid" ]] && kill -0 "$manager_pid" >/dev/null 2>&1; then
@@ -105,13 +149,11 @@ if ! grep -q "imagod listening on" "$daemon_log"; then
   exit 1
 fi
 
-manager_pid="$(
-  awk -v cmd="$workspace_root/target/release/imagod --config imagod.toml" \
-    'index($0, cmd) { print $1; exit }' \
-    < <(ps -axo pid=,command=)
-)"
+manager_pid="$(find_descendant_pid_by_command "$daemon_pid" "$workspace_root/target/release/imagod --config imagod.toml")"
 if [[ -z "$manager_pid" ]]; then
-  manager_pid="$daemon_pid"
+  echo "error: manager process was not found under daemon pid=$daemon_pid" >&2
+  tail -n 200 "$daemon_log" >&2 || true
+  exit 1
 fi
 echo "manager_pid: $manager_pid"
 
@@ -130,17 +172,7 @@ for _ in $(seq 1 160); do
     tail -n 200 "$daemon_log" >&2 || true
     exit 1
   fi
-  runner_pid="$(
-    awk -v parent_pid="$manager_pid" '$2 == parent_pid && index($0, "--runner") { print $1; exit }' \
-      < <(ps -axo pid=,ppid=,command=)
-  )"
-  if [[ -z "$runner_pid" ]]; then
-    runner_pid="$(
-      awk -v cmd="$workspace_root/target/release/imagod --runner" \
-        'index($0, cmd) { pid = $1 } END { if (pid != "") print pid }' \
-        < <(ps -axo pid=,command=)
-    )"
-  fi
+  runner_pid="$(find_descendant_pid_by_command "$manager_pid" "$workspace_root/target/release/imagod --runner")"
   if [[ -n "$runner_pid" ]]; then
     break
   fi

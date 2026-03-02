@@ -152,28 +152,14 @@ where
     R: PluginResolver,
     C: CapabilityChecker,
 {
+    let mut preloaded_components = BTreeMap::<String, Component>::new();
     let mut component_interfaces = BTreeMap::<String, PluginComponentInterfaces>::new();
     for dep in dependencies {
         if dep.kind != PluginKind::Wasm {
             continue;
         }
-        let component = dep.component.as_ref().ok_or_else(|| {
-            map_runtime_error(format!(
-                "plugin dependency '{}' missing component definition",
-                dep.name
-            ))
-        })?;
-        let loaded = Component::from_file(engine, &component.path).map_err(|e| {
-            map_runtime_error(format!(
-                "failed to load plugin component '{}' from {}: {e}",
-                dep.name,
-                component.path.display()
-            ))
-        })?;
-        let interfaces = PluginComponentInterfaces {
-            imports: collect_component_instance_import_names(&loaded, engine),
-            exports: collect_component_instance_export_names(&loaded, engine),
-        };
+        let interfaces =
+            component_interfaces_for_dependency(dep, engine, &mut preloaded_components)?;
         component_interfaces.insert(dep.name.clone(), interfaces);
     }
 
@@ -202,20 +188,8 @@ where
                 );
             }
             PluginKind::Wasm => {
-                let component_meta = dep.component.as_ref().ok_or_else(|| {
-                    map_runtime_error(format!(
-                        "plugin dependency '{}' missing component definition",
-                        dep.name
-                    ))
-                })?;
                 let component =
-                    Component::from_file(engine, &component_meta.path).map_err(|e| {
-                        map_runtime_error(format!(
-                            "failed to load plugin component '{}' from {}: {e}",
-                            dep.name,
-                            component_meta.path.display()
-                        ))
-                    })?;
+                    load_component_for_instantiation(dep, engine, &mut preloaded_components)?;
 
                 let mut linker = Linker::new(engine);
                 add_to_linker_async(&mut linker).map_err(|e| {
@@ -272,6 +246,61 @@ where
     }
 
     Ok(available)
+}
+
+fn component_interfaces_for_dependency(
+    dep: &PluginDependency,
+    engine: &Engine,
+    preloaded_components: &mut BTreeMap<String, Component>,
+) -> Result<PluginComponentInterfaces, ImagodError> {
+    let component = dep.component.as_ref().ok_or_else(|| {
+        map_runtime_error(format!(
+            "plugin dependency '{}' missing component definition",
+            dep.name
+        ))
+    })?;
+    if let (Some(imports), Some(exports)) = (&component.imports, &component.exports) {
+        return Ok(PluginComponentInterfaces {
+            imports: imports.clone(),
+            exports: exports.iter().cloned().collect(),
+        });
+    }
+    let loaded = Component::from_file(engine, &component.path).map_err(|e| {
+        map_runtime_error(format!(
+            "failed to load plugin component '{}' from {}: {e}",
+            dep.name,
+            component.path.display()
+        ))
+    })?;
+    let interfaces = PluginComponentInterfaces {
+        imports: collect_component_instance_import_names(&loaded, engine),
+        exports: collect_component_instance_export_names(&loaded, engine),
+    };
+    preloaded_components.insert(dep.name.clone(), loaded);
+    Ok(interfaces)
+}
+
+fn load_component_for_instantiation(
+    dep: &PluginDependency,
+    engine: &Engine,
+    preloaded_components: &mut BTreeMap<String, Component>,
+) -> Result<Component, ImagodError> {
+    if let Some(preloaded) = preloaded_components.remove(&dep.name) {
+        return Ok(preloaded);
+    }
+    let component_meta = dep.component.as_ref().ok_or_else(|| {
+        map_runtime_error(format!(
+            "plugin dependency '{}' missing component definition",
+            dep.name
+        ))
+    })?;
+    Component::from_file(engine, &component_meta.path).map_err(|e| {
+        map_runtime_error(format!(
+            "failed to load plugin component '{}' from {}: {e}",
+            dep.name,
+            component_meta.path.display()
+        ))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -944,11 +973,12 @@ mod tests {
     };
     use imago_protocol::ErrorCode;
     use serde_json::json;
-    use std::path::PathBuf;
     use std::sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
+    use std::{fs, path::PathBuf};
+    use tempfile::TempDir;
 
     /// Test-only inline WIT bindings used to reproduce a same-package
     /// multi-import native plugin fixture with minimal surface area.
@@ -1088,6 +1118,40 @@ mod tests {
         Store::new(engine, state)
     }
 
+    fn write_minimal_component_file(name: &str) -> (TempDir, PathBuf) {
+        let tempdir = tempfile::Builder::new()
+            .prefix(name)
+            .tempdir()
+            .expect("tempdir should be created");
+        let component_path = tempdir.path().join("plugin.wasm");
+        let bytes = wat::parse_str("(component)").expect("wat component should compile");
+        fs::write(&component_path, bytes).expect("component bytes should be written");
+        (tempdir, component_path)
+    }
+
+    fn wasm_plugin_dependency_with_component(
+        name: &str,
+        component_path: PathBuf,
+        imports: Option<Vec<String>>,
+        exports: Option<Vec<String>>,
+    ) -> PluginDependency {
+        PluginDependency {
+            name: name.to_string(),
+            version: "0.1.0".to_string(),
+            kind: PluginKind::Wasm,
+            wit: format!("warg://{name}@0.1.0"),
+            requires: Vec::new(),
+            component: Some(imagod_ipc::PluginComponent {
+                path: component_path,
+                sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_string(),
+                imports,
+                exports,
+            }),
+            capabilities: CapabilityPolicy::default(),
+        }
+    }
+
     impl NativePlugin for TestMultiImportPlugin {
         fn package_name(&self) -> &'static str {
             Self::PACKAGE_NAME
@@ -1204,6 +1268,68 @@ mod tests {
             plugin.validate_call_count(),
             1,
             "failing resource validation should still execute exactly once"
+        );
+    }
+
+    #[test]
+    fn component_interfaces_for_dependency_uses_metadata_without_loading_file() {
+        let engine = Engine::default();
+        let dependency = wasm_plugin_dependency_with_component(
+            "yieldspace:plugin/metadata-only",
+            PathBuf::from("/nonexistent/plugin.wasm"),
+            Some(vec!["yieldspace:plugin/provider".to_string()]),
+            Some(vec!["yieldspace:plugin/metadata-only".to_string()]),
+        );
+        let mut preloaded_components = BTreeMap::new();
+
+        let interfaces =
+            component_interfaces_for_dependency(&dependency, &engine, &mut preloaded_components)
+                .expect("interfaces should come from metadata");
+
+        assert_eq!(
+            interfaces.imports,
+            vec!["yieldspace:plugin/provider".to_string()]
+        );
+        assert_eq!(
+            interfaces.exports,
+            BTreeSet::from(["yieldspace:plugin/metadata-only".to_string()])
+        );
+        assert!(
+            preloaded_components.is_empty(),
+            "metadata path should avoid preload inserts"
+        );
+    }
+
+    #[test]
+    fn load_component_for_instantiation_reuses_preloaded_component() {
+        let engine = Engine::default();
+        let (_tempdir, component_path) = write_minimal_component_file("plugin-preload-reuse");
+        let dependency = wasm_plugin_dependency_with_component(
+            "yieldspace:plugin/preload",
+            component_path,
+            None,
+            None,
+        );
+        let mut preloaded_components = BTreeMap::new();
+
+        let interfaces =
+            component_interfaces_for_dependency(&dependency, &engine, &mut preloaded_components)
+                .expect("fallback path should preload component");
+        assert!(
+            preloaded_components.contains_key(&dependency.name),
+            "legacy fallback should preload loaded component"
+        );
+
+        let _component =
+            load_component_for_instantiation(&dependency, &engine, &mut preloaded_components)
+                .expect("instantiation should reuse preloaded component");
+        assert!(
+            preloaded_components.is_empty(),
+            "preloaded component should be consumed by instantiation"
+        );
+        assert!(
+            interfaces.imports.is_empty() && interfaces.exports.is_empty(),
+            "minimal component should have no instance imports/exports"
         );
     }
 

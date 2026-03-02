@@ -21,7 +21,11 @@ use std::{
 };
 
 use imago_protocol::ErrorCode;
-use imagod_common::ImagodError;
+use imagod_common::{
+    DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY, DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES,
+    DEFAULT_WASM_MEMORY_RESERVATION_BYTES, DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES,
+    DEFAULT_WASM_PARALLEL_COMPILATION, ImagodError,
+};
 use imagod_ipc::{
     CapabilityPolicy, PluginDependency, ResourceMap, RunnerAppType, RunnerBootstrap,
     RunnerInboundRequest, RunnerInboundResponse, RunnerSocketConfig, RunnerWasiMount,
@@ -64,11 +68,6 @@ const MAX_MANAGER_CONTROL_CONNECTION_HANDLERS: usize = 32;
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
 const LOG_CHANNEL_CAPACITY: usize = 256;
 const DEFAULT_HTTP_QUEUE_MEMORY_BUDGET_BYTES: u64 = 32 * 1024 * 1024;
-const DEFAULT_WASM_MEMORY_RESERVATION_BYTES: u64 = 64 * 1024 * 1024;
-const DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES: u64 = 16 * 1024 * 1024;
-const DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES: u64 = 64 * 1024;
-const DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY: bool = false;
-const DEFAULT_WASM_PARALLEL_COMPILATION: bool = false;
 type PendingReadyMap = BTreeMap<String, oneshot::Sender<Result<(), ImagodError>>>;
 type StoppingServicesMap = BTreeMap<String, usize>;
 
