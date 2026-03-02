@@ -2353,7 +2353,6 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "hex",
- "imago-lockfile",
  "imago-protocol",
  "include_dir",
  "indicatif",
@@ -2377,16 +2376,6 @@ dependencies = [
  "web-transport-quinn",
  "wit-component 0.245.1",
  "wit-parser 0.245.1",
-]
-
-[[package]]
-name = "imago-lockfile"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "sha2",
- "toml 1.0.3+spec-1.1.0",
 ]
 
 [[package]]

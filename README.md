@@ -22,6 +22,33 @@ imago is under development and currently intended for use on private networks.
 
 See [QUICKSTART.md](QUICKSTART.md) for step-by-step setup and local example execution.
 
+## imagod Installer (Release Asset Based)
+
+`imagod` can be installed from GitHub Release assets with environment-aware target resolution:
+
+```bash
+./scripts/install_imagod.sh
+```
+
+Useful options:
+
+- `--tag <semver|imagod-vX.Y.Z>`
+- `--libc <auto|gnu|musl>`
+- `--repo <owner/repo>`
+- `--install-dir <path>`
+- `--no-service`
+- `--dry-run`
+
+Defaults:
+
+- Source: GitHub Release assets (`imagod-<target-triple>` and `imagod-<target-triple>.sha256`)
+- Linux only
+- Includes both GNU and musl targets (including `x86_64-unknown-linux-musl`)
+- Install path: `/usr/local/bin` (root) or `~/.local/bin` (non-root)
+- Service setup: `systemd` first, then `init.d`, otherwise binary-only
+
+`GH_TOKEN` is optional for public repositories and required when accessing private releases.
+
 ## CLI Output Modes
 
 Mode priority:
@@ -42,7 +69,7 @@ Mode priority:
   - [`crates/imago-cli/src/commands/build/validation.rs`](crates/imago-cli/src/commands/build/validation.rs)
 - Dependency and lock resolution:
   - [`crates/imago-cli/src/commands/update/mod.rs`](crates/imago-cli/src/commands/update/mod.rs)
-  - [`crates/imago-lockfile/src/lib.rs`](crates/imago-lockfile/src/lib.rs)
+  - [`crates/imago-cli/src/lockfile/mod.rs`](crates/imago-cli/src/lockfile/mod.rs)
 - Wire contracts and validation:
   - [`crates/imago-protocol/src/lib.rs`](crates/imago-protocol/src/lib.rs)
   - [`crates/imago-protocol/src/messages`](crates/imago-protocol/src/messages)

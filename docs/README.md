@@ -25,6 +25,27 @@ flowchart LR
 - [Network RPC Model](./network-rpc.md)
 - [WIT Plugins](./wit-plugins.md)
 
+## Release Flow Contract
+
+- リリースは `release-plz` の2段運用です。
+  - `release-plz release-pr`: version 更新を含むリリースPRを作成します。
+  - `release-plz release`: マージ済みリリースPRに対してタグと GitHub Release を作成します。
+- タグは `release-plz` が生成し、以下のバージョン契約に従います。
+  - `imago-vX.Y.Z` / `imago-vX.Y.Z-alpha(.N)` / `imago-vX.Y.Z-beta(.N)`:
+    `crates/imago-cli/Cargo.toml` の `version`。
+  - `imagod-vX.Y.Z` / `imagod-vX.Y.Z-alpha(.N)` / `imagod-vX.Y.Z-beta(.N)`:
+    ルート `Cargo.toml` の `[workspace.package].version`。
+- GitHub Release は stable / alpha / beta を問わず常に prerelease として作成されます。
+- release-plz workflow では `RELEASE_PLZ_TOKEN`（PAT）を利用します。
+- バイナリ添付は `imago-build.yml` が `release` イベントで既存Releaseへ追加します。
+  - `imagod-v*` では `imagod-<target-triple>` と `imagod-<target-triple>.sha256` が添付されます。
+  - musl 系 target には `x86_64-unknown-linux-musl` も含まれます。
+- `scripts/install_imagod.sh` は上記 release asset を利用して `imagod` を自動導入します。
+  - タグ解決優先順: `--tag` > `GITHUB_REF_NAME=imagod-v*` > API で最新 `imagod-v*`
+  - libc 解決: `--libc auto|gnu|musl`（既定: `auto`）
+  - サービス導入優先順: `systemd` > `init.d` > binary-only
+  - private release へアクセスする場合は `GH_TOKEN` を利用します。
+
 ## Source Of Truth (Code)
 
 The source of truth is the codebase (module docs, type definitions, validation logic, and tests).
@@ -34,8 +55,8 @@ The source of truth is the codebase (module docs, type definitions, validation l
   - [`crates/imago-cli/src/commands/build/validation.rs`](../crates/imago-cli/src/commands/build/validation.rs)
 - Dependency and lock resolution:
   - [`crates/imago-cli/src/commands/update/mod.rs`](../crates/imago-cli/src/commands/update/mod.rs)
-  - [`crates/imago-lockfile/src/lib.rs`](../crates/imago-lockfile/src/lib.rs)
-  - [`crates/imago-lockfile/src/resolve.rs`](../crates/imago-lockfile/src/resolve.rs)
+  - [`crates/imago-cli/src/lockfile/mod.rs`](../crates/imago-cli/src/lockfile/mod.rs)
+  - [`crates/imago-cli/src/lockfile/resolve.rs`](../crates/imago-cli/src/lockfile/resolve.rs)
 - Protocol contracts and validation:
   - [`crates/imago-protocol/src/lib.rs`](../crates/imago-protocol/src/lib.rs)
   - [`crates/imago-protocol/src/messages`](../crates/imago-protocol/src/messages)

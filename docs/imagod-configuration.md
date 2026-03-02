@@ -51,7 +51,7 @@ storage_root = "/var/lib/imago"
 - Type: `string`
 - Required/Optional: Optional.
 - Accepted values / Constraints: no additional load-time constraints.
-- Default: `"imagod/0.1.0"`.
+- Default: `"imagod/<imagod version>"` (derived from the built `imagod-config` crate version; workspace imagod系 version と同期).
 - Example:
 
 ```toml

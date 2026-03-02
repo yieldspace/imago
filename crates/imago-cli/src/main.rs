@@ -1,5 +1,6 @@
 mod cli;
 mod commands;
+mod lockfile;
 
 use clap::Parser;
 use cli::{

@@ -12,7 +12,7 @@ use std::{
 use anyhow::{Context, anyhow};
 use sha2::{Digest, Sha256};
 
-use crate::{
+use super::{
     hash::{DigestProvider, Sha256DigestProvider},
     types::{
         BindingWitExpectation, DependencyExpectation, IMAGO_LOCK_VERSION, ImagoLock,

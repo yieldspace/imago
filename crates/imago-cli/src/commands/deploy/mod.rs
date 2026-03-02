@@ -2273,7 +2273,7 @@ fn decode_frames(value: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
 mod tests {
     use super::*;
     use crate::commands::dependency_cache;
-    use imago_lockfile::{
+    use crate::lockfile::{
         ComponentExpectation, DependencyExpectation, IMAGO_LOCK_VERSION, ImagoLock,
         ImagoLockResolved, ImagoLockResolvedDependency, LockCapabilityPolicy, LockDependencyKind,
         LockSourceKind, build_requested_snapshot, compute_dependency_request_id,
