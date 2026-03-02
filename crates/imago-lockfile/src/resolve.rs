@@ -17,9 +17,10 @@ use crate::{
     types::{
         BindingWitExpectation, DependencyExpectation, IMAGO_LOCK_VERSION, ImagoLock,
         ImagoLockRequested, ImagoLockRequestedBinding, ImagoLockRequestedDependency,
-        ImagoLockResolvedBinding, ImagoLockResolvedPackage, ImagoLockResolvedPackageEdge,
-        LockCapabilityPolicy, LockDependencyKind, LockEdgeFromKind, LockPackageEdgeReason,
-        LockSourceKind, ResolvedBindingWit, ResolvedDependency, TransitivePackageRecord,
+        ImagoLockResolvedBinding, ImagoLockResolvedDependency, ImagoLockResolvedPackage,
+        ImagoLockResolvedPackageEdge, LockCapabilityPolicy, LockDependencyKind, LockEdgeFromKind,
+        LockPackageEdgeReason, LockSourceKind, ResolvedBindingWit, ResolvedDependency,
+        TransitivePackageRecord,
     },
     validation::{
         PathVerifier, StrictPathVerifier, parse_prefixed_sha256, validate_sha256_hex,
@@ -319,12 +320,12 @@ fn resolve_dependencies_with(
             ));
         }
 
-        if !requested_by_id.contains_key(&resolved.request_id) {
-            return Err(anyhow!(
+        let requested = requested_by_id.get(&resolved.request_id).ok_or_else(|| {
+            anyhow!(
                 "imago.lock.resolved.dependencies contains unknown request_id '{}'; run `imago deps sync`",
                 resolved.request_id
-            ));
-        }
+            )
+        })?;
 
         for requires in &resolved.requires_request_ids {
             if !requested_by_id.contains_key(requires) {
@@ -347,16 +348,7 @@ fn resolve_dependencies_with(
             digest_provider,
             path_verifier,
         )?;
-
-        if let Some(component_sha256) = resolved.component_sha256.as_deref() {
-            validate_sha256_hex(
-                component_sha256,
-                &format!(
-                    "imago.lock.resolved.dependencies['{}'].component_sha256",
-                    resolved.request_id
-                ),
-            )?;
-        }
+        validate_resolved_component_against_requested(requested, resolved)?;
     }
 
     verify_resolved_packages_and_edges(project_root, lock, digest_provider, path_verifier)?;
@@ -599,6 +591,91 @@ fn validate_binding_interfaces(entry: &ImagoLockResolvedBinding) -> anyhow::Resu
             ),
         )?;
     }
+    Ok(())
+}
+
+fn validate_resolved_component_against_requested(
+    requested: &ImagoLockRequestedDependency,
+    resolved: &ImagoLockResolvedDependency,
+) -> anyhow::Result<()> {
+    if let Some(requested_sha256) = requested.component_sha256.as_deref() {
+        validate_sha256_hex(
+            requested_sha256,
+            &format!(
+                "imago.lock.requested.dependencies['{}'].component_sha256",
+                requested.id
+            ),
+        )?;
+    }
+    if let Some(resolved_sha256) = resolved.component_sha256.as_deref() {
+        validate_sha256_hex(
+            resolved_sha256,
+            &format!(
+                "imago.lock.resolved.dependencies['{}'].component_sha256",
+                resolved.request_id
+            ),
+        )?;
+    }
+
+    let requested_has_component = requested.component_source_kind.is_some()
+        || requested.component_source.is_some()
+        || requested.component_registry.is_some()
+        || requested.component_sha256.is_some();
+    let resolved_has_component = resolved.component_source.is_some()
+        || resolved.component_registry.is_some()
+        || resolved.component_sha256.is_some();
+
+    if requested.kind == LockDependencyKind::Native
+        && !requested_has_component
+        && resolved_has_component
+    {
+        return Err(anyhow!(
+            "imago.lock.resolved.dependencies['{}'] must not define component metadata for native dependency request '{}'; run `imago deps sync`",
+            resolved.request_id,
+            requested.id
+        ));
+    }
+
+    if requested.component_source != resolved.component_source {
+        return Err(anyhow!(
+            "imago.lock.resolved.dependencies['{}'] component source mismatch with requested dependency '{}'; run `imago deps sync`",
+            resolved.request_id,
+            requested.id
+        ));
+    }
+    if requested.component_registry != resolved.component_registry {
+        return Err(anyhow!(
+            "imago.lock.resolved.dependencies['{}'] component registry mismatch with requested dependency '{}'; run `imago deps sync`",
+            resolved.request_id,
+            requested.id
+        ));
+    }
+
+    if requested.kind == LockDependencyKind::Wasm && resolved.component_sha256.is_none() {
+        return Err(anyhow!(
+            "imago.lock.resolved.dependencies['{}'].component_sha256 is missing for wasm dependency request '{}'; run `imago deps sync`",
+            resolved.request_id,
+            requested.id
+        ));
+    }
+
+    if let Some(expected_sha256) = requested.component_sha256.as_deref() {
+        let actual_sha256 = resolved.component_sha256.as_deref().ok_or_else(|| {
+            anyhow!(
+                "imago.lock.resolved.dependencies['{}'].component_sha256 is missing for dependency request '{}'; run `imago deps sync`",
+                resolved.request_id,
+                requested.id
+            )
+        })?;
+        if !actual_sha256.eq_ignore_ascii_case(expected_sha256) {
+            return Err(anyhow!(
+                "imago.lock.resolved.dependencies['{}'] component sha256 mismatch with requested dependency '{}'; run `imago deps sync`",
+                resolved.request_id,
+                requested.id
+            ));
+        }
+    }
+
     Ok(())
 }
 

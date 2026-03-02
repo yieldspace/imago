@@ -65,6 +65,26 @@ mod tests {
         }
     }
 
+    fn sample_wasm_dependency_expectation(name: &str) -> DependencyExpectation {
+        DependencyExpectation {
+            name: name.to_string(),
+            kind: LockDependencyKind::Wasm,
+            version: "0.1.0".to_string(),
+            source_kind: LockSourceKind::Wit,
+            source: "demo:test".to_string(),
+            registry: Some("wa.dev".to_string()),
+            sha256: None,
+            requires: vec![],
+            capabilities: LockCapabilityPolicy::default(),
+            component: Some(ComponentExpectation {
+                source_kind: LockSourceKind::Wit,
+                source: "demo:component".to_string(),
+                registry: Some("wa.dev".to_string()),
+                sha256: None,
+            }),
+        }
+    }
+
     #[test]
     fn requested_snapshot_is_deterministic() {
         let mut ns = BTreeMap::new();
@@ -203,6 +223,245 @@ mod tests {
             resolve_dependencies(&root, &lock, std::slice::from_ref(&expectation)).expect("ok");
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved["path-source-0"].request_id, request_id);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_dependencies_rejects_component_source_mismatch_between_requested_and_resolved() {
+        let root = new_temp_dir("component-source-mismatch");
+        write(
+            &root.join("wit/deps/demo-test-0.1.0/package.wit"),
+            b"package demo:test@0.1.0;\n",
+        );
+
+        let expectation = sample_wasm_dependency_expectation("path-source-0");
+        let request_id = compute_dependency_request_id(&expectation);
+        let requested = build_requested_snapshot(std::slice::from_ref(&expectation), &[], None);
+
+        let lock = ImagoLock {
+            version: IMAGO_LOCK_VERSION,
+            requested,
+            resolved: ImagoLockResolved {
+                dependencies: vec![ImagoLockResolvedDependency {
+                    request_id,
+                    resolved_name: "demo:test".to_string(),
+                    resolved_version: "0.1.0".to_string(),
+                    wit_path: "wit/deps/demo-test-0.1.0".to_string(),
+                    wit_tree_digest: {
+                        use crate::hash::compute_path_digest_hex;
+                        compute_path_digest_hex(&root.join("wit/deps/demo-test-0.1.0"))
+                            .expect("digest")
+                    },
+                    component_source: Some("demo:other-component".to_string()),
+                    component_registry: Some("wa.dev".to_string()),
+                    component_sha256: Some(
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .to_string(),
+                    ),
+                    requires_request_ids: vec![],
+                }],
+                bindings: vec![],
+                packages: vec![],
+                package_edges: vec![],
+            },
+        };
+
+        let err = resolve_dependencies(&root, &lock, &[expectation]).expect_err("must fail");
+        assert!(err.to_string().contains("component source mismatch"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_dependencies_rejects_component_registry_mismatch_between_requested_and_resolved() {
+        let root = new_temp_dir("component-registry-mismatch");
+        write(
+            &root.join("wit/deps/demo-test-0.1.0/package.wit"),
+            b"package demo:test@0.1.0;\n",
+        );
+
+        let expectation = sample_wasm_dependency_expectation("path-source-0");
+        let request_id = compute_dependency_request_id(&expectation);
+        let requested = build_requested_snapshot(std::slice::from_ref(&expectation), &[], None);
+
+        let lock = ImagoLock {
+            version: IMAGO_LOCK_VERSION,
+            requested,
+            resolved: ImagoLockResolved {
+                dependencies: vec![ImagoLockResolvedDependency {
+                    request_id,
+                    resolved_name: "demo:test".to_string(),
+                    resolved_version: "0.1.0".to_string(),
+                    wit_path: "wit/deps/demo-test-0.1.0".to_string(),
+                    wit_tree_digest: {
+                        use crate::hash::compute_path_digest_hex;
+                        compute_path_digest_hex(&root.join("wit/deps/demo-test-0.1.0"))
+                            .expect("digest")
+                    },
+                    component_source: Some("demo:component".to_string()),
+                    component_registry: Some("other.dev".to_string()),
+                    component_sha256: Some(
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .to_string(),
+                    ),
+                    requires_request_ids: vec![],
+                }],
+                bindings: vec![],
+                packages: vec![],
+                package_edges: vec![],
+            },
+        };
+
+        let err = resolve_dependencies(&root, &lock, &[expectation]).expect_err("must fail");
+        assert!(err.to_string().contains("component registry mismatch"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_dependencies_rejects_component_sha_mismatch_when_requested_sha_is_set() {
+        let root = new_temp_dir("component-sha-mismatch");
+        write(
+            &root.join("wit/deps/demo-test-0.1.0/package.wit"),
+            b"package demo:test@0.1.0;\n",
+        );
+
+        let mut expectation = sample_wasm_dependency_expectation("path-source-0");
+        expectation
+            .component
+            .as_mut()
+            .expect("component must exist")
+            .sha256 =
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string());
+        let request_id = compute_dependency_request_id(&expectation);
+        let requested = build_requested_snapshot(std::slice::from_ref(&expectation), &[], None);
+
+        let lock = ImagoLock {
+            version: IMAGO_LOCK_VERSION,
+            requested,
+            resolved: ImagoLockResolved {
+                dependencies: vec![ImagoLockResolvedDependency {
+                    request_id,
+                    resolved_name: "demo:test".to_string(),
+                    resolved_version: "0.1.0".to_string(),
+                    wit_path: "wit/deps/demo-test-0.1.0".to_string(),
+                    wit_tree_digest: {
+                        use crate::hash::compute_path_digest_hex;
+                        compute_path_digest_hex(&root.join("wit/deps/demo-test-0.1.0"))
+                            .expect("digest")
+                    },
+                    component_source: Some("demo:component".to_string()),
+                    component_registry: Some("wa.dev".to_string()),
+                    component_sha256: Some(
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                            .to_string(),
+                    ),
+                    requires_request_ids: vec![],
+                }],
+                bindings: vec![],
+                packages: vec![],
+                package_edges: vec![],
+            },
+        };
+
+        let err = resolve_dependencies(&root, &lock, &[expectation]).expect_err("must fail");
+        assert!(err.to_string().contains("component sha256 mismatch"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_dependencies_allows_resolved_component_sha_when_requested_sha_is_absent() {
+        let root = new_temp_dir("component-sha-absent-in-requested");
+        write(
+            &root.join("wit/deps/demo-test-0.1.0/package.wit"),
+            b"package demo:test@0.1.0;\n",
+        );
+
+        let expectation = sample_wasm_dependency_expectation("path-source-0");
+        let request_id = compute_dependency_request_id(&expectation);
+        let requested = build_requested_snapshot(std::slice::from_ref(&expectation), &[], None);
+
+        let lock = ImagoLock {
+            version: IMAGO_LOCK_VERSION,
+            requested,
+            resolved: ImagoLockResolved {
+                dependencies: vec![ImagoLockResolvedDependency {
+                    request_id: request_id.clone(),
+                    resolved_name: "demo:test".to_string(),
+                    resolved_version: "0.1.0".to_string(),
+                    wit_path: "wit/deps/demo-test-0.1.0".to_string(),
+                    wit_tree_digest: {
+                        use crate::hash::compute_path_digest_hex;
+                        compute_path_digest_hex(&root.join("wit/deps/demo-test-0.1.0"))
+                            .expect("digest")
+                    },
+                    component_source: Some("demo:component".to_string()),
+                    component_registry: Some("wa.dev".to_string()),
+                    component_sha256: Some(
+                        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                            .to_string(),
+                    ),
+                    requires_request_ids: vec![],
+                }],
+                bindings: vec![],
+                packages: vec![],
+                package_edges: vec![],
+            },
+        };
+
+        let resolved = resolve_dependencies(&root, &lock, &[expectation]).expect("must pass");
+        assert_eq!(resolved["path-source-0"].request_id, request_id);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_dependencies_rejects_component_fields_for_native_request() {
+        let root = new_temp_dir("native-component-metadata-rejected");
+        write(
+            &root.join("wit/deps/demo-test-0.1.0/package.wit"),
+            b"package demo:test@0.1.0;\n",
+        );
+
+        let expectation = sample_dependency_expectation("path-source-0");
+        let request_id = compute_dependency_request_id(&expectation);
+        let requested = build_requested_snapshot(std::slice::from_ref(&expectation), &[], None);
+
+        let lock = ImagoLock {
+            version: IMAGO_LOCK_VERSION,
+            requested,
+            resolved: ImagoLockResolved {
+                dependencies: vec![ImagoLockResolvedDependency {
+                    request_id,
+                    resolved_name: "demo:test".to_string(),
+                    resolved_version: "0.1.0".to_string(),
+                    wit_path: "wit/deps/demo-test-0.1.0".to_string(),
+                    wit_tree_digest: {
+                        use crate::hash::compute_path_digest_hex;
+                        compute_path_digest_hex(&root.join("wit/deps/demo-test-0.1.0"))
+                            .expect("digest")
+                    },
+                    component_source: Some("demo:component".to_string()),
+                    component_registry: Some("wa.dev".to_string()),
+                    component_sha256: Some(
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .to_string(),
+                    ),
+                    requires_request_ids: vec![],
+                }],
+                bindings: vec![],
+                packages: vec![],
+                package_edges: vec![],
+            },
+        };
+
+        let err = resolve_dependencies(&root, &lock, &[expectation]).expect_err("must fail");
+        assert!(
+            err.to_string()
+                .contains("must not define component metadata")
+        );
 
         let _ = fs::remove_dir_all(root);
     }
