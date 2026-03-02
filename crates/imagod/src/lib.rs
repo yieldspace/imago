@@ -2,11 +2,13 @@
 
 use std::{path::PathBuf, sync::Arc};
 
+use clap::{CommandFactory, FromArgMatches, Parser, error::ErrorKind};
 use imago_plugin_imago_admin::ImagoAdminPlugin;
 use imago_plugin_imago_experimental_gpio::ImagoExperimentalGpioPlugin;
 use imago_plugin_imago_experimental_i2c::ImagoExperimentalI2cPlugin;
 use imago_plugin_imago_node::ImagoNodePlugin;
 use imago_plugin_imago_usb::ImagoUsbPlugin;
+use imago_protocol::PROTOCOL_VERSION;
 
 mod manager_runtime;
 mod runner_runtime;
@@ -18,10 +20,25 @@ enum RunMode {
     Runner,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Parser)]
+#[command(name = "imagod", about = "imago daemon")]
 struct CliArgs {
+    /// Path to imagod.toml used by manager mode.
+    #[arg(long = "config", value_name = "PATH")]
     config_path: Option<PathBuf>,
-    mode: RunMode,
+    /// Start as an internal runner process.
+    #[arg(long)]
+    runner: bool,
+}
+
+impl CliArgs {
+    fn mode(&self) -> RunMode {
+        if self.runner {
+            RunMode::Runner
+        } else {
+            RunMode::Manager
+        }
+    }
 }
 
 #[cfg(feature = "runtime-wasmtime")]
@@ -31,8 +48,11 @@ pub use imagod_runtime::{NativePluginRegistry, NativePluginRegistryBuilder};
 /// Dispatches `imagod` from process arguments with built-in native plugins.
 pub async fn dispatch_from_env() -> Result<(), anyhow::Error> {
     install_rustls_provider();
-    let cli = parse_cli_args(std::env::args().skip(1))?;
-    match cli.mode {
+    let Some(cli) = parse_cli_args_or_emit(std::env::args().skip(1))? else {
+        return Ok(());
+    };
+
+    match cli.mode() {
         RunMode::Runner => {
             runner_runtime::run_runner_with_registry(builtin_native_plugin_registry()?).await
         }
@@ -45,8 +65,11 @@ pub async fn dispatch_from_env_with_registry(
     native_plugin_registry: NativePluginRegistry,
 ) -> Result<(), anyhow::Error> {
     install_rustls_provider();
-    let cli = parse_cli_args(std::env::args().skip(1))?;
-    match cli.mode {
+    let Some(cli) = parse_cli_args_or_emit(std::env::args().skip(1))? else {
+        return Ok(());
+    };
+
+    match cli.mode() {
         RunMode::Runner => runner_runtime::run_runner_with_registry(native_plugin_registry).await,
         RunMode::Manager => manager_runtime::run_manager(cli.config_path).await,
     }
@@ -92,34 +115,35 @@ fn install_rustls_provider() {
     }
 }
 
-fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliArgs, anyhow::Error> {
-    let mut args = args.into_iter();
-    let mut config: Option<PathBuf> = None;
-    let mut mode = RunMode::Manager;
+fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliArgs, clap::Error> {
+    let mut command = CliArgs::command();
+    command = command.about(cli_about_text());
+    command = command.version(env!("CARGO_PKG_VERSION"));
+    command
+        .try_get_matches_from(std::iter::once("imagod".to_string()).chain(args))
+        .and_then(|matches| CliArgs::from_arg_matches(&matches))
+}
 
-    while let Some(arg) = args.next() {
-        if arg == "--runner" {
-            mode = RunMode::Runner;
-            continue;
-        }
-        if arg == "--config" {
-            let path = args
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("--config requires a file path argument"))?;
-            config = Some(PathBuf::from(path));
-            continue;
-        }
+fn cli_about_text() -> String {
+    format!("imago daemon (protocol {PROTOCOL_VERSION})")
+}
 
-        if let Some(path) = arg.strip_prefix("--config=") {
-            config = Some(PathBuf::from(path));
-            continue;
+fn parse_cli_args_or_emit(
+    args: impl IntoIterator<Item = String>,
+) -> Result<Option<CliArgs>, anyhow::Error> {
+    match parse_cli_args(args) {
+        Ok(cli) => Ok(Some(cli)),
+        Err(err)
+            if matches!(
+                err.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) =>
+        {
+            err.print()?;
+            Ok(None)
         }
+        Err(err) => Err(err.into()),
     }
-
-    Ok(CliArgs {
-        config_path: config,
-        mode,
-    })
 }
 
 #[cfg(test)]
@@ -129,21 +153,23 @@ mod tests {
     #[test]
     fn parse_cli_defaults_to_manager_mode() {
         let cli = parse_cli_args(Vec::<String>::new()).expect("cli parse should succeed");
-        assert_eq!(cli.mode, RunMode::Manager);
+        assert_eq!(cli.mode(), RunMode::Manager);
+        assert!(!cli.runner);
         assert_eq!(cli.config_path, None);
     }
 
     #[test]
     fn parse_cli_accepts_runner_flag() {
         let cli = parse_cli_args(vec!["--runner".to_string()]).expect("runner parse should work");
-        assert_eq!(cli.mode, RunMode::Runner);
+        assert_eq!(cli.mode(), RunMode::Runner);
+        assert!(cli.runner);
     }
 
     #[test]
     fn parse_cli_accepts_config_separate_argument() {
         let cli = parse_cli_args(vec!["--config".to_string(), "imagod.toml".to_string()])
             .expect("config parse should work");
-        assert_eq!(cli.mode, RunMode::Manager);
+        assert_eq!(cli.mode(), RunMode::Manager);
         assert_eq!(cli.config_path, Some(PathBuf::from("imagod.toml")));
     }
 
@@ -151,18 +177,30 @@ mod tests {
     fn parse_cli_accepts_config_equals_argument() {
         let cli = parse_cli_args(vec!["--config=/tmp/imagod.toml".to_string()])
             .expect("config parse should work");
-        assert_eq!(cli.mode, RunMode::Manager);
+        assert_eq!(cli.mode(), RunMode::Manager);
         assert_eq!(cli.config_path, Some(PathBuf::from("/tmp/imagod.toml")));
     }
 
     #[test]
     fn parse_cli_requires_config_value() {
         let err = parse_cli_args(vec!["--config".to_string()]).expect_err("must fail");
-        assert!(
-            err.to_string()
-                .contains("--config requires a file path argument"),
-            "unexpected error: {err}"
-        );
+        assert_eq!(err.kind(), ErrorKind::InvalidValue);
+        assert!(err.to_string().contains("--config <PATH>"));
+    }
+
+    #[test]
+    fn parse_cli_reports_version_information() {
+        let err = parse_cli_args(vec!["--version".to_string()]).expect_err("must print version");
+        assert_eq!(err.kind(), ErrorKind::DisplayVersion);
+        assert!(err.to_string().contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn parse_cli_help_contains_protocol_version_in_about() {
+        let err = parse_cli_args(vec!["--help".to_string()]).expect_err("must print help");
+        assert_eq!(err.kind(), ErrorKind::DisplayHelp);
+        let expected = format!("protocol {PROTOCOL_VERSION}");
+        assert!(err.to_string().contains(&expected));
     }
 
     #[cfg(feature = "runtime-wasmtime")]

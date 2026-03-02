@@ -18,11 +18,13 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
 imago-plugin-imago-admin = { workspace = true }
 imago-plugin-imago-experimental-gpio = { workspace = true }
 imago-plugin-imago-experimental-i2c = { workspace = true }
 imago-plugin-imago-node = { workspace = true }
 imago-plugin-imago-usb = { workspace = true }
+imago-protocol = { workspace = true }
 imagod-config = { workspace = true }
 imagod-control = { workspace = true }
 imagod-runtime = { workspace = true }
