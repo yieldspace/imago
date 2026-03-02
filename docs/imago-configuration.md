@@ -608,7 +608,7 @@ This section defines plugin dependencies and their resolution sources.
 - `imago.lock` is split into `[requested]` and `[resolved]`.
 - `[requested]` stores normalized dependency/binding requests and a `fingerprint`.
 - `[resolved]` stores `dependencies`, `bindings`, `packages`, and `package_edges`.
-- `requested.dependencies[].id` is derived from normalized request identity (`kind/version/source/component/declared_requires/capabilities`).
+- `requested.dependencies[].id` is derived from full normalized request identity (`kind/version/source_kind/source/registry/sha256/component_source_kind/component_source/component_registry/component_sha256/declared_requires/capabilities`).
 - `resolved.packages[].package_ref` must equal canonical `<name>@<version-or-*>#<registry-or-empty>`.
 - `resolved.package_edges[].reason` must be one of:
   - `declared-requires`

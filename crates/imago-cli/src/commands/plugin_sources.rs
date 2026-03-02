@@ -2033,15 +2033,17 @@ fn selected_world_local_interface_ids(
     world_package: wit_parser::PackageId,
 ) -> BTreeSet<InterfaceId> {
     let mut reachable = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    let mut seen_type_ids = BTreeSet::new();
     collect_local_world_interfaces_recursive(
         resolve,
         world,
         world_package,
         &mut reachable,
+        &mut queue,
+        &mut seen_type_ids,
         &mut BTreeSet::new(),
     );
-    let mut queue = reachable.iter().copied().collect::<VecDeque<_>>();
-    let mut seen_type_ids = BTreeSet::new();
     while let Some(interface_id) = queue.pop_front() {
         collect_reachable_local_interfaces_from_interface(
             resolve,
@@ -2060,6 +2062,8 @@ fn collect_local_world_interfaces_recursive(
     world: WorldId,
     world_package: wit_parser::PackageId,
     reachable: &mut BTreeSet<InterfaceId>,
+    queue: &mut VecDeque<InterfaceId>,
+    seen_type_ids: &mut BTreeSet<TypeId>,
     seen_worlds: &mut BTreeSet<WorldId>,
 ) {
     if !seen_worlds.insert(world) {
@@ -2070,14 +2074,59 @@ fn collect_local_world_interfaces_recursive(
         .iter()
         .chain(resolve.worlds[world].exports.iter())
     {
-        let WorldItem::Interface { id, .. } = world_item else {
-            continue;
-        };
-        let interface = &resolve.interfaces[*id];
-        if interface.package != Some(world_package) {
-            continue;
+        match world_item {
+            WorldItem::Interface { id, .. } => {
+                let interface = &resolve.interfaces[*id];
+                if interface.package != Some(world_package) {
+                    continue;
+                }
+                if reachable.insert(*id) {
+                    queue.push_back(*id);
+                }
+            }
+            WorldItem::Function(function) => {
+                for param in &function.params {
+                    collect_reachable_local_interfaces_from_type(
+                        resolve,
+                        &param.ty,
+                        world_package,
+                        reachable,
+                        queue,
+                        seen_type_ids,
+                    );
+                }
+                if let Some(result) = &function.result {
+                    collect_reachable_local_interfaces_from_type(
+                        resolve,
+                        result,
+                        world_package,
+                        reachable,
+                        queue,
+                        seen_type_ids,
+                    );
+                }
+                if let Some(resource_id) = function.kind.resource() {
+                    collect_reachable_local_interfaces_from_type_id(
+                        resolve,
+                        resource_id,
+                        world_package,
+                        reachable,
+                        queue,
+                        seen_type_ids,
+                    );
+                }
+            }
+            WorldItem::Type { id, .. } => {
+                collect_reachable_local_interfaces_from_type_id(
+                    resolve,
+                    *id,
+                    world_package,
+                    reachable,
+                    queue,
+                    seen_type_ids,
+                );
+            }
         }
-        reachable.insert(*id);
     }
     for include in &resolve.worlds[world].includes {
         collect_local_world_interfaces_recursive(
@@ -2085,6 +2134,8 @@ fn collect_local_world_interfaces_recursive(
             include.id,
             world_package,
             reachable,
+            queue,
+            seen_type_ids,
             seen_worlds,
         );
     }
@@ -3724,6 +3775,64 @@ interface types {
             .iter()
             .find(|package| package.name == "chikoski:external")
             .expect("chikoski:external should be collected via transitive local interface");
+        assert_eq!(external.version.as_deref(), Some("0.1.0"));
+        assert!(
+            external.interfaces.contains(&"types".to_string()),
+            "expected external interface name to be collected: {external:?}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn collect_component_world_foreign_packages_keeps_local_interfaces_reachable_from_world_function_types()
+     {
+        let root = new_temp_dir("component-world-foreign-world-function-type");
+        let source = root.join("source");
+        write(
+            &source.join("package.wit"),
+            br#"
+package root:component@0.1.0;
+
+interface helper-types {
+    use chikoski:external/types@0.1.0.{token};
+    type local-token = token;
+}
+
+world component {
+    use helper-types.{local-token};
+    import process: func(value: local-token);
+}
+"#,
+        );
+        write(
+            &source.join("deps/chikoski-external/package.wit"),
+            br#"
+package chikoski:external@0.1.0;
+
+interface types {
+    resource token {}
+}
+"#,
+        );
+
+        let mut resolve = wit_parser::Resolve::default();
+        let (top_package, _) = resolve
+            .push_path(&source)
+            .expect("WIT package dir should parse");
+        let world = resolve.packages[top_package]
+            .worlds
+            .get("component")
+            .copied()
+            .expect("component world should exist");
+
+        let foreign_packages =
+            super::collect_component_world_foreign_packages(&resolve, world, "test source")
+                .expect("foreign package collection should succeed");
+        let external = foreign_packages
+            .iter()
+            .find(|package| package.name == "chikoski:external")
+            .expect("chikoski:external should be collected via world function type reference");
         assert_eq!(external.version.as_deref(), Some("0.1.0"));
         assert!(
             external.interfaces.contains(&"types".to_string()),

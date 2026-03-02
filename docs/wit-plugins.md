@@ -58,7 +58,7 @@ Rules:
 - `imago.lock` has two sections: `[requested]` and `[resolved]`.
 - `[requested]` records normalized request identities and `fingerprint`.
 - `[resolved]` records resolved dependency/binding entries and transitive package graph (`packages` + `package_edges`).
-- `requested.dependencies[].id` is derived from normalized request identity (`kind/version/source/component/declared_requires/capabilities`).
+- `requested.dependencies[].id` is derived from full normalized request identity (`kind/version/source_kind/source/registry/sha256/component_source_kind/component_source/component_registry/component_sha256/declared_requires/capabilities`).
 - `resolved.packages[].package_ref` must match canonical `<name>@<version-or-*>#<registry-or-empty>`.
 - `resolved.package_edges[].reason` accepts only:
   - `declared-requires`
