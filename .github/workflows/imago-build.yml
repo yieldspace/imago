@@ -98,6 +98,16 @@ jobs:
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/imagod" "dist/imagod-${{ matrix.target }}"
 
+      - name: Generate release checksum (imagod)
+        if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imagod-v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd dist
+            sha256sum "imagod-${{ matrix.target }}" > "imagod-${{ matrix.target }}.sha256"
+          )
+
       - name: Stage CI artifacts (main/PR)
         if: github.event_name != 'release'
         shell: bash

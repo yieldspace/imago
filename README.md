@@ -22,6 +22,31 @@ imago is under development and currently intended for use on private networks.
 
 See [QUICKSTART.md](QUICKSTART.md) for step-by-step setup and local example execution.
 
+## imagod Installer (Release Asset Based)
+
+`imagod` can be installed from GitHub Release assets with environment-aware target resolution:
+
+```bash
+./scripts/install_imagod.sh
+```
+
+Useful options:
+
+- `--tag <semver|imagod-vX.Y.Z>`
+- `--repo <owner/repo>`
+- `--install-dir <path>`
+- `--no-service`
+- `--dry-run`
+
+Defaults:
+
+- Source: GitHub Release assets (`imagod-<target-triple>` and `imagod-<target-triple>.sha256`)
+- Linux only
+- Install path: `/usr/local/bin` (root) or `~/.local/bin` (non-root)
+- Service setup: `systemd` first, then `init.d`, otherwise binary-only
+
+`GH_TOKEN` is optional for public repositories and required when accessing private releases.
+
 ## CLI Output Modes
 
 Mode priority:

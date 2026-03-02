@@ -38,6 +38,11 @@ flowchart LR
 - GitHub Release は stable / alpha / beta を問わず常に prerelease として作成されます。
 - release-plz workflow では `RELEASE_PLZ_TOKEN`（PAT）を利用します。
 - バイナリ添付は `imago-build.yml` が `release` イベントで既存Releaseへ追加します。
+  - `imagod-v*` では `imagod-<target-triple>` と `imagod-<target-triple>.sha256` が添付されます。
+- `scripts/install_imagod.sh` は上記 release asset を利用して `imagod` を自動導入します。
+  - タグ解決優先順: `--tag` > `GITHUB_REF_NAME=imagod-v*` > API で最新 `imagod-v*`
+  - サービス導入優先順: `systemd` > `init.d` > binary-only
+  - private release へアクセスする場合は `GH_TOKEN` を利用します。
 
 ## Source Of Truth (Code)
 
