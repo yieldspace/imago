@@ -546,10 +546,9 @@ pub fn collect_resolved_packages_and_edges(
 
         if let (Some(from_kind), Some(from_ref), Some(reason)) =
             (record.from_kind, record.from_ref, record.reason)
+            && !from_ref.trim().is_empty()
         {
-            if !from_ref.trim().is_empty() {
-                edges.insert((edge_kind_sort_key(from_kind), from_ref, package_ref, reason));
-            }
+            edges.insert((edge_kind_sort_key(from_kind), from_ref, package_ref, reason));
         }
     }
 
@@ -882,7 +881,7 @@ fn verify_resolved_packages_and_edges(
             edge_kind_sort_key(edge.from_kind),
             edge.from_ref.clone(),
             edge.to_package_ref.clone(),
-            edge.reason.clone(),
+            edge.reason,
         );
         if !seen_edges.insert(key) {
             return Err(anyhow!(
