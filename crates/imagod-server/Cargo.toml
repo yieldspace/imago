@@ -6,11 +6,12 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-bench-internals = []
+bench-internals = ["dep:criterion"]
 
 [dependencies]
 async-trait = { workspace = true }
 bytes = { workspace = true }
+criterion = { workspace = true, optional = true }
 imago-protocol = { workspace = true }
 imagod-common = { workspace = true }
 imagod-config = { workspace = true }
@@ -25,9 +26,6 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 uuid = { workspace = true, features = ["v4"] }
 web-transport-quinn = { workspace = true }
-
-[dev-dependencies]
-criterion = { workspace = true }
 
 [[bench]]
 name = "logs_forwarder"

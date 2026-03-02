@@ -6,10 +6,11 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-bench-internals = []
+bench-internals = ["dep:criterion"]
 
 [dependencies]
 base64 = { workspace = true }
+criterion = { workspace = true, optional = true }
 hex = { workspace = true }
 imago-protocol = { workspace = true }
 imagod-common = { workspace = true }
@@ -31,7 +32,6 @@ web-transport-quinn = { workspace = true }
 wasmparser = { workspace = true }
 
 [dev-dependencies]
-criterion = { workspace = true }
 wat = { workspace = true }
 
 [[bench]]
