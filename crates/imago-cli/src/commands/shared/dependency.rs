@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -88,6 +88,21 @@ pub(crate) fn resolve_manifest_dependencies_from_lock(
         .collect::<anyhow::Result<Vec<_>>>()?;
     let resolved_by_name =
         imago_lockfile::resolve_dependencies(project_root, &lock, &expectations)?;
+    let mut resolved_name_by_request_id = BTreeMap::new();
+    let mut project_dependency_id_by_resolved_name = BTreeMap::new();
+    for (project_dependency_id, entry) in &resolved_by_name {
+        resolved_name_by_request_id.insert(entry.request_id.clone(), entry.resolved_name.clone());
+        if let Some(existing_project_dependency_id) = project_dependency_id_by_resolved_name
+            .insert(entry.resolved_name.clone(), project_dependency_id.clone())
+        {
+            return Err(anyhow!(
+                "imago.lock resolves multiple project dependency ids ('{}', '{}') to package '{}'; run `imago deps sync`",
+                existing_project_dependency_id,
+                project_dependency_id,
+                entry.resolved_name
+            ));
+        }
+    }
 
     let mut manifest_dependencies = Vec::with_capacity(dependencies.len());
     for dependency in dependencies {
@@ -97,6 +112,21 @@ pub(crate) fn resolve_manifest_dependencies_from_lock(
                 dependency.name
             )
         })?;
+        let requires = entry
+            .requires_request_ids
+            .iter()
+            .map(|request_id| {
+                resolved_name_by_request_id.get(request_id).cloned().ok_or_else(|| {
+                    anyhow!(
+                        "dependency '{}' requires unresolved request_id '{}' in imago.lock; run `imago deps sync`",
+                        dependency.name,
+                        request_id
+                    )
+                })
+            })
+            .collect::<anyhow::Result<BTreeSet<_>>>()?
+            .into_iter()
+            .collect::<Vec<_>>();
 
         let component = match dependency.kind {
             ManifestDependencyKind::Native => None,
@@ -119,7 +149,7 @@ pub(crate) fn resolve_manifest_dependencies_from_lock(
             version: dependency.version.clone(),
             kind: dependency.kind,
             wit: dependency.wit.source.clone(),
-            requires: dependency.requires.clone(),
+            requires,
             component,
             capabilities: dependency.capabilities.clone(),
         });

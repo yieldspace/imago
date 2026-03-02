@@ -5082,6 +5082,109 @@ remote = "127.0.0.1:4443"
     }
 
     #[test]
+    fn build_normalizes_dependency_requires_to_resolved_package_names_from_lock() {
+        let root = new_temp_dir("dependencies-requires-normalized");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+version = "0.1.0"
+kind = "native"
+path = "registry/example-a"
+requires = ["path-source-1"]
+
+[[dependencies]]
+version = "0.1.0"
+kind = "native"
+path = "registry/example-b"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("registry/example-a/package.wit"),
+            b"package test:example-a;\n",
+        );
+        write_file(
+            &root.join("registry/example-b/package.wit"),
+            b"package test:example-b;\n",
+        );
+        run_update(&root);
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        assert_eq!(manifest.dependencies.len(), 2);
+        let dependency_a = manifest
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.name == "test:example-a")
+            .expect("dependency 'test:example-a' should exist");
+        assert_eq!(dependency_a.requires, vec!["test:example-b".to_string()]);
+        let dependency_b = manifest
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.name == "test:example-b")
+            .expect("dependency 'test:example-b' should exist");
+        assert!(dependency_b.requires.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_fails_when_lock_requires_request_id_cannot_be_resolved() {
+        let root = new_temp_dir("dependencies-requires-request-id-unresolved");
+        write_imago_toml(
+            &root,
+            r#"
+name = "svc"
+main = "build/app.wasm"
+type = "cli"
+
+[[dependencies]]
+version = "0.1.0"
+kind = "native"
+path = "registry/example"
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("registry/example/package.wit"),
+            b"package test:example;\n",
+        );
+        run_update(&root);
+        let lock_path = root.join("imago.lock");
+        let mut lock: ImagoLock =
+            toml::from_str(&fs::read_to_string(&lock_path).expect("lock should exist"))
+                .expect("lock should parse");
+        lock.resolved.dependencies[0].requires_request_ids = vec!["dep:unknown".to_string()];
+        write_imago_lock(&root, &lock);
+
+        let err = build_project("default", &root)
+            .expect_err("build should fail when requires_request_id is unknown");
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains("requires_request_ids contains unknown request_id")
+                || err_text.contains("requires unresolved request_id"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            err_text.contains("imago deps sync"),
+            "unexpected error: {err:#}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn build_accepts_dependency_capabilities_deps_wildcard_string() {
         let root = new_temp_dir("dependencies-capabilities-deps-wildcard");
         write_imago_toml(
