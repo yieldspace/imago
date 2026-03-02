@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     io::Read,
     path::{Component, Path, PathBuf},
@@ -20,7 +20,10 @@ use wasm_pkg_common::{
     registry::Registry,
 };
 use wit_component::DecodedWasm;
-use wit_parser::{Resolve, UnresolvedPackageGroup, WorldItem};
+use wit_parser::{
+    InterfaceId, Resolve, Type, TypeDefKind, TypeId, TypeOwner, UnresolvedPackageGroup, WorldId,
+    WorldItem,
+};
 
 pub(crate) const DEFAULT_WARG_REGISTRY: &str = "wa.dev";
 pub(crate) const DEFAULT_WASI_WARG_REGISTRY: &str = "wasi.dev";
@@ -647,20 +650,19 @@ pub(crate) async fn materialize_wit_source(
                     })
                 }
                 Err(_) => {
-                    materialize_plain_wit_text(
+                    let materialized = materialize_plain_wit_text(
                         destination_dir,
                         &bytes,
                         MaterializePlainWitTextRequest {
-                            protocol: RemoteSourceProtocol::Warg,
-                            package: expected_package.unwrap_or("<unknown>"),
-                            version: version.unwrap_or("<unknown>"),
-                            registry: DEFAULT_WARG_REGISTRY,
+                            origin: PlainWitSourceOrigin::Http {
+                                source_desc: &source_desc,
+                            },
                             expected_package,
                             expected_version: version,
                             source_desc: &source_desc,
                         },
                     )?;
-                    Ok(MaterializedWitSource::default())
+                    Ok(materialized)
                 }
             }
         }
@@ -1367,13 +1369,23 @@ struct MaterializeRemoteWitBytesRequest<'a> {
 
 #[derive(Debug, Clone, Copy)]
 struct MaterializePlainWitTextRequest<'a> {
-    protocol: RemoteSourceProtocol,
-    package: &'a str,
-    version: &'a str,
-    registry: &'a str,
+    origin: PlainWitSourceOrigin<'a>,
     expected_package: Option<&'a str>,
     expected_version: Option<&'a str>,
     source_desc: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PlainWitSourceOrigin<'a> {
+    Remote {
+        protocol: RemoteSourceProtocol,
+        package: &'a str,
+        version: &'a str,
+        registry: &'a str,
+    },
+    Http {
+        source_desc: &'a str,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1490,20 +1502,22 @@ fn materialize_remote_wit_bytes(
             })
         }
         Err(_) => {
-            materialize_plain_wit_text(
+            let materialized = materialize_plain_wit_text(
                 destination_dir,
                 bytes,
                 MaterializePlainWitTextRequest {
-                    protocol: request.protocol,
-                    package: request.package,
-                    version: request.version,
-                    registry: request.registry,
+                    origin: PlainWitSourceOrigin::Remote {
+                        protocol: request.protocol,
+                        package: request.package,
+                        version: request.version,
+                        registry: request.registry,
+                    },
                     expected_package: request.expected_package,
                     expected_version: Some(request.version),
                     source_desc: &source_desc,
                 },
             )?;
-            Ok(MaterializedWitSource::default())
+            Ok(materialized)
         }
     }
 }
@@ -1512,22 +1526,42 @@ fn materialize_plain_wit_text(
     destination_dir: &Path,
     bytes: &[u8],
     request: MaterializePlainWitTextRequest<'_>,
-) -> anyhow::Result<()> {
-    let scheme = match request.protocol {
-        RemoteSourceProtocol::Warg => "warg",
-        RemoteSourceProtocol::Oci => "oci",
-    };
+) -> anyhow::Result<MaterializedWitSource> {
     let text = String::from_utf8(bytes.to_vec()).with_context(|| {
-        format!(
-            "failed to decode wit source for package '{}@{}' from registry '{}': payload is not UTF-8",
-            request.package, request.version, request.registry
-        )
+        match request.origin {
+            PlainWitSourceOrigin::Remote {
+                package,
+                version,
+                registry,
+                ..
+            } => {
+                format!(
+                    "failed to decode wit source for package '{}@{}' from registry '{}': payload is not UTF-8",
+                    package, version, registry
+                )
+            }
+            PlainWitSourceOrigin::Http { source_desc } => {
+                format!("failed to decode plain WIT payload from {source_desc}: payload is not UTF-8")
+            }
+        }
     })?;
     let unresolved = UnresolvedPackageGroup::parse("dependency.wit", &text).with_context(|| {
-        format!(
-            "failed to parse plain WIT source for package '{}@{}' from registry '{}'",
-            request.package, request.version, request.registry
-        )
+        match request.origin {
+            PlainWitSourceOrigin::Remote {
+                package,
+                version,
+                registry,
+                ..
+            } => {
+                format!(
+                    "failed to parse plain WIT source for package '{}@{}' from registry '{}'",
+                    package, version, registry
+                )
+            }
+            PlainWitSourceOrigin::Http { source_desc } => {
+                format!("failed to parse plain WIT source from {source_desc}")
+            }
+        }
     })?;
     let actual_package = format!(
         "{}:{}",
@@ -1565,11 +1599,17 @@ fn materialize_plain_wit_text(
             .iter()
             .any(|nested| !nested.foreign_deps.is_empty());
     if has_foreign_deps {
+        let detail = match request.origin {
+            PlainWitSourceOrigin::Remote {
+                protocol,
+                package,
+                version,
+                ..
+            } => format!("{} source '{}@{}'", protocol.scheme(), package, version),
+            PlainWitSourceOrigin::Http { source_desc } => source_desc.to_string(),
+        };
         return Err(anyhow!(
-            "{} source '{}@{}' contains foreign imports in plain .wit form; publish/use a WIT package so `imago deps sync` can resolve transitive dependencies",
-            scheme,
-            request.package,
-            request.version
+            "{detail} contains foreign imports in plain .wit form; publish/use a WIT package so `imago deps sync` can resolve transitive dependencies"
         ));
     }
     fs::write(destination_dir.join("dependency.wit"), text).with_context(|| {
@@ -1578,7 +1618,16 @@ fn materialize_plain_wit_text(
             destination_dir.display()
         )
     })?;
-    Ok(())
+    Ok(MaterializedWitSource {
+        top_package_name: Some(actual_package),
+        top_package_version: unresolved
+            .main
+            .name
+            .version
+            .as_ref()
+            .map(ToString::to_string),
+        ..MaterializedWitSource::default()
+    })
 }
 
 fn materialize_wit_package_resolve(
@@ -1898,7 +1947,14 @@ fn collect_component_world_foreign_packages(
     source_desc: &str,
 ) -> anyhow::Result<Vec<MaterializedComponentWorldForeignPackage>> {
     let world_package = component_world_package_id(resolve, world, source_desc)?;
-    let world_text = render_component_world_only_package(resolve, world, world_package)?;
+    let reachable_local_interfaces =
+        selected_world_local_interface_ids(resolve, world, world_package);
+    let world_text = render_component_world_only_package(
+        resolve,
+        world,
+        world_package,
+        &reachable_local_interfaces,
+    )?;
     let unresolved = UnresolvedPackageGroup::parse("component-world.wit", &world_text)
         .with_context(|| {
             format!("failed to parse component world package metadata from {source_desc}")
@@ -1971,16 +2027,377 @@ fn collect_component_world_foreign_packages(
         .collect())
 }
 
+fn selected_world_local_interface_ids(
+    resolve: &Resolve,
+    world: WorldId,
+    world_package: wit_parser::PackageId,
+) -> BTreeSet<InterfaceId> {
+    let mut reachable = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    let mut seen_type_ids = BTreeSet::new();
+    collect_local_world_interfaces_recursive(
+        resolve,
+        world,
+        world_package,
+        &mut reachable,
+        &mut queue,
+        &mut seen_type_ids,
+        &mut BTreeSet::new(),
+    );
+    while let Some(interface_id) = queue.pop_front() {
+        collect_reachable_local_interfaces_from_interface(
+            resolve,
+            interface_id,
+            world_package,
+            &mut reachable,
+            &mut queue,
+            &mut seen_type_ids,
+        );
+    }
+    reachable
+}
+
+fn collect_local_world_interfaces_recursive(
+    resolve: &Resolve,
+    world: WorldId,
+    world_package: wit_parser::PackageId,
+    reachable: &mut BTreeSet<InterfaceId>,
+    queue: &mut VecDeque<InterfaceId>,
+    seen_type_ids: &mut BTreeSet<TypeId>,
+    seen_worlds: &mut BTreeSet<WorldId>,
+) {
+    if !seen_worlds.insert(world) {
+        return;
+    }
+    for (_, world_item) in resolve.worlds[world]
+        .imports
+        .iter()
+        .chain(resolve.worlds[world].exports.iter())
+    {
+        match world_item {
+            WorldItem::Interface { id, .. } => {
+                let interface = &resolve.interfaces[*id];
+                if interface.package != Some(world_package) {
+                    continue;
+                }
+                if reachable.insert(*id) {
+                    queue.push_back(*id);
+                }
+            }
+            WorldItem::Function(function) => {
+                for param in &function.params {
+                    collect_reachable_local_interfaces_from_type(
+                        resolve,
+                        &param.ty,
+                        world_package,
+                        reachable,
+                        queue,
+                        seen_type_ids,
+                    );
+                }
+                if let Some(result) = &function.result {
+                    collect_reachable_local_interfaces_from_type(
+                        resolve,
+                        result,
+                        world_package,
+                        reachable,
+                        queue,
+                        seen_type_ids,
+                    );
+                }
+                if let Some(resource_id) = function.kind.resource() {
+                    collect_reachable_local_interfaces_from_type_id(
+                        resolve,
+                        resource_id,
+                        world_package,
+                        reachable,
+                        queue,
+                        seen_type_ids,
+                    );
+                }
+            }
+            WorldItem::Type { id, .. } => {
+                collect_reachable_local_interfaces_from_type_id(
+                    resolve,
+                    *id,
+                    world_package,
+                    reachable,
+                    queue,
+                    seen_type_ids,
+                );
+            }
+        }
+    }
+    for include in &resolve.worlds[world].includes {
+        collect_local_world_interfaces_recursive(
+            resolve,
+            include.id,
+            world_package,
+            reachable,
+            queue,
+            seen_type_ids,
+            seen_worlds,
+        );
+    }
+}
+
+fn collect_reachable_local_interfaces_from_interface(
+    resolve: &Resolve,
+    interface_id: InterfaceId,
+    world_package: wit_parser::PackageId,
+    reachable: &mut BTreeSet<InterfaceId>,
+    queue: &mut VecDeque<InterfaceId>,
+    seen_type_ids: &mut BTreeSet<TypeId>,
+) {
+    let interface = &resolve.interfaces[interface_id];
+    for function in interface.functions.values() {
+        for param in &function.params {
+            collect_reachable_local_interfaces_from_type(
+                resolve,
+                &param.ty,
+                world_package,
+                reachable,
+                queue,
+                seen_type_ids,
+            );
+        }
+        if let Some(result) = &function.result {
+            collect_reachable_local_interfaces_from_type(
+                resolve,
+                result,
+                world_package,
+                reachable,
+                queue,
+                seen_type_ids,
+            );
+        }
+        if let Some(resource_id) = function.kind.resource() {
+            collect_reachable_local_interfaces_from_type_id(
+                resolve,
+                resource_id,
+                world_package,
+                reachable,
+                queue,
+                seen_type_ids,
+            );
+        }
+    }
+    for type_id in interface.types.values() {
+        collect_reachable_local_interfaces_from_type_id(
+            resolve,
+            *type_id,
+            world_package,
+            reachable,
+            queue,
+            seen_type_ids,
+        );
+    }
+}
+
+fn collect_reachable_local_interfaces_from_type(
+    resolve: &Resolve,
+    ty: &Type,
+    world_package: wit_parser::PackageId,
+    reachable: &mut BTreeSet<InterfaceId>,
+    queue: &mut VecDeque<InterfaceId>,
+    seen_type_ids: &mut BTreeSet<TypeId>,
+) {
+    if let Type::Id(type_id) = ty {
+        collect_reachable_local_interfaces_from_type_id(
+            resolve,
+            *type_id,
+            world_package,
+            reachable,
+            queue,
+            seen_type_ids,
+        );
+    }
+}
+
+fn collect_reachable_local_interfaces_from_type_id(
+    resolve: &Resolve,
+    type_id: TypeId,
+    world_package: wit_parser::PackageId,
+    reachable: &mut BTreeSet<InterfaceId>,
+    queue: &mut VecDeque<InterfaceId>,
+    seen_type_ids: &mut BTreeSet<TypeId>,
+) {
+    if !seen_type_ids.insert(type_id) {
+        return;
+    }
+    let typedef = &resolve.types[type_id];
+    if let TypeOwner::Interface(owner_interface_id) = typedef.owner
+        && resolve.interfaces[owner_interface_id].package == Some(world_package)
+        && reachable.insert(owner_interface_id)
+    {
+        queue.push_back(owner_interface_id);
+    }
+
+    match &typedef.kind {
+        TypeDefKind::Record(record) => {
+            for field in &record.fields {
+                collect_reachable_local_interfaces_from_type(
+                    resolve,
+                    &field.ty,
+                    world_package,
+                    reachable,
+                    queue,
+                    seen_type_ids,
+                );
+            }
+        }
+        TypeDefKind::Tuple(tuple) => {
+            for item in &tuple.types {
+                collect_reachable_local_interfaces_from_type(
+                    resolve,
+                    item,
+                    world_package,
+                    reachable,
+                    queue,
+                    seen_type_ids,
+                );
+            }
+        }
+        TypeDefKind::Variant(variant) => {
+            for case in &variant.cases {
+                if let Some(case_ty) = &case.ty {
+                    collect_reachable_local_interfaces_from_type(
+                        resolve,
+                        case_ty,
+                        world_package,
+                        reachable,
+                        queue,
+                        seen_type_ids,
+                    );
+                }
+            }
+        }
+        TypeDefKind::Option(inner) => {
+            collect_reachable_local_interfaces_from_type(
+                resolve,
+                inner,
+                world_package,
+                reachable,
+                queue,
+                seen_type_ids,
+            );
+        }
+        TypeDefKind::Result(result) => {
+            if let Some(ok) = &result.ok {
+                collect_reachable_local_interfaces_from_type(
+                    resolve,
+                    ok,
+                    world_package,
+                    reachable,
+                    queue,
+                    seen_type_ids,
+                );
+            }
+            if let Some(err) = &result.err {
+                collect_reachable_local_interfaces_from_type(
+                    resolve,
+                    err,
+                    world_package,
+                    reachable,
+                    queue,
+                    seen_type_ids,
+                );
+            }
+        }
+        TypeDefKind::List(inner) => {
+            collect_reachable_local_interfaces_from_type(
+                resolve,
+                inner,
+                world_package,
+                reachable,
+                queue,
+                seen_type_ids,
+            );
+        }
+        TypeDefKind::Map(key, value) => {
+            collect_reachable_local_interfaces_from_type(
+                resolve,
+                key,
+                world_package,
+                reachable,
+                queue,
+                seen_type_ids,
+            );
+            collect_reachable_local_interfaces_from_type(
+                resolve,
+                value,
+                world_package,
+                reachable,
+                queue,
+                seen_type_ids,
+            );
+        }
+        TypeDefKind::FixedLengthList(inner, _) => {
+            collect_reachable_local_interfaces_from_type(
+                resolve,
+                inner,
+                world_package,
+                reachable,
+                queue,
+                seen_type_ids,
+            );
+        }
+        TypeDefKind::Future(inner) | TypeDefKind::Stream(inner) => {
+            if let Some(inner) = inner {
+                collect_reachable_local_interfaces_from_type(
+                    resolve,
+                    inner,
+                    world_package,
+                    reachable,
+                    queue,
+                    seen_type_ids,
+                );
+            }
+        }
+        TypeDefKind::Type(alias) => {
+            collect_reachable_local_interfaces_from_type(
+                resolve,
+                alias,
+                world_package,
+                reachable,
+                queue,
+                seen_type_ids,
+            );
+        }
+        TypeDefKind::Handle(handle) => {
+            let type_id = match handle {
+                wit_parser::Handle::Own(id) | wit_parser::Handle::Borrow(id) => *id,
+            };
+            collect_reachable_local_interfaces_from_type_id(
+                resolve,
+                type_id,
+                world_package,
+                reachable,
+                queue,
+                seen_type_ids,
+            );
+        }
+        TypeDefKind::Flags(_)
+        | TypeDefKind::Enum(_)
+        | TypeDefKind::Resource
+        | TypeDefKind::Unknown => {}
+    }
+}
+
 fn render_component_world_only_package(
     resolve: &wit_parser::Resolve,
     world: wit_parser::WorldId,
     world_package: wit_parser::PackageId,
+    reachable_local_interfaces: &BTreeSet<InterfaceId>,
 ) -> anyhow::Result<String> {
     let mut world_only_resolve = resolve.clone();
     let world_name = world_only_resolve.worlds[world].name.clone();
     let package = &mut world_only_resolve.packages[world_package];
     package.worlds.clear();
     package.worlds.insert(world_name, world);
+    package
+        .interfaces
+        .retain(|_, interface_id| reachable_local_interfaces.contains(interface_id));
     render_wit_package(&world_only_resolve, world_package)
 }
 
@@ -2947,6 +3364,86 @@ interface api {
     }
 
     #[test]
+    fn materialize_plain_http_wit_rejects_foreign_imports_with_http_origin_message() {
+        let root = new_temp_dir("materialize-plain-http-wit-foreign-imports");
+        let destination = root.join("dest/wit/deps/http-source");
+        fs::create_dir_all(&destination).expect("destination dir should be created");
+        let source_desc = "http source 'https://example.invalid/dependency.wit'";
+
+        let err = super::materialize_plain_wit_text(
+            &destination,
+            br#"
+package acme:example@0.1.0;
+
+world host {
+    import chikoski:name/name-provider@0.1.0;
+}
+"#,
+            super::MaterializePlainWitTextRequest {
+                origin: super::PlainWitSourceOrigin::Http { source_desc },
+                expected_package: Some("acme:example"),
+                expected_version: Some("0.1.0"),
+                source_desc,
+            },
+        )
+        .expect_err("http plain wit with foreign imports must fail");
+
+        let message = err.to_string();
+        assert!(
+            message.contains(source_desc),
+            "http origin should be preserved in error message: {message}"
+        );
+        assert!(
+            message.contains("contains foreign imports in plain .wit form"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            !message.contains("warg source"),
+            "http fallback must not report warg placeholder origin: {message}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn materialize_plain_http_wit_populates_top_package_metadata() {
+        let root = new_temp_dir("materialize-plain-http-wit-metadata");
+        let destination = root.join("dest/wit/deps/http-source");
+        fs::create_dir_all(&destination).expect("destination dir should be created");
+        let source_desc = "http source 'https://example.invalid/dependency.wit'";
+
+        let materialized = super::materialize_plain_wit_text(
+            &destination,
+            br#"
+package acme:example@0.1.0;
+
+interface api {
+    ping: func();
+}
+"#,
+            super::MaterializePlainWitTextRequest {
+                origin: super::PlainWitSourceOrigin::Http { source_desc },
+                expected_package: Some("acme:example"),
+                expected_version: Some("0.1.0"),
+                source_desc,
+            },
+        )
+        .expect("http plain wit materialization should succeed");
+
+        assert_eq!(
+            materialized.top_package_name.as_deref(),
+            Some("acme:example")
+        );
+        assert_eq!(materialized.top_package_version.as_deref(), Some("0.1.0"));
+        assert!(
+            destination.join("dependency.wit").is_file(),
+            "plain wit fallback should write dependency.wit"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn select_top_package_for_component_prefers_expected_package_when_present() {
         let root = new_temp_dir("select-top-package-prefers-expected");
         let source = root.join("source");
@@ -3162,6 +3659,184 @@ interface unused-api {
                 .iter()
                 .all(|package| package.name != "chikoski:unused"),
             "packages referenced only by non-selected worlds must not be collected"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn collect_component_world_foreign_packages_ignores_unreachable_local_interface_foreign_deps() {
+        let root = new_temp_dir("component-world-foreign-unreachable-local-interface");
+        let source = root.join("source");
+        write(
+            &source.join("package.wit"),
+            br#"
+package root:component@0.1.0;
+
+interface active-api {
+    ping: func();
+}
+
+interface hidden-api {
+    use chikoski:unused/types@0.1.0.{token};
+    consume: func(value: token);
+}
+
+world component {
+    import active-api;
+}
+
+world diagnostics {
+    import hidden-api;
+}
+"#,
+        );
+        write(
+            &source.join("deps/chikoski-unused/package.wit"),
+            br#"
+package chikoski:unused@0.1.0;
+
+interface types {
+    resource token {}
+}
+"#,
+        );
+
+        let mut resolve = wit_parser::Resolve::default();
+        let (top_package, _) = resolve
+            .push_path(&source)
+            .expect("WIT package dir should parse");
+        let world = resolve.packages[top_package]
+            .worlds
+            .get("component")
+            .copied()
+            .expect("component world should exist");
+
+        let foreign_packages =
+            super::collect_component_world_foreign_packages(&resolve, world, "test source")
+                .expect("foreign package collection should succeed");
+        assert!(
+            foreign_packages.is_empty(),
+            "selected world must not collect foreign deps reachable only from non-selected local interfaces: {foreign_packages:?}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn collect_component_world_foreign_packages_keeps_transitively_referenced_local_interfaces() {
+        let root = new_temp_dir("component-world-foreign-transitive-local-interface");
+        let source = root.join("source");
+        write(
+            &source.join("package.wit"),
+            br#"
+package root:component@0.1.0;
+
+interface helper-types {
+    use chikoski:external/types@0.1.0.{token};
+    type local-token = token;
+}
+
+interface active-api {
+    use helper-types.{local-token};
+    consume: func(value: local-token);
+}
+
+world component {
+    import active-api;
+}
+"#,
+        );
+        write(
+            &source.join("deps/chikoski-external/package.wit"),
+            br#"
+package chikoski:external@0.1.0;
+
+interface types {
+    resource token {}
+}
+"#,
+        );
+
+        let mut resolve = wit_parser::Resolve::default();
+        let (top_package, _) = resolve
+            .push_path(&source)
+            .expect("WIT package dir should parse");
+        let world = resolve.packages[top_package]
+            .worlds
+            .get("component")
+            .copied()
+            .expect("component world should exist");
+
+        let foreign_packages =
+            super::collect_component_world_foreign_packages(&resolve, world, "test source")
+                .expect("foreign package collection should succeed");
+        let external = foreign_packages
+            .iter()
+            .find(|package| package.name == "chikoski:external")
+            .expect("chikoski:external should be collected via transitive local interface");
+        assert_eq!(external.version.as_deref(), Some("0.1.0"));
+        assert!(
+            external.interfaces.contains(&"types".to_string()),
+            "expected external interface name to be collected: {external:?}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn collect_component_world_foreign_packages_keeps_local_interfaces_reachable_from_world_function_types()
+     {
+        let root = new_temp_dir("component-world-foreign-world-function-type");
+        let source = root.join("source");
+        write(
+            &source.join("package.wit"),
+            br#"
+package root:component@0.1.0;
+
+interface helper-types {
+    use chikoski:external/types@0.1.0.{token};
+    type local-token = token;
+}
+
+world component {
+    use helper-types.{local-token};
+    import process: func(value: local-token);
+}
+"#,
+        );
+        write(
+            &source.join("deps/chikoski-external/package.wit"),
+            br#"
+package chikoski:external@0.1.0;
+
+interface types {
+    resource token {}
+}
+"#,
+        );
+
+        let mut resolve = wit_parser::Resolve::default();
+        let (top_package, _) = resolve
+            .push_path(&source)
+            .expect("WIT package dir should parse");
+        let world = resolve.packages[top_package]
+            .worlds
+            .get("component")
+            .copied()
+            .expect("component world should exist");
+
+        let foreign_packages =
+            super::collect_component_world_foreign_packages(&resolve, world, "test source")
+                .expect("foreign package collection should succeed");
+        let external = foreign_packages
+            .iter()
+            .find(|package| package.name == "chikoski:external")
+            .expect("chikoski:external should be collected via world function type reference");
+        assert_eq!(external.version.as_deref(), Some("0.1.0"));
+        assert!(
+            external.interfaces.contains(&"types".to_string()),
+            "expected external interface name to be collected: {external:?}"
         );
 
         let _ = fs::remove_dir_all(root);

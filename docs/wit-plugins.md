@@ -54,9 +54,19 @@ Rules:
 - Auto-fetch is only for `wasi:*`; these packages are always resolved from `wasi.dev` and materialized into `wit/deps`.
 - Non-`wasi` refs are never auto-fetched; they must already exist in declared dependencies with matching `name+version`.
 - Version conflicts for the same package fail closed.
-- `imago.lock` is the source of truth for resolved digests and transitive package records.
-- `imago.lock.wit_packages[*].versions[*].via` may be empty (`[]`) for auto-hydrated records.
-- `resolved_at` is removed from lock dependency/binding entries; older lockfiles with that field are rejected.
+- For `path = "http(s)://..."` sources that fall back to plain `.wit`, diagnostics keep the HTTP origin (`http source '...'`) and do not rewrite it to Warg placeholder metadata.
+- `imago.lock` has two sections: `[requested]` and `[resolved]`.
+- `[requested]` records normalized request identities and `fingerprint`.
+- `[resolved]` records resolved dependency/binding entries and transitive package graph (`packages` + `package_edges`).
+- `requested.dependencies[].id` is derived from full normalized request identity (`kind/version/source_kind/source/registry/sha256/component_source_kind/component_source/component_registry/component_sha256/declared_requires/capabilities`).
+- `resolved.packages[].package_ref` must match canonical `<name>@<version-or-*>#<registry-or-empty>`.
+- `resolved.package_edges[].reason` accepts only:
+  - `declared-requires`
+  - `wit-import`
+  - `component-world`
+  - `auto-wasi`
+  - `wit-dir-closure`
+- Build/deploy recompute `[requested].fingerprint` from `imago.toml` and require exact match.
 - Missing or mismatched cache/lock data requires running `imago deps sync`.
 
 ## Native Plugin WIT Publishing

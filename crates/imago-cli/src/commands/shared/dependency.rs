@@ -1,12 +1,15 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
-use imago_lockfile::{ComponentExpectation, DependencyExpectation};
+use imago_lockfile::{
+    ComponentExpectation, DependencyExpectation, LockCapabilityPolicy, LockDependencyKind,
+    LockSourceKind,
+};
 
 use crate::commands::{
     build::{self, ManifestDependencyKind},
@@ -79,18 +82,27 @@ pub(crate) fn resolve_manifest_dependencies_from_lock(
     }
 
     let lock = imago_lockfile::load_from_project_root(project_root)?;
-    let mut expectations = Vec::with_capacity(dependencies.len());
-    for dependency in dependencies {
-        expectations.push(DependencyExpectation {
-            name: dependency.name.clone(),
-            version: dependency.version.clone(),
-            wit_source: dependency.wit.source.clone(),
-            wit_registry: dependency.wit.registry.clone(),
-            component: expected_component_for_dependency(dependency)?,
-        });
-    }
+    let expectations = dependencies
+        .iter()
+        .map(dependency_expectation_for_project_dependency)
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let resolved_by_name =
         imago_lockfile::resolve_dependencies(project_root, &lock, &expectations)?;
+    let mut resolved_name_by_request_id = BTreeMap::new();
+    let mut project_dependency_id_by_resolved_name = BTreeMap::new();
+    for (project_dependency_id, entry) in &resolved_by_name {
+        resolved_name_by_request_id.insert(entry.request_id.clone(), entry.resolved_name.clone());
+        if let Some(existing_project_dependency_id) = project_dependency_id_by_resolved_name
+            .insert(entry.resolved_name.clone(), project_dependency_id.clone())
+        {
+            return Err(anyhow!(
+                "imago.lock resolves multiple project dependency ids ('{}', '{}') to package '{}'; run `imago deps sync`",
+                existing_project_dependency_id,
+                project_dependency_id,
+                entry.resolved_name
+            ));
+        }
+    }
 
     let mut manifest_dependencies = Vec::with_capacity(dependencies.len());
     for dependency in dependencies {
@@ -100,6 +112,21 @@ pub(crate) fn resolve_manifest_dependencies_from_lock(
                 dependency.name
             )
         })?;
+        let requires = entry
+            .requires_request_ids
+            .iter()
+            .map(|request_id| {
+                resolved_name_by_request_id.get(request_id).cloned().ok_or_else(|| {
+                    anyhow!(
+                        "dependency '{}' requires unresolved request_id '{}' in imago.lock; run `imago deps sync`",
+                        dependency.name,
+                        request_id
+                    )
+                })
+            })
+            .collect::<anyhow::Result<BTreeSet<_>>>()?
+            .into_iter()
+            .collect::<Vec<_>>();
 
         let component = match dependency.kind {
             ManifestDependencyKind::Native => None,
@@ -118,11 +145,11 @@ pub(crate) fn resolve_manifest_dependencies_from_lock(
         };
 
         manifest_dependencies.push(build::ManifestDependency {
-            name: entry.name.clone(),
+            name: entry.resolved_name.clone(),
             version: dependency.version.clone(),
             kind: dependency.kind,
             wit: dependency.wit.source.clone(),
-            requires: dependency.requires.clone(),
+            requires,
             component,
             capabilities: dependency.capabilities.clone(),
         });
@@ -139,6 +166,7 @@ pub(crate) fn expected_component_for_dependency(
         ManifestDependencyKind::Wasm => {
             if let Some(component) = dependency.component.as_ref() {
                 return Ok(Some(ComponentExpectation {
+                    source_kind: lock_source_kind(component.source_kind),
                     source: component.source.clone(),
                     registry: component.registry.clone(),
                     sha256: component.sha256.clone(),
@@ -157,6 +185,7 @@ pub(crate) fn expected_component_for_dependency(
                 )
             })?;
             Ok(Some(ComponentExpectation {
+                source_kind: lock_source_kind(dependency.wit.source_kind),
                 source,
                 registry,
                 sha256: None,
@@ -177,12 +206,31 @@ pub(crate) fn resolve_dependency_component_sources(
         return Ok(sources);
     }
 
+    let project_dependencies = build::load_project_dependencies_with_namespace_registries(
+        project_root,
+        &build::load_namespace_registries(project_root)?,
+    )?;
     let lock = imago_lockfile::load_from_project_root(project_root)?;
-    let lock_by_name = lock
-        .dependencies
-        .into_iter()
-        .map(|entry| (entry.name.clone(), entry))
-        .collect::<BTreeMap<_, _>>();
+    let expectations = project_dependencies
+        .iter()
+        .map(dependency_expectation_for_project_dependency)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let resolved_by_name =
+        imago_lockfile::resolve_dependencies(project_root, &lock, &expectations)?;
+    let mut project_dependency_id_by_resolved_name = BTreeMap::new();
+    for (project_dependency_id, resolved) in &resolved_by_name {
+        if let Some(existing_project_dependency_id) = project_dependency_id_by_resolved_name.insert(
+            resolved.resolved_name.clone(),
+            project_dependency_id.clone(),
+        ) {
+            return Err(anyhow!(
+                "imago.lock resolves multiple project dependency ids ('{}', '{}') to package '{}'; run `imago deps sync`",
+                existing_project_dependency_id,
+                project_dependency_id,
+                resolved.resolved_name
+            ));
+        }
+    }
 
     for dependency in dependencies {
         if dependency.kind != ManifestDependencyKind::Wasm {
@@ -195,7 +243,15 @@ pub(crate) fn resolve_dependency_component_sources(
                 dependency.name
             )
         })?;
-        let lock_entry = lock_by_name.get(&dependency.name).ok_or_else(|| {
+        let project_dependency_id = project_dependency_id_by_resolved_name
+            .get(&dependency.name)
+            .ok_or_else(|| {
+                anyhow!(
+                    "dependency '{}' is not resolved in imago.lock; run `imago deps sync`",
+                    dependency.name
+                )
+            })?;
+        let lock_entry = resolved_by_name.get(project_dependency_id).ok_or_else(|| {
             anyhow!(
                 "dependency '{}' is not resolved in imago.lock; run `imago deps sync`",
                 dependency.name
@@ -221,18 +277,61 @@ pub(crate) fn resolve_dependency_component_sources(
                 sha
             ));
         }
-        let cache_path =
-            dependency_cache::resolve_cached_component_path(project_root, &dependency.name, sha)
-                .with_context(|| {
-                    format!(
-                        "failed to resolve cached component bytes for dependency '{}'",
-                        dependency.name
-                    )
-                })?;
+        let cache_path = dependency_cache::resolve_cached_component_path(
+            project_root,
+            project_dependency_id,
+            sha,
+        )
+        .with_context(|| {
+            format!(
+                "failed to resolve cached component bytes for dependency '{}' (project dependency id '{}')",
+                dependency.name, project_dependency_id
+            )
+        })?;
         sources.insert(dependency.name.clone(), cache_path);
     }
 
     Ok(sources)
+}
+
+pub(crate) fn dependency_expectation_for_project_dependency(
+    dependency: &build::ProjectDependency,
+) -> anyhow::Result<DependencyExpectation> {
+    Ok(DependencyExpectation {
+        name: dependency.name.clone(),
+        kind: lock_dependency_kind(dependency.kind),
+        version: dependency.version.clone(),
+        source_kind: lock_source_kind(dependency.wit.source_kind),
+        source: dependency.wit.source.clone(),
+        registry: dependency.wit.registry.clone(),
+        sha256: dependency.wit.sha256.clone(),
+        requires: dependency.requires.clone(),
+        capabilities: lock_capability_policy(&dependency.capabilities),
+        component: expected_component_for_dependency(dependency)?,
+    })
+}
+
+fn lock_source_kind(kind: plugin_sources::SourceKind) -> LockSourceKind {
+    match kind {
+        plugin_sources::SourceKind::Wit => LockSourceKind::Wit,
+        plugin_sources::SourceKind::Oci => LockSourceKind::Oci,
+        plugin_sources::SourceKind::Path => LockSourceKind::Path,
+    }
+}
+
+fn lock_dependency_kind(kind: ManifestDependencyKind) -> LockDependencyKind {
+    match kind {
+        ManifestDependencyKind::Native => LockDependencyKind::Native,
+        ManifestDependencyKind::Wasm => LockDependencyKind::Wasm,
+    }
+}
+
+fn lock_capability_policy(policy: &build::ManifestCapabilityPolicy) -> LockCapabilityPolicy {
+    LockCapabilityPolicy {
+        privileged: policy.privileged,
+        deps: policy.deps.clone(),
+        wasi: policy.wasi.clone(),
+    }
 }
 
 pub(crate) async fn load_or_refresh_cache_entry(
