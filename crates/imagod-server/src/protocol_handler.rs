@@ -19,6 +19,8 @@ use imagod_control::{ArtifactStore, OperationManager, Orchestrator};
 use serde_json::Value;
 use web_transport_quinn::Session;
 
+#[cfg(feature = "bench-internals")]
+pub mod bench_internals;
 mod clock;
 mod codec;
 mod envelope_io;

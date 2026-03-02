@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use imago_protocol::{
     LogChunk, LogEnd, LogError, LogErrorCode, LogStreamKind, MessageType, ProtocolEnvelope, to_cbor,
 };
@@ -118,7 +119,7 @@ pub(crate) async fn run_logs_forwarder<S>(
                     &mut seq,
                     &terminal_name,
                     LogStreamKind::Composite,
-                    Vec::new(),
+                    &[],
                     true,
                     None,
                 )
@@ -143,6 +144,19 @@ where
     max_datagram_size: usize,
     chunk_size: usize,
     with_timestamp: bool,
+}
+
+#[derive(serde::Serialize)]
+struct BorrowedLogChunk<'a> {
+    request_id: Uuid,
+    seq: u64,
+    name: &'a str,
+    stream_kind: LogStreamKind,
+    #[serde(with = "serde_bytes")]
+    bytes: &'a [u8],
+    is_last: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timestamp_unix_ms: Option<u64>,
 }
 
 impl<'a, S> LogsDatagramSender<'a, S>
@@ -194,14 +208,14 @@ where
                 seq,
                 name,
                 stream_kind,
-                bytes[offset..end].to_vec(),
+                &bytes[offset..end],
                 false,
                 timestamp_unix_ms,
             )
             .await?;
-            *last_name = Some(name.to_string());
             offset = end;
         }
+        *last_name = Some(name.to_string());
 
         Ok(())
     }
@@ -211,7 +225,7 @@ where
         seq: &mut u64,
         name: &str,
         stream_kind: LogStreamKind,
-        bytes: Vec<u8>,
+        bytes: &[u8],
         is_last: bool,
         timestamp_unix_ms: Option<u64>,
     ) -> Result<(), ImagodError> {
@@ -220,10 +234,10 @@ where
         } else {
             None
         };
-        let chunk = LogChunk {
+        let chunk = BorrowedLogChunk {
             request_id: self.request_id,
             seq: *seq,
-            name: name.to_string(),
+            name,
             stream_kind,
             bytes,
             is_last,
@@ -444,10 +458,13 @@ where
             ),
         ));
     }
-    send_datagram_with_retry(session, bytes).await
+    send_datagram_with_retry(session, Bytes::from(bytes)).await
 }
 
-async fn send_datagram_with_retry<S>(session: &S, bytes: Vec<u8>) -> Result<(), ImagodError>
+pub(super) async fn send_datagram_with_retry<S>(
+    session: &S,
+    bytes: Bytes,
+) -> Result<(), ImagodError>
 where
     S: ProtocolSession,
 {
@@ -550,6 +567,7 @@ mod tests {
     };
 
     use async_trait::async_trait;
+    use bytes::Bytes;
     use imago_protocol::{ErrorCode, from_cbor};
     use imagod_control::{ServiceLogEvent, ServiceLogStream, ServiceLogSubscription};
     use tokio::sync::{Notify, broadcast};
@@ -561,6 +579,7 @@ mod tests {
         max_datagram_size: usize,
         send_outcomes: Mutex<VecDeque<Result<(), String>>>,
         sent_datagrams: Mutex<Vec<Vec<u8>>>,
+        sent_payload_ptrs: Mutex<Vec<usize>>,
         send_attempts: AtomicUsize,
         close_notify: Notify,
     }
@@ -571,6 +590,7 @@ mod tests {
                 max_datagram_size,
                 send_outcomes: Mutex::new(send_outcomes.into()),
                 sent_datagrams: Mutex::new(Vec::new()),
+                sent_payload_ptrs: Mutex::new(Vec::new()),
                 send_attempts: AtomicUsize::new(0),
                 close_notify: Notify::new(),
             }
@@ -585,6 +605,13 @@ mod tests {
 
         fn send_attempts(&self) -> usize {
             self.send_attempts.load(Ordering::SeqCst)
+        }
+
+        fn sent_payload_ptrs(&self) -> Vec<usize> {
+            self.sent_payload_ptrs
+                .lock()
+                .expect("sent_payload_ptrs lock should succeed")
+                .clone()
         }
     }
 
@@ -603,12 +630,16 @@ mod tests {
             self.max_datagram_size
         }
 
-        fn send_datagram(&self, payload: Vec<u8>) -> Result<(), ImagodError> {
+        fn send_datagram(&self, payload: Bytes) -> Result<(), ImagodError> {
             self.send_attempts.fetch_add(1, Ordering::SeqCst);
+            self.sent_payload_ptrs
+                .lock()
+                .expect("sent_payload_ptrs lock should succeed")
+                .push(payload.as_ptr() as usize);
             self.sent_datagrams
                 .lock()
                 .expect("sent_datagrams lock should succeed")
-                .push(payload);
+                .push(payload.to_vec());
 
             let outcome = self
                 .send_outcomes
@@ -654,7 +685,7 @@ mod tests {
         let session =
             FakeProtocolSession::new(1200, vec![Err("first failure".to_string()), Ok(())]);
 
-        send_datagram_with_retry(&session, vec![0x01, 0x02])
+        send_datagram_with_retry(&session, Bytes::from(vec![0x01, 0x02]))
             .await
             .expect("second attempt should succeed");
         assert_eq!(session.send_attempts(), 2);
@@ -673,13 +704,27 @@ mod tests {
             ],
         );
 
-        let err = send_datagram_with_retry(&session, vec![0x0a])
+        let err = send_datagram_with_retry(&session, Bytes::from(vec![0x0a]))
             .await
             .expect_err("all attempts should fail");
         assert_eq!(session.send_attempts(), 4);
         assert_eq!(err.code, ErrorCode::Internal);
         assert_eq!(err.stage, "logs.datagram");
         assert!(err.message.contains("e4"));
+    }
+
+    #[tokio::test]
+    async fn given_retry_send__when_send_datagram_with_retry__then_payload_uses_shared_backing_buffer()
+     {
+        let session =
+            FakeProtocolSession::new(1200, vec![Err("first failure".to_string()), Ok(())]);
+        send_datagram_with_retry(&session, Bytes::from(vec![0xaa; 32]))
+            .await
+            .expect("second attempt should succeed");
+
+        let ptrs = session.sent_payload_ptrs();
+        assert_eq!(ptrs.len(), 2);
+        assert_eq!(ptrs[0], ptrs[1]);
     }
 
     #[tokio::test]
@@ -746,6 +791,50 @@ mod tests {
         assert_eq!(end.message_type, MessageType::LogsEnd);
         assert_eq!(end.payload.request_id, request_id);
         assert!(end.payload.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn given_large_snapshot_bytes__when_run_logs_forwarder__then_all_bytes_are_chunked_and_forwarded()
+     {
+        let session = Arc::new(FakeProtocolSession::new(2048, Vec::new()));
+        let request_id = Uuid::new_v4();
+        let correlation_id = Uuid::new_v4();
+        let mut snapshot = Vec::with_capacity(96 * 1024);
+        for idx in 0..(96 * 1024) {
+            snapshot.push(if idx % 97 == 0 { b'\n' } else { b'a' });
+        }
+        let subscriptions = vec![sample_subscription("svc-large", &snapshot)];
+
+        run_logs_forwarder(
+            session.clone(),
+            request_id,
+            correlation_id,
+            subscriptions,
+            false,
+        )
+        .await;
+
+        let sent = session.sent_datagrams();
+        assert!(
+            sent.len() > 3,
+            "large payload should produce multiple chunks"
+        );
+
+        let mut forwarded = Vec::new();
+        for datagram in sent.iter().take(sent.len().saturating_sub(1)) {
+            let chunk =
+                from_cbor::<ProtocolEnvelope<LogChunk>>(datagram).expect("chunk should decode");
+            if !chunk.payload.is_last {
+                forwarded.extend_from_slice(&chunk.payload.bytes);
+            }
+        }
+
+        assert_eq!(forwarded, snapshot);
+        let end = from_cbor::<ProtocolEnvelope<LogEnd>>(
+            sent.last().expect("logs.end datagram should exist"),
+        )
+        .expect("logs.end decode");
+        assert_eq!(end.message_type, MessageType::LogsEnd);
     }
 
     #[tokio::test]

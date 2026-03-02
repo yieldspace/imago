@@ -15,13 +15,24 @@ use tokio::{
 #[derive(Debug)]
 pub(super) struct DefaultManagerControlHandler {
     remote_rpc: Mutex<super::remote_rpc::RemoteRpcManager>,
+    runner_index: Arc<RwLock<super::RunnerServiceIndex>>,
 }
 
 impl DefaultManagerControlHandler {
     pub(super) fn new(config_path: PathBuf) -> Self {
         Self {
             remote_rpc: Mutex::new(super::remote_rpc::RemoteRpcManager::new(config_path)),
+            runner_index: Arc::new(RwLock::new(BTreeMap::new())),
         }
+    }
+
+    pub(super) fn new_with_runner_index(
+        config_path: PathBuf,
+        runner_index: Arc<RwLock<super::RunnerServiceIndex>>,
+    ) -> Self {
+        let mut handler = Self::new(config_path);
+        handler.runner_index = runner_index;
+        handler
     }
 
     pub(super) async fn handle_control_request(
@@ -51,12 +62,52 @@ impl DefaultManagerControlHandler {
     }
 }
 
+async fn resolve_runner_service_name(
+    inner: &Arc<RwLock<BTreeMap<String, super::RunningService>>>,
+    runner_index: &Arc<RwLock<super::RunnerServiceIndex>>,
+    runner_id: &str,
+) -> Option<String> {
+    let indexed_service_name = {
+        let guard = runner_index.read().await;
+        guard.get(runner_id).cloned()
+    };
+    if let Some(indexed_service_name) = indexed_service_name {
+        let is_valid = {
+            let guard = inner.read().await;
+            guard
+                .get(&indexed_service_name)
+                .map(|service| service.runner_id == runner_id)
+                .unwrap_or(false)
+        };
+        if is_valid {
+            return Some(indexed_service_name);
+        }
+        runner_index.write().await.remove(runner_id);
+    }
+
+    let scanned = {
+        let guard = inner.read().await;
+        guard
+            .iter()
+            .find(|(_, service)| service.runner_id == runner_id)
+            .map(|(service_name, _)| service_name.clone())
+    };
+    if let Some(service_name) = scanned.as_ref() {
+        runner_index
+            .write()
+            .await
+            .insert(runner_id.to_string(), service_name.clone());
+    }
+    scanned
+}
+
 pub(super) async fn handle_control_request_impl(
     inner: &Arc<RwLock<BTreeMap<String, super::RunningService>>>,
     pending_ready: &Arc<Mutex<super::PendingReadyMap>>,
     handler: &DefaultManagerControlHandler,
     request: ControlRequest,
 ) -> ControlResponse {
+    let runner_index = &handler.runner_index;
     match request {
         ControlRequest::RegisterRunner {
             runner_id,
@@ -65,13 +116,22 @@ pub(super) async fn handle_control_request_impl(
             runner_endpoint,
             manager_auth_proof,
         } => {
-            let mut guard = inner.write().await;
-            let Some((actual_service_name, service)) = guard
-                .iter_mut()
-                .find(|(_, service)| service.runner_id == runner_id)
+            let Some(actual_service_name) =
+                resolve_runner_service_name(inner, runner_index, &runner_id).await
             else {
                 return control_error(ErrorCode::NotFound, "runner is not registered for startup");
             };
+            let mut guard = inner.write().await;
+            let Some(service) = guard.get_mut(&actual_service_name) else {
+                drop(guard);
+                runner_index.write().await.remove(&runner_id);
+                return control_error(ErrorCode::NotFound, "runner is not registered for startup");
+            };
+            if service.runner_id != runner_id {
+                drop(guard);
+                runner_index.write().await.remove(&runner_id);
+                return control_error(ErrorCode::NotFound, "runner is not registered for startup");
+            }
 
             if let Err(err) = validate_manager_auth(
                 &service.manager_auth_secret,
@@ -81,7 +141,7 @@ pub(super) async fn handle_control_request_impl(
                 return ControlResponse::Error(IpcErrorPayload::from_error(&err));
             }
 
-            if actual_service_name != &service_name || service.release_hash != release_hash {
+            if actual_service_name != service_name || service.release_hash != release_hash {
                 return control_error(ErrorCode::BadRequest, "register_runner metadata mismatch");
             }
 
@@ -95,14 +155,23 @@ pub(super) async fn handle_control_request_impl(
             runner_id,
             manager_auth_proof,
         } => {
+            let Some(service_name) =
+                resolve_runner_service_name(inner, runner_index, &runner_id).await
+            else {
+                return control_error(ErrorCode::NotFound, "runner is not registered");
+            };
             {
                 let mut guard = inner.write().await;
-                let Some((_, service)) = guard
-                    .iter_mut()
-                    .find(|(_, service)| service.runner_id == runner_id)
-                else {
+                let Some(service) = guard.get_mut(&service_name) else {
+                    drop(guard);
+                    runner_index.write().await.remove(&runner_id);
                     return control_error(ErrorCode::NotFound, "runner is not registered");
                 };
+                if service.runner_id != runner_id {
+                    drop(guard);
+                    runner_index.write().await.remove(&runner_id);
+                    return control_error(ErrorCode::NotFound, "runner is not registered");
+                }
 
                 if let Err(err) = validate_manager_auth(
                     &service.manager_auth_secret,
@@ -125,13 +194,22 @@ pub(super) async fn handle_control_request_impl(
             runner_id,
             manager_auth_proof,
         } => {
-            let mut guard = inner.write().await;
-            let Some((_, service)) = guard
-                .iter_mut()
-                .find(|(_, service)| service.runner_id == runner_id)
+            let Some(service_name) =
+                resolve_runner_service_name(inner, runner_index, &runner_id).await
             else {
                 return control_error(ErrorCode::NotFound, "runner is not registered");
             };
+            let mut guard = inner.write().await;
+            let Some(service) = guard.get_mut(&service_name) else {
+                drop(guard);
+                runner_index.write().await.remove(&runner_id);
+                return control_error(ErrorCode::NotFound, "runner is not registered");
+            };
+            if service.runner_id != runner_id {
+                drop(guard);
+                runner_index.write().await.remove(&runner_id);
+                return control_error(ErrorCode::NotFound, "runner is not registered");
+            }
 
             if let Err(err) = validate_manager_auth(
                 &service.manager_auth_secret,
@@ -150,14 +228,23 @@ pub(super) async fn handle_control_request_impl(
             target_service,
             wit,
         } => {
-            let guard = inner.read().await;
-
-            let Some((source_service_name, source_service)) = guard
-                .iter()
-                .find(|(_, service)| service.runner_id == runner_id)
+            let Some(source_service_name) =
+                resolve_runner_service_name(inner, runner_index, &runner_id).await
             else {
                 return control_error(ErrorCode::NotFound, "source runner is not registered");
             };
+            let guard = inner.read().await;
+
+            let Some(source_service) = guard.get(&source_service_name) else {
+                drop(guard);
+                runner_index.write().await.remove(&runner_id);
+                return control_error(ErrorCode::NotFound, "source runner is not registered");
+            };
+            if source_service.runner_id != runner_id {
+                drop(guard);
+                runner_index.write().await.remove(&runner_id);
+                return control_error(ErrorCode::NotFound, "source runner is not registered");
+            }
 
             if let Err(err) = validate_manager_auth(
                 &source_service.manager_auth_secret,
@@ -182,7 +269,7 @@ pub(super) async fn handle_control_request_impl(
             }
 
             let claims = imagod_ipc::InvocationTokenClaims {
-                source_service: source_service_name.clone(),
+                source_service: source_service_name,
                 target_service: target_service.clone(),
                 wit: wit.clone(),
                 exp: now_unix_secs() + super::INVOCATION_TOKEN_TTL_SECS,
@@ -203,13 +290,22 @@ pub(super) async fn handle_control_request_impl(
             manager_auth_proof,
             authority,
         } => {
-            let guard = inner.read().await;
-            let Some((_, source_service)) = guard
-                .iter()
-                .find(|(_, service)| service.runner_id == runner_id)
+            let Some(source_service_name) =
+                resolve_runner_service_name(inner, runner_index, &runner_id).await
             else {
                 return control_error(ErrorCode::NotFound, "source runner is not registered");
             };
+            let guard = inner.read().await;
+            let Some(source_service) = guard.get(&source_service_name) else {
+                drop(guard);
+                runner_index.write().await.remove(&runner_id);
+                return control_error(ErrorCode::NotFound, "source runner is not registered");
+            };
+            if source_service.runner_id != runner_id {
+                drop(guard);
+                runner_index.write().await.remove(&runner_id);
+                return control_error(ErrorCode::NotFound, "source runner is not registered");
+            }
 
             if let Err(err) = validate_manager_auth(
                 &source_service.manager_auth_secret,
@@ -247,13 +343,22 @@ pub(super) async fn handle_control_request_impl(
             function,
             args_cbor,
         } => {
-            let guard = inner.read().await;
-            let Some((_, source_service)) = guard
-                .iter()
-                .find(|(_, service)| service.runner_id == runner_id)
+            let Some(source_service_name) =
+                resolve_runner_service_name(inner, runner_index, &runner_id).await
             else {
                 return control_error(ErrorCode::NotFound, "source runner is not registered");
             };
+            let guard = inner.read().await;
+            let Some(source_service) = guard.get(&source_service_name) else {
+                drop(guard);
+                runner_index.write().await.remove(&runner_id);
+                return control_error(ErrorCode::NotFound, "source runner is not registered");
+            };
+            if source_service.runner_id != runner_id {
+                drop(guard);
+                runner_index.write().await.remove(&runner_id);
+                return control_error(ErrorCode::NotFound, "source runner is not registered");
+            }
 
             if let Err(err) = validate_manager_auth(
                 &source_service.manager_auth_secret,
@@ -303,13 +408,22 @@ pub(super) async fn handle_control_request_impl(
             manager_auth_proof,
             connection_id,
         } => {
-            let guard = inner.read().await;
-            let Some((_, source_service)) = guard
-                .iter()
-                .find(|(_, service)| service.runner_id == runner_id)
+            let Some(source_service_name) =
+                resolve_runner_service_name(inner, runner_index, &runner_id).await
             else {
                 return control_error(ErrorCode::NotFound, "source runner is not registered");
             };
+            let guard = inner.read().await;
+            let Some(source_service) = guard.get(&source_service_name) else {
+                drop(guard);
+                runner_index.write().await.remove(&runner_id);
+                return control_error(ErrorCode::NotFound, "source runner is not registered");
+            };
+            if source_service.runner_id != runner_id {
+                drop(guard);
+                runner_index.write().await.remove(&runner_id);
+                return control_error(ErrorCode::NotFound, "source runner is not registered");
+            }
 
             if let Err(err) = validate_manager_auth(
                 &source_service.manager_auth_secret,
@@ -806,6 +920,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn given_register_runner_stale_index__when_handle_control_request_impl__then_not_found_without_deadlock()
+     {
+        let inner: Arc<RwLock<BTreeMap<String, super::super::RunningService>>> =
+            Arc::new(RwLock::new(BTreeMap::new()));
+        let pending_ready: Arc<Mutex<super::super::PendingReadyMap>> =
+            Arc::new(Mutex::new(BTreeMap::new()));
+        let runner_index: Arc<RwLock<super::super::RunnerServiceIndex>> =
+            Arc::new(RwLock::new(BTreeMap::new()));
+        let runner_id = "runner-register-stale";
+        runner_index
+            .write()
+            .await
+            .insert(runner_id.to_string(), "svc-stale".to_string());
+
+        let handler = DefaultManagerControlHandler::new_with_runner_index(
+            PathBuf::from("/tmp/imagod-control-test.toml"),
+            runner_index.clone(),
+        );
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            handle_control_request_impl(
+                &inner,
+                &pending_ready,
+                &handler,
+                ControlRequest::RegisterRunner {
+                    runner_id: runner_id.to_string(),
+                    service_name: "svc-stale".to_string(),
+                    release_hash: "release-test".to_string(),
+                    runner_endpoint: PathBuf::from(format!("/tmp/{runner_id}.sock")),
+                    manager_auth_proof: "proof".to_string(),
+                },
+            ),
+        )
+        .await
+        .expect("register_runner stale index path should return without deadlock");
+
+        match response {
+            ControlResponse::Error(err) => assert_eq!(err.code, ErrorCode::NotFound),
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert!(
+            !runner_index.read().await.contains_key(runner_id),
+            "stale runner index entry should be removed on register_runner NotFound"
+        );
+    }
+
+    #[tokio::test]
     async fn given_runner_ready_with_pending_waiter__when_handle_control_request_impl__then_ack_and_notify_are_returned()
      {
         let inner: Arc<RwLock<BTreeMap<String, super::super::RunningService>>> =
@@ -859,6 +1020,122 @@ mod tests {
         assert!(service.is_ready, "service should be marked ready");
         drop(guard);
 
+        stop_running_service_best_effort(&inner, service_name).await;
+    }
+
+    #[tokio::test]
+    async fn heartbeat_uses_runner_index_hit_without_linear_scan() {
+        let inner: Arc<RwLock<BTreeMap<String, super::super::RunningService>>> =
+            Arc::new(RwLock::new(BTreeMap::new()));
+        let pending_ready: Arc<Mutex<super::super::PendingReadyMap>> =
+            Arc::new(Mutex::new(BTreeMap::new()));
+        let runner_index: Arc<RwLock<super::super::RunnerServiceIndex>> =
+            Arc::new(RwLock::new(BTreeMap::new()));
+        let service_name = "svc-index-hit";
+        let runner_id = "runner-index-hit";
+        let manager_auth_secret = random_secret_hex();
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("runner child should spawn");
+        let mut service =
+            new_running_service(child, runner_id, manager_auth_secret.clone(), Vec::new());
+        service.last_heartbeat_at = "0".to_string();
+        {
+            let mut guard = inner.write().await;
+            guard.insert(service_name.to_string(), service);
+        }
+        runner_index
+            .write()
+            .await
+            .insert(runner_id.to_string(), service_name.to_string());
+
+        let proof = compute_manager_auth_proof(&manager_auth_secret, runner_id)
+            .expect("proof generation should succeed");
+        let handler = DefaultManagerControlHandler::new_with_runner_index(
+            PathBuf::from("/tmp/imagod-control-test.toml"),
+            runner_index.clone(),
+        );
+        let response = handle_control_request_impl(
+            &inner,
+            &pending_ready,
+            &handler,
+            ControlRequest::Heartbeat {
+                runner_id: runner_id.to_string(),
+                manager_auth_proof: proof,
+            },
+        )
+        .await;
+
+        assert!(matches!(response, ControlResponse::Ack));
+        let guard = inner.read().await;
+        let service = guard
+            .get(service_name)
+            .expect("service should remain registered");
+        assert_ne!(service.last_heartbeat_at, "0");
+        drop(guard);
+
+        assert_eq!(
+            runner_index.read().await.get(runner_id).cloned(),
+            Some(service_name.to_string())
+        );
+        stop_running_service_best_effort(&inner, service_name).await;
+    }
+
+    #[tokio::test]
+    async fn heartbeat_recovers_from_stale_runner_index_entry() {
+        let inner: Arc<RwLock<BTreeMap<String, super::super::RunningService>>> =
+            Arc::new(RwLock::new(BTreeMap::new()));
+        let pending_ready: Arc<Mutex<super::super::PendingReadyMap>> =
+            Arc::new(Mutex::new(BTreeMap::new()));
+        let runner_index: Arc<RwLock<super::super::RunnerServiceIndex>> =
+            Arc::new(RwLock::new(BTreeMap::new()));
+        let service_name = "svc-index-recovered";
+        let runner_id = "runner-index-recovered";
+        let manager_auth_secret = random_secret_hex();
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("runner child should spawn");
+        let service =
+            new_running_service(child, runner_id, manager_auth_secret.clone(), Vec::new());
+        {
+            let mut guard = inner.write().await;
+            guard.insert(service_name.to_string(), service);
+        }
+        runner_index
+            .write()
+            .await
+            .insert(runner_id.to_string(), "svc-stale".to_string());
+
+        let proof = compute_manager_auth_proof(&manager_auth_secret, runner_id)
+            .expect("proof generation should succeed");
+        let handler = DefaultManagerControlHandler::new_with_runner_index(
+            PathBuf::from("/tmp/imagod-control-test.toml"),
+            runner_index.clone(),
+        );
+        let response = handle_control_request_impl(
+            &inner,
+            &pending_ready,
+            &handler,
+            ControlRequest::Heartbeat {
+                runner_id: runner_id.to_string(),
+                manager_auth_proof: proof,
+            },
+        )
+        .await;
+
+        assert!(matches!(response, ControlResponse::Ack));
+        assert_eq!(
+            runner_index.read().await.get(runner_id).cloned(),
+            Some(service_name.to_string())
+        );
         stop_running_service_best_effort(&inner, service_name).await;
     }
 }
