@@ -33,6 +33,7 @@ See [QUICKSTART.md](QUICKSTART.md) for step-by-step setup and local example exec
 Useful options:
 
 - `--tag <semver|imagod-vX.Y.Z>`
+- `--libc <auto|gnu|musl>`
 - `--repo <owner/repo>`
 - `--install-dir <path>`
 - `--no-service`

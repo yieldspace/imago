@@ -8,6 +8,7 @@ DEFAULT_CONFIG_PATH="/etc/imago/imagod.toml"
 
 REPO="${DEFAULT_REPO}"
 TAG_INPUT=""
+LIBC_MODE="auto"
 INSTALL_DIR=""
 NO_SERVICE=0
 DRY_RUN=0
@@ -31,6 +32,7 @@ Usage: install_imagod.sh [options]
 
 Options:
   --tag <semver|imagod-vX.Y.Z>      Install a specific release tag/version.
+  --libc <auto|gnu|musl>            libc selection (default: auto).
   --repo <owner/repo>               GitHub repository (default: yieldspace/imago).
   --install-dir <path>              Binary install directory.
   --no-service                      Skip service setup.
@@ -45,6 +47,7 @@ Environment:
 Notes:
   - Linux only.
   - Service setup priority: systemd -> init.d -> binary-only.
+  - Use --libc to override auto detection if your environment is atypical.
 EOF
 }
 
@@ -78,28 +81,58 @@ build_curl_headers() {
   fi
 }
 
+normalize_libc_mode() {
+  local input="$1"
+  case "${input}" in
+    auto | gnu | musl)
+      printf '%s\n' "${input}"
+      ;;
+    *)
+      die "invalid --libc value: ${input} (expected: auto|gnu|musl)"
+      ;;
+  esac
+}
+
 resolve_latest_imagod_tag() {
   build_curl_headers
-  local api_url="https://api.github.com/repos/${REPO}/releases?per_page=100"
-  local body
-  if ! body="$(curl -fsSL "${CURL_HEADERS[@]}" "${api_url}")"; then
-    if [[ -z "${GH_TOKEN:-}" ]]; then
-      die "failed to fetch releases from ${api_url} (repository may be private; set GH_TOKEN)"
-    fi
-    die "failed to fetch releases from ${api_url}"
-  fi
+  local per_page=100
+  local max_pages=20
+  local page=1
 
-  local tag
-  tag="$(
-    printf '%s' "${body}" \
-      | tr -d '\n' \
-      | grep -o '"tag_name":"imagod-v[^"]*"' \
-      | head -n1 \
-      | sed -E 's/"tag_name":"([^"]+)"/\1/' \
-      || true
-  )"
-  [[ -n "${tag}" ]] || die "no imagod-v* release tag found in ${REPO}"
-  printf '%s\n' "${tag}"
+  while [[ "${page}" -le "${max_pages}" ]]; do
+    local api_url="https://api.github.com/repos/${REPO}/releases?per_page=${per_page}&page=${page}"
+    local body
+    if ! body="$(curl -fsSL "${CURL_HEADERS[@]}" "${api_url}")"; then
+      if [[ -z "${GH_TOKEN:-}" ]]; then
+        die "failed to fetch releases from ${api_url} (repository may be private; set GH_TOKEN)"
+      fi
+      die "failed to fetch releases from ${api_url}"
+    fi
+
+    local tag
+    tag="$(
+      printf '%s' "${body}" \
+        | tr -d '\n' \
+        | grep -o '"tag_name":"imagod-v[^"]*"' \
+        | head -n1 \
+        | sed -E 's/"tag_name":"([^"]+)"/\1/' \
+        || true
+    )"
+    if [[ -n "${tag}" ]]; then
+      printf '%s\n' "${tag}"
+      return 0
+    fi
+
+    local release_count
+    release_count="$(printf '%s' "${body}" | grep -o '"tag_name":' | wc -l | tr -d ' ')"
+    if [[ "${release_count}" -lt "${per_page}" ]]; then
+      break
+    fi
+
+    page=$((page + 1))
+  done
+
+  die "no imagod-v* release tag found in ${REPO}; specify --tag explicitly if needed"
 }
 
 resolve_release_tag() {
@@ -135,6 +168,12 @@ detect_arch() {
 }
 
 detect_libc() {
+  local arch="$1"
+  if [[ "${LIBC_MODE}" != "auto" ]]; then
+    printf '%s\n' "${LIBC_MODE}"
+    return 0
+  fi
+
   if [[ -n "${IMAGOD_TEST_LIBC:-}" ]]; then
     case "${IMAGOD_TEST_LIBC}" in
       gnu | musl)
@@ -165,8 +204,31 @@ detect_libc() {
     return 0
   fi
 
-  warn "failed to detect libc; defaulting to gnu"
-  printf 'gnu\n'
+  if compgen -G "/lib/ld-musl-*.so.*" >/dev/null || compgen -G "/lib64/ld-musl-*.so.*" >/dev/null || compgen -G "/usr/lib/ld-musl-*.so.*" >/dev/null; then
+    warn "libc auto-detection inferred 'musl' from dynamic loader files; rerun with --libc gnu|musl to override"
+    printf 'musl\n'
+    return 0
+  fi
+
+  if compgen -G "/lib*/ld-linux*.so*" >/dev/null || compgen -G "/usr/lib*/ld-linux*.so*" >/dev/null; then
+    warn "libc auto-detection inferred 'gnu' from dynamic loader files; rerun with --libc gnu|musl to override"
+    printf 'gnu\n'
+    return 0
+  fi
+
+  case "${arch}" in
+    aarch64 | armv7 | riscv64gc)
+      warn "libc auto-detection is inconclusive; falling back to 'musl' for arch=${arch}. rerun with --libc gnu|musl if needed"
+      printf 'musl\n'
+      ;;
+    x86_64)
+      warn "libc auto-detection is inconclusive; falling back to 'gnu' for arch=${arch}. rerun with --libc gnu|musl if needed"
+      printf 'gnu\n'
+      ;;
+    *)
+      die "libc auto-detection failed for arch=${arch}; rerun with --libc gnu|musl"
+      ;;
+  esac
 }
 
 resolve_target_triple() {
@@ -207,6 +269,31 @@ run_as_root() {
   fi
 
   return 1
+}
+
+validate_service_binary_path() {
+  local path="$1"
+
+  if [[ "${path}" != /* ]]; then
+    warn "service setup skipped because binary path is not absolute: ${path}"
+    warn "use an absolute --install-dir or run with --no-service"
+    return 1
+  fi
+
+  if [[ ! "${path}" =~ ^/[A-Za-z0-9._/+:-]+$ ]]; then
+    warn "service setup skipped because binary path contains unsafe characters: ${path}"
+    warn "allowed characters: A-Z a-z 0-9 . _ / + : -"
+    return 1
+  fi
+
+  return 0
+}
+
+validate_install_dir_path() {
+  local path="$1"
+  if [[ ! "${path}" =~ ^[A-Za-z0-9._/+:-]+$ ]]; then
+    die "invalid --install-dir: '${path}' (contains unsafe characters)"
+  fi
 }
 
 download_release_asset() {
@@ -293,8 +380,8 @@ setup_initd_service() {
 # Short-Description: imagod daemon
 ### END INIT INFO
 
-DAEMON="${binary_path}"
-DAEMON_ARGS="--config ${DEFAULT_CONFIG_PATH}"
+DAEMON='${binary_path}'
+DAEMON_ARGS='--config ${DEFAULT_CONFIG_PATH}'
 PIDFILE="/var/run/imagod.pid"
 NAME="imagod"
 
@@ -371,6 +458,10 @@ maybe_setup_service() {
     return 0
   fi
 
+  if ! validate_service_binary_path "${binary_path}"; then
+    return 0
+  fi
+
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
     setup_systemd_service "${binary_path}" || true
     return 0
@@ -390,6 +481,11 @@ parse_args() {
       --tag)
         [[ $# -ge 2 ]] || die "--tag requires a value"
         TAG_INPUT="$2"
+        shift 2
+        ;;
+      --libc)
+        [[ $# -ge 2 ]] || die "--libc requires a value"
+        LIBC_MODE="$(normalize_libc_mode "$2")"
         shift 2
         ;;
       --repo)
@@ -436,7 +532,7 @@ main() {
   local tag
 
   arch="$(detect_arch)"
-  libc="$(detect_libc)"
+  libc="$(detect_libc "${arch}")"
   target="$(resolve_target_triple "${arch}" "${libc}")"
   tag="$(resolve_release_tag)"
 
@@ -450,6 +546,7 @@ main() {
   else
     install_dir="$(default_install_dir)"
   fi
+  validate_install_dir_path "${install_dir}"
 
   log "repository: ${REPO}"
   log "tag: ${tag}"

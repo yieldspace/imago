@@ -41,6 +41,7 @@ flowchart LR
   - `imagod-v*` では `imagod-<target-triple>` と `imagod-<target-triple>.sha256` が添付されます。
 - `scripts/install_imagod.sh` は上記 release asset を利用して `imagod` を自動導入します。
   - タグ解決優先順: `--tag` > `GITHUB_REF_NAME=imagod-v*` > API で最新 `imagod-v*`
+  - libc 解決: `--libc auto|gnu|musl`（既定: `auto`）
   - サービス導入優先順: `systemd` > `init.d` > binary-only
   - private release へアクセスする場合は `GH_TOKEN` を利用します。
 
