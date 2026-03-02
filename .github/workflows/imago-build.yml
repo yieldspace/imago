@@ -59,7 +59,7 @@ jobs:
           echo "imagod_version=${imagod_pkgid##*#}" >> "$GITHUB_OUTPUT"
 
       - name: Upload imago binary
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           if-no-files-found: error
           name: ${{ matrix.target }}-imago-${{ steps.versions.outputs.imago_version }}-${{ github.sha }}
@@ -67,7 +67,7 @@ jobs:
           retention-days: 7
 
       - name: Upload imagod binary
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           if-no-files-found: error
           name: ${{ matrix.target }}-imagod-${{ steps.versions.outputs.imagod_version }}-${{ github.sha }}
@@ -105,7 +105,7 @@ jobs:
         run: cargo build -p nanokvm-imagod --locked --release --bin imagod --target riscv64gc-unknown-linux-musl
 
       - name: Upload NanoKVM imagod
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           if-no-files-found: error
           name: nanokvm-imagod-riscv64gc-unknown-linux-musl-${{ github.sha }}
