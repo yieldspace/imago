@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+
+[features]
+bench-internals = []
+
 [dependencies]
 base64 = { workspace = true }
 hex = { workspace = true }
@@ -27,4 +31,15 @@ web-transport-quinn = { workspace = true }
 wasmparser = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 wat = { workspace = true }
+
+[[bench]]
+name = "log_buffer"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "heartbeat_lookup"
+harness = false
+required-features = ["bench-internals"]

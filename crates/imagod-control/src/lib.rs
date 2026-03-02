@@ -9,6 +9,12 @@ pub mod orchestrator;
 /// Service process supervisor and manager-runner control-plane handlers.
 pub mod service_supervisor;
 
+#[cfg(feature = "bench-internals")]
+/// Benchmark-only internals exposed for Criterion benches.
+pub mod bench_internals {
+    pub use crate::service_supervisor::bench_internals::*;
+}
+
 /// Re-export of the artifact storage entry point.
 pub use artifact_store::ArtifactStore;
 /// Re-exports for command operation state management.

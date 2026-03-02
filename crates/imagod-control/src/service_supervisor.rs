@@ -48,6 +48,8 @@ use self::{
     retained_file_store::RetainedFileLogStore, runner_spawn::DefaultRunnerSpawner,
 };
 
+#[cfg(feature = "bench-internals")]
+pub mod bench_internals;
 mod log_buffer;
 mod manager_control;
 mod remote_rpc;
@@ -70,6 +72,7 @@ const LOG_CHANNEL_CAPACITY: usize = 256;
 const DEFAULT_HTTP_QUEUE_MEMORY_BUDGET_BYTES: u64 = 32 * 1024 * 1024;
 type PendingReadyMap = BTreeMap<String, oneshot::Sender<Result<(), ImagodError>>>;
 type StoppingServicesMap = BTreeMap<String, usize>;
+type RunnerServiceIndex = BTreeMap<String, String>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Launch specification used to spawn one runner process.
@@ -204,6 +207,7 @@ pub struct ServiceSupervisor {
     epoch_tick_interval_ms: u64,
     manager_control_endpoint: PathBuf,
     inner: Arc<RwLock<BTreeMap<String, RunningService>>>,
+    runner_index: Arc<RwLock<RunnerServiceIndex>>,
     retained_logs: Arc<Mutex<RetainedFileLogStore>>,
     stopping_services: Arc<StdMutex<StoppingServicesMap>>,
     pending_ready: Arc<Mutex<PendingReadyMap>>,
@@ -305,6 +309,7 @@ impl ServiceSupervisor {
         })?;
 
         let inner = Arc::new(RwLock::new(BTreeMap::new()));
+        let runner_index = Arc::new(RwLock::new(BTreeMap::new()));
         let retained_logs = Arc::new(Mutex::new(RetainedFileLogStore::new(
             &storage_root,
             retained_logs_capacity_bytes,
@@ -313,7 +318,9 @@ impl ServiceSupervisor {
         let pending_ready = Arc::new(Mutex::new(BTreeMap::new()));
         let starting_services = Arc::new(Mutex::new(BTreeSet::new()));
         let stopping_count = Arc::new(AtomicUsize::new(0));
-        let manager_control_handler = Arc::new(DefaultManagerControlHandler::new(config_path));
+        let manager_control_handler = Arc::new(
+            DefaultManagerControlHandler::new_with_runner_index(config_path, runner_index.clone()),
+        );
         let runner_spawner = DefaultRunnerSpawner;
         let manager_control_server = Arc::new(Self::spawn_manager_control_server(
             listener,
@@ -341,6 +348,7 @@ impl ServiceSupervisor {
             epoch_tick_interval_ms: epoch_tick_interval_ms.max(1),
             manager_control_endpoint,
             inner,
+            runner_index,
             retained_logs,
             stopping_services,
             pending_ready,
@@ -496,6 +504,7 @@ impl ServiceSupervisor {
                     },
                 );
             }
+            self.upsert_runner_index(&runner_id, &launch.name).await;
 
             if let Err(err) = self
                 .write_bootstrap_to_running_service(&launch.name, &bootstrap)
@@ -612,6 +621,7 @@ impl ServiceSupervisor {
                 service.status,
                 exit_status,
             );
+            self.remove_runner_index(&service.runner_id).await;
             remove_runner_endpoint_best_effort(&service.runner_endpoint);
             self.retain_composite_snapshot(service_name, &service.composite_log)
                 .await;
@@ -788,6 +798,7 @@ impl ServiceSupervisor {
                 service.status,
                 status,
             );
+            self.remove_runner_index(&service.runner_id).await;
             remove_runner_endpoint_best_effort(&service.runner_endpoint);
             self.retain_composite_snapshot(&name, &service.composite_log)
                 .await;
@@ -1177,12 +1188,24 @@ impl ServiceSupervisor {
         self.starting_services.lock().await.remove(service_name);
     }
 
+    async fn upsert_runner_index(&self, runner_id: &str, service_name: &str) {
+        self.runner_index
+            .write()
+            .await
+            .insert(runner_id.to_string(), service_name.to_string());
+    }
+
+    async fn remove_runner_index(&self, runner_id: &str) {
+        self.runner_index.write().await.remove(runner_id);
+    }
+
     async fn cleanup_start_failure(&self, service_name: &str) {
         let service = {
             let mut inner = self.inner.write().await;
             inner.remove(service_name)
         };
         if let Some(mut service) = service {
+            self.remove_runner_index(&service.runner_id).await;
             let _ = service.child.start_kill();
             let _ = service.child.wait().await;
             remove_runner_endpoint_best_effort(&service.runner_endpoint);
@@ -1342,13 +1365,15 @@ impl ServiceSupervisor {
             let mut inner = self.inner.write().await;
             inner.remove(service_name)
         };
-        service.ok_or_else(|| {
-            ImagodError::new(
+        let Some(service) = service else {
+            return Err(ImagodError::new(
                 ErrorCode::NotFound,
                 STAGE_STOP,
                 format!("service '{service_name}' is not running"),
-            )
-        })
+            ));
+        };
+        self.remove_runner_index(&service.runner_id).await;
+        Ok(service)
     }
 
     async fn restore_service_after_stop_error(
@@ -1398,7 +1423,10 @@ impl ServiceSupervisor {
             }
             return;
         }
+        let runner_id = service.runner_id.clone();
         inner.insert(service_name.to_string(), service);
+        drop(inner);
+        self.upsert_runner_index(&runner_id, service_name).await;
     }
 }
 
@@ -3039,6 +3067,51 @@ mod tests {
         assert!(
             !runner_endpoint.exists(),
             "runner endpoint should be removed after force stop"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn stop_removes_runner_index_entry() {
+        let root = new_test_root("stop-runner-index");
+        let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+            .expect("supervisor should initialize");
+        let service_name = "svc-stop-index";
+        let runner_id = "runner-stop-index";
+        let runner_endpoint = root
+            .join("runtime")
+            .join("ipc")
+            .join("runners")
+            .join("stop-index.sock");
+
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep process should spawn");
+        {
+            let mut inner = supervisor.inner.write().await;
+            inner.insert(
+                service_name.to_string(),
+                new_running_service(child, runner_id, runner_endpoint),
+            );
+        }
+        supervisor
+            .runner_index
+            .write()
+            .await
+            .insert(runner_id.to_string(), service_name.to_string());
+
+        supervisor
+            .stop(service_name, true)
+            .await
+            .expect("force stop should succeed");
+        assert!(
+            !supervisor.runner_index.read().await.contains_key(runner_id),
+            "runner index entry should be removed after stop"
         );
 
         let _ = std::fs::remove_dir_all(&root);
