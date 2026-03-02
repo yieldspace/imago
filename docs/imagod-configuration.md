@@ -332,6 +332,27 @@ wasm_guard_before_linear_memory = false
 
 - Validation error notes: non-boolean values fail TOML decode.
 
+### The `wasm_parallel_compilation` field
+
+- Type: `boolean`
+- Required/Optional: Optional.
+- Accepted values / Constraints: `true` or `false`.
+- Default: `false`.
+- Behavior notes:
+  - Passed to Wasmtime `Config::parallel_compilation`.
+  - `false` reduces runner thread count and memory footprint by avoiding parallel compile workers.
+  - `true` may reduce startup compile latency for large components at the cost of higher memory usage.
+- Rollback notes:
+  - Set `true` to approximate the previous default behavior.
+- Example:
+
+```toml
+[runtime]
+wasm_parallel_compilation = false
+```
+
+- Validation error notes: non-boolean values fail TOML decode.
+
 ### The `http_worker_count` field
 
 - Type: `integer` (`u32`)

@@ -15,7 +15,7 @@ pub(super) struct DefaultRunnerSpawner;
 impl DefaultRunnerSpawner {
     pub(super) fn spawn_runner_child(
         &self,
-        _bootstrap: &RunnerBootstrap,
+        bootstrap: &RunnerBootstrap,
     ) -> Result<Child, ImagodError> {
         let exe = std::env::current_exe().map_err(|e| {
             ImagodError::new(
@@ -26,7 +26,9 @@ impl DefaultRunnerSpawner {
         })?;
         let mut cmd = Command::new(exe);
         cmd.arg("--runner");
-        cmd.env("TOKIO_WORKER_THREADS", "1");
+        for (key, value) in runner_env_overrides(bootstrap.wasm_parallel_compilation) {
+            cmd.env(key, value);
+        }
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -38,6 +40,14 @@ impl DefaultRunnerSpawner {
             )
         })
     }
+}
+
+fn runner_env_overrides(wasm_parallel_compilation: bool) -> Vec<(&'static str, &'static str)> {
+    let mut envs = vec![("TOKIO_WORKER_THREADS", "1")];
+    if !wasm_parallel_compilation {
+        envs.push(("RAYON_NUM_THREADS", "1"));
+    }
+    envs
 }
 
 pub(super) fn build_runner_endpoint(
@@ -77,4 +87,30 @@ pub(super) fn validate_unix_socket_path_len(
             path.display()
         ),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runner_env_overrides;
+    use std::collections::BTreeMap;
+
+    fn env_map(wasm_parallel_compilation: bool) -> BTreeMap<&'static str, &'static str> {
+        runner_env_overrides(wasm_parallel_compilation)
+            .into_iter()
+            .collect::<BTreeMap<_, _>>()
+    }
+
+    #[test]
+    fn runner_env_overrides_force_single_worker_and_single_rayon_when_parallel_disabled() {
+        let envs = env_map(false);
+        assert_eq!(envs.get("TOKIO_WORKER_THREADS"), Some(&"1"));
+        assert_eq!(envs.get("RAYON_NUM_THREADS"), Some(&"1"));
+    }
+
+    #[test]
+    fn runner_env_overrides_keep_rayon_unset_when_parallel_enabled() {
+        let envs = env_map(true);
+        assert_eq!(envs.get("TOKIO_WORKER_THREADS"), Some(&"1"));
+        assert!(!envs.contains_key("RAYON_NUM_THREADS"));
+    }
 }

@@ -106,9 +106,9 @@ if ! grep -q "imagod listening on" "$daemon_log"; then
 fi
 
 manager_pid="$(
-  ps -axo pid=,command= \
-    | awk -v cmd="$workspace_root/target/release/imagod --config imagod.toml" \
-      'index($0, cmd) { print $1; exit }'
+  awk -v cmd="$workspace_root/target/release/imagod --config imagod.toml" \
+    'index($0, cmd) { print $1; exit }' \
+    < <(ps -axo pid=,command=)
 )"
 if [[ -z "$manager_pid" ]]; then
   manager_pid="$daemon_pid"
@@ -131,14 +131,14 @@ for _ in $(seq 1 160); do
     exit 1
   fi
   runner_pid="$(
-    ps -axo pid=,ppid=,command= \
-      | awk -v parent_pid="$manager_pid" '$2 == parent_pid && index($0, "--runner") { print $1; exit }'
+    awk -v parent_pid="$manager_pid" '$2 == parent_pid && index($0, "--runner") { print $1; exit }' \
+      < <(ps -axo pid=,ppid=,command=)
   )"
   if [[ -z "$runner_pid" ]]; then
     runner_pid="$(
-      ps -axo pid=,command= \
-        | awk -v cmd="$workspace_root/target/release/imagod --runner" \
-          'index($0, cmd) { pid = $1 } END { if (pid != "") print pid }'
+      awk -v cmd="$workspace_root/target/release/imagod --runner" \
+        'index($0, cmd) { pid = $1 } END { if (pid != "") print pid }' \
+        < <(ps -axo pid=,command=)
     )"
   fi
   if [[ -n "$runner_pid" ]]; then

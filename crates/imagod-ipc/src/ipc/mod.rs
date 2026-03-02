@@ -694,6 +694,8 @@ pub struct RunnerBootstrap {
     pub wasm_memory_guard_size_bytes: u64,
     /// Whether Wasmtime reserves a guard region before linear memory.
     pub wasm_guard_before_linear_memory: bool,
+    /// Whether Wasmtime compiles modules in parallel.
+    pub wasm_parallel_compilation: bool,
 }
 
 impl Validate for RunnerBootstrap {
@@ -1369,6 +1371,7 @@ mod tests {
             wasm_memory_reservation_for_growth_bytes: 16 * 1024 * 1024,
             wasm_memory_guard_size_bytes: 64 * 1024,
             wasm_guard_before_linear_memory: false,
+            wasm_parallel_compilation: false,
         }
     }
 
@@ -1452,6 +1455,7 @@ mod tests {
             wasm_memory_reservation_for_growth_bytes: 16 * 1024 * 1024,
             wasm_memory_guard_size_bytes: 64 * 1024,
             wasm_guard_before_linear_memory: false,
+            wasm_parallel_compilation: false,
         };
         let encoded = imago_protocol::to_cbor(&bootstrap).expect("bootstrap encoding should work");
         let decoded = imago_protocol::from_cbor::<RunnerBootstrap>(&encoded)
@@ -1501,6 +1505,7 @@ mod tests {
         );
         assert_eq!(decoded.wasm_memory_guard_size_bytes, 64 * 1024);
         assert!(!decoded.wasm_guard_before_linear_memory);
+        assert!(!decoded.wasm_parallel_compilation);
     }
 
     #[test]

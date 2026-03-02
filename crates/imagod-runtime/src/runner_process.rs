@@ -142,9 +142,10 @@ pub async fn run_runner_from_stdin_with_registry(
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let runtime_invoker: Arc<dyn RuntimeInvoker> = runtime.clone();
+    let inbound_bootstrap = Arc::new(bootstrap.clone());
     let inbound_task = tokio::spawn(run_inbound_server(
         listener,
-        bootstrap.clone(),
+        inbound_bootstrap,
         runtime_invoker.clone(),
         shutdown_tx.clone(),
         shutdown_rx.clone(),
@@ -323,6 +324,7 @@ fn create_runtime_backend(
             memory_reservation_for_growth_bytes: bootstrap.wasm_memory_reservation_for_growth_bytes,
             memory_guard_size_bytes: bootstrap.wasm_memory_guard_size_bytes,
             guard_before_linear_memory: bootstrap.wasm_guard_before_linear_memory,
+            parallel_compilation: bootstrap.wasm_parallel_compilation,
         };
         Ok(Arc::new(WasmRuntime::new_with_native_plugins_and_tuning(
             native_plugin_registry.clone(),
@@ -459,6 +461,7 @@ mod tests {
             wasm_memory_reservation_for_growth_bytes: 16 * 1024 * 1024,
             wasm_memory_guard_size_bytes: 64 * 1024,
             wasm_guard_before_linear_memory: false,
+            wasm_parallel_compilation: false,
         }
     }
 

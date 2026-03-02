@@ -53,6 +53,7 @@ pub(crate) async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyh
         config.runtime.wasm_memory_reservation_for_growth_bytes,
         config.runtime.wasm_memory_guard_size_bytes,
         config.runtime.wasm_guard_before_linear_memory,
+        config.runtime.wasm_parallel_compilation,
     )
     .with_http_queue_memory_budget_bytes(config.runtime.http_queue_memory_budget_bytes);
     let orchestrator = Orchestrator::new(&config.storage_root, artifacts.clone(), supervisor);

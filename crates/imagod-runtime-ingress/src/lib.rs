@@ -443,6 +443,7 @@ mod tests {
             wasm_memory_reservation_for_growth_bytes: 16 * 1024 * 1024,
             wasm_memory_guard_size_bytes: 64 * 1024,
             wasm_guard_before_linear_memory: false,
+            wasm_parallel_compilation: false,
         }
     }
 

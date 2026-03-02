@@ -10,7 +10,7 @@ use imagod_ipc::{
     RunnerInboundResponse, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
     verify_invocation_token, verify_manager_auth_proof,
 };
-use imagod_runtime_internal::{RuntimeInvokeRequest, RuntimeInvoker};
+use imagod_runtime_internal::{RuntimeInvokeContext, RuntimeInvokeRequest, RuntimeInvoker};
 use tokio::{
     net::{UnixListener, UnixStream},
     sync::{Semaphore, watch},
@@ -251,17 +251,38 @@ pub fn apply_retryable_heartbeat_failure(consecutive_failures: &mut u32) -> Hear
     }
 }
 
+fn build_runtime_invoke_context(bootstrap: &RunnerBootstrap) -> Arc<RuntimeInvokeContext> {
+    Arc::new(RuntimeInvokeContext {
+        app_type: bootstrap.app_type,
+        runner_id: bootstrap.runner_id.clone(),
+        service_name: bootstrap.service_name.clone(),
+        release_hash: bootstrap.release_hash.clone(),
+        component_path: bootstrap.component_path.clone(),
+        args: bootstrap.args.clone(),
+        envs: bootstrap.envs.clone(),
+        wasi_mounts: bootstrap.wasi_mounts.clone(),
+        wasi_http_outbound: bootstrap.wasi_http_outbound.clone(),
+        resources: bootstrap.resources.clone(),
+        plugin_dependencies: bootstrap.plugin_dependencies.clone(),
+        capabilities: bootstrap.capabilities.clone(),
+        bindings: bootstrap.bindings.clone(),
+        manager_control_endpoint: bootstrap.manager_control_endpoint.clone(),
+        manager_auth_secret: bootstrap.manager_auth_secret.clone(),
+    })
+}
+
 /// Accepts inbound runner requests and writes one response per request.
 ///
 /// Concurrency: runs as a dedicated background task.
 pub async fn run_inbound_server(
     listener: UnixListener,
-    bootstrap: RunnerBootstrap,
+    bootstrap: Arc<RunnerBootstrap>,
     runtime_invoker: Arc<dyn RuntimeInvoker>,
     shutdown_tx: watch::Sender<bool>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let concurrency = Arc::new(Semaphore::new(MAX_INBOUND_CONNECTION_HANDLERS));
+    let invoke_context = build_runtime_invoke_context(bootstrap.as_ref());
     loop {
         let permit = tokio::select! {
             acquired = concurrency.clone().acquire_owned() => {
@@ -304,12 +325,20 @@ pub async fn run_inbound_server(
         };
 
         let bootstrap = bootstrap.clone();
+        let invoke_context = invoke_context.clone();
         let runtime_invoker = runtime_invoker.clone();
         let shutdown_tx = shutdown_tx.clone();
         tokio::spawn(async move {
             let _permit = permit;
             let mut stream = stream;
-            handle_inbound_connection(&mut stream, bootstrap, runtime_invoker, shutdown_tx).await;
+            handle_inbound_connection(
+                &mut stream,
+                bootstrap,
+                invoke_context,
+                runtime_invoker,
+                shutdown_tx,
+            )
+            .await;
         });
     }
 }
@@ -326,7 +355,8 @@ pub fn should_retry_inbound_accept(err: &std::io::Error) -> bool {
 
 pub async fn handle_inbound_connection(
     stream: &mut UnixStream,
-    bootstrap: RunnerBootstrap,
+    bootstrap: Arc<RunnerBootstrap>,
+    invoke_context: Arc<RuntimeInvokeContext>,
     runtime_invoker: Arc<dyn RuntimeInvoker>,
     shutdown_tx: watch::Sender<bool>,
 ) {
@@ -359,8 +389,14 @@ pub async fn handle_inbound_connection(
         }
     };
 
-    let response =
-        handle_inbound_request(&bootstrap, runtime_invoker.as_ref(), request, &shutdown_tx).await;
+    let response = handle_inbound_request(
+        &bootstrap,
+        &invoke_context,
+        runtime_invoker.as_ref(),
+        request,
+        &shutdown_tx,
+    )
+    .await;
     let _ = DbusP2pTransport::write_message(stream, &response).await;
 }
 
@@ -387,6 +423,7 @@ pub fn validate_shutdown_auth(
 /// Handles a single inbound request and performs token validation for invoke calls.
 pub async fn handle_inbound_request(
     bootstrap: &RunnerBootstrap,
+    invoke_context: &Arc<RuntimeInvokeContext>,
     runtime_invoker: &dyn RuntimeInvoker,
     request: RunnerInboundRequest,
     shutdown_tx: &watch::Sender<bool>,
@@ -433,21 +470,7 @@ pub async fn handle_inbound_request(
             }
 
             let invoke_request = RuntimeInvokeRequest {
-                app_type: bootstrap.app_type,
-                runner_id: bootstrap.runner_id.clone(),
-                service_name: bootstrap.service_name.clone(),
-                release_hash: bootstrap.release_hash.clone(),
-                component_path: bootstrap.component_path.clone(),
-                args: bootstrap.args.clone(),
-                envs: bootstrap.envs.clone(),
-                wasi_mounts: bootstrap.wasi_mounts.clone(),
-                wasi_http_outbound: bootstrap.wasi_http_outbound.clone(),
-                resources: bootstrap.resources.clone(),
-                plugin_dependencies: bootstrap.plugin_dependencies.clone(),
-                capabilities: bootstrap.capabilities.clone(),
-                bindings: bootstrap.bindings.clone(),
-                manager_control_endpoint: bootstrap.manager_control_endpoint.clone(),
-                manager_auth_secret: bootstrap.manager_auth_secret.clone(),
+                context: invoke_context.clone(),
                 interface_id,
                 function,
                 payload_cbor,
@@ -491,6 +514,24 @@ mod tests {
         }
     }
 
+    struct ContextCheckingInvoker {
+        expected_context: Arc<RuntimeInvokeContext>,
+    }
+
+    #[async_trait]
+    impl RuntimeInvoker for ContextCheckingInvoker {
+        async fn invoke_component(
+            &self,
+            request: RuntimeInvokeRequest,
+        ) -> Result<Vec<u8>, ImagodError> {
+            assert!(
+                Arc::ptr_eq(&request.context, &self.expected_context),
+                "invoke request should reuse shared RuntimeInvokeContext"
+            );
+            Ok(request.payload_cbor)
+        }
+    }
+
     fn new_test_root(prefix: &str) -> PathBuf {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -529,6 +570,7 @@ mod tests {
             wasm_memory_reservation_for_growth_bytes: 16 * 1024 * 1024,
             wasm_memory_guard_size_bytes: 64 * 1024,
             wasm_guard_before_linear_memory: false,
+            wasm_parallel_compilation: false,
         }
     }
 
@@ -545,11 +587,13 @@ mod tests {
     async fn shutdown_runner_rejects_invalid_manager_auth_proof() {
         let root = new_test_root("shutdown-auth");
         let bootstrap = new_test_bootstrap(&root, "runner.sock");
+        let invoke_context = build_runtime_invoke_context(&bootstrap);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let runtime_invoker = EchoRuntimeInvoker;
         let response = handle_inbound_request(
             &bootstrap,
+            &invoke_context,
             &runtime_invoker,
             RunnerInboundRequest::ShutdownRunner {
                 manager_auth_proof: "invalid-proof".to_string(),
@@ -574,6 +618,7 @@ mod tests {
     async fn shutdown_runner_accepts_valid_manager_auth_proof() {
         let root = new_test_root("shutdown-auth-valid");
         let bootstrap = new_test_bootstrap(&root, "runner.sock");
+        let invoke_context = build_runtime_invoke_context(&bootstrap);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let manager_auth_proof =
@@ -582,6 +627,7 @@ mod tests {
         let runtime_invoker = EchoRuntimeInvoker;
         let response = handle_inbound_request(
             &bootstrap,
+            &invoke_context,
             &runtime_invoker,
             RunnerInboundRequest::ShutdownRunner { manager_auth_proof },
             &shutdown_tx,
@@ -601,6 +647,7 @@ mod tests {
     async fn invoke_returns_payload_cbor_on_valid_token() {
         let root = new_test_root("invoke-success");
         let bootstrap = new_test_bootstrap(&root, "runner.sock");
+        let invoke_context = build_runtime_invoke_context(&bootstrap);
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let payload_cbor = vec![0x01, 0x02, 0x03];
 
@@ -619,6 +666,7 @@ mod tests {
         let runtime_invoker = EchoRuntimeInvoker;
         let response = handle_inbound_request(
             &bootstrap,
+            &invoke_context,
             &runtime_invoker,
             RunnerInboundRequest::Invoke {
                 interface_id: "yieldspace:service/invoke".to_string(),
@@ -643,6 +691,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invoke_request_reuses_shared_runtime_invoke_context() {
+        let root = new_test_root("invoke-shared-context");
+        let bootstrap = new_test_bootstrap(&root, "runner.sock");
+        let invoke_context = build_runtime_invoke_context(&bootstrap);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+
+        let token = issue_invocation_token(
+            &bootstrap.invocation_secret,
+            InvocationTokenClaims {
+                source_service: "remote".to_string(),
+                target_service: bootstrap.service_name.clone(),
+                wit: "yieldspace:service/invoke".to_string(),
+                exp: now_unix_secs() + 30,
+                nonce: "nonce-invoke-context".to_string(),
+            },
+        )
+        .expect("token should be issued");
+
+        let runtime_invoker = ContextCheckingInvoker {
+            expected_context: invoke_context.clone(),
+        };
+        let response = handle_inbound_request(
+            &bootstrap,
+            &invoke_context,
+            &runtime_invoker,
+            RunnerInboundRequest::Invoke {
+                interface_id: "yieldspace:service/invoke".to_string(),
+                function: "call".to_string(),
+                payload_cbor: vec![0xAB],
+                token,
+            },
+            &shutdown_tx,
+        )
+        .await;
+
+        assert!(
+            matches!(response, RunnerInboundResponse::InvokeResult { .. }),
+            "invoke should complete while preserving shared context"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
     async fn inbound_server_keeps_accepting_when_first_connection_stalls() {
         let root = new_test_root("inbound-hol");
         let bootstrap = new_test_bootstrap(&root, "runner.sock");
@@ -654,7 +746,7 @@ mod tests {
         let mut shutdown_observer = shutdown_tx.subscribe();
         let server_task = tokio::spawn(run_inbound_server(
             listener,
-            bootstrap.clone(),
+            Arc::new(bootstrap.clone()),
             Arc::new(EchoRuntimeInvoker),
             shutdown_tx.clone(),
             shutdown_rx,

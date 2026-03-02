@@ -152,7 +152,6 @@ where
     R: PluginResolver,
     C: CapabilityChecker,
 {
-    let mut loaded_components = BTreeMap::<String, Component>::new();
     let mut component_interfaces = BTreeMap::<String, PluginComponentInterfaces>::new();
     for dep in dependencies {
         if dep.kind != PluginKind::Wasm {
@@ -176,7 +175,6 @@ where
             exports: collect_component_instance_export_names(&loaded, engine),
         };
         component_interfaces.insert(dep.name.clone(), interfaces);
-        loaded_components.insert(dep.name.clone(), loaded);
     }
 
     let order = resolver.dependency_topological_order(dependencies, &component_interfaces)?;
@@ -204,12 +202,20 @@ where
                 );
             }
             PluginKind::Wasm => {
-                let component = loaded_components.get(&dep.name).ok_or_else(|| {
+                let component_meta = dep.component.as_ref().ok_or_else(|| {
                     map_runtime_error(format!(
-                        "internal error: loaded component for dependency '{}' is missing",
+                        "plugin dependency '{}' missing component definition",
                         dep.name
                     ))
                 })?;
+                let component =
+                    Component::from_file(engine, &component_meta.path).map_err(|e| {
+                        map_runtime_error(format!(
+                            "failed to load plugin component '{}' from {}: {e}",
+                            dep.name,
+                            component_meta.path.display()
+                        ))
+                    })?;
 
                 let mut linker = Linker::new(engine);
                 add_to_linker_async(&mut linker).map_err(|e| {
@@ -232,7 +238,7 @@ where
                     engine,
                     &mut linker,
                     store,
-                    component,
+                    &component,
                     &dep.name,
                     &explicit_dependency_names,
                     &dep.capabilities,
@@ -242,7 +248,7 @@ where
                 )?;
 
                 let instance = linker
-                    .instantiate_async(&mut *store, component)
+                    .instantiate_async(&mut *store, &component)
                     .await
                     .map_err(|e| {
                         map_runtime_error(format!(

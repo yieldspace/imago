@@ -68,6 +68,7 @@ const DEFAULT_WASM_MEMORY_RESERVATION_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES: u64 = 16 * 1024 * 1024;
 const DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES: u64 = 64 * 1024;
 const DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY: bool = false;
+const DEFAULT_WASM_PARALLEL_COMPILATION: bool = false;
 type PendingReadyMap = BTreeMap<String, oneshot::Sender<Result<(), ImagodError>>>;
 type StoppingServicesMap = BTreeMap<String, usize>;
 
@@ -199,6 +200,7 @@ pub struct ServiceSupervisor {
     wasm_memory_reservation_for_growth_bytes: u64,
     wasm_memory_guard_size_bytes: u64,
     wasm_guard_before_linear_memory: bool,
+    wasm_parallel_compilation: bool,
     runner_log_buffer_bytes: usize,
     epoch_tick_interval_ms: u64,
     manager_control_endpoint: PathBuf,
@@ -335,6 +337,7 @@ impl ServiceSupervisor {
                 DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES,
             wasm_memory_guard_size_bytes: DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES,
             wasm_guard_before_linear_memory: DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY,
+            wasm_parallel_compilation: DEFAULT_WASM_PARALLEL_COMPILATION,
             runner_log_buffer_bytes,
             epoch_tick_interval_ms: epoch_tick_interval_ms.max(1),
             manager_control_endpoint,
@@ -367,11 +370,13 @@ impl ServiceSupervisor {
         wasm_memory_reservation_for_growth_bytes: u64,
         wasm_memory_guard_size_bytes: u64,
         wasm_guard_before_linear_memory: bool,
+        wasm_parallel_compilation: bool,
     ) -> Self {
         self.wasm_memory_reservation_bytes = wasm_memory_reservation_bytes;
         self.wasm_memory_reservation_for_growth_bytes = wasm_memory_reservation_for_growth_bytes;
         self.wasm_memory_guard_size_bytes = wasm_memory_guard_size_bytes;
         self.wasm_guard_before_linear_memory = wasm_guard_before_linear_memory;
+        self.wasm_parallel_compilation = wasm_parallel_compilation;
         self
     }
 
@@ -425,6 +430,7 @@ impl ServiceSupervisor {
                     .wasm_memory_reservation_for_growth_bytes,
                 wasm_memory_guard_size_bytes: self.wasm_memory_guard_size_bytes,
                 wasm_guard_before_linear_memory: self.wasm_guard_before_linear_memory,
+                wasm_parallel_compilation: self.wasm_parallel_compilation,
             };
 
             let (ready_tx, mut ready_rx) = oneshot::channel::<Result<(), ImagodError>>();
