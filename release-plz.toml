@@ -6,7 +6,8 @@ git_only = true
 git_tag_enable = false
 git_release_enable = false
 git_release_type = "pre"
-changelog_update = false
+changelog_update = true
+pr_labels = ["release"]
 
 [[package]]
 name = "imago-cli"
