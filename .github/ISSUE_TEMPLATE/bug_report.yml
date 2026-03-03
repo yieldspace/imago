@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible defect in imago.
+description: Report a reproducible defect in imago for embedded Linux deployment and runtime workflows.
 title: "[bug] "
 labels:
   - bug
@@ -7,7 +7,25 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a bug. Please provide enough detail for us to reproduce and verify the fix.
+        Thanks for reporting a bug.
+
+        imago is currently under development and mainly used in private networks.
+        Please share enough context for us to understand where the issue occurs in the CLI -> imagod workflow.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      description: Select the main area where you observed the problem.
+      options:
+        - imago-cli
+        - imagod
+        - plugin
+        - docs
+        - ci/workflow
+        - other
+    validations:
+      required: true
 
   - type: textarea
     id: summary
@@ -22,13 +40,11 @@ body:
     id: steps
     attributes:
       label: Steps to reproduce
-      description: Include exact commands, inputs, and environment details.
+      description: Optional but helpful. Include exact commands, inputs, and configuration when possible.
       placeholder: |
         1. Run ...
         2. Deploy ...
         3. Observe ...
-    validations:
-      required: true
 
   - type: textarea
     id: expected
@@ -56,20 +72,25 @@ body:
       required: true
 
   - type: dropdown
-    id: target
+    id: environment
     attributes:
-      label: Target environment
+      label: Environment
       description: Choose the environment where the issue occurs.
       options:
         - local-imagod example
         - embedded Linux target
         - CI
         - other
-    validations:
-      required: true
+
+  - type: textarea
+    id: resource_impact
+    attributes:
+      label: Resource impact (optional)
+      description: Share CPU, memory, or binary-size impact if relevant. Write "unknown" if not measured.
+      placeholder: "Example: +20 MiB peak RSS during deploy, unknown CPU impact."
 
   - type: textarea
     id: additional
     attributes:
       label: Additional context
-      description: Links, screenshots, or other context.
+      description: Links, screenshots, traces, or related issues.
