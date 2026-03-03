@@ -36,14 +36,28 @@ pub(super) fn compute_manifest_hash(
 }
 
 pub(super) fn compute_sha256_hex(path: &Path) -> anyhow::Result<String> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect file for sha256: {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(anyhow!(
+            "symlink paths are not allowed while hashing: {}",
+            path.display()
+        ));
+    }
     let mut hasher = Sha256::new();
     hash_file_into(&mut hasher, path, "file for sha256")?;
     Ok(hex::encode(hasher.finalize()))
 }
 
 pub(crate) fn compute_path_digest_hex(path: &Path) -> anyhow::Result<String> {
-    let metadata = fs::metadata(path)
+    let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("failed to read path for digest: {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(anyhow!(
+            "symlink paths are not allowed while hashing: {}",
+            path.display()
+        ));
+    }
     if metadata.is_file() {
         return compute_sha256_hex(path);
     }
@@ -64,12 +78,18 @@ pub(crate) fn compute_path_digest_hex(path: &Path) -> anyhow::Result<String> {
                 )
             })?;
             let entry_path = entry.path();
-            let entry_metadata = entry
-                .metadata()
+            let file_type = entry
+                .file_type()
                 .with_context(|| format!("failed to read metadata for {}", entry_path.display()))?;
-            if entry_metadata.is_dir() {
+            if file_type.is_symlink() {
+                return Err(anyhow!(
+                    "symlink paths are not allowed while hashing: {}",
+                    entry_path.display()
+                ));
+            }
+            if file_type.is_dir() {
                 stack.push(entry_path);
-            } else if entry_metadata.is_file() {
+            } else if file_type.is_file() {
                 files.push(entry_path);
             }
         }
@@ -177,7 +197,8 @@ mod tests {
     };
 
     use super::{
-        AssetSource, Manifest, compute_manifest_hash, compute_sha256_hex, materialize_hashed_wasm,
+        AssetSource, Manifest, compute_manifest_hash, compute_path_digest_hex, compute_sha256_hex,
+        materialize_hashed_wasm,
     };
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
@@ -277,5 +298,35 @@ mod tests {
         let repaired_sha = compute_sha256_hex(&output).expect("sha should compute");
         let source_sha = compute_sha256_hex(&root.join("app.wasm")).expect("sha should compute");
         assert_eq!(repaired_sha, source_sha);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compute_sha256_hex_rejects_symlink_path() {
+        use std::os::unix::fs::symlink;
+
+        let root = new_temp_dir("sha-symlink");
+        let file = root.join("main.wasm");
+        let link = root.join("main-link.wasm");
+        write(&file, b"\0asm\x01\0\0\0");
+        symlink(&file, &link).expect("symlink should be created");
+
+        let err = compute_sha256_hex(&link).expect_err("symlink should be rejected");
+        assert!(err.to_string().contains("symlink paths are not allowed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compute_path_digest_hex_rejects_symlink_entry_in_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = new_temp_dir("dir-symlink-entry");
+        let dir = root.join("assets");
+        fs::create_dir_all(&dir).expect("asset dir should be created");
+        write(&dir.join("one.txt"), b"one");
+        symlink(dir.join("one.txt"), dir.join("linked.txt")).expect("symlink should be created");
+
+        let err = compute_path_digest_hex(&dir).expect_err("symlink entry should be rejected");
+        assert!(err.to_string().contains("symlink paths are not allowed"));
     }
 }

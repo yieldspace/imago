@@ -111,7 +111,7 @@ pub(super) fn resolve_existing_file_source_path(
     } else {
         project_root.join(path)
     };
-    let metadata = match fs::metadata(&resolved) {
+    let metadata = match fs::symlink_metadata(&resolved) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => {
@@ -121,6 +121,12 @@ pub(super) fn resolve_existing_file_source_path(
             ));
         }
     };
+    if metadata.file_type().is_symlink() {
+        return Err(anyhow!(
+            "symlink paths are not allowed while resolving path source: {}",
+            resolved.display()
+        ));
+    }
     if !metadata.is_file() && !metadata.is_dir() {
         return Err(anyhow!(
             "resolved path source is not a file or directory: {}",
@@ -176,8 +182,14 @@ pub(super) fn copy_tree_with_conflict_check(
     source: &Path,
     destination: &Path,
 ) -> anyhow::Result<()> {
-    let metadata = fs::metadata(source)
+    let metadata = fs::symlink_metadata(source)
         .with_context(|| format!("failed to inspect source path {}", source.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(anyhow!(
+            "symlink paths are not allowed while copying cache files: {}",
+            source.display()
+        ));
+    }
     if metadata.is_file() {
         copy_file_with_conflict_check(source, destination)?;
         return Ok(());
@@ -201,6 +213,15 @@ pub(super) fn copy_tree_with_conflict_check(
             )
         })?;
         let source_path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect source path {}", source_path.display()))?;
+        if file_type.is_symlink() {
+            return Err(anyhow!(
+                "symlink paths are not allowed while copying cache files: {}",
+                source_path.display()
+            ));
+        }
         let file_name = source_path.file_name().ok_or_else(|| {
             anyhow!(
                 "failed to resolve source file name under {}",
@@ -208,7 +229,16 @@ pub(super) fn copy_tree_with_conflict_check(
             )
         })?;
         let destination_path = destination.join(file_name);
-        copy_tree_with_conflict_check(&source_path, &destination_path)?;
+        if file_type.is_dir() {
+            copy_tree_with_conflict_check(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            copy_file_with_conflict_check(&source_path, &destination_path)?;
+        } else {
+            return Err(anyhow!(
+                "source path is not file or dir: {}",
+                source_path.display()
+            ));
+        }
     }
     Ok(())
 }
@@ -251,8 +281,8 @@ mod tests {
     use crate::commands::plugin_sources;
 
     use super::{
-        DependencyCacheEntry, cache_entry_root, entry_files_are_complete, load_entry,
-        resolve_existing_file_source_path, save_entry,
+        DependencyCacheEntry, cache_entry_root, copy_tree_with_conflict_check,
+        entry_files_are_complete, load_entry, resolve_existing_file_source_path, save_entry,
     };
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
@@ -318,6 +348,25 @@ mod tests {
         assert!(err.to_string().contains("must not be empty"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn resolve_existing_file_source_path_rejects_symlink_source() {
+        use std::os::unix::fs::symlink;
+
+        let root = new_temp_dir("source-symlink");
+        fs::write(root.join("real.wit"), b"package demo:test@0.1.0;\n")
+            .expect("real file should be written");
+        symlink(root.join("real.wit"), root.join("linked.wit")).expect("symlink should be created");
+
+        let err = resolve_existing_file_source_path(
+            &root,
+            "linked.wit",
+            plugin_sources::SourceKind::Path,
+        )
+        .expect_err("symlink source should be rejected");
+        assert!(err.to_string().contains("symlink paths are not allowed"));
+    }
+
     #[test]
     fn entry_files_are_complete_detects_digest_mismatch() {
         let root = new_temp_dir("complete");
@@ -344,5 +393,23 @@ mod tests {
         assert!(
             !entry_files_are_complete(&root, &entry).expect("mismatch should be reported as false")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_with_conflict_check_rejects_symlink_entry() {
+        use std::os::unix::fs::symlink;
+
+        let root = new_temp_dir("copy-symlink");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source).expect("source dir should be created");
+        fs::write(source.join("file.txt"), b"ok").expect("source file should be written");
+        symlink(source.join("file.txt"), source.join("link.txt"))
+            .expect("symlink should be created");
+
+        let err = copy_tree_with_conflict_check(&source, &destination)
+            .expect_err("symlink entry should be rejected");
+        assert!(err.to_string().contains("symlink paths are not allowed"));
     }
 }
