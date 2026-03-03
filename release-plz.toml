@@ -1,6 +1,6 @@
 [workspace]
 release = false
-release_always = false
+release_always = true
 publish = false
 git_only = true
 git_tag_enable = false
