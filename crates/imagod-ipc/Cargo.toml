@@ -3,7 +3,7 @@ name = "imagod-ipc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+publish = false
 [dependencies]
 base64 = { workspace = true }
 hex = { workspace = true }

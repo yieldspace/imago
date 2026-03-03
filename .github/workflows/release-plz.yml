@@ -10,6 +10,11 @@ permissions:
   contents: write
   pull-requests: write
 
+env:
+  # Temporary pin: use fork commit with known-error fallback for git_only no-publish workspaces.
+  RELEASE_PLZ_PATCH_REPO: https://github.com/sizumita/release-plz.git
+  RELEASE_PLZ_PATCH_SHA: a799a8d4e0113ebf8bc6ca8144370e9929baf7fd
+
 jobs:
   release-plz-release:
     name: Release-plz release
@@ -21,11 +26,27 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Install release-plz (pinned fork commit)
+        run: |
+          cargo install \
+            --locked \
+            --force \
+            --git "${RELEASE_PLZ_PATCH_REPO}" \
+            --rev "${RELEASE_PLZ_PATCH_SHA}" \
+            release-plz
+
+      - name: Configure git user
+        run: |
+          git config --global user.name "release-plz[bot]"
+          git config --global user.email "release-plz[bot]@users.noreply.github.com"
+
       - name: Run release-plz release
-        uses: release-plz/action@v0.5
-        with:
-          command: release
-          config: release-plz.toml
+        run: |
+          release-plz release \
+            --config release-plz.toml \
+            --forge github \
+            --git-token "${GITHUB_TOKEN}" \
+            -o json
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
@@ -42,10 +63,27 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Install release-plz (pinned fork commit)
+        run: |
+          cargo install \
+            --locked \
+            --force \
+            --git "${RELEASE_PLZ_PATCH_REPO}" \
+            --rev "${RELEASE_PLZ_PATCH_SHA}" \
+            release-plz
+
+      - name: Configure git user
+        run: |
+          git config --global user.name "release-plz[bot]"
+          git config --global user.email "release-plz[bot]@users.noreply.github.com"
+
       - name: Run release-plz release-pr
-        uses: release-plz/action@v0.5
-        with:
-          command: release-pr
-          config: release-plz.toml
+        run: |
+          release-plz release-pr \
+            --config release-plz.toml \
+            --repo-url "https://github.com/${GITHUB_REPOSITORY}" \
+            --forge github \
+            --git-token "${GITHUB_TOKEN}" \
+            -o json
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}

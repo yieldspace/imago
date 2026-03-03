@@ -3,7 +3,7 @@ name = "imagod-runtime-control"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+publish = false
 [dependencies]
 async-trait = { workspace = true }
 imago-protocol = { workspace = true }

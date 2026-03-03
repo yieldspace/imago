@@ -2,7 +2,7 @@
 release = false
 release_always = false
 publish = false
-git_only = true
+git_only = false
 git_tag_enable = false
 git_release_enable = false
 git_release_type = "pre"
@@ -12,6 +12,8 @@ pr_labels = ["release"]
 [[package]]
 name = "imago-cli"
 release = true
+publish = false
+git_only = true
 git_tag_enable = true
 git_release_enable = true
 git_tag_name = "imago-v{{ version }}"
@@ -25,6 +27,8 @@ git_release_body = """
 [[package]]
 name = "imagod"
 release = true
+publish = false
+git_only = true
 git_tag_enable = true
 git_release_enable = true
 git_tag_name = "imagod-v{{ version }}"
@@ -36,45 +40,91 @@ git_release_body = """
 """
 
 [[package]]
+name = "imago-protocol"
+release = false
+publish = false
+
+[[package]]
+name = "imago-plugin-macros"
+release = false
+publish = false
+
+[[package]]
 name = "imagod-common"
-release = true
+release = false
+publish = false
 
 [[package]]
 name = "imagod-config"
-release = true
+release = false
+publish = false
 
 [[package]]
 name = "imagod-control"
-release = true
+release = false
+publish = false
 
 [[package]]
 name = "imagod-ipc"
-release = true
+release = false
+publish = false
 
 [[package]]
 name = "imagod-runtime"
-release = true
+release = false
+publish = false
 
 [[package]]
 name = "imagod-runtime-bootstrap"
-release = true
+release = false
+publish = false
 
 [[package]]
 name = "imagod-runtime-control"
-release = true
+release = false
+publish = false
 
 [[package]]
 name = "imagod-runtime-ingress"
-release = true
+release = false
+publish = false
 
 [[package]]
 name = "imagod-runtime-internal"
-release = true
+release = false
+publish = false
 
 [[package]]
 name = "imagod-runtime-wasmtime"
-release = true
+release = false
+publish = false
 
 [[package]]
 name = "imagod-server"
-release = true
+release = false
+publish = false
+
+[[package]]
+name = "imago-plugin-imago-admin"
+release = false
+publish = false
+
+[[package]]
+name = "imago-plugin-imago-experimental-gpio"
+release = false
+publish = false
+
+[[package]]
+name = "imago-plugin-imago-experimental-i2c"
+release = false
+publish = false
+
+[[package]]
+name = "imago-plugin-imago-node"
+release = false
+publish = false
+
+[[package]]
+name = "imago-plugin-imago-usb"
+release = false
+publish = false
