@@ -64,7 +64,7 @@ Treat these three template sections as the only authoritative PR-body contract.
 Include required details inside those sections: what changed and why, linked issue/PR context, validation commands, and spec/compatibility impact notes.
 
 ### PR Title Prefix and Breaking Footer (release-plz)
-- Use Conventional Commit style for PR titles: `<prefix><summary>`.
+- Use Conventional Commit style for PR titles: `<prefix> <summary>`.
 - Start every PR title with exactly one allowed prefix: `fix:`, `feat:`, `feat!:`, `ci:`, or `docs:`.
 - Prefix-to-impact mapping for release-plz:
   - `feat!:` => Major
