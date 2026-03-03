@@ -1,4 +1,4 @@
-package imago:usb@0.1.0;
+package imago:usb@0.2.0;
 
 /// Shared USB types used by provider, device, and interface APIs.
 @since(version = 0.1.0)
@@ -57,6 +57,25 @@ interface types {
         max-timeout-ms: u32,
         /// Maximum number of allowlisted device paths.
         max-paths: u32,
+        /// Fixed chunk size in bytes used by bulk ring readers.
+        bulk-ring-chunk-bytes: u32,
+        /// Number of chunks retained in each bulk ring reader.
+        bulk-ring-slots: u32,
+        /// Maximum bytes retained in each bulk ring reader.
+        bulk-ring-max-bytes: u32,
+    }
+
+    /// Statistics for one bulk ring reader.
+    @since(version = 0.2.0)
+    record bulk-read-stats {
+        /// Total dropped chunks caused by ring overflow.
+        dropped-chunks: u64,
+        /// Total dropped bytes caused by ring overflow.
+        dropped-bytes: u64,
+        /// Current buffered chunk count.
+        buffered-chunks: u32,
+        /// Current buffered byte count.
+        buffered-bytes: u64,
     }
 
     /// Common setup fields for USB control transfers.
@@ -249,6 +268,8 @@ interface types {
 interface usb-interface {
     @since(version = 0.1.0)
     use types.{control-setup, usb-error};
+    @since(version = 0.2.0)
+    use types.{bulk-read-stats};
 
     /// Claimed USB interface resource.
     @since(version = 0.1.0)
@@ -273,9 +294,13 @@ interface usb-interface {
         @since(version = 0.1.0)
         control-out: func(setup: control-setup, data: list<u8>, timeout-ms: u32) -> result<_, usb-error>;
 
-        /// Execute one bulk IN transfer.
-        @since(version = 0.1.0)
-        bulk-in: func(endpoint: u8, length: u32, timeout-ms: u32) -> result<list<u8>, usb-error>;
+        /// Read one chunk from a per-endpoint bulk ring buffer.
+        @since(version = 0.2.0)
+        bulk-read: func(endpoint: u8, timeout-ms: u32) -> result<list<u8>, usb-error>;
+
+        /// Return bulk ring buffer statistics for one endpoint.
+        @since(version = 0.2.0)
+        bulk-read-stats: func(endpoint: u8) -> result<bulk-read-stats, usb-error>;
 
         /// Execute one bulk OUT transfer.
         @since(version = 0.1.0)
