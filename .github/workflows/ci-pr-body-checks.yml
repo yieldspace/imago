@@ -7,6 +7,8 @@ on:
       - edited
       - reopened
       - synchronize
+      - labeled
+      - unlabeled
 
 permissions:
   contents: read
@@ -19,7 +21,7 @@ concurrency:
 jobs:
   pr_body_lint:
     name: pr body lint
-    if: ${{ github.event.pull_request.user.login != 'dependabot[bot]' }}
+    if: ${{ github.event.pull_request.user.login != 'dependabot[bot]' && !contains(github.event.pull_request.labels.*.name, 'release') }}
     runs-on: imago-default-runner-set
     steps:
       - name: Checkout
@@ -39,11 +41,20 @@ jobs:
       - name: Allow dependabot pull request
         run: echo "Dependabot pull request is exempt from PR body lint."
 
+  allow_release:
+    name: allow release
+    if: ${{ github.event.pull_request.user.login != 'dependabot[bot]' && contains(github.event.pull_request.labels.*.name, 'release') }}
+    runs-on: imago-default-runner-set
+    steps:
+      - name: Allow release-labeled pull request
+        run: echo "Release-labeled pull request is exempt from PR body lint."
+
   checks:
     name: checks
     needs:
       - pr_body_lint
       - allow_dependabot
+      - allow_release
     if: always()
     runs-on: imago-default-runner-set
     steps:
@@ -53,15 +64,19 @@ jobs:
           set -euo pipefail
 
           is_dependabot="${{ github.event.pull_request.user.login == 'dependabot[bot]' }}"
+          is_release="${{ contains(github.event.pull_request.labels.*.name, 'release') }}"
           lint_result='${{ needs.pr_body_lint.result }}'
-          allow_result='${{ needs.allow_dependabot.result }}'
+          allow_dependabot_result='${{ needs.allow_dependabot.result }}'
+          allow_release_result='${{ needs.allow_release.result }}'
 
           echo "is_dependabot: $is_dependabot"
+          echo "is_release: $is_release"
           echo "pr_body_lint: $lint_result"
-          echo "allow_dependabot: $allow_result"
+          echo "allow_dependabot: $allow_dependabot_result"
+          echo "allow_release: $allow_release_result"
 
           if [[ "$is_dependabot" == "true" ]]; then
-            [[ "$allow_result" == "success" ]] || {
+            [[ "$allow_dependabot_result" == "success" ]] || {
               echo "::error::allow_dependabot must succeed for Dependabot pull requests."
               exit 1
             }
@@ -70,14 +85,39 @@ jobs:
               echo "::error::pr_body_lint must be skipped or succeed for Dependabot pull requests."
               exit 1
             }
+
+            [[ "$allow_release_result" == "skipped" || "$allow_release_result" == "success" ]] || {
+              echo "::error::allow_release must be skipped or succeed for Dependabot pull requests."
+              exit 1
+            }
+          elif [[ "$is_release" == "true" ]]; then
+            [[ "$allow_release_result" == "success" ]] || {
+              echo "::error::allow_release must succeed for release-labeled pull requests."
+              exit 1
+            }
+
+            [[ "$lint_result" == "skipped" || "$lint_result" == "success" ]] || {
+              echo "::error::pr_body_lint must be skipped or succeed for release-labeled pull requests."
+              exit 1
+            }
+
+            [[ "$allow_dependabot_result" == "skipped" || "$allow_dependabot_result" == "success" ]] || {
+              echo "::error::allow_dependabot must be skipped or succeed for release-labeled pull requests."
+              exit 1
+            }
           else
             [[ "$lint_result" == "success" ]] || {
               echo "::error::pr_body_lint must succeed for non-Dependabot pull requests."
               exit 1
             }
 
-            [[ "$allow_result" == "skipped" || "$allow_result" == "success" ]] || {
+            [[ "$allow_dependabot_result" == "skipped" || "$allow_dependabot_result" == "success" ]] || {
               echo "::error::allow_dependabot must be skipped or succeed for non-Dependabot pull requests."
+              exit 1
+            }
+
+            [[ "$allow_release_result" == "skipped" || "$allow_release_result" == "success" ]] || {
+              echo "::error::allow_release must be skipped or succeed for non-release-labeled pull requests."
               exit 1
             }
           fi
