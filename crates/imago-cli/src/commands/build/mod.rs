@@ -18,6 +18,7 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
+use imago_project_config::{decode_document as decode_imago_toml_document, validate_for_build};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use toml::Value as TomlValue;
@@ -632,19 +633,13 @@ fn load_resolved_toml(project_root: &Path) -> anyhow::Result<toml::Table> {
     let path = project_root.join("imago.toml");
     let raw =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let document = decode_imago_toml_document(&raw).context("failed to decode imago.toml")?;
+    validate_for_build(&document)?;
     let parsed: TomlValue = toml::from_str(&raw).context("failed to parse imago.toml")?;
     let root = parsed
         .as_table()
         .cloned()
         .ok_or_else(|| anyhow!("imago.toml root must be a table"))?;
-
-    if let Some(runtime) = root.get("runtime").and_then(TomlValue::as_table)
-        && runtime.get("restart_policy").is_some()
-    {
-        return Err(anyhow!(
-            "runtime.restart_policy is no longer supported; use top-level restart"
-        ));
-    }
 
     Ok(root)
 }

@@ -3,6 +3,14 @@
 This page is a practical reference for `imago.toml`.
 Source of truth is the codebase (module docs, type definitions, validation logic, and tests).
 
+## JSON Schema
+
+You can enable editor completion/validation by adding this root key:
+
+```toml
+"$schema" = "https://raw.githubusercontent.com/yieldspace/imago/main/schemas/imago.schema.json"
+```
+
 ## Sections
 
 - [The top-level fields section](#the-top-level-fields-section)
@@ -78,7 +86,7 @@ type = "http"
 restart = "always"
 ```
 
-- Validation error notes: any other value fails validation; `runtime.restart_policy` is rejected as a legacy key.
+- Validation error notes: any other value fails validation. Legacy `runtime.restart_policy` is accepted for compatibility but ignored.
 
 <a id="the-build-section"></a>
 ## The [build] section

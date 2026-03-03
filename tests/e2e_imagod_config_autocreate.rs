@@ -89,6 +89,13 @@ fn e2e_imagod_creates_default_config_when_missing() -> TestResult {
         generated
     );
     assert!(
+        generated.contains(
+            "\"$schema\" = \"https://raw.githubusercontent.com/yieldspace/imago/main/schemas/imagod.schema.json\""
+        ),
+        "generated config is missing $schema URL: {}",
+        generated
+    );
+    assert!(
         generated.contains("listen_addr = "),
         "generated config is missing listen_addr: {}",
         generated

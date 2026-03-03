@@ -3,6 +3,14 @@
 This page is a practical reference for `imagod.toml`.
 Source of truth is the codebase (module docs, type definitions, validation logic, and tests).
 
+## JSON Schema
+
+You can enable editor completion/validation by adding this root key:
+
+```toml
+"$schema" = "https://raw.githubusercontent.com/yieldspace/imago/main/schemas/imagod.schema.json"
+```
+
 ## Sections
 
 - [The top-level fields section](#the-top-level-fields-section)

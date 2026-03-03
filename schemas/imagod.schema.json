@@ -1,0 +1,288 @@
+{
+  "$defs": {
+    "RuntimeConfig": {
+      "description": "Runtime limits and timeouts applied by manager and runner.",
+      "properties": {
+        "boot_plugin_gc_enabled": {
+          "default": true,
+          "description": "Whether plugin cache GC runs at manager boot.",
+          "type": "boolean"
+        },
+        "boot_restore_enabled": {
+          "default": true,
+          "description": "Whether restart-policy boot restore runs at manager boot.",
+          "type": "boolean"
+        },
+        "chunk_size": {
+          "default": 1048576,
+          "description": "Maximum chunk size accepted by `artifact.push`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "committed_session_ttl_secs": {
+          "default": 120,
+          "description": "TTL for committed upload sessions that have not been consumed by deploy.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "deploy_stream_timeout_secs": {
+          "default": 15,
+          "description": "Timeout for deployment stream operations in seconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "epoch_tick_interval_ms": {
+          "default": 50,
+          "description": "Runner epoch-tick interval in milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "http_queue_memory_budget_bytes": {
+          "default": 33554432,
+          "description": "Total memory budget for queued HTTP request bodies in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "http_worker_count": {
+          "default": 2,
+          "description": "Compatibility knob forwarded to runner bootstrap (runtime currently uses one worker task).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "http_worker_queue_capacity": {
+          "default": 4,
+          "description": "Upper bound for HTTP request queue capacity.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "manager_control_read_timeout_ms": {
+          "default": 500,
+          "description": "Read timeout for manager control channel operations in milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_artifact_size_bytes": {
+          "default": 67108864,
+          "description": "Upper bound for accepted artifact archive size.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_committed_sessions": {
+          "default": 16,
+          "description": "Upper bound for committed upload sessions retained in manager memory.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_concurrent_sessions": {
+          "default": 256,
+          "description": "Upper bound of concurrently active sessions managed by imagod.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_inflight_chunks": {
+          "default": 16,
+          "description": "Max concurrent chunk writes per upload session.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "retained_logs_capacity_bytes": {
+          "default": 524288,
+          "description": "Total capacity for retained logs from stopped services in bytes.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runner_log_buffer_bytes": {
+          "default": 262144,
+          "description": "Total per-runner log ring capacity in bytes.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runner_ready_timeout_secs": {
+          "default": 3,
+          "description": "Deadline for waiting runner-ready handshake.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stop_grace_timeout_secs": {
+          "default": 30,
+          "description": "Grace period for service stop before forced kill.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "transport_keepalive_interval_secs": {
+          "default": 5,
+          "description": "QUIC transport keepalive interval in seconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "transport_max_idle_timeout_secs": {
+          "default": 180,
+          "description": "QUIC transport max idle timeout in seconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "upload_session_ttl_secs": {
+          "default": 900,
+          "description": "Upload session time-to-live in seconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wasm_guard_before_linear_memory": {
+          "default": false,
+          "description": "Whether Wasmtime reserves a guard region before linear memory.",
+          "type": "boolean"
+        },
+        "wasm_memory_guard_size_bytes": {
+          "default": 65536,
+          "description": "Wasmtime linear-memory guard size in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wasm_memory_reservation_bytes": {
+          "default": 67108864,
+          "description": "Wasmtime linear-memory reservation size in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wasm_memory_reservation_for_growth_bytes": {
+          "default": 16777216,
+          "description": "Wasmtime extra reservation size for linear-memory growth in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wasm_parallel_compilation": {
+          "default": false,
+          "description": "Whether Wasmtime compiles modules in parallel.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "TlsConfig": {
+      "description": "TLS material locations for raw public key mTLS server startup.",
+      "properties": {
+        "admin_public_keys": {
+          "default": [],
+          "description": "Allowlist of admin Ed25519 raw public keys (32-byte hex).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "client_public_keys": {
+          "description": "Allowlist of client Ed25519 raw public keys (32-byte hex).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "known_public_keys": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "TOFU-known remote authorities mapped to Ed25519 raw public key hex.",
+          "type": "object"
+        },
+        "server_key": {
+          "description": "Server private key in PEM format.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "server_key",
+        "client_public_keys"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "TOML document model for `imagod.toml` including optional JSON Schema reference.",
+  "properties": {
+    "$schema": {
+      "description": "Optional JSON Schema URL used by editors for completion/validation.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "listen_addr": {
+      "default": "[::]:4443",
+      "description": "WebTransport listen address.",
+      "type": "string"
+    },
+    "runtime": {
+      "$ref": "#/$defs/RuntimeConfig",
+      "default": {
+        "boot_plugin_gc_enabled": true,
+        "boot_restore_enabled": true,
+        "chunk_size": 1048576,
+        "committed_session_ttl_secs": 120,
+        "deploy_stream_timeout_secs": 15,
+        "epoch_tick_interval_ms": 50,
+        "http_queue_memory_budget_bytes": 33554432,
+        "http_worker_count": 2,
+        "http_worker_queue_capacity": 4,
+        "manager_control_read_timeout_ms": 500,
+        "max_artifact_size_bytes": 67108864,
+        "max_committed_sessions": 16,
+        "max_concurrent_sessions": 256,
+        "max_inflight_chunks": 16,
+        "retained_logs_capacity_bytes": 524288,
+        "runner_log_buffer_bytes": 262144,
+        "runner_ready_timeout_secs": 3,
+        "stop_grace_timeout_secs": 30,
+        "transport_keepalive_interval_secs": 5,
+        "transport_max_idle_timeout_secs": 180,
+        "upload_session_ttl_secs": 900,
+        "wasm_guard_before_linear_memory": false,
+        "wasm_memory_guard_size_bytes": 65536,
+        "wasm_memory_reservation_bytes": 67108864,
+        "wasm_memory_reservation_for_growth_bytes": 16777216,
+        "wasm_parallel_compilation": false
+      },
+      "description": "Runtime limits and process-control knobs."
+    },
+    "server_version": {
+      "default": "imagod/0.1.0",
+      "description": "Server version reported via negotiate response.",
+      "type": "string"
+    },
+    "storage_root": {
+      "default": "/usr/local/var/imago",
+      "description": "Storage root used for artifacts, runtime state, and releases.",
+      "type": "string"
+    },
+    "tls": {
+      "$ref": "#/$defs/TlsConfig",
+      "description": "TLS certificate and key paths."
+    }
+  },
+  "required": [
+    "tls"
+  ],
+  "title": "ImagodTomlDocument",
+  "type": "object"
+}
