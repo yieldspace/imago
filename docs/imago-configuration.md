@@ -86,7 +86,7 @@ type = "http"
 restart = "always"
 ```
 
-- Validation error notes: any other value fails validation. Legacy `runtime.restart_policy` is accepted for compatibility but ignored.
+- Validation error notes: any other value fails validation. Legacy `runtime.restart_policy` is rejected; use top-level `restart`.
 
 <a id="the-build-section"></a>
 ## The [build] section
