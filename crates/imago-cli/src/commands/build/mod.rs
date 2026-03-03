@@ -406,12 +406,12 @@ fn run_inner_with_target_override(
 }
 
 pub fn load_target_config(target_name: &str, project_root: &Path) -> anyhow::Result<TargetConfig> {
-    let root = load_resolved_toml(project_root)?;
+    let root = load_resolved_toml(project_root, false)?;
     parse_target(&root, target_name, project_root)
 }
 
 pub fn load_service_name(project_root: &Path) -> anyhow::Result<String> {
-    let root = load_resolved_toml(project_root)?;
+    let root = load_resolved_toml(project_root, false)?;
     let name = required_string(&root, "name")?;
     validate_service_name(&name)?;
     Ok(name)
@@ -469,7 +469,7 @@ fn build_project_with_target_override_inner(
     if emit_progress {
         ui::command_stage("artifact.build", "load-config", "loading imago.toml");
     }
-    let root = load_resolved_toml(project_root)?;
+    let root = load_resolved_toml(project_root, true)?;
     let namespace_registries = parse_namespace_registries(root.get("namespace_registries"))?;
 
     let command = parse_build_command(&root)?;
@@ -629,12 +629,17 @@ fn build_project_with_target_override_inner(
     })
 }
 
-fn load_resolved_toml(project_root: &Path) -> anyhow::Result<toml::Table> {
+fn load_resolved_toml(
+    project_root: &Path,
+    validate_build_contract: bool,
+) -> anyhow::Result<toml::Table> {
     let path = project_root.join("imago.toml");
     let raw =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let document = decode_imago_toml_document(&raw).context("failed to decode imago.toml")?;
-    validate_for_build(&document)?;
+    if validate_build_contract {
+        validate_for_build(&document)?;
+    }
     let parsed: TomlValue = toml::from_str(&raw).context("failed to parse imago.toml")?;
     let root = parsed
         .as_table()
@@ -4478,6 +4483,58 @@ mod tests {
         let default_name = load_service_name(&root).expect("default name should load");
 
         assert_eq!(default_name, "svc-default");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_service_name_ignores_build_only_validation_errors() {
+        let root = new_temp_dir("load-service-name-ignores-build-validation");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc-default"
+    main = "build/app.wasm"
+    type = "cli"
+
+    [[dependencies]]
+    name = "missing-source"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+
+        let default_name = load_service_name(&root)
+            .expect("load_service_name should not require build-only validation");
+
+        assert_eq!(default_name, "svc-default");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_target_config_ignores_build_only_validation_errors() {
+        let root = new_temp_dir("load-target-config-ignores-build-validation");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc-default"
+    main = "build/app.wasm"
+    type = "cli"
+
+    [[dependencies]]
+    name = "missing-source"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+
+        let target = load_target_config("default", &root)
+            .expect("load_target_config should not require build-only validation");
+
+        assert_eq!(target.remote, "127.0.0.1:4443");
 
         let _ = fs::remove_dir_all(root);
     }
