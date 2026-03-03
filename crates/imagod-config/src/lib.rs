@@ -44,6 +44,7 @@ pub struct ImagodConfig {
     /// TLS certificate and key paths.
     pub tls: TlsConfig,
     #[serde(default = "default_storage_root")]
+    #[schemars(default = "schema_default_storage_root")]
     /// Storage root used for artifacts, runtime state, and releases.
     pub storage_root: PathBuf,
     #[serde(default)]
@@ -715,6 +716,10 @@ fn default_storage_root() -> PathBuf {
         std::env::consts::OS,
         option_env!("IMAGOD_STORAGE_ROOT_DEFAULT"),
     )
+}
+
+fn schema_default_storage_root() -> PathBuf {
+    PathBuf::from("/var/lib/imago")
 }
 
 fn resolve_default_storage_root(target_os: &str, build_override: Option<&str>) -> PathBuf {

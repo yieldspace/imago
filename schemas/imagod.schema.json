@@ -271,7 +271,7 @@
       "type": "string"
     },
     "storage_root": {
-      "default": "/usr/local/var/imago",
+      "default": "/var/lib/imago",
       "description": "Storage root used for artifacts, runtime state, and releases.",
       "type": "string"
     },
