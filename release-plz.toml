@@ -12,6 +12,7 @@ pr_labels = ["release"]
 [[package]]
 name = "imago-cli"
 release = true
+release_always = true
 git_tag_enable = true
 git_release_enable = true
 git_tag_name = "imago-v{{ version }}"
@@ -25,6 +26,7 @@ git_release_body = """
 [[package]]
 name = "imagod"
 release = true
+release_always = true
 git_tag_enable = true
 git_release_enable = true
 git_tag_name = "imagod-v{{ version }}"
