@@ -35,8 +35,13 @@ flowchart LR
     `crates/imago-cli/Cargo.toml` の `version`。
   - `imagod-vX.Y.Z` / `imagod-vX.Y.Z-alpha(.N)` / `imagod-vX.Y.Z-beta(.N)`:
     ルート `Cargo.toml` の `[workspace.package].version`。
+- `git_only` のタグ基準は `imago-cli` / `imagod` のみを対象にします。
+- 依存 crate は内部依存として扱い、`publish = false` / `release = false` を維持します。
+- crates.io への実 publish（`cargo publish`）は実行しません。
 - GitHub Release は stable / alpha / beta を問わず常に prerelease として作成されます。
-- release-plz workflow では `RELEASE_PLZ_TOKEN`（PAT）を利用します。
+- release-plz workflow では `RELEASE_PLZ_TOKEN`（GitHub 操作用）を利用します。
+- release-plz 本体は fork の patch commit SHA を `cargo install --git --rev <sha>` で pin して導入します。
+  - pin した SHA が参照できなくなった場合は fork の tag に退避して `--rev` を切り替えるか、upstream 正式リリースへ更新して pin を解除してください。
 - バイナリ添付は `imago-build.yml` が `release` イベントで既存Releaseへ追加します。
   - `imagod-v*` では `imagod-<target-triple>` と `imagod-<target-triple>.sha256` が添付されます。
   - musl 系 target には `x86_64-unknown-linux-musl` も含まれます。

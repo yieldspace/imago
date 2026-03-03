@@ -3,7 +3,7 @@ name = "imago-plugin-imago-node"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+publish = false
 [dependencies]
 imago-protocol = { workspace = true }
 imagod-ipc = { workspace = true }

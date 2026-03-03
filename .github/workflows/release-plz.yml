@@ -9,10 +9,76 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: read
+
+env:
+  # Temporary pin: use fork commit with known-error fallback for git_only no-publish workspaces.
+  RELEASE_PLZ_PATCH_REPO: https://github.com/sizumita/release-plz.git
+  RELEASE_PLZ_PATCH_SHA: a799a8d4e0113ebf8bc6ca8144370e9929baf7fd
 
 jobs:
+  prepare-release-plz:
+    name: Prepare release-plz
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore release-plz cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/release-plz/${{ env.RELEASE_PLZ_PATCH_SHA }}/root
+          key: release-plz-bin-${{ runner.os }}-${{ env.RELEASE_PLZ_PATCH_SHA }}
+
+      - name: Validate cached release-plz
+        id: validate_release_plz
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_PLZ_ROOT="$HOME/.cache/release-plz/${RELEASE_PLZ_PATCH_SHA}/root"
+          if [ -x "$RELEASE_PLZ_ROOT/bin/release-plz" ] && "$RELEASE_PLZ_ROOT/bin/release-plz" --version; then
+            echo "healthy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install release-plz into cache root (pinned fork commit)
+        if: steps.validate_release_plz.outputs.healthy != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_PLZ_ROOT="$HOME/.cache/release-plz/${RELEASE_PLZ_PATCH_SHA}/root"
+          mkdir -p "$RELEASE_PLZ_ROOT"
+          cargo install \
+            --locked \
+            --force \
+            --git "${RELEASE_PLZ_PATCH_REPO}" \
+            --rev "${RELEASE_PLZ_PATCH_SHA}" \
+            --root "$RELEASE_PLZ_ROOT" \
+            release-plz
+
+      - name: Verify prepared release-plz binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_PLZ_ROOT="$HOME/.cache/release-plz/${RELEASE_PLZ_PATCH_SHA}/root"
+          "$RELEASE_PLZ_ROOT/bin/release-plz" --version
+
+      - name: Pack release-plz root artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_PLZ_CACHE_DIR="$HOME/.cache/release-plz/${RELEASE_PLZ_PATCH_SHA}"
+          tar -C "$RELEASE_PLZ_CACHE_DIR" -czf release-plz-root.tgz root
+
+      - name: Upload release-plz root artifact
+        uses: actions/upload-artifact@v7
+        with:
+          if-no-files-found: error
+          name: release-plz-root
+          path: release-plz-root.tgz
+          retention-days: 1
+
   release-plz-release:
     name: Release-plz release
+    needs: prepare-release-plz
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -21,16 +87,43 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Run release-plz release
-        uses: release-plz/action@v0.5
+      - name: Download prepared release-plz root
+        uses: actions/download-artifact@v7
         with:
-          command: release
-          config: release-plz.toml
+          name: release-plz-root
+          path: /tmp/release-plz-artifact
+
+      - name: Restore release-plz root from artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_PLZ_CACHE_DIR="$HOME/.cache/release-plz/${RELEASE_PLZ_PATCH_SHA}"
+          mkdir -p "$RELEASE_PLZ_CACHE_DIR"
+          tar -xzf /tmp/release-plz-artifact/release-plz-root.tgz -C "$RELEASE_PLZ_CACHE_DIR"
+          echo "$RELEASE_PLZ_CACHE_DIR/root/bin" >> "$GITHUB_PATH"
+
+      - name: Log release-plz version
+        shell: bash
+        run: release-plz --version
+
+      - name: Configure git user
+        run: |
+          git config --global user.name "release-plz[bot]"
+          git config --global user.email "release-plz[bot]@users.noreply.github.com"
+
+      - name: Run release-plz release
+        run: |
+          release-plz release \
+            --config release-plz.toml \
+            --forge github \
+            --git-token "${GITHUB_TOKEN}" \
+            -o json
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
   release-plz-pr:
     name: Release-plz PR
+    needs: prepare-release-plz
     runs-on: ubuntu-latest
     concurrency:
       group: release-plz-${{ github.ref }}
@@ -42,10 +135,37 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Run release-plz release-pr
-        uses: release-plz/action@v0.5
+      - name: Download prepared release-plz root
+        uses: actions/download-artifact@v7
         with:
-          command: release-pr
-          config: release-plz.toml
+          name: release-plz-root
+          path: /tmp/release-plz-artifact
+
+      - name: Restore release-plz root from artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_PLZ_CACHE_DIR="$HOME/.cache/release-plz/${RELEASE_PLZ_PATCH_SHA}"
+          mkdir -p "$RELEASE_PLZ_CACHE_DIR"
+          tar -xzf /tmp/release-plz-artifact/release-plz-root.tgz -C "$RELEASE_PLZ_CACHE_DIR"
+          echo "$RELEASE_PLZ_CACHE_DIR/root/bin" >> "$GITHUB_PATH"
+
+      - name: Log release-plz version
+        shell: bash
+        run: release-plz --version
+
+      - name: Configure git user
+        run: |
+          git config --global user.name "release-plz[bot]"
+          git config --global user.email "release-plz[bot]@users.noreply.github.com"
+
+      - name: Run release-plz release-pr
+        run: |
+          release-plz release-pr \
+            --config release-plz.toml \
+            --repo-url "https://github.com/${GITHUB_REPOSITORY}" \
+            --forge github \
+            --git-token "${GITHUB_TOKEN}" \
+            -o json
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
