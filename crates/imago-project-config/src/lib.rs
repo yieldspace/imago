@@ -41,6 +41,16 @@ pub struct ImagoTomlConfig {
     pub bindings: Option<Vec<BindingEntry>>,
     pub dependencies: Option<Vec<DependencyEntry>>,
     pub namespace_registries: Option<BTreeMap<String, String>>,
+    #[serde(default, rename = "runtime", skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub legacy_runtime: Option<LegacyRuntimeSection>,
+    #[serde(
+        default,
+        rename = "capabilirties",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(skip)]
+    pub legacy_capabilirties: Option<JsonValue>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, JsonValue>,
 }
@@ -74,6 +84,23 @@ pub struct TargetEntry {
     pub remote: Option<String>,
     pub server_name: Option<String>,
     pub client_key: Option<String>,
+    #[serde(default, rename = "ca_cert", skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub legacy_ca_cert: Option<String>,
+    #[serde(
+        default,
+        rename = "client_cert",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(skip)]
+    pub legacy_client_cert: Option<String>,
+    #[serde(
+        default,
+        rename = "known_hosts",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(skip)]
+    pub legacy_known_hosts: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, JsonValue>,
 }
@@ -227,6 +254,20 @@ pub enum DependencyKind {
     Wasm,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct LegacyRuntimeSection {
+    #[serde(
+        default,
+        rename = "restart_policy",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(skip)]
+    pub restart_policy: Option<String>,
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub extra: BTreeMap<String, JsonValue>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum RestartPolicy {
@@ -242,6 +283,18 @@ pub fn decode_document(content: &str) -> Result<ImagoTomlDocument, toml::de::Err
 
 pub fn validate_for_build(document: &ImagoTomlDocument) -> Result<()> {
     let config = &document.config;
+
+    if config.legacy_capabilirties.is_some() {
+        return Err(anyhow!("unknown key 'capabilirties'; use 'capabilities'"));
+    }
+
+    if let Some(runtime) = &config.legacy_runtime
+        && runtime.restart_policy.is_some()
+    {
+        return Err(anyhow!(
+            "runtime.restart_policy is no longer supported; use top-level restart"
+        ));
+    }
 
     if let Some(app_type) = &config.app_type {
         validate_allowed(
@@ -272,6 +325,26 @@ pub fn validate_for_build(document: &ImagoTomlDocument) -> Result<()> {
                 &["inbound", "outbound", "both"],
                 "socket.direction must be one of: inbound, outbound, both",
             )?;
+        }
+    }
+
+    if let Some(targets) = &config.target {
+        for target in targets.values() {
+            if target.legacy_ca_cert.is_some() {
+                return Err(anyhow!(
+                    "target key 'ca_cert' is no longer supported; use target.<name>.client_key with RPK+TOFU"
+                ));
+            }
+            if target.legacy_client_cert.is_some() {
+                return Err(anyhow!(
+                    "target key 'client_cert' is no longer supported; use target.<name>.client_key with RPK+TOFU"
+                ));
+            }
+            if target.legacy_known_hosts.is_some() {
+                return Err(anyhow!(
+                    "target key 'known_hosts' is no longer supported; CLI always uses ~/.imago/known_hosts"
+                ));
+            }
         }
     }
 
@@ -525,7 +598,7 @@ kind = "wasm"
     }
 
     #[test]
-    fn accepts_legacy_runtime_restart_policy() {
+    fn rejects_legacy_runtime_restart_policy() {
         let result = decode_and_validate(
             r#"
 name = "example-service"
@@ -539,7 +612,11 @@ remote = "127.0.0.1:4443"
 restart_policy = "always"
 "#,
         );
-        assert!(result.is_ok(), "unexpected error: {result:?}");
+        let err = result.expect_err("validation must fail");
+        assert!(
+            err.to_string().contains("runtime.restart_policy"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -582,6 +659,48 @@ target = "legacy"
 "#,
         );
         assert!(result.is_ok(), "unexpected error: {result:?}");
+    }
+
+    #[test]
+    fn rejects_legacy_capabilirties_key() {
+        let result = decode_and_validate(
+            r#"
+name = "example-service"
+main = "build/example-service.wasm"
+type = "cli"
+
+[capabilirties]
+privileged = true
+
+[target.default]
+remote = "127.0.0.1:4443"
+"#,
+        );
+        let err = result.expect_err("validation must fail");
+        assert!(
+            err.to_string().contains("capabilirties"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_legacy_target_tls_keys() {
+        let result = decode_and_validate(
+            r#"
+name = "example-service"
+main = "build/example-service.wasm"
+type = "cli"
+
+[target.default]
+remote = "127.0.0.1:4443"
+ca_cert = "certs/ca.crt"
+"#,
+        );
+        let err = result.expect_err("validation must fail");
+        assert!(
+            err.to_string().contains("target key 'ca_cert'"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
