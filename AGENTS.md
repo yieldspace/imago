@@ -63,6 +63,21 @@ PR body must follow `.github/pull_request_template.md` and explicitly fill `## M
 Treat these three template sections as the only authoritative PR-body contract.
 Include required details inside those sections: what changed and why, linked issue/PR context, validation commands, and spec/compatibility impact notes.
 
+### PR Title Prefix and Breaking Footer (release-plz)
+- Use Conventional Commit style for PR titles: `<prefix><summary>`.
+- Start every PR title with exactly one allowed prefix: `fix:`, `feat:`, `feat!:`, `ci:`, or `docs:`.
+- Prefix-to-impact mapping for release-plz:
+  - `feat!:` => Major
+  - `feat:` => Minor
+  - `fix:` => Patch
+  - `ci:` and `docs:` => usually no release impact
+- If a change is breaking, the commit message footer must include `BREAKING CHANGE:` even when the title prefix is not `feat!`.
+- Any change that includes a `BREAKING CHANGE:` footer is treated as Major impact.
+- In the `BREAKING CHANGE:` footer, describe the compatibility break and migration path (if needed) in 1-2 sentences.
+- Impact precedence is: `BREAKING CHANGE footer` > `feat!:` > `feat:` > `fix:` > `ci:/docs:`.
+- For squash merges, preserve the same prefix in the final merge commit title and keep the `BREAKING CHANGE:` footer when applicable.
+- Prefixes outside the allowed set are not permitted. If additional prefixes are needed, update this rule first and update `release-plz.toml` as needed.
+
 ## Testing Guidelines
 Use t-wada style TDD for new behavior: Red (failing test first), Green (minimum implementation), Refactor (cleanup with tests still green).
 Add unit tests close to implementation with `#[cfg(test)] mod tests`.
