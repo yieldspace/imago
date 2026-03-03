@@ -3,7 +3,8 @@ name = "imagod"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+publish = true
+
 [features]
 default = ["runtime-wasmtime"]
 runtime-wasmtime = ["imagod-runtime/runtime-wasmtime"]
