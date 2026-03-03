@@ -3256,32 +3256,32 @@ mod tests {
         write(
             &source.join("package.wit"),
             br#"
-package imago:experimental-gpio@0.1.0;
-
-interface digital {
+    package imago:experimental-gpio@0.1.0;
+    
+    interface digital {
     use wasi:io/poll@0.2.6.{pollable};
-
+    
     resource digital-out-pin {
         watch-for-ready: func() -> pollable;
     }
-}
-
-world host {
+    }
+    
+    world host {
     import digital;
-}
-"#,
+    }
+    "#,
         );
         write(
             &source.join("deps/wasi-io-0.2.6/package.wit"),
             br#"
-package wasi:io@0.2.6;
-
-interface poll {
+    package wasi:io@0.2.6;
+    
+    interface poll {
     resource pollable {
         block: func();
     }
-}
-"#,
+    }
+    "#,
         );
 
         let source_ref = format!("file://{}", source.display());
@@ -3326,12 +3326,12 @@ interface poll {
         write(
             &source,
             br#"
-package acme:example@0.1.0;
-
-interface api {
+    package acme:example@0.1.0;
+    
+    interface api {
     ping: func();
-}
-"#,
+    }
+    "#,
         );
         fs::create_dir_all(&destination).expect("destination dir should be created");
 
@@ -3373,12 +3373,12 @@ interface api {
         let err = super::materialize_plain_wit_text(
             &destination,
             br#"
-package acme:example@0.1.0;
-
-world host {
+    package acme:example@0.1.0;
+    
+    world host {
     import chikoski:name/name-provider@0.1.0;
-}
-"#,
+    }
+    "#,
             super::MaterializePlainWitTextRequest {
                 origin: super::PlainWitSourceOrigin::Http { source_desc },
                 expected_package: Some("acme:example"),
@@ -3415,12 +3415,12 @@ world host {
         let materialized = super::materialize_plain_wit_text(
             &destination,
             br#"
-package acme:example@0.1.0;
-
-interface api {
+    package acme:example@0.1.0;
+    
+    interface api {
     ping: func();
-}
-"#,
+    }
+    "#,
             super::MaterializePlainWitTextRequest {
                 origin: super::PlainWitSourceOrigin::Http { source_desc },
                 expected_package: Some("acme:example"),
@@ -3450,27 +3450,27 @@ interface api {
         write(
             &source.join("package.wit"),
             br#"
-package root:component@0.1.0;
-
-interface root-api {
+    package root:component@0.1.0;
+    
+    interface root-api {
     use chikoski:name/example@0.1.0.{token};
     make-token: func() -> token;
-}
-
-world component {
+    }
+    
+    world component {
     import root-api;
-}
-"#,
+    }
+    "#,
         );
         write(
             &source.join("deps/chikoski-name/package.wit"),
             br#"
-package chikoski:name@0.1.0;
-
-interface example {
+    package chikoski:name@0.1.0;
+    
+    interface example {
     resource token {}
-}
-"#,
+    }
+    "#,
         );
 
         let mut resolve = wit_parser::Resolve::default();
@@ -3507,11 +3507,11 @@ interface example {
         write(
             &source.join("package.wit"),
             br#"
-package root:component@0.1.0;
-
-world component {
-}
-"#,
+    package root:component@0.1.0;
+    
+    world component {
+    }
+    "#,
         );
 
         let mut resolve = wit_parser::Resolve::default();
@@ -3544,12 +3544,12 @@ world component {
         write(
             &source.join("package.wit"),
             br#"
-package root:component@0.1.0;
-
-world component {
+    package root:component@0.1.0;
+    
+    world component {
     export ping: func();
-}
-"#,
+    }
+    "#,
         );
 
         let mut resolve = wit_parser::Resolve::default();
@@ -3586,47 +3586,47 @@ world component {
         write(
             &source.join("package.wit"),
             br#"
-package root:component@0.1.0;
-
-world component {
+    package root:component@0.1.0;
+    
+    world component {
     import chikoski:name/name-provider@0.1.0;
     export wasi:clocks/wall-clock@0.2.6;
-}
-
-world diagnostics {
+    }
+    
+    world diagnostics {
     import chikoski:unused/unused-api@0.1.0;
-}
-"#,
+    }
+    "#,
         );
         write(
             &source.join("deps/chikoski-name/package.wit"),
             br#"
-package chikoski:name@0.1.0;
-
-interface name-provider {
+    package chikoski:name@0.1.0;
+    
+    interface name-provider {
     get-name: func() -> string;
-}
-"#,
+    }
+    "#,
         );
         write(
             &source.join("deps/wasi-clocks/package.wit"),
             br#"
-package wasi:clocks@0.2.6;
-
-interface wall-clock {
+    package wasi:clocks@0.2.6;
+    
+    interface wall-clock {
     now: func() -> u64;
-}
-"#,
+    }
+    "#,
         );
         write(
             &source.join("deps/chikoski-unused/package.wit"),
             br#"
-package chikoski:unused@0.1.0;
-
-interface unused-api {
+    package chikoski:unused@0.1.0;
+    
+    interface unused-api {
     noop: func();
-}
-"#,
+    }
+    "#,
         );
 
         let mut resolve = wit_parser::Resolve::default();
@@ -3671,35 +3671,35 @@ interface unused-api {
         write(
             &source.join("package.wit"),
             br#"
-package root:component@0.1.0;
-
-interface active-api {
+    package root:component@0.1.0;
+    
+    interface active-api {
     ping: func();
-}
-
-interface hidden-api {
+    }
+    
+    interface hidden-api {
     use chikoski:unused/types@0.1.0.{token};
     consume: func(value: token);
-}
-
-world component {
+    }
+    
+    world component {
     import active-api;
-}
-
-world diagnostics {
+    }
+    
+    world diagnostics {
     import hidden-api;
-}
-"#,
+    }
+    "#,
         );
         write(
             &source.join("deps/chikoski-unused/package.wit"),
             br#"
-package chikoski:unused@0.1.0;
-
-interface types {
+    package chikoski:unused@0.1.0;
+    
+    interface types {
     resource token {}
-}
-"#,
+    }
+    "#,
         );
 
         let mut resolve = wit_parser::Resolve::default();
@@ -3730,32 +3730,32 @@ interface types {
         write(
             &source.join("package.wit"),
             br#"
-package root:component@0.1.0;
-
-interface helper-types {
+    package root:component@0.1.0;
+    
+    interface helper-types {
     use chikoski:external/types@0.1.0.{token};
     type local-token = token;
-}
-
-interface active-api {
+    }
+    
+    interface active-api {
     use helper-types.{local-token};
     consume: func(value: local-token);
-}
-
-world component {
+    }
+    
+    world component {
     import active-api;
-}
-"#,
+    }
+    "#,
         );
         write(
             &source.join("deps/chikoski-external/package.wit"),
             br#"
-package chikoski:external@0.1.0;
-
-interface types {
+    package chikoski:external@0.1.0;
+    
+    interface types {
     resource token {}
-}
-"#,
+    }
+    "#,
         );
 
         let mut resolve = wit_parser::Resolve::default();
@@ -3792,28 +3792,28 @@ interface types {
         write(
             &source.join("package.wit"),
             br#"
-package root:component@0.1.0;
-
-interface helper-types {
+    package root:component@0.1.0;
+    
+    interface helper-types {
     use chikoski:external/types@0.1.0.{token};
     type local-token = token;
-}
-
-world component {
+    }
+    
+    world component {
     use helper-types.{local-token};
     import process: func(value: local-token);
-}
-"#,
+    }
+    "#,
         );
         write(
             &source.join("deps/chikoski-external/package.wit"),
             br#"
-package chikoski:external@0.1.0;
-
-interface types {
+    package chikoski:external@0.1.0;
+    
+    interface types {
     resource token {}
-}
-"#,
+    }
+    "#,
         );
 
         let mut resolve = wit_parser::Resolve::default();
@@ -3853,18 +3853,18 @@ interface types {
         write(
             &source_real.join("package.wit"),
             br#"
-package imago:experimental-gpio@0.1.0;
-
-interface digital {
+    package imago:experimental-gpio@0.1.0;
+    
+    interface digital {
     resource digital-out-pin {
         watch-for-ready: func();
     }
-}
-
-world host {
+    }
+    
+    world host {
     import digital;
-}
-"#,
+    }
+    "#,
         );
         symlink(&source_real, &source_link).expect("symlink should be created");
 

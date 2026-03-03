@@ -296,3 +296,40 @@ impl LockCapabilityPolicy {
         !self.privileged && self.deps.is_empty() && self.wasi.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{IMAGO_LOCK_VERSION, ImagoLock, LockCapabilityPolicy, default_lock_version};
+
+    #[test]
+    fn default_lock_version_matches_schema_constant() {
+        assert_eq!(default_lock_version(), IMAGO_LOCK_VERSION);
+    }
+
+    #[test]
+    fn serde_default_version_uses_current_lock_version() {
+        let lock: ImagoLock = toml::from_str(
+            r#"
+[requested]
+fingerprint = "fp"
+
+[resolved]
+"#,
+        )
+        .expect("lock should deserialize without explicit version");
+        assert_eq!(lock.version, IMAGO_LOCK_VERSION);
+    }
+
+    #[test]
+    fn lock_capability_policy_is_empty_reflects_privileged_and_maps() {
+        let mut policy = LockCapabilityPolicy::default();
+        assert!(policy.is_empty());
+
+        policy.privileged = true;
+        assert!(!policy.is_empty());
+
+        policy.privileged = false;
+        policy.deps.insert("*".to_string(), vec!["foo".to_string()]);
+        assert!(!policy.is_empty());
+    }
+}

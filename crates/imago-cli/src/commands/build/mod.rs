@@ -7,23 +7,19 @@
 //! - computing integrity metadata consumed by deploy/runtime paths
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs,
     io::{BufRead, BufReader, Read},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc,
     thread,
     time::Instant,
 };
 
-use crate::lockfile::{BindingWitExpectation, LockSourceKind};
 use anyhow::{Context, anyhow};
-use dotenvy::from_path_iter;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use sha2::{Digest, Sha256};
 use toml::Value as TomlValue;
 
 use crate::{
@@ -38,7 +34,12 @@ use crate::{
     },
 };
 
+mod config_parse;
+mod manifest_hash;
 mod validation;
+
+pub(crate) use config_parse::*;
+pub(crate) use manifest_hash::*;
 
 const DEFAULT_TARGET_NAME: &str = "default";
 const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 4 * 1024 * 1024;
@@ -863,1701 +864,6 @@ fn make_build_process(command: &BuildCommand, project_root: &Path) -> Command {
     process
 }
 
-fn required_string(root: &toml::Table, key: &str) -> anyhow::Result<String> {
-    let value = root
-        .get(key)
-        .ok_or_else(|| anyhow!("imago.toml missing required key: {key}"))?;
-    let text = value
-        .as_str()
-        .ok_or_else(|| anyhow!("imago.toml key '{}' must be a string", key))?
-        .trim()
-        .to_string();
-    if text.is_empty() {
-        return Err(anyhow!("imago.toml key '{}' must not be empty", key));
-    }
-    Ok(text)
-}
-
-pub(crate) fn validate_service_name(name: &str) -> anyhow::Result<()> {
-    validation::validate_service_name(name)
-}
-
-pub(crate) fn validate_app_type(app_type: &str) -> anyhow::Result<()> {
-    validation::validate_app_type(app_type)
-}
-
-fn parse_http_section(root: &toml::Table, app_type: &str) -> anyhow::Result<Option<ManifestHttp>> {
-    let http = root.get("http");
-
-    if app_type != "http" {
-        if http.is_some() {
-            return Err(anyhow!(
-                "http section is only allowed when type is \"http\""
-            ));
-        }
-        return Ok(None);
-    }
-
-    let table = http
-        .and_then(TomlValue::as_table)
-        .ok_or_else(|| anyhow!("type=\"http\" requires [http] table"))?;
-    let raw_port = table
-        .get("port")
-        .and_then(TomlValue::as_integer)
-        .ok_or_else(|| anyhow!("http.port is required when type=\"http\""))?;
-    let port = u16::try_from(raw_port)
-        .map_err(|_| anyhow!("http.port must be in range 1..=65535 (got {raw_port})"))?;
-    if port == 0 {
-        return Err(anyhow!("http.port must be in range 1..=65535 (got 0)"));
-    }
-
-    let max_body_bytes = match table.get("max_body_bytes") {
-        Some(value) => {
-            let raw = value.as_integer().ok_or_else(|| {
-                anyhow!("http.max_body_bytes must be in range 1..={MAX_HTTP_MAX_BODY_BYTES}")
-            })?;
-            let value = u64::try_from(raw).map_err(|_| {
-                anyhow!(
-                    "http.max_body_bytes must be in range 1..={} (got {raw})",
-                    MAX_HTTP_MAX_BODY_BYTES
-                )
-            })?;
-            if value == 0 || value > MAX_HTTP_MAX_BODY_BYTES {
-                return Err(anyhow!(
-                    "http.max_body_bytes must be in range 1..={} (got {value})",
-                    MAX_HTTP_MAX_BODY_BYTES
-                ));
-            }
-            value
-        }
-        None => DEFAULT_HTTP_MAX_BODY_BYTES,
-    };
-
-    Ok(Some(ManifestHttp {
-        port,
-        max_body_bytes,
-    }))
-}
-
-fn parse_socket_section(
-    root: &toml::Table,
-    app_type: &str,
-) -> anyhow::Result<Option<ManifestSocket>> {
-    let socket = root.get("socket");
-
-    if app_type != "socket" {
-        if socket.is_some() {
-            return Err(anyhow!(
-                "socket section is only allowed when type is \"socket\""
-            ));
-        }
-        return Ok(None);
-    }
-
-    let table = socket
-        .and_then(TomlValue::as_table)
-        .ok_or_else(|| anyhow!("type=\"socket\" requires [socket] table"))?;
-
-    let protocol_raw = table
-        .get("protocol")
-        .and_then(TomlValue::as_str)
-        .ok_or_else(|| anyhow!("socket.protocol is required when type=\"socket\""))?;
-    let protocol = match protocol_raw {
-        "udp" => ManifestSocketProtocol::Udp,
-        "tcp" => ManifestSocketProtocol::Tcp,
-        "both" => ManifestSocketProtocol::Both,
-        _ => {
-            return Err(anyhow!(
-                "socket.protocol must be one of: udp, tcp, both (got: {protocol_raw})"
-            ));
-        }
-    };
-
-    let direction_raw = table
-        .get("direction")
-        .and_then(TomlValue::as_str)
-        .ok_or_else(|| anyhow!("socket.direction is required when type=\"socket\""))?;
-    let direction = match direction_raw {
-        "inbound" => ManifestSocketDirection::Inbound,
-        "outbound" => ManifestSocketDirection::Outbound,
-        "both" => ManifestSocketDirection::Both,
-        _ => {
-            return Err(anyhow!(
-                "socket.direction must be one of: inbound, outbound, both (got: {direction_raw})"
-            ));
-        }
-    };
-
-    let listen_addr = table
-        .get("listen_addr")
-        .and_then(TomlValue::as_str)
-        .ok_or_else(|| anyhow!("socket.listen_addr is required when type=\"socket\""))?
-        .trim()
-        .to_string();
-    if listen_addr.is_empty() {
-        return Err(anyhow!(
-            "socket.listen_addr must be a valid IP address (got empty value)"
-        ));
-    }
-    listen_addr.parse::<IpAddr>().map_err(|err| {
-        anyhow!("socket.listen_addr must be a valid IP address (got '{listen_addr}'): {err}")
-    })?;
-
-    let raw_port = table
-        .get("listen_port")
-        .and_then(TomlValue::as_integer)
-        .ok_or_else(|| anyhow!("socket.listen_port is required when type=\"socket\""))?;
-    let listen_port = u16::try_from(raw_port)
-        .map_err(|_| anyhow!("socket.listen_port must be in range 1..=65535 (got {raw_port})"))?;
-    if listen_port == 0 {
-        return Err(anyhow!(
-            "socket.listen_port must be in range 1..=65535 (got 0)"
-        ));
-    }
-
-    Ok(Some(ManifestSocket {
-        protocol,
-        direction,
-        listen_addr,
-        listen_port,
-    }))
-}
-
-fn normalize_relative_path(raw: &str, field_name: &str) -> anyhow::Result<PathBuf> {
-    if raw.is_empty() {
-        return Err(anyhow!("{field_name} must not be empty"));
-    }
-
-    let path = Path::new(raw);
-    if path.is_absolute() {
-        return Err(anyhow!("{field_name} must be a relative path: {raw}"));
-    }
-    if raw.contains('\\') {
-        return Err(anyhow!("{field_name} must not contain backslashes: {raw}"));
-    }
-
-    let raw_os = path.as_os_str().to_string_lossy();
-    if raw_os.len() >= 2 && raw_os.as_bytes()[1] == b':' {
-        return Err(anyhow!("{field_name} must not be windows-prefixed: {raw}"));
-    }
-
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::Normal(segment) => normalized.push(segment),
-            Component::ParentDir | Component::RootDir => {
-                return Err(anyhow!(
-                    "{field_name} must not contain path traversal: {raw}"
-                ));
-            }
-            _ => {
-                return Err(anyhow!(
-                    "{field_name} contains invalid path component: {raw}"
-                ));
-            }
-        }
-    }
-
-    if normalized.as_os_str().is_empty() {
-        return Err(anyhow!("{field_name} is invalid: {raw}"));
-    }
-
-    Ok(normalized)
-}
-
-fn normalized_path_to_string(path: &Path) -> String {
-    path.iter()
-        .map(|segment| segment.to_string_lossy().to_string())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn ensure_file_exists(
-    project_root: &Path,
-    relative: &Path,
-    field_name: &str,
-) -> anyhow::Result<()> {
-    let path = project_root.join(relative);
-    let metadata = fs::metadata(&path)
-        .with_context(|| format!("{} file is not accessible: {}", field_name, path.display()))?;
-    if !metadata.is_file() {
-        return Err(anyhow!(
-            "{} path is not a file: {}",
-            field_name,
-            path.display()
-        ));
-    }
-    Ok(())
-}
-
-fn parse_string_table(
-    value: Option<&TomlValue>,
-    field_name: &str,
-) -> anyhow::Result<BTreeMap<String, String>> {
-    let Some(value) = value else {
-        return Ok(BTreeMap::new());
-    };
-
-    let table = value
-        .as_table()
-        .ok_or_else(|| anyhow!("{} must be a table", field_name))?;
-
-    let mut map = BTreeMap::new();
-    for (key, value) in table {
-        let text = value
-            .as_str()
-            .ok_or_else(|| anyhow!("{}.{} must be a string", field_name, key))?;
-        map.insert(key.clone(), text.to_string());
-    }
-
-    Ok(map)
-}
-
-pub(crate) fn parse_namespace_registries(
-    value: Option<&TomlValue>,
-) -> anyhow::Result<plugin_sources::NamespaceRegistries> {
-    let raw = parse_string_table(value, "namespace_registries")?;
-    let mut registries = plugin_sources::NamespaceRegistries::new();
-    for (namespace, registry) in raw {
-        let normalized_namespace = namespace.trim();
-        if normalized_namespace.is_empty() {
-            return Err(anyhow!(
-                "namespace_registries contains an empty namespace key"
-            ));
-        }
-        let normalized_registry = plugin_sources::normalize_registry_name(&registry)
-            .with_context(|| format!("namespace_registries.{namespace}"))?;
-        if registries
-            .insert(normalized_namespace.to_string(), normalized_registry)
-            .is_some()
-        {
-            return Err(anyhow!(
-                "namespace_registries contains duplicate namespace key after trimming: {normalized_namespace}"
-            ));
-        }
-    }
-    Ok(registries)
-}
-
-pub(crate) fn load_namespace_registries(
-    project_root: &Path,
-) -> anyhow::Result<plugin_sources::NamespaceRegistries> {
-    let root = load_resolved_toml(project_root)?;
-    parse_namespace_registries(root.get("namespace_registries"))
-}
-
-pub(crate) fn load_project_dependencies_with_namespace_registries(
-    project_root: &Path,
-    namespace_registries: &plugin_sources::NamespaceRegistries,
-) -> anyhow::Result<Vec<ProjectDependency>> {
-    let root = load_resolved_toml(project_root)?;
-    parse_project_dependencies(root.get("dependencies"), Some(namespace_registries))
-}
-
-pub(crate) fn load_project_binding_sources_with_namespace_registries(
-    project_root: &Path,
-    namespace_registries: &plugin_sources::NamespaceRegistries,
-) -> anyhow::Result<Vec<ProjectBindingSource>> {
-    let root = load_resolved_toml(project_root)?;
-    parse_project_binding_sources(root.get("bindings"), Some(namespace_registries))
-}
-
-fn parse_project_dependencies(
-    value: Option<&TomlValue>,
-    namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
-) -> anyhow::Result<Vec<ProjectDependency>> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-
-    let array = value
-        .as_array()
-        .ok_or_else(|| anyhow!("dependencies must be an array"))?;
-    let mut dependencies = Vec::with_capacity(array.len());
-    let mut names = BTreeSet::new();
-
-    for (index, item) in array.iter().enumerate() {
-        let table = item
-            .as_table()
-            .ok_or_else(|| anyhow!("dependencies[{index}] must be a table"))?;
-        for key in table.keys() {
-            if key == "name" {
-                return Err(anyhow!(
-                    "dependencies[{index}].name is no longer supported; dependency ID is resolved from source"
-                ));
-            }
-            if !matches!(
-                key.as_str(),
-                "version"
-                    | "kind"
-                    | "wit"
-                    | "oci"
-                    | "path"
-                    | "sha256"
-                    | "registry"
-                    | "requires"
-                    | "component"
-                    | "capabilities"
-            ) {
-                return Err(anyhow!("dependencies[{index}].{key} is not supported"));
-            }
-        }
-
-        let version = table
-            .get("version")
-            .and_then(TomlValue::as_str)
-            .ok_or_else(|| anyhow!("dependencies[{index}].version must be a string"))?
-            .trim()
-            .to_string();
-        if version.is_empty() {
-            return Err(anyhow!("dependencies[{index}].version must not be empty"));
-        }
-
-        let kind = match table
-            .get("kind")
-            .and_then(TomlValue::as_str)
-            .ok_or_else(|| anyhow!("dependencies[{index}].kind must be a string"))?
-            .trim()
-        {
-            "native" => ManifestDependencyKind::Native,
-            "wasm" => ManifestDependencyKind::Wasm,
-            other => {
-                return Err(anyhow!(
-                    "dependencies[{index}].kind must be one of: native, wasm (got: {other})"
-                ));
-            }
-        };
-
-        let wit = parse_dependency_wit_source(table, index, &version, namespace_registries)
-            .with_context(|| {
-                format!("failed to parse dependencies[{index}] source configuration")
-            })?;
-        let name = dependency_name_hint_from_source(index, &wit)
-            .with_context(|| format!("failed to derive dependency id for dependencies[{index}]"))?;
-        if !names.insert(name.clone()) {
-            return Err(anyhow!(
-                "dependencies resolves duplicate dependency id: {name}"
-            ));
-        }
-
-        let requires = match table.get("requires") {
-            None => Vec::new(),
-            Some(value) => {
-                let array = value
-                    .as_array()
-                    .ok_or_else(|| anyhow!("dependencies[{index}].requires must be an array"))?;
-                let mut values = Vec::with_capacity(array.len());
-                for (req_index, req) in array.iter().enumerate() {
-                    let req = req
-                        .as_str()
-                        .ok_or_else(|| {
-                            anyhow!("dependencies[{index}].requires[{req_index}] must be a string")
-                        })?
-                        .trim()
-                        .to_string();
-                    if req.is_empty() {
-                        return Err(anyhow!(
-                            "dependencies[{index}].requires[{req_index}] must not be empty"
-                        ));
-                    }
-                    validate_dependency_package_name(&req).map_err(|err| {
-                        anyhow!("dependencies[{index}].requires[{req_index}] is invalid: {err}")
-                    })?;
-                    values.push(req);
-                }
-                normalize_string_list(values)
-            }
-        };
-
-        let capabilities = parse_capability_policy(
-            table.get("capabilities"),
-            &format!("dependencies[{index}].capabilities"),
-        )?;
-
-        let component = match table.get("component") {
-            None => None,
-            Some(value) => {
-                let component_table = value
-                    .as_table()
-                    .ok_or_else(|| anyhow!("dependencies[{index}].component must be a table"))?;
-                for key in component_table.keys() {
-                    if !matches!(key.as_str(), "wit" | "oci" | "path" | "registry" | "sha256") {
-                        return Err(anyhow!(
-                            "dependencies[{index}].component.{key} is not supported"
-                        ));
-                    }
-                }
-                let source = parse_source_selector(
-                    component_table,
-                    &format!("dependencies[{index}].component"),
-                    namespace_registries,
-                )?;
-
-                Some(ProjectDependencyComponent {
-                    source_kind: source.source_kind,
-                    source: source.source,
-                    registry: source.registry,
-                    sha256: source.sha256,
-                })
-            }
-        };
-
-        match kind {
-            ManifestDependencyKind::Native => {
-                if component.is_some() {
-                    return Err(anyhow!(
-                        "dependencies[{index}].component is only allowed when kind=\"wasm\""
-                    ));
-                }
-            }
-            ManifestDependencyKind::Wasm => {}
-        }
-
-        dependencies.push(ProjectDependency {
-            name,
-            version,
-            kind,
-            wit,
-            requires,
-            component,
-            capabilities,
-        });
-    }
-
-    Ok(dependencies)
-}
-
-fn parse_dependency_wit_source(
-    table: &toml::Table,
-    index: usize,
-    version: &str,
-    namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
-) -> anyhow::Result<ProjectDependencySource> {
-    if version.trim().is_empty() {
-        return Err(anyhow!("dependencies[{index}].version must not be empty"));
-    }
-    parse_source_selector(
-        table,
-        &format!("dependencies[{index}]"),
-        namespace_registries,
-    )
-}
-
-fn dependency_name_hint_from_source(
-    index: usize,
-    source: &ProjectDependencySource,
-) -> anyhow::Result<String> {
-    match source.source_kind {
-        plugin_sources::SourceKind::Wit => Ok(plugin_sources::parse_wit_package_source(
-            &source.source,
-            "dependencies[].wit",
-        )?
-        .to_string()),
-        plugin_sources::SourceKind::Oci => {
-            plugin_sources::parse_oci_package_source(&source.source, "dependencies[].oci")
-        }
-        plugin_sources::SourceKind::Path => Ok(format!("path-source-{index}")),
-    }
-}
-
-fn parse_source_selector(
-    table: &toml::Table,
-    field_base: &str,
-    namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
-) -> anyhow::Result<ProjectDependencySource> {
-    let wit = table.get("wit");
-    let oci = table.get("oci");
-    let path = table.get("path");
-    let selected = [("wit", wit), ("oci", oci), ("path", path)]
-        .into_iter()
-        .filter(|(_, value)| value.is_some())
-        .collect::<Vec<_>>();
-    if selected.is_empty() {
-        return Err(anyhow!(
-            "{field_base} must define exactly one source key: `wit`, `oci`, or `path`"
-        ));
-    }
-    if selected.len() > 1 {
-        return Err(anyhow!(
-            "{field_base} has multiple source keys; choose exactly one of `wit`, `oci`, or `path`"
-        ));
-    }
-    let (kind_key, value) = selected[0];
-    let source = value
-        .and_then(TomlValue::as_str)
-        .ok_or_else(|| anyhow!("{field_base}.{kind_key} must be a string"))?
-        .trim()
-        .to_string();
-    if source.is_empty() {
-        return Err(anyhow!("{field_base}.{kind_key} must not be empty"));
-    }
-
-    let source_kind = match kind_key {
-        "wit" => plugin_sources::SourceKind::Wit,
-        "oci" => plugin_sources::SourceKind::Oci,
-        "path" => plugin_sources::SourceKind::Path,
-        _ => unreachable!(),
-    };
-    plugin_sources::validate_wit_source(source_kind, &source, &format!("{field_base}.{kind_key}"))?;
-
-    let raw_registry = match table.get("registry") {
-        None => None,
-        Some(value) => Some(
-            value
-                .as_str()
-                .ok_or_else(|| anyhow!("{field_base}.registry must be a string"))?
-                .trim()
-                .to_string(),
-        ),
-    };
-    let registry = plugin_sources::normalize_registry_for_source(
-        source_kind,
-        &source,
-        raw_registry.as_deref(),
-        namespace_registries,
-        field_base,
-    )?;
-    let sha256 = match table.get("sha256") {
-        None => None,
-        Some(value) => {
-            let sha = value
-                .as_str()
-                .ok_or_else(|| anyhow!("{field_base}.sha256 must be a string"))?
-                .trim()
-                .to_string();
-            if sha.is_empty() {
-                return Err(anyhow!("{field_base}.sha256 must not be empty"));
-            }
-            plugin_sources::validate_sha256_hex(&sha, &format!("{field_base}.sha256"))?;
-            Some(sha)
-        }
-    };
-    Ok(ProjectDependencySource {
-        source_kind,
-        source,
-        registry,
-        sha256,
-    })
-}
-
-fn parse_root_capabilities(root: &toml::Table) -> anyhow::Result<ManifestCapabilityPolicy> {
-    if root.contains_key("capabilirties") {
-        return Err(anyhow!("unknown key 'capabilirties'; use 'capabilities'"));
-    }
-    parse_capability_policy(root.get("capabilities"), "capabilities")
-}
-
-fn parse_capability_policy(
-    value: Option<&TomlValue>,
-    field_name: &str,
-) -> anyhow::Result<ManifestCapabilityPolicy> {
-    let Some(value) = value else {
-        return Ok(ManifestCapabilityPolicy::default());
-    };
-    let table = value
-        .as_table()
-        .ok_or_else(|| anyhow!("{field_name} must be a table"))?;
-
-    for key in table.keys() {
-        if !matches!(key.as_str(), "privileged" | "deps" | "wasi") {
-            return Err(anyhow!("{field_name}.{key} is not supported"));
-        }
-    }
-
-    let privileged = match table.get("privileged") {
-        None => false,
-        Some(value) => value
-            .as_bool()
-            .ok_or_else(|| anyhow!("{field_name}.privileged must be a boolean"))?,
-    };
-
-    let deps = parse_deps_capability_rules(table.get("deps"), &format!("{field_name}.deps"))?;
-    let wasi = parse_wasi_capability_rules(table.get("wasi"), &format!("{field_name}.wasi"))?;
-
-    Ok(ManifestCapabilityPolicy {
-        privileged,
-        deps,
-        wasi,
-    })
-}
-
-fn parse_deps_capability_rules(
-    value: Option<&TomlValue>,
-    field_name: &str,
-) -> anyhow::Result<BTreeMap<String, Vec<String>>> {
-    let Some(value) = value else {
-        return Ok(BTreeMap::new());
-    };
-
-    if let Some(rule) = value.as_str() {
-        if rule.trim() == "*" {
-            return Ok(BTreeMap::from([("*".to_string(), vec!["*".to_string()])]));
-        }
-        return Err(anyhow!("{field_name} must be \"*\" or a table"));
-    }
-
-    if value.as_table().is_none() {
-        return Err(anyhow!("{field_name} must be \"*\" or a table"));
-    }
-
-    parse_capability_rule_table(Some(value), field_name)
-}
-
-fn parse_wasi_capability_rules(
-    value: Option<&TomlValue>,
-    field_name: &str,
-) -> anyhow::Result<BTreeMap<String, Vec<String>>> {
-    let Some(value) = value else {
-        return Ok(BTreeMap::new());
-    };
-
-    if let Some(allow_all) = value.as_bool() {
-        if allow_all {
-            return Ok(BTreeMap::from([("*".to_string(), vec!["*".to_string()])]));
-        }
-        return Ok(BTreeMap::new());
-    }
-
-    parse_capability_rule_table(Some(value), field_name)
-}
-
-fn parse_capability_rule_table(
-    value: Option<&TomlValue>,
-    field_name: &str,
-) -> anyhow::Result<BTreeMap<String, Vec<String>>> {
-    let Some(value) = value else {
-        return Ok(BTreeMap::new());
-    };
-    let table = value
-        .as_table()
-        .ok_or_else(|| anyhow!("{field_name} must be a table"))?;
-
-    let mut normalized = BTreeMap::new();
-    for (key, value) in table {
-        if key.trim().is_empty() {
-            return Err(anyhow!("{field_name} contains an empty key"));
-        }
-        let rules = parse_capability_rule_list(value, &format!("{field_name}.{key}"))?;
-        if !rules.is_empty() {
-            normalized.insert(key.clone(), rules);
-        }
-    }
-    Ok(normalized)
-}
-
-fn parse_capability_rule_list(value: &TomlValue, field_name: &str) -> anyhow::Result<Vec<String>> {
-    let array = value
-        .as_array()
-        .ok_or_else(|| anyhow!("{field_name} must be an array of strings"))?;
-    let mut rules = Vec::with_capacity(array.len());
-    for (index, value) in array.iter().enumerate() {
-        let text = value
-            .as_str()
-            .ok_or_else(|| anyhow!("{field_name}[{index}] must be a string"))?
-            .trim()
-            .to_string();
-        if text.is_empty() {
-            return Err(anyhow!("{field_name}[{index}] must not be empty"));
-        }
-        rules.push(text);
-    }
-    Ok(normalize_string_list(rules))
-}
-
-fn normalize_string_list(values: Vec<String>) -> Vec<String> {
-    let mut set = BTreeSet::new();
-    for value in values {
-        let value = value.trim();
-        if !value.is_empty() {
-            set.insert(value.to_string());
-        }
-    }
-    set.into_iter().collect()
-}
-
-fn validate_dependency_package_name(name: &str) -> anyhow::Result<()> {
-    validation::validate_dependency_package_name(name)
-}
-
-fn parse_project_binding_sources(
-    value: Option<&TomlValue>,
-    namespace_registries: Option<&plugin_sources::NamespaceRegistries>,
-) -> anyhow::Result<Vec<ProjectBindingSource>> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-
-    let array = value
-        .as_array()
-        .ok_or_else(|| anyhow!("bindings must be an array"))?;
-    let mut bindings = Vec::with_capacity(array.len());
-    let mut wit_to_name = BTreeMap::<(String, Option<String>, String), String>::new();
-    let mut seen_bindings = BTreeSet::<(String, String, Option<String>, String)>::new();
-    for (index, entry) in array.iter().enumerate() {
-        let table = entry
-            .as_table()
-            .ok_or_else(|| anyhow!("bindings[{index}] must be a table"))?;
-        for key in table.keys() {
-            if key == "target" {
-                return Err(anyhow!(
-                    "bindings[{index}].target is no longer supported; use bindings[{index}].name"
-                ));
-            }
-            if !matches!(
-                key.as_str(),
-                "name" | "version" | "wit" | "oci" | "path" | "sha256" | "registry"
-            ) {
-                return Err(anyhow!("bindings[{index}].{key} is not supported"));
-            }
-        }
-        let name = table
-            .get("name")
-            .and_then(TomlValue::as_str)
-            .ok_or_else(|| anyhow!("bindings[{index}].name must be a string"))?
-            .trim()
-            .to_string();
-        let wit_version = table
-            .get("version")
-            .and_then(TomlValue::as_str)
-            .ok_or_else(|| anyhow!("bindings[{index}].version must be a string"))?
-            .trim()
-            .to_string();
-
-        if name.is_empty() {
-            return Err(anyhow!("bindings[{index}].name must not be empty"));
-        }
-        if wit_version.is_empty() {
-            return Err(anyhow!("bindings[{index}].version must not be empty"));
-        }
-        validate_service_name(&name).map_err(|e| {
-            anyhow!(
-                "bindings[{index}].name is invalid: {}",
-                e.to_string().replace("name ", "")
-            )
-        })?;
-        let source =
-            parse_source_selector(table, &format!("bindings[{index}]"), namespace_registries)?;
-        let wit_source = source.source;
-        let wit_registry = source.registry;
-        let wit_source_kind = source.source_kind;
-        let wit_sha256 = source.sha256;
-
-        let source_key = (
-            wit_source.clone(),
-            wit_registry.clone(),
-            wit_version.clone(),
-        );
-        if let Some(existing_name) = wit_to_name.get(&source_key) {
-            if existing_name != &name {
-                return Err(anyhow!(
-                    "bindings wit '{}' maps to multiple services ('{}' and '{}'); this is ambiguous",
-                    wit_source,
-                    existing_name,
-                    name
-                ));
-            }
-        } else {
-            wit_to_name.insert(source_key, name.clone());
-        }
-
-        if seen_bindings.insert((
-            name.clone(),
-            wit_source.clone(),
-            wit_registry.clone(),
-            wit_version.clone(),
-        )) {
-            bindings.push(ProjectBindingSource {
-                name,
-                wit_source_kind,
-                wit_source,
-                wit_registry,
-                wit_version,
-                wit_sha256,
-            });
-        }
-    }
-    Ok(bindings)
-}
-
-fn resolve_manifest_bindings_from_lock(
-    project_root: &Path,
-    bindings: &[ProjectBindingSource],
-) -> anyhow::Result<Vec<ManifestBinding>> {
-    if bindings.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let lock = crate::lockfile::load_from_project_root(project_root)?;
-    let mut expectations = Vec::with_capacity(bindings.len());
-    for binding in bindings {
-        expectations.push(binding_expectation_for_project_binding(binding));
-    }
-    let resolved = crate::lockfile::resolve_binding_wits(project_root, &lock, &expectations)?;
-
-    let mut expanded = BTreeSet::<(String, String)>::new();
-    for binding in resolved {
-        for interface_id in binding.interfaces {
-            expanded.insert((binding.name.clone(), interface_id));
-        }
-    }
-    Ok(expanded
-        .into_iter()
-        .map(|(name, wit)| ManifestBinding { name, wit })
-        .collect())
-}
-
-fn binding_expectation_for_project_binding(
-    binding: &ProjectBindingSource,
-) -> BindingWitExpectation {
-    BindingWitExpectation {
-        name: binding.name.clone(),
-        source_kind: lock_source_kind(binding.wit_source_kind),
-        source: binding.wit_source.clone(),
-        registry: binding.wit_registry.clone(),
-        version: binding.wit_version.clone(),
-        sha256: binding.wit_sha256.clone(),
-    }
-}
-
-fn lock_source_kind(kind: plugin_sources::SourceKind) -> LockSourceKind {
-    match kind {
-        plugin_sources::SourceKind::Wit => LockSourceKind::Wit,
-        plugin_sources::SourceKind::Oci => LockSourceKind::Oci,
-        plugin_sources::SourceKind::Path => LockSourceKind::Path,
-    }
-}
-
-fn parse_target(
-    root: &toml::Table,
-    target_name: &str,
-    project_root: &Path,
-) -> anyhow::Result<TargetConfig> {
-    let targets = root
-        .get("target")
-        .and_then(TomlValue::as_table)
-        .ok_or_else(|| anyhow!("imago.toml missing required key: target"))?;
-    let raw_target = targets
-        .get(target_name)
-        .ok_or_else(|| anyhow!("target '{}' is not defined in imago.toml", target_name))?;
-    let target_table = raw_target
-        .as_table()
-        .ok_or_else(|| anyhow!("target '{}' must be a table", target_name))?;
-
-    let remote = target_table
-        .get("remote")
-        .and_then(TomlValue::as_str)
-        .ok_or_else(|| anyhow!("target '{}' is missing required key: remote", target_name))?
-        .to_string();
-
-    let server_name = optional_string(target_table, "server_name")?;
-    if target_table.contains_key("ca_cert") {
-        return Err(anyhow!(
-            "target key 'ca_cert' is no longer supported; use target.<name>.client_key with RPK+TOFU"
-        ));
-    }
-    if target_table.contains_key("client_cert") {
-        return Err(anyhow!(
-            "target key 'client_cert' is no longer supported; use target.<name>.client_key with RPK+TOFU"
-        ));
-    }
-    if target_table.contains_key("known_hosts") {
-        return Err(anyhow!(
-            "target key 'known_hosts' is no longer supported; CLI always uses ~/.imago/known_hosts"
-        ));
-    }
-    let client_key = optional_target_credential_path(target_table, "client_key", project_root)?;
-
-    Ok(TargetConfig {
-        remote,
-        server_name,
-        client_key,
-    })
-}
-
-fn optional_string(table: &toml::Table, key: &str) -> anyhow::Result<Option<String>> {
-    let Some(value) = table.get(key) else {
-        return Ok(None);
-    };
-    let text = value
-        .as_str()
-        .ok_or_else(|| anyhow!("target key '{}' must be a string", key))?
-        .to_string();
-    Ok(Some(text))
-}
-
-fn optional_target_credential_path(
-    table: &toml::Table,
-    key: &str,
-    project_root: &Path,
-) -> anyhow::Result<Option<PathBuf>> {
-    let Some(value) = table.get(key) else {
-        return Ok(None);
-    };
-    let text = value
-        .as_str()
-        .ok_or_else(|| anyhow!("target key '{}' must be a string", key))?;
-    Ok(Some(resolve_target_credential_path(
-        text,
-        key,
-        project_root,
-    )?))
-}
-
-fn normalize_target_credential_path(raw: &str, key: &str) -> anyhow::Result<PathBuf> {
-    if raw.is_empty() {
-        return Err(anyhow!("target key '{}' must not be empty", key));
-    }
-
-    let path = Path::new(raw);
-    if raw.contains('\\') {
-        return Err(anyhow!(
-            "target key '{}' must not contain backslashes: {}",
-            key,
-            raw
-        ));
-    }
-
-    let raw_os = path.as_os_str().to_string_lossy();
-    if raw_os.len() >= 2 && raw_os.as_bytes()[1] == b':' {
-        return Err(anyhow!(
-            "target key '{}' must not be windows-prefixed: {}",
-            key,
-            raw
-        ));
-    }
-
-    let is_absolute = path.is_absolute();
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::Normal(segment) => normalized.push(segment),
-            Component::RootDir => {}
-            Component::ParentDir => {
-                return Err(anyhow!(
-                    "target key '{}' must not contain path traversal: {}",
-                    key,
-                    raw
-                ));
-            }
-            _ => {
-                return Err(anyhow!("target key '{}' is invalid: {}", key, raw));
-            }
-        }
-    }
-
-    if normalized.as_os_str().is_empty() {
-        return Err(anyhow!("target key '{}' must not be empty", key));
-    }
-
-    if is_absolute {
-        Ok(Path::new("/").join(normalized))
-    } else {
-        Ok(normalized)
-    }
-}
-
-pub(crate) fn resolve_target_credential_path(
-    raw: &str,
-    key: &str,
-    project_root: &Path,
-) -> anyhow::Result<PathBuf> {
-    let normalized = normalize_target_credential_path(raw, key)?;
-    if normalized.is_absolute() {
-        Ok(normalized)
-    } else {
-        Ok(project_root.join(normalized))
-    }
-}
-
-fn parse_assets(
-    value: Option<&TomlValue>,
-    project_root: &Path,
-) -> anyhow::Result<Vec<AssetSource>> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-
-    let array = value
-        .as_array()
-        .ok_or_else(|| anyhow!("assets must be an array"))?;
-
-    let mut assets = Vec::with_capacity(array.len());
-    for (index, item) in array.iter().enumerate() {
-        let table = item
-            .as_table()
-            .ok_or_else(|| anyhow!("assets[{}] must be a table", index))?;
-
-        let path_value = table
-            .get("path")
-            .ok_or_else(|| anyhow!("assets[{}].path is required", index))?;
-        let path_text = path_value
-            .as_str()
-            .ok_or_else(|| anyhow!("assets[{}].path must be a string", index))?;
-        let normalized = normalize_relative_path(path_text, "assets[].path")?;
-        ensure_file_exists(project_root, &normalized, "assets[].path")?;
-
-        let mut extra = BTreeMap::new();
-        for (key, value) in table {
-            if key == "path" {
-                continue;
-            }
-            extra.insert(key.clone(), toml_to_json_normalized(value)?);
-        }
-
-        assets.push(AssetSource {
-            manifest_asset: ManifestAsset {
-                path: normalized_path_to_string(&normalized),
-                extra,
-            },
-            source_path: normalized,
-        });
-    }
-
-    Ok(assets)
-}
-
-fn parse_resources_section(
-    root: &toml::Table,
-    assets: &[AssetSource],
-) -> anyhow::Result<Option<ManifestResourcesConfig>> {
-    let Some(value) = root.get("resources") else {
-        return Ok(None);
-    };
-    let table = value
-        .as_table()
-        .ok_or_else(|| anyhow!("resources must be a table"))?;
-
-    let args = parse_resources_args(table.get("args"))?;
-    let env = parse_string_table(table.get("env"), "resources.env")?;
-    let http_outbound = parse_resources_http_outbound(table.get("http_outbound"))?;
-
-    let allowed_asset_dirs = collect_allowed_resource_asset_dirs(assets);
-    let mounts =
-        parse_resource_mount_entries(table.get("mounts"), "resources.mounts", &allowed_asset_dirs)?;
-    let read_only_mounts = parse_resource_mount_entries(
-        table.get("read_only_mounts"),
-        "resources.read_only_mounts",
-        &allowed_asset_dirs,
-    )?;
-    validate_resource_mount_uniqueness(&mounts, &read_only_mounts)?;
-
-    let mut extra = BTreeMap::new();
-    for (key, value) in table {
-        if matches!(
-            key.as_str(),
-            "args" | "env" | "http_outbound" | "mounts" | "read_only_mounts"
-        ) {
-            continue;
-        }
-        if key.trim().is_empty() {
-            return Err(anyhow!("resources contains an empty key"));
-        }
-        extra.insert(key.clone(), toml_to_json_normalized(value)?);
-    }
-
-    let resources = ManifestResourcesConfig {
-        args,
-        env,
-        http_outbound,
-        mounts,
-        read_only_mounts,
-        extra,
-    };
-    if resources.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(resources))
-    }
-}
-
-fn parse_resources_args(value: Option<&TomlValue>) -> anyhow::Result<Vec<String>> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-    let array = value
-        .as_array()
-        .ok_or_else(|| anyhow!("resources.args must be an array of strings"))?;
-    let mut args = Vec::with_capacity(array.len());
-    for (index, value) in array.iter().enumerate() {
-        let arg = value
-            .as_str()
-            .ok_or_else(|| anyhow!("resources.args[{index}] must be a string"))?
-            .trim()
-            .to_string();
-        if arg.is_empty() {
-            return Err(anyhow!("resources.args[{index}] must not be empty"));
-        }
-        args.push(arg);
-    }
-    Ok(args)
-}
-
-fn parse_resources_http_outbound(value: Option<&TomlValue>) -> anyhow::Result<Vec<String>> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-    let array = value
-        .as_array()
-        .ok_or_else(|| anyhow!("resources.http_outbound must be an array of strings"))?;
-    let mut rules = Vec::with_capacity(array.len());
-    let mut seen = BTreeSet::new();
-    for (index, value) in array.iter().enumerate() {
-        let raw = value
-            .as_str()
-            .ok_or_else(|| anyhow!("resources.http_outbound[{index}] must be a string"))?;
-        let normalized =
-            normalize_wasi_http_outbound_rule(raw, &format!("resources.http_outbound[{index}]"))?;
-        if seen.insert(normalized.clone()) {
-            rules.push(normalized);
-        }
-    }
-    Ok(rules)
-}
-
-fn normalize_wasi_http_outbound_rule(raw: &str, field_name: &str) -> anyhow::Result<String> {
-    let value = raw.trim();
-    if value.is_empty() {
-        return Err(anyhow!("{field_name} must not be empty"));
-    }
-    if value.contains('*') {
-        return Err(anyhow!("{field_name} wildcard is not supported: {}", value));
-    }
-    if value.chars().any(|ch| ch.is_whitespace()) {
-        return Err(anyhow!(
-            "{field_name} must not contain whitespace: {}",
-            value
-        ));
-    }
-    if value.contains('/') {
-        return normalize_wasi_http_outbound_cidr(value, field_name);
-    }
-
-    normalize_wasi_http_outbound_host_or_host_port(value, field_name)
-}
-
-fn normalize_wasi_http_outbound_cidr(value: &str, field_name: &str) -> anyhow::Result<String> {
-    let (ip_text, prefix_text) = value.split_once('/').ok_or_else(|| {
-        anyhow!(
-            "{field_name} must be hostname, host:port, or CIDR: {}",
-            value
-        )
-    })?;
-    if ip_text.is_empty() || prefix_text.is_empty() || prefix_text.contains('/') {
-        return Err(anyhow!(
-            "{field_name} must be valid CIDR (<ip>/<prefix>): {}",
-            value
-        ));
-    }
-    let ip = ip_text.parse::<IpAddr>().map_err(|err| {
-        anyhow!(
-            "{field_name} CIDR ip is invalid '{}': {err}",
-            ip_text.trim()
-        )
-    })?;
-    let prefix = prefix_text.parse::<u8>().map_err(|err| {
-        anyhow!(
-            "{field_name} CIDR prefix is invalid '{}': {err}",
-            prefix_text.trim()
-        )
-    })?;
-    let max_prefix = match ip {
-        IpAddr::V4(_) => 32,
-        IpAddr::V6(_) => 128,
-    };
-    if prefix > max_prefix {
-        return Err(anyhow!(
-            "{field_name} CIDR prefix must be in range 0..={max_prefix}: {}",
-            prefix
-        ));
-    }
-
-    let network_ip = cidr_network_ip(ip, prefix);
-    Ok(format!("{network_ip}/{prefix}"))
-}
-
-fn normalize_wasi_http_outbound_host_or_host_port(
-    value: &str,
-    field_name: &str,
-) -> anyhow::Result<String> {
-    if value.starts_with('[') {
-        let close_index = value
-            .find(']')
-            .ok_or_else(|| anyhow!("{field_name} has invalid bracketed host: {value}"))?;
-        let host_text = &value[1..close_index];
-        let host_ip = host_text.parse::<Ipv6Addr>().map_err(|err| {
-            anyhow!(
-                "{field_name} bracketed host must be valid IPv6: {} ({err})",
-                host_text
-            )
-        })?;
-        let rest = &value[(close_index + 1)..];
-        if rest.is_empty() {
-            return Ok(host_ip.to_string());
-        }
-        let port_text = rest.strip_prefix(':').ok_or_else(|| {
-            anyhow!(
-                "{field_name} bracketed host must use [ipv6]:port format: {}",
-                value
-            )
-        })?;
-        let port = parse_wasi_http_outbound_port(port_text, field_name)?;
-        return Ok(format!("[{host_ip}]:{port}"));
-    }
-
-    if value.matches(':').count() > 1 {
-        let ip = value.parse::<IpAddr>().map_err(|err| {
-            anyhow!(
-                "{field_name} must use [ipv6]:port for IPv6 host: {} ({err})",
-                value
-            )
-        })?;
-        return Ok(ip.to_string());
-    }
-
-    if let Some((host_text, port_text)) = value.rsplit_once(':')
-        && port_text.chars().all(|ch| ch.is_ascii_digit())
-    {
-        let host = normalize_wasi_http_outbound_host(host_text, field_name)?;
-        let port = parse_wasi_http_outbound_port(port_text, field_name)?;
-        if host.contains(':') {
-            return Ok(format!("[{host}]:{port}"));
-        }
-        return Ok(format!("{host}:{port}"));
-    }
-
-    normalize_wasi_http_outbound_host(value, field_name)
-}
-
-fn normalize_wasi_http_outbound_host(raw_host: &str, field_name: &str) -> anyhow::Result<String> {
-    let host = raw_host.trim();
-    if host.is_empty() {
-        return Err(anyhow!("{field_name} host must not be empty"));
-    }
-    if host.contains('*') {
-        return Err(anyhow!(
-            "{field_name} wildcard host is not supported: {}",
-            host
-        ));
-    }
-    if host.contains('/') || host.contains('\\') {
-        return Err(anyhow!(
-            "{field_name} host must not contain path separators: {}",
-            host
-        ));
-    }
-    if host.chars().any(|ch| ch.is_whitespace()) {
-        return Err(anyhow!(
-            "{field_name} host must not contain whitespace: {}",
-            host
-        ));
-    }
-    if host.starts_with('[') || host.ends_with(']') {
-        return Err(anyhow!(
-            "{field_name} host must not contain brackets: {}",
-            host
-        ));
-    }
-
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(ip.to_string());
-    }
-
-    if host.contains(':') {
-        return Err(anyhow!(
-            "{field_name} host with ':' must use [ipv6]:port format: {}",
-            host
-        ));
-    }
-
-    Ok(host.to_ascii_lowercase())
-}
-
-fn parse_wasi_http_outbound_port(port_text: &str, field_name: &str) -> anyhow::Result<u16> {
-    let port = port_text.parse::<u16>().map_err(|err| {
-        anyhow!(
-            "{field_name} port must be in range 1..=65535 (got '{}'): {err}",
-            port_text
-        )
-    })?;
-    if port == 0 {
-        return Err(anyhow!(
-            "{field_name} port must be in range 1..=65535 (got 0)"
-        ));
-    }
-    Ok(port)
-}
-
-fn cidr_network_ip(ip: IpAddr, prefix: u8) -> IpAddr {
-    match ip {
-        IpAddr::V4(v4) => {
-            let bits = u32::from(v4);
-            let mask = if prefix == 0 {
-                0
-            } else {
-                u32::MAX << u32::from(32_u8.saturating_sub(prefix))
-            };
-            IpAddr::V4(Ipv4Addr::from(bits & mask))
-        }
-        IpAddr::V6(v6) => {
-            let bits = u128::from(v6);
-            let mask = if prefix == 0 {
-                0
-            } else {
-                u128::MAX << u32::from(128_u8.saturating_sub(prefix))
-            };
-            IpAddr::V6(Ipv6Addr::from(bits & mask))
-        }
-    }
-}
-
-fn load_dotenv_resources_env(project_root: &Path) -> anyhow::Result<BTreeMap<String, String>> {
-    let path = project_root.join(".env");
-    if !path.exists() {
-        return Ok(BTreeMap::new());
-    }
-    let iter =
-        from_path_iter(&path).with_context(|| format!("failed to parse {}", path.display()))?;
-
-    let mut env = BTreeMap::new();
-    for entry in iter {
-        let (key, value) = entry.with_context(|| format!("failed to parse {}", path.display()))?;
-        env.insert(key, value);
-    }
-    Ok(env)
-}
-
-fn collect_allowed_resource_asset_dirs(assets: &[AssetSource]) -> BTreeSet<PathBuf> {
-    let mut allowed = BTreeSet::new();
-    for asset in assets {
-        if let Some(parent) = asset.source_path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            allowed.insert(parent.to_path_buf());
-        }
-    }
-    allowed
-}
-
-fn parse_resource_mount_entries(
-    value: Option<&TomlValue>,
-    field_name: &str,
-    allowed_asset_dirs: &BTreeSet<PathBuf>,
-) -> anyhow::Result<Vec<ManifestWasiMount>> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-    let array = value
-        .as_array()
-        .ok_or_else(|| anyhow!("{field_name} must be an array"))?;
-    let mut mounts = Vec::with_capacity(array.len());
-    for (index, item) in array.iter().enumerate() {
-        let entry = item
-            .as_table()
-            .ok_or_else(|| anyhow!("{field_name}[{index}] must be a table"))?;
-        for key in entry.keys() {
-            if !matches!(key.as_str(), "asset_dir" | "guest_path") {
-                return Err(anyhow!("{field_name}[{index}].{key} is not supported"));
-            }
-        }
-
-        let asset_dir_raw = entry
-            .get("asset_dir")
-            .and_then(TomlValue::as_str)
-            .ok_or_else(|| anyhow!("{field_name}[{index}].asset_dir must be a string"))?;
-        let asset_dir =
-            normalize_relative_path(asset_dir_raw, &format!("{field_name}[{index}].asset_dir"))?;
-        if !allowed_asset_dirs.contains(&asset_dir) {
-            return Err(anyhow!(
-                "{field_name}[{index}].asset_dir must match a directory derived from assets[].path"
-            ));
-        }
-
-        let guest_path_raw = entry
-            .get("guest_path")
-            .and_then(TomlValue::as_str)
-            .ok_or_else(|| anyhow!("{field_name}[{index}].guest_path must be a string"))?;
-        let guest_path = normalize_wasi_guest_path(
-            guest_path_raw,
-            &format!("{field_name}[{index}].guest_path"),
-        )?;
-
-        mounts.push(ManifestWasiMount {
-            asset_dir: normalized_path_to_string(&asset_dir),
-            guest_path,
-        });
-    }
-    Ok(mounts)
-}
-
-fn validate_resource_mount_uniqueness(
-    mounts: &[ManifestWasiMount],
-    read_only_mounts: &[ManifestWasiMount],
-) -> anyhow::Result<()> {
-    let mut seen_guest_paths = BTreeSet::new();
-    let mut seen_asset_dirs = BTreeSet::new();
-    for mount in mounts.iter().chain(read_only_mounts.iter()) {
-        if !seen_guest_paths.insert(mount.guest_path.clone()) {
-            return Err(anyhow!(
-                "resources mounts contain duplicate guest_path: {}",
-                mount.guest_path
-            ));
-        }
-        if !seen_asset_dirs.insert(mount.asset_dir.clone()) {
-            return Err(anyhow!(
-                "resources mounts contain duplicate asset_dir: {}",
-                mount.asset_dir
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn normalize_wasi_guest_path(raw: &str, field_name: &str) -> anyhow::Result<String> {
-    let path = Path::new(raw.trim());
-    if path.as_os_str().is_empty() {
-        return Err(anyhow!("{field_name} must not be empty"));
-    }
-    if raw.contains('\\') {
-        return Err(anyhow!(
-            "{field_name} must not contain backslashes: {}",
-            raw.trim()
-        ));
-    }
-    if !path.is_absolute() {
-        return Err(anyhow!(
-            "{field_name} must be an absolute path: {}",
-            raw.trim()
-        ));
-    }
-
-    let raw_os = path.as_os_str().to_string_lossy();
-    if raw_os.len() >= 2 && raw_os.as_bytes()[1] == b':' {
-        return Err(anyhow!(
-            "{field_name} must not be windows-prefixed: {}",
-            raw.trim()
-        ));
-    }
-
-    let mut segments = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(segment) => {
-                segments.push(segment.to_string_lossy().to_string());
-            }
-            Component::ParentDir | Component::CurDir => {
-                return Err(anyhow!(
-                    "{field_name} must not contain path traversal: {}",
-                    raw.trim()
-                ));
-            }
-            _ => {
-                return Err(anyhow!("{field_name} is invalid: {}", raw.trim()));
-            }
-        }
-    }
-
-    if segments.is_empty() {
-        Ok("/".to_string())
-    } else {
-        Ok(format!("/{}", segments.join("/")))
-    }
-}
-
-fn toml_to_json_normalized(value: &TomlValue) -> anyhow::Result<JsonValue> {
-    Ok(match value {
-        TomlValue::String(v) => JsonValue::String(v.clone()),
-        TomlValue::Integer(v) => JsonValue::Number((*v).into()),
-        TomlValue::Float(v) => {
-            let number = serde_json::Number::from_f64(*v)
-                .ok_or_else(|| anyhow!("floating-point value is not representable as JSON"))?;
-            JsonValue::Number(number)
-        }
-        TomlValue::Boolean(v) => JsonValue::Bool(*v),
-        TomlValue::Datetime(v) => JsonValue::String(v.to_string()),
-        TomlValue::Array(values) => JsonValue::Array(
-            values
-                .iter()
-                .map(toml_to_json_normalized)
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        TomlValue::Table(table) => {
-            let mut keys = table.keys().cloned().collect::<Vec<_>>();
-            keys.sort();
-
-            let mut object = serde_json::Map::new();
-            for key in keys {
-                let nested = table
-                    .get(&key)
-                    .ok_or_else(|| anyhow!("internal error: missing table key"))?;
-                object.insert(key, toml_to_json_normalized(nested)?);
-            }
-            JsonValue::Object(object)
-        }
-    })
-}
-
-fn compute_manifest_hash(
-    project_root: &Path,
-    main_path: &Path,
-    assets: &[AssetSource],
-    manifest: &Manifest,
-) -> anyhow::Result<String> {
-    let mut hasher = Sha256::new();
-    hash_file_into(&mut hasher, &project_root.join(main_path), "main wasm")?;
-
-    let normalized_manifest =
-        serde_json::to_vec(manifest).context("failed to serialize normalized manifest for hash")?;
-    hasher.update(&normalized_manifest);
-
-    let mut sorted_assets = assets.iter().collect::<Vec<_>>();
-    sorted_assets.sort_by(|a, b| a.manifest_asset.path.cmp(&b.manifest_asset.path));
-    for asset in sorted_assets {
-        hash_file_into(
-            &mut hasher,
-            &project_root.join(&asset.source_path),
-            "asset for hash",
-        )?;
-    }
-
-    Ok(hex::encode(hasher.finalize()))
-}
-
-fn compute_sha256_hex(path: &Path) -> anyhow::Result<String> {
-    let mut hasher = Sha256::new();
-    hash_file_into(&mut hasher, path, "file for sha256")?;
-    Ok(hex::encode(hasher.finalize()))
-}
-
-pub(crate) fn compute_path_digest_hex(path: &Path) -> anyhow::Result<String> {
-    let metadata = fs::metadata(path)
-        .with_context(|| format!("failed to read path for digest: {}", path.display()))?;
-    if metadata.is_file() {
-        return compute_sha256_hex(path);
-    }
-    if !metadata.is_dir() {
-        return Err(anyhow!("path is not file or directory: {}", path.display()));
-    }
-
-    let mut stack = vec![path.to_path_buf()];
-    let mut files = Vec::new();
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir)
-            .with_context(|| format!("failed to read directory for digest: {}", dir.display()))?
-        {
-            let entry = entry.with_context(|| {
-                format!(
-                    "failed to read directory entry while hashing {}",
-                    dir.display()
-                )
-            })?;
-            let entry_path = entry.path();
-            let entry_metadata = entry
-                .metadata()
-                .with_context(|| format!("failed to read metadata for {}", entry_path.display()))?;
-            if entry_metadata.is_dir() {
-                stack.push(entry_path);
-            } else if entry_metadata.is_file() {
-                files.push(entry_path);
-            }
-        }
-    }
-    files.sort();
-
-    let mut hasher = Sha256::new();
-    for file in files {
-        let rel = file
-            .strip_prefix(path)
-            .with_context(|| format!("failed to relativize digest path: {}", file.display()))?;
-        hasher.update(normalized_path_to_string(rel).as_bytes());
-        hasher.update([0]);
-        hash_file_into(&mut hasher, &file, "directory digest file")?;
-        hasher.update([0]);
-    }
-    Ok(hex::encode(hasher.finalize()))
-}
-
-fn hash_file_into(hasher: &mut Sha256, path: &Path, context_label: &str) -> anyhow::Result<()> {
-    let mut file = fs::File::open(path)
-        .with_context(|| format!("failed to read {}: {}", context_label, path.display()))?;
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = file
-            .read(&mut buf)
-            .with_context(|| format!("failed to read {}: {}", context_label, path.display()))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(())
-}
-
-fn ensure_build_dir(project_root: &Path) -> anyhow::Result<PathBuf> {
-    let build_dir = project_root.join("build");
-    fs::create_dir_all(&build_dir)
-        .with_context(|| format!("failed to create build directory: {}", build_dir.display()))?;
-    Ok(build_dir)
-}
-
-fn materialize_hashed_wasm(
-    project_root: &Path,
-    source_main_path: &Path,
-    service_name: &str,
-) -> anyhow::Result<PathBuf> {
-    let source = project_root.join(source_main_path);
-    let digest = compute_sha256_hex(&source)?;
-    let build_dir = ensure_build_dir(project_root)?;
-    let file_name = format!("{digest}-{service_name}.wasm");
-    let destination = build_dir.join(file_name);
-
-    if destination.exists() {
-        let metadata = fs::metadata(&destination).with_context(|| {
-            format!(
-                "failed to inspect materialized wasm: {}",
-                destination.display()
-            )
-        })?;
-        if !metadata.is_file() {
-            return Err(anyhow!(
-                "materialized wasm path is not a file: {}",
-                destination.display()
-            ));
-        }
-
-        let existing_digest = compute_sha256_hex(&destination).with_context(|| {
-            format!(
-                "failed to verify materialized wasm hash: {}",
-                destination.display()
-            )
-        })?;
-        if existing_digest != digest {
-            copy_materialized_wasm(&source, &destination)?;
-        }
-    } else {
-        copy_materialized_wasm(&source, &destination)?;
-    }
-
-    Ok(PathBuf::from("build").join(
-        destination
-            .file_name()
-            .ok_or_else(|| anyhow!("materialized wasm filename is missing"))?,
-    ))
-}
-
-fn copy_materialized_wasm(source: &Path, destination: &Path) -> anyhow::Result<()> {
-    fs::copy(source, destination).with_context(|| {
-        format!(
-            "failed to copy wasm from {} to {}",
-            source.display(),
-            destination.display()
-        )
-    })?;
-    Ok(())
-}
-
 pub fn resolve_manifest_output_path() -> PathBuf {
     PathBuf::from("build/manifest.json")
 }
@@ -2581,6 +887,8 @@ mod tests {
         cli::UpdateArgs,
         commands::{dependency_cache, update},
     };
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeSet;
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
         let unique = format!(
@@ -2765,22 +1073,22 @@ mod tests {
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "http"
-
-[http]
-port = 18080
-
-[vars]
-VISIBLE = "1"
-
-[secrets]
-SECRET_TOKEN = "abc"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "http"
+    
+    [http]
+    port = 18080
+    
+    [vars]
+    VISIBLE = "1"
+    
+    [secrets]
+    SECRET_TOKEN = "abc"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -2813,16 +1121,16 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc-http"
-main = "build/app.wasm"
-type = "http"
-
-[http]
-port = 18080
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc-http"
+    main = "build/app.wasm"
+    type = "http"
+    
+    [http]
+    port = 18080
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-http");
 
@@ -2844,17 +1152,17 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc-http"
-main = "build/app.wasm"
-type = "http"
-
-[http]
-port = 18080
-max_body_bytes = 4096
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc-http"
+    main = "build/app.wasm"
+    type = "http"
+    
+    [http]
+    port = 18080
+    max_body_bytes = 4096
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-http");
 
@@ -2871,13 +1179,13 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc-http"
-main = "build/app.wasm"
-type = "http"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc-http"
+    main = "build/app.wasm"
+    type = "http"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-http");
 
@@ -2896,16 +1204,16 @@ remote = "127.0.0.1:4443"
                 &root,
                 &format!(
                     r#"
-name = "svc-{app_type}"
-main = "build/app.wasm"
-type = "{app_type}"
-
-[http]
-port = 18080
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc-{app_type}"
+    main = "build/app.wasm"
+    type = "{app_type}"
+    
+    [http]
+    port = 18080
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
                 ),
             );
             write_file(&root.join("build/app.wasm"), b"wasm-cli");
@@ -2927,13 +1235,13 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc-rpc"
-main = "build/app.wasm"
-type = "rpc"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc-rpc"
+    main = "build/app.wasm"
+    type = "rpc"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-rpc");
 
@@ -2954,17 +1262,17 @@ remote = "127.0.0.1:4443"
                 &root,
                 &format!(
                     r#"
-name = "svc-http"
-main = "build/app.wasm"
-type = "http"
-
-[http]
-port = 18080
-max_body_bytes = {max_body_bytes}
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#
+    name = "svc-http"
+    main = "build/app.wasm"
+    type = "http"
+    
+    [http]
+    port = 18080
+    max_body_bytes = {max_body_bytes}
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#
                 ),
             );
             write_file(&root.join("build/app.wasm"), b"wasm-http");
@@ -2983,19 +1291,19 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc-socket"
-main = "build/app.wasm"
-type = "socket"
-
-[socket]
-protocol = "udp"
-direction = "inbound"
-listen_addr = "0.0.0.0"
-listen_port = 514
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc-socket"
+    main = "build/app.wasm"
+    type = "socket"
+    
+    [socket]
+    protocol = "udp"
+    direction = "inbound"
+    listen_addr = "0.0.0.0"
+    listen_port = 514
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-socket");
 
@@ -3019,13 +1327,13 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc-socket"
-main = "build/app.wasm"
-type = "socket"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc-socket"
+    main = "build/app.wasm"
+    type = "socket"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-socket");
 
@@ -3049,21 +1357,21 @@ remote = "127.0.0.1:4443"
                 &root,
                 &format!(
                     r#"
-name = "svc-{app_type}"
-main = "build/app.wasm"
-type = "{app_type}"
-
-{app_type_extra}
-
-[socket]
-protocol = "udp"
-direction = "inbound"
-listen_addr = "0.0.0.0"
-listen_port = 514
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#
+    name = "svc-{app_type}"
+    main = "build/app.wasm"
+    type = "{app_type}"
+    
+    {app_type_extra}
+    
+    [socket]
+    protocol = "udp"
+    direction = "inbound"
+    listen_addr = "0.0.0.0"
+    listen_port = 514
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#
                 ),
             );
             write_file(&root.join("build/app.wasm"), b"wasm-a");
@@ -3085,73 +1393,73 @@ remote = "127.0.0.1:4443"
             (
                 "bad-protocol",
                 r#"
-name = "svc"
-main = "build/app.wasm"
-type = "socket"
-
-[socket]
-protocol = "icmp"
-direction = "inbound"
-listen_addr = "0.0.0.0"
-listen_port = 514
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "socket"
+    
+    [socket]
+    protocol = "icmp"
+    direction = "inbound"
+    listen_addr = "0.0.0.0"
+    listen_port = 514
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
                 "socket.protocol must be one of",
             ),
             (
                 "bad-direction",
                 r#"
-name = "svc"
-main = "build/app.wasm"
-type = "socket"
-
-[socket]
-protocol = "udp"
-direction = "sideways"
-listen_addr = "0.0.0.0"
-listen_port = 514
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "socket"
+    
+    [socket]
+    protocol = "udp"
+    direction = "sideways"
+    listen_addr = "0.0.0.0"
+    listen_port = 514
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
                 "socket.direction must be one of",
             ),
             (
                 "bad-listen-addr",
                 r#"
-name = "svc"
-main = "build/app.wasm"
-type = "socket"
-
-[socket]
-protocol = "udp"
-direction = "inbound"
-listen_addr = "not-an-ip"
-listen_port = 514
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "socket"
+    
+    [socket]
+    protocol = "udp"
+    direction = "inbound"
+    listen_addr = "not-an-ip"
+    listen_port = 514
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
                 "socket.listen_addr must be a valid IP address",
             ),
             (
                 "bad-listen-port",
                 r#"
-name = "svc"
-main = "build/app.wasm"
-type = "socket"
-
-[socket]
-protocol = "udp"
-direction = "inbound"
-listen_addr = "0.0.0.0"
-listen_port = 0
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "socket"
+    
+    [socket]
+    protocol = "udp"
+    direction = "inbound"
+    listen_addr = "0.0.0.0"
+    listen_port = 0
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
                 "socket.listen_port must be in range",
             ),
         ];
@@ -3177,22 +1485,22 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[vars]
-A = "1"
-
-[target.default]
-remote = "127.0.0.1:4443"
-
-[env.prod]
-type = "http"
-
-[env.prod.vars]
-C = "3"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [vars]
+    A = "1"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    
+    [env.prod]
+    type = "http"
+    
+    [env.prod.vars]
+    C = "3"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -3215,16 +1523,16 @@ C = "3"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[build]
-command = "mkdir -p build && printf shell > build/app.wasm"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [build]
+    command = "mkdir -p build && printf shell > build/app.wasm"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         let output = build_project("default", &root).expect("build should succeed");
@@ -3245,16 +1553,16 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[build]
-command = ["sh", "-c", "mkdir -p build && printf argv > build/app.wasm"]
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [build]
+    command = ["sh", "-c", "mkdir -p build && printf argv > build/app.wasm"]
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         let output = build_project("default", &root).expect("build should succeed");
@@ -3274,13 +1582,13 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         let err = build_project("default", &root).expect_err("missing main file should fail");
@@ -3330,16 +1638,16 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[build]
-command = ["sh", "-c", "mkdir -p build && printf 'compose-out\n' && printf 'compose-err\n' >&2 && printf wasm > build/app.wasm"]
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [build]
+    command = ["sh", "-c", "mkdir -p build && printf 'compose-out\n' && printf 'compose-err\n' >&2 && printf wasm > build/app.wasm"]
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         let mut streamed = Vec::new();
@@ -3433,15 +1741,15 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-main = "build/app.wasm"
-type = "cli"
-
-[build]
-command = "mkdir -p build && printf side-effect > build/side-effect.txt"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [build]
+    command = "mkdir -p build && printf side-effect > build/side-effect.txt"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         let err = build_project("default", &root)
@@ -3461,15 +1769,15 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-server_name = "localhost"
-client_key = "certs/client.key"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    server_name = "localhost"
+    client_key = "certs/client.key"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -3495,18 +1803,18 @@ client_key = "certs/client.key"
         write_imago_toml(
             &root,
             r#"
-name = "svc-a"
-main = "build/app.wasm"
-type = "cli"
-
-[[bindings]]
-name = "svc-b"
-version = "0.1.0"
-path = "registry/acme-clock"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc-a"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[bindings]]
+    name = "svc-b"
+    version = "0.1.0"
+    path = "registry/acme-clock"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(
             &root.join("registry/acme-clock/package.wit"),
@@ -3515,16 +1823,16 @@ remote = "127.0.0.1:4443"
         write_file(
             &root.join("wit/deps/acme-clock-0.1.0/package.wit"),
             br#"
-package acme:clock@0.1.0;
-
-interface api {
-  now: func() -> u64;
-}
-
-interface admin {
-  health: func() -> string;
-}
-"#,
+    package acme:clock@0.1.0;
+    
+    interface api {
+      now: func() -> u64;
+    }
+    
+    interface admin {
+      health: func() -> string;
+    }
+    "#,
         );
         let wit_digest =
             compute_path_digest_hex(&root.join("wit/deps/acme-clock-0.1.0")).expect("wit digest");
@@ -3576,19 +1884,19 @@ interface admin {
         write_imago_toml(
             &root,
             r#"
-name = "svc-a"
-main = "build/app.wasm"
-type = "cli"
-
-[[bindings]]
-name = "svc-b"
-version = "0.1.0"
-path = "registry/acme-clock"
-sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc-a"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[bindings]]
+    name = "svc-b"
+    version = "0.1.0"
+    path = "registry/acme-clock"
+    sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(
             &root.join("registry/acme-clock/package.wit"),
@@ -3597,12 +1905,12 @@ remote = "127.0.0.1:4443"
         write_file(
             &root.join("wit/deps/acme-clock-0.1.0/package.wit"),
             br#"
-package acme:clock@0.1.0;
-
-interface api {
-  now: func() -> u64;
-}
-"#,
+    package acme:clock@0.1.0;
+    
+    interface api {
+      now: func() -> u64;
+    }
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         let wit_digest =
@@ -3648,17 +1956,17 @@ interface api {
         write_imago_toml(
             &root,
             r#"
-name = "svc-a"
-main = "build/app.wasm"
-type = "cli"
-
-[[bindings]]
-name = "svc-b"
-version = "0.1.0"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc-a"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[bindings]]
+    name = "svc-b"
+    version = "0.1.0"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -3678,19 +1986,19 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc-a"
-main = "build/app.wasm"
-type = "cli"
-
-[[bindings]]
-name = "svc-b"
-version = "0.1.0"
-path = "registry/acme-clock"
-target = "legacy"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc-a"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[bindings]]
+    name = "svc-b"
+    version = "0.1.0"
+    path = "registry/acme-clock"
+    target = "legacy"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -3707,18 +2015,18 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc-a"
-main = "build/app.wasm"
-type = "cli"
-
-[[bindings]]
-name = "svc-b"
-version = "0.1.0"
-wit = "yieldspace:svc/invoke"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc-a"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[bindings]]
+    name = "svc-b"
+    version = "0.1.0"
+    wit = "yieldspace:svc/invoke"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -3735,18 +2043,18 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc-a"
-main = "build/app.wasm"
-type = "cli"
-
-[[bindings]]
-name = "svc-b"
-version = "0.1.0"
-wit = "https://example.invalid/acme-clock.wit"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc-a"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[bindings]]
+    name = "svc-b"
+    version = "0.1.0"
+    wit = "https://example.invalid/acme-clock.wit"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -3766,16 +2074,16 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[capabilirties]
-privileged = true
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [capabilirties]
+    privileged = true
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -3791,16 +2099,16 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[capabilities]
-deps = "*"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [capabilities]
+    deps = "*"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -3820,16 +2128,16 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[capabilities]
-deps = "invoke"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [capabilities]
+    deps = "invoke"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -3850,16 +2158,16 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[capabilities]
-wasi = true
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [capabilities]
+    wasi = true
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -3879,16 +2187,16 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[capabilities]
-wasi = false
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [capabilities]
+    wasi = false
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -3905,33 +2213,33 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[assets]]
-path = "assets/rw/input.txt"
-
-[[assets]]
-path = "assets/ro/input.txt"
-
-[resources]
-args = ["--serve"]
-
-[resources.env]
-WASI_ONLY = "1"
-
-[[resources.mounts]]
-asset_dir = "assets/rw"
-guest_path = "/guest/rw"
-
-[[resources.read_only_mounts]]
-asset_dir = "assets/ro"
-guest_path = "/guest/ro"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[assets]]
+    path = "assets/rw/input.txt"
+    
+    [[assets]]
+    path = "assets/ro/input.txt"
+    
+    [resources]
+    args = ["--serve"]
+    
+    [resources.env]
+    WASI_ONLY = "1"
+    
+    [[resources.mounts]]
+    asset_dir = "assets/rw"
+    guest_path = "/guest/rw"
+    
+    [[resources.read_only_mounts]]
+    asset_dir = "assets/ro"
+    guest_path = "/guest/ro"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(&root.join("assets/rw/input.txt"), b"rw");
@@ -3969,21 +2277,21 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[resources]
-feature_enabled = true
-allowed_devices = ["/dev/i2c-1", "/dev/i2c-2"]
-
-[resources.policy]
-mode = "strict"
-retry = 3
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [resources]
+    feature_enabled = true
+    allowed_devices = ["/dev/i2c-1", "/dev/i2c-2"]
+    
+    [resources.policy]
+    mode = "strict"
+    retry = 3
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -4014,22 +2322,22 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[resources]
-http_outbound = [
-  "LOCALHOST",
-  "api.example.com:443",
-  "10.1.2.3/8",
-  "api.example.com:443",
-  "127.0.0.1"
-]
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [resources]
+    http_outbound = [
+      "LOCALHOST",
+      "api.example.com:443",
+      "10.1.2.3/8",
+      "api.example.com:443",
+      "127.0.0.1"
+    ]
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -4055,16 +2363,16 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[resources]
-http_outbound = "localhost"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [resources]
+    http_outbound = "localhost"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -4083,16 +2391,16 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[resources]
-http_outbound = ["*.example.com"]
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [resources]
+    http_outbound = ["*.example.com"]
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -4108,16 +2416,16 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[resources]
-http_outbound = ["10.0.0.0/99"]
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [resources]
+    http_outbound = ["10.0.0.0/99"]
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -4133,19 +2441,19 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[vars]
-SHARED = "a"
-
-[resources.env]
-SHARED = "b"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [vars]
+    SHARED = "a"
+    
+    [resources.env]
+    SHARED = "b"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -4163,17 +2471,17 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[resources.env]
-FROM_TOML = "toml"
-SHARED = "toml"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [resources.env]
+    FROM_TOML = "toml"
+    SHARED = "toml"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
@@ -4205,13 +2513,13 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(&root.join(".env"), b"DOTENV_ONLY=1\n");
@@ -4234,13 +2542,13 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(&root.join(".env"), b"INVALID_LINE\n");
@@ -4258,13 +2566,13 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -4281,27 +2589,27 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[assets]]
-path = "assets/rw/input.txt"
-
-[[assets]]
-path = "assets/ro/input.txt"
-
-[[resources.mounts]]
-asset_dir = "assets/rw"
-guest_path = "/guest/shared"
-
-[[resources.read_only_mounts]]
-asset_dir = "assets/ro"
-guest_path = "/guest/shared"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[assets]]
+    path = "assets/rw/input.txt"
+    
+    [[assets]]
+    path = "assets/ro/input.txt"
+    
+    [[resources.mounts]]
+    asset_dir = "assets/rw"
+    guest_path = "/guest/shared"
+    
+    [[resources.read_only_mounts]]
+    asset_dir = "assets/ro"
+    guest_path = "/guest/shared"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(&root.join("assets/rw/input.txt"), b"rw");
@@ -4319,24 +2627,24 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[assets]]
-path = "assets/shared/input.txt"
-
-[[resources.mounts]]
-asset_dir = "assets/shared"
-guest_path = "/guest/rw"
-
-[[resources.read_only_mounts]]
-asset_dir = "assets/shared"
-guest_path = "/guest/ro"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[assets]]
+    path = "assets/shared/input.txt"
+    
+    [[resources.mounts]]
+    asset_dir = "assets/shared"
+    guest_path = "/guest/rw"
+    
+    [[resources.read_only_mounts]]
+    asset_dir = "assets/shared"
+    guest_path = "/guest/ro"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(&root.join("assets/shared/input.txt"), b"shared");
@@ -4353,20 +2661,20 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[assets]]
-path = "assets/ro/input.txt"
-
-[[resources.read_only_mounts]]
-asset_dir = "assets/ro"
-guest_path = "/guest/ro"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[assets]]
+    path = "assets/ro/input.txt"
+    
+    [[resources.read_only_mounts]]
+    asset_dir = "assets/ro"
+    guest_path = "/guest/ro"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(&root.join("assets/ro/input.txt"), b"ro");
@@ -4394,20 +2702,20 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[assets]]
-path = "assets/rw/input.txt"
-
-[[resources.mounts]]
-asset_dir = "assets/not-listed"
-guest_path = "/guest/rw"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[assets]]
+    path = "assets/rw/input.txt"
+    
+    [[resources.mounts]]
+    asset_dir = "assets/not-listed"
+    guest_path = "/guest/rw"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(&root.join("assets/rw/input.txt"), b"rw");
@@ -4428,18 +2736,18 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
@@ -4462,18 +2770,18 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
@@ -4500,18 +2808,18 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
@@ -4542,18 +2850,18 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "/tmp/pwn"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "/tmp/pwn"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -4578,18 +2886,18 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "yieldspace:plugin/../example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "yieldspace:plugin/../example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -4614,19 +2922,19 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-requires = ["/tmp/pwn"]
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    requires = ["/tmp/pwn"]
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -4651,18 +2959,18 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
@@ -4693,18 +3001,18 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
@@ -4822,18 +3130,18 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
@@ -4946,18 +3254,18 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
@@ -4968,19 +3276,19 @@ remote = "127.0.0.1:4443"
         write_file(
             &root.join("imago.lock"),
             br#"
-version = 1
-
-[requested]
-fingerprint = "f"
-
-[resolved]
-
-[[resolved.package_edges]]
-from_kind = "dependency"
-from_ref = "dep:1"
-to_package_ref = "test:dep@*#"
-reason = "unknown-reason"
-"#,
+    version = 1
+    
+    [requested]
+    fingerprint = "f"
+    
+    [resolved]
+    
+    [[resolved.package_edges]]
+    from_kind = "dependency"
+    from_ref = "dep:1"
+    to_package_ref = "test:dep@*#"
+    reason = "unknown-reason"
+    "#,
         );
 
         let err = build_project("default", &root)
@@ -5000,22 +3308,22 @@ reason = "unknown-reason"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "wasm"
-path = "registry/example"
-
-[dependencies.component]
-source = "plugins/example.wasm"
-sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "wasm"
+    path = "registry/example"
+    
+    [dependencies.component]
+    source = "plugins/example.wasm"
+    sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
@@ -5039,24 +3347,24 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[capabilities]
-privileged = false
-
-[capabilities.deps]
-"test:example" = ["*"]
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [capabilities]
+    privileged = false
+    
+    [capabilities.deps]
+    "test:example" = ["*"]
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
@@ -5087,24 +3395,24 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example-a"
-requires = ["path-source-1"]
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example-b"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example-a"
+    requires = ["path-source-1"]
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example-b"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
@@ -5142,18 +3450,18 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
@@ -5190,21 +3498,21 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[dependencies.capabilities]
-deps = "*"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [dependencies.capabilities]
+    deps = "*"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
@@ -5230,18 +3538,18 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
@@ -5366,21 +3674,21 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "wasm"
-path = "registry/example"
-
-[dependencies.component]
-path = "registry/example-plugin.wasm"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "wasm"
+    path = "registry/example"
+    
+    [dependencies.component]
+    path = "registry/example-plugin.wasm"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
@@ -5421,18 +3729,18 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "wasm"
-wit = "chikoski:hello"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "wasm"
+    wit = "chikoski:hello"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
@@ -5534,18 +3842,18 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "wasm"
-wit = "chikoski:hello"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "wasm"
+    wit = "chikoski:hello"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
         write_file(
@@ -5639,14 +3947,14 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-client_key = "certs/client.key"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    client_key = "certs/client.key"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -5667,14 +3975,14 @@ client_key = "certs/client.key"
             &root,
             &format!(
                 r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-client_key = "{}"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    client_key = "{}"
+    "#,
                 abs_client_key.display()
             ),
         );
@@ -5692,14 +4000,14 @@ client_key = "{}"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-client_key = "../secrets/client.key"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    client_key = "../secrets/client.key"
+    "#,
         );
 
         let err = build_project("default", &root)
@@ -5718,14 +4026,14 @@ client_key = "../secrets/client.key"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-client_key = "certs\\client.key"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    client_key = "certs\\client.key"
+    "#,
         );
 
         let err = build_project("default", &root).expect_err("backslash path must be rejected");
@@ -5743,14 +4051,14 @@ client_key = "certs\\client.key"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-client_key = "C:/certs/client.key"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    client_key = "C:/certs/client.key"
+    "#,
         );
 
         let err = build_project("default", &root)
@@ -5769,14 +4077,14 @@ client_key = "C:/certs/client.key"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-ca_cert = "certs/ca.crt"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    ca_cert = "certs/ca.crt"
+    "#,
         );
 
         let err = build_project("default", &root).expect_err("ca_cert should be rejected");
@@ -5792,14 +4100,14 @@ ca_cert = "certs/ca.crt"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-client_cert = "certs/client.crt"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    client_cert = "certs/client.crt"
+    "#,
         );
 
         let err = build_project("default", &root).expect_err("client_cert should be rejected");
@@ -5815,14 +4123,14 @@ client_cert = "certs/client.crt"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-known_hosts = "certs/known_hosts"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    known_hosts = "certs/known_hosts"
+    "#,
         );
 
         let err = build_project("default", &root).expect_err("known_hosts should be rejected");
@@ -5838,16 +4146,16 @@ known_hosts = "certs/known_hosts"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[secrets]
-FROM_TOML = "nope"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [secrets]
+    FROM_TOML = "nope"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -5867,17 +4175,17 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[assets]]
-path = "assets/message.txt"
-mount = "/app/message.txt"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[assets]]
+    path = "assets/message.txt"
+    mount = "/app/message.txt"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         write_file(&root.join("build/app.wasm"), b"wasm-a");
@@ -5902,13 +4210,13 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -5932,13 +4240,13 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -5965,13 +4273,13 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -6036,13 +4344,13 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc..bad"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc..bad"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -6062,13 +4370,13 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -6086,14 +4394,14 @@ remote = "127.0.0.1:4443"
                 &root,
                 &format!(
                     r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-restart = "{policy}"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    restart = "{policy}"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
                 ),
             );
             write_file(&root.join("build/app.wasm"), b"wasm-a");
@@ -6111,14 +4419,14 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-restart = "sometimes"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    restart = "sometimes"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -6134,16 +4442,16 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[runtime]
-restart_policy = "never"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [runtime]
+    restart_policy = "never"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
@@ -6160,16 +4468,16 @@ remote = "127.0.0.1:4443"
         write_imago_toml(
             &root,
             r#"
-name = "svc-default"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-
-[env.prod]
-name = "svc-prod"
-"#,
+    name = "svc-default"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    
+    [env.prod]
+    name = "svc-prod"
+    "#,
         );
 
         let default_name = load_service_name(&root).expect("default name should load");

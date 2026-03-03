@@ -150,3 +150,93 @@ pub(crate) fn ensure_no_symlink_in_relative_path(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::PathBuf};
+
+    use super::{
+        ensure_no_symlink_in_relative_path, parse_prefixed_sha256, validate_safe_wit_path,
+        validate_wit_source,
+    };
+
+    fn new_temp_dir(test_name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "imago-lockfile-validation-tests-{test_name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos(),
+        ));
+        fs::create_dir_all(&root).expect("temp dir should be created");
+        root
+    }
+
+    #[test]
+    fn validate_safe_wit_path_accepts_wit_deps_path() {
+        let normalized = validate_safe_wit_path("wit/deps/acme-test-0.1.0", "field")
+            .expect("wit/deps path should pass");
+        assert_eq!(normalized, PathBuf::from("wit/deps/acme-test-0.1.0"));
+    }
+
+    #[test]
+    fn validate_safe_wit_path_rejects_absolute_path() {
+        let err = validate_safe_wit_path("/tmp/wit/deps/pkg", "field")
+            .expect_err("absolute path must fail");
+        assert!(err.to_string().contains("relative path"));
+    }
+
+    #[test]
+    fn validate_safe_wit_path_rejects_path_outside_wit_deps() {
+        let err = validate_safe_wit_path("wit/cache/pkg", "field")
+            .expect_err("non wit/deps path must fail");
+        assert!(err.to_string().contains("must be under wit/deps"));
+    }
+
+    #[test]
+    fn validate_safe_wit_path_rejects_parent_traversal() {
+        let err = validate_safe_wit_path("wit/deps/../pkg", "field")
+            .expect_err("parent traversal must fail");
+        assert!(err.to_string().contains("invalid path components"));
+    }
+
+    #[test]
+    fn parse_prefixed_sha256_rejects_missing_prefix() {
+        let err = parse_prefixed_sha256("abc", "field").expect_err("missing prefix must fail");
+        assert!(err.to_string().contains("must start with 'sha256:'"));
+    }
+
+    #[test]
+    fn parse_prefixed_sha256_rejects_invalid_hex_length() {
+        let err = parse_prefixed_sha256("sha256:abc", "field").expect_err("short digest must fail");
+        assert!(err.to_string().contains("64-character hex"));
+    }
+
+    #[test]
+    fn validate_wit_source_rejects_unsupported_scheme() {
+        let err = validate_wit_source("ftp://example.com/pkg", "field")
+            .expect_err("unsupported scheme must fail");
+        assert!(err.to_string().contains("not supported"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_no_symlink_in_relative_path_rejects_symlink_component() {
+        use std::os::unix::fs::symlink;
+
+        let root = new_temp_dir("symlink-reject");
+        fs::create_dir_all(root.join("wit/deps")).expect("wit/deps should exist");
+        fs::write(root.join("target-dir"), b"x").expect("target should exist");
+        symlink(root.join("target-dir"), root.join("wit/deps/link"))
+            .expect("symlink should be created");
+
+        let err = ensure_no_symlink_in_relative_path(
+            &root,
+            PathBuf::from("wit/deps/link").as_path(),
+            "field",
+        )
+        .expect_err("symlink should be rejected");
+        assert!(err.to_string().contains("resolves through symlink"));
+    }
+}

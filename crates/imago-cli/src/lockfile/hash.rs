@@ -120,3 +120,75 @@ fn hash_file_into(hasher: &mut Sha256, path: &Path, context_label: &str) -> anyh
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::PathBuf};
+
+    use super::{compute_path_digest_hex, compute_sha256_hex};
+
+    fn new_temp_dir(test_name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "imago-lockfile-hash-tests-{test_name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos(),
+        ));
+        fs::create_dir_all(&root).expect("temp dir should be created");
+        root
+    }
+
+    fn write(path: &PathBuf, bytes: &[u8]) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("parent should be created");
+        }
+        fs::write(path, bytes).expect("file write should succeed");
+    }
+
+    #[test]
+    fn compute_path_digest_hex_is_deterministic_for_same_tree_with_different_creation_order() {
+        let root = new_temp_dir("deterministic");
+        let a = root.join("a");
+        let b = root.join("b");
+        fs::create_dir_all(&a).expect("a dir should be created");
+        fs::create_dir_all(&b).expect("b dir should be created");
+
+        write(&a.join("nested/one.txt"), b"one");
+        write(&a.join("two.txt"), b"two");
+
+        write(&b.join("two.txt"), b"two");
+        write(&b.join("nested/one.txt"), b"one");
+
+        let digest_a = compute_path_digest_hex(&a).expect("digest should compute");
+        let digest_b = compute_path_digest_hex(&b).expect("digest should compute");
+        assert_eq!(digest_a, digest_b);
+    }
+
+    #[test]
+    fn compute_path_digest_hex_matches_file_sha_for_single_file() {
+        let root = new_temp_dir("single-file");
+        let file = root.join("file.wit");
+        write(&file, b"package demo:test@0.1.0;\n");
+
+        let path_digest = compute_path_digest_hex(&file).expect("path digest should compute");
+        let sha = compute_sha256_hex(&file).expect("sha should compute");
+        assert_eq!(path_digest, sha);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compute_path_digest_hex_rejects_symlink_path() {
+        use std::os::unix::fs::symlink;
+
+        let root = new_temp_dir("symlink");
+        let file = root.join("real.wit");
+        let link = root.join("link.wit");
+        write(&file, b"package demo:test@0.1.0;\n");
+        symlink(&file, &link).expect("symlink should be created");
+
+        let err = compute_path_digest_hex(&link).expect_err("symlink path must fail");
+        assert!(err.to_string().contains("symlink paths are not allowed"));
+    }
+}
