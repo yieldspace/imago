@@ -9,6 +9,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: read
 
 env:
   # Temporary pin: use fork commit with known-error fallback for git_only no-publish workspaces.
