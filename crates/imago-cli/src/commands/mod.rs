@@ -47,3 +47,36 @@ impl CommandResult {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn success_result_sets_expected_fields() {
+        let started_at = Instant::now();
+        let result = CommandResult::success("artifact.build", started_at);
+
+        assert_eq!(result.command, "artifact.build");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stderr.is_none());
+        assert!(result.duration_ms <= started_at.elapsed().as_millis());
+        assert!(result.meta.is_empty());
+    }
+
+    #[test]
+    fn failure_result_sets_expected_fields() {
+        let started_at = Instant::now();
+        let result = CommandResult::failure(
+            "deps.sync",
+            started_at,
+            "failed to parse config".to_string(),
+        );
+
+        assert_eq!(result.command, "deps.sync");
+        assert_eq!(result.exit_code, 2);
+        assert_eq!(result.stderr.as_deref(), Some("failed to parse config"));
+        assert!(result.duration_ms <= started_at.elapsed().as_millis());
+        assert!(result.meta.is_empty());
+    }
+}

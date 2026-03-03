@@ -1,27 +1,13 @@
-use std::{fs, io::Read, path::Path};
+use std::{
+    fs,
+    io::Read,
+    path::{Component, Path},
+};
 
 use anyhow::{Context, anyhow};
 use sha2::{Digest, Sha256};
 
-pub trait DigestProvider {
-    fn compute_sha256_hex(&self, path: &Path) -> anyhow::Result<String>;
-    fn compute_path_digest_hex(&self, path: &Path) -> anyhow::Result<String>;
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Sha256DigestProvider;
-
-impl DigestProvider for Sha256DigestProvider {
-    fn compute_sha256_hex(&self, path: &Path) -> anyhow::Result<String> {
-        compute_sha256_hex(path)
-    }
-
-    fn compute_path_digest_hex(&self, path: &Path) -> anyhow::Result<String> {
-        compute_path_digest_hex(path)
-    }
-}
-
-pub(crate) fn compute_sha256_hex(path: &Path) -> anyhow::Result<String> {
+pub(super) fn compute_sha256_hex(path: &Path) -> anyhow::Result<String> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("failed to inspect file for sha256: {}", path.display()))?;
     if metadata.file_type().is_symlink() {
@@ -32,10 +18,10 @@ pub(crate) fn compute_sha256_hex(path: &Path) -> anyhow::Result<String> {
     }
     let mut hasher = Sha256::new();
     hash_file_into(&mut hasher, path, "file for sha256")?;
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
-pub(crate) fn compute_path_digest_hex(path: &Path) -> anyhow::Result<String> {
+pub(super) fn compute_path_digest_hex(path: &Path) -> anyhow::Result<String> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("failed to read path for digest: {}", path.display()))?;
     if metadata.file_type().is_symlink() {
@@ -92,13 +78,13 @@ pub(crate) fn compute_path_digest_hex(path: &Path) -> anyhow::Result<String> {
         hash_file_into(&mut hasher, &file, "directory digest file")?;
         hasher.update([0]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn normalized_path_to_string(path: &Path) -> String {
     path.components()
         .filter_map(|component| match component {
-            std::path::Component::Normal(part) => Some(part.to_string_lossy().to_string()),
+            Component::Normal(part) => Some(part.to_string_lossy().replace('\\', "/")),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -129,7 +115,7 @@ mod tests {
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "imago-lockfile-hash-tests-{test_name}-{}-{}",
+            "imago-cli-dependency-cache-digest-tests-{test_name}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -148,47 +134,69 @@ mod tests {
     }
 
     #[test]
-    fn compute_path_digest_hex_is_deterministic_for_same_tree_with_different_creation_order() {
+    fn compute_path_digest_hex_is_order_independent_for_directory_entries() {
         let root = new_temp_dir("deterministic");
-        let a = root.join("a");
-        let b = root.join("b");
-        fs::create_dir_all(&a).expect("a dir should be created");
-        fs::create_dir_all(&b).expect("b dir should be created");
+        let dir_a = root.join("a");
+        let dir_b = root.join("b");
+        fs::create_dir_all(&dir_a).expect("dir a should be created");
+        fs::create_dir_all(&dir_b).expect("dir b should be created");
 
-        write(&a.join("nested/one.txt"), b"one");
-        write(&a.join("two.txt"), b"two");
+        write(&dir_a.join("nested/one.wit"), b"one");
+        write(&dir_a.join("two.wit"), b"two");
+        write(&dir_b.join("two.wit"), b"two");
+        write(&dir_b.join("nested/one.wit"), b"one");
 
-        write(&b.join("two.txt"), b"two");
-        write(&b.join("nested/one.txt"), b"one");
-
-        let digest_a = compute_path_digest_hex(&a).expect("digest should compute");
-        let digest_b = compute_path_digest_hex(&b).expect("digest should compute");
+        let digest_a = compute_path_digest_hex(&dir_a).expect("digest should compute");
+        let digest_b = compute_path_digest_hex(&dir_b).expect("digest should compute");
         assert_eq!(digest_a, digest_b);
     }
 
     #[test]
-    fn compute_path_digest_hex_matches_file_sha_for_single_file() {
-        let root = new_temp_dir("single-file");
-        let file = root.join("file.wit");
-        write(&file, b"package demo:test@0.1.0;\n");
+    fn compute_path_digest_hex_matches_sha_for_file_path() {
+        let root = new_temp_dir("file");
+        let file = root.join("package.wit");
+        write(&file, b"package test:demo@0.1.0;\n");
 
-        let path_digest = compute_path_digest_hex(&file).expect("path digest should compute");
+        let digest = compute_path_digest_hex(&file).expect("path digest should compute");
         let sha = compute_sha256_hex(&file).expect("sha should compute");
-        assert_eq!(path_digest, sha);
+        assert_eq!(digest, sha);
     }
 
     #[cfg(unix)]
     #[test]
-    fn compute_path_digest_hex_rejects_symlink_path() {
+    fn compute_sha256_hex_rejects_symlink_path() {
         use std::os::unix::fs::symlink;
 
-        let root = new_temp_dir("symlink");
+        let root = new_temp_dir("sha-symlink");
         let file = root.join("real.wit");
         let link = root.join("link.wit");
         write(&file, b"package demo:test@0.1.0;\n");
         symlink(&file, &link).expect("symlink should be created");
 
-        let err = compute_path_digest_hex(&link).expect_err("symlink path must fail");
+        let err = compute_sha256_hex(&link).expect_err("symlink path must fail");
         assert!(err.to_string().contains("symlink paths are not allowed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compute_path_digest_hex_rejects_symlink_entry_in_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = new_temp_dir("dir-symlink-entry");
+        let dir = root.join("wit");
+        fs::create_dir_all(&dir).expect("wit dir should be created");
+        write(&dir.join("package.wit"), b"package demo:test@0.1.0;\n");
+        symlink(dir.join("package.wit"), dir.join("link.wit")).expect("symlink should be created");
+
+        let err = compute_path_digest_hex(&dir).expect_err("symlink entry must fail");
+        assert!(err.to_string().contains("symlink paths are not allowed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compute_path_digest_hex_rejects_non_file_non_directory() {
+        let err = compute_path_digest_hex(std::path::Path::new("/dev/null"))
+            .expect_err("character device should be rejected");
+        assert!(err.to_string().contains("not file or directory"));
     }
 }

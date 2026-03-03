@@ -2163,18 +2163,18 @@ mod tests {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("registry/example/package.wit"),
@@ -2222,18 +2222,18 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "1.2.3"
-kind = "native"
-wit = "yieldspace:example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "1.2.3"
+    kind = "native"
+    wit = "yieldspace:example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &local_warg_file_path(&root, "yieldspace:example", "1.2.3", "wit.wit"),
@@ -2267,18 +2267,18 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.2.6"
-kind = "native"
-wit = "wasi:cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.2.6"
+    kind = "native"
+    wit = "wasi:cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &local_warg_file_path(&root, "wasi:cli", "0.2.6", "wit.wit"),
@@ -2310,21 +2310,21 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[namespace_registries]
-wasi = "custom-wasi.example"
-
-[[dependencies]]
-version = "0.2.6"
-kind = "native"
-wit = "wasi:io"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [namespace_registries]
+    wasi = "custom-wasi.example"
+    
+    [[dependencies]]
+    version = "0.2.6"
+    kind = "native"
+    wit = "wasi:io"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &local_warg_file_path(&root, "wasi:io", "0.2.6", "wit.wit"),
@@ -2353,18 +2353,18 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.2.0"
-kind = "native"
-oci = "ghcr.io/chikoski/advent-of-spin"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.2.0"
+    kind = "native"
+    oci = "ghcr.io/chikoski/advent-of-spin"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &local_oci_file_path(
@@ -2401,18 +2401,18 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "1.2.3"
-kind = "native"
-wit = "yieldspace:nanokvm"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "1.2.3"
+    kind = "native"
+    wit = "yieldspace:nanokvm"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &local_warg_file_path(&root, "yieldspace:nanokvm", "1.2.3", "wit.wit"),
@@ -2441,18 +2441,18 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "1.2.3"
-kind = "native"
-oci = "ghcr.io/yieldspace/nanokvm"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "1.2.3"
+    kind = "native"
+    oci = "ghcr.io/yieldspace/nanokvm"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &local_oci_file_path(&root, "ghcr.io", "yieldspace:nanokvm", "1.2.3", "wit.wit"),
@@ -2481,18 +2481,18 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "1.2.3"
-kind = "native"
-wit = "yieldspace:nanokvm"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "1.2.3"
+    kind = "native"
+    wit = "yieldspace:nanokvm"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &local_warg_file_path(&root, "yieldspace:nanokvm", "1.2.3", "wit.wit"),
@@ -2524,18 +2524,18 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "1.2.3"
-kind = "native"
-oci = "ghcr.io/yieldspace/nanokvm"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "1.2.3"
+    kind = "native"
+    oci = "ghcr.io/yieldspace/nanokvm"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &local_oci_file_path(&root, "ghcr.io", "yieldspace:nanokvm", "1.2.3", "wit.wit"),
@@ -2567,28 +2567,28 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[bindings]]
-name = "svc-target"
-version = "0.1.0"
-wit = "yieldspace:nanokvm"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[bindings]]
+    name = "svc-target"
+    version = "0.1.0"
+    wit = "yieldspace:nanokvm"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &local_warg_file_path(&root, "yieldspace:nanokvm", "0.1.0", "wit.wit"),
             br#"
-package yieldspace:other@0.1.0;
-
-interface greet {
-  hello: func() -> string;
-}
-"#,
+    package yieldspace:other@0.1.0;
+    
+    interface greet {
+      hello: func() -> string;
+    }
+    "#,
         );
 
         let result = run_with_project_root(UpdateArgs {}, &root).await;
@@ -2619,19 +2619,19 @@ interface greet {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.2.0"
-kind = "native"
-oci = "ghcr.io/chikoski/advent-of-spin"
-registry = "wa.dev"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.2.0"
+    kind = "native"
+    oci = "ghcr.io/chikoski/advent-of-spin"
+    registry = "wa.dev"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         let result = run_with_project_root(UpdateArgs {}, &root).await;
@@ -2651,22 +2651,22 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.2.0"
-kind = "wasm"
-path = "registry/example"
-
-[dependencies.component]
-oci = "ghcr.io/chikoski/advent-of-spin"
-registry = "wa.dev"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.2.0"
+    kind = "wasm"
+    path = "registry/example"
+    
+    [dependencies.component]
+    oci = "ghcr.io/chikoski/advent-of-spin"
+    registry = "wa.dev"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("registry/example/package.wit"),
@@ -2694,21 +2694,21 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "1.2.3"
-kind = "wasm"
-path = "registry/example"
-
-[dependencies.component]
-path = "registry/example-component.wasm"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "1.2.3"
+    kind = "wasm"
+    path = "registry/example"
+    
+    [dependencies.component]
+    path = "registry/example-component.wasm"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("registry/example/package.wit"),
@@ -2765,29 +2765,29 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "wasm"
-wit = "root:component"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "wasm"
+    wit = "root:component"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         let fixture_wit_root = root.join("fixture-wit-component");
         write(
             &fixture_wit_root.join("package.wit"),
             br#"
-package root:component@0.1.0;
-
-world plugin {
-}
-"#,
+    package root:component@0.1.0;
+    
+    world plugin {
+    }
+    "#,
         );
         let component_bytes = encode_wit_component(&fixture_wit_root, "plugin");
         let expected_sha = sha256_hex(&component_bytes);
@@ -2835,54 +2835,54 @@ world plugin {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "wasm"
-wit = "root:component"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "chikoski:name"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "wasm"
+    wit = "root:component"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "chikoski:name"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         let root_component_fixture = root.join("fixture-root-component");
         write(
             &root_component_fixture.join("package.wit"),
             br#"
-package root:component@0.1.0;
-
-interface imported {
-  ping: func();
-}
-
-interface exported {
-}
-
-world plugin {
-  import chikoski:name/name-provider@0.1.0;
-  import imported;
-  export exported;
-}
-"#,
+    package root:component@0.1.0;
+    
+    interface imported {
+      ping: func();
+    }
+    
+    interface exported {
+    }
+    
+    world plugin {
+      import chikoski:name/name-provider@0.1.0;
+      import imported;
+      export exported;
+    }
+    "#,
         );
         write(
             &root_component_fixture.join("deps/chikoski-name/package.wit"),
             br#"
-package chikoski:name@0.1.0;
-
-interface name-provider {
-  get-name: func() -> string;
-}
-"#,
+    package chikoski:name@0.1.0;
+    
+    interface name-provider {
+      get-name: func() -> string;
+    }
+    "#,
         );
         write(
             &local_warg_file_path(&root, "root:component", "0.1.0", "wit.wasm"),
@@ -2893,12 +2893,12 @@ interface name-provider {
         write(
             &chikoski_name_fixture.join("package.wit"),
             br#"
-package chikoski:name@0.1.0;
-
-interface name-provider {
-  get-name: func() -> string;
-}
-"#,
+    package chikoski:name@0.1.0;
+    
+    interface name-provider {
+      get-name: func() -> string;
+    }
+    "#,
         );
         write(
             &local_warg_file_path(&root, "chikoski:name", "0.1.0", "wit.wasm"),
@@ -2941,12 +2941,12 @@ interface name-provider {
         write(
             &root.join("wit/deps/chikoski-name-0.1.0/package.wit"),
             br#"
-package chikoski:name@0.1.0;
-
-interface other-provider {
-  get-name: func() -> string;
-}
-"#,
+    package chikoski:name@0.1.0;
+    
+    interface other-provider {
+      get-name: func() -> string;
+    }
+    "#,
         );
         let requirements = vec![ComponentWorldNonWasiInterfaceRequirement {
             dependency_name: "root:component".to_string(),
@@ -2975,23 +2975,23 @@ interface other-provider {
         write(
             &root.join("wit/world.wit"),
             br#"
-package example:svc@0.1.0;
-
-world plugin {
-  import wasi:random/random@0.2.6;
-}
-"#,
+    package example:svc@0.1.0;
+    
+    world plugin {
+      import wasi:random/random@0.2.6;
+    }
+    "#,
         );
         let wasi_random_fixture = root.join("fixture-wasi-random-merge");
         write(
             &wasi_random_fixture.join("package.wit"),
             br#"
-package wasi:random@0.2.6;
-
-interface random {
-  get-random-bytes: func(len: u64) -> list<u8>;
-}
-"#,
+    package wasi:random@0.2.6;
+    
+    interface random {
+      get-random-bytes: func(len: u64) -> list<u8>;
+    }
+    "#,
         );
         write(
             &local_warg_file_path(&root, "wasi:random", "0.2.6", "wit.wasm"),
@@ -3171,12 +3171,12 @@ interface random {
         write(
             &root.join("wit/world.wit"),
             br#"
-package example:svc@0.1.0;
-
-world plugin {
-  import wasi:random/random@0.2.7;
-}
-"#,
+    package example:svc@0.1.0;
+    
+    world plugin {
+      import wasi:random/random@0.2.7;
+    }
+    "#,
         );
 
         let err = hydrate_wasi_packages_from_component_and_wit_package_dir(
@@ -3201,40 +3201,40 @@ world plugin {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "chikoski:missing"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "chikoski:missing"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         let fixture_wit_root = root.join("fixture-wit-component-expected-package-missing");
         write(
             &fixture_wit_root.join("package.wit"),
             br#"
-package root:component@0.1.0;
-
-world plugin {
-  import chikoski:name/name-provider@0.1.0;
-}
-"#,
+    package root:component@0.1.0;
+    
+    world plugin {
+      import chikoski:name/name-provider@0.1.0;
+    }
+    "#,
         );
         write(
             &fixture_wit_root.join("deps/chikoski-name/package.wit"),
             br#"
-package chikoski:name@0.1.0;
-
-interface name-provider {
-  get-name: func() -> string;
-}
-"#,
+    package chikoski:name@0.1.0;
+    
+    interface name-provider {
+      get-name: func() -> string;
+    }
+    "#,
         );
         let component_bytes = encode_wit_component(&fixture_wit_root, "plugin");
         write(
@@ -3267,30 +3267,30 @@ interface name-provider {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "wasm"
-wit = "chikoski:hello"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "wasm"
+    wit = "chikoski:hello"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         let fixture_wit_root = root.join("fixture-wit-package");
         write(
             &fixture_wit_root.join("package.wit"),
             br#"
-package chikoski:hello@0.1.0;
-
-interface greet {
-  hello: func() -> string;
-}
-"#,
+    package chikoski:hello@0.1.0;
+    
+    interface greet {
+      hello: func() -> string;
+    }
+    "#,
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
@@ -3319,18 +3319,18 @@ interface greet {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "https://wa.dev/chikoski:hello/greet"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "https://wa.dev/chikoski:hello/greet"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         let result = run_with_project_root(UpdateArgs {}, &root).await;
         assert_eq!(result.exit_code, 2);
@@ -3350,23 +3350,23 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "foo-bar:baz"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "foo:bar-baz"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "foo-bar:baz"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "foo:bar-baz"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("wit/deps/stale/dependency.wit"),
@@ -3395,23 +3395,23 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "foo-bar:baz"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "foo:bar-baz"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "foo-bar:baz"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "foo:bar-baz"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("wit/deps/stale/dependency.wit"),
@@ -3440,23 +3440,23 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/a"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/b"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/a"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/b"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(&root.join("build/app.wasm"), b"\0asm");
         let cache_wit_root_a = dependency_cache::cache_entry_root(&root, "path-source-0").join(
@@ -3540,18 +3540,18 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "wit/deps/vendor/example.wit"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "wit/deps/vendor/example.wit"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("wit/deps/vendor/example.wit"),
@@ -3582,18 +3582,18 @@ remote = "127.0.0.1:4443"
             &root.join("imago.toml"),
             format!(
                 r#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "{}"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "{}"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
                 absolute_source.display()
             )
             .as_bytes(),
@@ -3622,21 +3622,21 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "wasm"
-path = "registry/example"
-
-[dependencies.component]
-path = "wit/deps/vendor/example-component.wasm"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "wasm"
+    path = "registry/example"
+    
+    [dependencies.component]
+    path = "wit/deps/vendor/example-component.wasm"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("registry/example/package.wit"),
@@ -3673,18 +3673,18 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "/tmp/pwn"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "/tmp/pwn"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("wit/deps/stale/dependency.wit"),
@@ -3717,18 +3717,18 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "chikoski:hello"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "chikoski:hello"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("wit/deps/stale/dependency.wit"),
@@ -3739,26 +3739,26 @@ remote = "127.0.0.1:4443"
         write(
             &fixture_wit_root.join("greet.wit"),
             br#"
-package chikoski:hello@0.1.0;
-
-interface greet {
-  hello: func() -> string;
-}
-
-world example {
-  import chikoski:name/name-provider@0.1.0;
-}
-"#,
+    package chikoski:hello@0.1.0;
+    
+    interface greet {
+      hello: func() -> string;
+    }
+    
+    world example {
+      import chikoski:name/name-provider@0.1.0;
+    }
+    "#,
         );
         write(
             &fixture_wit_root.join("deps/chikoski-name/package.wit"),
             br#"
-package chikoski:name@0.1.0;
-
-interface name-provider {
-  get-name: func() -> string;
-}
-"#,
+    package chikoski:name@0.1.0;
+    
+    interface name-provider {
+      get-name: func() -> string;
+    }
+    "#,
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
@@ -3835,44 +3835,44 @@ interface name-provider {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "chikoski:hello"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "chikoski:hello"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         let fixture_wit_root = root.join("fixture-wit-wasi");
         write(
             &fixture_wit_root.join("greet.wit"),
             br#"
-package chikoski:hello@0.1.0;
-
-interface greet {
-  hello: func() -> string;
-}
-
-world example {
-  import wasi:io/streams@0.2.6;
-}
-"#,
+    package chikoski:hello@0.1.0;
+    
+    interface greet {
+      hello: func() -> string;
+    }
+    
+    world example {
+      import wasi:io/streams@0.2.6;
+    }
+    "#,
         );
         write(
             &fixture_wit_root.join("deps/wasi-io/package.wit"),
             br#"
-package wasi:io@0.2.6;
-
-interface streams {
-  read: func();
-}
-"#,
+    package wasi:io@0.2.6;
+    
+    interface streams {
+      read: func();
+    }
+    "#,
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
@@ -3910,47 +3910,47 @@ interface streams {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[namespace_registries]
-wasi = "custom-wasi.example"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "chikoski:hello"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [namespace_registries]
+    wasi = "custom-wasi.example"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "chikoski:hello"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         let fixture_wit_root = root.join("fixture-wit-wasi-override");
         write(
             &fixture_wit_root.join("greet.wit"),
             br#"
-package chikoski:hello@0.1.0;
-
-interface greet {
-  hello: func() -> string;
-}
-
-world example {
-  import wasi:io/streams@0.2.6;
-}
-"#,
+    package chikoski:hello@0.1.0;
+    
+    interface greet {
+      hello: func() -> string;
+    }
+    
+    world example {
+      import wasi:io/streams@0.2.6;
+    }
+    "#,
         );
         write(
             &fixture_wit_root.join("deps/wasi-io/package.wit"),
             br#"
-package wasi:io@0.2.6;
-
-interface streams {
-  read: func();
-}
-"#,
+    package wasi:io@0.2.6;
+    
+    interface streams {
+      read: func();
+    }
+    "#,
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
@@ -3984,45 +3984,45 @@ interface streams {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "chikoski:hello"
-registry = "custom-root.example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "chikoski:hello"
+    registry = "custom-root.example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         let fixture_wit_root = root.join("fixture-wit-parent-registry");
         write(
             &fixture_wit_root.join("greet.wit"),
             br#"
-package chikoski:hello@0.1.0;
-
-interface greet {
-  hello: func() -> string;
-}
-
-world example {
-  import chikoski:name/name-provider@0.1.0;
-}
-"#,
+    package chikoski:hello@0.1.0;
+    
+    interface greet {
+      hello: func() -> string;
+    }
+    
+    world example {
+      import chikoski:name/name-provider@0.1.0;
+    }
+    "#,
         );
         write(
             &fixture_wit_root.join("deps/chikoski-name/package.wit"),
             br#"
-package chikoski:name@0.1.0;
-
-interface name-provider {
-  get-name: func() -> string;
-}
-"#,
+    package chikoski:name@0.1.0;
+    
+    interface name-provider {
+      get-name: func() -> string;
+    }
+    "#,
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
@@ -4056,30 +4056,30 @@ interface name-provider {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "chikoski:hello"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "chikoski:hello"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         let fixture_wit_root = root.join("fixture-wit-top-no-version");
         write(
             &fixture_wit_root.join("greet.wit"),
             br#"
-package chikoski:hello;
-
-interface greet {
-  hello: func() -> string;
-}
-"#,
+    package chikoski:hello;
+    
+    interface greet {
+      hello: func() -> string;
+    }
+    "#,
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
@@ -4108,30 +4108,30 @@ interface greet {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "chikoski:hello"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "chikoski:hello"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         let fixture_wit_root = root.join("fixture-wit-top-version-mismatch");
         write(
             &fixture_wit_root.join("greet.wit"),
             br#"
-package chikoski:hello@0.2.0;
-
-interface greet {
-  hello: func() -> string;
-}
-"#,
+    package chikoski:hello@0.2.0;
+    
+    interface greet {
+      hello: func() -> string;
+    }
+    "#,
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
@@ -4156,44 +4156,44 @@ interface greet {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "chikoski:hello"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "chikoski:hello"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         let fixture_wit_root = root.join("fixture-wit-transitive-no-version");
         write(
             &fixture_wit_root.join("greet.wit"),
             br#"
-package chikoski:hello@0.1.0;
-
-interface greet {
-  hello: func() -> string;
-}
-
-world example {
-  import chikoski:name/name-provider;
-}
-"#,
+    package chikoski:hello@0.1.0;
+    
+    interface greet {
+      hello: func() -> string;
+    }
+    
+    world example {
+      import chikoski:name/name-provider;
+    }
+    "#,
         );
         write(
             &fixture_wit_root.join("deps/chikoski-name/package.wit"),
             br#"
-package chikoski:name;
-
-interface name-provider {
-  name: func() -> string;
-}
-"#,
+    package chikoski:name;
+    
+    interface name-provider {
+      name: func() -> string;
+    }
+    "#,
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
@@ -4243,18 +4243,18 @@ interface name-provider {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("registry/example/package.wit"),
@@ -4286,18 +4286,18 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("registry/example/package.wit"),
@@ -4332,18 +4332,18 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("registry/example/package.wit"),
@@ -4378,18 +4378,18 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("registry/example/package.wit"),
@@ -4441,29 +4441,29 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "chikoski:hello"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "chikoski:hello"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         let fixture_wit_root = root.join("fixture-wit-warg");
         write(
             &fixture_wit_root.join("package.wit"),
             br#"
-package chikoski:hello@0.1.0;
-
-interface greet {
-  hello: func() -> string;
-}
-"#,
+    package chikoski:hello@0.1.0;
+    
+    interface greet {
+      hello: func() -> string;
+    }
+    "#,
         );
         let wit_package_bytes = encode_wit_package(&fixture_wit_root);
         write(
@@ -4501,32 +4501,32 @@ interface greet {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-wit = "chikoski:hello"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    wit = "chikoski:hello"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &local_warg_file_path(&root, "chikoski:hello", "0.1.0", "wit.wit"),
             br#"
-package chikoski:hello@0.1.0;
-
-interface greet {
-  hello: func() -> string;
-}
-
-world example {
-  import chikoski:name/name-provider;
-}
-"#,
+    package chikoski:hello@0.1.0;
+    
+    interface greet {
+      hello: func() -> string;
+    }
+    
+    world example {
+      import chikoski:name/name-provider;
+    }
+    "#,
         );
 
         let result = run_with_project_root(UpdateArgs {}, &root).await;
@@ -4546,38 +4546,38 @@ world example {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/hello"
-
-[[bindings]]
-name = "svc-target"
-version = "0.1.0"
-path = "registry/hello"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/hello"
+    
+    [[bindings]]
+    name = "svc-target"
+    version = "0.1.0"
+    path = "registry/hello"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("registry/hello/package.wit"),
             br#"
-package chikoski:hello@0.1.0;
-
-interface greet {
-  hello: func() -> string;
-  ping: func(a: u32) -> u32;
-}
-
-interface untouched {
-  pass-through: func() -> string;
-}
-"#,
+    package chikoski:hello@0.1.0;
+    
+    interface greet {
+      hello: func() -> string;
+      ping: func(a: u32) -> u32;
+    }
+    
+    interface untouched {
+      pass-through: func() -> string;
+    }
+    "#,
         );
         write(&root.join("build/app.wasm"), b"\0asm");
 
@@ -4651,28 +4651,28 @@ interface untouched {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[bindings]]
-name = "svc-target"
-version = "0.1.0"
-path = "registry/hello"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[bindings]]
+    name = "svc-target"
+    version = "0.1.0"
+    path = "registry/hello"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("registry/hello/package.wit"),
             br#"
-package chikoski:hello@0.1.0;
-
-interface greet {
-  hello: func() -> string;
-}
-"#,
+    package chikoski:hello@0.1.0;
+    
+    interface greet {
+      hello: func() -> string;
+    }
+    "#,
         );
         write(&root.join("build/app.wasm"), b"\0asm");
 
@@ -4710,37 +4710,37 @@ interface greet {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/hello-a"
-
-[[bindings]]
-name = "svc-target"
-version = "0.1.0"
-path = "registry/hello-b"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/hello-a"
+    
+    [[bindings]]
+    name = "svc-target"
+    version = "0.1.0"
+    path = "registry/hello-b"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("registry/hello-a/package.wit"),
             br#"
-package chikoski:hello@0.1.0;
-interface greet { hello: func() -> string; }
-"#,
+    package chikoski:hello@0.1.0;
+    interface greet { hello: func() -> string; }
+    "#,
         );
         write(
             &root.join("registry/hello-b/package.wit"),
             br#"
-package chikoski:hello@0.1.0;
-interface greet { hello2: func() -> string; }
-"#,
+    package chikoski:hello@0.1.0;
+    interface greet { hello2: func() -> string; }
+    "#,
         );
 
         let result = run_with_project_root(UpdateArgs {}, &root).await;
@@ -4760,36 +4760,36 @@ interface greet { hello2: func() -> string; }
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/hello"
-
-[[bindings]]
-name = "svc-target"
-version = "0.1.0"
-path = "registry/hello"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/hello"
+    
+    [[bindings]]
+    name = "svc-target"
+    version = "0.1.0"
+    path = "registry/hello"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("registry/hello/package.wit"),
             br#"
-package chikoski:hello@0.1.0;
-
-interface greet {
-  resource connection {
+    package chikoski:hello@0.1.0;
+    
+    interface greet {
+      resource connection {
     close: func();
-  }
-  hello: func(connection: borrow<connection>) -> string;
-}
-"#,
+      }
+      hello: func(connection: borrow<connection>) -> string;
+    }
+    "#,
         );
 
         let result = run_with_project_root(UpdateArgs {}, &root).await;
@@ -4809,28 +4809,28 @@ interface greet {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/hello"
-
-[[bindings]]
-name = "svc-target-a"
-version = "0.1.0"
-path = "registry/hello"
-
-[[bindings]]
-name = "svc-target-b"
-version = "0.1.0"
-path = "registry/hello"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/hello"
+    
+    [[bindings]]
+    name = "svc-target-a"
+    version = "0.1.0"
+    path = "registry/hello"
+    
+    [[bindings]]
+    name = "svc-target-b"
+    version = "0.1.0"
+    path = "registry/hello"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(
             &root.join("registry/hello/package.wit"),
@@ -4854,48 +4854,48 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(&root.join("build/app.wasm"), b"\0asm");
         write(
             &root.join("wit/common.wit"),
             br#"
-package example:svc@0.1.0;
-
-world common {
-  import wasi:clocks/wall-clock@0.2.6;
-}
-"#,
+    package example:svc@0.1.0;
+    
+    world common {
+      import wasi:clocks/wall-clock@0.2.6;
+    }
+    "#,
         );
         write(
             &root.join("wit/world.wit"),
             br#"
-package example:svc@0.1.0;
-
-world host {
-  include common;
-  import wasi:io/streams@0.2.6;
-  export wasi:clocks/wall-clock@0.2.6;
-}
-"#,
+    package example:svc@0.1.0;
+    
+    world host {
+      include common;
+      import wasi:io/streams@0.2.6;
+      export wasi:clocks/wall-clock@0.2.6;
+    }
+    "#,
         );
 
         let wasi_io_fixture = root.join("fixture-wasi-io");
         write(
             &wasi_io_fixture.join("package.wit"),
             br#"
-package wasi:io@0.2.6;
-
-interface streams {
-  read: func();
-}
-"#,
+    package wasi:io@0.2.6;
+    
+    interface streams {
+      read: func();
+    }
+    "#,
         );
         write(
             &local_warg_file_path(&root, "wasi:io", "0.2.6", "wit.wasm"),
@@ -4906,12 +4906,12 @@ interface streams {
         write(
             &wasi_clocks_fixture.join("package.wit"),
             br#"
-package wasi:clocks@0.2.6;
-
-interface wall-clock {
-  now: func() -> u64;
-}
-"#,
+    package wasi:clocks@0.2.6;
+    
+    interface wall-clock {
+      now: func() -> u64;
+    }
+    "#,
         );
         write(
             &local_warg_file_path(&root, "wasi:clocks", "0.2.6", "wit.wasm"),
@@ -4980,24 +4980,24 @@ interface wall-clock {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(&root.join("build/app.wasm"), b"\0asm");
         write(
             &root.join("wit/world.wit"),
             br#"
-package example:svc@0.1.0;
-
-world host {
-  import wasi:io/streams;
-}
-"#,
+    package example:svc@0.1.0;
+    
+    world host {
+      import wasi:io/streams;
+    }
+    "#,
         );
 
         let result = run_with_project_root(UpdateArgs {}, &root).await;
@@ -5017,34 +5017,34 @@ world host {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(&root.join("build/app.wasm"), b"\0asm");
         write(
             &root.join("wit/a.wit"),
             br#"
-package example:svc@0.1.0;
-
-world host-a {
-  import wasi:io/streams@0.2.6;
-}
-"#,
+    package example:svc@0.1.0;
+    
+    world host-a {
+      import wasi:io/streams@0.2.6;
+    }
+    "#,
         );
         write(
             &root.join("wit/b.wit"),
             br#"
-package example:svc@0.1.0;
-
-world host-b {
-  import wasi:io/streams@0.2.7;
-}
-"#,
+    package example:svc@0.1.0;
+    
+    world host-b {
+      import wasi:io/streams@0.2.7;
+    }
+    "#,
         );
 
         let result = run_with_project_root(UpdateArgs {}, &root).await;
@@ -5064,13 +5064,13 @@ world host-b {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(&root.join("build/app.wasm"), b"\0asm");
         write(&root.join("wit/notes.txt"), b"not a wit file");
@@ -5096,41 +5096,41 @@ remote = "127.0.0.1:4443"
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.2.6"
-kind = "native"
-wit = "wasi:io"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.2.6"
+    kind = "native"
+    wit = "wasi:io"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(&root.join("build/app.wasm"), b"\0asm");
         write(
             &root.join("wit/world.wit"),
             br#"
-package example:svc@0.1.0;
-
-world host {
-  import wasi:io/streams@0.2.6;
-}
-"#,
+    package example:svc@0.1.0;
+    
+    world host {
+      import wasi:io/streams@0.2.6;
+    }
+    "#,
         );
 
         let wasi_io_fixture = root.join("fixture-wasi-io-overlap-same");
         write(
             &wasi_io_fixture.join("package.wit"),
             br#"
-package wasi:io@0.2.6;
-
-interface streams {
-  read: func();
-}
-"#,
+    package wasi:io@0.2.6;
+    
+    interface streams {
+      read: func();
+    }
+    "#,
         );
         write(
             &local_warg_file_path(&root, "wasi:io", "0.2.6", "wit.wasm"),
@@ -5154,51 +5154,51 @@ interface streams {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.2.6"
-kind = "native"
-path = "registry/wasi-io"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.2.6"
+    kind = "native"
+    path = "registry/wasi-io"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write(&root.join("build/app.wasm"), b"\0asm");
         write(
             &root.join("wit/world.wit"),
             br#"
-package example:svc@0.1.0;
-
-world host {
-  import wasi:io/streams@0.2.6;
-}
-"#,
+    package example:svc@0.1.0;
+    
+    world host {
+      import wasi:io/streams@0.2.6;
+    }
+    "#,
         );
         write(
             &root.join("registry/wasi-io/package.wit"),
             br#"
-package wasi:io@0.2.6;
-
-interface streams {
-  read: func();
-}
-"#,
+    package wasi:io@0.2.6;
+    
+    interface streams {
+      read: func();
+    }
+    "#,
         );
 
         let wasi_io_fixture = root.join("fixture-wasi-io-overlap-conflict");
         write(
             &wasi_io_fixture.join("package.wit"),
             br#"
-package wasi:io@0.2.6;
-
-interface streams {
-  write: func();
-}
-"#,
+    package wasi:io@0.2.6;
+    
+    interface streams {
+      write: func();
+    }
+    "#,
         );
         write(
             &local_warg_file_path(&root, "wasi:io", "0.2.6", "wit.wasm"),
@@ -5222,23 +5222,23 @@ interface streams {
         write(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "native"
-path = "registry/example"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
 
         let result = run_with_project_root(UpdateArgs {}, &root).await;

@@ -2308,21 +2308,21 @@ mod tests {
         write_file(
             &root.join("imago.toml"),
             br#"
-name = "svc"
-main = "build/app.wasm"
-type = "cli"
-
-[[dependencies]]
-version = "0.1.0"
-kind = "wasm"
-path = "registry/example"
-
-[dependencies.component]
-path = "registry/example-component.wasm"
-
-[target.default]
-remote = "127.0.0.1:4443"
-"#,
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+    
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "wasm"
+    path = "registry/example"
+    
+    [dependencies.component]
+    path = "registry/example-component.wasm"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
         );
         write_file(
             &root.join("registry/example/package.wit"),
