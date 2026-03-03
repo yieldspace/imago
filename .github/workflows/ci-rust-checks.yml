@@ -52,7 +52,7 @@ jobs:
               case "$file" in
                 plugins/*/wkg.lock)
                   ;;
-                Cargo.toml|Cargo.lock|build.rs|crates/*|src/*|tests/*|e2e/*|examples/*|plugins/*)
+                Cargo.toml|Cargo.lock|build.rs|crates/*|src/*|tests/*|e2e/*|examples/*|plugins/*|schemas/*)
                   rust_related=true
                   ;;
               esac
