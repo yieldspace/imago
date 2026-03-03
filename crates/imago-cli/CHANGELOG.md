@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/yieldspace/imago/compare/imago-v0.1.0...imago-v0.1.1) - 2026-03-03
+
+### Other
+
+- Refactor imago-cli internals and expand unit test coverage ([#279](https://github.com/yieldspace/imago/pull/279))
+
 ## [0.1.0](https://github.com/yieldspace/imago/releases/tag/imago-v0.1.0) - 2026-03-02
 
 ### Other
