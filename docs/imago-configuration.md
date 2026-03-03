@@ -444,6 +444,36 @@ max_paths = 128
 
 - Validation error notes: out-of-range values or `paths` overflow fail runtime startup validation.
 
+### The `usb.bulk_ring_chunk_bytes` field
+
+- Type: `integer`
+- Required/Optional: Optional.
+- Accepted values / Constraints: `1..=usb.max_transfer_bytes`.
+- Default: `min(16384, usb.max_transfer_bytes)`.
+- Example:
+
+```toml
+[resources.usb]
+bulk_ring_chunk_bytes = 16384
+```
+
+- Validation error notes: zero, negative, non-integer, or values above `usb.max_transfer_bytes` fail runtime startup validation.
+
+### The `usb.bulk_ring_slots` field
+
+- Type: `integer`
+- Required/Optional: Optional.
+- Accepted values / Constraints: `1..=256`; `usb.bulk_ring_chunk_bytes * usb.bulk_ring_slots` must be `<= 67108864`.
+- Default: `16`.
+- Example:
+
+```toml
+[resources.usb]
+bulk_ring_slots = 16
+```
+
+- Validation error notes: zero, negative, non-integer, out-of-range values, or capacity products above `67108864` fail runtime startup validation.
+
 ### USB runtime behavior (`imago:usb`)
 
 - `provider.list-openable-paths` returns the normalized allowlist defined by `resources.usb.paths`.
@@ -452,6 +482,8 @@ max_paths = 128
 - `provider.open-device(path)` rejects non-allowlisted paths before backend open attempts.
 - Per-device worker channels are bounded; saturated workers can return `usb-error.busy`.
 - All transfer APIs (`control`, `bulk`, `interrupt`, `isochronous`) enforce `usb.max_transfer_bytes` and `usb.max_timeout_ms`.
+- `claimed-interface.bulk-read(endpoint, timeout-ms)` reads one chunk from a per-endpoint bounded ring buffer (size from `usb.bulk_ring_chunk_bytes`).
+- Ring overflow uses drop-oldest backpressure and is observable via `claimed-interface.bulk-read-stats(endpoint)`.
 
 ### The `<custom_key>` field
 
@@ -477,6 +509,8 @@ digital_pins = [
 [resources.usb]
 paths = ["/dev/bus/usb/001/001"]
 max_transfer_bytes = 1048576
+bulk_ring_chunk_bytes = 16384
+bulk_ring_slots = 16
 ```
 
 - Validation error notes: empty keys fail validation. `resources.gpio.digital_pins` rejects duplicated `label` and duplicated `value_path`; `resources.usb` rejects invalid path/limit settings during runtime startup.

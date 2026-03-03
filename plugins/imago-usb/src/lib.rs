@@ -85,6 +85,7 @@ type ControlSetup = imago_usb_plugin_bindings::imago::usb::types::ControlSetup;
 type ControlType = imago_usb_plugin_bindings::imago::usb::types::ControlType;
 type Recipient = imago_usb_plugin_bindings::imago::usb::types::Recipient;
 type Limits = imago_usb_plugin_bindings::imago::usb::types::Limits;
+type BulkReadStatsRecord = imago_usb_plugin_bindings::imago::usb::types::BulkReadStats;
 type VersionRecord = imago_usb_plugin_bindings::imago::usb::types::Version;
 type DirectionRecord = imago_usb_plugin_bindings::imago::usb::types::Direction;
 type UsageTypeRecord = imago_usb_plugin_bindings::imago::usb::types::UsageType;
@@ -106,25 +107,50 @@ const USB_RESOURCE_PATHS_KEY: &str = "paths";
 const USB_RESOURCE_MAX_TRANSFER_BYTES_KEY: &str = "max_transfer_bytes";
 const USB_RESOURCE_MAX_TIMEOUT_MS_KEY: &str = "max_timeout_ms";
 const USB_RESOURCE_MAX_PATHS_KEY: &str = "max_paths";
+const USB_RESOURCE_BULK_RING_CHUNK_BYTES_KEY: &str = "bulk_ring_chunk_bytes";
+const USB_RESOURCE_BULK_RING_SLOTS_KEY: &str = "bulk_ring_slots";
 
 const DEFAULT_MAX_TRANSFER_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_TIMEOUT_MS: u32 = 30_000;
 const DEFAULT_MAX_PATHS: usize = 128;
+const DEFAULT_BULK_RING_CHUNK_BYTES: usize = 16 * 1024;
+const DEFAULT_BULK_RING_SLOTS: usize = 16;
 
 const MAX_MAX_TRANSFER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_MAX_TIMEOUT_MS: u32 = 120_000;
 const MAX_MAX_PATHS: usize = 256;
+const MAX_BULK_RING_SLOTS: usize = 256;
+const MAX_BULK_RING_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 const DEVICE_COMMAND_CHANNEL_CAPACITY: usize = 64;
 const DEFAULT_THREAD_STACK_BYTES: usize = 256 * 1024;
 const MAX_HOTPLUG_QUEUE_LEN: usize = 256;
 const MAX_ISO_PACKETS: u16 = 1024;
+const BULK_READER_IO_TIMEOUT_MS: u64 = 100;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BulkRingConfig {
+    chunk_bytes: usize,
+    slots: usize,
+    max_bytes: usize,
+}
+
+impl Default for BulkRingConfig {
+    fn default() -> Self {
+        Self {
+            chunk_bytes: DEFAULT_BULK_RING_CHUNK_BYTES,
+            slots: DEFAULT_BULK_RING_SLOTS,
+            max_bytes: DEFAULT_BULK_RING_CHUNK_BYTES * DEFAULT_BULK_RING_SLOTS,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UsbLimitsConfig {
     max_transfer_bytes: usize,
     max_timeout_ms: u32,
     max_paths: usize,
+    bulk_ring: BulkRingConfig,
 }
 
 impl Default for UsbLimitsConfig {
@@ -133,6 +159,7 @@ impl Default for UsbLimitsConfig {
             max_transfer_bytes: DEFAULT_MAX_TRANSFER_BYTES,
             max_timeout_ms: DEFAULT_MAX_TIMEOUT_MS,
             max_paths: DEFAULT_MAX_PATHS,
+            bulk_ring: BulkRingConfig::default(),
         }
     }
 }
@@ -142,6 +169,21 @@ struct UsbResourcesConfig {
     paths: Vec<String>,
     allowlist: BTreeSet<String>,
     limits: UsbLimitsConfig,
+}
+
+#[derive(Debug, Default)]
+struct BulkReaderSharedState {
+    ring: VecDeque<Vec<u8>>,
+    buffered_bytes: usize,
+    dropped_chunks: u64,
+    dropped_bytes: u64,
+    terminal_error: Option<UsbError>,
+    stop: bool,
+}
+
+struct BulkReaderRuntime {
+    shared: Arc<(Mutex<BulkReaderSharedState>, Condvar)>,
+    thread_handle: Option<thread::JoinHandle<()>>,
 }
 
 #[derive(Clone)]
@@ -230,10 +272,11 @@ impl Hotplug<rusb::Context> for HotplugCallback {
 }
 
 struct DeviceThreadState {
-    handle: rusb::DeviceHandle<rusb::Context>,
+    handle: Arc<rusb::DeviceHandle<rusb::Context>>,
     claimed_interfaces: BTreeSet<u8>,
     alt_settings: BTreeMap<u8, u8>,
     limits: UsbLimitsConfig,
+    bulk_readers: BTreeMap<(u8, u8), BulkReaderRuntime>,
 }
 
 enum DeviceCommand {
@@ -287,12 +330,16 @@ enum DeviceCommand {
         timeout_ms: u32,
         reply: oneshot::Sender<Result<(), UsbError>>,
     },
-    BulkIn {
+    BulkRead {
         interface: u8,
         endpoint: u8,
-        length: u32,
         timeout_ms: u32,
         reply: oneshot::Sender<Result<Vec<u8>, UsbError>>,
+    },
+    BulkReadStats {
+        interface: u8,
+        endpoint: u8,
+        reply: oneshot::Sender<Result<BulkReadStatsRecord, UsbError>>,
     },
     BulkOut {
         interface: u8,
@@ -594,6 +641,50 @@ fn parse_usb_resources_config(
         ));
     }
 
+    let bulk_ring_chunk_bytes =
+        parse_u64_field(usb_table, USB_RESOURCE_BULK_RING_CHUNK_BYTES_KEY)?
+            .map(|value| {
+                usize::try_from(value).map_err(|_| {
+                    format!(
+                        "resources.usb.{USB_RESOURCE_BULK_RING_CHUNK_BYTES_KEY} is too large for this platform"
+                    )
+                })
+            })
+            .transpose()?
+            .unwrap_or(DEFAULT_BULK_RING_CHUNK_BYTES.min(max_transfer_bytes));
+    if bulk_ring_chunk_bytes == 0 || bulk_ring_chunk_bytes > max_transfer_bytes {
+        return Err(format!(
+            "resources.usb.{USB_RESOURCE_BULK_RING_CHUNK_BYTES_KEY} must be within 1..={max_transfer_bytes}"
+        ));
+    }
+
+    let bulk_ring_slots = parse_u64_field(usb_table, USB_RESOURCE_BULK_RING_SLOTS_KEY)?
+        .map(|value| {
+            usize::try_from(value).map_err(|_| {
+                format!("resources.usb.{USB_RESOURCE_BULK_RING_SLOTS_KEY} is too large for this platform")
+            })
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_BULK_RING_SLOTS);
+    if bulk_ring_slots == 0 || bulk_ring_slots > MAX_BULK_RING_SLOTS {
+        return Err(format!(
+            "resources.usb.{USB_RESOURCE_BULK_RING_SLOTS_KEY} must be within 1..={MAX_BULK_RING_SLOTS}"
+        ));
+    }
+
+    let bulk_ring_max_bytes = bulk_ring_chunk_bytes
+        .checked_mul(bulk_ring_slots)
+        .ok_or_else(|| {
+            format!(
+                "resources.usb.{USB_RESOURCE_BULK_RING_CHUNK_BYTES_KEY} * resources.usb.{USB_RESOURCE_BULK_RING_SLOTS_KEY} overflowed"
+            )
+        })?;
+    if bulk_ring_max_bytes > MAX_BULK_RING_MAX_BYTES {
+        return Err(format!(
+            "resources.usb.{USB_RESOURCE_BULK_RING_CHUNK_BYTES_KEY} * resources.usb.{USB_RESOURCE_BULK_RING_SLOTS_KEY} must be <= {MAX_BULK_RING_MAX_BYTES}"
+        ));
+    }
+
     Ok(UsbResourcesConfig {
         paths,
         allowlist,
@@ -601,6 +692,11 @@ fn parse_usb_resources_config(
             max_transfer_bytes,
             max_timeout_ms,
             max_paths,
+            bulk_ring: BulkRingConfig {
+                chunk_bytes: bulk_ring_chunk_bytes,
+                slots: bulk_ring_slots,
+                max_bytes: bulk_ring_max_bytes,
+            },
         },
     })
 }
@@ -656,6 +752,12 @@ fn to_limits_record(limits: &UsbLimitsConfig) -> Limits {
             .expect("max_transfer_bytes should fit in u32"),
         max_timeout_ms: limits.max_timeout_ms,
         max_paths: u32::try_from(limits.max_paths).expect("max_paths should fit in u32"),
+        bulk_ring_chunk_bytes: u32::try_from(limits.bulk_ring.chunk_bytes)
+            .expect("bulk_ring.chunk_bytes should fit in u32"),
+        bulk_ring_slots: u32::try_from(limits.bulk_ring.slots)
+            .expect("bulk_ring.slots should fit in u32"),
+        bulk_ring_max_bytes: u32::try_from(limits.bulk_ring.max_bytes)
+            .expect("bulk_ring.max_bytes should fit in u32"),
     }
 }
 
@@ -1088,6 +1190,271 @@ fn ensure_interface_claimed(state: &DeviceThreadState, interface: u8) -> Result<
     Ok(())
 }
 
+fn clone_usb_error(err: &UsbError) -> UsbError {
+    match err {
+        UsbError::NotAllowed => UsbError::NotAllowed,
+        UsbError::Timeout => UsbError::Timeout,
+        UsbError::Disconnected => UsbError::Disconnected,
+        UsbError::Busy => UsbError::Busy,
+        UsbError::InvalidArgument => UsbError::InvalidArgument,
+        UsbError::TransferFault => UsbError::TransferFault,
+        UsbError::OperationNotSupported => UsbError::OperationNotSupported,
+        UsbError::Other(message) => UsbError::Other(message.clone()),
+    }
+}
+
+fn pop_bulk_chunk(state: &mut BulkReaderSharedState) -> Option<Vec<u8>> {
+    let chunk = state.ring.pop_front()?;
+    state.buffered_bytes = state.buffered_bytes.saturating_sub(chunk.len());
+    Some(chunk)
+}
+
+fn push_bulk_chunk_drop_oldest(
+    state: &mut BulkReaderSharedState,
+    payload: &[u8],
+    slots: usize,
+    default_capacity: usize,
+) {
+    let mut chunk = if state.ring.len() >= slots {
+        if let Some(mut dropped) = state.ring.pop_front() {
+            state.buffered_bytes = state.buffered_bytes.saturating_sub(dropped.len());
+            state.dropped_chunks = state.dropped_chunks.saturating_add(1);
+            state.dropped_bytes = state.dropped_bytes.saturating_add(dropped.len() as u64);
+            dropped.clear();
+            dropped
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    let target_capacity = default_capacity.max(payload.len());
+    if chunk.capacity() < target_capacity {
+        chunk.reserve(target_capacity - chunk.capacity());
+    }
+
+    chunk.extend_from_slice(payload);
+    state.buffered_bytes = state.buffered_bytes.saturating_add(chunk.len());
+    state.ring.push_back(chunk);
+}
+
+fn bulk_reader_io_len(chunk_bytes: usize, max_packet_size: Option<usize>) -> usize {
+    let Some(max_packet_size) = max_packet_size else {
+        return chunk_bytes;
+    };
+    if max_packet_size == 0 {
+        return chunk_bytes;
+    }
+
+    round_up_in_request_len(chunk_bytes, max_packet_size).unwrap_or(chunk_bytes)
+}
+
+fn push_bulk_payload_chunks_drop_oldest(
+    state: &mut BulkReaderSharedState,
+    payload: &[u8],
+    chunk_bytes: usize,
+    slots: usize,
+) {
+    if chunk_bytes == 0 {
+        return;
+    }
+    for chunk in payload.chunks(chunk_bytes) {
+        push_bulk_chunk_drop_oldest(state, chunk, slots, chunk_bytes);
+    }
+}
+
+fn bulk_reader_stats_from_shared(
+    shared: &Arc<(Mutex<BulkReaderSharedState>, Condvar)>,
+) -> Result<BulkReadStatsRecord, UsbError> {
+    let (lock, _) = &**shared;
+    let state = lock
+        .lock()
+        .map_err(|_| UsbError::Other("bulk reader state lock poisoned".to_string()))?;
+    Ok(BulkReadStatsRecord {
+        dropped_chunks: state.dropped_chunks,
+        dropped_bytes: state.dropped_bytes,
+        buffered_chunks: u32::try_from(state.ring.len())
+            .expect("bulk ring slot count should fit in u32"),
+        buffered_bytes: state.buffered_bytes as u64,
+    })
+}
+
+fn read_bulk_chunk_from_shared(
+    shared: &Arc<(Mutex<BulkReaderSharedState>, Condvar)>,
+    timeout: Duration,
+) -> Result<Vec<u8>, UsbError> {
+    let (lock, condvar) = &**shared;
+    let mut state = lock
+        .lock()
+        .map_err(|_| UsbError::Other("bulk reader state lock poisoned".to_string()))?;
+
+    if let Some(chunk) = pop_bulk_chunk(&mut state) {
+        return Ok(chunk);
+    }
+    if let Some(err) = state.terminal_error.as_ref() {
+        return Err(clone_usb_error(err));
+    }
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(UsbError::Timeout);
+        }
+
+        let wait = deadline.saturating_duration_since(now);
+        let (next_state, wait_result) = condvar
+            .wait_timeout(state, wait)
+            .map_err(|_| UsbError::Other("bulk reader state lock poisoned".to_string()))?;
+        state = next_state;
+
+        if let Some(chunk) = pop_bulk_chunk(&mut state) {
+            return Ok(chunk);
+        }
+        if let Some(err) = state.terminal_error.as_ref() {
+            return Err(clone_usb_error(err));
+        }
+        if wait_result.timed_out() {
+            return Err(UsbError::Timeout);
+        }
+    }
+}
+
+fn run_bulk_reader_thread(
+    handle: Arc<rusb::DeviceHandle<rusb::Context>>,
+    endpoint: u8,
+    read_buffer_bytes: usize,
+    chunk_bytes: usize,
+    slots: usize,
+    shared: Arc<(Mutex<BulkReaderSharedState>, Condvar)>,
+) {
+    let mut read_buffer = vec![0u8; read_buffer_bytes];
+    let io_timeout = Duration::from_millis(BULK_READER_IO_TIMEOUT_MS);
+
+    loop {
+        let should_stop = {
+            let (lock, _) = &*shared;
+            match lock.lock() {
+                Ok(state) => state.stop,
+                Err(_) => true,
+            }
+        };
+        if should_stop {
+            break;
+        }
+
+        match handle.read_bulk(endpoint, &mut read_buffer, io_timeout) {
+            Ok(read_len) => {
+                if read_len == 0 {
+                    continue;
+                }
+                let (lock, condvar) = &*shared;
+                let mut state = match lock.lock() {
+                    Ok(state) => state,
+                    Err(_) => break,
+                };
+                if state.stop {
+                    break;
+                }
+                push_bulk_payload_chunks_drop_oldest(
+                    &mut state,
+                    &read_buffer[..read_len],
+                    chunk_bytes,
+                    slots,
+                );
+                condvar.notify_one();
+            }
+            Err(rusb::Error::Timeout) => {}
+            Err(err) => {
+                let (lock, condvar) = &*shared;
+                if let Ok(mut state) = lock.lock() {
+                    state.terminal_error = Some(map_rusb_error(err));
+                    condvar.notify_all();
+                }
+                break;
+            }
+        }
+    }
+
+    let (lock, condvar) = &*shared;
+    if let Ok(mut state) = lock.lock() {
+        state.stop = true;
+        condvar.notify_all();
+    }
+}
+
+fn start_bulk_reader_runtime(
+    state: &DeviceThreadState,
+    interface: u8,
+    endpoint: u8,
+) -> Result<BulkReaderRuntime, UsbError> {
+    let shared = Arc::new((Mutex::new(BulkReaderSharedState::default()), Condvar::new()));
+    let thread_shared = shared.clone();
+    let thread_handle = state.handle.clone();
+    let chunk_bytes = state.limits.bulk_ring.chunk_bytes;
+    let slots = state.limits.bulk_ring.slots;
+    let max_packet_size = max_packet_size_for_endpoint(state, interface, endpoint);
+    let read_buffer_bytes = bulk_reader_io_len(chunk_bytes, max_packet_size);
+    let thread_name = format!("imago-usb-bulk-if{interface}-ep{endpoint:02x}");
+    let join_handle = thread::Builder::new()
+        .name(thread_name)
+        .stack_size(DEFAULT_THREAD_STACK_BYTES)
+        .spawn(move || {
+            run_bulk_reader_thread(
+                thread_handle,
+                endpoint,
+                read_buffer_bytes,
+                chunk_bytes,
+                slots,
+                thread_shared,
+            )
+        })
+        .map_err(|err| UsbError::Other(format!("failed to spawn bulk reader thread: {err}")))?;
+
+    Ok(BulkReaderRuntime {
+        shared,
+        thread_handle: Some(join_handle),
+    })
+}
+
+fn stop_bulk_reader_runtime(runtime: &mut BulkReaderRuntime) {
+    {
+        let (lock, condvar) = &*runtime.shared;
+        if let Ok(mut state) = lock.lock() {
+            state.stop = true;
+            condvar.notify_all();
+        }
+    }
+
+    if let Some(handle) = runtime.thread_handle.take() {
+        let _ = handle.join();
+    }
+}
+
+fn stop_bulk_readers_for_interface(state: &mut DeviceThreadState, interface: u8) {
+    let keys: Vec<_> = state
+        .bulk_readers
+        .keys()
+        .filter(|(number, _)| *number == interface)
+        .copied()
+        .collect();
+    for key in keys {
+        if let Some(mut runtime) = state.bulk_readers.remove(&key) {
+            stop_bulk_reader_runtime(&mut runtime);
+        }
+    }
+}
+
+fn stop_all_bulk_readers(state: &mut DeviceThreadState) {
+    let keys: Vec<_> = state.bulk_readers.keys().copied().collect();
+    for key in keys {
+        if let Some(mut runtime) = state.bulk_readers.remove(&key) {
+            stop_bulk_reader_runtime(&mut runtime);
+        }
+    }
+}
+
 fn perform_iso_transfer(
     state: &DeviceThreadState,
     endpoint: u8,
@@ -1269,10 +1636,11 @@ fn run_device_thread(
     };
 
     let mut state = DeviceThreadState {
-        handle,
+        handle: Arc::new(handle),
         claimed_interfaces: BTreeSet::new(),
         alt_settings: BTreeMap::new(),
         limits,
+        bulk_readers: BTreeMap::new(),
     };
 
     let _ = ready.send(Ok(()));
@@ -1299,6 +1667,7 @@ fn run_device_thread(
                 let _ = reply.send(result);
             }
             DeviceCommand::ReleaseInterface { number, reply } => {
+                stop_bulk_readers_for_interface(&mut state, number);
                 let result = if state.claimed_interfaces.contains(&number) {
                     state
                         .handle
@@ -1314,6 +1683,7 @@ fn run_device_thread(
                 let _ = reply.send(result);
             }
             DeviceCommand::ReleaseInterfaceNoReply { number } => {
+                stop_bulk_readers_for_interface(&mut state, number);
                 if state.claimed_interfaces.contains(&number) {
                     let _ = state.handle.release_interface(number);
                     state.claimed_interfaces.remove(&number);
@@ -1343,6 +1713,7 @@ fn run_device_thread(
                 let _ = reply.send(result);
             }
             DeviceCommand::Reset { reply } => {
+                stop_all_bulk_readers(&mut state);
                 let result = state.handle.reset().map_err(map_rusb_error);
                 let _ = reply.send(result);
             }
@@ -1354,6 +1725,7 @@ fn run_device_thread(
                 configuration,
                 reply,
             } => {
+                stop_all_bulk_readers(&mut state);
                 let result = state
                     .handle
                     .set_active_configuration(configuration)
@@ -1370,6 +1742,7 @@ fn run_device_thread(
                 setting,
                 reply,
             } => {
+                stop_bulk_readers_for_interface(&mut state, interface);
                 let result = ensure_interface_claimed(&state, interface)
                     .and_then(|_| {
                         state
@@ -1446,10 +1819,9 @@ fn run_device_thread(
                 })();
                 let _ = reply.send(result);
             }
-            DeviceCommand::BulkIn {
+            DeviceCommand::BulkRead {
                 interface,
                 endpoint,
-                length,
                 timeout_ms,
                 reply,
             } => {
@@ -1457,21 +1829,38 @@ fn run_device_thread(
                     ensure_interface_claimed(&state, interface)?;
                     validate_endpoint_in_address(endpoint)?;
                     let timeout = validate_timeout(timeout_ms, &state.limits)?;
-                    let requested_len = validate_transfer_len(length, &state.limits)?;
-                    if requested_len == 0 {
-                        return Ok(Vec::new());
+                    let key = (interface, endpoint);
+                    if !state.bulk_readers.contains_key(&key) {
+                        let runtime = start_bulk_reader_runtime(&state, interface, endpoint)?;
+                        state.bulk_readers.insert(key, runtime);
                     }
 
-                    let max_packet_size = max_packet_size_for_endpoint(&state, interface, endpoint)
-                        .unwrap_or(requested_len);
-                    let padded_len = round_up_in_request_len(requested_len, max_packet_size)?;
-                    let mut buffer = vec![0u8; padded_len];
-                    let read = state
-                        .handle
-                        .read_bulk(endpoint, &mut buffer, timeout)
-                        .map_err(map_rusb_error)?;
-                    buffer.truncate(read.min(requested_len));
-                    Ok(buffer)
+                    let runtime = state.bulk_readers.get(&key).ok_or_else(|| {
+                        UsbError::Other("bulk reader runtime missing".to_string())
+                    })?;
+                    read_bulk_chunk_from_shared(&runtime.shared, timeout)
+                })();
+                let _ = reply.send(result);
+            }
+            DeviceCommand::BulkReadStats {
+                interface,
+                endpoint,
+                reply,
+            } => {
+                let result = (|| {
+                    ensure_interface_claimed(&state, interface)?;
+                    validate_endpoint_in_address(endpoint)?;
+                    let key = (interface, endpoint);
+                    if let Some(runtime) = state.bulk_readers.get(&key) {
+                        bulk_reader_stats_from_shared(&runtime.shared)
+                    } else {
+                        Ok(BulkReadStatsRecord {
+                            dropped_chunks: 0,
+                            dropped_bytes: 0,
+                            buffered_chunks: 0,
+                            buffered_bytes: 0,
+                        })
+                    }
                 })();
                 let _ = reply.send(result);
             }
@@ -1593,11 +1982,14 @@ fn run_device_thread(
                 let _ = reply.send(result);
             }
             DeviceCommand::Shutdown { reply } => {
+                stop_all_bulk_readers(&mut state);
                 let _ = reply.send(());
                 break;
             }
         }
     }
+
+    stop_all_bulk_readers(&mut state);
 }
 
 async fn start_device_runtime(
@@ -2091,19 +2483,31 @@ impl imago_usb_plugin_bindings::imago::usb::usb_interface::HostClaimedInterface 
         .await
     }
 
-    async fn bulk_in(
+    async fn bulk_read(
         &mut self,
         self_: Resource<ClaimedInterfaceResource>,
         endpoint: u8,
-        length: u32,
         timeout_ms: u32,
     ) -> Result<Vec<u8>, UsbError> {
         let handle = lookup_claimed_interface_handle(self_.rep()).map_err(map_lookup_error)?;
-        request_device(&handle.sender, |reply| DeviceCommand::BulkIn {
+        request_device(&handle.sender, |reply| DeviceCommand::BulkRead {
             interface: handle.number,
             endpoint,
-            length,
             timeout_ms,
+            reply,
+        })
+        .await
+    }
+
+    async fn bulk_read_stats(
+        &mut self,
+        self_: Resource<ClaimedInterfaceResource>,
+        endpoint: u8,
+    ) -> Result<BulkReadStatsRecord, UsbError> {
+        let handle = lookup_claimed_interface_handle(self_.rep()).map_err(map_lookup_error)?;
+        request_device(&handle.sender, |reply| DeviceCommand::BulkReadStats {
+            interface: handle.number,
+            endpoint,
             reply,
         })
         .await
@@ -2327,6 +2731,15 @@ mod tests {
         assert_eq!(config.limits.max_transfer_bytes, DEFAULT_MAX_TRANSFER_BYTES);
         assert_eq!(config.limits.max_timeout_ms, DEFAULT_MAX_TIMEOUT_MS);
         assert_eq!(config.limits.max_paths, DEFAULT_MAX_PATHS);
+        assert_eq!(
+            config.limits.bulk_ring.chunk_bytes,
+            DEFAULT_BULK_RING_CHUNK_BYTES
+        );
+        assert_eq!(config.limits.bulk_ring.slots, DEFAULT_BULK_RING_SLOTS);
+        assert_eq!(
+            config.limits.bulk_ring.max_bytes,
+            DEFAULT_BULK_RING_CHUNK_BYTES * DEFAULT_BULK_RING_SLOTS
+        );
     }
 
     #[test]
@@ -2335,13 +2748,35 @@ mod tests {
             "paths": ["/dev/bus/usb/001/001"],
             "max_transfer_bytes": 65536,
             "max_timeout_ms": 5000,
-            "max_paths": 8
+            "max_paths": 8,
+            "bulk_ring_chunk_bytes": 8192,
+            "bulk_ring_slots": 32
         })))
         .expect("custom limits should parse");
 
         assert_eq!(config.limits.max_transfer_bytes, 65536);
         assert_eq!(config.limits.max_timeout_ms, 5000);
         assert_eq!(config.limits.max_paths, 8);
+        assert_eq!(config.limits.bulk_ring.chunk_bytes, 8192);
+        assert_eq!(config.limits.bulk_ring.slots, 32);
+        assert_eq!(config.limits.bulk_ring.max_bytes, 8192 * 32);
+    }
+
+    #[test]
+    fn parse_usb_resources_clamps_default_bulk_ring_chunk_to_transfer_limit() {
+        let config = parse_usb_resources_config(&resources_with_usb(json!({
+            "paths": ["/dev/bus/usb/001/001"],
+            "max_transfer_bytes": 4096
+        })))
+        .expect("default bulk ring chunk should clamp to max_transfer_bytes");
+
+        assert_eq!(config.limits.max_transfer_bytes, 4096);
+        assert_eq!(config.limits.bulk_ring.chunk_bytes, 4096);
+        assert_eq!(config.limits.bulk_ring.slots, DEFAULT_BULK_RING_SLOTS);
+        assert_eq!(
+            config.limits.bulk_ring.max_bytes,
+            4096 * DEFAULT_BULK_RING_SLOTS
+        );
     }
 
     #[test]
@@ -2369,6 +2804,58 @@ mod tests {
         })))
         .expect_err("oversized max_paths must fail");
         assert!(err.contains("max_paths"), "unexpected error: {err}");
+
+        let err = parse_usb_resources_config(&resources_with_usb(json!({
+            "paths": ["/dev/bus/usb/001/001"],
+            "bulk_ring_chunk_bytes": 0
+        })))
+        .expect_err("zero bulk ring chunk must fail");
+        assert!(
+            err.contains("bulk_ring_chunk_bytes"),
+            "unexpected error: {err}"
+        );
+
+        let err = parse_usb_resources_config(&resources_with_usb(json!({
+            "paths": ["/dev/bus/usb/001/001"],
+            "bulk_ring_slots": 0
+        })))
+        .expect_err("zero bulk ring slots must fail");
+        assert!(err.contains("bulk_ring_slots"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_usb_resources_rejects_out_of_range_bulk_ring_capacity() {
+        let err = parse_usb_resources_config(&resources_with_usb(json!({
+            "paths": ["/dev/bus/usb/001/001"],
+            "max_transfer_bytes": 4096,
+            "bulk_ring_chunk_bytes": 8192
+        })))
+        .expect_err("bulk ring chunk larger than max_transfer_bytes must fail");
+        assert!(
+            err.contains("bulk_ring_chunk_bytes"),
+            "unexpected error: {err}"
+        );
+
+        let err = parse_usb_resources_config(&resources_with_usb(json!({
+            "paths": ["/dev/bus/usb/001/001"],
+            "bulk_ring_slots": 300
+        })))
+        .expect_err("bulk ring slots above limit must fail");
+        assert!(err.contains("bulk_ring_slots"), "unexpected error: {err}");
+
+        let err = parse_usb_resources_config(&resources_with_usb(json!({
+            "paths": ["/dev/bus/usb/001/001"],
+            "max_transfer_bytes": 8388608,
+            "bulk_ring_chunk_bytes": 8388608,
+            "bulk_ring_slots": 9
+        })))
+        .expect_err("bulk ring total bytes above cap must fail");
+        assert!(
+            err.contains("bulk_ring_chunk_bytes")
+                && err.contains("bulk_ring_slots")
+                && err.contains("67108864"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -2478,6 +2965,86 @@ mod tests {
             map_libusb_transfer_status(LIBUSB_TRANSFER_ERROR, "test"),
             Err(UsbError::TransferFault)
         ));
+    }
+
+    #[test]
+    fn bulk_reader_io_len_rounds_up_to_packet_boundary() {
+        assert_eq!(bulk_reader_io_len(10_000, Some(512)), 10_240);
+        assert_eq!(bulk_reader_io_len(10_240, Some(512)), 10_240);
+        assert_eq!(bulk_reader_io_len(10_000, None), 10_000);
+        assert_eq!(bulk_reader_io_len(10_000, Some(0)), 10_000);
+    }
+
+    #[test]
+    fn push_bulk_chunk_drop_oldest_discards_oldest_entry() {
+        let mut state = BulkReaderSharedState::default();
+        push_bulk_chunk_drop_oldest(&mut state, &[1], 2, 16);
+        push_bulk_chunk_drop_oldest(&mut state, &[2, 2], 2, 16);
+        push_bulk_chunk_drop_oldest(&mut state, &[3, 3, 3], 2, 16);
+
+        assert_eq!(state.ring.len(), 2);
+        assert_eq!(state.dropped_chunks, 1);
+        assert_eq!(state.dropped_bytes, 1);
+        assert_eq!(state.buffered_bytes, 5);
+        assert_eq!(pop_bulk_chunk(&mut state), Some(vec![2, 2]));
+        assert_eq!(pop_bulk_chunk(&mut state), Some(vec![3, 3, 3]));
+        assert_eq!(state.buffered_bytes, 0);
+    }
+
+    #[test]
+    fn push_bulk_payload_chunks_drop_oldest_splits_by_chunk_size() {
+        let mut state = BulkReaderSharedState::default();
+        let payload = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        push_bulk_payload_chunks_drop_oldest(&mut state, &payload, 4, 8);
+
+        assert_eq!(state.ring.len(), 3);
+        assert_eq!(state.dropped_chunks, 0);
+        assert_eq!(state.dropped_bytes, 0);
+        assert_eq!(state.buffered_bytes, 10);
+        assert_eq!(pop_bulk_chunk(&mut state), Some(vec![1, 2, 3, 4]));
+        assert_eq!(pop_bulk_chunk(&mut state), Some(vec![5, 6, 7, 8]));
+        assert_eq!(pop_bulk_chunk(&mut state), Some(vec![9, 10]));
+        assert_eq!(state.buffered_bytes, 0);
+    }
+
+    #[test]
+    fn push_bulk_payload_chunks_drop_oldest_tracks_overflow() {
+        let mut state = BulkReaderSharedState::default();
+        let payload = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        push_bulk_payload_chunks_drop_oldest(&mut state, &payload, 4, 2);
+
+        assert_eq!(state.ring.len(), 2);
+        assert_eq!(state.dropped_chunks, 1);
+        assert_eq!(state.dropped_bytes, 4);
+        assert_eq!(state.buffered_bytes, 6);
+        assert_eq!(pop_bulk_chunk(&mut state), Some(vec![5, 6, 7, 8]));
+        assert_eq!(pop_bulk_chunk(&mut state), Some(vec![9, 10]));
+        assert_eq!(state.buffered_bytes, 0);
+    }
+
+    #[test]
+    fn read_bulk_chunk_from_shared_times_out_when_empty() {
+        let shared = Arc::new((Mutex::new(BulkReaderSharedState::default()), Condvar::new()));
+        let result = read_bulk_chunk_from_shared(&shared, Duration::from_millis(1));
+        assert!(matches!(result, Err(UsbError::Timeout)));
+    }
+
+    #[test]
+    fn read_bulk_chunk_from_shared_returns_terminal_error_after_buffer_drain() {
+        let shared = Arc::new((Mutex::new(BulkReaderSharedState::default()), Condvar::new()));
+        {
+            let (lock, _) = &*shared;
+            let mut state = lock.lock().expect("state lock should succeed");
+            push_bulk_chunk_drop_oldest(&mut state, &[0x10, 0x20], 2, 16);
+            state.terminal_error = Some(UsbError::Disconnected);
+        }
+
+        let first = read_bulk_chunk_from_shared(&shared, Duration::from_millis(1))
+            .expect("first read should return buffered data");
+        assert_eq!(first, vec![0x10, 0x20]);
+
+        let second = read_bulk_chunk_from_shared(&shared, Duration::from_millis(1));
+        assert!(matches!(second, Err(UsbError::Disconnected)));
     }
 
     #[test]

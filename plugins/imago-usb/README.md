@@ -1,6 +1,6 @@
 # imago-usb native plugin
 
-`imago:usb@0.1.0` provides native USB access APIs backed by `rusb` (libusb).
+`imago:usb@0.2.0` provides native USB access APIs backed by `rusb` (libusb).
 
 ## Features
 
@@ -20,7 +20,8 @@
 - Backend is fixed to `rusb` (libusb).
 - One dedicated worker thread is created per opened `device` resource.
 - Host calls are sent to the worker via bounded `tokio::sync::mpsc` and completed via `oneshot`.
-- `claimed-interface` resources do not create extra threads; they forward commands to the same device worker.
+- `bulk-read` lazily starts one producer thread per `(claimed-interface, endpoint-in)` pair.
+- Producer threads write fixed-size chunks into bounded ring buffers and drop oldest chunks on overflow.
 
 ## Requirements
 
@@ -33,7 +34,7 @@
 ```toml
 [[dependencies]]
 name = "imago:usb"
-version = "0.1.0"
+version = "0.2.0"
 kind = "native"
 wit = "file://../../plugins/imago-usb/wit"
 
@@ -45,12 +46,15 @@ paths = [
 max_transfer_bytes = 1048576
 max_timeout_ms = 30000
 max_paths = 128
+bulk_ring_chunk_bytes = 16384
+bulk_ring_slots = 16
 
 [capabilities.deps]
 "imago:usb" = ["*"]
 ```
 
 `paths` is required. An empty array is valid and means all open operations are denied.
+If omitted, `bulk_ring_chunk_bytes` defaults to `min(16384, max_transfer_bytes)`.
 
 ## WIT import example
 
@@ -58,9 +62,9 @@ max_paths = 128
 package example:usb-client;
 
 world plugin-imports {
-    import imago:usb/provider@0.1.0;
-    import imago:usb/device@0.1.0;
-    import imago:usb/usb-interface@0.1.0;
+    import imago:usb/provider@0.2.0;
+    import imago:usb/device@0.2.0;
+    import imago:usb/usb-interface@0.2.0;
 }
 ```
 
@@ -108,6 +112,29 @@ let payload = iface.isochronous_in(0x81, 1024, 8, 1000)?;
 let _written = iface.isochronous_out(0x01, &payload, 8, 1000)?;
 ```
 
+### Consume bulk IN chunks from ring buffer
+
+```rust
+let device = imago::usb::provider::open_device("/dev/bus/usb/001/001")?;
+let iface = device.claim_interface(0)?;
+
+loop {
+    let chunk = iface.bulk_read(0x81, 200)?;
+    if chunk.is_empty() {
+        continue;
+    }
+    process_samples(&chunk);
+
+    let stats = iface.bulk_read_stats(0x81)?;
+    if stats.dropped_chunks > 0 {
+        eprintln!(
+            "bulk ring overflow: dropped_chunks={}, dropped_bytes={}",
+            stats.dropped_chunks, stats.dropped_bytes
+        );
+    }
+}
+```
+
 ## Resource validation rules
 
 `resources.usb` is validated at startup.
@@ -119,6 +146,9 @@ let _written = iface.isochronous_out(0x01, &payload, 8, 1000)?;
 - `max_transfer_bytes` must be within `1..=8388608`
 - `max_timeout_ms` must be within `1..=120000`
 - `max_paths` must be within `0..=256`
+- `bulk_ring_chunk_bytes` must be within `1..=max_transfer_bytes`
+- `bulk_ring_slots` must be within `1..=256`
+- `bulk_ring_chunk_bytes * bulk_ring_slots` must be within `1..=67108864`
 - `paths.len() > max_paths` is an error
 
 ## Error behavior notes
