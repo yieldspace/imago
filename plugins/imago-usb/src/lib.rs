@@ -1280,6 +1280,46 @@ fn bulk_reader_stats_from_shared(
     })
 }
 
+fn should_restart_bulk_reader_after_terminal_error(err: &UsbError) -> bool {
+    !matches!(err, UsbError::Disconnected)
+}
+
+fn bulk_reader_restart_required_from_shared(
+    shared: &Arc<(Mutex<BulkReaderSharedState>, Condvar)>,
+) -> Result<bool, UsbError> {
+    let (lock, _) = &**shared;
+    let state = lock
+        .lock()
+        .map_err(|_| UsbError::Other("bulk reader state lock poisoned".to_string()))?;
+    if !state.ring.is_empty() {
+        return Ok(false);
+    }
+    let Some(err) = state.terminal_error.as_ref() else {
+        return Ok(false);
+    };
+    Ok(should_restart_bulk_reader_after_terminal_error(err))
+}
+
+fn prepare_bulk_reader_runtime_for_read(
+    bulk_readers: &mut BTreeMap<(u8, u8), BulkReaderRuntime>,
+    key: (u8, u8),
+    mut start_runtime: impl FnMut() -> Result<BulkReaderRuntime, UsbError>,
+) -> Result<(), UsbError> {
+    let restart_required = if let Some(runtime) = bulk_readers.get(&key) {
+        bulk_reader_restart_required_from_shared(&runtime.shared)?
+    } else {
+        false
+    };
+    if restart_required && let Some(mut runtime) = bulk_readers.remove(&key) {
+        stop_bulk_reader_runtime(&mut runtime);
+    }
+    if let std::collections::btree_map::Entry::Vacant(entry) = bulk_readers.entry(key) {
+        let runtime = start_runtime()?;
+        entry.insert(runtime);
+    }
+    Ok(())
+}
+
 fn read_bulk_chunk_from_shared(
     shared: &Arc<(Mutex<BulkReaderSharedState>, Condvar)>,
     timeout: Duration,
@@ -1385,16 +1425,16 @@ fn run_bulk_reader_thread(
 }
 
 fn start_bulk_reader_runtime(
-    state: &DeviceThreadState,
+    handle: Arc<rusb::DeviceHandle<rusb::Context>>,
     interface: u8,
     endpoint: u8,
+    chunk_bytes: usize,
+    slots: usize,
+    max_packet_size: Option<usize>,
 ) -> Result<BulkReaderRuntime, UsbError> {
     let shared = Arc::new((Mutex::new(BulkReaderSharedState::default()), Condvar::new()));
     let thread_shared = shared.clone();
-    let thread_handle = state.handle.clone();
-    let chunk_bytes = state.limits.bulk_ring.chunk_bytes;
-    let slots = state.limits.bulk_ring.slots;
-    let max_packet_size = max_packet_size_for_endpoint(state, interface, endpoint);
+    let thread_handle = handle;
     let read_buffer_bytes = bulk_reader_io_len(chunk_bytes, max_packet_size);
     let thread_name = format!("imago-usb-bulk-if{interface}-ep{endpoint:02x}");
     let join_handle = thread::Builder::new()
@@ -1830,10 +1870,20 @@ fn run_device_thread(
                     validate_endpoint_in_address(endpoint)?;
                     let timeout = validate_timeout(timeout_ms, &state.limits)?;
                     let key = (interface, endpoint);
-                    if !state.bulk_readers.contains_key(&key) {
-                        let runtime = start_bulk_reader_runtime(&state, interface, endpoint)?;
-                        state.bulk_readers.insert(key, runtime);
-                    }
+                    let handle = state.handle.clone();
+                    let chunk_bytes = state.limits.bulk_ring.chunk_bytes;
+                    let slots = state.limits.bulk_ring.slots;
+                    let max_packet_size = max_packet_size_for_endpoint(&state, interface, endpoint);
+                    prepare_bulk_reader_runtime_for_read(&mut state.bulk_readers, key, || {
+                        start_bulk_reader_runtime(
+                            handle.clone(),
+                            interface,
+                            endpoint,
+                            chunk_bytes,
+                            slots,
+                            max_packet_size,
+                        )
+                    })?;
 
                     let runtime = state.bulk_readers.get(&key).ok_or_else(|| {
                         UsbError::Other("bulk reader runtime missing".to_string())
@@ -3020,6 +3070,84 @@ mod tests {
         assert_eq!(pop_bulk_chunk(&mut state), Some(vec![5, 6, 7, 8]));
         assert_eq!(pop_bulk_chunk(&mut state), Some(vec![9, 10]));
         assert_eq!(state.buffered_bytes, 0);
+    }
+
+    #[test]
+    fn bulk_reader_restart_required_when_terminal_error_is_restartable() {
+        let shared = Arc::new((Mutex::new(BulkReaderSharedState::default()), Condvar::new()));
+        {
+            let (lock, _) = &*shared;
+            let mut state = lock.lock().expect("state lock should succeed");
+            state.terminal_error = Some(UsbError::TransferFault);
+        }
+        assert!(
+            bulk_reader_restart_required_from_shared(&shared)
+                .expect("restart check should succeed")
+        );
+    }
+
+    #[test]
+    fn bulk_reader_restart_not_required_when_terminal_error_is_disconnected() {
+        let shared = Arc::new((Mutex::new(BulkReaderSharedState::default()), Condvar::new()));
+        {
+            let (lock, _) = &*shared;
+            let mut state = lock.lock().expect("state lock should succeed");
+            state.terminal_error = Some(UsbError::Disconnected);
+        }
+        assert!(
+            !bulk_reader_restart_required_from_shared(&shared)
+                .expect("restart check should succeed")
+        );
+    }
+
+    #[test]
+    fn bulk_reader_restart_not_required_while_ring_has_buffered_chunks() {
+        let shared = Arc::new((Mutex::new(BulkReaderSharedState::default()), Condvar::new()));
+        {
+            let (lock, _) = &*shared;
+            let mut state = lock.lock().expect("state lock should succeed");
+            push_bulk_chunk_drop_oldest(&mut state, &[0x01, 0x02], 2, 16);
+            state.terminal_error = Some(UsbError::TransferFault);
+        }
+        assert!(
+            !bulk_reader_restart_required_from_shared(&shared)
+                .expect("restart check should succeed")
+        );
+    }
+
+    #[test]
+    fn prepare_bulk_reader_runtime_for_read_replaces_dead_runtime() {
+        let key = (1u8, 0x81u8);
+        let dead_shared = Arc::new((Mutex::new(BulkReaderSharedState::default()), Condvar::new()));
+        {
+            let (lock, _) = &*dead_shared;
+            let mut state = lock.lock().expect("state lock should succeed");
+            state.terminal_error = Some(UsbError::TransferFault);
+        }
+        let mut bulk_readers = BTreeMap::new();
+        bulk_readers.insert(
+            key,
+            BulkReaderRuntime {
+                shared: dead_shared.clone(),
+                thread_handle: None,
+            },
+        );
+
+        let replacement_shared =
+            Arc::new((Mutex::new(BulkReaderSharedState::default()), Condvar::new()));
+        let mut started = 0usize;
+        prepare_bulk_reader_runtime_for_read(&mut bulk_readers, key, || {
+            started = started.saturating_add(1);
+            Ok(BulkReaderRuntime {
+                shared: replacement_shared.clone(),
+                thread_handle: None,
+            })
+        })
+        .expect("runtime preparation should succeed");
+
+        assert_eq!(started, 1);
+        let runtime = bulk_readers.get(&key).expect("runtime should exist");
+        assert!(Arc::ptr_eq(&runtime.shared, &replacement_shared));
     }
 
     #[test]
