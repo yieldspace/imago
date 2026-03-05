@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/yieldspace/imago/compare/imago-v0.1.1...imago-v0.1.2) - 2026-03-05
+
+### Added
+
+- add JSON Schema auto-generation for imago and imagod TOML ([#284](https://github.com/yieldspace/imago/pull/284))
+
 ## [0.1.1](https://github.com/yieldspace/imago/compare/imago-v0.1.0...imago-v0.1.1) - 2026-03-03
 
 ### Other
