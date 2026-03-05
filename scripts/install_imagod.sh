@@ -46,7 +46,7 @@ Environment:
 
 Notes:
   - Supported OS: Linux and macOS.
-  - Tag resolution: --tag > releases/latest/download.
+  - Tag resolution: --tag > latest imagod-v* tag from git refs.
   - Target resolution: --target > auto-detect.
   - Service setup priority:
       Linux: systemd -> init.d -> binary-only
@@ -107,6 +107,24 @@ resolve_release_tag() {
   fi
 
   printf ''
+}
+
+resolve_latest_imagod_tag_from_git_refs() {
+  check_cmd git || die "git command is required when --tag is omitted; install git or pass --tag imagod-vX.Y.Z"
+
+  local remote_url="https://github.com/${REPO}.git"
+  local refs
+  if ! refs="$(git ls-remote --refs --tags --sort='v:refname' "${remote_url}" 'imagod-v*' 2>/dev/null)"; then
+    die "failed to query imagod tags from ${remote_url}; pass --tag imagod-vX.Y.Z explicitly"
+  fi
+
+  local latest_tag
+  latest_tag="$(printf '%s\n' "${refs}" | awk -F/ 'NF {print $NF}' | tail -n1)"
+  if [[ -z "${latest_tag}" ]]; then
+    die "no imagod-v* tags found in ${REPO}; pass --tag imagod-vX.Y.Z explicitly"
+  fi
+
+  printf '%s\n' "${latest_tag}"
 }
 
 resolve_release_url_base() {
@@ -725,6 +743,9 @@ main() {
   fi
 
   tag="$(resolve_release_tag)"
+  if [[ -z "${tag}" && -z "${IMAGOD_RELEASE_BASE_URL:-}" ]]; then
+    tag="$(resolve_latest_imagod_tag_from_git_refs)"
+  fi
 
   if [[ -n "${tag}" ]]; then
     release_mode="tag"

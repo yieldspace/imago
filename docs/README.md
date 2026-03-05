@@ -46,7 +46,7 @@ flowchart LR
   - `imagod-v*` では `imagod-<target-triple>` と `imagod-<target-triple>.sha256` が添付されます。
   - target には Linux 系（gnu/musl）に加えて `x86_64-apple-darwin` / `aarch64-apple-darwin` も含まれます。
 - `scripts/install_imagod.sh` は上記 release asset を利用して `imagod` を自動導入します。
-  - タグ解決優先順: `--tag` > `releases/latest/download`（GitHub API の JSON 解析はしない）
+  - タグ解決優先順: `--tag` > `git ls-remote` で最新 `imagod-v*`（GitHub API の JSON 解析はしない）
   - 対応OS: Linux / macOS（Darwin）
   - target 解決: `--target <triple>`（指定時） > 自動判定（未指定時）
   - `--libc` は廃止（breaking change）され、受け付けません
