@@ -19,12 +19,16 @@ pub enum Commands {
     Apply(ApplyArgs),
     Explain(ExplainArgs),
     ReleaseTargets(ReleaseTargetsArgs),
+    ReleasePrTargets(ReleasePrTargetsArgs),
 }
 
 #[derive(Debug, Clone, clap::Args)]
 pub struct CommonPlanArgs {
     #[arg(long)]
     pub base_ref: Option<String>,
+
+    #[arg(long)]
+    pub line: Option<String>,
 
     #[arg(long)]
     pub allow_dirty: bool,
@@ -64,6 +68,18 @@ pub struct ExplainArgs {
 
 #[derive(Debug, Clone, clap::Args)]
 pub struct ReleaseTargetsArgs {
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub format: OutputFormat,
+
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct ReleasePrTargetsArgs {
+    #[command(flatten)]
+    pub common: CommonPlanArgs,
+
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     pub format: OutputFormat,
 

@@ -5,6 +5,7 @@ use anyhow::{Result, anyhow};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -127,6 +128,22 @@ pub struct CurrentReleaseTarget {
     pub tag: String,
     pub github_release: bool,
     pub release_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleasePrTarget {
+    pub line_id: String,
+    pub crate_name: String,
+    pub before_version: String,
+    pub after_version: String,
+    pub bump: BumpLevel,
+    pub base_ref: String,
+    pub current_tag: String,
+    pub next_tag: String,
+    pub branch: String,
+    pub title: String,
+    pub body: String,
+    pub labels: Vec<String>,
 }
 
 pub fn build_plan_from_line_scopes(
@@ -449,6 +466,74 @@ pub fn build_current_release_targets(
     Ok(targets)
 }
 
+pub fn build_release_pr_target(
+    config: &ResolvedPolicy,
+    plan: &ReleasePlan,
+    line_id: &str,
+) -> Result<ReleasePrTarget> {
+    let line_bump = plan
+        .line_bumps
+        .iter()
+        .find(|line| line.line_id == line_id)
+        .ok_or_else(|| anyhow!("line {} is not bumped in the provided plan", line_id))?;
+
+    let crate_policy = config
+        .emit_tag_crates()
+        .into_iter()
+        .find(|crate_policy| crate_policy.line == line_id)
+        .ok_or_else(|| anyhow!("line {} does not have an emit_tag crate", line_id))?;
+
+    let crate_update = plan
+        .crate_updates
+        .iter()
+        .find(|update| update.crate_name == crate_policy.name)
+        .ok_or_else(|| anyhow!("top crate update missing for line {}", line_id))?;
+
+    let line_map = config.line_map();
+    let line_policy = line_map
+        .get(line_id)
+        .ok_or_else(|| anyhow!("missing line policy for {}", line_id))?;
+
+    let tag_template = crate_policy
+        .tag_pattern
+        .as_deref()
+        .or(line_policy.tag_pattern.as_deref())
+        .unwrap_or("{{crate}}-v{{version}}");
+
+    let current_tag = render_template(tag_template, &crate_policy.name, &crate_update.before);
+    let next_tag = render_template(tag_template, &crate_policy.name, &crate_update.after);
+    let title = format!(
+        "ci(release): {} {} -> {}",
+        crate_policy.name, crate_update.before, crate_update.after
+    );
+
+    Ok(ReleasePrTarget {
+        line_id: line_id.to_string(),
+        crate_name: crate_policy.name.clone(),
+        before_version: crate_update.before.clone(),
+        after_version: crate_update.after.clone(),
+        bump: line_bump.bump,
+        base_ref: plan
+            .line_base_refs
+            .get(line_id)
+            .cloned()
+            .unwrap_or_else(|| current_tag.clone()),
+        current_tag: current_tag.clone(),
+        next_tag: next_tag.clone(),
+        branch: release_pr_branch_name(line_id),
+        title,
+        body: render_release_pr_body(
+            crate_policy,
+            line_bump,
+            crate_update,
+            plan,
+            &current_tag,
+            &next_tag,
+        ),
+        labels: config.github.release_pr.labels.clone(),
+    })
+}
+
 pub fn baseline_tag_glob(crate_policy: &CratePolicy, line_policy: &LinePolicy) -> String {
     let template = crate_policy
         .tag_pattern
@@ -553,10 +638,80 @@ fn render_template(template: &str, crate_name: &str, version: &str) -> String {
         .replace("{{version}}", version)
 }
 
+fn render_release_pr_body(
+    crate_policy: &CratePolicy,
+    line_bump: &LineBumpPlan,
+    crate_update: &CrateVersionUpdate,
+    plan: &ReleasePlan,
+    current_tag: &str,
+    next_tag: &str,
+) -> String {
+    let mut body = String::new();
+    let _ = writeln!(body, "## Release");
+    let _ = writeln!(body, "- Line: `{}`", line_bump.line_id);
+    let _ = writeln!(body, "- Top crate: `{}`", crate_policy.name);
+    let _ = writeln!(body, "- Bump: `{}`", bump_name(line_bump.bump));
+    let _ = writeln!(
+        body,
+        "- Version: `{}` -> `{}`",
+        crate_update.before, crate_update.after
+    );
+    let _ = writeln!(body, "- Tag: `{}` -> `{}`", current_tag, next_tag);
+
+    if !line_bump.triggered_by.is_empty() {
+        let _ = writeln!(body, "\n## Triggered By");
+        for crate_name in &line_bump.triggered_by {
+            let _ = writeln!(body, "- `{crate_name}`");
+        }
+    }
+
+    if !line_bump.propagated_from.is_empty() {
+        let _ = writeln!(body, "\n## Propagated From");
+        for line_name in &line_bump.propagated_from {
+            let _ = writeln!(body, "- `{line_name}`");
+        }
+    }
+
+    if !plan.crate_updates.is_empty() {
+        let _ = writeln!(body, "\n## Updated Crates");
+        for update in &plan.crate_updates {
+            let _ = writeln!(
+                body,
+                "- `{}`: `{}` -> `{}`",
+                update.crate_name, update.before, update.after
+            );
+        }
+    }
+
+    body
+}
+
+fn release_pr_branch_name(line_id: &str) -> String {
+    format!("codex/prup-release-{}", sanitize_branch_component(line_id))
+}
+
+fn sanitize_branch_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => ch,
+            _ => '-',
+        })
+        .collect()
+}
+
+fn bump_name(bump: BumpLevel) -> &'static str {
+    match bump {
+        BumpLevel::Patch => "patch",
+        BumpLevel::Minor => "minor",
+        BumpLevel::Major => "major",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DependencyKind, LineKind};
+    use crate::config::{DependencyKind, GithubConfig, LineKind, ReleasePrConfig};
     use crate::resolver::ResolvedPolicy;
     use crate::workspace::{WorkspaceInfo, WorkspacePackage};
     use std::path::PathBuf;
@@ -568,6 +723,11 @@ mod tests {
             baseline_tag_required: true,
             allow_dirty: false,
             github_prerelease: true,
+            github: GithubConfig {
+                release_pr: ReleasePrConfig {
+                    labels: vec!["release".to_string()],
+                },
+            },
             dependency_kinds: BTreeSet::from([
                 DependencyKind::Normal,
                 DependencyKind::Build,
@@ -858,5 +1018,34 @@ mod tests {
             "feat!: change api".to_string(),
         ]);
         assert_eq!(detected, Some(BumpLevel::Major));
+    }
+
+    #[test]
+    fn release_pr_target_uses_line_specific_metadata() {
+        let config = sample_policy();
+        let workspace = sample_workspace();
+        let workspace_version = Version::parse("0.1.0").expect("workspace version should parse");
+
+        let plan = build_plan_from_line_scopes(
+            &config,
+            &workspace,
+            &workspace_version,
+            &[LineScopeInput {
+                line_id: "imago-cli".to_string(),
+                base_ref: "imago-v0.2.0".to_string(),
+                changed_files: vec![PathBuf::from("imago-project-config/src/lib.rs")],
+                commit_messages: vec!["fix: adjust cli config".to_string()],
+            }],
+        )
+        .expect("plan should build");
+
+        let target =
+            build_release_pr_target(&config, &plan, "imago-cli").expect("target should build");
+
+        assert_eq!(target.branch, "codex/prup-release-imago-cli");
+        assert_eq!(target.title, "ci(release): imago-cli 0.2.0 -> 0.2.1");
+        assert_eq!(target.current_tag, "imago-v0.2.0");
+        assert_eq!(target.next_tag, "imago-v0.2.1");
+        assert_eq!(target.labels, vec!["release".to_string()]);
     }
 }

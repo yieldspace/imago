@@ -139,6 +139,9 @@ github_prerelease = true
 dependency_kinds = ["normal", "build", "dev"]
 shared_line = "imago-shared"
 
+[workspace.metadata.prup.github.release_pr]
+labels = ["release"]
+
 [[workspace.metadata.prup.lines]]
 id = "imago-cli"
 kind = "public-release"
