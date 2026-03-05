@@ -189,13 +189,6 @@ impl WorkspaceInfo {
     pub fn package(&self, name: &str) -> Option<&WorkspacePackage> {
         self.packages.get(name)
     }
-
-    pub fn workspace_manifest_paths(&self) -> Vec<PathBuf> {
-        self.packages
-            .values()
-            .map(|pkg| pkg.manifest_path.clone())
-            .collect()
-    }
 }
 
 fn parse_dependency_kinds(items: &[MetadataDepKind]) -> Result<BTreeSet<DependencyKind>> {
