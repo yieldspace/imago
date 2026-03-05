@@ -1,0 +1,28 @@
+name: prup-release
+description: Create tags and GitHub Releases from prup release-targets output
+
+inputs:
+  github-token:
+    description: GitHub token used by gh CLI
+    required: true
+  remote:
+    description: Remote used to push tags
+    required: false
+    default: origin
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: '1.93.1'
+
+    - name: Run prup release action
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        INPUT_REMOTE: ${{ inputs.remote }}
+      run: |
+        set -euo pipefail
+        "$GITHUB_ACTION_PATH/run.sh"

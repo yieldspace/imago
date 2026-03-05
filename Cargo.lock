@@ -4066,6 +4066,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "prup"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "semver",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml 1.0.3+spec-1.1.0",
+ "toml_edit 0.23.10+spec-1.0.0",
+]
+
+[[package]]
 name = "ptree"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5627,6 +5641,7 @@ dependencies = [
  "indexmap 2.13.0",
  "toml_datetime 0.7.5+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 

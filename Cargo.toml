@@ -39,6 +39,7 @@ members = [
     "examples/local-imagod-plugin-hello",
     "examples/local-imagod-socket",
     "plugins/*",
+    "tools/prup",
     "e2e",
 ]
 
@@ -103,6 +104,7 @@ wit-component = "0.245.1"
 wit-parser = "0.245.1"
 web-transport-quinn = "0.11.6"
 syn = "2.0.117"
+toml_edit = "0.23.7"
 
 imago-plugin-imago-admin = { path = "plugins/imago-admin", version = "0.1.0" }
 imago-plugin-imago-experimental-gpio = { path = "plugins/imago-experimental-gpio", version = "0.1.0" }
@@ -126,6 +128,49 @@ imagod-runtime-ingress = { path = "crates/imagod-runtime-ingress", version = "0.
 imagod-runtime-internal = { path = "crates/imagod-runtime-internal", version = "0.1.0" }
 imagod-runtime-wasmtime = { path = "crates/imagod-runtime-wasmtime", version = "0.1.0" }
 imagod-server = { path = "crates/imagod-server", version = "0.1.0" }
+
+[workspace.metadata.prup]
+base_ref = "origin/main"
+bump_strategy = "conventional_commits"
+default_bump = "patch"
+baseline_tag_required = true
+allow_dirty = false
+github_prerelease = true
+dependency_kinds = ["normal", "build", "dev"]
+shared_line = "imago-shared"
+
+[[workspace.metadata.prup.lines]]
+id = "imago-cli"
+kind = "public-release"
+propagate_to = []
+
+[[workspace.metadata.prup.lines]]
+id = "imagod-daemon"
+kind = "public-release"
+propagate_to = []
+
+[[workspace.metadata.prup.lines]]
+id = "imago-shared"
+kind = "tag-only"
+propagate_to = ["imago-cli", "imagod-daemon"]
+
+[[workspace.metadata.prup.crates]]
+name = "imago-cli"
+line = "imago-cli"
+version_source = "package"
+emit_tag = true
+tag_pattern = "imago-v{{version}}"
+github_release = true
+github_release_name = "imago-v{{version}}"
+
+[[workspace.metadata.prup.crates]]
+name = "imagod"
+line = "imagod-daemon"
+version_source = "workspace"
+emit_tag = true
+tag_pattern = "imagod-v{{version}}"
+github_release = true
+github_release_name = "imagod-v{{version}}"
 
 [[test]]
 name = "e2e_cli"
