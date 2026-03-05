@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          persist-credentials: false
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
       - name: Run prup release action
         uses: ./.github/actions/prup-release
@@ -41,7 +41,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          persist-credentials: false
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
       - name: Run prup release-pr action
         uses: ./.github/actions/prup-release-pr
