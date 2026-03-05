@@ -3,7 +3,21 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use imago_schema_gen::generate_all;
+
 fn main() {
+    println!("cargo:rerun-if-changed=crates/imago-project-config/src/lib.rs");
+    println!("cargo:rerun-if-changed=crates/imago-schema-gen/src/lib.rs");
+    println!("cargo:rerun-if-changed=crates/imagod-config/src/lib.rs");
+    println!("cargo:rerun-if-changed=crates/imago-project-config/Cargo.toml");
+    println!("cargo:rerun-if-changed=crates/imago-schema-gen/Cargo.toml");
+    println!("cargo:rerun-if-changed=crates/imagod-config/Cargo.toml");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+
+    let manifest_dir =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is missing"));
+    generate_all(&manifest_dir).expect("failed to generate JSON schema files");
+
     println!("cargo:rerun-if-changed=e2e/Cargo.toml");
     println!("cargo:rerun-if-changed=e2e/src/bin");
     println!("cargo:rerun-if-changed=e2e/wit");
@@ -13,8 +27,6 @@ fn main() {
         return;
     }
 
-    let manifest_dir =
-        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is missing"));
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is missing"));
     let target_dir = out_dir.join("e2e-target");
     fs::create_dir_all(&target_dir).expect("failed to create build script target dir");

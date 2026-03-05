@@ -52,7 +52,7 @@ jobs:
               case "$file" in
                 plugins/*/wkg.lock)
                   ;;
-                Cargo.toml|Cargo.lock|build.rs|crates/*|src/*|tests/*|e2e/*|examples/*|plugins/*)
+                Cargo.toml|Cargo.lock|build.rs|crates/*|src/*|tests/*|e2e/*|examples/*|plugins/*|schemas/*)
                   rust_related=true
                   ;;
               esac
@@ -104,6 +104,16 @@ jobs:
 
       - name: cargo check
         run: cargo check --workspace
+
+      - name: verify generated schemas are committed
+        run: |
+          set -euo pipefail
+          status="$(git status --porcelain --untracked-files=all -- schemas)"
+          if [[ -n "$status" ]]; then
+            echo "$status"
+            echo "::error::generated schemas are out of date. Run cargo check and commit schemas/."
+            exit 1
+          fi
 
       - name: cargo doc
         run: cargo doc --workspace --no-deps

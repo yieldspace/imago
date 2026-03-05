@@ -1,0 +1,563 @@
+{
+  "$defs": {
+    "AssetEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "BindingEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "oci": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "registry": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": "string"
+        },
+        "wit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "BuildCommand": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      ]
+    },
+    "BuildSection": {
+      "additionalProperties": true,
+      "properties": {
+        "command": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BuildCommand"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CapabilityDepsRule": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "CapabilityPolicy": {
+      "additionalProperties": true,
+      "properties": {
+        "deps": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CapabilityDepsRule"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "privileged": {
+          "default": false,
+          "type": "boolean"
+        },
+        "wasi": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CapabilityWasiRule"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CapabilityWasiRule": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "DependencyComponentEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "oci": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "registry": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "DependencyEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CapabilityPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "component": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DependencyComponentEntry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "enum": [
+            "native",
+            "wasm"
+          ],
+          "type": "string"
+        },
+        "oci": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "registry": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requires": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": "string"
+        },
+        "wit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "HttpSection": {
+      "additionalProperties": true,
+      "properties": {
+        "max_body_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "port": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "port"
+      ],
+      "type": "object"
+    },
+    "ResourceMount": {
+      "additionalProperties": true,
+      "properties": {
+        "asset_dir": {
+          "type": "string"
+        },
+        "guest_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "asset_dir",
+        "guest_path"
+      ],
+      "type": "object"
+    },
+    "ResourcesSection": {
+      "additionalProperties": true,
+      "properties": {
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "http_outbound": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "mounts": {
+          "items": {
+            "$ref": "#/$defs/ResourceMount"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "read_only_mounts": {
+          "items": {
+            "$ref": "#/$defs/ResourceMount"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RestartPolicy": {
+      "enum": [
+        "never",
+        "on-failure",
+        "always",
+        "unless-stopped"
+      ],
+      "type": "string"
+    },
+    "SocketSection": {
+      "additionalProperties": true,
+      "properties": {
+        "direction": {
+          "enum": [
+            "inbound",
+            "outbound",
+            "both"
+          ],
+          "type": "string"
+        },
+        "listen_addr": {
+          "type": "string"
+        },
+        "listen_port": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "protocol": {
+          "enum": [
+            "udp",
+            "tcp",
+            "both"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol",
+        "direction",
+        "listen_addr",
+        "listen_port"
+      ],
+      "type": "object"
+    },
+    "TargetEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "client_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remote": {
+          "type": "string"
+        },
+        "server_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "remote"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "assets": {
+      "items": {
+        "$ref": "#/$defs/AssetEntry"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "bindings": {
+      "items": {
+        "$ref": "#/$defs/BindingEntry"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "build": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BuildSection"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "capabilities": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CapabilityPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "dependencies": {
+      "items": {
+        "$ref": "#/$defs/DependencyEntry"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "http": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HttpSection"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "main": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "namespace_registries": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "resources": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResourcesSection"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "restart": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RestartPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "socket": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SocketSection"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "target": {
+      "additionalProperties": {
+        "$ref": "#/$defs/TargetEntry"
+      },
+      "type": "object"
+    },
+    "type": {
+      "enum": [
+        "cli",
+        "http",
+        "socket",
+        "rpc"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "main",
+    "type",
+    "target"
+  ],
+  "title": "ImagoTomlDocument",
+  "type": "object"
+}

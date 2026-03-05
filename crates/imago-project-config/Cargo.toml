@@ -1,13 +1,13 @@
 [package]
-name = "imagod-config"
+name = "imago-project-config"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
+publish.workspace = true
+
 [dependencies]
-imago-protocol = { workspace = true }
-imagod-common = { workspace = true }
-rcgen = { workspace = true }
+anyhow = { workspace = true }
 schemars = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 toml = { workspace = true }

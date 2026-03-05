@@ -21,6 +21,7 @@ include_dir = { workspace = true }
 futures-util = { workspace = true }
 hex = { workspace = true }
 indicatif = { workspace = true }
+imago-project-config = { workspace = true }
 imago-protocol = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }

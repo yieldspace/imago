@@ -72,6 +72,8 @@ client_public_key_hex=<YOUR_CLIENT_PUBLIC_KEY_HEX>
 Write the following content to `imago.toml` in your project root:
 
 ```toml
+"$schema" = "https://raw.githubusercontent.com/yieldspace/imago/main/schemas/imago.schema.json"
+
 name = "example-service"
 main = "target/wasm32-wasip2/release/example-service.wasm"
 type = "cli"
@@ -105,6 +107,8 @@ cargo install imagod --git https://github.com/yieldspace/imago
 Write the following content to `imagod.toml` in your project root:
 
 ```toml
+"$schema" = "https://raw.githubusercontent.com/yieldspace/imago/main/schemas/imagod.schema.json"
+
 listen_addr = "127.0.0.1:4443"
 storage_root = ".imagod-data"
 server_version = "imagod/local-quickstart"

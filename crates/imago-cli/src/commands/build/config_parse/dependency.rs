@@ -52,7 +52,7 @@ pub(crate) fn parse_namespace_registries(
 pub(crate) fn load_namespace_registries(
     project_root: &Path,
 ) -> anyhow::Result<plugin_sources::NamespaceRegistries> {
-    let root = load_resolved_toml(project_root)?;
+    let root = load_resolved_toml(project_root, true)?;
     parse_namespace_registries(root.get("namespace_registries"))
 }
 
@@ -60,7 +60,7 @@ pub(crate) fn load_project_dependencies_with_namespace_registries(
     project_root: &Path,
     namespace_registries: &plugin_sources::NamespaceRegistries,
 ) -> anyhow::Result<Vec<ProjectDependency>> {
-    let root = load_resolved_toml(project_root)?;
+    let root = load_resolved_toml(project_root, true)?;
     parse_project_dependencies(root.get("dependencies"), Some(namespace_registries))
 }
 
@@ -68,7 +68,7 @@ pub(crate) fn load_project_binding_sources_with_namespace_registries(
     project_root: &Path,
     namespace_registries: &plugin_sources::NamespaceRegistries,
 ) -> anyhow::Result<Vec<ProjectBindingSource>> {
-    let root = load_resolved_toml(project_root)?;
+    let root = load_resolved_toml(project_root, true)?;
     parse_project_binding_sources(root.get("bindings"), Some(namespace_registries))
 }
 
