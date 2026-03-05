@@ -114,7 +114,11 @@ resolve_latest_imagod_tag_from_git_refs() {
 
   local remote_url="https://github.com/${REPO}.git"
   local refs
-  if ! refs="$(git ls-remote --refs --tags --sort='v:refname' "${remote_url}" 'imagod-v*' 2>/dev/null)"; then
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    if ! refs="$(git -c "http.https://github.com/.extraheader=Authorization: Bearer ${GH_TOKEN}" ls-remote --refs --tags --sort='v:refname' "${remote_url}" 'imagod-v*' 2>/dev/null)"; then
+      die "failed to query imagod tags from ${remote_url} with GH_TOKEN; pass --tag imagod-vX.Y.Z explicitly"
+    fi
+  elif ! refs="$(git ls-remote --refs --tags --sort='v:refname' "${remote_url}" 'imagod-v*' 2>/dev/null)"; then
     die "failed to query imagod tags from ${remote_url}; pass --tag imagod-vX.Y.Z explicitly"
   fi
 
