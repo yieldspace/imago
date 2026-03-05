@@ -1,4 +1,6 @@
-use crate::config::{CratePolicy, DependencyKind, LinePolicy, PrupConfig, VersionSource};
+use crate::config::{
+    CratePolicy, DependencyKind, GithubConfig, LinePolicy, PrupConfig, VersionSource,
+};
 use crate::workspace::WorkspaceInfo;
 use anyhow::{Result, anyhow};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -10,6 +12,7 @@ pub struct ResolvedPolicy {
     pub baseline_tag_required: bool,
     pub allow_dirty: bool,
     pub github_prerelease: bool,
+    pub github: GithubConfig,
     pub dependency_kinds: BTreeSet<DependencyKind>,
     pub lines: Vec<LinePolicy>,
     pub crates: Vec<CratePolicy>,
@@ -77,6 +80,7 @@ pub fn resolve(config: &PrupConfig, workspace: &WorkspaceInfo) -> Result<Resolve
         baseline_tag_required: config.baseline_tag_required,
         allow_dirty: config.allow_dirty,
         github_prerelease: config.github_prerelease,
+        github: config.github.clone(),
         dependency_kinds,
         lines: config.lines.clone(),
         crates: resolved_crates,
@@ -215,6 +219,11 @@ mod tests {
             baseline_tag_required: true,
             allow_dirty: false,
             github_prerelease: true,
+            github: GithubConfig {
+                release_pr: ReleasePrConfig {
+                    labels: vec!["release".to_string()],
+                },
+            },
             dependency_kinds: vec![
                 DependencyKind::Normal,
                 DependencyKind::Build,

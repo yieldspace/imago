@@ -53,9 +53,23 @@ pub struct PrupConfig {
     #[serde(default)]
     pub shared_line: Option<String>,
     #[serde(default)]
+    pub github: GithubConfig,
+    #[serde(default)]
     pub lines: Vec<LinePolicy>,
     #[serde(default)]
     pub crates: Vec<CratePolicy>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GithubConfig {
+    #[serde(default)]
+    pub release_pr: ReleasePrConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReleasePrConfig {
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,6 +226,16 @@ fn validate_config(config: &PrupConfig) -> Result<()> {
         }
     }
 
+    let mut release_pr_labels = BTreeSet::new();
+    for label in &config.github.release_pr.labels {
+        if label.trim().is_empty() {
+            return Err(anyhow!("release_pr label must not be empty"));
+        }
+        if !release_pr_labels.insert(label.clone()) {
+            return Err(anyhow!("duplicate release_pr label: {label}"));
+        }
+    }
+
     let line_map = config.line_map();
     let mut crate_names = BTreeSet::new();
     let mut line_emit_tag_counts: BTreeMap<&str, usize> = BTreeMap::new();
@@ -335,6 +359,11 @@ mod tests {
             github_prerelease: true,
             dependency_kinds: default_dependency_kinds(),
             shared_line: Some("imago-shared".to_string()),
+            github: GithubConfig {
+                release_pr: ReleasePrConfig {
+                    labels: vec!["release".to_string()],
+                },
+            },
             lines: vec![
                 LinePolicy {
                     id: "imago-cli".to_string(),
@@ -412,6 +441,15 @@ mod tests {
                 .to_string()
                 .contains("manual crate config is reserved for top crates")
         );
+    }
+
+    #[test]
+    fn rejects_duplicate_release_pr_labels() {
+        let mut config = sample_config();
+        config.github.release_pr.labels = vec!["release".to_string(), "release".to_string()];
+
+        let error = validate_config(&config).expect_err("duplicate labels should fail");
+        assert!(error.to_string().contains("duplicate release_pr label"));
     }
 
     #[test]

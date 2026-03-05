@@ -11,7 +11,7 @@ mod workspace;
 
 use crate::cli::{ApplyArgs, Cli, Commands, CommonPlanArgs, OutputFormat};
 use crate::config::LoadedConfig;
-use crate::planner::{CurrentReleaseTarget, LineScopeInput, ReleasePlan};
+use crate::planner::{CurrentReleaseTarget, LineScopeInput, ReleasePlan, ReleasePrTarget};
 use crate::resolver::ResolvedPolicy;
 use anyhow::{Result, anyhow};
 use clap::Parser;
@@ -23,6 +23,11 @@ use std::path::{Path, PathBuf};
 struct ReleaseTargetsOutput {
     prerelease: bool,
     targets: Vec<CurrentReleaseTarget>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReleasePrTargetsOutput {
+    targets: Vec<ReleasePrTarget>,
 }
 
 fn main() {
@@ -51,12 +56,16 @@ fn run() -> Result<()> {
                 &workspace,
                 &resolved,
                 args.common.base_ref.as_deref(),
+                args.common.line.as_deref(),
                 allow_dirty,
             )?;
             println!("{}", explain::render_explanation(&plan, &args.target));
             Ok(())
         }
         Commands::ReleaseTargets(args) => run_release_targets(&loaded, &workspace, &resolved, args),
+        Commands::ReleasePrTargets(args) => {
+            run_release_pr_targets(&repo_root, &loaded, &workspace, &resolved, args)
+        }
     }
 }
 
@@ -102,6 +111,7 @@ fn run_plan(
         workspace,
         resolved,
         args.common.base_ref.as_deref(),
+        args.common.line.as_deref(),
         allow_dirty,
     )?;
 
@@ -141,6 +151,7 @@ fn run_apply(
             workspace,
             resolved,
             args.common.base_ref.as_deref(),
+            args.common.line.as_deref(),
             allow_dirty,
         )?
     };
@@ -203,18 +214,106 @@ fn run_release_targets(
     Ok(())
 }
 
+fn run_release_pr_targets(
+    repo_root: &Path,
+    loaded: &LoadedConfig,
+    workspace: &workspace::WorkspaceInfo,
+    resolved: &ResolvedPolicy,
+    args: cli::ReleasePrTargetsArgs,
+) -> Result<()> {
+    let allow_dirty = effective_allow_dirty(resolved, &args.common);
+    git::ensure_clean(repo_root, allow_dirty)?;
+    ensure_baseline_tags(repo_root, resolved)?;
+
+    let mut top_crates = resolved.emit_tag_crates();
+    top_crates.sort_by(|a, b| a.line.cmp(&b.line).then(a.name.cmp(&b.name)));
+
+    if let Some(line_id) = args.common.line.as_deref()
+        && !top_crates
+            .iter()
+            .any(|crate_policy| crate_policy.line == line_id)
+    {
+        return Err(anyhow!(
+            "selected line {} is not a release line with emit_tag=true",
+            line_id
+        ));
+    }
+
+    let mut targets = Vec::new();
+    for crate_policy in top_crates {
+        if args
+            .common
+            .line
+            .as_deref()
+            .is_some_and(|line_id| crate_policy.line != line_id)
+        {
+            continue;
+        }
+
+        let plan = build_git_plan(
+            repo_root,
+            loaded,
+            workspace,
+            resolved,
+            args.common.base_ref.as_deref(),
+            Some(crate_policy.line.as_str()),
+            allow_dirty,
+        )?;
+
+        if plan.crate_updates.is_empty() {
+            continue;
+        }
+
+        targets.push(planner::build_release_pr_target(
+            resolved,
+            &plan,
+            crate_policy.line.as_str(),
+        )?);
+    }
+
+    let output = ReleasePrTargetsOutput { targets };
+
+    if let Some(path) = args.output {
+        let json = serde_json::to_string_pretty(&output)?;
+        fs::write(path, json)?;
+    }
+
+    match args.format {
+        OutputFormat::Human => {
+            if output.targets.is_empty() {
+                println!("release-pr-targets: none");
+                return Ok(());
+            }
+            println!("release-pr-targets:");
+            for target in output.targets {
+                println!(
+                    "- {}: {} -> {} [{}]",
+                    target.line_id, target.before_version, target.after_version, target.branch
+                );
+            }
+        }
+        OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(&output)?;
+            println!("{json}");
+        }
+    }
+
+    Ok(())
+}
+
 fn build_git_plan(
     repo_root: &Path,
     loaded: &LoadedConfig,
     workspace: &workspace::WorkspaceInfo,
     resolved: &ResolvedPolicy,
     base_ref_override: Option<&str>,
+    selected_line: Option<&str>,
     allow_dirty: bool,
 ) -> Result<ReleasePlan> {
     git::ensure_clean(repo_root, allow_dirty)?;
     ensure_baseline_tags(repo_root, resolved)?;
 
-    let line_scopes = collect_line_scopes(repo_root, resolved, base_ref_override)?;
+    let line_scopes = collect_line_scopes(repo_root, resolved, base_ref_override, selected_line)?;
 
     planner::build_plan_from_line_scopes(
         resolved,
@@ -228,14 +327,30 @@ fn collect_line_scopes(
     repo_root: &Path,
     resolved: &ResolvedPolicy,
     base_ref_override: Option<&str>,
+    selected_line: Option<&str>,
 ) -> Result<Vec<LineScopeInput>> {
     let line_map = resolved.line_map();
     let mut top_crates = resolved.emit_tag_crates();
     top_crates.sort_by(|a, b| a.line.cmp(&b.line).then(a.name.cmp(&b.name)));
 
+    if let Some(line_id) = selected_line
+        && !top_crates
+            .iter()
+            .any(|crate_policy| crate_policy.line == line_id)
+    {
+        return Err(anyhow!(
+            "selected line {} is not a release line with emit_tag=true",
+            line_id
+        ));
+    }
+
     let mut scopes = Vec::new();
 
     for crate_policy in top_crates {
+        if selected_line.is_some_and(|line_id| crate_policy.line != line_id) {
+            continue;
+        }
+
         let line_policy = line_map
             .get(crate_policy.line.as_str())
             .ok_or_else(|| anyhow!("unknown line {}", crate_policy.line))?;

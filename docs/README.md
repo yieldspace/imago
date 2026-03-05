@@ -29,11 +29,13 @@ flowchart LR
 
 - リリースは `prup` + custom GitHub Action の2段運用です。
   - `prup`: 差分計算・version更新計画・Cargo.toml更新を担当します。
-  - `.github/actions/prup-release-pr`: release PR 作成（branch/push/PR）を担当します。
+  - `.github/actions/prup-release-pr`: top crate ごとの release PR 作成（branch/push/PR）を担当します。
   - `.github/actions/prup-release`: tag / GitHub Release 作成を担当します。
 - 設定の source-of-truth は root `Cargo.toml` の `[workspace.metadata.prup]` です。
 - `[workspace.metadata.prup.crates]` は top crate のみを手動定義します。
   内部 crate は `cargo metadata` の依存グラフから自動検出されます。
+- release PR の GitHub label は `[workspace.metadata.prup.github.release_pr]` で管理します。
+  imago では `labels = ["release"]` を設定し、release PR に自動付与します。
 - 自動所属判定に使う依存種別は `dependency_kinds = ["normal", "build", "dev"]` です。
 - タグは `prup` が生成し、以下のバージョン契約に従います。
   - `imago-vX.Y.Z` / `imago-vX.Y.Z-alpha(.N)` / `imago-vX.Y.Z-beta(.N)`:
@@ -50,6 +52,10 @@ flowchart LR
 - タグ生成対象は top crate のみです。
   - `imago-cli` -> `imago-vX.Y.Z`
   - `imagod` -> `imagod-vX.Y.Z`
+- release PR は top crate / release line ごとに 1 本作られます。
+  - branch: `codex/prup-release-<line-id>`
+  - title: `ci(release): <crate> <before> -> <after>`
+  - body: bump level, tag diff, updated crates, propagated lines を自動生成
 - 内部 crate はタグ不要で、top crate の最新タグから `HEAD` までの差分計算で line へ連動します。
 - `imago-cli` 専用の内部 crate は impact-only として扱い、`imagod` の workspace version は不用意に bump しません。
 - daemon 閉包外の依存 crate は内部依存として扱い、`publish = false` / `release = false` を維持します。
