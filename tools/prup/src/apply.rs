@@ -31,6 +31,7 @@ pub fn apply_plan(
         )?;
         extend_workspace_manifest_version_updates(workspace, plan, &mut manifest_version_updates)?;
     }
+    validate_manifest_update_targets(workspace, &manifest_version_updates)?;
 
     let cargo_toml_path = repo_root.join("Cargo.toml");
     let mut root_doc = load_doc(&cargo_toml_path)?;
@@ -90,6 +91,19 @@ fn extend_workspace_manifest_version_updates(
         manifest_version_updates
             .entry(crate_update.crate_name.clone())
             .or_insert_with(|| crate_update.after.clone());
+    }
+
+    Ok(())
+}
+
+fn validate_manifest_update_targets(
+    workspace: &WorkspaceInfo,
+    manifest_version_updates: &BTreeMap<String, String>,
+) -> Result<()> {
+    for crate_name in manifest_version_updates.keys() {
+        if workspace.package(crate_name).is_none() {
+            return Err(anyhow!("package {crate_name} not found"));
+        }
     }
 
     Ok(())
@@ -428,6 +442,36 @@ mod tests {
             cargo_before
         );
         assert_eq!(read_to_string(root.join("Cargo.lock")), lock_before);
+    }
+
+    #[test]
+    fn apply_plan_rejects_unknown_manifest_update_targets() {
+        let root = create_package_workspace();
+        let workspace = load_workspace_info(&root, &[("imago-cli", "crates/imago-cli")]);
+        let plan = ReleasePlan {
+            line_base_refs: BTreeMap::new(),
+            changed_files: Vec::new(),
+            changed_crates: Vec::new(),
+            impacted_crates: Vec::new(),
+            line_bumps: Vec::new(),
+            workspace_version_update: None,
+            package_version_updates: vec![PackageVersionUpdate {
+                crate_name: "missing-crate".to_string(),
+                before: "0.1.0".to_string(),
+                after: "0.2.0".to_string(),
+                bump: BumpLevel::Minor,
+            }],
+            crate_updates: Vec::new(),
+            tags: Vec::new(),
+            release_targets: Vec::new(),
+        };
+
+        let error = apply_plan(&root, &workspace, &plan, false).expect_err("apply should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("package missing-crate not found")
+        );
     }
 
     fn create_package_workspace() -> PathBuf {
