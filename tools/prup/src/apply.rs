@@ -18,11 +18,18 @@ pub fn apply_plan(
         .iter()
         .map(|update| (update.crate_name.clone(), update.after.clone()))
         .collect();
-    let dependency_updates: BTreeMap<String, String> = plan
+    let mut dependency_updates: BTreeMap<String, String> = plan
         .crate_updates
         .iter()
         .map(|update| (update.crate_name.clone(), update.after.clone()))
         .collect();
+    if let Some(workspace_update) = &plan.workspace_version_update {
+        extend_workspace_dependency_updates(
+            workspace,
+            &mut dependency_updates,
+            &workspace_update.after,
+        )?;
+    }
 
     let cargo_toml_path = repo_root.join("Cargo.toml");
     let mut root_doc = load_doc(&cargo_toml_path)?;
@@ -115,6 +122,35 @@ fn load_doc(path: &Path) -> Result<DocumentMut> {
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     raw.parse::<DocumentMut>()
         .with_context(|| format!("failed to parse TOML: {}", path.display()))
+}
+
+fn extend_workspace_dependency_updates(
+    workspace: &WorkspaceInfo,
+    dependency_updates: &mut BTreeMap<String, String>,
+    next_workspace_version: &str,
+) -> Result<()> {
+    for (crate_name, package) in &workspace.packages {
+        let doc = load_doc(&package.manifest_path)?;
+        if package_uses_workspace_version(&doc) {
+            dependency_updates
+                .entry(crate_name.clone())
+                .or_insert_with(|| next_workspace_version.to_string());
+        }
+    }
+
+    Ok(())
+}
+
+fn package_uses_workspace_version(doc: &DocumentMut) -> bool {
+    doc.as_item()
+        .get("package")
+        .and_then(Item::as_table_like)
+        .and_then(|package| package.get("version"))
+        .and_then(Item::as_table_like)
+        .and_then(|version| version.get("workspace"))
+        .and_then(Item::as_value)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn update_dependency_versions(
@@ -263,6 +299,8 @@ mod tests {
             &[
                 ("imagod", "crates/imagod"),
                 ("imagod-common", "crates/imagod-common"),
+                ("imago-cli", "crates/imago-cli"),
+                ("imago-project-config", "crates/imago-project-config"),
             ],
         );
         let plan = ReleasePlan {
@@ -305,12 +343,19 @@ mod tests {
                 "imagod-common = { path = \"crates/imagod-common\", version = \"0.2.0\" }"
             )
         );
+        assert!(read_to_string(root.join("Cargo.toml")).contains(
+            "imago-project-config = { path = \"crates/imago-project-config\", version = \"0.2.0\" }"
+        ));
         assert_eq!(
             lockfile_package_version(&root, "imagod").as_deref(),
             Some("0.2.0")
         );
         assert_eq!(
             lockfile_package_version(&root, "imagod-common").as_deref(),
+            Some("0.2.0")
+        );
+        assert_eq!(
+            lockfile_package_version(&root, "imago-project-config").as_deref(),
             Some("0.2.0")
         );
     }
@@ -403,7 +448,7 @@ edition = "2024"
         write_file(
             root.join("Cargo.toml"),
             r#"[workspace]
-members = ["crates/imagod", "crates/imagod-common"]
+members = ["crates/imagod", "crates/imagod-common", "crates/imago-cli", "crates/imago-project-config"]
 resolver = "3"
 
 [workspace.package]
@@ -412,6 +457,7 @@ edition = "2024"
 
 [workspace.dependencies]
 imagod-common = { path = "crates/imagod-common", version = "0.1.0" }
+imago-project-config = { path = "crates/imago-project-config", version = "0.1.0" }
 "#,
         );
         write_file(
@@ -440,6 +486,33 @@ edition.workspace = true
         write_file(
             root.join("crates/imagod-common/src/lib.rs"),
             "pub fn common() {}\n",
+        );
+        write_file(
+            root.join("crates/imago-cli/Cargo.toml"),
+            r#"[package]
+name = "imago-cli"
+version = "0.1.1"
+edition = "2024"
+
+[dependencies]
+imago-project-config = { workspace = true }
+"#,
+        );
+        write_file(
+            root.join("crates/imago-cli/src/lib.rs"),
+            "pub fn cli() {}\n",
+        );
+        write_file(
+            root.join("crates/imago-project-config/Cargo.toml"),
+            r#"[package]
+name = "imago-project-config"
+version.workspace = true
+edition.workspace = true
+"#,
+        );
+        write_file(
+            root.join("crates/imago-project-config/src/lib.rs"),
+            "pub fn config() {}\n",
         );
         sync_lockfile(&root).expect("initial cargo update should succeed");
         root
