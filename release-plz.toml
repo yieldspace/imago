@@ -18,6 +18,7 @@ git_tag_enable = true
 git_release_enable = true
 git_tag_name = "imago-v{{ version }}"
 git_release_name = "imago-v{{ version }}"
+version_group = "imago-cli"
 git_release_body = """
 ## CLI Release
 
@@ -48,7 +49,7 @@ git_only = true
 git_tag_enable = true
 git_release_enable = false
 changelog_update = false
-version_group = "imagod-daemon"
+version_group = "imago-shared"
 
 [[package]]
 name = "imago-plugin-macros"

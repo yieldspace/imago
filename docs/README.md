@@ -35,13 +35,19 @@ flowchart LR
     `crates/imago-cli/Cargo.toml` の `version`。
   - `imagod-vX.Y.Z` / `imagod-vX.Y.Z-alpha(.N)` / `imagod-vX.Y.Z-beta(.N)`:
     ルート `Cargo.toml` の `[workspace.package].version`。
-- `git_only` のタグ基準は `imago-cli` / `imagod` に加えて daemon 閉包 crate を対象にします。
-- daemon 閉包 crate（`imagod-*`、`imago-protocol`、`imago-plugin-macros`、`imago-plugin-imago-*`）は
-  `version_group = "imagod-daemon"` で同一バージョンへ連動します。
-- daemon 閉包 crate は `tag-only` 運用です。
+- `git_only` のタグ基準は `imago-cli` / `imagod` に加えて daemon・shared の内部 crate を対象にします。
+- `version_group` は以下の3グループで管理します。
+  - `imagod-daemon`: `imagod`、`imagod-*`、`imago-plugin-macros`、`imago-plugin-imago-*`
+  - `imago-cli`: `imago-cli`
+  - `imago-shared`: `imago-protocol`
+- `imago-protocol` のように `imagod`/`imago-cli` の双方で使う crate は
+  二重所属せず `imago-shared` にのみ所属させます。
+- daemon/shared の内部 crate は `tag-only` 運用です。
   - タグ形式は `<crate>-vX.Y.Z` です（`imagod` は `imagod-vX.Y.Z`）。
   - 内部 crate は `git_release_enable = false` / `changelog_update = false` を維持します。
 - daemon 閉包外の依存 crate は内部依存として扱い、`publish = false` / `release = false` を維持します。
+- 初回導入時は group 参加 crate へ baseline tag（最低1タグ）を事前に付与してください。
+  未タグの crate があると `version_group` の次バージョン計算が進まず、連動 bump が発生しません。
 - crates.io への実 publish（`cargo publish`）は実行しません。
 - GitHub Release は stable / alpha / beta を問わず常に prerelease として作成されます。
 - release-plz workflow では `RELEASE_PLZ_TOKEN`（GitHub 操作用）を利用します。
