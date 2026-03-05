@@ -13,7 +13,7 @@ pub fn apply_plan(
     plan: &ReleasePlan,
     dry_run: bool,
 ) -> Result<()> {
-    let package_updates: BTreeMap<String, String> = plan
+    let mut manifest_version_updates: BTreeMap<String, String> = plan
         .package_version_updates
         .iter()
         .map(|update| (update.crate_name.clone(), update.after.clone()))
@@ -29,7 +29,9 @@ pub fn apply_plan(
             &mut dependency_updates,
             &workspace_update.after,
         )?;
+        extend_workspace_manifest_version_updates(workspace, plan, &mut manifest_version_updates)?;
     }
+    validate_manifest_update_targets(workspace, &manifest_version_updates)?;
 
     let cargo_toml_path = repo_root.join("Cargo.toml");
     let mut root_doc = load_doc(&cargo_toml_path)?;
@@ -44,40 +46,64 @@ pub fn apply_plan(
             .with_context(|| format!("failed to write {}", cargo_toml_path.display()))?;
     }
 
-    for (crate_name, next_version) in &package_updates {
-        let package = workspace
-            .package(crate_name)
-            .ok_or_else(|| anyhow!("package {crate_name} not found"))?;
+    for (crate_name, package) in &workspace.packages {
         let mut doc = load_doc(&package.manifest_path)?;
-        doc["package"]["version"] = value(next_version.clone());
-        if !dry_run {
+        let mut changed = false;
+
+        if let Some(next_version) = manifest_version_updates.get(crate_name) {
+            doc["package"]["version"] = value(next_version.clone());
+            changed = true;
+        }
+
+        changed |= update_dependency_versions(&mut doc, &dependency_updates);
+
+        if changed && !dry_run {
             fs::write(&package.manifest_path, doc.to_string())
                 .with_context(|| format!("failed to write {}", package.manifest_path.display()))?;
         }
     }
 
-    if !dependency_updates.is_empty() {
-        for manifest_path in workspace.workspace_manifest_paths() {
-            if package_updates.keys().any(|crate_name| {
-                workspace
-                    .package(crate_name)
-                    .map(|pkg| pkg.manifest_path == manifest_path)
-                    .unwrap_or(false)
-            }) {
-                continue;
-            }
-
-            let mut doc = load_doc(&manifest_path)?;
-            let changed = update_dependency_versions(&mut doc, &dependency_updates);
-            if changed && !dry_run {
-                fs::write(&manifest_path, doc.to_string())
-                    .with_context(|| format!("failed to write {}", manifest_path.display()))?;
-            }
-        }
-    }
-
     if !dry_run {
         sync_lockfile(repo_root)?;
+    }
+
+    Ok(())
+}
+
+fn extend_workspace_manifest_version_updates(
+    workspace: &WorkspaceInfo,
+    plan: &ReleasePlan,
+    manifest_version_updates: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    for crate_update in &plan.crate_updates {
+        if crate_update.version_source != crate::config::VersionSource::Workspace {
+            continue;
+        }
+
+        let package = workspace
+            .package(&crate_update.crate_name)
+            .ok_or_else(|| anyhow!("package {} not found", crate_update.crate_name))?;
+        let doc = load_doc(&package.manifest_path)?;
+        if package_uses_workspace_version(&doc) {
+            continue;
+        }
+
+        manifest_version_updates
+            .entry(crate_update.crate_name.clone())
+            .or_insert_with(|| crate_update.after.clone());
+    }
+
+    Ok(())
+}
+
+fn validate_manifest_update_targets(
+    workspace: &WorkspaceInfo,
+    manifest_version_updates: &BTreeMap<String, String>,
+) -> Result<()> {
+    for crate_name in manifest_version_updates.keys() {
+        if workspace.package(crate_name).is_none() {
+            return Err(anyhow!("package {crate_name} not found"));
+        }
     }
 
     Ok(())
@@ -299,6 +325,7 @@ mod tests {
             &[
                 ("imagod", "crates/imagod"),
                 ("imagod-common", "crates/imagod-common"),
+                ("imago-protocol", "crates/imago-protocol"),
                 ("imago-cli", "crates/imago-cli"),
                 ("imago-project-config", "crates/imago-project-config"),
             ],
@@ -330,6 +357,13 @@ mod tests {
                     "0.2.0",
                     crate::config::VersionSource::Workspace,
                 ),
+                crate_update(
+                    "imago-protocol",
+                    "imago-shared",
+                    "0.1.0",
+                    "0.2.0",
+                    crate::config::VersionSource::Workspace,
+                ),
             ],
             tags: Vec::new(),
             release_targets: Vec::new(),
@@ -346,6 +380,13 @@ mod tests {
         assert!(read_to_string(root.join("Cargo.toml")).contains(
             "imago-project-config = { path = \"crates/imago-project-config\", version = \"0.2.0\" }"
         ));
+        assert!(read_to_string(root.join("Cargo.toml")).contains(
+            "imago-protocol = { path = \"crates/imago-protocol\", version = \"0.2.0\" }"
+        ));
+        assert!(
+            read_to_string(root.join("crates/imago-protocol/Cargo.toml"))
+                .contains("version = \"0.2.0\"")
+        );
         assert_eq!(
             lockfile_package_version(&root, "imagod").as_deref(),
             Some("0.2.0")
@@ -356,6 +397,10 @@ mod tests {
         );
         assert_eq!(
             lockfile_package_version(&root, "imago-project-config").as_deref(),
+            Some("0.2.0")
+        );
+        assert_eq!(
+            lockfile_package_version(&root, "imago-protocol").as_deref(),
             Some("0.2.0")
         );
     }
@@ -397,6 +442,36 @@ mod tests {
             cargo_before
         );
         assert_eq!(read_to_string(root.join("Cargo.lock")), lock_before);
+    }
+
+    #[test]
+    fn apply_plan_rejects_unknown_manifest_update_targets() {
+        let root = create_package_workspace();
+        let workspace = load_workspace_info(&root, &[("imago-cli", "crates/imago-cli")]);
+        let plan = ReleasePlan {
+            line_base_refs: BTreeMap::new(),
+            changed_files: Vec::new(),
+            changed_crates: Vec::new(),
+            impacted_crates: Vec::new(),
+            line_bumps: Vec::new(),
+            workspace_version_update: None,
+            package_version_updates: vec![PackageVersionUpdate {
+                crate_name: "missing-crate".to_string(),
+                before: "0.1.0".to_string(),
+                after: "0.2.0".to_string(),
+                bump: BumpLevel::Minor,
+            }],
+            crate_updates: Vec::new(),
+            tags: Vec::new(),
+            release_targets: Vec::new(),
+        };
+
+        let error = apply_plan(&root, &workspace, &plan, false).expect_err("apply should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("package missing-crate not found")
+        );
     }
 
     fn create_package_workspace() -> PathBuf {
@@ -448,7 +523,7 @@ edition = "2024"
         write_file(
             root.join("Cargo.toml"),
             r#"[workspace]
-members = ["crates/imagod", "crates/imagod-common", "crates/imago-cli", "crates/imago-project-config"]
+members = ["crates/imagod", "crates/imagod-common", "crates/imago-protocol", "crates/imago-cli", "crates/imago-project-config"]
 resolver = "3"
 
 [workspace.package]
@@ -458,6 +533,7 @@ edition = "2024"
 [workspace.dependencies]
 imagod-common = { path = "crates/imagod-common", version = "0.1.0" }
 imago-project-config = { path = "crates/imago-project-config", version = "0.1.0" }
+imago-protocol = { path = "crates/imago-protocol", version = "0.1.0" }
 "#,
         );
         write_file(
@@ -488,6 +564,18 @@ edition.workspace = true
             "pub fn common() {}\n",
         );
         write_file(
+            root.join("crates/imago-protocol/Cargo.toml"),
+            r#"[package]
+name = "imago-protocol"
+version = "0.1.0"
+edition = "2024"
+"#,
+        );
+        write_file(
+            root.join("crates/imago-protocol/src/lib.rs"),
+            "pub fn protocol() {}\n",
+        );
+        write_file(
             root.join("crates/imago-cli/Cargo.toml"),
             r#"[package]
 name = "imago-cli"
@@ -496,6 +584,7 @@ edition = "2024"
 
 [dependencies]
 imago-project-config = { workspace = true }
+imago-protocol = { workspace = true }
 "#,
         );
         write_file(
