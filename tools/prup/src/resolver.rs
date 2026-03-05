@@ -206,7 +206,7 @@ fn top_crates_by_line(config: &PrupConfig) -> Result<BTreeMap<&str, &CratePolicy
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DependencyKind, LineKind, PrupConfig};
+    use crate::config::{DependencyKind, LineKind, PrupConfig, ReleasePrConfig};
     use crate::workspace::{WorkspaceInfo, WorkspacePackage};
     use semver::Version;
     use std::path::PathBuf;
