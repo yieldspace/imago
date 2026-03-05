@@ -29,10 +29,12 @@ flowchart LR
 
 - リリースは `prup` + custom GitHub Action の2段運用です。
   - `prup`: 差分計算・version更新計画・`Cargo.toml` / root `Cargo.lock` 同期を担当します。
-  - `.github/actions/prup-release-pr`: top crate ごとの release PR 作成（branch/push/PR）を担当します。
+  - `.github/actions/prup-release-pr`: top crate ごとの release PR 作成（branch/push/PR）と、`cargo check --workspace` による generated schema 同期を担当します。
   - `.github/actions/prup-release`: tag / GitHub Release 作成を担当します。
 - `prup apply` は plan 適用時に root `Cargo.lock` も同期します。
   release bump PR には `Cargo.toml` だけでなく `Cargo.lock` の差分も必ず含まれます。
+- release PR では version bump 後に `cargo check --workspace` を実行し、`schemas/imago.schema.json` / `schemas/imagod.schema.json` の生成差分も同じ commit に含めます。
+  特に `imagod` line は `server_version` default が crate version に追従するため、`schemas/imagod.schema.json` が更新対象になりえます。
 - 設定の source-of-truth は root `Cargo.toml` の `[workspace.metadata.prup]` です。
 - `[workspace.metadata.prup.crates]` は top crate のみを手動定義します。
   内部 crate は `cargo metadata` の依存グラフから自動検出されます。
