@@ -164,9 +164,9 @@ fn run_apply(
     apply::apply_plan(repo_root, workspace, &plan, args.dry_run)?;
 
     if args.dry_run {
-        println!("apply: dry-run completed");
+        println!("apply: dry-run completed (would update Cargo.toml files and Cargo.lock)");
     } else {
-        println!("apply: updated Cargo.toml files");
+        println!("apply: updated Cargo.toml files and Cargo.lock");
     }
 
     Ok(())
