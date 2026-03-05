@@ -33,6 +33,7 @@ git_tag_enable = true
 git_release_enable = true
 git_tag_name = "imagod-v{{ version }}"
 git_release_name = "imagod-v{{ version }}"
+version_group = "imagod-daemon"
 git_release_body = """
 ## Daemon Release
 
@@ -41,90 +42,180 @@ git_release_body = """
 
 [[package]]
 name = "imago-protocol"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
 
 [[package]]
 name = "imago-plugin-macros"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
 
 [[package]]
 name = "imagod-common"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
 
 [[package]]
 name = "imagod-config"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
 
 [[package]]
 name = "imagod-control"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
 
 [[package]]
 name = "imagod-ipc"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
 
 [[package]]
 name = "imagod-runtime"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
 
 [[package]]
 name = "imagod-runtime-bootstrap"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
 
 [[package]]
 name = "imagod-runtime-control"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
 
 [[package]]
 name = "imagod-runtime-ingress"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
 
 [[package]]
 name = "imagod-runtime-internal"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
 
 [[package]]
 name = "imagod-runtime-wasmtime"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
 
 [[package]]
 name = "imagod-server"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
 
 [[package]]
 name = "imago-plugin-imago-admin"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
 
 [[package]]
 name = "imago-plugin-imago-experimental-gpio"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
 
 [[package]]
 name = "imago-plugin-imago-experimental-i2c"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
 
 [[package]]
 name = "imago-plugin-imago-node"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
 
 [[package]]
 name = "imago-plugin-imago-usb"
-release = false
+release = true
 publish = false
+git_only = true
+git_tag_enable = true
+git_release_enable = false
+changelog_update = false
+version_group = "imagod-daemon"
