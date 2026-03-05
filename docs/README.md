@@ -44,11 +44,13 @@ flowchart LR
   - pin した SHA が参照できなくなった場合は fork の tag に退避して `--rev` を切り替えるか、upstream 正式リリースへ更新して pin を解除してください。
 - バイナリ添付は `imago-build.yml` が `release` イベントで既存Releaseへ追加します。
   - `imagod-v*` では `imagod-<target-triple>` と `imagod-<target-triple>.sha256` が添付されます。
-  - musl 系 target には `x86_64-unknown-linux-musl` も含まれます。
+  - target には Linux 系（gnu/musl）に加えて `x86_64-apple-darwin` / `aarch64-apple-darwin` も含まれます。
 - `scripts/install_imagod.sh` は上記 release asset を利用して `imagod` を自動導入します。
-  - タグ解決優先順: `--tag` > `GITHUB_REF_NAME=imagod-v*` > API で最新 `imagod-v*`
-  - libc 解決: `--libc auto|gnu|musl`（既定: `auto`）
-  - サービス導入優先順: `systemd` > `init.d` > binary-only
+  - タグ解決優先順: `--tag` > `git ls-remote` で最新 `imagod-v*`（GitHub API の JSON 解析はしない）
+  - 対応OS: Linux / macOS（Darwin）
+  - target 解決: `--target <triple>`（指定時） > 自動判定（未指定時）
+  - `--libc` は廃止（breaking change）され、受け付けません
+  - サービス導入優先順: Linux は `systemd` > `init.d` > binary-only、macOS は `launchd(system daemon)` > binary-only
   - private release へアクセスする場合は `GH_TOKEN` を利用します。
 
 ## Source Of Truth (Code)
