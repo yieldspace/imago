@@ -27,32 +27,37 @@ flowchart LR
 
 ## Release Flow Contract
 
-- リリースは `release-plz` の2段運用です。
-  - `release-plz release-pr`: version 更新を含むリリースPRを作成します。
-  - `release-plz release`: マージ済みリリースPRに対してタグと GitHub Release を作成します。
-- タグは `release-plz` が生成し、以下のバージョン契約に従います。
+- リリースは `prup` + custom GitHub Action の2段運用です。
+  - `prup`: 差分計算・version更新計画・Cargo.toml更新を担当します。
+  - `.github/actions/prup-release-pr`: release PR 作成（branch/push/PR）を担当します。
+  - `.github/actions/prup-release`: tag / GitHub Release 作成を担当します。
+- 設定の source-of-truth は root `Cargo.toml` の `[workspace.metadata.prup]` です。
+- `[workspace.metadata.prup.crates]` は top crate のみを手動定義します。
+  内部 crate は `cargo metadata` の依存グラフから自動検出されます。
+- 自動所属判定に使う依存種別は `dependency_kinds = ["normal", "build", "dev"]` です。
+- タグは `prup` が生成し、以下のバージョン契約に従います。
   - `imago-vX.Y.Z` / `imago-vX.Y.Z-alpha(.N)` / `imago-vX.Y.Z-beta(.N)`:
     `crates/imago-cli/Cargo.toml` の `version`。
   - `imagod-vX.Y.Z` / `imagod-vX.Y.Z-alpha(.N)` / `imagod-vX.Y.Z-beta(.N)`:
     ルート `Cargo.toml` の `[workspace.package].version`。
-- `git_only` のタグ基準は `imago-cli` / `imagod` に加えて daemon・shared の内部 crate を対象にします。
-- `version_group` は以下の3グループで管理します。
+- `prup` の line 管理は以下の3グループです。
   - `imagod-daemon`: `imagod`、`imagod-*`、`imago-plugin-macros`、`imago-plugin-imago-*`
   - `imago-cli`: `imago-cli`
   - `imago-shared`: `imago-protocol`
 - `imago-protocol` のように `imagod`/`imago-cli` の双方で使う crate は
-  二重所属せず `imago-shared` にのみ所属させます。
-- daemon/shared の内部 crate は `tag-only` 運用です。
-  - タグ形式は `<crate>-vX.Y.Z` です（`imagod` は `imagod-vX.Y.Z`）。
-  - 内部 crate は `git_release_enable = false` / `changelog_update = false` を維持します。
+  二重所属せず `shared_line = "imago-shared"` へ自動集約し、`propagate_to` で波及させます。
+  `shared_line` 未設定で overlap が出た場合、`prup doctor` / `prup plan` は fail-closed で停止します。
+- タグ生成対象は top crate のみです。
+  - `imago-cli` -> `imago-vX.Y.Z`
+  - `imagod` -> `imagod-vX.Y.Z`
+- 内部 crate はタグ不要で、top crate の最新タグから `HEAD` までの差分計算で line へ連動します。
+- `imago-cli` 専用の内部 crate は impact-only として扱い、`imagod` の workspace version は不用意に bump しません。
 - daemon 閉包外の依存 crate は内部依存として扱い、`publish = false` / `release = false` を維持します。
-- 初回導入時は group 参加 crate へ baseline tag（最低1タグ）を事前に付与してください。
-  未タグの crate があると `version_group` の次バージョン計算が進まず、連動 bump が発生しません。
+- baseline tag の必須対象は top crate (`imago-cli` / `imagod`) のみです。
+  未タグの top crate があると `prup doctor` / `prup plan` は fail-closed で停止します。
 - crates.io への実 publish（`cargo publish`）は実行しません。
 - GitHub Release は stable / alpha / beta を問わず常に prerelease として作成されます。
-- release-plz workflow では `RELEASE_PLZ_TOKEN`（GitHub 操作用）を利用します。
-- release-plz 本体は fork の patch commit SHA を `cargo install --git --rev <sha>` で pin して導入します。
-  - pin した SHA が参照できなくなった場合は fork の tag に退避して `--rev` を切り替えるか、upstream 正式リリースへ更新して pin を解除してください。
+- release workflow では `RELEASE_PLZ_TOKEN`（GitHub 操作用）を利用し、custom action 内で `gh` CLI を呼び出します。
 - バイナリ添付は `imago-build.yml` が `release` イベントで既存Releaseへ追加します。
   - `imagod-v*` では `imagod-<target-triple>` と `imagod-<target-triple>.sha256` が添付されます。
   - target には Linux 系（gnu/musl）に加えて `x86_64-apple-darwin` / `aarch64-apple-darwin` も含まれます。
