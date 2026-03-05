@@ -39,6 +39,7 @@ while IFS= read -r row; do
   fi
 
   cargo run --locked -p prup -- apply --from-plan "$plan_json"
+  cargo check --workspace
 
   git add -A
   if git diff --cached --quiet; then
