@@ -110,8 +110,19 @@ pub fn latest_tag(repo_root: &Path, pattern: &str) -> Result<Option<String>> {
 }
 
 pub fn github_repo_name_with_owner(repo_root: &Path) -> Result<Option<String>> {
-    let remote_url = run_git(repo_root, ["config", "--get", "remote.origin.url"])?;
-    Ok(parse_github_repo_name_with_owner(remote_url.trim()))
+    let output = Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(repo_root)
+        .output()
+        .with_context(|| "failed to query remote.origin.url")?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    Ok(parse_github_repo_name_with_owner(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
 }
 
 fn parse_github_repo_name_with_owner(remote_url: &str) -> Option<String> {
@@ -139,6 +150,8 @@ fn parse_github_repo_name_with_owner(remote_url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn parses_github_repo_name_from_ssh_remote() {
@@ -154,5 +167,27 @@ mod tests {
             parse_github_repo_name_with_owner("https://github.com/yieldspace/imago.git"),
             Some("yieldspace/imago".to_string())
         );
+    }
+
+    #[test]
+    fn github_repo_name_with_owner_returns_none_without_origin_remote() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!("prup-git-test-{unique}"));
+        fs::create_dir_all(&repo_root).unwrap();
+
+        let init_status = Command::new("git")
+            .args(["init"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap();
+        assert!(init_status.success());
+
+        let repo_name = github_repo_name_with_owner(&repo_root).unwrap();
+        assert_eq!(repo_name, None);
+
+        fs::remove_dir_all(&repo_root).unwrap();
     }
 }
