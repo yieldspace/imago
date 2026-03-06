@@ -1215,6 +1215,19 @@ fn reset_ssh_process(
     Ok(())
 }
 
+fn recover_ssh_read_result<T, F>(result: anyhow::Result<T>, mut reset: F) -> anyhow::Result<T>
+where
+    F: FnMut() -> anyhow::Result<()>,
+{
+    match result {
+        Ok(value) => Ok(value),
+        Err(err) => {
+            reset().context("failed to reset ssh transport after read failure")?;
+            Err(err)
+        }
+    }
+}
+
 fn server_identity_mismatch_error(
     authority: &str,
     expected_key_hex: &str,
@@ -1728,7 +1741,9 @@ async fn request_events_over_ssh(
             match tokio::time::timeout(read_timeout, read_stdio_response_message(&mut inner.stdout))
                 .await
             {
-                Ok(result) => result,
+                Ok(result) => recover_ssh_read_result(result, || {
+                    reset_ssh_process(&mut inner, &session.remote, &session.remote_input)
+                }),
                 Err(_) => {
                     reset_ssh_process(&mut inner, &session.remote, &session.remote_input)?;
                     Err(anyhow!(
@@ -1738,7 +1753,11 @@ async fn request_events_over_ssh(
                 }
             }
         }
-        None => read_stdio_response_message(&mut inner.stdout).await,
+        None => {
+            recover_ssh_read_result(read_stdio_response_message(&mut inner.stdout).await, || {
+                reset_ssh_process(&mut inner, &session.remote, &session.remote_input)
+            })
+        }
     }
 }
 
@@ -1922,7 +1941,10 @@ where
                     terminate_ssh_process(&mut inner.child);
                     return Ok(StreamRequestTermination::Interrupted);
                 };
-                let Some(frame) = next? else {
+                let next = recover_ssh_read_result(next, || {
+                    reset_ssh_process(&mut inner, &ssh_session.remote, &ssh_session.remote_input)
+                })?;
+                let Some(frame) = next else {
                     return Ok(StreamRequestTermination::Completed);
                 };
                 if on_envelope(decode_response_envelope(&frame)?)? {
@@ -3006,6 +3028,30 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["--socket", "/tmp/imagod.sock"])
         );
+    }
+
+    #[test]
+    fn recover_ssh_read_result_resets_only_on_error() {
+        let reset_calls = std::cell::Cell::new(0usize);
+
+        let ok = recover_ssh_read_result(Ok::<_, anyhow::Error>(7usize), || {
+            reset_calls.set(reset_calls.get() + 1);
+            Ok(())
+        })
+        .expect("ok result should pass through");
+        assert_eq!(ok, 7);
+        assert_eq!(reset_calls.get(), 0);
+
+        let err = recover_ssh_read_result(
+            Err::<usize, anyhow::Error>(anyhow!("ssh read failed")),
+            || {
+                reset_calls.set(reset_calls.get() + 1);
+                Ok(())
+            },
+        )
+        .expect_err("error result should remain an error");
+        assert!(err.to_string().contains("ssh read failed"));
+        assert_eq!(reset_calls.get(), 1);
     }
 
     #[test]

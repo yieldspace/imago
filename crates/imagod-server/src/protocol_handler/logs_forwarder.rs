@@ -19,6 +19,23 @@ const DATAGRAM_SEND_RETRY_DELAYS_MS: [u64; 3] = [10, 50, 100];
 
 pub(crate) struct DefaultLogsForwarder;
 
+#[derive(Default)]
+struct AbortOnDropTasks(Vec<tokio::task::JoinHandle<()>>);
+
+impl AbortOnDropTasks {
+    fn push(&mut self, handle: tokio::task::JoinHandle<()>) {
+        self.0.push(handle);
+    }
+}
+
+impl Drop for AbortOnDropTasks {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 impl DefaultLogsForwarder {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn forward_stream<W, C>(
@@ -313,7 +330,7 @@ where
     }
 
     let (tx, mut rx) = mpsc::channel::<FollowForwardMsg>(128);
-    let mut forward_tasks = Vec::new();
+    let mut forward_tasks = AbortOnDropTasks::default();
     for (service_name, mut receiver) in follow_targets.drain(..) {
         let tx = tx.clone();
         let handle = tokio::spawn(async move {
@@ -383,10 +400,6 @@ where
             }
             _ = &mut close_signal => break,
         }
-    }
-
-    for task in forward_tasks {
-        task.abort();
     }
 
     Ok(())
@@ -740,7 +753,7 @@ async fn stream_logs_datagrams(
     }
 
     let (tx, mut rx) = mpsc::channel::<FollowForwardMsg>(128);
-    let mut forward_tasks = Vec::new();
+    let mut forward_tasks = AbortOnDropTasks::default();
     for (service_name, mut receiver) in follow_targets.drain(..) {
         let tx = tx.clone();
         let handle = tokio::spawn(async move {
@@ -805,10 +818,6 @@ async fn stream_logs_datagrams(
             }
             _ = session.closed() => break,
         }
-    }
-
-    for task in forward_tasks {
-        task.abort();
     }
 
     Ok(())
@@ -994,8 +1003,13 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
     use imago_protocol::{ErrorCode, ProtocolEnvelope, from_cbor};
-    use imagod_control::{ServiceLogSnapshot, ServiceLogStream, ServiceLogSubscription};
-    use tokio::{io::AsyncWrite, sync::Notify};
+    use imagod_control::{
+        ServiceLogEvent, ServiceLogSnapshot, ServiceLogStream, ServiceLogSubscription,
+    };
+    use tokio::{
+        io::AsyncWrite,
+        sync::{Notify, broadcast},
+    };
 
     use super::*;
     use crate::protocol_handler::{
@@ -1385,6 +1399,47 @@ mod tests {
         .expect_err("write failure should bubble up");
         assert_eq!(err.code, ErrorCode::Internal);
         assert_eq!(err.stage, "session.write");
+    }
+
+    #[tokio::test]
+    async fn given_follow_write_failure__when_run_stream_logs_forwarder__then_forward_tasks_are_aborted()
+     {
+        let mut send = CapturedWriteStream::with_fail_after_write_call(1);
+        let request_id = Uuid::new_v4();
+        let correlation_id = Uuid::new_v4();
+        let (tx, rx) = broadcast::channel::<ServiceLogEvent>(4);
+        tx.send(ServiceLogEvent {
+            stream: ServiceLogStream::Stdout,
+            bytes: b"hello-log".to_vec(),
+            timestamp_unix_ms: 1,
+        })
+        .expect("send should succeed");
+        let subscriptions = vec![ServiceLogSubscription {
+            service_name: "svc-follow".to_string(),
+            snapshot: ServiceLogSnapshot::Bytes(Vec::new()),
+            receiver: Some(rx),
+        }];
+
+        let err = run_stream_logs_forwarder(
+            &mut send,
+            request_id,
+            correlation_id,
+            subscriptions,
+            false,
+            std::future::pending(),
+            &LengthPrefixedFrameCodec,
+        )
+        .await
+        .expect_err("write failure should bubble up");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert_eq!(err.stage, "session.write");
+
+        tokio::task::yield_now().await;
+        assert_eq!(
+            tx.receiver_count(),
+            0,
+            "follow tasks should abort on failure"
+        );
     }
 
     #[test]
