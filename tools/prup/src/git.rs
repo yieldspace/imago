@@ -50,16 +50,7 @@ pub fn ensure_clean(repo_root: &Path, allow_dirty: bool) -> Result<()> {
 
 pub fn commits_since(repo_root: &Path, base_ref: &str) -> Result<Vec<CommitInfo>> {
     let range = format!("{base_ref}..HEAD");
-    let output = run_git(
-        repo_root,
-        [
-            "log",
-            "--format=%H%x1f%s%x1f%b%x1f%x1e",
-            "--name-only",
-            "--no-renames",
-            &range,
-        ],
-    )?;
+    let output = run_git(repo_root, ["log", "--format=%H%x1f%s%x1f%b%x1e", &range])?;
 
     let mut commits = Vec::new();
     for record in output.split('\x1e') {
@@ -68,11 +59,10 @@ pub fn commits_since(repo_root: &Path, base_ref: &str) -> Result<Vec<CommitInfo>
             continue;
         }
 
-        let mut parts = record.splitn(4, '\x1f');
+        let mut parts = record.splitn(3, '\x1f');
         let sha = parts.next().unwrap_or_default().trim();
         let subject = parts.next().unwrap_or_default().trim();
         let body = parts.next().unwrap_or_default().trim();
-        let files = parts.next().unwrap_or_default();
 
         if sha.is_empty() || subject.is_empty() {
             continue;
@@ -82,16 +72,33 @@ pub fn commits_since(repo_root: &Path, base_ref: &str) -> Result<Vec<CommitInfo>
             sha: sha.to_string(),
             subject: subject.to_string(),
             body: body.to_string(),
-            files: files
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(PathBuf::from)
-                .collect(),
+            files: changed_files_for_commit(repo_root, sha)?,
         });
     }
 
     Ok(commits)
+}
+
+fn changed_files_for_commit(repo_root: &Path, sha: &str) -> Result<Vec<PathBuf>> {
+    let output = run_git(
+        repo_root,
+        [
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "--no-renames",
+            sha,
+        ],
+    )?;
+
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .collect())
 }
 
 pub fn list_tags(repo_root: &Path, pattern: &str) -> Result<Vec<String>> {
@@ -171,23 +178,66 @@ mod tests {
 
     #[test]
     fn github_repo_name_with_owner_returns_none_without_origin_remote() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let repo_root = std::env::temp_dir().join(format!("prup-git-test-{unique}"));
-        fs::create_dir_all(&repo_root).unwrap();
-
-        let init_status = Command::new("git")
-            .args(["init"])
-            .current_dir(&repo_root)
-            .status()
-            .unwrap();
-        assert!(init_status.success());
+        let repo_root = init_temp_git_repo("github-repo-name");
 
         let repo_name = github_repo_name_with_owner(&repo_root).unwrap();
         assert_eq!(repo_name, None);
 
         fs::remove_dir_all(&repo_root).unwrap();
+    }
+
+    #[test]
+    fn commits_since_collects_changed_files_per_commit() {
+        let repo_root = init_temp_git_repo("commits-since");
+
+        fs::write(repo_root.join("tracked.txt"), "before\n").unwrap();
+        git_ok(&repo_root, ["add", "tracked.txt"]);
+        git_ok(&repo_root, ["commit", "-m", "feat: add tracked file"]);
+        let base_sha = run_git(&repo_root, ["rev-parse", "HEAD"]).unwrap();
+
+        fs::write(repo_root.join("tracked.txt"), "after\n").unwrap();
+        fs::write(repo_root.join("second.txt"), "new\n").unwrap();
+        git_ok(&repo_root, ["add", "tracked.txt", "second.txt"]);
+        git_ok(&repo_root, ["commit", "-m", "fix: update tracked files"]);
+
+        let commits = commits_since(&repo_root, base_sha.trim()).unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "fix: update tracked files");
+        assert_eq!(
+            commits[0].files,
+            vec![PathBuf::from("second.txt"), PathBuf::from("tracked.txt")]
+        );
+
+        fs::remove_dir_all(&repo_root).unwrap();
+    }
+
+    fn init_temp_git_repo(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!("prup-git-test-{name}-{unique}"));
+        fs::create_dir_all(&repo_root).unwrap();
+
+        git_ok(&repo_root, ["init"]);
+        git_ok(&repo_root, ["config", "user.name", "prup-test"]);
+        git_ok(
+            &repo_root,
+            ["config", "user.email", "prup-test@example.com"],
+        );
+        repo_root
+    }
+
+    fn git_ok<I, S>(repo_root: &Path, args: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo_root)
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 }
