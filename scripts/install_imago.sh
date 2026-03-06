@@ -464,25 +464,76 @@ parse_release_tag_from_index() {
   ' "$1"
 }
 
-resolve_latest_release_tag() {
-  release_index_tmp="$(mktemp)"
-  if ! download_github_api "${RELEASES_API_URL}" "${release_index_tmp}"; then
-    rm -f "${release_index_tmp}"
-    die "failed to query GitHub Releases API: ${RELEASES_API_URL} (set GH_TOKEN/GITHUB_TOKEN or pass --tag imago-vX.Y.Z)"
-  fi
+release_api_supports_paging() {
+  case "$1" in
+    http://*|https://*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
 
-  if ! grep -q '"tag_name"' "${release_index_tmp}"; then
-    rm -f "${release_index_tmp}"
-    die "failed to parse GitHub Releases API response from ${RELEASES_API_URL}; pass --tag imago-vX.Y.Z explicitly"
-  fi
+release_api_page_url() {
+  base_url="$1"
+  page="$2"
 
-  selected_tag="$(parse_release_tag_from_index "${release_index_tmp}" "${ALLOW_PRERELEASE}")"
-  rm -f "${release_index_tmp}"
-
-  if [ -n "${selected_tag}" ]; then
-    printf '%s\n' "${selected_tag}"
+  if [ "${page}" = "1" ] || ! release_api_supports_paging "${base_url}"; then
+    printf '%s\n' "${base_url}"
     return 0
   fi
+
+  case "${base_url}" in
+    *\?*)
+      printf '%s&page=%s\n' "${base_url}" "${page}"
+      ;;
+    *)
+      printf '%s?page=%s\n' "${base_url}" "${page}"
+      ;;
+  esac
+}
+
+resolve_latest_release_tag() {
+  page=1
+  supports_paging=0
+  if release_api_supports_paging "${RELEASES_API_URL}"; then
+    supports_paging=1
+  fi
+
+  while :; do
+    release_index_tmp="$(mktemp)"
+    api_url="$(release_api_page_url "${RELEASES_API_URL}" "${page}")"
+
+    if ! download_github_api "${api_url}" "${release_index_tmp}"; then
+      rm -f "${release_index_tmp}"
+      die "failed to query GitHub Releases API: ${api_url} (set GH_TOKEN/GITHUB_TOKEN or pass --tag imago-vX.Y.Z)"
+    fi
+
+    if grep -q '"tag_name"' "${release_index_tmp}"; then
+      has_release_items=1
+    else
+      has_release_items=0
+      if [ "${page}" = "1" ] && ! grep -Eq '^[[:space:]]*\[' "${release_index_tmp}"; then
+        rm -f "${release_index_tmp}"
+        die "failed to parse GitHub Releases API response from ${api_url}; pass --tag imago-vX.Y.Z explicitly"
+      fi
+    fi
+
+    selected_tag="$(parse_release_tag_from_index "${release_index_tmp}" "${ALLOW_PRERELEASE}")"
+    rm -f "${release_index_tmp}"
+
+    if [ -n "${selected_tag}" ]; then
+      printf '%s\n' "${selected_tag}"
+      return 0
+    fi
+
+    if [ "${supports_paging}" != "1" ] || [ "${has_release_items}" != "1" ]; then
+      break
+    fi
+
+    page=$((page + 1))
+  done
 
   if [ "${ALLOW_PRERELEASE}" = "1" ]; then
     die "no imago release found via GitHub Releases API; pass --tag imago-vX.Y.Z explicitly"
@@ -568,13 +619,13 @@ install_binary() {
   destination_dir="$2"
   destination_bin="${destination_dir}/imago"
 
-  if mkdir -p "${destination_dir}" 2>/dev/null && install -m 0755 "${source_bin}" "${destination_bin}" 2>/dev/null; then
+  if mkdir -p -- "${destination_dir}" 2>/dev/null && install -m 0755 -- "${source_bin}" "${destination_bin}" 2>/dev/null; then
     printf '%s\n' "${destination_bin}"
     return 0
   fi
 
-  run_as_root install -d "${destination_dir}" || die "failed to create install dir: ${destination_dir}"
-  run_as_root install -m 0755 "${source_bin}" "${destination_bin}" || die "failed to install imago to ${destination_bin}"
+  run_as_root install -d -- "${destination_dir}" || die "failed to create install dir: ${destination_dir}"
+  run_as_root install -m 0755 -- "${source_bin}" "${destination_bin}" || die "failed to install imago to ${destination_bin}"
   printf '%s\n' "${destination_bin}"
 }
 

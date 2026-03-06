@@ -37,7 +37,7 @@ Choose one installation method:
 
 Option A:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yieldspace/imago/main/scripts/install_imagod.sh | sh -s -- --prerelease
+curl -fsSL https://raw.githubusercontent.com/yieldspace/imago/main/scripts/install_imagod.sh | sh
 ```
 
 This installer defaults to the latest stable `imagod` release.
@@ -109,7 +109,7 @@ Install imagod:
 
 ```bash
 # For server
-curl -sSf https://install.imago.sh | sh -s -- --prerelease
+curl -sSf https://install.imago.sh | sh
 # For local
 cargo install imagod --git https://github.com/yieldspace/imago
 ```
