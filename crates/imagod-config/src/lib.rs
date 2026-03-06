@@ -27,6 +27,9 @@ mod load;
 const MAX_CHUNK_SIZE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_HTTP_QUEUE_MEMORY_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_SERVER_KEY_FILENAME: &str = "server.key";
+const DEFAULT_CONTROL_SOCKET_FILENAME: &str = "imagod.sock";
+const DEFAULT_CONFIG_PATH: &str = "/etc/imago/imagod.toml";
+pub const DEFAULT_CONTROL_SOCKET_PATH: &str = "/run/imago/imagod.sock";
 pub const IMAGOD_SCHEMA_FILENAME: &str = "imagod.schema.json";
 pub const IMAGOD_SCHEMA_URL: &str =
     "https://raw.githubusercontent.com/yieldspace/imago/main/schemas/imagod.schema.json";
@@ -41,6 +44,10 @@ pub struct ImagodConfig {
     #[serde(default = "default_listen_addr")]
     /// WebTransport listen address.
     pub listen_addr: String,
+    #[serde(default = "default_control_socket_path")]
+    #[schemars(default = "schema_default_control_socket_path")]
+    /// Local Unix socket path used for SSH-bridged control requests.
+    pub control_socket_path: PathBuf,
     /// TLS certificate and key paths.
     pub tls: TlsConfig,
     #[serde(default = "default_storage_root")]
@@ -277,7 +284,7 @@ pub fn resolve_config_path(cli_path: Option<PathBuf>) -> PathBuf {
     if let Ok(path) = std::env::var("IMAGOD_CONFIG") {
         return PathBuf::from(path);
     }
-    PathBuf::from("/etc/imago/imagod.toml")
+    PathBuf::from(DEFAULT_CONFIG_PATH)
 }
 
 /// Adds one public key to `tls.client_public_keys` and updates
@@ -540,6 +547,7 @@ fn write_toml_body_atomic(
 
 fn write_default_config_atomic(config_path: &Path) -> Result<(), ImagodError> {
     let server_key_path = ensure_default_server_key(config_path)?;
+    let control_socket_path = resolve_generated_control_socket_path(config_path)?;
 
     let mut root = toml::Table::new();
     root.insert(
@@ -549,6 +557,10 @@ fn write_default_config_atomic(config_path: &Path) -> Result<(), ImagodError> {
     root.insert(
         "listen_addr".to_string(),
         toml::Value::String(default_listen_addr()),
+    );
+    root.insert(
+        "control_socket_path".to_string(),
+        toml::Value::String(control_socket_path.to_string_lossy().to_string()),
     );
     root.insert(
         "server_version".to_string(),
@@ -593,29 +605,7 @@ fn write_default_config_atomic(config_path: &Path) -> Result<(), ImagodError> {
 }
 
 fn ensure_default_server_key(config_path: &Path) -> Result<PathBuf, ImagodError> {
-    let config_dir = config_parent_dir(config_path);
-    fs::create_dir_all(&config_dir).map_err(|e| {
-        ImagodError::new(
-            ErrorCode::Internal,
-            "config.init",
-            format!(
-                "failed to create config dir {}: {e}",
-                config_dir.to_string_lossy()
-            ),
-        )
-        .with_detail("path", config_path.to_string_lossy())
-    })?;
-    let config_dir = fs::canonicalize(&config_dir).map_err(|e| {
-        ImagodError::new(
-            ErrorCode::Internal,
-            "config.init",
-            format!(
-                "failed to canonicalize config dir {}: {e}",
-                config_dir.to_string_lossy()
-            ),
-        )
-        .with_detail("path", config_path.to_string_lossy())
-    })?;
+    let config_dir = ensure_default_config_dir(config_path)?;
     let server_key_path = config_dir.join(DEFAULT_SERVER_KEY_FILENAME);
     match fs::symlink_metadata(&server_key_path) {
         Ok(metadata) => {
@@ -646,6 +636,40 @@ fn ensure_default_server_key(config_path: &Path) -> Result<PathBuf, ImagodError>
         )
         .with_detail("path", config_path.to_string_lossy())),
     }
+}
+
+fn resolve_generated_control_socket_path(config_path: &Path) -> Result<PathBuf, ImagodError> {
+    if config_path == Path::new(DEFAULT_CONFIG_PATH) {
+        return Ok(PathBuf::from(DEFAULT_CONTROL_SOCKET_PATH));
+    }
+
+    Ok(ensure_default_config_dir(config_path)?.join(DEFAULT_CONTROL_SOCKET_FILENAME))
+}
+
+fn ensure_default_config_dir(config_path: &Path) -> Result<PathBuf, ImagodError> {
+    let config_dir = config_parent_dir(config_path);
+    fs::create_dir_all(&config_dir).map_err(|e| {
+        ImagodError::new(
+            ErrorCode::Internal,
+            "config.init",
+            format!(
+                "failed to create config dir {}: {e}",
+                config_dir.to_string_lossy()
+            ),
+        )
+        .with_detail("path", config_path.to_string_lossy())
+    })?;
+    fs::canonicalize(&config_dir).map_err(|e| {
+        ImagodError::new(
+            ErrorCode::Internal,
+            "config.init",
+            format!(
+                "failed to canonicalize config dir {}: {e}",
+                config_dir.to_string_lossy()
+            ),
+        )
+        .with_detail("path", config_path.to_string_lossy())
+    })
 }
 
 fn create_default_server_key_file(
@@ -711,11 +735,19 @@ fn default_listen_addr() -> String {
     "[::]:4443".to_string()
 }
 
+fn default_control_socket_path() -> PathBuf {
+    PathBuf::from(DEFAULT_CONTROL_SOCKET_PATH)
+}
+
 fn default_storage_root() -> PathBuf {
     resolve_default_storage_root(
         std::env::consts::OS,
         option_env!("IMAGOD_STORAGE_ROOT_DEFAULT"),
     )
+}
+
+fn schema_default_control_socket_path() -> PathBuf {
+    PathBuf::from(DEFAULT_CONTROL_SOCKET_PATH)
 }
 
 fn schema_default_storage_root() -> PathBuf {
@@ -2036,6 +2068,10 @@ transport_max_idle_timeout_secs = 180
         assert!(path.exists());
         let expected_server_key_path = expected_generated_server_key_path(&path);
         assert_eq!(result.config.listen_addr, "[::]:4443");
+        assert_eq!(
+            result.config.control_socket_path,
+            expected_generated_control_socket_path(&path)
+        );
         assert_eq!(result.config.server_version, default_server_version());
         assert_eq!(result.config.tls.server_key, expected_server_key_path);
         assert!(result.config.tls.client_public_keys.is_empty());
@@ -2129,6 +2165,15 @@ client_public_keys = ["222222222222222222222222222222222222222222222222222222222
             Some("[::]:4443")
         );
         assert_eq!(
+            root.get("control_socket_path")
+                .and_then(toml::Value::as_str),
+            Some(
+                expected_generated_control_socket_path(&path)
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert_eq!(
             root.get("server_version").and_then(toml::Value::as_str),
             Some(expected_server_version.as_str())
         );
@@ -2187,6 +2232,29 @@ client_public_keys = ["222222222222222222222222222222222222222222222222222222222
         cleanup_temp_path(path);
     }
 
+    #[test]
+    fn resolve_generated_control_socket_path_keeps_system_default_for_system_config_path() {
+        let path = Path::new(DEFAULT_CONFIG_PATH);
+        let generated = resolve_generated_control_socket_path(path)
+            .expect("system config path should resolve control socket path");
+
+        assert_eq!(generated, PathBuf::from(DEFAULT_CONTROL_SOCKET_PATH));
+    }
+
+    #[test]
+    fn resolve_generated_control_socket_path_makes_relative_config_absolute() {
+        let generated = resolve_generated_control_socket_path(Path::new("imagod.toml"))
+            .expect("relative config path should resolve control socket path");
+
+        assert!(generated.is_absolute());
+        assert_eq!(
+            generated,
+            fs::canonicalize(".")
+                .expect("current directory should be canonicalizable")
+                .join(DEFAULT_CONTROL_SOCKET_FILENAME)
+        );
+    }
+
     fn write_temp_config(test_name: &str, body: &str) -> PathBuf {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2216,12 +2284,13 @@ client_public_keys = ["222222222222222222222222222222222222222222222222222222222
     }
 
     fn expected_generated_server_key_path(config_path: &Path) -> PathBuf {
-        let config_dir = config_path
-            .parent()
-            .filter(|value| !value.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        fs::canonicalize(config_dir)
+        ensure_default_config_dir(config_path)
             .expect("config dir should exist")
             .join(DEFAULT_SERVER_KEY_FILENAME)
+    }
+
+    fn expected_generated_control_socket_path(config_path: &Path) -> PathBuf {
+        resolve_generated_control_socket_path(config_path)
+            .expect("control socket path should resolve")
     }
 }

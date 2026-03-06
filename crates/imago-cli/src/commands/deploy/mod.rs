@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
-    io::{BufReader, Read, Write},
+    io::{BufReader as StdBufReader, Read, Write},
     net::{IpAddr, SocketAddr},
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
@@ -30,8 +30,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::{
-    io::{AsyncReadExt, AsyncSeekExt},
+    io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader as TokioBufReader},
     net::lookup_host,
+    process::{Child, ChildStdin, ChildStdout, Command},
     task::JoinSet,
 };
 use url::Url;
@@ -86,6 +87,7 @@ const KNOWN_HOSTS_MODE: u32 = 0o600;
 const ED25519_SPKI_PREFIX: [u8; 12] = [
     0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
 ];
+const STDIO_MESSAGE_TERMINATOR: [u8; 4] = 0u32.to_be_bytes();
 
 pub(crate) type Envelope = ProtocolEnvelope<Value>;
 
@@ -104,7 +106,7 @@ struct UploadLimits {
 
 #[derive(Clone, Copy)]
 struct UploadRequestContext<'a> {
-    session: &'a web_transport_quinn::Session,
+    session: &'a ConnectedTargetSession,
     correlation_id: Uuid,
     deploy_id: &'a str,
     upload_token: &'a str,
@@ -125,7 +127,7 @@ struct UploadPhaseInputs<'a> {
 }
 
 struct UploadPhaseResult {
-    session: Session,
+    session: ConnectedTargetSession,
     deploy_id: String,
     deploy_stream_timeout: Duration,
     authority: String,
@@ -142,20 +144,43 @@ struct DeployRunSummary {
     deployed_at: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct ConnectedTargetSession {
-    pub session: Session,
+    transport: ConnectedTargetTransport,
     pub authority: String,
-    pub resolved_addr: SocketAddr,
+    pub resolved_addr: String,
     #[allow(dead_code)]
     pub configured_host: String,
     #[allow(dead_code)]
     pub remote_input: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamRequestTermination {
+    Completed,
+    Interrupted,
+}
+
+#[derive(Clone)]
+enum ConnectedTargetTransport {
+    Quinn(Arc<Session>),
+    Ssh(Arc<SshTargetSession>),
+}
+
+struct SshTargetSession {
+    inner: tokio::sync::Mutex<SshProcessIo>,
+}
+
+struct SshProcessIo {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: TokioBufReader<ChildStdout>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConnectedTargetMetadata {
     authority: String,
-    resolved_addr: SocketAddr,
+    resolved_addr: String,
     configured_host: String,
     remote_input: String,
 }
@@ -164,13 +189,41 @@ fn build_connected_target_metadata(
     target: &build::DeployTargetConfig,
     configured_host: &str,
     authority: &str,
-    resolved_addr: SocketAddr,
+    resolved_addr: impl Into<String>,
 ) -> ConnectedTargetMetadata {
     ConnectedTargetMetadata {
         authority: authority.to_string(),
-        resolved_addr,
+        resolved_addr: resolved_addr.into(),
         configured_host: configured_host.to_string(),
         remote_input: target.remote.clone(),
+    }
+}
+
+impl ConnectedTargetSession {
+    pub(crate) fn close(&self, code: u32, reason: &[u8]) {
+        match &self.transport {
+            ConnectedTargetTransport::Quinn(session) => session.close(code, reason),
+            ConnectedTargetTransport::Ssh(session) => session.close(),
+        }
+    }
+
+    pub(crate) fn uses_ssh_transport(&self) -> bool {
+        matches!(&self.transport, ConnectedTargetTransport::Ssh(_))
+    }
+
+    pub(crate) fn as_quinn_session(&self) -> Option<&Session> {
+        match &self.transport {
+            ConnectedTargetTransport::Quinn(session) => Some(session.as_ref()),
+            ConnectedTargetTransport::Ssh(_) => None,
+        }
+    }
+}
+
+impl SshTargetSession {
+    fn close(&self) {
+        if let Ok(mut inner) = self.inner.try_lock() {
+            let _ = inner.child.start_kill();
+        }
     }
 }
 
@@ -729,7 +782,6 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
         "establishing transport session",
     );
     let connected = target_connector.connect(inputs.target).await?;
-    let session = connected.session;
 
     deploy_stage(DEPLOY_PHASE_HELLO, "hello", "negotiating upload features");
     let hello = request_envelope(
@@ -748,14 +800,14 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
         },
     )?;
     let hello_response: HelloNegotiateResponse =
-        response_payload(request_response(&session, &hello).await?)?;
+        response_payload(request_response(&connected, &hello).await?)?;
     command_common::ensure_hello_protocol_compatibility(&hello_response)?;
     let hello_summary = hello_summary_from_response(&hello_response);
     ui::command_info(
         "service.deploy",
         &command_common::format_peer_context_line(
             &connected.authority,
-            &connected.resolved_addr.to_string(),
+            &connected.resolved_addr,
             &hello_summary,
         ),
     );
@@ -778,7 +830,7 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
         },
     )?;
     let prepare_response: DeployPrepareResponse = response_payload(
-        request_response_with_timeout(&session, &prepare, upload_limits.deploy_stream_timeout)
+        request_response_with_timeout(&connected, &prepare, upload_limits.deploy_stream_timeout)
             .await?,
     )?;
 
@@ -795,7 +847,7 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
         let upload_detail = deploy_phase_detail(DEPLOY_PHASE_UPLOAD, "uploading artifact");
         ui::command_upload_start("service.deploy", upload_total_bytes, &upload_detail);
         let upload_context = UploadRequestContext {
-            session: &session,
+            session: &connected,
             correlation_id: inputs.correlation_id,
             deploy_id: &prepare_response.deploy_id,
             upload_token: &prepare_response.upload_token,
@@ -831,19 +883,21 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
         },
     )?;
     let commit_response: ArtifactCommitResponse = response_payload(
-        request_response_with_timeout(&session, &commit, upload_limits.deploy_stream_timeout)
+        request_response_with_timeout(&connected, &commit, upload_limits.deploy_stream_timeout)
             .await?,
     )?;
     if !commit_response.verified {
         return Err(CommitNotVerifiedError.into());
     }
 
+    let authority = connected.authority.clone();
+    let resolved_addr = connected.resolved_addr.clone();
     Ok(UploadPhaseResult {
-        session,
+        session: connected,
         deploy_id: prepare_response.deploy_id,
         deploy_stream_timeout: upload_limits.deploy_stream_timeout,
-        authority: connected.authority,
-        resolved_addr: connected.resolved_addr.to_string(),
+        authority,
+        resolved_addr,
     })
 }
 
@@ -947,7 +1001,21 @@ fn contains_unauthorized_marker(err: &anyhow::Error) -> bool {
 pub(crate) async fn connect_target(
     target: &build::DeployTargetConfig,
 ) -> anyhow::Result<ConnectedTargetSession> {
-    let client_key = load_private_key(&target.client_key)?;
+    match build::parse_target_remote(&target.remote)? {
+        build::ParsedTargetRemote::Direct => connect_direct_target(target).await,
+        build::ParsedTargetRemote::Ssh(remote) => connect_ssh_target(target, &remote).await,
+    }
+}
+
+async fn connect_direct_target(
+    target: &build::DeployTargetConfig,
+) -> anyhow::Result<ConnectedTargetSession> {
+    let client_key = load_private_key(
+        target
+            .client_key
+            .as_ref()
+            .ok_or_else(|| anyhow!("target is missing required key: client_key"))?,
+    )?;
     let endpoint_info = parse_remote_endpoint(&target.remote).await?;
     let configured_host = target.server_name.as_deref().unwrap_or(&endpoint_info.host);
     let authority = format_authority(configured_host, endpoint_info.port);
@@ -999,10 +1067,10 @@ pub(crate) async fn connect_target(
         target,
         configured_host,
         &authority,
-        endpoint_info.remote_addr,
+        endpoint_info.remote_addr.to_string(),
     );
     let connected = ConnectedTargetSession {
-        session,
+        transport: ConnectedTargetTransport::Quinn(Arc::new(session)),
         authority: metadata.authority,
         resolved_addr: metadata.resolved_addr,
         configured_host: metadata.configured_host,
@@ -1015,9 +1083,7 @@ pub(crate) async fn connect_target(
             if let Err(err) =
                 save_known_host_entry(&known_hosts_path, &authority, &presented_key_hex)
             {
-                connected
-                    .session
-                    .close(0, b"failed to persist known_hosts entry");
+                connected.close(0, b"failed to persist known_hosts entry");
                 return Err(err);
             }
             Ok(connected)
@@ -1026,9 +1092,7 @@ pub(crate) async fn connect_target(
             expected_key_hex,
             presented_key_hex,
         }) => {
-            connected
-                .session
-                .close(0, b"server raw public key mismatch");
+            connected.close(0, b"server raw public key mismatch");
             Err(server_identity_mismatch_error(
                 &authority,
                 &expected_key_hex,
@@ -1037,12 +1101,69 @@ pub(crate) async fn connect_target(
             ))
         }
         None => {
-            connected
-                .session
-                .close(0, b"missing server identity verification");
+            connected.close(0, b"missing server identity verification");
             Err(missing_server_identity_error(&authority))
         }
     }
+}
+
+async fn connect_ssh_target(
+    target: &build::DeployTargetConfig,
+    remote: &build::SshTargetRemote,
+) -> anyhow::Result<ConnectedTargetSession> {
+    let mut command = Command::new("ssh");
+    command.arg("-T");
+    if let Some(port) = remote.port {
+        command.arg("-p").arg(port.to_string());
+    }
+    command
+        .arg(format!("{}@{}", remote.user, remote.host))
+        .arg("imagod")
+        .arg("proxy-stdio");
+    if let Some(socket_path) = remote.socket_path.as_deref() {
+        command.arg("--socket").arg(socket_path);
+    }
+    command.stdin(std::process::Stdio::piped());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::inherit());
+
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to spawn ssh transport for {}", target.remote))?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture ssh stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture ssh stdout"))?;
+
+    let authority = if let Some(port) = remote.port {
+        format!("ssh://{}@{}:{}", remote.user, remote.host, port)
+    } else {
+        format!("ssh://{}@{}", remote.user, remote.host)
+    };
+    let resolved_addr = remote
+        .socket_path
+        .as_deref()
+        .map(|path| format!("ssh:{} via {}", remote.host, path))
+        .unwrap_or_else(|| format!("ssh:{} via /run/imago/imagod.sock", remote.host));
+    let metadata = build_connected_target_metadata(target, &remote.host, &authority, resolved_addr);
+
+    Ok(ConnectedTargetSession {
+        transport: ConnectedTargetTransport::Ssh(Arc::new(SshTargetSession {
+            inner: tokio::sync::Mutex::new(SshProcessIo {
+                child,
+                stdin,
+                stdout: TokioBufReader::new(stdout),
+            }),
+        })),
+        authority: metadata.authority,
+        resolved_addr: metadata.resolved_addr,
+        configured_host: metadata.configured_host,
+        remote_input: metadata.remote_input,
+    })
 }
 
 fn server_identity_mismatch_error(
@@ -1359,14 +1480,14 @@ pub(crate) fn build_command_start_envelope(
 }
 
 pub(crate) async fn request_response(
-    session: &web_transport_quinn::Session,
+    session: &ConnectedTargetSession,
     envelope: &Envelope,
 ) -> anyhow::Result<Envelope> {
     request_response_with_timeout(session, envelope, resolve_deploy_stream_timeout()).await
 }
 
 pub(crate) async fn request_response_with_timeout(
-    session: &web_transport_quinn::Session,
+    session: &ConnectedTargetSession,
     envelope: &Envelope,
     stream_timeout: Duration,
 ) -> anyhow::Result<Envelope> {
@@ -1378,7 +1499,7 @@ pub(crate) async fn request_response_with_timeout(
 }
 
 pub(crate) async fn request_command_start_events_with_timeout(
-    session: &web_transport_quinn::Session,
+    session: &ConnectedTargetSession,
     envelope: &Envelope,
     stream_timeout: Duration,
 ) -> anyhow::Result<Vec<Envelope>> {
@@ -1397,7 +1518,7 @@ pub(crate) async fn request_command_start_events_with_timeout(
 }
 
 pub(crate) async fn request_events_with_timeout(
-    session: &web_transport_quinn::Session,
+    session: &ConnectedTargetSession,
     envelope: &Envelope,
     stream_timeout: Duration,
 ) -> anyhow::Result<Vec<Envelope>> {
@@ -1411,7 +1532,7 @@ pub(crate) async fn request_events_with_timeout(
 }
 
 async fn request_events_with_retry_policy(
-    session: &web_transport_quinn::Session,
+    session: &ConnectedTargetSession,
     envelope: &Envelope,
     stream_timeout: Duration,
     retry_policy: RequestStreamRetryPolicy,
@@ -1422,7 +1543,7 @@ async fn request_events_with_retry_policy(
 }
 
 async fn request_events_with_retry_policy_framed(
-    session: &web_transport_quinn::Session,
+    session: &ConnectedTargetSession,
     framed: &[u8],
     stream_timeout: Duration,
     retry_policy: RequestStreamRetryPolicy,
@@ -1469,45 +1590,328 @@ async fn request_events_with_retry_policy_framed(
 }
 
 async fn request_events_once(
-    session: &web_transport_quinn::Session,
+    session: &ConnectedTargetSession,
     framed: &[u8],
     open_write_timeout: Duration,
     read_timeout: Option<Duration>,
 ) -> anyhow::Result<Vec<u8>> {
-    let (mut send, mut recv) = tokio::time::timeout(open_write_timeout, session.open_bi())
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "request stream open timed out after {} ms",
-                open_write_timeout.as_millis()
-            )
-        })??;
-    tokio::time::timeout(open_write_timeout, send.write_all(framed))
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "request stream write timed out after {} ms",
-                open_write_timeout.as_millis()
-            )
-        })??;
-    send.finish()?;
-    match read_timeout {
-        Some(read_timeout) => {
-            tokio::time::timeout(read_timeout, recv.read_to_end(MAX_STREAM_BYTES))
+    match &session.transport {
+        ConnectedTargetTransport::Quinn(quinn_session) => {
+            let (mut send, mut recv) =
+                tokio::time::timeout(open_write_timeout, quinn_session.open_bi())
+                    .await
+                    .map_err(|_| {
+                        anyhow!(
+                            "request stream open timed out after {} ms",
+                            open_write_timeout.as_millis()
+                        )
+                    })??;
+            tokio::time::timeout(open_write_timeout, send.write_all(framed))
                 .await
                 .map_err(|_| {
                     anyhow!(
-                        "request stream read timed out after {} ms",
+                        "request stream write timed out after {} ms",
+                        open_write_timeout.as_millis()
+                    )
+                })??;
+            send.finish()?;
+            match read_timeout {
+                Some(read_timeout) => {
+                    tokio::time::timeout(read_timeout, recv.read_to_end(MAX_STREAM_BYTES))
+                        .await
+                        .map_err(|_| {
+                            anyhow!(
+                                "request stream read timed out after {} ms",
+                                read_timeout.as_millis()
+                            )
+                        })?
+                        .map_err(anyhow::Error::from)
+                }
+                None => recv
+                    .read_to_end(MAX_STREAM_BYTES)
+                    .await
+                    .map_err(anyhow::Error::from),
+            }
+        }
+        ConnectedTargetTransport::Ssh(ssh_session) => {
+            request_events_over_ssh(ssh_session, framed, open_write_timeout, read_timeout).await
+        }
+    }
+}
+
+async fn request_events_over_ssh(
+    session: &SshTargetSession,
+    framed: &[u8],
+    open_write_timeout: Duration,
+    read_timeout: Option<Duration>,
+) -> anyhow::Result<Vec<u8>> {
+    let mut inner = session.inner.lock().await;
+    tokio::time::timeout(open_write_timeout, inner.stdin.write_all(framed))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "ssh transport write timed out after {} ms",
+                open_write_timeout.as_millis()
+            )
+        })??;
+    tokio::time::timeout(
+        open_write_timeout,
+        inner.stdin.write_all(&STDIO_MESSAGE_TERMINATOR),
+    )
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "ssh transport write timed out after {} ms",
+            open_write_timeout.as_millis()
+        )
+    })??;
+    tokio::time::timeout(open_write_timeout, inner.stdin.flush())
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "ssh transport flush timed out after {} ms",
+                open_write_timeout.as_millis()
+            )
+        })??;
+
+    match read_timeout {
+        Some(read_timeout) => {
+            tokio::time::timeout(read_timeout, read_stdio_response_message(&mut inner.stdout))
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "ssh transport read timed out after {} ms",
                         read_timeout.as_millis()
                     )
                 })?
-                .map_err(anyhow::Error::from)
         }
-        None => recv
-            .read_to_end(MAX_STREAM_BYTES)
-            .await
-            .map_err(anyhow::Error::from),
+        None => read_stdio_response_message(&mut inner.stdout).await,
     }
+}
+
+async fn read_stdio_response_message<R>(reader: &mut R) -> anyhow::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut out = Vec::new();
+    loop {
+        let mut header = [0u8; 4];
+        match reader.read_exact(&mut header).await {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof && out.is_empty() => {
+                return Err(anyhow!("ssh transport closed before returning a response"));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Err(anyhow!("ssh transport closed in the middle of a response"));
+            }
+            Err(err) => return Err(anyhow::Error::from(err)),
+        }
+
+        let len = u32::from_be_bytes(header) as usize;
+        if len == 0 {
+            break;
+        }
+        ensure_stdio_response_message_growth(out.len(), len)?;
+
+        let mut payload = vec![0u8; len];
+        reader.read_exact(&mut payload).await?;
+        out.extend_from_slice(&encode_frame(&payload));
+    }
+    Ok(out)
+}
+
+fn ensure_stdio_response_message_growth(
+    current_len: usize,
+    payload_len: usize,
+) -> anyhow::Result<()> {
+    ensure_stdio_response_frame_len(payload_len)?;
+    let next_frame_len = 4usize.checked_add(payload_len).ok_or_else(|| {
+        anyhow!("ssh transport response exceeds max size {MAX_STREAM_BYTES} bytes")
+    })?;
+    let projected_len = current_len.checked_add(next_frame_len).ok_or_else(|| {
+        anyhow!("ssh transport response exceeds max size {MAX_STREAM_BYTES} bytes")
+    })?;
+    if projected_len > MAX_STREAM_BYTES {
+        return Err(anyhow!(
+            "ssh transport response exceeds max size {MAX_STREAM_BYTES} bytes"
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn request_streamed_events<F>(
+    session: &ConnectedTargetSession,
+    envelope: &Envelope,
+    open_write_timeout: Duration,
+    read_idle_timeout: Option<Duration>,
+    follow: bool,
+    mut on_envelope: F,
+) -> anyhow::Result<StreamRequestTermination>
+where
+    F: FnMut(Envelope) -> anyhow::Result<()>,
+{
+    let payload = to_cbor(envelope)?;
+    let framed = encode_frame(&payload);
+    match &session.transport {
+        ConnectedTargetTransport::Quinn(quinn_session) => {
+            let (mut send, mut recv) =
+                tokio::time::timeout(open_write_timeout, quinn_session.open_bi())
+                    .await
+                    .map_err(|_| {
+                        anyhow!(
+                            "request stream open timed out after {} ms",
+                            open_write_timeout.as_millis()
+                        )
+                    })??;
+            tokio::time::timeout(open_write_timeout, send.write_all(&framed))
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "request stream write timed out after {} ms",
+                        open_write_timeout.as_millis()
+                    )
+                })??;
+            send.finish()?;
+            loop {
+                let next = if follow {
+                    tokio::select! {
+                        frame = read_next_length_prefixed_frame(&mut recv) => Some(frame),
+                        _ = tokio::signal::ctrl_c() => None,
+                    }
+                } else if let Some(read_idle_timeout) = read_idle_timeout {
+                    Some(
+                        tokio::time::timeout(
+                            read_idle_timeout,
+                            read_next_length_prefixed_frame(&mut recv),
+                        )
+                        .await
+                        .map_err(|_| {
+                            anyhow!(
+                                "request stream read timed out after {} ms",
+                                read_idle_timeout.as_millis()
+                            )
+                        })?,
+                    )
+                } else {
+                    Some(read_next_length_prefixed_frame(&mut recv).await)
+                };
+                let Some(next) = next else {
+                    return Ok(StreamRequestTermination::Interrupted);
+                };
+                let Some(frame) = next? else {
+                    return Ok(StreamRequestTermination::Completed);
+                };
+                on_envelope(from_cbor::<Envelope>(&frame)?)?;
+            }
+        }
+        ConnectedTargetTransport::Ssh(ssh_session) => {
+            let mut inner = ssh_session.inner.lock().await;
+            tokio::time::timeout(open_write_timeout, inner.stdin.write_all(&framed))
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "ssh transport write timed out after {} ms",
+                        open_write_timeout.as_millis()
+                    )
+                })??;
+            tokio::time::timeout(
+                open_write_timeout,
+                inner.stdin.write_all(&STDIO_MESSAGE_TERMINATOR),
+            )
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "ssh transport write timed out after {} ms",
+                    open_write_timeout.as_millis()
+                )
+            })??;
+            tokio::time::timeout(open_write_timeout, inner.stdin.flush())
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "ssh transport flush timed out after {} ms",
+                        open_write_timeout.as_millis()
+                    )
+                })??;
+
+            loop {
+                let next = if follow {
+                    tokio::select! {
+                        frame = read_next_stdio_response_frame(&mut inner.stdout) => Some(frame),
+                        _ = tokio::signal::ctrl_c() => None,
+                    }
+                } else if let Some(read_idle_timeout) = read_idle_timeout {
+                    Some(
+                        tokio::time::timeout(
+                            read_idle_timeout,
+                            read_next_stdio_response_frame(&mut inner.stdout),
+                        )
+                        .await
+                        .map_err(|_| {
+                            anyhow!(
+                                "ssh transport read timed out after {} ms",
+                                read_idle_timeout.as_millis()
+                            )
+                        })?,
+                    )
+                } else {
+                    Some(read_next_stdio_response_frame(&mut inner.stdout).await)
+                };
+                let Some(next) = next else {
+                    let _ = inner.child.start_kill();
+                    return Ok(StreamRequestTermination::Interrupted);
+                };
+                let Some(frame) = next? else {
+                    return Ok(StreamRequestTermination::Completed);
+                };
+                on_envelope(from_cbor::<Envelope>(&frame)?)?;
+            }
+        }
+    }
+}
+
+async fn read_next_length_prefixed_frame<R>(reader: &mut R) -> anyhow::Result<Option<Vec<u8>>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut header = [0u8; 4];
+    match reader.read_exact(&mut header).await {
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(err) => return Err(anyhow::Error::from(err)),
+    }
+    let len = u32::from_be_bytes(header) as usize;
+    if len == 0 {
+        return Err(anyhow!("unexpected zero-length transport frame"));
+    }
+    let mut payload = vec![0u8; len];
+    reader.read_exact(&mut payload).await?;
+    Ok(Some(payload))
+}
+
+async fn read_next_stdio_response_frame<R>(reader: &mut R) -> anyhow::Result<Option<Vec<u8>>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut header = [0u8; 4];
+    reader.read_exact(&mut header).await?;
+    let len = u32::from_be_bytes(header) as usize;
+    if len == 0 {
+        return Ok(None);
+    }
+    ensure_stdio_response_frame_len(len)?;
+    let mut payload = vec![0u8; len];
+    reader.read_exact(&mut payload).await?;
+    Ok(Some(payload))
+}
+
+fn ensure_stdio_response_frame_len(len: usize) -> anyhow::Result<()> {
+    if len > MAX_STREAM_BYTES {
+        return Err(anyhow!(
+            "ssh transport response frame exceeds max size {MAX_STREAM_BYTES} bytes"
+        ));
+    }
+    Ok(())
 }
 
 fn deploy_stream_retry_backoff(attempt: usize) -> Option<Duration> {
@@ -1572,7 +1976,7 @@ fn format_request_stream_failure_summary(
     }
 }
 
-fn resolve_deploy_stream_timeout() -> Duration {
+pub(crate) fn resolve_deploy_stream_timeout() -> Duration {
     let value = std::env::var("IMAGO_DEPLOY_STREAM_TIMEOUT_SECS")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
@@ -1665,8 +2069,14 @@ async fn push_artifact_ranges(
     let deploy_id = Arc::<str>::from(context.deploy_id.to_string());
     let upload_token = Arc::<str>::from(context.upload_token.to_string());
 
+    let max_inflight_chunks = if context.session.uses_ssh_transport() {
+        1
+    } else {
+        limits.max_inflight_chunks
+    };
+
     for (offset, chunk_len) in chunk_plan {
-        while uploads.len() >= limits.max_inflight_chunks {
+        while uploads.len() >= max_inflight_chunks {
             let completed = uploads
                 .join_next()
                 .await
@@ -1719,7 +2129,7 @@ async fn push_artifact_ranges(
 }
 
 async fn push_single_artifact_chunk(
-    session: Session,
+    session: ConnectedTargetSession,
     correlation_id: Uuid,
     deploy_id: Arc<str>,
     upload_token: Arc<str>,
@@ -1990,7 +2400,7 @@ fn add_file_to_tar<W: std::io::Write>(
 fn load_private_key(path: &Path) -> anyhow::Result<PrivateKeyDer<'static>> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("failed to open private key: {}", path.display()))?;
-    let mut reader = BufReader::new(file);
+    let mut reader = StdBufReader::new(file);
     let key = rustls_pemfile::private_key(&mut reader)
         .with_context(|| format!("failed to parse private key: {}", path.display()))?
         .ok_or_else(|| anyhow!("private key is missing: {}", path.display()))?;
@@ -2801,6 +3211,68 @@ mod tests {
     }
 
     #[test]
+    fn stdio_response_message_growth_enforces_frame_and_total_limits() {
+        let oversized_frame = ensure_stdio_response_frame_len(MAX_STREAM_BYTES + 1)
+            .expect_err("frame larger than limit should be rejected");
+        assert!(
+            oversized_frame
+                .to_string()
+                .contains("frame exceeds max size")
+        );
+
+        ensure_stdio_response_message_growth(0, MAX_STREAM_BYTES - 4)
+            .expect("a single framed response at the exact limit should be accepted");
+
+        let oversized_total = ensure_stdio_response_message_growth(MAX_STREAM_BYTES - 4, 1)
+            .expect_err("cumulative framed bytes above the limit should be rejected");
+        assert!(
+            oversized_total
+                .to_string()
+                .contains("response exceeds max size")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_stdio_response_message_rejects_oversized_frame_length() {
+        let header = u32::try_from(MAX_STREAM_BYTES + 1)
+            .expect("limit should fit in u32")
+            .to_be_bytes();
+        let mut reader = &header[..];
+
+        let err = read_stdio_response_message(&mut reader)
+            .await
+            .expect_err("oversized frame length should be rejected before allocation");
+        assert!(err.to_string().contains("frame exceeds max size"));
+    }
+
+    #[tokio::test]
+    async fn read_next_stdio_response_frame_rejects_oversized_frame_length() {
+        let header = u32::try_from(MAX_STREAM_BYTES + 1)
+            .expect("limit should fit in u32")
+            .to_be_bytes();
+        let mut reader = &header[..];
+
+        let err = read_next_stdio_response_frame(&mut reader)
+            .await
+            .expect_err("oversized frame length should be rejected before allocation");
+        assert!(err.to_string().contains("frame exceeds max size"));
+    }
+
+    #[tokio::test]
+    async fn read_next_stdio_response_frame_returns_none_for_zero_length_terminator() {
+        let header = 0u32.to_be_bytes();
+        let mut reader = &header[..];
+
+        let frame = read_next_stdio_response_frame(&mut reader)
+            .await
+            .expect("zero-length frame should terminate the stream");
+        assert!(
+            frame.is_none(),
+            "zero-length frame should remain a terminator"
+        );
+    }
+
+    #[test]
     fn parse_upload_limits_uses_hello_limits_values() {
         let response = HelloNegotiateResponse {
             accepted: true,
@@ -3285,13 +3757,13 @@ mod tests {
         let target = build::DeployTargetConfig {
             remote: "127.0.0.1:4443".to_string(),
             server_name: Some("imagod.local".to_string()),
-            client_key: PathBuf::from("/tmp/client.key"),
+            client_key: Some(PathBuf::from("/tmp/client.key")),
         };
         let metadata = build_connected_target_metadata(
             &target,
             "imagod.local",
             "imagod.local:4443",
-            "127.0.0.1:4443".parse().expect("valid socket addr"),
+            "127.0.0.1:4443",
         );
 
         assert_eq!(metadata.authority, "imagod.local:4443");

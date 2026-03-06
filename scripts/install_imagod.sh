@@ -67,6 +67,9 @@ Notes:
   - Release resolution: --tag > latest stable imagod-v* release from GitHub Releases API.
   - Use --prerelease when the latest imagod build is still prerelease-only.
   - Service setup is disabled by default. Use --with-service to opt in.
+  - SSH targets call `ssh <host> imagod proxy-stdio` on the remote host.
+  - The default SSH control socket is /run/imago/imagod.sock and can be overridden in imagod.toml with control_socket_path.
+  - --with-service installs a service that reads /etc/imago/imagod.toml; prepare that config separately before first start.
 USAGE
 }
 
@@ -660,6 +663,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=${service_binary} --config ${DEFAULT_CONFIG_PATH}
+RuntimeDirectory=imago
+RuntimeDirectoryMode=0755
 Restart=on-failure
 RestartSec=2
 
@@ -697,6 +702,7 @@ PIDFILE="/var/run/imagod.pid"
 NAME="imagod"
 
 start() {
+  mkdir -p /run/imago
   if command -v start-stop-daemon >/dev/null 2>&1; then
     start-stop-daemon --start --quiet --background --make-pidfile --pidfile "\$PIDFILE" --exec "\$DAEMON" -- \$DAEMON_ARGS
     return \$?

@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands::build::{ParsedTargetRemote, parse_target_remote};
 
 pub(in crate::commands::build) fn parse_target(
     root: &toml::Table,
@@ -39,6 +40,19 @@ pub(in crate::commands::build) fn parse_target(
         ));
     }
     let client_key = optional_target_credential_path(target_table, "client_key", project_root)?;
+
+    if matches!(parse_target_remote(&remote)?, ParsedTargetRemote::Ssh(_)) {
+        if server_name.is_some() {
+            return Err(anyhow!(
+                "target key 'server_name' is not supported for ssh targets"
+            ));
+        }
+        if client_key.is_some() {
+            return Err(anyhow!(
+                "target key 'client_key' is not supported for ssh targets"
+            ));
+        }
+    }
 
     Ok(TargetConfig {
         remote,
@@ -86,6 +100,7 @@ mod tests {
     use toml::Value as TomlValue;
 
     use super::{optional_string, optional_target_credential_path, parse_target};
+    use crate::commands::build::{ParsedTargetRemote, parse_target_remote};
 
     fn parse_table(raw: &str) -> toml::Table {
         toml::from_str::<TomlValue>(raw)
@@ -140,5 +155,63 @@ ca_cert = "ca.pem"
         let table = parse_table(r#"remote = "127.0.0.1:7443""#);
         let value = optional_string(&table, "server_name").expect("optional parse should pass");
         assert!(value.is_none());
+    }
+
+    #[test]
+    fn parse_target_rejects_server_name_for_ssh_remote() {
+        let root = parse_table(
+            r#"
+[target.default]
+remote = "ssh://root@example.com"
+server_name = "example.com"
+"#,
+        );
+        let err = parse_target(&root, "default", Path::new("/tmp/project"))
+            .expect_err("server_name should be rejected for ssh remote");
+        assert!(err.to_string().contains("server_name"));
+    }
+
+    #[test]
+    fn parse_target_rejects_client_key_for_ssh_remote() {
+        let root = parse_table(
+            r#"
+[target.default]
+remote = "ssh://root@example.com"
+client_key = "certs/client.key"
+"#,
+        );
+        let err = parse_target(&root, "default", Path::new("/tmp/project"))
+            .expect_err("client_key should be rejected for ssh remote");
+        assert!(err.to_string().contains("client_key"));
+    }
+
+    #[test]
+    fn parse_target_remote_reads_ssh_socket_query() {
+        let parsed =
+            parse_target_remote("ssh://root@example.com:2222?socket=/run/imago/custom.sock")
+                .expect("ssh remote should parse");
+        assert_eq!(
+            parsed,
+            ParsedTargetRemote::Ssh(crate::commands::build::SshTargetRemote {
+                user: "root".to_string(),
+                host: "example.com".to_string(),
+                port: Some(2222),
+                socket_path: Some("/run/imago/custom.sock".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_target_remote_rejects_unknown_ssh_query_keys() {
+        let err = parse_target_remote("ssh://root@example.com?foo=bar")
+            .expect_err("unknown ssh query should fail");
+        assert!(err.to_string().contains("foo"));
+    }
+
+    #[test]
+    fn parse_target_remote_rejects_relative_ssh_socket_path() {
+        let err = parse_target_remote("ssh://root@example.com?socket=imagod.sock")
+            .expect_err("relative socket path should fail");
+        assert!(err.to_string().contains("absolute path"));
     }
 }

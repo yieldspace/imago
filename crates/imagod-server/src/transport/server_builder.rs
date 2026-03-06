@@ -36,7 +36,7 @@ mod tests {
     #![allow(dead_code)]
     use std::{collections::BTreeMap, net::UdpSocket, path::PathBuf};
 
-    use imagod_config::{ImagodConfig, RuntimeConfig, TlsConfig};
+    use imagod_config::{DEFAULT_CONTROL_SOCKET_PATH, ImagodConfig, RuntimeConfig, TlsConfig};
 
     use super::build_server;
 
@@ -48,6 +48,7 @@ mod tests {
     fn sample_config(listen_addr: String) -> ImagodConfig {
         ImagodConfig {
             listen_addr,
+            control_socket_path: PathBuf::from(DEFAULT_CONTROL_SOCKET_PATH),
             tls: TlsConfig {
                 server_key: test_server_key_path(),
                 admin_public_keys: Vec::new(),

@@ -22,6 +22,7 @@ use imago_project_config::{decode_document as decode_imago_toml_document, valida
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use toml::Value as TomlValue;
+use url::Url;
 
 use crate::{
     cli::BuildArgs,
@@ -61,7 +62,21 @@ pub struct TargetConfig {
 pub struct DeployTargetConfig {
     pub remote: String,
     pub server_name: Option<String>,
-    pub client_key: PathBuf,
+    pub client_key: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParsedTargetRemote {
+    Direct,
+    Ssh(SshTargetRemote),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshTargetRemote {
+    pub user: String,
+    pub host: String,
+    pub port: Option<u16>,
+    pub socket_path: Option<String>,
 }
 
 impl TargetConfig {
@@ -75,17 +90,112 @@ impl TargetConfig {
     }
 
     pub fn require_deploy_credentials(&self) -> anyhow::Result<DeployTargetConfig> {
-        let client_key = self
-            .client_key
-            .clone()
-            .ok_or_else(|| anyhow!("target is missing required key: client_key"))?;
+        match parse_target_remote(&self.remote)? {
+            ParsedTargetRemote::Direct => {
+                let client_key = self
+                    .client_key
+                    .clone()
+                    .ok_or_else(|| anyhow!("target is missing required key: client_key"))?;
 
-        Ok(DeployTargetConfig {
-            remote: self.remote.clone(),
-            server_name: self.server_name.clone(),
-            client_key,
-        })
+                Ok(DeployTargetConfig {
+                    remote: self.remote.clone(),
+                    server_name: self.server_name.clone(),
+                    client_key: Some(client_key),
+                })
+            }
+            ParsedTargetRemote::Ssh(_) => {
+                if self.server_name.is_some() {
+                    return Err(anyhow!(
+                        "target key 'server_name' is not supported for ssh targets"
+                    ));
+                }
+                if self.client_key.is_some() {
+                    return Err(anyhow!(
+                        "target key 'client_key' is not supported for ssh targets"
+                    ));
+                }
+                Ok(DeployTargetConfig {
+                    remote: self.remote.clone(),
+                    server_name: None,
+                    client_key: None,
+                })
+            }
+        }
     }
+}
+
+pub fn parse_target_remote(raw: &str) -> anyhow::Result<ParsedTargetRemote> {
+    if !raw.starts_with("ssh://") {
+        return Ok(ParsedTargetRemote::Direct);
+    }
+
+    let parsed = Url::parse(raw).with_context(|| format!("target remote is invalid: {raw}"))?;
+    if parsed.scheme() != "ssh" {
+        return Err(anyhow!("target remote must use ssh:// scheme: {raw}"));
+    }
+    if parsed.password().is_some() {
+        return Err(anyhow!(
+            "target remote must not include a password for ssh targets"
+        ));
+    }
+    if parsed.fragment().is_some() {
+        return Err(anyhow!(
+            "target remote must not include a fragment for ssh targets"
+        ));
+    }
+    if !parsed.path().is_empty() && parsed.path() != "/" {
+        return Err(anyhow!(
+            "target remote must not include a path for ssh targets"
+        ));
+    }
+
+    let user = parsed.username().trim();
+    if user.is_empty() {
+        return Err(anyhow!(
+            "target remote must include a non-empty user for ssh targets"
+        ));
+    }
+    let host = parsed
+        .host_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("target remote must include a host for ssh targets"))?;
+
+    let mut socket_path = None;
+    for (key, value) in parsed.query_pairs() {
+        match key.as_ref() {
+            "socket" => {
+                if socket_path.is_some() {
+                    return Err(anyhow!(
+                        "target remote query 'socket' must not be specified more than once"
+                    ));
+                }
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    return Err(anyhow!("target remote query 'socket' must not be empty"));
+                }
+                if !trimmed.starts_with('/') {
+                    return Err(anyhow!(
+                        "target remote query 'socket' must be an absolute path"
+                    ));
+                }
+                socket_path = Some(trimmed.to_string());
+            }
+            other => {
+                return Err(anyhow!(
+                    "target remote query '{}' is not supported for ssh targets",
+                    other
+                ));
+            }
+        }
+    }
+
+    Ok(ParsedTargetRemote::Ssh(SshTargetRemote {
+        user: user.to_string(),
+        host: host.to_string(),
+        port: parsed.port(),
+        socket_path,
+    }))
 }
 
 #[derive(Debug, Clone)]
@@ -4069,6 +4179,35 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn require_deploy_credentials_rejects_ssh_target_server_name() {
+        let target = TargetConfig {
+            remote: "ssh://root@example.com".to_string(),
+            server_name: Some("example.com".to_string()),
+            client_key: None,
+        };
+
+        let err = target
+            .require_deploy_credentials()
+            .expect_err("ssh target server_name should be rejected");
+        assert!(err.to_string().contains("server_name"));
+    }
+
+    #[test]
+    fn require_deploy_credentials_accepts_ssh_target_without_client_key() {
+        let target = TargetConfig {
+            remote: "ssh://root@example.com?socket=/run/imago/imagod.sock".to_string(),
+            server_name: None,
+            client_key: None,
+        };
+
+        let resolved = target
+            .require_deploy_credentials()
+            .expect("ssh target should not require client_key");
+        assert_eq!(resolved.remote, target.remote);
+        assert!(resolved.client_key.is_none());
     }
 
     #[test]

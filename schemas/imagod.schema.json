@@ -228,6 +228,11 @@
         "null"
       ]
     },
+    "control_socket_path": {
+      "default": "/run/imago/imagod.sock",
+      "description": "Local Unix socket path used for SSH-bridged control requests.",
+      "type": "string"
+    },
     "listen_addr": {
       "default": "[::]:4443",
       "description": "WebTransport listen address.",

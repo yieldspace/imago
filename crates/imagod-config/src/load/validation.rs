@@ -54,6 +54,25 @@ pub(crate) fn reject_legacy_keys(path: &Path, raw: &toml::Value) -> Result<(), I
 }
 
 pub(crate) fn validate(config: &ImagodConfig) -> Result<(), ImagodError> {
+    if config.control_socket_path.as_os_str().is_empty() {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.load",
+            "control_socket_path must not be empty",
+        ));
+    }
+
+    if !config.control_socket_path.is_absolute() {
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.load",
+            format!(
+                "control_socket_path must be an absolute path: {}",
+                config.control_socket_path.display()
+            ),
+        ));
+    }
+
     let client_keys =
         parse_unique_public_key_hexes(&config.tls.client_public_keys, "tls.client_public_keys")?;
     parse_unique_public_key_hexes(&config.tls.admin_public_keys, "tls.admin_public_keys")?;
@@ -313,4 +332,51 @@ fn parse_unique_public_key_hexes(
         }
     }
     Ok(seen)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+    #![allow(dead_code)]
+
+    use std::{collections::BTreeMap, path::PathBuf};
+
+    use crate::{DEFAULT_CONTROL_SOCKET_PATH, RuntimeConfig, TlsConfig};
+
+    use super::*;
+
+    fn sample_config() -> ImagodConfig {
+        ImagodConfig {
+            listen_addr: "127.0.0.1:4443".to_string(),
+            control_socket_path: PathBuf::from(DEFAULT_CONTROL_SOCKET_PATH),
+            tls: TlsConfig {
+                server_key: PathBuf::from("/tmp/server.key"),
+                admin_public_keys: Vec::new(),
+                client_public_keys: Vec::new(),
+                known_public_keys: BTreeMap::new(),
+            },
+            storage_root: PathBuf::from("/tmp/imago-storage"),
+            runtime: RuntimeConfig::default(),
+            server_version: "imagod/test".to_string(),
+        }
+    }
+
+    #[test]
+    fn given_relative_control_socket_path__when_validate__then_bad_request_is_returned() {
+        let mut config = sample_config();
+        config.control_socket_path = PathBuf::from("imagod.sock");
+
+        let err = validate(&config).expect_err("relative control socket path must fail");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert_eq!(err.stage, "config.load");
+        assert!(
+            err.message
+                .contains("control_socket_path must be an absolute path")
+        );
+    }
+
+    #[test]
+    fn given_default_control_socket_path__when_validate__then_config_is_accepted() {
+        validate(&sample_config()).expect("default control socket path should validate");
+    }
 }

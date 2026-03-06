@@ -107,23 +107,16 @@ async fn run_async_with_target_override(
 
     let correlation_id = Uuid::new_v4();
     ui::command_stage("service.ls", "hello", "negotiating hello");
-    let hello = negotiate_hello_with_features(
-        &connected.session,
-        correlation_id,
-        &PS_HELLO_REQUIRED_FEATURES,
-    )
-    .await?;
+    let hello =
+        negotiate_hello_with_features(&connected, correlation_id, &PS_HELLO_REQUIRED_FEATURES)
+            .await?;
     ui::command_info(
         "service.ls",
-        &format_peer_context_line(
-            &connected.authority,
-            &connected.resolved_addr.to_string(),
-            &hello,
-        ),
+        &format_peer_context_line(&connected.authority, &connected.resolved_addr, &hello),
     );
 
     ui::command_stage("service.ls", "services.list", "requesting service states");
-    let response = request_services_list(&connected.session, correlation_id, names_filter).await?;
+    let response = request_services_list(&connected, correlation_id, names_filter).await?;
     let services = response.services.len();
     render_services(&response.services)?;
     Ok(PsSummary {
@@ -141,7 +134,7 @@ fn ps_service_context(names_filter: Option<&[String]>) -> String {
 }
 
 async fn request_services_list(
-    session: &web_transport_quinn::Session,
+    session: &deploy::ConnectedTargetSession,
     correlation_id: Uuid,
     names_filter: Option<Vec<String>>,
 ) -> anyhow::Result<ServiceListResponse> {

@@ -100,6 +100,16 @@ server_name = "localhost"
 client_key = "certs/client.key"
 ```
 
+If the daemon is reachable only over SSH, switch the target to:
+
+```toml
+[target.default]
+remote = "ssh://root@your-host"
+```
+
+You can also override the daemon control socket path with `remote = "ssh://root@your-host?socket=/run/imago/imagod.sock"`.
+SSH targets use the system `ssh` command and must not set `server_name` or `client_key`.
+
 ## Configure `imagod.toml`
 
 For this local quickstart only, we reuse the generated key as both server key and allowed client key.
@@ -120,6 +130,7 @@ Write the following content to `imagod.toml` in your project root:
 "$schema" = "https://raw.githubusercontent.com/yieldspace/imago/main/schemas/imagod.schema.json"
 
 listen_addr = "127.0.0.1:4443"
+control_socket_path = "/tmp/imago-quickstart-imagod.sock"
 storage_root = ".imagod-data"
 server_version = "imagod/local-quickstart"
 
@@ -144,6 +155,8 @@ imagod --config imagod.toml
 cd ~/imago-quickstart/app
 imago service deploy
 ```
+
+For an SSH target, the CLI runs `ssh root@your-host imagod proxy-stdio` and forwards deploy/log/ls/start/stop requests through the daemon's local control socket. If the daemon uses a non-default `control_socket_path`, the SSH target must set the matching query, for example `remote = "ssh://root@your-host?socket=/tmp/imago-quickstart-imagod.sock"`. SSH log streaming requires a daemon that advertises `logs.stream`.
 
 ## Success Check
 

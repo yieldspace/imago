@@ -1,9 +1,7 @@
 use std::{
     collections::BTreeMap,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    future::Future,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use imago_protocol::messages::{
@@ -20,13 +18,11 @@ use imagod_config::upsert_tls_known_client_key;
 use imagod_control::{OperationManager, SpawnTransition};
 use semver::{Version, VersionReq};
 use serde::Serialize;
-use web_transport_quinn::SendStream;
+use tokio::io::AsyncWrite;
 
 use super::{
     Envelope, ProtocolHandler,
     envelope_io::{bad_request, event_envelope, payload_take, response_envelope, write_envelope},
-    logs_forwarder::LogsForwarder,
-    session_loop::ProtocolSession,
     upsert_dynamic_client_public_key,
 };
 
@@ -105,6 +101,7 @@ impl ProtocolHandler {
                     "services.list".to_string(),
                     "command.cancel".to_string(),
                     "logs.request".to_string(),
+                    "logs.stream".to_string(),
                     "logs.chunk".to_string(),
                     "logs.chunk.timestamp".to_string(),
                     "logs.end".to_string(),
@@ -299,15 +296,16 @@ impl ProtocolHandler {
         )
     }
 
-    /// Handles `logs.request`, returns stream ACK and starts datagram forwarding.
-    pub(crate) async fn handle_logs_request<S>(
+    /// Handles `logs.request`, writes stream ACK and then streams log frames.
+    pub(crate) async fn handle_logs_request<W, C>(
         &self,
-        session: Arc<S>,
         mut request: Envelope,
-        send: &mut SendStream,
+        send: &mut W,
+        close_signal: C,
     ) -> Result<(), ImagodError>
     where
-        S: ProtocolSession + 'static,
+        W: AsyncWrite + Unpin + Send,
+        C: Future<Output = ()> + Send,
     {
         let request_id = request.request_id;
         let correlation_id = request.correlation_id;
@@ -357,28 +355,28 @@ impl ProtocolHandler {
         )?;
         write_envelope(send, &ack, self.frame_codec.as_ref()).await?;
 
-        let logs_forwarder = self.logs_forwarder.clone();
-        tokio::spawn(async move {
-            logs_forwarder
-                .forward(
-                    session,
-                    request_id,
-                    correlation_id,
-                    subscriptions,
-                    with_timestamp,
-                )
-                .await;
-        });
-
-        Ok(())
+        self.logs_forwarder
+            .forward(
+                send,
+                request_id,
+                correlation_id,
+                subscriptions,
+                with_timestamp,
+                close_signal,
+                self.frame_codec.as_ref(),
+            )
+            .await
     }
 
     /// Handles `command.start` and emits accepted/progress/terminal events.
-    pub(crate) async fn handle_command_start(
+    pub(crate) async fn handle_command_start<W>(
         &self,
         mut request: Envelope,
-        send: &mut SendStream,
-    ) -> Result<(), ImagodError> {
+        send: &mut W,
+    ) -> Result<(), ImagodError>
+    where
+        W: AsyncWrite + Unpin + Send,
+    {
         let request_id = request.request_id;
         let correlation_id = request.correlation_id;
         let payload: CommandStartRequest = payload_take(&mut request)?;

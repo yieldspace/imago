@@ -10,7 +10,6 @@ use imago_protocol::{BindingsCertUploadRequest, BindingsCertUploadResponse, Mess
 use rcgen::{KeyPair, PKCS_ED25519};
 use url::Url;
 use uuid::Uuid;
-use web_transport_quinn::Session;
 
 use crate::{
     cli::{BindingsCertDeployArgs, BindingsCertUploadArgs, CertsGenerateArgs},
@@ -222,7 +221,7 @@ async fn run_bindings_cert_deploy_async(
             ui::command_stage("trust.cert.replicate", "hello", "negotiating hello (from)");
             let correlation_id = Uuid::new_v4();
             match negotiate_bindings_cert_hello(
-                &connected.session,
+                &connected,
                 correlation_id,
                 &BINDINGS_CERT_NO_REQUIRED_FEATURES,
             )
@@ -233,13 +232,11 @@ async fn run_bindings_cert_deploy_async(
                         "trust.cert.replicate",
                         &format_peer_context_line(
                             &connected.authority,
-                            &connected.resolved_addr.to_string(),
+                            &connected.resolved_addr,
                             &hello,
                         ),
                     );
-                    connected
-                        .session
-                        .close(0, b"trust cert replicate from probe complete");
+                    connected.close(0, b"trust cert replicate from probe complete");
                 }
                 Err(err) => from_failures.push(format!("hello failed: {err}")),
             }
@@ -314,7 +311,9 @@ fn load_bindings_client_key(project_root: &Path) -> anyhow::Result<PathBuf> {
         .context("failed to load target configuration")?
         .require_deploy_credentials()
         .context("target settings are invalid for trust cert commands")?;
-    Ok(target.client_key)
+    target
+        .client_key
+        .ok_or_else(|| anyhow!("target is missing required key: client_key"))
 }
 
 async fn connect_remote(
@@ -324,7 +323,7 @@ async fn connect_remote(
     let target = build::DeployTargetConfig {
         remote: remote.to_string(),
         server_name: None,
-        client_key: client_key.to_path_buf(),
+        client_key: Some(client_key.to_path_buf()),
     };
     deploy::connect_target(&target).await
 }
@@ -343,32 +342,27 @@ async fn upload_public_key_to_remote(
 
     ui::command_stage(command_name, "hello", "negotiating hello");
     let hello =
-        negotiate_bindings_cert_hello(&connected.session, correlation_id, required_features)
-            .await?;
+        negotiate_bindings_cert_hello(&connected, correlation_id, required_features).await?;
     ui::command_info(
         command_name,
-        &format_peer_context_line(
-            &connected.authority,
-            &connected.resolved_addr.to_string(),
-            &hello,
-        ),
+        &format_peer_context_line(&connected.authority, &connected.resolved_addr, &hello),
     );
     ui::command_stage(command_name, "upload", "uploading public key");
     send_bindings_cert_upload_request(
         command_name,
-        &connected.session,
+        &connected,
         correlation_id,
         public_key_hex,
         authority,
     )
     .await?;
-    connected.session.close(0, b"trust cert upload complete");
+    connected.close(0, b"trust cert upload complete");
 
     Ok(())
 }
 
 async fn negotiate_bindings_cert_hello(
-    session: &Session,
+    session: &deploy::ConnectedTargetSession,
     correlation_id: Uuid,
     required_features: &[&str],
 ) -> anyhow::Result<crate::commands::command_common::HelloSummary> {
@@ -377,7 +371,7 @@ async fn negotiate_bindings_cert_hello(
 
 async fn send_bindings_cert_upload_request(
     command_name: &str,
-    session: &Session,
+    session: &deploy::ConnectedTargetSession,
     correlation_id: Uuid,
     public_key_hex: &str,
     authority: &str,

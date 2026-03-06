@@ -2,22 +2,40 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use clap::{CommandFactory, FromArgMatches, Parser, error::ErrorKind};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, error::ErrorKind};
 use imago_plugin_imago_admin::ImagoAdminPlugin;
 use imago_plugin_imago_experimental_gpio::ImagoExperimentalGpioPlugin;
 use imago_plugin_imago_experimental_i2c::ImagoExperimentalI2cPlugin;
 use imago_plugin_imago_node::ImagoNodePlugin;
 use imago_plugin_imago_usb::ImagoUsbPlugin;
 use imago_protocol::PROTOCOL_VERSION;
+use imagod_config::DEFAULT_CONTROL_SOCKET_PATH;
+use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 mod manager_runtime;
 mod runner_runtime;
 mod shutdown;
 
+const STDIO_MESSAGE_TERMINATOR: [u8; 4] = 0u32.to_be_bytes();
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RunMode {
     Manager,
     Runner,
+    ProxyStdio,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum CliCommand {
+    /// Bridge stdin/stdout to the local control socket for SSH transport.
+    ProxyStdio(ProxyStdioArgs),
+}
+
+#[derive(Debug, Clone, Parser)]
+struct ProxyStdioArgs {
+    /// Override the local control socket path.
+    #[arg(long = "socket", value_name = "PATH")]
+    socket_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -29,14 +47,25 @@ struct CliArgs {
     /// Start as an internal runner process.
     #[arg(long)]
     runner: bool,
+    #[command(subcommand)]
+    command: Option<CliCommand>,
 }
 
 impl CliArgs {
     fn mode(&self) -> RunMode {
-        if self.runner {
+        if matches!(self.command, Some(CliCommand::ProxyStdio(_))) {
+            RunMode::ProxyStdio
+        } else if self.runner {
             RunMode::Runner
         } else {
             RunMode::Manager
+        }
+    }
+
+    fn proxy_socket_path(&self) -> Option<PathBuf> {
+        match &self.command {
+            Some(CliCommand::ProxyStdio(args)) => args.socket_path.clone(),
+            None => None,
         }
     }
 }
@@ -57,6 +86,7 @@ pub async fn dispatch_from_env() -> Result<(), anyhow::Error> {
             runner_runtime::run_runner_with_registry(builtin_native_plugin_registry()?).await
         }
         RunMode::Manager => manager_runtime::run_manager(cli.config_path).await,
+        RunMode::ProxyStdio => run_proxy_stdio(cli.proxy_socket_path()).await,
     }
 }
 
@@ -72,6 +102,7 @@ pub async fn dispatch_from_env_with_registry(
     match cli.mode() {
         RunMode::Runner => runner_runtime::run_runner_with_registry(native_plugin_registry).await,
         RunMode::Manager => manager_runtime::run_manager(cli.config_path).await,
+        RunMode::ProxyStdio => run_proxy_stdio(cli.proxy_socket_path()).await,
     }
 }
 
@@ -119,13 +150,30 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliArgs, cla
     let mut command = CliArgs::command();
     command = command.about(cli_about_text());
     command = command.version(env!("CARGO_PKG_VERSION"));
-    command
+    let cli = command
         .try_get_matches_from(std::iter::once("imagod".to_string()).chain(args))
-        .and_then(|matches| CliArgs::from_arg_matches(&matches))
+        .and_then(|matches| CliArgs::from_arg_matches(&matches))?;
+    validate_cli_args(cli)
 }
 
 fn cli_about_text() -> String {
     format!("imago daemon (protocol {PROTOCOL_VERSION})")
+}
+
+fn validate_cli_args(cli: CliArgs) -> Result<CliArgs, clap::Error> {
+    if cli.command.is_some() && cli.runner {
+        return Err(clap::Error::raw(
+            ErrorKind::ArgumentConflict,
+            "--runner cannot be used with proxy-stdio",
+        ));
+    }
+    if cli.command.is_some() && cli.config_path.is_some() {
+        return Err(clap::Error::raw(
+            ErrorKind::ArgumentConflict,
+            "--config cannot be used with proxy-stdio",
+        ));
+    }
+    Ok(cli)
 }
 
 fn parse_cli_args_or_emit(
@@ -146,6 +194,76 @@ fn parse_cli_args_or_emit(
     }
 }
 
+#[cfg(unix)]
+async fn run_proxy_stdio(socket_path: Option<PathBuf>) -> Result<(), anyhow::Error> {
+    let socket_path = socket_path.unwrap_or_else(|| PathBuf::from(DEFAULT_CONTROL_SOCKET_PATH));
+    proxy_stdio_streams(socket_path, io::stdin(), io::stdout()).await
+}
+
+#[cfg(not(unix))]
+async fn run_proxy_stdio(_socket_path: Option<PathBuf>) -> Result<(), anyhow::Error> {
+    Err(anyhow::anyhow!(
+        "proxy-stdio is only supported on unix platforms"
+    ))
+}
+
+#[cfg(unix)]
+async fn proxy_stdio_streams<R, W>(
+    socket_path: PathBuf,
+    mut input: R,
+    mut output: W,
+) -> Result<(), anyhow::Error>
+where
+    R: AsyncRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+{
+    while let Some(message) = read_stdio_message(&mut input).await? {
+        let mut stream = tokio::net::UnixStream::connect(&socket_path).await?;
+        stream.write_all(&message).await?;
+        stream.write_all(&STDIO_MESSAGE_TERMINATOR).await?;
+        tokio::io::copy(&mut stream, &mut output).await?;
+        output.write_all(&STDIO_MESSAGE_TERMINATOR).await?;
+        output.flush().await?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn read_stdio_message<R>(input: &mut R) -> Result<Option<Vec<u8>>, anyhow::Error>
+where
+    R: AsyncRead + Unpin + Send,
+{
+    let mut message = Vec::new();
+    loop {
+        let mut header = [0u8; 4];
+        match input.read_exact(&mut header).await {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof && message.is_empty() => {
+                return Ok(None);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Err(anyhow::anyhow!(
+                    "proxy-stdio received a truncated frame header"
+                ));
+            }
+            Err(err) => return Err(err.into()),
+        }
+
+        let len = u32::from_be_bytes(header) as usize;
+        if len == 0 {
+            if message.is_empty() {
+                return Err(anyhow::anyhow!("proxy-stdio received an empty request"));
+            }
+            return Ok(Some(message));
+        }
+
+        let mut payload = vec![0u8; len];
+        input.read_exact(&mut payload).await?;
+        message.extend_from_slice(&header);
+        message.extend_from_slice(&payload);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +281,29 @@ mod tests {
         let cli = parse_cli_args(vec!["--runner".to_string()]).expect("runner parse should work");
         assert_eq!(cli.mode(), RunMode::Runner);
         assert!(cli.runner);
+    }
+
+    #[test]
+    fn parse_cli_accepts_proxy_stdio_subcommand() {
+        let cli =
+            parse_cli_args(vec!["proxy-stdio".to_string()]).expect("proxy-stdio parse should work");
+        assert_eq!(cli.mode(), RunMode::ProxyStdio);
+        assert_eq!(cli.proxy_socket_path(), None);
+    }
+
+    #[test]
+    fn parse_cli_accepts_proxy_stdio_socket_override() {
+        let cli = parse_cli_args(vec![
+            "proxy-stdio".to_string(),
+            "--socket".to_string(),
+            "/tmp/imagod.sock".to_string(),
+        ])
+        .expect("proxy-stdio socket parse should work");
+        assert_eq!(cli.mode(), RunMode::ProxyStdio);
+        assert_eq!(
+            cli.proxy_socket_path(),
+            Some(PathBuf::from("/tmp/imagod.sock"))
+        );
     }
 
     #[test]
@@ -189,6 +330,13 @@ mod tests {
     }
 
     #[test]
+    fn parse_cli_rejects_runner_with_proxy_stdio() {
+        let err = parse_cli_args(vec!["--runner".to_string(), "proxy-stdio".to_string()])
+            .expect_err("runner and proxy-stdio must conflict");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
     fn parse_cli_reports_version_information() {
         let err = parse_cli_args(vec!["--version".to_string()]).expect_err("must print version");
         assert_eq!(err.kind(), ErrorKind::DisplayVersion);
@@ -201,6 +349,201 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::DisplayHelp);
         let expected = format!("protocol {PROTOCOL_VERSION}");
         assert!(err.to_string().contains(&expected));
+    }
+
+    #[cfg(unix)]
+    mod proxy_stdio_tests {
+        use super::*;
+        use std::{
+            io,
+            path::PathBuf,
+            pin::Pin,
+            sync::{Arc, Mutex},
+            task::{Context, Poll},
+            time::{SystemTime, UNIX_EPOCH},
+        };
+        use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+        #[derive(Clone, Default)]
+        struct CapturedOutput {
+            bytes: Arc<Mutex<Vec<u8>>>,
+        }
+
+        impl CapturedOutput {
+            fn bytes(&self) -> Vec<u8> {
+                self.bytes
+                    .lock()
+                    .expect("output lock should succeed")
+                    .clone()
+            }
+        }
+
+        impl AsyncWrite for CapturedOutput {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                self.bytes
+                    .lock()
+                    .expect("output lock should succeed")
+                    .extend_from_slice(buf);
+                Poll::Ready(Ok(buf.len()))
+            }
+
+            fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn frame(payload: &[u8]) -> Vec<u8> {
+            let mut framed = Vec::with_capacity(4 + payload.len());
+            framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            framed.extend_from_slice(payload);
+            framed
+        }
+
+        fn temp_socket_path(test_name: &str) -> PathBuf {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos();
+            PathBuf::from("/tmp").join(format!(
+                "ig-{}-{}-{}.sock",
+                test_name,
+                std::process::id(),
+                nanos
+            ))
+        }
+
+        async fn read_socket_request(stream: &mut tokio::net::UnixStream) -> Vec<u8> {
+            let mut request = Vec::new();
+            loop {
+                let mut header = [0u8; 4];
+                stream
+                    .read_exact(&mut header)
+                    .await
+                    .expect("server should read frame header");
+                let len = u32::from_be_bytes(header) as usize;
+                if len == 0 {
+                    break;
+                }
+                let mut payload = vec![0u8; len];
+                stream
+                    .read_exact(&mut payload)
+                    .await
+                    .expect("server should read frame payload");
+                request.extend_from_slice(&header);
+                request.extend_from_slice(&payload);
+            }
+            request
+        }
+
+        #[tokio::test]
+        async fn proxy_stdio_streams_bridges_framed_messages_and_terminator() {
+            let socket_path = temp_socket_path("bridge");
+            let listener =
+                tokio::net::UnixListener::bind(&socket_path).expect("unix listener should bind");
+
+            let server_task = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept should succeed");
+                let request = read_socket_request(&mut stream).await;
+                assert_eq!(request, frame(b"hello imagod"));
+                stream
+                    .write_all(&frame(b"hello cli"))
+                    .await
+                    .expect("server should write response");
+                stream
+                    .shutdown()
+                    .await
+                    .expect("server shutdown should succeed");
+            });
+
+            let (mut input_writer, input_reader) = tokio::io::duplex(64);
+            input_writer
+                .write_all(&frame(b"hello imagod"))
+                .await
+                .expect("input write should succeed");
+            input_writer
+                .write_all(&STDIO_MESSAGE_TERMINATOR)
+                .await
+                .expect("input write should succeed");
+            input_writer
+                .shutdown()
+                .await
+                .expect("input shutdown should succeed");
+            drop(input_writer);
+
+            let output = CapturedOutput::default();
+            proxy_stdio_streams(socket_path.clone(), input_reader, output.clone())
+                .await
+                .expect("proxy-stdio should succeed");
+            server_task.await.expect("server task should join");
+            let mut expected = frame(b"hello cli");
+            expected.extend_from_slice(&STDIO_MESSAGE_TERMINATOR);
+            assert_eq!(output.bytes(), expected);
+            std::fs::remove_file(&socket_path).expect("socket file should be removed");
+        }
+
+        #[tokio::test]
+        async fn proxy_stdio_streams_reconnects_for_each_request() {
+            let socket_path = temp_socket_path("reconnect");
+            let listener =
+                tokio::net::UnixListener::bind(&socket_path).expect("unix listener should bind");
+
+            let server_task = tokio::spawn(async move {
+                for (expected_request, response) in [
+                    (b"first".as_slice(), b"alpha".as_slice()),
+                    (b"second".as_slice(), b"beta".as_slice()),
+                ] {
+                    let (mut stream, _) = listener.accept().await.expect("accept should succeed");
+                    let request = read_socket_request(&mut stream).await;
+                    assert_eq!(request, frame(expected_request));
+                    stream
+                        .write_all(&frame(response))
+                        .await
+                        .expect("server should write response");
+                    stream
+                        .shutdown()
+                        .await
+                        .expect("server shutdown should succeed");
+                }
+            });
+
+            let (mut input_writer, input_reader) = tokio::io::duplex(128);
+            for payload in [b"first".as_slice(), b"second".as_slice()] {
+                input_writer
+                    .write_all(&frame(payload))
+                    .await
+                    .expect("input write should succeed");
+                input_writer
+                    .write_all(&STDIO_MESSAGE_TERMINATOR)
+                    .await
+                    .expect("terminator write should succeed");
+            }
+            input_writer
+                .shutdown()
+                .await
+                .expect("input shutdown should succeed");
+            drop(input_writer);
+
+            let output = CapturedOutput::default();
+            proxy_stdio_streams(socket_path.clone(), input_reader, output.clone())
+                .await
+                .expect("proxy-stdio should succeed");
+            server_task.await.expect("server task should join");
+
+            let mut expected = frame(b"alpha");
+            expected.extend_from_slice(&STDIO_MESSAGE_TERMINATOR);
+            expected.extend_from_slice(&frame(b"beta"));
+            expected.extend_from_slice(&STDIO_MESSAGE_TERMINATOR);
+            assert_eq!(output.bytes(), expected);
+            std::fs::remove_file(&socket_path).expect("socket file should be removed");
+        }
     }
 
     #[cfg(feature = "runtime-wasmtime")]
