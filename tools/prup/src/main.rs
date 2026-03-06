@@ -62,7 +62,9 @@ fn run() -> Result<()> {
             println!("{}", explain::render_explanation(&plan, &args.target));
             Ok(())
         }
-        Commands::ReleaseTargets(args) => run_release_targets(&loaded, &workspace, &resolved, args),
+        Commands::ReleaseTargets(args) => {
+            run_release_targets(&repo_root, &loaded, &workspace, &resolved, args)
+        }
         Commands::ReleasePrTargets(args) => {
             run_release_pr_targets(&repo_root, &loaded, &workspace, &resolved, args)
         }
@@ -173,13 +175,22 @@ fn run_apply(
 }
 
 fn run_release_targets(
+    repo_root: &Path,
     loaded: &LoadedConfig,
     workspace: &workspace::WorkspaceInfo,
     resolved: &ResolvedPolicy,
     args: cli::ReleaseTargetsArgs,
 ) -> Result<()> {
-    let targets =
-        planner::build_current_release_targets(resolved, workspace, &loaded.workspace_version)?;
+    ensure_baseline_tags(repo_root, resolved)?;
+    let line_scopes = collect_line_scopes(repo_root, resolved, None, None)?;
+    let github_repo_name_with_owner = git::github_repo_name_with_owner(repo_root)?;
+    let targets = planner::build_current_release_targets(
+        resolved,
+        workspace,
+        &loaded.workspace_version,
+        &line_scopes,
+        github_repo_name_with_owner.as_deref(),
+    )?;
 
     let output = ReleaseTargetsOutput {
         prerelease: resolved.github_prerelease,
@@ -374,8 +385,7 @@ fn collect_line_scopes(
         scopes.push(LineScopeInput {
             line_id: crate_policy.line.clone(),
             base_ref: base_ref.clone(),
-            changed_files: git::changed_files_since(repo_root, &base_ref)?,
-            commit_messages: git::commit_messages_since(repo_root, &base_ref)?,
+            commits: git::commits_since(repo_root, &base_ref)?,
         });
     }
 

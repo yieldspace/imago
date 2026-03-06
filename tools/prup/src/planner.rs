@@ -1,4 +1,5 @@
 use crate::config::{CratePolicy, LinePolicy, VersionSource};
+use crate::git::CommitInfo;
 use crate::resolver::ResolvedPolicy;
 use crate::workspace::WorkspaceInfo;
 use anyhow::{Result, anyhow};
@@ -56,8 +57,7 @@ impl BumpLevel {
 pub struct LineScopeInput {
     pub line_id: String,
     pub base_ref: String,
-    pub changed_files: Vec<PathBuf>,
-    pub commit_messages: Vec<String>,
+    pub commits: Vec<CommitInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +128,7 @@ pub struct CurrentReleaseTarget {
     pub tag: String,
     pub github_release: bool,
     pub release_name: String,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,33 +173,47 @@ pub fn build_plan_from_line_scopes(
     for line_scope in line_scopes {
         line_base_refs.insert(line_scope.line_id.clone(), line_scope.base_ref.clone());
 
-        let mut changed_crates: BTreeSet<String> = BTreeSet::new();
-        for path in &line_scope.changed_files {
-            changed_files_union.insert(path.to_string_lossy().to_string());
-            if let Some(owner) = workspace.owner_of_file(path) {
-                changed_crates.insert(owner);
+        let relevant_commits = collect_relevant_commits(
+            config,
+            workspace,
+            &crate_map,
+            &line_scope.line_id,
+            &line_scope.commits,
+        )?;
+
+        if relevant_commits.is_empty() {
+            continue;
+        }
+
+        let mut changed_crates = BTreeSet::new();
+        let mut impacted_crates = BTreeSet::new();
+        let mut contributing_lines = BTreeSet::new();
+
+        for commit in &relevant_commits {
+            for path in &commit.files {
+                changed_files_union.insert(path.to_string_lossy().to_string());
+            }
+
+            let commit_changed_crates = changed_crates_for_files(workspace, &commit.files);
+            changed_crates.extend(commit_changed_crates.iter().cloned());
+
+            let commit_impacted_crates =
+                workspace.reverse_closure(&commit_changed_crates, config.dependency_kinds());
+            impacted_crates.extend(commit_impacted_crates.iter().cloned());
+
+            let source_lines = impacted_source_lines(&commit_impacted_crates, &crate_map);
+            for source_line in source_lines {
+                if can_reach_line(config, &source_line, &line_scope.line_id)? {
+                    contributing_lines.insert(source_line);
+                }
             }
         }
 
         changed_crates_union.extend(changed_crates.iter().cloned());
-
-        let impacted_crates = workspace.reverse_closure(&changed_crates, config.dependency_kinds());
         impacted_crates_union.extend(impacted_crates.iter().cloned());
 
-        let source_lines = impacted_source_lines(&impacted_crates, &crate_map);
-        let mut contributing_lines = BTreeSet::new();
-
-        for source_line in source_lines {
-            if can_reach_line(config, &source_line, &line_scope.line_id)? {
-                contributing_lines.insert(source_line);
-            }
-        }
-
-        if contributing_lines.is_empty() {
-            continue;
-        }
-
-        let bump = match detect_bump_from_commits(&line_scope.commit_messages) {
+        let relevant_messages: Vec<String> = relevant_commits.iter().map(commit_message).collect();
+        let bump = match detect_bump_from_commits(&relevant_messages) {
             Some(detected) => normalize_bump_for_line_version(
                 config,
                 workspace,
@@ -422,14 +437,21 @@ pub fn build_current_release_targets(
     config: &ResolvedPolicy,
     workspace: &WorkspaceInfo,
     workspace_version: &Version,
+    line_scopes: &[LineScopeInput],
+    github_repo_name_with_owner: Option<&str>,
 ) -> Result<Vec<CurrentReleaseTarget>> {
     let line_map = config.line_map();
+    let crate_map = config.crate_map();
     let mut targets = Vec::new();
 
     for crate_policy in config.emit_tag_crates() {
         let line_policy = line_map
             .get(crate_policy.line.as_str())
             .ok_or_else(|| anyhow!("unknown line {}", crate_policy.line))?;
+        let line_scope = line_scopes
+            .iter()
+            .find(|scope| scope.line_id == crate_policy.line)
+            .ok_or_else(|| anyhow!("missing line scope for {}", crate_policy.line))?;
 
         let version = match crate_policy.version_source {
             VersionSource::Workspace => workspace_version.clone(),
@@ -464,6 +486,14 @@ pub fn build_current_release_targets(
             .or(line_policy.github_release_name.as_deref())
             .unwrap_or(tag_template);
 
+        let relevant_commits = collect_relevant_commits(
+            config,
+            workspace,
+            &crate_map,
+            &crate_policy.line,
+            &line_scope.commits,
+        )?;
+
         targets.push(CurrentReleaseTarget {
             crate_name: crate_policy.name.clone(),
             version: version.to_string(),
@@ -474,6 +504,7 @@ pub fn build_current_release_targets(
                 &crate_policy.name,
                 &version.to_string(),
             ),
+            body: render_release_body(&relevant_commits, github_repo_name_with_owner),
         });
     }
 
@@ -547,6 +578,271 @@ pub fn build_release_pr_target(
         ),
         labels: config.github.release_pr.labels.clone(),
     })
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ReleaseNoteSection {
+    Added,
+    Fixed,
+    Other,
+}
+
+impl ReleaseNoteSection {
+    fn heading(self) -> &'static str {
+        match self {
+            Self::Added => "Added",
+            Self::Fixed => "Fixed",
+            Self::Other => "Other",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ParsedReleaseCommit {
+    section: ReleaseNoteSection,
+    scope: Option<String>,
+    summary: String,
+    breaking: bool,
+    pr_number: Option<String>,
+}
+
+fn collect_relevant_commits(
+    config: &ResolvedPolicy,
+    workspace: &WorkspaceInfo,
+    crate_map: &BTreeMap<&str, &CratePolicy>,
+    line_id: &str,
+    commits: &[CommitInfo],
+) -> Result<Vec<CommitInfo>> {
+    let mut relevant = Vec::new();
+
+    for commit in commits {
+        if is_release_bookkeeping_subject(&commit.subject) {
+            continue;
+        }
+
+        let changed_crates = changed_crates_for_files(workspace, &commit.files);
+        if changed_crates.is_empty() {
+            continue;
+        }
+
+        let impacted_crates = workspace.reverse_closure(&changed_crates, config.dependency_kinds());
+        let source_lines = impacted_source_lines(&impacted_crates, crate_map);
+
+        let mut reaches_line = false;
+        for source_line in &source_lines {
+            if can_reach_line(config, source_line, line_id)? {
+                reaches_line = true;
+                break;
+            }
+        }
+
+        if reaches_line {
+            relevant.push(commit.clone());
+        }
+    }
+
+    Ok(relevant)
+}
+
+fn changed_crates_for_files(workspace: &WorkspaceInfo, files: &[PathBuf]) -> BTreeSet<String> {
+    files
+        .iter()
+        .filter_map(|path| workspace.owner_of_file(path))
+        .collect()
+}
+
+fn commit_message(commit: &CommitInfo) -> String {
+    if commit.body.is_empty() {
+        commit.subject.clone()
+    } else {
+        format!("{}\n\n{}", commit.subject, commit.body)
+    }
+}
+
+fn render_release_body(
+    commits: &[CommitInfo],
+    github_repo_name_with_owner: Option<&str>,
+) -> String {
+    let mut added = Vec::new();
+    let mut fixed = Vec::new();
+    let mut other = Vec::new();
+
+    for commit in commits {
+        let parsed = parse_release_commit(commit);
+        match parsed.section {
+            ReleaseNoteSection::Added => added.push(parsed),
+            ReleaseNoteSection::Fixed => fixed.push(parsed),
+            ReleaseNoteSection::Other => other.push(parsed),
+        }
+    }
+
+    let mut body = String::new();
+    for (section, entries) in [
+        (ReleaseNoteSection::Added, added),
+        (ReleaseNoteSection::Fixed, fixed),
+        (ReleaseNoteSection::Other, other),
+    ] {
+        if entries.is_empty() {
+            continue;
+        }
+
+        if !body.is_empty() {
+            body.push('\n');
+        }
+
+        let _ = writeln!(body, "### {}", section.heading());
+        let _ = writeln!(body);
+
+        for entry in entries {
+            let _ = writeln!(
+                body,
+                "{}",
+                render_release_note_entry(&entry, github_repo_name_with_owner)
+            );
+        }
+    }
+
+    if body.trim().is_empty() {
+        "No notable changes.".to_string()
+    } else {
+        body.trim_end().to_string()
+    }
+}
+
+fn render_release_note_entry(
+    entry: &ParsedReleaseCommit,
+    github_repo_name_with_owner: Option<&str>,
+) -> String {
+    let mut line = String::from("- ");
+
+    if let Some(scope) = &entry.scope {
+        let _ = write!(line, "*({scope})* ");
+    }
+
+    if entry.breaking {
+        line.push_str("[breaking] ");
+    }
+
+    line.push_str(&entry.summary);
+
+    if let Some(pr_number) = &entry.pr_number {
+        if let Some(repo) = github_repo_name_with_owner {
+            let _ = write!(
+                line,
+                " ([#{}](https://github.com/{repo}/pull/{}))",
+                pr_number, pr_number
+            );
+        } else {
+            let _ = write!(line, " (#{})", pr_number);
+        }
+    }
+
+    line
+}
+
+fn parse_release_commit(commit: &CommitInfo) -> ParsedReleaseCommit {
+    let (subject_without_pr, pr_number) = split_subject_pr_number(&commit.subject);
+
+    if let Some(parsed) = parse_conventional_subject(&subject_without_pr) {
+        let section = match parsed.kind.as_str() {
+            "feat" => ReleaseNoteSection::Added,
+            "fix" => ReleaseNoteSection::Fixed,
+            _ => ReleaseNoteSection::Other,
+        };
+
+        return ParsedReleaseCommit {
+            section,
+            scope: parsed.scope,
+            summary: parsed.summary,
+            breaking: parsed.breaking || commit.body.contains("BREAKING CHANGE"),
+            pr_number,
+        };
+    }
+
+    ParsedReleaseCommit {
+        section: ReleaseNoteSection::Other,
+        scope: None,
+        summary: subject_without_pr,
+        breaking: commit.body.contains("BREAKING CHANGE"),
+        pr_number,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ParsedConventionalSubject {
+    kind: String,
+    scope: Option<String>,
+    summary: String,
+    breaking: bool,
+}
+
+fn parse_conventional_subject(subject: &str) -> Option<ParsedConventionalSubject> {
+    let (prefix, summary) = subject.split_once(':')?;
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return None;
+    }
+
+    let prefix = prefix.trim();
+    if prefix.is_empty() {
+        return None;
+    }
+
+    let breaking = prefix.contains('!');
+    let prefix = prefix.trim_end_matches('!');
+
+    if let Some((kind, scope)) = prefix.split_once('(') {
+        let scope = scope.strip_suffix(')')?.trim();
+        let kind = kind.trim();
+        if kind.is_empty() {
+            return None;
+        }
+        return Some(ParsedConventionalSubject {
+            kind: kind.to_string(),
+            scope: if scope.is_empty() {
+                None
+            } else {
+                Some(scope.to_string())
+            },
+            summary: summary.to_string(),
+            breaking,
+        });
+    }
+
+    Some(ParsedConventionalSubject {
+        kind: prefix.to_string(),
+        scope: None,
+        summary: summary.to_string(),
+        breaking,
+    })
+}
+
+fn split_subject_pr_number(subject: &str) -> (String, Option<String>) {
+    let subject = subject.trim();
+    let Some((prefix, suffix)) = subject.rsplit_once(" (#") else {
+        return (subject.to_string(), None);
+    };
+    let Some(pr_number) = suffix.strip_suffix(')') else {
+        return (subject.to_string(), None);
+    };
+    if pr_number.is_empty() || !pr_number.chars().all(|ch| ch.is_ascii_digit()) {
+        return (subject.to_string(), None);
+    }
+    (prefix.trim().to_string(), Some(pr_number.to_string()))
+}
+
+fn is_release_bookkeeping_subject(subject: &str) -> bool {
+    let subject = subject.trim();
+    if subject.starts_with("ci(release):") {
+        return true;
+    }
+
+    if subject.starts_with("chore(") || subject.starts_with("chore:") {
+        let lower = subject.to_ascii_lowercase();
+        return lower.contains(": release ") || lower.ends_with(": release");
+    }
+
+    false
 }
 
 pub fn baseline_tag_glob(crate_policy: &CratePolicy, line_policy: &LinePolicy) -> String {
@@ -979,6 +1275,32 @@ mod tests {
         }
     }
 
+    fn commit(subject: &str, files: &[&str]) -> CommitInfo {
+        CommitInfo {
+            sha: format!("sha-{}", subject.replace(' ', "-")),
+            subject: subject.to_string(),
+            body: String::new(),
+            files: files.iter().map(PathBuf::from).collect(),
+        }
+    }
+
+    fn commit_with_body(subject: &str, body: &str, files: &[&str]) -> CommitInfo {
+        CommitInfo {
+            sha: format!("sha-{}", subject.replace(' ', "-")),
+            subject: subject.to_string(),
+            body: body.to_string(),
+            files: files.iter().map(PathBuf::from).collect(),
+        }
+    }
+
+    fn line_scope(line_id: &str, base_ref: &str, commits: Vec<CommitInfo>) -> LineScopeInput {
+        LineScopeInput {
+            line_id: line_id.to_string(),
+            base_ref: base_ref.to_string(),
+            commits,
+        }
+    }
+
     #[test]
     fn shared_change_propagates_to_cli_and_daemon() {
         let config = sample_policy();
@@ -990,18 +1312,22 @@ mod tests {
             &workspace,
             &workspace_version,
             &[
-                LineScopeInput {
-                    line_id: "imago-cli".to_string(),
-                    base_ref: "imago-v0.2.0".to_string(),
-                    changed_files: vec![PathBuf::from("imago-protocol/src/lib.rs")],
-                    commit_messages: vec!["feat: protocol change".to_string()],
-                },
-                LineScopeInput {
-                    line_id: "imagod-daemon".to_string(),
-                    base_ref: "imagod-v0.1.0".to_string(),
-                    changed_files: vec![PathBuf::from("imago-protocol/src/lib.rs")],
-                    commit_messages: vec!["feat: protocol change".to_string()],
-                },
+                line_scope(
+                    "imago-cli",
+                    "imago-v0.2.0",
+                    vec![commit(
+                        "feat: protocol change",
+                        &["imago-protocol/src/lib.rs"],
+                    )],
+                ),
+                line_scope(
+                    "imagod-daemon",
+                    "imagod-v0.1.0",
+                    vec![commit(
+                        "feat: protocol change",
+                        &["imago-protocol/src/lib.rs"],
+                    )],
+                ),
             ],
         )
         .expect("plan should build");
@@ -1032,18 +1358,15 @@ mod tests {
             &workspace,
             &workspace_version,
             &[
-                LineScopeInput {
-                    line_id: "imago-cli".to_string(),
-                    base_ref: "imago-v0.2.0".to_string(),
-                    changed_files: vec![PathBuf::from("imago-project-config/src/lib.rs")],
-                    commit_messages: vec!["fix: adjust cli config".to_string()],
-                },
-                LineScopeInput {
-                    line_id: "imagod-daemon".to_string(),
-                    base_ref: "imagod-v0.1.0".to_string(),
-                    changed_files: vec![],
-                    commit_messages: vec![],
-                },
+                line_scope(
+                    "imago-cli",
+                    "imago-v0.2.0",
+                    vec![commit(
+                        "fix: adjust cli config",
+                        &["imago-project-config/src/lib.rs"],
+                    )],
+                ),
+                line_scope("imagod-daemon", "imagod-v0.1.0", vec![]),
             ],
         )
         .expect("plan should build");
@@ -1073,8 +1396,17 @@ mod tests {
         let workspace = sample_workspace();
         let workspace_version = Version::parse("0.1.0").expect("workspace version should parse");
 
-        let targets = build_current_release_targets(&config, &workspace, &workspace_version)
-            .expect("targets should build");
+        let targets = build_current_release_targets(
+            &config,
+            &workspace,
+            &workspace_version,
+            &[
+                line_scope("imago-cli", "imago-v0.2.0", vec![]),
+                line_scope("imagod-daemon", "imagod-v0.1.0", vec![]),
+            ],
+            Some("yieldspace/imago"),
+        )
+        .expect("targets should build");
 
         let names: BTreeSet<String> = targets
             .into_iter()
@@ -1116,6 +1448,73 @@ mod tests {
     }
 
     #[test]
+    fn release_body_groups_commits_and_links_pull_requests() {
+        let body = render_release_body(
+            &[
+                commit(
+                    "feat(cli)!: add deploy mode (#101)",
+                    &["imago-project-config/src/lib.rs"],
+                ),
+                commit(
+                    "fix(prup): keep lock in sync (#102)",
+                    &["imago-project-config/src/lib.rs"],
+                ),
+                commit(
+                    "docs: document release flow (#103)",
+                    &["imago-project-config/src/lib.rs"],
+                ),
+            ],
+            Some("yieldspace/imago"),
+        );
+
+        assert!(body.contains("### Added"));
+        assert!(body.contains("### Fixed"));
+        assert!(body.contains("### Other"));
+        assert!(body.contains("*("));
+        assert!(body.contains("[breaking] add deploy mode"));
+        assert!(body.contains("[#101](https://github.com/yieldspace/imago/pull/101)"));
+        assert!(body.contains("keep lock in sync"));
+        assert!(body.contains("document release flow"));
+    }
+
+    #[test]
+    fn release_bookkeeping_commits_do_not_create_bumps_or_notes() {
+        let config = sample_policy();
+        let workspace = sample_workspace();
+        let workspace_version = Version::parse("0.1.0").expect("workspace version should parse");
+        let scopes = vec![
+            line_scope(
+                "imago-cli",
+                "imago-v0.2.0",
+                vec![commit(
+                    "ci(release): imago-cli 0.1.1 -> 0.2.0 (#293)",
+                    &["imago-cli/src/main.rs"],
+                )],
+            ),
+            line_scope("imagod-daemon", "imagod-v0.1.0", vec![]),
+        ];
+
+        let plan = build_plan_from_line_scopes(&config, &workspace, &workspace_version, &scopes)
+            .expect("plan should build");
+        assert!(plan.line_bumps.is_empty());
+
+        let targets = build_current_release_targets(
+            &config,
+            &workspace,
+            &workspace_version,
+            &scopes,
+            Some("yieldspace/imago"),
+        )
+        .expect("targets should build");
+
+        let cli_target = targets
+            .iter()
+            .find(|target| target.crate_name == "imago-cli")
+            .expect("cli target should exist");
+        assert_eq!(cli_target.body, "No notable changes.");
+    }
+
+    #[test]
     fn post_1_0_breaking_stays_major() {
         let normalized = normalize_bump_for_version(
             BumpLevel::Major,
@@ -1136,18 +1535,23 @@ mod tests {
             &workspace,
             &workspace_version,
             &[
-                LineScopeInput {
-                    line_id: "imago-cli".to_string(),
-                    base_ref: "imago-v0.2.0".to_string(),
-                    changed_files: vec![PathBuf::from("imago-project-config/src/lib.rs")],
-                    commit_messages: vec!["feat!: change cli api".to_string()],
-                },
-                LineScopeInput {
-                    line_id: "imagod-daemon".to_string(),
-                    base_ref: "imagod-v0.1.0".to_string(),
-                    changed_files: vec![PathBuf::from("imagod-common/src/lib.rs")],
-                    commit_messages: vec!["BREAKING CHANGE: daemon api".to_string()],
-                },
+                line_scope(
+                    "imago-cli",
+                    "imago-v0.2.0",
+                    vec![commit(
+                        "feat!: change cli api",
+                        &["imago-project-config/src/lib.rs"],
+                    )],
+                ),
+                line_scope(
+                    "imagod-daemon",
+                    "imagod-v0.1.0",
+                    vec![commit_with_body(
+                        "fix: daemon api",
+                        "BREAKING CHANGE: daemon api",
+                        &["imagod-common/src/lib.rs"],
+                    )],
+                ),
             ],
         )
         .expect("plan should build");
@@ -1193,12 +1597,14 @@ mod tests {
             &config,
             &workspace,
             &workspace_version,
-            &[LineScopeInput {
-                line_id: "imagod-daemon".to_string(),
-                base_ref: "imagod-v0.1.0".to_string(),
-                changed_files: vec![PathBuf::from("imagod-common/src/lib.rs")],
-                commit_messages: vec!["feat!: change daemon api".to_string()],
-            }],
+            &[line_scope(
+                "imagod-daemon",
+                "imagod-v0.1.0",
+                vec![commit(
+                    "feat!: change daemon api",
+                    &["imagod-common/src/lib.rs"],
+                )],
+            )],
         )
         .expect("plan should build");
 
@@ -1220,12 +1626,14 @@ mod tests {
             &config,
             &workspace,
             &workspace_version,
-            &[LineScopeInput {
-                line_id: "imago-cli".to_string(),
-                base_ref: "imago-v0.2.0".to_string(),
-                changed_files: vec![PathBuf::from("imago-project-config/src/lib.rs")],
-                commit_messages: vec!["fix: adjust cli config".to_string()],
-            }],
+            &[line_scope(
+                "imago-cli",
+                "imago-v0.2.0",
+                vec![commit(
+                    "fix: adjust cli config",
+                    &["imago-project-config/src/lib.rs"],
+                )],
+            )],
         )
         .expect("plan should build");
 
