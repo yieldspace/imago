@@ -31,10 +31,10 @@ use crate::{
 
 const NON_FOLLOW_IDLE_TIMEOUT_SECS: u64 = 2;
 const POST_END_DRAIN_TIMEOUT_MS: u64 = 200;
-const LOGS_HELLO_REQUIRED_FEATURES: [&str; 1] = ["logs.request"];
-const LOGS_HELLO_REQUIRED_FEATURES_WITH_TIMESTAMP: [&str; 2] =
-    ["logs.request", "logs.chunk.timestamp"];
 const LOGS_STREAM_FEATURE: &str = "logs.stream";
+const LOGS_HELLO_REQUIRED_FEATURES: [&str; 2] = ["logs.request", LOGS_STREAM_FEATURE];
+const LOGS_HELLO_REQUIRED_FEATURES_WITH_TIMESTAMP: [&str; 3] =
+    ["logs.request", LOGS_STREAM_FEATURE, "logs.chunk.timestamp"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogsTermination {
@@ -979,10 +979,13 @@ mod tests {
 
     #[test]
     fn logs_hello_required_features_are_fixed() {
-        assert_eq!(LOGS_HELLO_REQUIRED_FEATURES, ["logs.request"]);
+        assert_eq!(
+            LOGS_HELLO_REQUIRED_FEATURES,
+            ["logs.request", "logs.stream"]
+        );
         assert_eq!(
             LOGS_HELLO_REQUIRED_FEATURES_WITH_TIMESTAMP,
-            ["logs.request", "logs.chunk.timestamp"]
+            ["logs.request", "logs.stream", "logs.chunk.timestamp"]
         );
     }
 
