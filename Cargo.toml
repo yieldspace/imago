@@ -44,7 +44,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
@@ -106,28 +106,28 @@ web-transport-quinn = "0.11.6"
 syn = "2.0.117"
 toml_edit = "0.23.7"
 
-imago-plugin-imago-admin = { path = "plugins/imago-admin", version = "0.1.0" }
-imago-plugin-imago-experimental-gpio = { path = "plugins/imago-experimental-gpio", version = "0.1.0" }
-imago-plugin-imago-experimental-i2c = { path = "plugins/imago-experimental-i2c", version = "0.1.0" }
-imago-plugin-imago-node = { path = "plugins/imago-node", version = "0.1.0" }
-imago-plugin-imago-usb = { path = "plugins/imago-usb", version = "0.1.0" }
+imago-plugin-imago-admin = { path = "plugins/imago-admin", version = "0.2.0" }
+imago-plugin-imago-experimental-gpio = { path = "plugins/imago-experimental-gpio", version = "0.2.0" }
+imago-plugin-imago-experimental-i2c = { path = "plugins/imago-experimental-i2c", version = "0.2.0" }
+imago-plugin-imago-node = { path = "plugins/imago-node", version = "0.2.0" }
+imago-plugin-imago-usb = { path = "plugins/imago-usb", version = "0.2.0" }
 imago-plugin-nanokvm-plugin = { path = "plugins/imago-plugin-nanokvm-plugin", version = "0.1.0" }
-imago-plugin-macros = { path = "crates/imago-plugin-macros", version = "0.1.0" }
-imago-project-config = { path = "crates/imago-project-config", version = "0.1.0" }
-imago-protocol = { path = "crates/imago-protocol", version = "0.1.0" }
-imago-schema-gen = { path = "crates/imago-schema-gen", version = "0.1.0" }
-imagod = { path = "crates/imagod", version = "0.1.0" }
-imagod-common = { path = "crates/imagod-common", version = "0.1.0" }
-imagod-config = { path = "crates/imagod-config", version = "0.1.0" }
-imagod-control = { path = "crates/imagod-control", version = "0.1.0" }
-imagod-ipc = { path = "crates/imagod-ipc", version = "0.1.0" }
-imagod-runtime = { path = "crates/imagod-runtime", version = "0.1.0", default-features = false }
-imagod-runtime-bootstrap = { path = "crates/imagod-runtime-bootstrap", version = "0.1.0" }
-imagod-runtime-control = { path = "crates/imagod-runtime-control", version = "0.1.0" }
-imagod-runtime-ingress = { path = "crates/imagod-runtime-ingress", version = "0.1.0" }
-imagod-runtime-internal = { path = "crates/imagod-runtime-internal", version = "0.1.0" }
-imagod-runtime-wasmtime = { path = "crates/imagod-runtime-wasmtime", version = "0.1.0" }
-imagod-server = { path = "crates/imagod-server", version = "0.1.0" }
+imago-plugin-macros = { path = "crates/imago-plugin-macros", version = "0.2.0" }
+imago-project-config = { path = "crates/imago-project-config", version = "0.2.0" }
+imago-protocol = { path = "crates/imago-protocol", version = "0.2.0" }
+imago-schema-gen = { path = "crates/imago-schema-gen", version = "0.2.0" }
+imagod = { path = "crates/imagod", version = "0.2.0" }
+imagod-common = { path = "crates/imagod-common", version = "0.2.0" }
+imagod-config = { path = "crates/imagod-config", version = "0.2.0" }
+imagod-control = { path = "crates/imagod-control", version = "0.2.0" }
+imagod-ipc = { path = "crates/imagod-ipc", version = "0.2.0" }
+imagod-runtime = { path = "crates/imagod-runtime", version = "0.2.0", default-features = false }
+imagod-runtime-bootstrap = { path = "crates/imagod-runtime-bootstrap", version = "0.2.0" }
+imagod-runtime-control = { path = "crates/imagod-runtime-control", version = "0.2.0" }
+imagod-runtime-ingress = { path = "crates/imagod-runtime-ingress", version = "0.2.0" }
+imagod-runtime-internal = { path = "crates/imagod-runtime-internal", version = "0.2.0" }
+imagod-runtime-wasmtime = { path = "crates/imagod-runtime-wasmtime", version = "0.2.0" }
+imagod-server = { path = "crates/imagod-server", version = "0.2.0" }
 
 [workspace.metadata.prup]
 base_ref = "origin/main"
