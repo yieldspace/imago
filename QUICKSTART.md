@@ -19,6 +19,13 @@ Option A:
 curl -sSf https://cli.imago.sh | sh
 ```
 
+This installer defaults to the latest stable `imago` release.
+If only prereleases are available, use `--prerelease`. To pin an exact build, use `--tag imago-vX.Y.Z`.
+Repository-local fallback:
+```bash
+curl -fsSL https://raw.githubusercontent.com/yieldspace/imago/main/scripts/install_imago.sh | sh
+```
+
 Option B:
 ```bash
 cargo install imago-cli --git https://github.com/yieldspace/imago
@@ -30,8 +37,11 @@ Choose one installation method:
 
 Option A:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yieldspace/imago/main/scripts/install_imagod.sh | sh
+curl -fsSL https://raw.githubusercontent.com/yieldspace/imago/main/scripts/install_imagod.sh | sh -s -- --prerelease
 ```
+
+This installer defaults to the latest stable `imagod` release.
+If only prereleases are available, use `--prerelease`. To pin an exact build, use `--tag imagod-vX.Y.Z`.
 
 Option B:
 ```bash
@@ -99,7 +109,7 @@ Install imagod:
 
 ```bash
 # For server
-curl -sSf https://install.imago.sh | sh
+curl -sSf https://install.imago.sh | sh -s -- --prerelease
 # For local
 cargo install imagod --git https://github.com/yieldspace/imago
 ```
