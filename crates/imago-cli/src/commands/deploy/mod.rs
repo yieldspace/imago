@@ -168,6 +168,8 @@ enum ConnectedTargetTransport {
 }
 
 struct SshTargetSession {
+    remote: build::SshTargetRemote,
+    remote_input: String,
     inner: tokio::sync::Mutex<SshProcessIo>,
 }
 
@@ -222,9 +224,26 @@ impl ConnectedTargetSession {
 impl SshTargetSession {
     fn close(&self) {
         if let Ok(mut inner) = self.inner.try_lock() {
-            let _ = inner.child.start_kill();
+            terminate_ssh_process(&mut inner.child);
         }
     }
+}
+
+fn terminate_ssh_process(child: &mut Child) {
+    let _ = child.start_kill();
+}
+
+fn replace_ssh_process_io(slot: &mut SshProcessIo, replacement: SshProcessIo) {
+    let old = std::mem::replace(slot, replacement);
+    let SshProcessIo {
+        mut child,
+        stdin: _stdin,
+        stdout: _stdout,
+    } = old;
+    terminate_ssh_process(&mut child);
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
 }
 
 fn deploy_phase_detail(phase: u8, detail: &str) -> String {
@@ -1111,34 +1130,6 @@ async fn connect_ssh_target(
     target: &build::DeployTargetConfig,
     remote: &build::SshTargetRemote,
 ) -> anyhow::Result<ConnectedTargetSession> {
-    let mut command = Command::new("ssh");
-    command.arg("-T");
-    if let Some(port) = remote.port {
-        command.arg("-p").arg(port.to_string());
-    }
-    command
-        .arg(format!("{}@{}", remote.user, remote.host))
-        .arg("imagod")
-        .arg("proxy-stdio");
-    if let Some(socket_path) = remote.socket_path.as_deref() {
-        command.arg("--socket").arg(socket_path);
-    }
-    command.stdin(std::process::Stdio::piped());
-    command.stdout(std::process::Stdio::piped());
-    command.stderr(std::process::Stdio::inherit());
-
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("failed to spawn ssh transport for {}", target.remote))?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("failed to capture ssh stdin"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow!("failed to capture ssh stdout"))?;
-
     let authority = if let Some(port) = remote.port {
         format!("ssh://{}@{}:{}", remote.user, remote.host, port)
     } else {
@@ -1150,20 +1141,78 @@ async fn connect_ssh_target(
         .map(|path| format!("ssh:{} via {}", remote.host, path))
         .unwrap_or_else(|| format!("ssh:{} via /run/imago/imagod.sock", remote.host));
     let metadata = build_connected_target_metadata(target, &remote.host, &authority, resolved_addr);
+    let process_io = spawn_ssh_proxy_process(remote, &target.remote)?;
 
     Ok(ConnectedTargetSession {
         transport: ConnectedTargetTransport::Ssh(Arc::new(SshTargetSession {
-            inner: tokio::sync::Mutex::new(SshProcessIo {
-                child,
-                stdin,
-                stdout: TokioBufReader::new(stdout),
-            }),
+            remote: remote.clone(),
+            remote_input: target.remote.clone(),
+            inner: tokio::sync::Mutex::new(process_io),
         })),
         authority: metadata.authority,
         resolved_addr: metadata.resolved_addr,
         configured_host: metadata.configured_host,
         remote_input: metadata.remote_input,
     })
+}
+
+fn spawn_ssh_proxy_process(
+    remote: &build::SshTargetRemote,
+    remote_input: &str,
+) -> anyhow::Result<SshProcessIo> {
+    let mut command = Command::new("ssh");
+    command.args(ssh_proxy_command_args(remote));
+    command.stdin(std::process::Stdio::piped());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::inherit());
+
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to spawn ssh transport for {remote_input}"))?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture ssh stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture ssh stdout"))?;
+
+    Ok(SshProcessIo {
+        child,
+        stdin,
+        stdout: TokioBufReader::new(stdout),
+    })
+}
+
+fn ssh_proxy_command_args(remote: &build::SshTargetRemote) -> Vec<String> {
+    let mut args = vec![
+        "-T".to_string(),
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+    ];
+    if let Some(port) = remote.port {
+        args.push("-p".to_string());
+        args.push(port.to_string());
+    }
+    args.push(format!("{}@{}", remote.user, remote.host));
+    args.push("imagod".to_string());
+    args.push("proxy-stdio".to_string());
+    if let Some(socket_path) = remote.socket_path.as_deref() {
+        args.push("--socket".to_string());
+        args.push(socket_path.to_string());
+    }
+    args
+}
+
+fn reset_ssh_process(
+    inner: &mut SshProcessIo,
+    remote: &build::SshTargetRemote,
+    remote_input: &str,
+) -> anyhow::Result<()> {
+    let replacement = spawn_ssh_proxy_process(remote, remote_input)?;
+    replace_ssh_process_io(inner, replacement);
+    Ok(())
 }
 
 fn server_identity_mismatch_error(
@@ -1676,14 +1725,18 @@ async fn request_events_over_ssh(
 
     match read_timeout {
         Some(read_timeout) => {
-            tokio::time::timeout(read_timeout, read_stdio_response_message(&mut inner.stdout))
+            match tokio::time::timeout(read_timeout, read_stdio_response_message(&mut inner.stdout))
                 .await
-                .map_err(|_| {
-                    anyhow!(
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    reset_ssh_process(&mut inner, &session.remote, &session.remote_input)?;
+                    Err(anyhow!(
                         "ssh transport read timed out after {} ms",
                         read_timeout.as_millis()
-                    )
-                })?
+                    ))
+                }
+            }
         }
         None => read_stdio_response_message(&mut inner.stdout).await,
     }
@@ -1841,24 +1894,30 @@ where
                         _ = tokio::signal::ctrl_c() => None,
                     }
                 } else if let Some(read_idle_timeout) = read_idle_timeout {
-                    Some(
-                        tokio::time::timeout(
-                            read_idle_timeout,
-                            read_next_stdio_response_frame(&mut inner.stdout),
-                        )
-                        .await
-                        .map_err(|_| {
-                            anyhow!(
+                    match tokio::time::timeout(
+                        read_idle_timeout,
+                        read_next_stdio_response_frame(&mut inner.stdout),
+                    )
+                    .await
+                    {
+                        Ok(result) => Some(result),
+                        Err(_) => {
+                            reset_ssh_process(
+                                &mut inner,
+                                &ssh_session.remote,
+                                &ssh_session.remote_input,
+                            )?;
+                            return Err(anyhow!(
                                 "ssh transport read timed out after {} ms",
                                 read_idle_timeout.as_millis()
-                            )
-                        })?,
-                    )
+                            ));
+                        }
+                    }
                 } else {
                     Some(read_next_stdio_response_frame(&mut inner.stdout).await)
                 };
                 let Some(next) = next else {
-                    let _ = inner.child.start_kill();
+                    terminate_ssh_process(&mut inner.child);
                     return Ok(StreamRequestTermination::Interrupted);
                 };
                 let Some(frame) = next? else {
@@ -2863,7 +2922,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_response_envelope_normalizes_logs_chunk_byte_string_fields() {
+    fn response_payload_decodes_logs_chunk_byte_string_fields() {
         let chunk = imago_protocol::LogChunk {
             request_id: Uuid::new_v4(),
             seq: 3,
@@ -2890,7 +2949,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_response_envelope_normalizes_logs_end_payload() {
+    fn response_payload_decodes_logs_end_payload() {
         let end = imago_protocol::LogEnd {
             request_id: Uuid::new_v4(),
             seq: 4,
@@ -2910,6 +2969,29 @@ mod tests {
             response_payload(response).expect("response payload should decode");
 
         assert_eq!(decoded, end);
+    }
+
+    #[test]
+    fn ssh_proxy_command_args_enable_batch_mode_and_forward_socket_override() {
+        let remote = build::SshTargetRemote {
+            user: "root".to_string(),
+            host: "edge.example.com".to_string(),
+            port: Some(2222),
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+
+        let args = ssh_proxy_command_args(&remote);
+
+        assert_eq!(args[0], "-T");
+        assert_eq!(args[1], "-o");
+        assert_eq!(args[2], "BatchMode=yes");
+        assert!(args.windows(2).any(|pair| pair == ["-p", "2222"]));
+        assert!(args.iter().any(|arg| arg == "root@edge.example.com"));
+        assert!(args.iter().any(|arg| arg == "proxy-stdio"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--socket", "/tmp/imagod.sock"])
+        );
     }
 
     #[test]

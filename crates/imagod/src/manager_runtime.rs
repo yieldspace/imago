@@ -224,7 +224,13 @@ pub(crate) async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyh
                 });
             }
             accepted = control_listener.accept() => {
-                let (stream, _) = accepted?;
+                let (stream, _) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(err) => {
+                        eprintln!("control socket accept error: {err}");
+                        continue;
+                    }
+                };
                 let permit = match session_concurrency.clone().try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => {

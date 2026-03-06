@@ -101,6 +101,11 @@ fn e2e_imagod_creates_default_config_when_missing() -> TestResult {
         generated
     );
     assert!(
+        generated.contains("control_socket_path = "),
+        "generated config is missing control_socket_path: {}",
+        generated
+    );
+    assert!(
         generated.contains("server_version = "),
         "generated config is missing server_version: {}",
         generated
@@ -167,9 +172,11 @@ fn e2e_imagod_does_not_overwrite_existing_config() -> TestResult {
     let config_path = temp.path().join("imagod.toml");
     let key_material = generate_key_material(temp.path())?;
     let storage_root = temp.path().join("s");
+    let control_socket_path = temp.path().join("control.sock");
     let server_key = key_material.server_key_path;
     let existing = format!(
-        "listen_addr = \"127.0.0.1:0\"\nstorage_root = \"{}\"\nserver_version = \"imagod/existing\"\n\n[tls]\nserver_key = \"{}\"\nclient_public_keys = [\"{}\"]\n",
+        "listen_addr = \"127.0.0.1:0\"\ncontrol_socket_path = \"{}\"\nstorage_root = \"{}\"\nserver_version = \"imagod/existing\"\n\n[tls]\nserver_key = \"{}\"\nclient_public_keys = [\"{}\"]\n",
+        toml_escape(control_socket_path.to_string_lossy().as_ref()),
         toml_escape(storage_root.to_string_lossy().as_ref()),
         toml_escape(server_key.to_string_lossy().as_ref()),
         CLIENT_PUBLIC_KEY_SAMPLE,
