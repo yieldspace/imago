@@ -12,6 +12,9 @@ if jq -e '.targets | length == 0' "$targets_json" >/dev/null; then
   exit 0
 fi
 
+git config user.name "prup[bot]"
+git config user.email "prup[bot]@users.noreply.github.com"
+
 prerelease_flag="$(jq -r '.prerelease' "$targets_json")"
 
 while IFS= read -r row; do
