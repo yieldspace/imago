@@ -1,7 +1,17 @@
-use std::{any::Any, fmt::Write, future::Future, sync::Arc, time::Duration};
+use std::{
+    any::Any,
+    fmt::Write,
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
-use imago_protocol::{ErrorCode, MessageType};
+use bytes::Bytes;
+use imago_protocol::{ErrorCode, HelloNegotiateRequest, MessageType, Validate};
 use imagod_common::ImagodError;
 use rustls::pki_types::CertificateDer;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
@@ -13,7 +23,7 @@ use web_transport_quinn::{RecvStream, SendStream, Session};
 use super::{
     DynamicClientRole, MAX_STREAM_BYTES, ProtocolHandler, STREAM_READ_TIMEOUT_SECS,
     envelope_io::{
-        error_envelope, finish_stream, parse_single_request_envelope,
+        error_envelope, finish_stream, parse_single_request_envelope, payload_as,
         response_message_type_for_request, write_envelope,
     },
     resolve_dynamic_client_role,
@@ -22,6 +32,7 @@ use super::{
 const ED25519_SPKI_PREFIX: [u8; 12] = [
     0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
 ];
+const LOGS_STREAM_FEATURE: &str = "logs.stream";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionAuthContext {
@@ -39,9 +50,47 @@ impl SessionAuthContext {
     }
 }
 
+#[derive(Debug, Default)]
+struct SessionFeatureState {
+    logs_stream_requested: AtomicBool,
+}
+
+impl SessionFeatureState {
+    fn record_hello_request(&self, request: &super::Envelope) {
+        let Ok(hello) = payload_as::<HelloNegotiateRequest>(request) else {
+            return;
+        };
+        if hello.validate().is_err() {
+            return;
+        }
+        let requested = hello
+            .required_features
+            .iter()
+            .any(|feature| feature == LOGS_STREAM_FEATURE);
+        self.logs_stream_requested
+            .store(requested, Ordering::Relaxed);
+    }
+
+    fn logs_stream_requested(&self) -> bool {
+        self.logs_stream_requested.load(Ordering::Relaxed)
+    }
+}
+
 #[async_trait]
 pub(crate) trait ProtocolSession: Send + Sync {
     async fn accept_bi(&self) -> Option<(SendStream, RecvStream)>;
+
+    fn max_datagram_size(&self) -> Option<usize> {
+        None
+    }
+
+    fn send_datagram(&self, _payload: Bytes) -> Result<(), ImagodError> {
+        Err(ImagodError::new(
+            ErrorCode::Internal,
+            "logs.datagram",
+            "transport does not support datagrams",
+        ))
+    }
 
     fn peer_identity(&self) -> Option<Box<dyn Any>>;
 
@@ -52,6 +101,20 @@ pub(crate) trait ProtocolSession: Send + Sync {
 impl ProtocolSession for Session {
     async fn accept_bi(&self) -> Option<(SendStream, RecvStream)> {
         Session::accept_bi(self).await.ok()
+    }
+
+    fn max_datagram_size(&self) -> Option<usize> {
+        Some(Session::max_datagram_size(self))
+    }
+
+    fn send_datagram(&self, payload: Bytes) -> Result<(), ImagodError> {
+        Session::send_datagram(self, payload).map_err(|e| {
+            ImagodError::new(
+                ErrorCode::Internal,
+                "logs.datagram",
+                format!("failed to send datagram: {e}"),
+            )
+        })
     }
 
     fn peer_identity(&self) -> Option<Box<dyn Any>> {
@@ -71,6 +134,7 @@ where
     S: ProtocolSession + 'static,
 {
     let auth_context = resolve_session_auth_context(session.as_ref())?;
+    let session_features = Arc::new(SessionFeatureState::default());
     let mut stream_tasks = tokio::task::JoinSet::new();
     let mut first_error = None;
     loop {
@@ -81,12 +145,23 @@ where
                 };
                 let handler = handler.clone();
                 let session = session.clone();
+                let datagram_session: Arc<dyn ProtocolSession> = session.clone();
+                let session_features = session_features.clone();
                 let auth_context = auth_context.clone();
                 stream_tasks.spawn(async move {
                     let close_signal = async move {
                         session.closed().await;
                     };
-                    run_stream_io(&handler, auth_context, &mut send, &mut recv, close_signal).await
+                    run_stream_io(
+                        &handler,
+                        datagram_session,
+                        session_features,
+                        auth_context,
+                        &mut send,
+                        &mut recv,
+                        close_signal,
+                    )
+                    .await
                 });
             }
             joined = stream_tasks.join_next(), if !stream_tasks.is_empty() => {
@@ -136,13 +211,24 @@ pub(crate) async fn run_local_stream(
     };
 
     let close_signal = wait_for_local_disconnect(&mut recv);
-    handle_parsed_request(handler, auth_context, &mut send, parsed, close_signal).await?;
+    handle_parsed_request(
+        handler,
+        None,
+        None,
+        auth_context,
+        &mut send,
+        parsed,
+        close_signal,
+    )
+    .await?;
     finish_stream(&mut send).await?;
     Ok(())
 }
 
 async fn run_stream_io<R, W, C>(
     handler: &ProtocolHandler,
+    logs_session: Arc<dyn ProtocolSession>,
+    session_features: Arc<SessionFeatureState>,
     auth_context: SessionAuthContext,
     send: &mut W,
     recv: &mut R,
@@ -171,7 +257,16 @@ where
         return Ok(());
     };
 
-    handle_parsed_request(handler, auth_context, send, parsed, close_signal).await?;
+    handle_parsed_request(
+        handler,
+        Some(logs_session),
+        Some(session_features),
+        auth_context,
+        send,
+        parsed,
+        close_signal,
+    )
+    .await?;
     finish_stream(send).await?;
     Ok(())
 }
@@ -206,6 +301,8 @@ where
 
 async fn handle_parsed_request<W, C>(
     handler: &ProtocolHandler,
+    logs_session: Option<Arc<dyn ProtocolSession>>,
+    session_features: Option<Arc<SessionFeatureState>>,
     auth_context: SessionAuthContext,
     send: &mut W,
     parsed: super::envelope_io::ParsedSingleRequestEnvelope,
@@ -220,6 +317,11 @@ where
     let request_id = request.request_id;
     let correlation_id = request.correlation_id;
     let request_message_type = request.message_type;
+    if request_message_type == MessageType::HelloNegotiate
+        && let Some(features) = &session_features
+    {
+        features.record_hello_request(&request);
+    }
     if let Err(err) = ensure_message_type_allowed(&request, &auth_context) {
         let response = error_envelope(
             response_message_type_for_request(request_message_type),
@@ -274,8 +376,17 @@ where
         return Ok(());
     }
     if request_message_type == MessageType::LogsRequest {
+        let client_requested_logs_stream = session_features
+            .as_ref()
+            .is_some_and(|features| features.logs_stream_requested());
         if let Err(err) = handler
-            .handle_logs_request(request, send, close_signal)
+            .handle_logs_request(
+                logs_session,
+                client_requested_logs_stream,
+                request,
+                send,
+                close_signal,
+            )
             .await
         {
             finish_logs_request_error(
@@ -801,6 +912,37 @@ mod tests {
         assert!(ensure_message_type_allowed(&request_hello, &client_context).is_ok());
         assert!(ensure_message_type_allowed(&request_rpc, &client_context).is_ok());
         assert!(ensure_message_type_allowed(&request_event, &client_context).is_err());
+    }
+
+    #[test]
+    fn given_hello_requests__when_record_session_features__then_logs_stream_flag_tracks_required_features()
+     {
+        let features = SessionFeatureState::default();
+        let stream_hello = Envelope::new(
+            MessageType::HelloNegotiate,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            serde_json::json!({
+                "client_version": "0.1.0",
+                "required_features": ["logs.request", "logs.stream"],
+            }),
+        );
+
+        features.record_hello_request(&stream_hello);
+        assert!(features.logs_stream_requested());
+
+        let legacy_hello = Envelope::new(
+            MessageType::HelloNegotiate,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            serde_json::json!({
+                "client_version": "0.1.0",
+                "required_features": ["logs.request"],
+            }),
+        );
+
+        features.record_hello_request(&legacy_hello);
+        assert!(!features.logs_stream_requested());
     }
 
     #[test]

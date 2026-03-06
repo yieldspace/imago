@@ -1,7 +1,10 @@
 use std::{
     collections::BTreeMap,
     future::Future,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use imago_protocol::messages::{
@@ -23,6 +26,7 @@ use tokio::io::AsyncWrite;
 use super::{
     Envelope, ProtocolHandler,
     envelope_io::{bad_request, event_envelope, payload_take, response_envelope, write_envelope},
+    session_loop::ProtocolSession,
     upsert_dynamic_client_public_key,
 };
 
@@ -296,9 +300,11 @@ impl ProtocolHandler {
         )
     }
 
-    /// Handles `logs.request`, writes stream ACK and then streams log frames.
+    /// Handles `logs.request`, writes stream ACK, then streams or datagram-forwards logs.
     pub(crate) async fn handle_logs_request<W, C>(
         &self,
+        logs_session: Option<Arc<dyn ProtocolSession>>,
+        client_requested_logs_stream: bool,
         mut request: Envelope,
         send: &mut W,
         close_signal: C,
@@ -355,8 +361,26 @@ impl ProtocolHandler {
         )?;
         write_envelope(send, &ack, self.frame_codec.as_ref()).await?;
 
+        if let Some(session) = logs_session
+            && !client_requested_logs_stream
+        {
+            let logs_forwarder = self.logs_forwarder.clone();
+            tokio::spawn(async move {
+                logs_forwarder
+                    .forward_datagrams(
+                        session,
+                        request_id,
+                        correlation_id,
+                        subscriptions,
+                        with_timestamp,
+                    )
+                    .await;
+            });
+            return Ok(());
+        }
+
         self.logs_forwarder
-            .forward(
+            .forward_stream(
                 send,
                 request_id,
                 correlation_id,

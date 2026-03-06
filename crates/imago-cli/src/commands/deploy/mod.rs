@@ -1947,6 +1947,7 @@ where
     if len == 0 {
         return Err(anyhow!("unexpected zero-length transport frame"));
     }
+    ensure_stream_response_frame_len(len)?;
     let mut payload = vec![0u8; len];
     reader.read_exact(&mut payload).await?;
     Ok(Some(payload))
@@ -1972,6 +1973,15 @@ fn ensure_stdio_response_frame_len(len: usize) -> anyhow::Result<()> {
     if len > MAX_STREAM_BYTES {
         return Err(anyhow!(
             "ssh transport response frame exceeds max size {MAX_STREAM_BYTES} bytes"
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_stream_response_frame_len(len: usize) -> anyhow::Result<()> {
+    if len > MAX_STREAM_BYTES {
+        return Err(anyhow!(
+            "transport response frame exceeds max size {MAX_STREAM_BYTES} bytes"
         ));
     }
     Ok(())
@@ -3399,6 +3409,19 @@ mod tests {
                 .to_string()
                 .contains("response exceeds max size")
         );
+    }
+
+    #[tokio::test]
+    async fn read_next_length_prefixed_frame_rejects_oversized_frame_length() {
+        let header = u32::try_from(MAX_STREAM_BYTES + 1)
+            .expect("limit should fit in u32")
+            .to_be_bytes();
+        let mut reader = &header[..];
+
+        let err = read_next_length_prefixed_frame(&mut reader)
+            .await
+            .expect_err("oversized frame length should be rejected before allocation");
+        assert!(err.to_string().contains("frame exceeds max size"));
     }
 
     #[tokio::test]
