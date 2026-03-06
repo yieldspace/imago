@@ -14,6 +14,7 @@ INSTALL_DIR=""
 ALLOW_PRERELEASE=0
 WITH_SERVICE=0
 DRY_RUN=0
+ASSUME_YES=0
 
 RELEASES_API_URL="${IMAGOD_RELEASES_API_URL:-${DEFAULT_RELEASES_API_URL}}"
 RELEASE_BASE_URL_OVERRIDE="${IMAGOD_RELEASE_BASE_URL:-}"
@@ -52,6 +53,7 @@ Options:
   --install-dir <path>              Binary install directory.
   --prerelease                      Allow prerelease imagod releases when --tag is omitted.
   --with-service                    Install and start a service after installing the binary.
+  -y, --yes                         Skip the confirmation prompt when a TTY is available.
   --dry-run                         Print resolved values without installing.
   -h, --help                        Show this help.
 
@@ -67,6 +69,7 @@ Notes:
   - Release resolution: --tag > latest stable imagod-v* release from GitHub Releases API.
   - Use --prerelease when the latest imagod build is still prerelease-only.
   - Service setup is disabled by default. Use --with-service to opt in.
+  - Interactive terminal runs ask for confirmation before installation; use -y to skip it.
 USAGE
 }
 
@@ -427,7 +430,9 @@ download_github_api() {
 }
 
 parse_release_tag_from_index() {
-  awk -v allow_prerelease="$2" '
+  tr '\r\n' '  ' < "$1" |
+    grep -Eo '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"|"draft"[[:space:]]*:[[:space:]]*(true|false)|"prerelease"[[:space:]]*:[[:space:]]*(true|false)' |
+    awk -v allow_prerelease="$2" '
     function reset_release() {
       tag = ""
       draft = ""
@@ -451,25 +456,23 @@ parse_release_tag_from_index() {
     BEGIN {
       reset_release()
     }
-    /"tag_name"[[:space:]]*:/ {
+    /^"tag_name"[[:space:]]*:/ {
       if (tag != "" && draft != "" && prerelease != "") {
         emit_if_match()
       }
       line = $0
       sub(/.*"tag_name"[[:space:]]*:[[:space:]]*"/, "", line)
-      sub(/".*/, "", line)
+      sub(/"$/, "", line)
       tag = line
     }
-    /"draft"[[:space:]]*:/ {
+    /^"draft"[[:space:]]*:/ {
       line = $0
       sub(/.*"draft"[[:space:]]*:[[:space:]]*/, "", line)
-      sub(/[^a-z].*/, "", line)
       draft = line
     }
-    /"prerelease"[[:space:]]*:/ {
+    /^"prerelease"[[:space:]]*:/ {
       line = $0
       sub(/.*"prerelease"[[:space:]]*:[[:space:]]*/, "", line)
-      sub(/[^a-z].*/, "", line)
       prerelease = line
       if (tag != "" && draft != "") {
         emit_if_match()
@@ -480,7 +483,7 @@ parse_release_tag_from_index() {
         emit_if_match()
       }
     }
-  ' "$1"
+  '
 }
 
 release_api_supports_paging() {
@@ -571,47 +574,47 @@ resolve_release_url_base() {
 }
 
 download_release_asset() {
-  asset_url="$1"
-  asset_output="$2"
-  selection_mode="$3"
-  resolved_tag="$4"
-  asset_name="$5"
+  release_asset_url="$1"
+  release_asset_output="$2"
+  release_selection_mode="$3"
+  release_resolved_tag="$4"
+  release_asset_name="$5"
 
-  if downloader "${asset_url}" "${asset_output}"; then
+  if downloader "${release_asset_url}" "${release_asset_output}"; then
     return 0
   fi
 
-  case "${selection_mode}" in
+  case "${release_selection_mode}" in
     stable)
-      die "resolved stable release ${resolved_tag} does not provide ${asset_name} yet; retry later, use --prerelease, or pass --tag imagod-vX.Y.Z"
+      die "resolved stable release ${release_resolved_tag} does not provide ${release_asset_name} yet; retry later, use --prerelease, or pass --tag imagod-vX.Y.Z"
       ;;
     prerelease)
-      die "resolved prerelease ${resolved_tag} does not provide ${asset_name} yet; retry later or pass --tag imagod-vX.Y.Z"
+      die "resolved prerelease ${release_resolved_tag} does not provide ${release_asset_name} yet; retry later or pass --tag imagod-vX.Y.Z"
       ;;
     *)
-      die "failed to download ${asset_name} from ${asset_url}"
+      die "failed to download ${release_asset_name} from ${release_asset_url}"
       ;;
   esac
 }
 
 verify_checksum() {
-  checksum_dir="$1"
-  checksum_name="$2"
-  asset_name="$3"
+  verify_checksum_dir="$1"
+  verify_checksum_name="$2"
+  verify_asset_name="$3"
 
   if check_cmd sha256sum; then
     (
-      cd "${checksum_dir}"
-      sha256sum -c "${checksum_name}"
-    ) || die "checksum verification failed for ${asset_name}"
+      cd "${verify_checksum_dir}"
+      sha256sum -c "${verify_checksum_name}"
+    ) || die "checksum verification failed for ${verify_asset_name}"
     return 0
   fi
 
   if check_cmd shasum; then
     (
-      cd "${checksum_dir}"
-      shasum -a 256 -c "${checksum_name}"
-    ) || die "checksum verification failed for ${asset_name}"
+      cd "${verify_checksum_dir}"
+      shasum -a 256 -c "${verify_checksum_name}"
+    ) || die "checksum verification failed for ${verify_asset_name}"
     return 0
   fi
 
@@ -634,18 +637,18 @@ check_release_assets_for_dry_run() {
 }
 
 install_binary() {
-  source_bin="$1"
-  destination_dir="$2"
-  destination_bin="${destination_dir}/imagod"
+  install_source_bin="$1"
+  install_destination_dir="$2"
+  install_destination_bin="${install_destination_dir}/imagod"
 
-  if mkdir -p -- "${destination_dir}" 2>/dev/null && install -m 0755 -- "${source_bin}" "${destination_bin}" 2>/dev/null; then
-    printf '%s\n' "${destination_bin}"
+  if mkdir -p -- "${install_destination_dir}" 2>/dev/null && install -m 0755 -- "${install_source_bin}" "${install_destination_bin}" 2>/dev/null; then
+    printf '%s\n' "${install_destination_bin}"
     return 0
   fi
 
-  run_as_root install -d -- "${destination_dir}" || die "failed to create install dir: ${destination_dir}"
-  run_as_root install -m 0755 -- "${source_bin}" "${destination_bin}" || die "failed to install imagod to ${destination_bin}"
-  printf '%s\n' "${destination_bin}"
+  run_as_root install -d -- "${install_destination_dir}" || die "failed to create install dir: ${install_destination_dir}"
+  run_as_root install -m 0755 -- "${install_source_bin}" "${install_destination_bin}" || die "failed to install imagod to ${install_destination_bin}"
+  printf '%s\n' "${install_destination_bin}"
 }
 
 setup_systemd_service() {
@@ -860,6 +863,66 @@ path_contains() {
   return 1
 }
 
+tty_prompt_available() {
+  if [ "${ASSUME_YES}" = "1" ] || [ "${DRY_RUN}" = "1" ]; then
+    return 1
+  fi
+
+  if [ ! -t 1 ] && [ ! -t 2 ]; then
+    return 1
+  fi
+
+  if ! ( : >/dev/tty ) 2>/dev/null || ! ( : </dev/tty ) 2>/dev/null; then
+    return 1
+  fi
+
+  return 0
+}
+
+confirm_installation_or_exit() {
+  confirm_tag="$1"
+  confirm_release_resolution="$2"
+  confirm_os="$3"
+  confirm_target="$4"
+  confirm_target_resolution="$5"
+  confirm_libc="$6"
+  confirm_install_dir="$7"
+  confirm_service="$8"
+
+  if ! tty_prompt_available; then
+    return 0
+  fi
+
+  {
+    printf '%s\n' "Install imagod with the following settings?"
+    printf '  tag: %s\n' "${confirm_tag}"
+    printf '  release_resolution: %s\n' "${confirm_release_resolution}"
+    printf '  os: %s\n' "${confirm_os}"
+    printf '  target: %s\n' "${confirm_target}"
+    printf '  target_resolution: %s\n' "${confirm_target_resolution}"
+    if [ "${confirm_target_resolution}" = "auto" ] && [ "${confirm_os}" = "linux" ]; then
+      printf '  libc: %s\n' "${confirm_libc}"
+    fi
+    printf '  install_dir: %s\n' "${confirm_install_dir}"
+    printf '  service: %s\n' "${confirm_service}"
+    printf 'Proceed with installation? [y/N] '
+  } >/dev/tty
+
+  if ! IFS= read -r confirm_reply </dev/tty; then
+    confirm_reply=""
+  fi
+
+  case "${confirm_reply}" in
+    y|Y|yes|YES|Yes)
+      return 0
+      ;;
+    *)
+      log "installation cancelled by user"
+      exit 0
+      ;;
+  esac
+}
+
 parse_args() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -898,6 +961,10 @@ parse_args() {
         WITH_SERVICE=1
         shift
         ;;
+      -y|--yes)
+        ASSUME_YES=1
+        shift
+        ;;
       --dry-run)
         DRY_RUN=1
         shift
@@ -924,6 +991,7 @@ main() {
   need_cmd mkdir
   need_cmd mktemp
   need_cmd rm
+  need_cmd tr
   need_cmd uname
 
   os="$(detect_os)"
@@ -967,10 +1035,12 @@ main() {
   validate_install_dir_path "${install_dir}"
 
   service_manager=""
+  service_status="disabled"
   planned_binary_path="${install_dir}/imagod"
   if [ "${WITH_SERVICE}" = "1" ]; then
     validate_service_binary_path_or_die "${planned_binary_path}"
     service_manager="$(detect_service_manager_or_die "${os}")"
+    service_status="enabled (${service_manager})"
   fi
 
   log "tag: ${resolved_tag}"
@@ -982,11 +1052,7 @@ main() {
     log "libc: ${libc}"
   fi
   log "install_dir: ${install_dir}"
-  if [ "${WITH_SERVICE}" = "1" ]; then
-    log "service: enabled (${service_manager})"
-  else
-    log "service: disabled"
-  fi
+  log "service: ${service_status}"
 
   if [ "${DRY_RUN}" = "1" ]; then
     check_release_assets_for_dry_run "${binary_url}" "${checksum_url}" "${asset_name}" "${checksum_name}" "${selection_mode}" "${resolved_tag}"
@@ -995,6 +1061,8 @@ main() {
     log "checksum URL: ${checksum_url}"
     exit 0
   fi
+
+  confirm_installation_or_exit "${resolved_tag}" "${selection_mode}" "${os}" "${target}" "${target_resolution}" "${libc}" "${install_dir}" "${service_status}"
 
   MAIN_TMP_DIR="$(mktemp -d)"
   download_release_asset "${binary_url}" "${MAIN_TMP_DIR}/${asset_name}" "${selection_mode}" "${resolved_tag}" "${asset_name}"
