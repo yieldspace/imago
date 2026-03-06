@@ -23,6 +23,7 @@ while IFS= read -r row; do
   tag="$(jq -r '.tag' <<<"$row")"
   release_name="$(jq -r '.release_name' <<<"$row")"
   github_release="$(jq -r '.github_release' <<<"$row")"
+  body="$(jq -r '.body' <<<"$row")"
 
   if git tag --list "$tag" | grep -qx "$tag"; then
     echo "Tag already exists: $tag"
@@ -41,11 +42,10 @@ while IFS= read -r row; do
     continue
   fi
 
-  notes="Automated release by prup for ${crate_name} ${version}."
   if [[ "$prerelease_flag" == "true" ]]; then
-    gh release create "$tag" --title "$release_name" --notes "$notes" --prerelease
+    gh release create "$tag" --title "$release_name" --notes "$body" --prerelease
   else
-    gh release create "$tag" --title "$release_name" --notes "$notes"
+    gh release create "$tag" --title "$release_name" --notes "$body"
   fi
   echo "Created GitHub Release: $tag"
 done < <(jq -c '.targets[]' "$targets_json")
