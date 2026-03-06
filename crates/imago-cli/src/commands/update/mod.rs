@@ -2469,6 +2469,7 @@ mod tests {
         let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
         let (requested, resolved) = single_dependency_entry(&lock);
         assert_eq!(requested.source, "ghcr.io/yieldspace/nanokvm".to_string());
+        assert_eq!(resolved.resolved_name, "yieldspace:nanokvm".to_string());
         assert_eq!(resolved.wit_path, "wit/deps/yieldspace-nanokvm-1.2.3");
         assert!(root.join(&resolved.wit_path).exists());
 
@@ -2519,7 +2520,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_rejects_oci_dependency_when_resolved_package_mismatches_dependency_name() {
+    async fn update_accepts_oci_dependency_when_resolved_package_mismatches_dependency_name() {
         let root = new_temp_dir("oci-dependency-name-mismatch");
         write(
             &root.join("imago.toml"),
@@ -2543,20 +2544,18 @@ mod tests {
         );
 
         let result = run_with_project_root(UpdateArgs {}, &root).await;
-        assert_eq!(result.exit_code, 2);
-        let stderr = result.stderr.unwrap_or_default();
-        assert!(
-            stderr.contains("top-level WIT package mismatch"),
-            "unexpected stderr: {stderr}"
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
         );
-        assert!(
-            stderr.contains("yieldspace:nanokvm"),
-            "unexpected stderr: {stderr}"
-        );
-        assert!(
-            stderr.contains("yieldspace:other"),
-            "unexpected stderr: {stderr}"
-        );
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        let (requested, resolved) = single_dependency_entry(&lock);
+        assert_eq!(requested.source, "ghcr.io/yieldspace/nanokvm".to_string());
+        assert_eq!(resolved.resolved_name, "yieldspace:other".to_string());
+        assert_eq!(resolved.wit_path, "wit/deps/yieldspace-other-1.2.3");
+        assert!(root.join(&resolved.wit_path).exists());
 
         let _ = fs::remove_dir_all(root);
     }
