@@ -21,6 +21,8 @@ curl -sSf https://cli.imago.sh | sh
 
 This installer defaults to the latest stable `imago` release.
 If only prereleases are available, use `--prerelease`. To pin an exact build, use `--tag imago-vX.Y.Z`.
+Interactive terminals show a confirmation prompt before installation.
+For automation or unattended runs, pass `-y` (for example, `curl -sSf https://cli.imago.sh | sh -s -- -y`).
 Repository-local fallback:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/yieldspace/imago/main/scripts/install_imago.sh | sh
@@ -42,6 +44,8 @@ curl -fsSL https://raw.githubusercontent.com/yieldspace/imago/main/scripts/insta
 
 This installer defaults to the latest stable `imagod` release.
 If only prereleases are available, use `--prerelease`. To pin an exact build, use `--tag imagod-vX.Y.Z`.
+Interactive terminals show a confirmation prompt before installation.
+For automation or unattended runs, pass `-y` (for example, `curl -fsSL https://raw.githubusercontent.com/yieldspace/imago/main/scripts/install_imagod.sh | sh -s -- -y`).
 
 Option B:
 ```bash
