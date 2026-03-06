@@ -324,7 +324,9 @@ pub(crate) async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyh
 fn bind_control_listener(path: &Path) -> Result<UnixListener, ImagodError> {
     use std::{
         fs,
+        io::ErrorKind,
         os::unix::fs::{FileTypeExt, PermissionsExt},
+        os::unix::net::UnixStream,
     };
 
     let parent = path.parent().ok_or_else(|| {
@@ -359,18 +361,41 @@ fn bind_control_listener(path: &Path) -> Result<UnixListener, ImagodError> {
     }
 
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_socket() => {
-            fs::remove_file(path).map_err(|e| {
-                ImagodError::new(
+        Ok(metadata) if metadata.file_type().is_socket() => match UnixStream::connect(path) {
+            Ok(_) => {
+                return Err(ImagodError::new(
+                    imago_protocol::ErrorCode::BadRequest,
+                    "transport.control_socket",
+                    format!(
+                        "control socket path is already serving another imagod instance: {}",
+                        path.display()
+                    ),
+                ));
+            }
+            Err(err) if err.kind() == ErrorKind::ConnectionRefused => {
+                fs::remove_file(path).map_err(|e| {
+                    ImagodError::new(
+                        imago_protocol::ErrorCode::Internal,
+                        "transport.control_socket",
+                        format!(
+                            "failed to remove stale control socket {}: {e}",
+                            path.display()
+                        ),
+                    )
+                })?;
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(ImagodError::new(
                     imago_protocol::ErrorCode::Internal,
                     "transport.control_socket",
                     format!(
-                        "failed to remove stale control socket {}: {e}",
+                        "failed to probe control socket liveness {}: {err}",
                         path.display()
                     ),
-                )
-            })?;
-        }
+                ));
+            }
+        },
         Ok(_) => {
             return Err(ImagodError::new(
                 imago_protocol::ErrorCode::BadRequest,
@@ -420,6 +445,7 @@ mod tests {
     use std::{
         fs,
         os::unix::fs::{FileTypeExt, PermissionsExt},
+        os::unix::net::UnixListener as StdUnixListener,
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -434,8 +460,8 @@ mod tests {
     #[tokio::test]
     async fn bind_control_listener_replaces_stale_socket_file() {
         let socket_path = unique_socket_path("stale-socket");
-        let stale_listener = std::os::unix::net::UnixListener::bind(&socket_path)
-            .expect("initial unix listener should bind");
+        let stale_listener =
+            StdUnixListener::bind(&socket_path).expect("initial unix listener should bind");
         drop(stale_listener);
         let metadata = fs::symlink_metadata(&socket_path).expect("stale socket should remain");
         assert!(
@@ -451,6 +477,21 @@ mod tests {
         );
         assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
         drop(rebound);
+        fs::remove_file(&socket_path).expect("socket file should be removed");
+    }
+
+    #[tokio::test]
+    async fn bind_control_listener_rejects_live_socket_path() {
+        let socket_path = unique_socket_path("live-socket");
+        let live_listener = StdUnixListener::bind(&socket_path).expect("listener should bind");
+
+        let err = bind_control_listener(&socket_path).expect_err("live socket must be rejected");
+        assert!(
+            err.message
+                .contains("already serving another imagod instance")
+        );
+
+        drop(live_listener);
         fs::remove_file(&socket_path).expect("socket file should be removed");
     }
 

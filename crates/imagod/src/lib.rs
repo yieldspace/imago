@@ -17,6 +17,7 @@ mod runner_runtime;
 mod shutdown;
 
 const STDIO_MESSAGE_TERMINATOR: [u8; 4] = 0u32.to_be_bytes();
+const PROXY_STDIO_MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RunMode {
@@ -257,11 +258,35 @@ where
             return Ok(Some(message));
         }
 
+        ensure_stdio_message_growth(message.len(), len)?;
         let mut payload = vec![0u8; len];
         input.read_exact(&mut payload).await?;
         message.extend_from_slice(&header);
         message.extend_from_slice(&payload);
     }
+}
+
+#[cfg(unix)]
+fn ensure_stdio_message_growth(
+    current_len: usize,
+    payload_len: usize,
+) -> Result<(), anyhow::Error> {
+    let next_frame_len = 4usize.checked_add(payload_len).ok_or_else(|| {
+        anyhow::anyhow!(
+            "proxy-stdio request exceeds max size {PROXY_STDIO_MAX_REQUEST_BYTES} bytes"
+        )
+    })?;
+    let projected_len = current_len.checked_add(next_frame_len).ok_or_else(|| {
+        anyhow::anyhow!(
+            "proxy-stdio request exceeds max size {PROXY_STDIO_MAX_REQUEST_BYTES} bytes"
+        )
+    })?;
+    if projected_len > PROXY_STDIO_MAX_REQUEST_BYTES {
+        return Err(anyhow::anyhow!(
+            "proxy-stdio request exceeds max size {PROXY_STDIO_MAX_REQUEST_BYTES} bytes"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -543,6 +568,24 @@ mod tests {
             expected.extend_from_slice(&STDIO_MESSAGE_TERMINATOR);
             assert_eq!(output.bytes(), expected);
             std::fs::remove_file(&socket_path).expect("socket file should be removed");
+        }
+
+        #[tokio::test]
+        async fn read_stdio_message_rejects_oversized_request_before_payload_allocation() {
+            let oversized_len = PROXY_STDIO_MAX_REQUEST_BYTES - 3;
+            let mut encoded = Vec::new();
+            encoded.extend_from_slice(&(oversized_len as u32).to_be_bytes());
+            let (mut writer, mut reader) = tokio::io::duplex(16);
+            writer
+                .write_all(&encoded)
+                .await
+                .expect("oversized header write should succeed");
+
+            let err = read_stdio_message(&mut reader)
+                .await
+                .expect_err("oversized request must be rejected");
+
+            assert!(err.to_string().contains("exceeds max size"));
         }
     }
 
