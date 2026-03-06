@@ -44,10 +44,9 @@ pub(crate) async fn load_or_refresh_cache_entry(
         )
     })?;
 
-    let expected_package = if dependency.wit.source_kind == plugin_sources::SourceKind::Path {
-        None
-    } else {
-        Some(dependency.name.as_str())
+    let expected_package = match dependency.wit.source_kind {
+        plugin_sources::SourceKind::Wit => Some(dependency.name.as_str()),
+        plugin_sources::SourceKind::Oci | plugin_sources::SourceKind::Path => None,
     };
     let materialized = plugin_sources::materialize_wit_source(
         project_root,
