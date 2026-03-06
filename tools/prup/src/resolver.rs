@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub struct ResolvedPolicy {
     pub base_ref: String,
     pub default_bump: String,
+    pub pre_1_0_breaking_bump: String,
     pub baseline_tag_required: bool,
     pub allow_dirty: bool,
     pub github_prerelease: bool,
@@ -77,6 +78,7 @@ pub fn resolve(config: &PrupConfig, workspace: &WorkspaceInfo) -> Result<Resolve
     Ok(ResolvedPolicy {
         base_ref: config.base_ref.clone(),
         default_bump: config.default_bump.clone(),
+        pre_1_0_breaking_bump: config.pre_1_0_breaking_bump.clone(),
         baseline_tag_required: config.baseline_tag_required,
         allow_dirty: config.allow_dirty,
         github_prerelease: config.github_prerelease,
@@ -216,6 +218,7 @@ mod tests {
             base_ref: "origin/main".to_string(),
             bump_strategy: "conventional_commits".to_string(),
             default_bump: "patch".to_string(),
+            pre_1_0_breaking_bump: "major".to_string(),
             baseline_tag_required: true,
             allow_dirty: false,
             github_prerelease: true,

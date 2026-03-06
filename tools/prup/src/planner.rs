@@ -154,6 +154,11 @@ pub fn build_plan_from_line_scopes(
 ) -> Result<ReleasePlan> {
     let default_bump = BumpLevel::from_config(&config.default_bump)?;
     let crate_map = config.crate_map();
+    let emit_tag_crates_by_line: BTreeMap<&str, &CratePolicy> = config
+        .emit_tag_crates()
+        .into_iter()
+        .map(|crate_policy| (crate_policy.line.as_str(), crate_policy))
+        .collect();
 
     let mut line_base_refs: BTreeMap<String, String> = BTreeMap::new();
     let mut changed_files_union: BTreeSet<String> = BTreeSet::new();
@@ -193,7 +198,17 @@ pub fn build_plan_from_line_scopes(
             continue;
         }
 
-        let bump = detect_bump_from_commits(&line_scope.commit_messages).unwrap_or(default_bump);
+        let bump = match detect_bump_from_commits(&line_scope.commit_messages) {
+            Some(detected) => normalize_bump_for_line_version(
+                config,
+                workspace,
+                workspace_version,
+                &emit_tag_crates_by_line,
+                &line_scope.line_id,
+                detected,
+            )?,
+            None => default_bump,
+        };
         line_bumps
             .entry(line_scope.line_id.clone())
             .and_modify(|current| *current = (*current).max(bump))
@@ -575,6 +590,65 @@ pub fn detect_bump_from_commits(messages: &[String]) -> Option<BumpLevel> {
     detected
 }
 
+fn normalize_bump_for_line_version(
+    config: &ResolvedPolicy,
+    workspace: &WorkspaceInfo,
+    workspace_version: &Version,
+    emit_tag_crates_by_line: &BTreeMap<&str, &CratePolicy>,
+    line_id: &str,
+    detected: BumpLevel,
+) -> Result<BumpLevel> {
+    let current_version = current_line_version(
+        workspace,
+        workspace_version,
+        emit_tag_crates_by_line,
+        line_id,
+    )?;
+    Ok(normalize_bump_for_version(
+        detected,
+        &current_version,
+        &config.pre_1_0_breaking_bump,
+    ))
+}
+
+fn current_line_version(
+    workspace: &WorkspaceInfo,
+    workspace_version: &Version,
+    emit_tag_crates_by_line: &BTreeMap<&str, &CratePolicy>,
+    line_id: &str,
+) -> Result<Version> {
+    let crate_policy = emit_tag_crates_by_line
+        .get(line_id)
+        .ok_or_else(|| anyhow!("line {} does not have an emit_tag crate", line_id))?;
+
+    match crate_policy.version_source {
+        VersionSource::Workspace => Ok(workspace_version.clone()),
+        VersionSource::Package => workspace
+            .package(&crate_policy.name)
+            .map(|package| package.version.clone())
+            .ok_or_else(|| anyhow!("package {} not found", crate_policy.name)),
+        VersionSource::None => Err(anyhow!(
+            "emit_tag crate {} cannot use version_source=none",
+            crate_policy.name
+        )),
+    }
+}
+
+fn normalize_bump_for_version(
+    detected: BumpLevel,
+    current_version: &Version,
+    pre_1_0_breaking_bump: &str,
+) -> BumpLevel {
+    if detected == BumpLevel::Major
+        && current_version.major == 0
+        && pre_1_0_breaking_bump == "minor"
+    {
+        BumpLevel::Minor
+    } else {
+        detected
+    }
+}
+
 fn impacted_source_lines(
     impacted_crates: &BTreeSet<String>,
     crate_map: &BTreeMap<&str, &CratePolicy>,
@@ -720,6 +794,7 @@ mod tests {
         ResolvedPolicy {
             base_ref: "origin/main".to_string(),
             default_bump: "patch".to_string(),
+            pre_1_0_breaking_bump: "minor".to_string(),
             baseline_tag_required: true,
             allow_dirty: false,
             github_prerelease: true,
@@ -1018,6 +1093,121 @@ mod tests {
             "feat!: change api".to_string(),
         ]);
         assert_eq!(detected, Some(BumpLevel::Major));
+    }
+
+    #[test]
+    fn pre_1_0_minor_policy_normalizes_major_bump() {
+        let normalized = normalize_bump_for_version(
+            BumpLevel::Major,
+            &Version::parse("0.1.1").expect("version should parse"),
+            "minor",
+        );
+        assert_eq!(normalized, BumpLevel::Minor);
+    }
+
+    #[test]
+    fn pre_1_0_major_policy_keeps_major_bump() {
+        let normalized = normalize_bump_for_version(
+            BumpLevel::Major,
+            &Version::parse("0.1.1").expect("version should parse"),
+            "major",
+        );
+        assert_eq!(normalized, BumpLevel::Major);
+    }
+
+    #[test]
+    fn post_1_0_breaking_stays_major() {
+        let normalized = normalize_bump_for_version(
+            BumpLevel::Major,
+            &Version::parse("1.2.3").expect("version should parse"),
+            "minor",
+        );
+        assert_eq!(normalized, BumpLevel::Major);
+    }
+
+    #[test]
+    fn breaking_commit_uses_minor_for_pre_1_0_lines_when_configured() {
+        let config = sample_policy();
+        let workspace = sample_workspace();
+        let workspace_version = Version::parse("0.1.0").expect("workspace version should parse");
+
+        let plan = build_plan_from_line_scopes(
+            &config,
+            &workspace,
+            &workspace_version,
+            &[
+                LineScopeInput {
+                    line_id: "imago-cli".to_string(),
+                    base_ref: "imago-v0.2.0".to_string(),
+                    changed_files: vec![PathBuf::from("imago-project-config/src/lib.rs")],
+                    commit_messages: vec!["feat!: change cli api".to_string()],
+                },
+                LineScopeInput {
+                    line_id: "imagod-daemon".to_string(),
+                    base_ref: "imagod-v0.1.0".to_string(),
+                    changed_files: vec![PathBuf::from("imagod-common/src/lib.rs")],
+                    commit_messages: vec!["BREAKING CHANGE: daemon api".to_string()],
+                },
+            ],
+        )
+        .expect("plan should build");
+
+        let line_bumps: BTreeMap<String, BumpLevel> = plan
+            .line_bumps
+            .iter()
+            .map(|item| (item.line_id.clone(), item.bump))
+            .collect();
+        assert_eq!(line_bumps.get("imago-cli"), Some(&BumpLevel::Minor));
+        assert_eq!(line_bumps.get("imagod-daemon"), Some(&BumpLevel::Minor));
+
+        let cli_update = plan
+            .package_version_updates
+            .iter()
+            .find(|update| update.crate_name == "imago-cli")
+            .expect("cli update should exist");
+        assert_eq!(cli_update.after, "0.3.0");
+        assert_eq!(cli_update.bump, BumpLevel::Minor);
+
+        let workspace_update = plan
+            .workspace_version_update
+            .as_ref()
+            .expect("workspace update should exist");
+        assert_eq!(workspace_update.after, "0.2.0");
+        assert_eq!(workspace_update.bump, BumpLevel::Minor);
+
+        let target =
+            build_release_pr_target(&config, &plan, "imagod-daemon").expect("target should build");
+        assert_eq!(target.bump, BumpLevel::Minor);
+        assert!(target.body.contains("- Bump: `minor`"));
+        assert_eq!(target.after_version, "0.2.0");
+    }
+
+    #[test]
+    fn default_major_policy_preserves_pre_1_0_major_bump() {
+        let mut config = sample_policy();
+        config.pre_1_0_breaking_bump = "major".to_string();
+        let workspace = sample_workspace();
+        let workspace_version = Version::parse("0.1.0").expect("workspace version should parse");
+
+        let plan = build_plan_from_line_scopes(
+            &config,
+            &workspace,
+            &workspace_version,
+            &[LineScopeInput {
+                line_id: "imagod-daemon".to_string(),
+                base_ref: "imagod-v0.1.0".to_string(),
+                changed_files: vec![PathBuf::from("imagod-common/src/lib.rs")],
+                commit_messages: vec!["feat!: change daemon api".to_string()],
+            }],
+        )
+        .expect("plan should build");
+
+        let workspace_update = plan
+            .workspace_version_update
+            .as_ref()
+            .expect("workspace update should exist");
+        assert_eq!(workspace_update.bump, BumpLevel::Major);
+        assert_eq!(workspace_update.after, "1.0.0");
     }
 
     #[test]

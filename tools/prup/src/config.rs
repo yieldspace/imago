@@ -42,6 +42,8 @@ pub struct PrupConfig {
     pub bump_strategy: String,
     #[serde(default = "default_bump")]
     pub default_bump: String,
+    #[serde(default = "default_pre_1_0_breaking_bump")]
+    pub pre_1_0_breaking_bump: String,
     #[serde(default = "default_true")]
     pub baseline_tag_required: bool,
     #[serde(default)]
@@ -140,6 +142,10 @@ fn default_bump_strategy() -> String {
 
 fn default_bump() -> String {
     "patch".to_string()
+}
+
+fn default_pre_1_0_breaking_bump() -> String {
+    "major".to_string()
 }
 
 const fn default_true() -> bool {
@@ -328,6 +334,13 @@ fn validate_config(config: &PrupConfig) -> Result<()> {
         ));
     }
 
+    if !matches!(config.pre_1_0_breaking_bump.as_str(), "minor" | "major") {
+        return Err(anyhow!(
+            "pre_1_0_breaking_bump must be one of minor/major, got {}",
+            config.pre_1_0_breaking_bump
+        ));
+    }
+
     Ok(())
 }
 
@@ -354,6 +367,7 @@ mod tests {
             base_ref: "origin/main".to_string(),
             bump_strategy: "conventional_commits".to_string(),
             default_bump: "patch".to_string(),
+            pre_1_0_breaking_bump: "major".to_string(),
             baseline_tag_required: true,
             allow_dirty: false,
             github_prerelease: true,
@@ -462,6 +476,27 @@ mod tests {
             error
                 .to_string()
                 .contains("shared_line references unknown line")
+        );
+    }
+
+    #[test]
+    fn accepts_minor_pre_1_0_breaking_bump() {
+        let mut config = sample_config();
+        config.pre_1_0_breaking_bump = "minor".to_string();
+        validate_config(&config).expect("minor pre_1_0_breaking_bump should validate");
+    }
+
+    #[test]
+    fn rejects_unknown_pre_1_0_breaking_bump() {
+        let mut config = sample_config();
+        config.pre_1_0_breaking_bump = "patch".to_string();
+
+        let error =
+            validate_config(&config).expect_err("invalid pre_1_0_breaking_bump should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("pre_1_0_breaking_bump must be one of minor/major")
         );
     }
 }
