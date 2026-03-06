@@ -16,7 +16,7 @@ concurrency:
 jobs:
   checks:
     name: checks
-    runs-on: imago-default-runner-set
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -25,8 +25,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Restore Rust cache
-        if: ${{ runner.environment != 'self-hosted' }}
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-deny-linux-v1
+          cache-targets: "false"
+          cache-bin: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@cargo-deny
@@ -36,7 +40,7 @@ jobs:
 
   advisories:
     name: advisories
-    runs-on: imago-default-runner-set
+    runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
       - name: Checkout
@@ -46,8 +50,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Restore Rust cache
-        if: ${{ runner.environment != 'self-hosted' }}
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-deny-linux-v1
+          cache-targets: "false"
+          cache-bin: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@cargo-deny

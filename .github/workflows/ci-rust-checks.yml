@@ -22,7 +22,7 @@ concurrency:
 jobs:
   changed:
     name: detect changes
-    runs-on: imago-default-runner-set
+    runs-on: ubuntu-24.04
     outputs:
       rust_related: ${{ steps.detect.outputs.rust_related }}
       workflow_related: ${{ steps.detect.outputs.workflow_related }}
@@ -79,7 +79,10 @@ jobs:
     name: rust checks
     needs: changed
     if: ${{ needs.changed.outputs.rust_related == 'true' || needs.changed.outputs.workflow_related == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
-    runs-on: imago-default-runner-set
+    runs-on: ubuntu-24.04
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -90,8 +93,15 @@ jobs:
           components: clippy,rustfmt
 
       - name: Restore Rust cache
-        if: ${{ runner.environment != 'self-hosted' }}
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-rust-checks-linux-v1
+          cache-targets: "false"
+          cache-bin: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' }}
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
@@ -118,13 +128,17 @@ jobs:
       - name: cargo doc
         run: cargo doc --workspace --no-deps
 
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
   checks:
     name: checks
     needs:
       - changed
       - rust_checks
     if: always()
-    runs-on: imago-default-runner-set
+    runs-on: ubuntu-24.04
     steps:
       - name: Evaluate required checks
         shell: bash

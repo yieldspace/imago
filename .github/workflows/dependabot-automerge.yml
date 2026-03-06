@@ -19,7 +19,7 @@ jobs:
   automerge:
     name: enable auto-merge for dependabot patch updates
     if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.state == 'open' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Fetch Dependabot metadata
         id: metadata

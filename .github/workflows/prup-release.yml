@@ -17,7 +17,7 @@ concurrency:
 jobs:
   prup-release:
     name: prup release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -35,7 +35,7 @@ jobs:
     name: prup release-pr
     if: github.event_name == 'push'
     needs: prup-release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

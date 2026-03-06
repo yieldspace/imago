@@ -22,10 +22,13 @@ jobs:
       matrix:
         include:
           - name: ubuntu
-            runs_on: imago-default-runner-set
+            runs_on: ubuntu-24.04
           # Disabled on 2026-02-25 by request: macOS e2e is temporarily turned off.
           # - name: macos
           #   runs_on: macos-latest
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -36,8 +39,15 @@ jobs:
           targets: wasm32-wasip2
 
       - name: Restore Rust cache
-        if: ${{ runner.environment != 'self-hosted' }}
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-rust-e2e-${{ matrix.name }}-v1
+          cache-targets: "false"
+          cache-bin: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Guard ignored e2e tests in root package
         shell: bash
@@ -73,3 +83,7 @@ jobs:
 
       - name: Run ignored e2e tests
         run: cargo test -p imago --features e2e -- --ignored
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true

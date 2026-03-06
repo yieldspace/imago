@@ -22,7 +22,7 @@ jobs:
   pr_body_lint:
     name: pr body lint
     if: ${{ github.event.pull_request.user.login != 'dependabot[bot]' && !contains(github.event.pull_request.labels.*.name, 'release') }}
-    runs-on: imago-default-runner-set
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -36,7 +36,7 @@ jobs:
   allow_dependabot:
     name: allow dependabot
     if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
-    runs-on: imago-default-runner-set
+    runs-on: ubuntu-24.04
     steps:
       - name: Allow dependabot pull request
         run: echo "Dependabot pull request is exempt from PR body lint."
@@ -44,7 +44,7 @@ jobs:
   allow_release:
     name: allow release
     if: ${{ github.event.pull_request.user.login != 'dependabot[bot]' && contains(github.event.pull_request.labels.*.name, 'release') }}
-    runs-on: imago-default-runner-set
+    runs-on: ubuntu-24.04
     steps:
       - name: Allow release-labeled pull request
         run: echo "Release-labeled pull request is exempt from PR body lint."
@@ -56,7 +56,7 @@ jobs:
       - allow_dependabot
       - allow_release
     if: always()
-    runs-on: imago-default-runner-set
+    runs-on: ubuntu-24.04
     steps:
       - name: Evaluate required checks
         shell: bash
