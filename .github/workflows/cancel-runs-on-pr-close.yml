@@ -16,7 +16,7 @@ concurrency:
 jobs:
   cancel:
     name: cancel runs for closed pull request
-    runs-on: imago-dind-runner-set
+    runs-on: ubuntu-24.04
     steps:
       - name: Cancel queued and running pull_request runs for this PR
         uses: actions/github-script@v8

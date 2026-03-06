@@ -22,7 +22,7 @@ concurrency:
 jobs:
   publish:
     name: publish native plugin WIT
-    runs-on: imago-default-runner-set
+    runs-on: ubuntu-24.04
     env:
       WKG_OCI_USERNAME: ${{ github.actor }}
       WKG_OCI_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -113,12 +113,14 @@ jobs:
           owner_lc="${GITHUB_REPOSITORY_OWNER,,}"
           reference="ghcr.io/${owner_lc}/${wit_package_oci}:${tag_version}"
 
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "plugin_dir=${plugin_dir}" >> "$GITHUB_OUTPUT"
-          echo "tag_version=${tag_version}" >> "$GITHUB_OUTPUT"
-          echo "wit_package=${wit_package}" >> "$GITHUB_OUTPUT"
-          echo "wit_package_oci=${wit_package_oci}" >> "$GITHUB_OUTPUT"
-          echo "reference=${reference}" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=${tag}"
+            echo "plugin_dir=${plugin_dir}"
+            echo "tag_version=${tag_version}"
+            echo "wit_package=${wit_package}"
+            echo "wit_package_oci=${wit_package_oci}"
+            echo "reference=${reference}"
+          } >> "$GITHUB_OUTPUT"
           echo "Resolved publish target: ${plugin_dir} -> ${reference}"
 
       - name: Verify plugin wkg.lock

@@ -22,7 +22,7 @@ concurrency:
 jobs:
   changed:
     name: detect changes
-    runs-on: imago-default-runner-set
+    runs-on: ubuntu-24.04
     outputs:
       wkg_related: ${{ steps.detect.outputs.wkg_related }}
       workflow_related: ${{ steps.detect.outputs.workflow_related }}
@@ -86,7 +86,7 @@ jobs:
     name: wkg checks
     needs: changed
     if: ${{ needs.changed.outputs.wkg_related == 'true' || needs.changed.outputs.workflow_related == 'true' || github.event_name == 'workflow_dispatch' }}
-    runs-on: imago-default-runner-set
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -105,7 +105,7 @@ jobs:
       - changed
       - wkg_checks
     if: always()
-    runs-on: imago-default-runner-set
+    runs-on: ubuntu-24.04
     steps:
       - name: Evaluate required checks
         shell: bash

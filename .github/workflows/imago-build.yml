@@ -12,6 +12,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/imago-build.yml
+      - .github/scripts/setup_linux_cross_build_env.sh
 
 permissions:
   contents: read
@@ -25,33 +26,36 @@ jobs:
     name: Build (${{ matrix.target }})
     if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'imago-v') || startsWith(github.event.release.tag_name, 'imagod-v')
     runs-on: ${{ matrix.runs_on }}
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     strategy:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             use_zig: false
-            runs_on: imago-cross-runner-set
+            runs_on: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
             use_zig: false
-            runs_on: imago-cross-runner-set
+            runs_on: ubuntu-24.04
           - target: armv7-unknown-linux-gnueabihf
             use_zig: false
-            runs_on: imago-cross-runner-set
+            runs_on: ubuntu-24.04
           - target: riscv64gc-unknown-linux-gnu
             use_zig: false
-            runs_on: imago-cross-runner-set
+            runs_on: ubuntu-24.04
           - target: aarch64-unknown-linux-musl
             use_zig: true
-            runs_on: imago-cross-runner-set
+            runs_on: ubuntu-24.04
           - target: x86_64-unknown-linux-musl
             use_zig: true
-            runs_on: imago-cross-runner-set
+            runs_on: ubuntu-24.04
           - target: armv7-unknown-linux-musleabihf
             use_zig: true
-            runs_on: imago-cross-runner-set
+            runs_on: ubuntu-24.04
           - target: riscv64gc-unknown-linux-musl
             use_zig: true
-            runs_on: imago-cross-runner-set
+            runs_on: ubuntu-24.04
           - target: x86_64-apple-darwin
             use_zig: false
             runs_on: macos-latest
@@ -68,6 +72,25 @@ jobs:
         with:
           toolchain: '1.93.1'
           targets: ${{ matrix.target }}
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: imago-build-${{ runner.os }}-v1
+          cache-targets: "false"
+          cache-bin: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || github.event_name == 'release' }}
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Setup Linux cross build prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          IMAGO_ENABLE_ZIG_SETUP: ${{ matrix.use_zig && 'true' || 'false' }}
+          IMAGO_EXPECTED_TARGET: ${{ matrix.target }}
+        run: bash ./.github/scripts/setup_linux_cross_build_env.sh
 
       - name: Build GNU target (main/PR)
         if: ${{ !(matrix.use_zig) && github.event_name != 'release' }}
@@ -164,12 +187,16 @@ jobs:
           path: dist/*
           retention-days: 7
 
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
   upload-release-assets:
     name: Upload release assets
     needs:
       - build
     if: github.event_name == 'release' && (startsWith(github.event.release.tag_name, 'imago-v') || startsWith(github.event.release.tag_name, 'imagod-v')) && needs.build.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       actions: read
