@@ -142,12 +142,34 @@ pub struct ServiceLogEvent {
     pub timestamp_unix_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Snapshot payload returned for a logs subscription request.
+pub enum ServiceLogSnapshot {
+    Bytes(Vec<u8>),
+    Events(Vec<ServiceLogEvent>),
+}
+
+impl ServiceLogSnapshot {
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Bytes(bytes) => Some(bytes),
+            Self::Events(_) => None,
+        }
+    }
+
+    pub fn as_events(&self) -> Option<&[ServiceLogEvent]> {
+        match self {
+            Self::Bytes(_) => None,
+            Self::Events(events) => Some(events),
+        }
+    }
+}
+
 #[derive(Debug)]
 /// Result returned for a logs subscription request.
 pub struct ServiceLogSubscription {
     pub service_name: String,
-    pub snapshot_bytes: Vec<u8>,
-    pub snapshot_events: Vec<ServiceLogEvent>,
+    pub snapshot: ServiceLogSnapshot,
     pub receiver: Option<broadcast::Receiver<ServiceLogEvent>>,
 }
 
@@ -865,6 +887,7 @@ impl ServiceSupervisor {
         service_name: &str,
         tail_lines: u32,
         follow: bool,
+        with_timestamp: bool,
     ) -> Result<ServiceLogSubscription, ImagodError> {
         let running_subscription = {
             let inner = self.inner.read().await;
@@ -882,15 +905,18 @@ impl ServiceSupervisor {
         };
 
         if let Some((snapshot_source, receiver)) = running_subscription {
-            let (snapshot_bytes, snapshot_events) = {
+            let snapshot = {
                 let buffer = snapshot_source.lock().await;
-                buffer.tail_snapshot(tail_lines)
+                if with_timestamp {
+                    ServiceLogSnapshot::Events(buffer.tail_snapshot_events(tail_lines))
+                } else {
+                    ServiceLogSnapshot::Bytes(buffer.tail_snapshot_bytes(tail_lines))
+                }
             };
 
             return Ok(ServiceLogSubscription {
                 service_name: service_name.to_string(),
-                snapshot_bytes,
-                snapshot_events,
+                snapshot,
                 receiver,
             });
         }
@@ -903,8 +929,8 @@ impl ServiceSupervisor {
             ));
         }
 
-        let retained_snapshot = self.read_retained_snapshot(service_name).await?;
-        let (retained_snapshot, retained_events) = retained_snapshot.ok_or_else(|| {
+        let retained_events = self.read_retained_events(service_name).await?;
+        let retained_events = retained_events.ok_or_else(|| {
             ImagodError::new(
                 ErrorCode::NotFound,
                 STAGE_LOGS,
@@ -912,17 +938,21 @@ impl ServiceSupervisor {
             )
         })?;
 
-        let snapshot_bytes = tail_lines_from_bytes(&retained_snapshot, tail_lines);
-        let snapshot_events = tail_events_from_snapshot_bytes(
-            &retained_events,
-            &retained_snapshot,
-            snapshot_bytes.len(),
-        );
+        let snapshot = if with_timestamp {
+            ServiceLogSnapshot::Events(tail_snapshot_events_from_events(
+                &retained_events,
+                tail_lines,
+            ))
+        } else {
+            ServiceLogSnapshot::Bytes(tail_snapshot_bytes_from_events(
+                &retained_events,
+                tail_lines,
+            ))
+        };
 
         Ok(ServiceLogSubscription {
             service_name: service_name.to_string(),
-            snapshot_bytes,
-            snapshot_events,
+            snapshot,
             receiver: None,
         })
     }
@@ -1306,8 +1336,7 @@ impl ServiceSupervisor {
     ) {
         let snapshot_events = {
             let buffer = composite_log.lock().await;
-            let (_, events) = buffer.snapshot();
-            events
+            buffer.snapshot_events()
         };
 
         if let Err(err) = self
@@ -1321,15 +1350,15 @@ impl ServiceSupervisor {
         }
     }
 
-    async fn read_retained_snapshot(
+    async fn read_retained_events(
         &self,
         service_name: &str,
-    ) -> Result<Option<(Vec<u8>, Vec<ServiceLogEvent>)>, ImagodError> {
+    ) -> Result<Option<Vec<ServiceLogEvent>>, ImagodError> {
         let retained_logs = self.retained_logs.clone();
         let service_name = service_name.to_string();
         tokio::task::spawn_blocking(move || {
             let retained = retained_logs.blocking_lock();
-            retained.snapshot(&service_name)
+            retained.snapshot_events(&service_name)
         })
         .await
         .map_err(|err| {
@@ -1442,8 +1471,7 @@ async fn attach_start_failure_wasm_log_details(
 
     let snapshot_events = {
         let buffer = log_buffers.composite_log.lock().await;
-        let (_, events) = buffer.snapshot();
-        events
+        buffer.snapshot_events()
     };
 
     let stdout = collect_stream_snapshot_bytes(&snapshot_events, ServiceLogStream::Stdout);
@@ -1531,65 +1559,20 @@ fn spawn_log_drain<R>(
     );
 }
 
-fn tail_lines_from_bytes(bytes: &[u8], tail_lines: u32) -> Vec<u8> {
-    log_buffer::tail_lines_from_bytes(bytes, tail_lines)
+#[cfg(test)]
+fn snapshot_bytes_from_events(events: &[ServiceLogEvent]) -> Vec<u8> {
+    log_buffer::snapshot_bytes_from_events(events)
 }
 
-fn tail_events_from_snapshot_bytes(
+fn tail_snapshot_bytes_from_events(events: &[ServiceLogEvent], tail_lines: u32) -> Vec<u8> {
+    log_buffer::tail_snapshot_bytes_from_events(events, tail_lines)
+}
+
+fn tail_snapshot_events_from_events(
     events: &[ServiceLogEvent],
-    full_snapshot_bytes: &[u8],
-    tailed_bytes_len: usize,
+    tail_lines: u32,
 ) -> Vec<ServiceLogEvent> {
-    if tailed_bytes_len == 0 {
-        return Vec::new();
-    }
-
-    let start = full_snapshot_bytes.len().saturating_sub(tailed_bytes_len);
-    let mut skip = start;
-    let mut remaining = tailed_bytes_len;
-    let mut out = Vec::new();
-
-    for event in events {
-        if remaining == 0 {
-            break;
-        }
-        if skip >= event.bytes.len() {
-            skip = skip.saturating_sub(event.bytes.len());
-            continue;
-        }
-
-        let start = skip;
-        let available = event.bytes.len().saturating_sub(start);
-        let take = available.min(remaining);
-        if take == 0 {
-            continue;
-        }
-
-        out.push(ServiceLogEvent {
-            stream: event.stream,
-            bytes: event.bytes[start..start + take].to_vec(),
-            timestamp_unix_ms: event.timestamp_unix_ms,
-        });
-        skip = 0;
-        remaining = remaining.saturating_sub(take);
-    }
-
-    if remaining == 0 {
-        return out;
-    }
-
-    // Fall back to preserving exact tail bytes even when event boundaries are inconsistent.
-    vec![ServiceLogEvent {
-        stream: events
-            .last()
-            .map(|event| event.stream)
-            .unwrap_or(ServiceLogStream::Stdout),
-        bytes: full_snapshot_bytes[start..].to_vec(),
-        timestamp_unix_ms: events
-            .last()
-            .map(|event| event.timestamp_unix_ms)
-            .unwrap_or(0),
-    }]
+    log_buffer::tail_snapshot_events_from_events(events, tail_lines)
 }
 
 /// Sends kill signal to child and waits for termination.
@@ -1740,6 +1723,18 @@ mod tests {
         PathBuf::from(format!("/tmp/iss-{prefix}-{id}"))
     }
 
+    fn expect_snapshot_bytes(snapshot: &ServiceLogSnapshot) -> &[u8] {
+        snapshot
+            .as_bytes()
+            .expect("snapshot should be bytes-based for this assertion")
+    }
+
+    fn expect_snapshot_events(snapshot: &ServiceLogSnapshot) -> &[ServiceLogEvent] {
+        snapshot
+            .as_events()
+            .expect("snapshot should be event-based for this assertion")
+    }
+
     fn new_running_service(
         child: Child,
         runner_id: &str,
@@ -1798,10 +1793,19 @@ mod tests {
 
     #[test]
     fn bounded_log_buffer_keeps_latest_bytes_only() {
-        let mut buffer = log_buffer::BoundedLogBuffer::new(5);
-        buffer.push(b"abc");
-        buffer.push(b"def");
-        assert_eq!(buffer.len(), 5);
+        let mut buffer = log_buffer::BoundedLogEventBuffer::new(5);
+        buffer.push(ServiceLogEvent {
+            stream: ServiceLogStream::Stdout,
+            bytes: b"abc".to_vec(),
+            timestamp_unix_ms: 1,
+        });
+        buffer.push(ServiceLogEvent {
+            stream: ServiceLogStream::Stdout,
+            bytes: b"def".to_vec(),
+            timestamp_unix_ms: 2,
+        });
+        assert_eq!(buffer.total_bytes(), 5);
+        assert_eq!(buffer.snapshot_bytes(), b"bcdef");
     }
 
     #[tokio::test]
@@ -1920,17 +1924,31 @@ mod tests {
     }
 
     #[test]
-    fn tail_lines_from_bytes_returns_last_n_lines() {
-        let value = b"l1\nl2\nl3\n";
-        assert_eq!(tail_lines_from_bytes(value, 1), b"l3\n");
-        assert_eq!(tail_lines_from_bytes(value, 2), b"l2\nl3\n");
-        assert_eq!(tail_lines_from_bytes(value, 0), b"");
+    fn tail_snapshot_bytes_from_events_returns_last_n_lines() {
+        let events = vec![
+            ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"l1\n".to_vec(),
+                timestamp_unix_ms: 1,
+            },
+            ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"l2\n".to_vec(),
+                timestamp_unix_ms: 2,
+            },
+            ServiceLogEvent {
+                stream: ServiceLogStream::Stdout,
+                bytes: b"l3\n".to_vec(),
+                timestamp_unix_ms: 3,
+            },
+        ];
+        assert_eq!(tail_snapshot_bytes_from_events(&events, 1), b"l3\n");
+        assert_eq!(tail_snapshot_bytes_from_events(&events, 2), b"l2\nl3\n");
+        assert_eq!(tail_snapshot_bytes_from_events(&events, 0), b"");
     }
 
     #[test]
-    fn tail_events_from_snapshot_bytes_preserves_timestamp_for_tailed_content() {
-        let full = b"l1\nl2\nl3\n".to_vec();
-        let tailed = tail_lines_from_bytes(&full, 2);
+    fn tail_snapshot_events_from_events_preserves_timestamp_for_tailed_content() {
         let events = vec![
             ServiceLogEvent {
                 stream: ServiceLogStream::Stdout,
@@ -1949,11 +1967,9 @@ mod tests {
             },
         ];
 
-        let tailed_events = tail_events_from_snapshot_bytes(&events, &full, tailed.len());
-        let joined = tailed_events
-            .iter()
-            .flat_map(|event| event.bytes.clone())
-            .collect::<Vec<_>>();
+        let tailed = tail_snapshot_bytes_from_events(&events, 2);
+        let tailed_events = tail_snapshot_events_from_events(&events, 2);
+        let joined = snapshot_bytes_from_events(&tailed_events);
         let timestamps = tailed_events
             .iter()
             .map(|event| event.timestamp_unix_ms)
@@ -1964,22 +1980,15 @@ mod tests {
     }
 
     #[test]
-    fn tail_events_from_snapshot_bytes_preserves_full_snapshot_bytes_when_events_are_shorter() {
-        let full = b"abc\ndef\n".to_vec();
+    fn tail_snapshot_events_from_events_preserves_partial_event_timestamp() {
         let events = vec![ServiceLogEvent {
             stream: ServiceLogStream::Stdout,
-            bytes: b"def\n".to_vec(),
+            bytes: b"abc\ndef\n".to_vec(),
             timestamp_unix_ms: 10,
         }];
 
-        let tailed_events = tail_events_from_snapshot_bytes(&events, &full, full.len());
-        assert_eq!(
-            tailed_events
-                .iter()
-                .flat_map(|event| event.bytes.clone())
-                .collect::<Vec<_>>(),
-            full
-        );
+        let tailed_events = tail_snapshot_events_from_events(&events, 1);
+        assert_eq!(snapshot_bytes_from_events(&tailed_events), b"def\n");
         assert_eq!(tailed_events.len(), 1);
         assert_eq!(tailed_events[0].timestamp_unix_ms, 10);
     }
@@ -2035,18 +2044,10 @@ mod tests {
             .await
             .expect("force stop should succeed");
         let subscription = supervisor
-            .open_logs(service_name, 10, false)
+            .open_logs(service_name, 10, false, false)
             .await
             .expect("retained logs should remain available");
-        assert_eq!(subscription.snapshot_bytes.len(), 900);
-        assert_eq!(
-            subscription
-                .snapshot_events
-                .iter()
-                .flat_map(|event| event.bytes.clone())
-                .collect::<Vec<_>>(),
-            subscription.snapshot_bytes
-        );
+        assert_eq!(expect_snapshot_bytes(&subscription.snapshot).len(), 900);
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2115,29 +2116,39 @@ mod tests {
             inner.insert(service_name.to_string(), service);
         }
 
-        let subscription = supervisor
-            .open_logs(service_name, 2, true)
+        let byte_subscription = supervisor
+            .open_logs(service_name, 2, true, false)
             .await
             .expect("open_logs should succeed");
-        assert_eq!(subscription.service_name, service_name);
-        assert_eq!(subscription.snapshot_bytes, b"b\nc\n");
+        assert_eq!(byte_subscription.service_name, service_name);
         assert_eq!(
-            subscription
-                .snapshot_events
-                .iter()
-                .flat_map(|event| event.bytes.clone())
-                .collect::<Vec<_>>(),
-            subscription.snapshot_bytes
+            expect_snapshot_bytes(&byte_subscription.snapshot),
+            b"b\nc\n"
+        );
+        assert!(
+            byte_subscription.receiver.is_some(),
+            "follow should subscribe"
+        );
+
+        let event_subscription = supervisor
+            .open_logs(service_name, 2, true, true)
+            .await
+            .expect("timestamped open_logs should succeed");
+        assert_eq!(
+            snapshot_bytes_from_events(expect_snapshot_events(&event_subscription.snapshot)),
+            b"b\nc\n"
         );
         assert_eq!(
-            subscription
-                .snapshot_events
+            expect_snapshot_events(&event_subscription.snapshot)
                 .iter()
                 .map(|event| event.timestamp_unix_ms)
                 .collect::<Vec<_>>(),
             vec![11, 12]
         );
-        assert!(subscription.receiver.is_some(), "follow should subscribe");
+        assert!(
+            event_subscription.receiver.is_some(),
+            "follow should subscribe"
+        );
 
         stop_running_service_best_effort(&supervisor.inner, service_name).await;
         let _ = std::fs::remove_dir_all(&root);
@@ -2172,7 +2183,7 @@ mod tests {
         let held_snapshot_lock = composite_log.lock().await;
         let open_task = {
             let supervisor = supervisor.clone();
-            tokio::spawn(async move { supervisor.open_logs(service_name, 10, true).await })
+            tokio::spawn(async move { supervisor.open_logs(service_name, 10, true, false).await })
         };
 
         time::timeout(Duration::from_millis(200), async {
@@ -2227,32 +2238,36 @@ mod tests {
             )
             .expect("retained upsert should succeed");
 
-        let subscription = supervisor
-            .open_logs(service_name, 2, true)
+        let byte_subscription = supervisor
+            .open_logs(service_name, 2, true, false)
             .await
             .expect("retained open_logs should succeed");
-        assert_eq!(subscription.service_name, service_name);
-        assert_eq!(subscription.snapshot_bytes, b"old-b\nold-c\n");
+        assert_eq!(byte_subscription.service_name, service_name);
         assert_eq!(
-            subscription
-                .snapshot_events
-                .iter()
-                .flat_map(|event| event.bytes.clone())
-                .collect::<Vec<_>>(),
-            subscription.snapshot_bytes
+            expect_snapshot_bytes(&byte_subscription.snapshot),
+            b"old-b\nold-c\n"
+        );
+        assert!(
+            byte_subscription.receiver.is_none(),
+            "retained logs should not provide follow receiver"
+        );
+
+        let event_subscription = supervisor
+            .open_logs(service_name, 2, true, true)
+            .await
+            .expect("timestamped retained open_logs should succeed");
+        assert_eq!(
+            snapshot_bytes_from_events(expect_snapshot_events(&event_subscription.snapshot)),
+            b"old-b\nold-c\n"
         );
         assert_eq!(
-            subscription
-                .snapshot_events
+            expect_snapshot_events(&event_subscription.snapshot)
                 .iter()
                 .map(|event| event.timestamp_unix_ms)
                 .collect::<Vec<_>>(),
             vec![22, 23]
         );
-        assert!(
-            subscription.receiver.is_none(),
-            "retained logs should not provide follow receiver"
-        );
+        assert!(event_subscription.receiver.is_none());
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2273,7 +2288,7 @@ mod tests {
 
         let _stopping_guard = supervisor.begin_stop_service(service_name);
         let err = supervisor
-            .open_logs(service_name, 10, true)
+            .open_logs(service_name, 10, true, false)
             .await
             .expect_err("stopping service should not serve stale retained logs");
         assert_eq!(err.code, ErrorCode::NotFound);
@@ -2321,10 +2336,13 @@ mod tests {
         }
 
         let subscription = supervisor
-            .open_logs(service_name, 10, true)
+            .open_logs(service_name, 10, true, false)
             .await
             .expect("open_logs should prefer running service");
-        assert_eq!(subscription.snapshot_bytes, b"running-a\nrunning-b\n");
+        assert_eq!(
+            expect_snapshot_bytes(&subscription.snapshot),
+            b"running-a\nrunning-b\n"
+        );
         assert!(
             subscription.receiver.is_some(),
             "running logs should provide follow receiver"
@@ -2637,10 +2655,13 @@ mod tests {
         drop(inner);
 
         let retained = supervisor
-            .open_logs(service_name, 10, false)
+            .open_logs(service_name, 10, false, false)
             .await
             .expect("reclaimed service logs should be retained");
-        assert_eq!(retained.snapshot_bytes, b"reclaim-a\nreclaim-b\n");
+        assert_eq!(
+            expect_snapshot_bytes(&retained.snapshot),
+            b"reclaim-a\nreclaim-b\n"
+        );
         assert!(retained.receiver.is_none());
 
         supervisor.release_start(service_name).await;
@@ -3156,10 +3177,13 @@ mod tests {
             .await
             .expect("force stop should succeed");
         let subscription = supervisor
-            .open_logs(service_name, 10, true)
+            .open_logs(service_name, 10, true, false)
             .await
             .expect("retained logs should be available");
-        assert_eq!(subscription.snapshot_bytes, b"line-a\nline-b\n");
+        assert_eq!(
+            expect_snapshot_bytes(&subscription.snapshot),
+            b"line-a\nline-b\n"
+        );
         assert!(
             subscription.receiver.is_none(),
             "retained logs should not include follow receiver"
@@ -3214,10 +3238,13 @@ mod tests {
         assert_eq!(err.code, ErrorCode::NotFound);
 
         let subscription = supervisor
-            .open_logs(service_name, 10, true)
+            .open_logs(service_name, 10, true, false)
             .await
             .expect("retained logs should remain available");
-        assert_eq!(subscription.snapshot_bytes, b"done-a\ndone-b\n");
+        assert_eq!(
+            expect_snapshot_bytes(&subscription.snapshot),
+            b"done-a\ndone-b\n"
+        );
         assert!(subscription.receiver.is_none());
 
         let _ = std::fs::remove_dir_all(&root);
@@ -3713,10 +3740,13 @@ mod tests {
         supervisor.reap_finished().await;
 
         let subscription = supervisor
-            .open_logs(service_name, 10, true)
+            .open_logs(service_name, 10, true, false)
             .await
             .expect("reap should retain logs");
-        assert_eq!(subscription.snapshot_bytes, b"reap-a\nreap-b\n");
+        assert_eq!(
+            expect_snapshot_bytes(&subscription.snapshot),
+            b"reap-a\nreap-b\n"
+        );
         assert!(subscription.receiver.is_none());
 
         let _ = std::fs::remove_dir_all(&root);
@@ -3763,10 +3793,13 @@ mod tests {
         supervisor.reap_finished_service(service_name).await;
 
         let subscription = supervisor
-            .open_logs(service_name, 10, false)
+            .open_logs(service_name, 10, false, false)
             .await
             .expect("single-service reap should retain logs");
-        assert_eq!(subscription.snapshot_bytes, b"single-a\nsingle-b\n");
+        assert_eq!(
+            expect_snapshot_bytes(&subscription.snapshot),
+            b"single-a\nsingle-b\n"
+        );
         assert!(subscription.receiver.is_none());
 
         let _ = std::fs::remove_dir_all(&root);

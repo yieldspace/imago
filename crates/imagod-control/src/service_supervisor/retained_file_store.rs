@@ -21,7 +21,6 @@ use super::{STAGE_LOGS, ServiceLogEvent, ServiceLogStream};
 
 const STORE_FILE_EXTENSION: &str = "cbor";
 const STORED_RETAINED_LOG_VERSION: u32 = 1;
-type RetainedSnapshot = (Vec<u8>, Vec<ServiceLogEvent>);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct StoredRetainedLog {
@@ -166,10 +165,10 @@ impl RetainedFileLogStore {
         self.evict_if_needed()
     }
 
-    pub(super) fn snapshot(
+    pub(super) fn snapshot_events(
         &self,
         service_name: &str,
-    ) -> Result<Option<RetainedSnapshot>, ImagodError> {
+    ) -> Result<Option<Vec<ServiceLogEvent>>, ImagodError> {
         let Some(entry) = self.entries.get(service_name) else {
             return Ok(None);
         };
@@ -204,11 +203,7 @@ impl RetainedFileLogStore {
                 timestamp_unix_ms: event.timestamp_unix_ms,
             })
             .collect();
-        let mut snapshot_bytes = Vec::new();
-        for event in &events {
-            snapshot_bytes.extend_from_slice(&event.bytes);
-        }
-        Ok(Some((snapshot_bytes, events)))
+        Ok(Some(events))
     }
 
     #[cfg(test)]
@@ -486,8 +481,8 @@ mod tests {
             .upsert("svc-a", &events)
             .expect("upsert should persist snapshot");
 
-        let (snapshot_bytes, loaded_events) = store
-            .snapshot("svc-a")
+        let loaded_events = store
+            .snapshot_events("svc-a")
             .expect("snapshot read should succeed")
             .expect("snapshot should exist");
         assert_eq!(loaded_events, events);
@@ -496,7 +491,7 @@ mod tests {
                 .iter()
                 .flat_map(|event| event.bytes.clone())
                 .collect::<Vec<_>>(),
-            snapshot_bytes
+            b"a-out\na-err\n"
         );
 
         let _ = fs::remove_dir_all(root);
@@ -515,11 +510,15 @@ mod tests {
             .upsert("svc-a", &sample_events("new", 2))
             .expect("second upsert should replace existing file");
 
-        let (snapshot_bytes, _) = store
-            .snapshot("svc-a")
+        let snapshot_events = store
+            .snapshot_events("svc-a")
             .expect("snapshot read should succeed")
             .expect("snapshot should exist");
-        assert!(String::from_utf8_lossy(&snapshot_bytes).contains("new-out"));
+        let joined = snapshot_events
+            .iter()
+            .flat_map(|event| event.bytes.clone())
+            .collect::<Vec<_>>();
+        assert!(String::from_utf8_lossy(&joined).contains("new-out"));
 
         let lingering_tmp = fs::read_dir(store.retained_dir())
             .expect("retained dir should be readable")
@@ -541,7 +540,7 @@ mod tests {
         fs::write(&path, b"not-cbor").expect("corrupt payload should be written");
 
         let err = store
-            .snapshot("svc-a")
+            .snapshot_events("svc-a")
             .expect_err("corrupt payload should map to internal error");
         assert_eq!(err.code, ErrorCode::Internal);
         assert_eq!(err.stage, STAGE_LOGS);
@@ -587,7 +586,7 @@ mod tests {
         );
         assert!(
             store
-                .snapshot("svc-c")
+                .snapshot_events("svc-c")
                 .expect("latest snapshot read should succeed")
                 .is_some(),
             "newest snapshot should remain after eviction"
@@ -613,10 +612,14 @@ mod tests {
         let store = RetainedFileLogStore::new(&root, 4096).expect("store should re-init");
         let names = store.service_names();
         assert_eq!(names, vec!["svc-persist".to_string()]);
-        let (bytes, events) = store
-            .snapshot("svc-persist")
+        let events = store
+            .snapshot_events("svc-persist")
             .expect("snapshot read should succeed")
             .expect("snapshot should exist");
+        let bytes = events
+            .iter()
+            .flat_map(|event| event.bytes.clone())
+            .collect::<Vec<_>>();
         assert!(
             String::from_utf8_lossy(&bytes).contains("persist-out"),
             "persisted bytes should be available after restart"
@@ -649,7 +652,7 @@ mod tests {
         );
         assert!(
             store
-                .snapshot("svc-a")
+                .snapshot_events("svc-a")
                 .expect("snapshot read should succeed")
                 .is_some(),
             "retained snapshot should survive startup cleanup"

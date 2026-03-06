@@ -23,6 +23,6 @@ pub use operation_state::{OperationManager, SpawnTransition};
 pub use orchestrator::{Orchestrator, RestoreActiveServicesSummary, RestoreFailure};
 /// Re-exports for service supervision primitives.
 pub use service_supervisor::{
-    RunningStatus, ServiceLaunch, ServiceLogEvent, ServiceLogStream, ServiceLogSubscription,
-    ServiceSupervisor,
+    RunningStatus, ServiceLaunch, ServiceLogEvent, ServiceLogSnapshot, ServiceLogStream,
+    ServiceLogSubscription, ServiceSupervisor,
 };
