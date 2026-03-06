@@ -36,6 +36,8 @@ flowchart LR
 - release PR では version bump 後に `cargo check --workspace` を実行し、`schemas/imago.schema.json` / `schemas/imagod.schema.json` の生成差分も同じ commit に含めます。
   特に `imagod` line は `server_version` default が crate version に追従するため、`schemas/imagod.schema.json` が更新対象になりえます。
 - 設定の source-of-truth は root `Cargo.toml` の `[workspace.metadata.prup]` です。
+- imago は pre-1.0 運用中のため、`pre_1_0_breaking_bump = "minor"` を設定しています。
+  `feat!:` / `BREAKING CHANGE` があっても `0.x.y` の間は `0.(x+1).0` へ上げ、`1.0.0` にはしません。
 - `[workspace.metadata.prup.crates]` は top crate のみを手動定義します。
   内部 crate は `cargo metadata` の依存グラフから自動検出されます。
 - release PR の GitHub label は `[workspace.metadata.prup.github.release_pr]` で管理します。

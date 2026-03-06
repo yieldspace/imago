@@ -133,6 +133,7 @@ imagod-server = { path = "crates/imagod-server", version = "0.1.0" }
 base_ref = "origin/main"
 bump_strategy = "conventional_commits"
 default_bump = "patch"
+pre_1_0_breaking_bump = "minor"
 baseline_tag_required = true
 allow_dirty = false
 github_prerelease = true
