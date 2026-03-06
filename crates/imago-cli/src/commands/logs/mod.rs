@@ -303,7 +303,7 @@ async fn run_async_with_target_override(
                     );
                     ack = Some(response);
                     ui::command_clear("service.logs");
-                    Ok(false)
+                    Ok(())
                 }
                 MessageType::LogsChunk => {
                     if ack.is_none() {
@@ -311,11 +311,10 @@ async fn run_async_with_target_override(
                     }
                     let chunk: LogChunk = deploy::response_payload(envelope)?;
                     if request_id != chunk.request_id {
-                        return Ok(false);
+                        return Ok(());
                     }
                     warn_if_seq_gap(&mut expected_seq, chunk.seq, &mut truncated_warned);
-                    render_chunk(&chunk, name.is_none(), with_timestamp, &mut prefix_state)?;
-                    Ok(false)
+                    render_chunk(&chunk, name.is_none(), with_timestamp, &mut prefix_state)
                 }
                 MessageType::LogsEnd => {
                     if ack.is_none() {
@@ -323,7 +322,7 @@ async fn run_async_with_target_override(
                     }
                     let end: LogEnd = deploy::response_payload(envelope)?;
                     if request_id != end.request_id {
-                        return Ok(false);
+                        return Ok(());
                     }
                     if let Some(error) = end.error {
                         return Err(anyhow!(
@@ -339,9 +338,9 @@ async fn run_async_with_target_override(
                         &mut truncated_warned,
                     );
                     saw_end = true;
-                    Ok(true)
+                    Ok(())
                 }
-                _ => Ok(false),
+                _ => Ok(()),
             },
         )
         .await?;
