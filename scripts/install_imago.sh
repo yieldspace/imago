@@ -1,23 +1,20 @@
 #!/bin/sh
 set -eu
 
-SCRIPT_NAME="install_imagod.sh"
-DEFAULT_CONFIG_PATH="/etc/imago/imagod.toml"
-LAUNCHD_PLIST_PATH="/Library/LaunchDaemons/imagod.plist"
+SCRIPT_NAME="install_imago.sh"
 DEFAULT_RELEASES_API_URL="https://api.github.com/repos/yieldspace/imago/releases?per_page=100"
 DEFAULT_RELEASE_DOWNLOAD_BASE="https://github.com/yieldspace/imago/releases/download"
-GITHUB_USER_AGENT="imago-install-imagod"
+GITHUB_USER_AGENT="imago-install-imago"
 
 TAG_INPUT=""
 TARGET_OVERRIDE=""
 INSTALL_DIR=""
 ALLOW_PRERELEASE=0
-WITH_SERVICE=0
 DRY_RUN=0
 
-RELEASES_API_URL="${IMAGOD_RELEASES_API_URL:-${DEFAULT_RELEASES_API_URL}}"
-RELEASE_BASE_URL_OVERRIDE="${IMAGOD_RELEASE_BASE_URL:-}"
-DRY_RUN_CHECK_ASSETS="${IMAGOD_DRY_RUN_CHECK_ASSETS:-0}"
+RELEASES_API_URL="${IMAGO_RELEASES_API_URL:-${DEFAULT_RELEASES_API_URL}}"
+RELEASE_BASE_URL_OVERRIDE="${IMAGO_RELEASE_BASE_URL:-}"
+DRY_RUN_CHECK_ASSETS="${IMAGO_DRY_RUN_CHECK_ASSETS:-0}"
 AUTH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 MAIN_TMP_DIR=""
 
@@ -44,29 +41,27 @@ trap 'cleanup_main_tmp_dir' EXIT HUP INT TERM
 
 usage() {
   cat <<'USAGE'
-Usage: install_imagod.sh [options]
+Usage: install_imago.sh [options]
 
 Options:
-  --tag <semver|imagod-vX.Y.Z>      Install a specific release tag/version.
+  --tag <semver|imago-vX.Y.Z>       Install a specific release tag/version.
   --target <triple>                 Override auto-detected target triple.
   --install-dir <path>              Binary install directory.
-  --prerelease                      Allow prerelease imagod releases when --tag is omitted.
-  --with-service                    Install and start a service after installing the binary.
+  --prerelease                      Allow prerelease imago releases when --tag is omitted.
   --dry-run                         Print resolved values without installing.
   -h, --help                        Show this help.
 
 Environment:
   GH_TOKEN                          Optional GitHub token for API/download requests.
   GITHUB_TOKEN                      Fallback GitHub token for API/download requests.
-  IMAGOD_RELEASES_API_URL           Internal test override for the releases API URL.
-  IMAGOD_RELEASE_BASE_URL           Internal test override for the release asset base URL.
-  IMAGOD_DRY_RUN_CHECK_ASSETS=1     Internal test mode: verify asset URLs during --dry-run.
+  IMAGO_RELEASES_API_URL            Internal test override for the releases API URL.
+  IMAGO_RELEASE_BASE_URL            Internal test override for the release asset base URL.
+  IMAGO_DRY_RUN_CHECK_ASSETS=1      Internal test mode: verify asset URLs during --dry-run.
 
 Notes:
   - Supported OS: Linux and macOS.
-  - Release resolution: --tag > latest stable imagod-v* release from GitHub Releases API.
-  - Use --prerelease when the latest imagod build is still prerelease-only.
-  - Service setup is disabled by default. Use --with-service to opt in.
+  - Release resolution: --tag > latest stable imago-v* release from GitHub Releases API.
+  - Use --prerelease when the latest imago build is prerelease-only.
 USAGE
 }
 
@@ -81,13 +76,13 @@ need_cmd() {
 }
 
 normalize_tag() {
-  if printf '%s\n' "$1" | grep -Eq '^imagod-v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$'; then
+  if printf '%s\n' "$1" | grep -Eq '^imago-v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$'; then
     printf '%s\n' "$1"
     return 0
   fi
 
   if printf '%s\n' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$'; then
-    printf 'imagod-v%s\n' "$1"
+    printf 'imago-v%s\n' "$1"
     return 0
   fi
 
@@ -133,7 +128,7 @@ resolve_home_dir() {
 }
 
 detect_os() {
-  detected_uname_s="${IMAGOD_TEST_UNAME_S:-$(uname -s)}"
+  detected_uname_s="${IMAGO_TEST_UNAME_S:-$(uname -s)}"
   case "${detected_uname_s}" in
     Linux)
       printf 'linux\n'
@@ -162,15 +157,15 @@ darwin_sysctl_has_one() {
 }
 
 detect_darwin_arch() {
-  detected_uname_m="${IMAGOD_TEST_UNAME_M:-$(uname -m)}"
+  detected_uname_m="${IMAGO_TEST_UNAME_M:-$(uname -m)}"
   case "${detected_uname_m}" in
     i386)
-      if darwin_sysctl_has_one "hw.optional.x86_64" "IMAGOD_TEST_SYSCTL_HW_OPTIONAL_X86_64"; then
+      if darwin_sysctl_has_one "hw.optional.x86_64" "IMAGO_TEST_SYSCTL_HW_OPTIONAL_X86_64"; then
         detected_uname_m="x86_64"
       fi
       ;;
     x86_64|amd64)
-      if darwin_sysctl_has_one "hw.optional.arm64" "IMAGOD_TEST_SYSCTL_HW_OPTIONAL_ARM64"; then
+      if darwin_sysctl_has_one "hw.optional.arm64" "IMAGO_TEST_SYSCTL_HW_OPTIONAL_ARM64"; then
         detected_uname_m="arm64"
       fi
       ;;
@@ -190,7 +185,7 @@ detect_darwin_arch() {
 }
 
 detect_linux_arch() {
-  detected_uname_m="${IMAGOD_TEST_UNAME_M:-$(uname -m)}"
+  detected_uname_m="${IMAGO_TEST_UNAME_M:-$(uname -m)}"
   case "${detected_uname_m}" in
     x86_64|amd64)
       printf 'x86_64\n'
@@ -234,14 +229,14 @@ has_matching_path() {
 }
 
 detect_linux_libc() {
-  if [ -n "${IMAGOD_TEST_LIBC:-}" ]; then
-    case "${IMAGOD_TEST_LIBC}" in
+  if [ -n "${IMAGO_TEST_LIBC:-}" ]; then
+    case "${IMAGO_TEST_LIBC}" in
       gnu|musl)
-        printf '%s\n' "${IMAGOD_TEST_LIBC}"
+        printf '%s\n' "${IMAGO_TEST_LIBC}"
         return 0
         ;;
       *)
-        die "IMAGOD_TEST_LIBC must be 'gnu' or 'musl'"
+        die "IMAGO_TEST_LIBC must be 'gnu' or 'musl'"
         ;;
     esac
   fi
@@ -371,20 +366,6 @@ validate_install_dir_path() {
   fi
 }
 
-validate_service_binary_path_or_die() {
-  case "$1" in
-    /*)
-      ;;
-    *)
-      die "--with-service requires an absolute install path; use an absolute --install-dir"
-      ;;
-  esac
-
-  if ! printf '%s\n' "$1" | grep -Eq '^/[A-Za-z0-9._/+:-]+$'; then
-    die "service binary path contains unsafe characters: $1"
-  fi
-}
-
 downloader() {
   if [ "${1:-}" = "--check" ]; then
     if check_cmd curl || check_cmd wget; then
@@ -437,7 +418,7 @@ parse_release_tag_from_index() {
       if (tag == "") {
         return
       }
-      if (tag !~ /^imagod-v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$/) {
+      if (tag !~ /^imago-v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$/) {
         reset_release()
         return
       }
@@ -526,7 +507,7 @@ resolve_latest_release_tag() {
 
     if ! download_github_api "${api_url}" "${release_index_tmp}"; then
       rm -f "${release_index_tmp}"
-      die "failed to query GitHub Releases API: ${api_url} (set GH_TOKEN/GITHUB_TOKEN or pass --tag imagod-vX.Y.Z)"
+      die "failed to query GitHub Releases API: ${api_url} (set GH_TOKEN/GITHUB_TOKEN or pass --tag imago-vX.Y.Z)"
     fi
 
     if grep -q '"tag_name"' "${release_index_tmp}"; then
@@ -535,7 +516,7 @@ resolve_latest_release_tag() {
       has_release_items=0
       if [ "${page}" = "1" ] && ! grep -Eq '^[[:space:]]*\[' "${release_index_tmp}"; then
         rm -f "${release_index_tmp}"
-        die "failed to parse GitHub Releases API response from ${api_url}; pass --tag imagod-vX.Y.Z explicitly"
+        die "failed to parse GitHub Releases API response from ${api_url}; pass --tag imago-vX.Y.Z explicitly"
       fi
     fi
 
@@ -555,10 +536,10 @@ resolve_latest_release_tag() {
   done
 
   if [ "${ALLOW_PRERELEASE}" = "1" ]; then
-    die "no imagod release found via GitHub Releases API; pass --tag imagod-vX.Y.Z explicitly"
+    die "no imago release found via GitHub Releases API; pass --tag imago-vX.Y.Z explicitly"
   fi
 
-  die "no stable imagod release found via GitHub Releases API; rerun with --prerelease or pass --tag imagod-vX.Y.Z"
+  die "no stable imago release found via GitHub Releases API; rerun with --prerelease or pass --tag imago-vX.Y.Z"
 }
 
 resolve_release_url_base() {
@@ -583,10 +564,10 @@ download_release_asset() {
 
   case "${selection_mode}" in
     stable)
-      die "resolved stable release ${resolved_tag} does not provide ${asset_name} yet; retry later, use --prerelease, or pass --tag imagod-vX.Y.Z"
+      die "resolved stable release ${resolved_tag} does not provide ${asset_name} yet; retry later, use --prerelease, or pass --tag imago-vX.Y.Z"
       ;;
     prerelease)
-      die "resolved prerelease ${resolved_tag} does not provide ${asset_name} yet; retry later or pass --tag imagod-vX.Y.Z"
+      die "resolved prerelease ${resolved_tag} does not provide ${asset_name} yet; retry later or pass --tag imago-vX.Y.Z"
       ;;
     *)
       die "failed to download ${asset_name} from ${asset_url}"
@@ -636,7 +617,7 @@ check_release_assets_for_dry_run() {
 install_binary() {
   source_bin="$1"
   destination_dir="$2"
-  destination_bin="${destination_dir}/imagod"
+  destination_bin="${destination_dir}/imago"
 
   if mkdir -p -- "${destination_dir}" 2>/dev/null && install -m 0755 -- "${source_bin}" "${destination_bin}" 2>/dev/null; then
     printf '%s\n' "${destination_bin}"
@@ -644,206 +625,8 @@ install_binary() {
   fi
 
   run_as_root install -d -- "${destination_dir}" || die "failed to create install dir: ${destination_dir}"
-  run_as_root install -m 0755 -- "${source_bin}" "${destination_bin}" || die "failed to install imagod to ${destination_bin}"
+  run_as_root install -m 0755 -- "${source_bin}" "${destination_bin}" || die "failed to install imago to ${destination_bin}"
   printf '%s\n' "${destination_bin}"
-}
-
-setup_systemd_service() {
-  service_binary="$1"
-  systemd_tmp="$(mktemp)"
-  cat > "${systemd_tmp}" <<EOF_SYSTEMD
-[Unit]
-Description=imagod daemon
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=${service_binary} --config ${DEFAULT_CONFIG_PATH}
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF_SYSTEMD
-
-  if ! run_as_root install -m 0644 -- "${systemd_tmp}" /etc/systemd/system/imagod.service; then
-    rm -f "${systemd_tmp}"
-    return 1
-  fi
-  rm -f "${systemd_tmp}"
-
-  run_as_root systemctl daemon-reload &&
-    run_as_root systemctl enable --now imagod.service
-}
-
-setup_initd_service() {
-  service_binary="$1"
-  initd_tmp="$(mktemp)"
-  cat > "${initd_tmp}" <<EOF_INITD
-#!/bin/sh
-### BEGIN INIT INFO
-# Provides:          imagod
-# Required-Start:    \$remote_fs \$network
-# Required-Stop:     \$remote_fs \$network
-# Default-Start:     2 3 4 5
-# Default-Stop:      0 1 6
-# Short-Description: imagod daemon
-### END INIT INFO
-
-DAEMON='${service_binary}'
-DAEMON_ARGS='--config ${DEFAULT_CONFIG_PATH}'
-PIDFILE="/var/run/imagod.pid"
-NAME="imagod"
-
-start() {
-  if command -v start-stop-daemon >/dev/null 2>&1; then
-    start-stop-daemon --start --quiet --background --make-pidfile --pidfile "\$PIDFILE" --exec "\$DAEMON" -- \$DAEMON_ARGS
-    return \$?
-  fi
-
-  "\$DAEMON" \$DAEMON_ARGS >/dev/null 2>&1 &
-  echo \$! > "\$PIDFILE"
-}
-
-stop() {
-  if command -v start-stop-daemon >/dev/null 2>&1; then
-    start-stop-daemon --stop --quiet --pidfile "\$PIDFILE" --retry 5
-    rm -f "\$PIDFILE"
-    return \$?
-  fi
-
-  if [ -f "\$PIDFILE" ]; then
-    kill "\$(cat "\$PIDFILE")" >/dev/null 2>&1 || true
-    rm -f "\$PIDFILE"
-  fi
-}
-
-status() {
-  if [ -f "\$PIDFILE" ] && kill -0 "\$(cat "\$PIDFILE")" >/dev/null 2>&1; then
-    echo "\$NAME is running"
-    exit 0
-  fi
-  echo "\$NAME is not running"
-  exit 3
-}
-
-case "\$1" in
-  start) start ;;
-  stop) stop ;;
-  restart) stop; start ;;
-  status) status ;;
-  *) echo "Usage: /etc/init.d/\$NAME {start|stop|restart|status}"; exit 1 ;;
-esac
-EOF_INITD
-
-  if ! run_as_root install -m 0755 -- "${initd_tmp}" /etc/init.d/imagod; then
-    rm -f "${initd_tmp}"
-    return 1
-  fi
-  rm -f "${initd_tmp}"
-
-  if check_cmd update-rc.d; then
-    run_as_root update-rc.d imagod defaults || return 1
-  elif check_cmd chkconfig; then
-    run_as_root chkconfig --add imagod || return 1
-  fi
-
-  if check_cmd service; then
-    run_as_root service imagod start
-  else
-    run_as_root /etc/init.d/imagod start
-  fi
-}
-
-setup_launchd_system_daemon() {
-  service_binary="$1"
-  launchd_tmp="$(mktemp)"
-  cat > "${launchd_tmp}" <<EOF_LAUNCHD
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>imagod</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${service_binary}</string>
-    <string>--config</string>
-    <string>${DEFAULT_CONFIG_PATH}</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-</dict>
-</plist>
-EOF_LAUNCHD
-
-  if ! run_as_root install -m 0644 -- "${launchd_tmp}" "${LAUNCHD_PLIST_PATH}"; then
-    rm -f "${launchd_tmp}"
-    return 1
-  fi
-  rm -f "${launchd_tmp}"
-
-  run_as_root launchctl bootout system "${LAUNCHD_PLIST_PATH}" >/dev/null 2>&1 || true
-  run_as_root launchctl bootstrap system "${LAUNCHD_PLIST_PATH}" &&
-    run_as_root launchctl enable system/imagod &&
-    run_as_root launchctl kickstart -k system/imagod
-}
-
-detect_service_manager_or_die() {
-  if [ -n "${IMAGOD_TEST_SERVICE_MANAGER:-}" ]; then
-    case "${IMAGOD_TEST_SERVICE_MANAGER}" in
-      systemd|initd|launchd)
-        printf '%s\n' "${IMAGOD_TEST_SERVICE_MANAGER}"
-        return 0
-        ;;
-      none)
-        die "no supported init system detected for --with-service"
-        ;;
-      *)
-        die "IMAGOD_TEST_SERVICE_MANAGER must be one of: systemd, initd, launchd, none"
-        ;;
-    esac
-  fi
-
-  if [ "$1" = "darwin" ]; then
-    if check_cmd launchctl; then
-      printf 'launchd\n'
-      return 0
-    fi
-    die "launchctl not found on macOS; cannot use --with-service"
-  fi
-
-  if check_cmd systemctl && [ -d /run/systemd/system ]; then
-    printf 'systemd\n'
-    return 0
-  fi
-
-  if [ -d /etc/init.d ]; then
-    printf 'initd\n'
-    return 0
-  fi
-
-  die "no supported init system detected for --with-service"
-}
-
-setup_requested_service() {
-  case "$2" in
-    systemd)
-      setup_systemd_service "$1"
-      ;;
-    initd)
-      setup_initd_service "$1"
-      ;;
-    launchd)
-      setup_launchd_system_daemon "$1"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
 }
 
 path_contains() {
@@ -892,10 +675,6 @@ parse_args() {
         ;;
       --prerelease)
         ALLOW_PRERELEASE=1
-        shift
-        ;;
-      --with-service)
-        WITH_SERVICE=1
         shift
         ;;
       --dry-run)
@@ -953,7 +732,7 @@ main() {
     fi
   fi
 
-  asset_name="imagod-${target}"
+  asset_name="imago-${target}"
   checksum_name="${asset_name}.sha256"
   release_url_base="$(resolve_release_url_base "${resolved_tag}")"
   binary_url="${release_url_base}/${asset_name}"
@@ -966,13 +745,6 @@ main() {
   fi
   validate_install_dir_path "${install_dir}"
 
-  service_manager=""
-  planned_binary_path="${install_dir}/imagod"
-  if [ "${WITH_SERVICE}" = "1" ]; then
-    validate_service_binary_path_or_die "${planned_binary_path}"
-    service_manager="$(detect_service_manager_or_die "${os}")"
-  fi
-
   log "tag: ${resolved_tag}"
   log "release_resolution: ${selection_mode}"
   log "os: ${os}"
@@ -982,11 +754,6 @@ main() {
     log "libc: ${libc}"
   fi
   log "install_dir: ${install_dir}"
-  if [ "${WITH_SERVICE}" = "1" ]; then
-    log "service: enabled (${service_manager})"
-  else
-    log "service: disabled"
-  fi
 
   if [ "${DRY_RUN}" = "1" ]; then
     check_release_assets_for_dry_run "${binary_url}" "${checksum_url}" "${asset_name}" "${checksum_name}" "${selection_mode}" "${resolved_tag}"
@@ -1004,18 +771,11 @@ main() {
   installed_bin="$(install_binary "${MAIN_TMP_DIR}/${asset_name}" "${install_dir}")"
   log "installed binary: ${installed_bin}"
 
-  if [ "${WITH_SERVICE}" = "1" ]; then
-    if ! setup_requested_service "${installed_bin}" "${service_manager}"; then
-      die "binary installed at ${installed_bin}, but service setup failed"
-    fi
-    log "service installed and started: ${service_manager}"
-  fi
-
   if ! path_contains "${install_dir}"; then
     log "PATH hint: add ${install_dir} to PATH"
   fi
 
-  log "imagod installation completed"
+  log "imago installation completed"
   log "run '${installed_bin} --help' to verify installation"
 }
 
