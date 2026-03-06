@@ -87,6 +87,9 @@ jobs:
       - name: Setup Linux cross build prerequisites
         if: runner.os == 'Linux'
         shell: bash
+        env:
+          IMAGO_ENABLE_ZIG_SETUP: ${{ matrix.use_zig && 'true' || 'false' }}
+          IMAGO_EXPECTED_TARGET: ${{ matrix.target }}
         run: bash ./.github/scripts/setup_linux_cross_build_env.sh
 
       - name: Build GNU target (main/PR)

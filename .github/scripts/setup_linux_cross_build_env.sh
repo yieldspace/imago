@@ -11,6 +11,9 @@ zig_archive="zig-x86_64-linux-${zig_version}.tar.xz"
 runner_temp="${RUNNER_TEMP:-/tmp}"
 zig_install_root="${runner_temp}/zig-${zig_version}"
 zig_unpack_dir="${zig_install_root}/zig-x86_64-linux-${zig_version}"
+enable_zig_setup="${IMAGO_ENABLE_ZIG_SETUP:-false}"
+expected_target="${IMAGO_EXPECTED_TARGET:-}"
+cargo_zigbuild_version="${CARGO_ZIGBUILD_VERSION:-0.22.1}"
 
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
@@ -34,31 +37,28 @@ sudo apt-get install -y --no-install-recommends \
   binutils-riscv64-linux-gnu
 sudo rm -rf /var/lib/apt/lists/*
 
-mkdir -p "${zig_install_root}"
-if [[ ! -x "${zig_unpack_dir}/zig" ]]; then
-  curl -fsSL -o "${runner_temp}/${zig_archive}" "https://ziglang.org/download/${zig_version}/${zig_archive}"
-  tar -xJf "${runner_temp}/${zig_archive}" -C "${zig_install_root}"
-  rm -f "${runner_temp:?}/${zig_archive}"
-fi
+if [[ "${enable_zig_setup}" == "true" ]]; then
+  mkdir -p "${zig_install_root}"
+  if [[ ! -x "${zig_unpack_dir}/zig" ]]; then
+    curl -fsSL -o "${runner_temp}/${zig_archive}" "https://ziglang.org/download/${zig_version}/${zig_archive}"
+    tar -xJf "${runner_temp}/${zig_archive}" -C "${zig_install_root}"
+    rm -f "${runner_temp:?}/${zig_archive}"
+  fi
 
-export PATH="${zig_unpack_dir}:${PATH}"
-if [[ -n "${GITHUB_PATH:-}" ]]; then
-  echo "${zig_unpack_dir}" >> "${GITHUB_PATH}"
-fi
+  export PATH="${zig_unpack_dir}:${PATH}"
+  if [[ -n "${GITHUB_PATH:-}" ]]; then
+    echo "${zig_unpack_dir}" >> "${GITHUB_PATH}"
+  fi
 
-if ! command -v cargo-zigbuild >/dev/null 2>&1; then
-  cargo install --locked cargo-zigbuild
-fi
+  current_cargo_zigbuild_version=""
+  if command -v cargo-zigbuild >/dev/null 2>&1; then
+    current_cargo_zigbuild_version="$(cargo-zigbuild --version | awk '{print $2}')"
+  fi
 
-rustup target add \
-  x86_64-unknown-linux-gnu \
-  aarch64-unknown-linux-gnu \
-  armv7-unknown-linux-gnueabihf \
-  riscv64gc-unknown-linux-gnu \
-  x86_64-unknown-linux-musl \
-  aarch64-unknown-linux-musl \
-  armv7-unknown-linux-musleabihf \
-  riscv64gc-unknown-linux-musl
+  if [[ "${current_cargo_zigbuild_version}" != "${cargo_zigbuild_version}" ]]; then
+    cargo install --locked cargo-zigbuild --version "${cargo_zigbuild_version}" --force
+  fi
+fi
 
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   {
@@ -76,18 +76,12 @@ command -v cargo >/dev/null
 command -v aarch64-linux-gnu-gcc >/dev/null
 command -v arm-linux-gnueabihf-gcc >/dev/null
 command -v riscv64-linux-gnu-gcc >/dev/null
-command -v zig >/dev/null
-cargo zigbuild --help >/dev/null
 
-for target in \
-  x86_64-unknown-linux-gnu \
-  aarch64-unknown-linux-gnu \
-  armv7-unknown-linux-gnueabihf \
-  riscv64gc-unknown-linux-gnu \
-  x86_64-unknown-linux-musl \
-  aarch64-unknown-linux-musl \
-  armv7-unknown-linux-musleabihf \
-  riscv64gc-unknown-linux-musl
-do
-  rustup target list --installed | grep -qx "${target}"
-done
+if [[ -n "${expected_target}" ]]; then
+  rustup target list --installed | grep -qx "${expected_target}"
+fi
+
+if [[ "${enable_zig_setup}" == "true" ]]; then
+  command -v zig >/dev/null
+  cargo zigbuild --help >/dev/null
+fi
