@@ -13,8 +13,8 @@ use imago_protocol::{
     ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushChunkHeader, ArtifactPushRequest,
     ArtifactStatus, ByteRange, CommandEvent, CommandEventType, CommandPayload, CommandStartRequest,
     CommandStartResponse, CommandType, DeployCommandPayload, DeployPrepareRequest,
-    DeployPrepareResponse, ErrorCode, HelloNegotiateRequest, HelloNegotiateResponse, MessageType,
-    PROTOCOL_VERSION, ProtocolEnvelope, StructuredError, from_cbor, to_cbor,
+    DeployPrepareResponse, ErrorCode, HelloNegotiateRequest, HelloNegotiateResponse, LogChunk,
+    LogEnd, MessageType, PROTOCOL_VERSION, ProtocolEnvelope, StructuredError, from_cbor, to_cbor,
 };
 use rustls::{
     DigitallySignedStruct, SignatureScheme,
@@ -1584,7 +1584,7 @@ async fn request_events_with_retry_policy_framed(
     let frames = decode_frames(&response_bytes)?;
     let mut envelopes = Vec::with_capacity(frames.len());
     for frame in frames {
-        envelopes.push(from_cbor::<Envelope>(&frame)?);
+        envelopes.push(decode_response_envelope(&frame)?);
     }
     Ok(envelopes)
 }
@@ -1801,7 +1801,7 @@ where
                 let Some(frame) = next? else {
                     return Ok(StreamRequestTermination::Completed);
                 };
-                on_envelope(from_cbor::<Envelope>(&frame)?)?;
+                on_envelope(decode_response_envelope(&frame)?)?;
             }
         }
         ConnectedTargetTransport::Ssh(ssh_session) => {
@@ -1864,7 +1864,7 @@ where
                 let Some(frame) = next? else {
                     return Ok(StreamRequestTermination::Completed);
                 };
-                on_envelope(from_cbor::<Envelope>(&frame)?)?;
+                on_envelope(decode_response_envelope(&frame)?)?;
             }
         }
     }
@@ -2193,6 +2193,39 @@ pub(crate) fn response_payload<T: serde::de::DeserializeOwned>(
     }
     serde_json::from_value(response.payload)
         .map_err(|e| anyhow!("response payload decode failed: {e}"))
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponseEnvelopeHeader {
+    #[serde(rename = "type")]
+    message_type: MessageType,
+}
+
+fn decode_response_envelope(frame: &[u8]) -> anyhow::Result<Envelope> {
+    let header: ResponseEnvelopeHeader =
+        from_cbor(frame).context("failed to decode streamed response header")?;
+    match header.message_type {
+        MessageType::LogsChunk => normalize_typed_response_payload::<LogChunk>(frame, "logs.chunk"),
+        MessageType::LogsEnd => normalize_typed_response_payload::<LogEnd>(frame, "logs.end"),
+        _ => from_cbor(frame)
+            .with_context(|| format!("failed to decode {:?} frame", header.message_type)),
+    }
+}
+
+fn normalize_typed_response_payload<T>(frame: &[u8], label: &str) -> anyhow::Result<Envelope>
+where
+    T: Serialize + serde::de::DeserializeOwned,
+{
+    let envelope: ProtocolEnvelope<T> =
+        from_cbor(frame).with_context(|| format!("failed to decode {label} frame"))?;
+    Ok(Envelope {
+        message_type: envelope.message_type,
+        request_id: envelope.request_id,
+        correlation_id: envelope.correlation_id,
+        payload: serde_json::to_value(envelope.payload)
+            .with_context(|| format!("failed to normalize {label} payload"))?,
+        error: envelope.error,
+    })
 }
 
 fn build_idempotency_key(
@@ -2827,6 +2860,56 @@ mod tests {
         let message = mapped.to_string();
         assert!(message.contains("E_UNAUTHORIZED"));
         assert!(message.contains("transport.connect"));
+    }
+
+    #[test]
+    fn decode_response_envelope_normalizes_logs_chunk_byte_string_fields() {
+        let chunk = imago_protocol::LogChunk {
+            request_id: Uuid::new_v4(),
+            seq: 3,
+            name: "svc".to_string(),
+            stream_kind: imago_protocol::LogStreamKind::Stdout,
+            bytes: b"hello".to_vec(),
+            is_last: false,
+            timestamp_unix_ms: Some(1234),
+        };
+        let encoded = to_cbor(&ProtocolEnvelope::new(
+            MessageType::LogsChunk,
+            chunk.request_id,
+            Uuid::new_v4(),
+            chunk.clone(),
+        ))
+        .expect("typed envelope should encode");
+        let response =
+            decode_response_envelope(&encoded).expect("response envelope should normalize");
+
+        let decoded: imago_protocol::LogChunk =
+            response_payload(response).expect("response payload should decode");
+
+        assert_eq!(decoded, chunk);
+    }
+
+    #[test]
+    fn decode_response_envelope_normalizes_logs_end_payload() {
+        let end = imago_protocol::LogEnd {
+            request_id: Uuid::new_v4(),
+            seq: 4,
+            error: None,
+        };
+        let encoded = to_cbor(&ProtocolEnvelope::new(
+            MessageType::LogsEnd,
+            end.request_id,
+            Uuid::new_v4(),
+            end.clone(),
+        ))
+        .expect("typed envelope should encode");
+        let response =
+            decode_response_envelope(&encoded).expect("response envelope should normalize");
+
+        let decoded: imago_protocol::LogEnd =
+            response_payload(response).expect("response payload should decode");
+
+        assert_eq!(decoded, end);
     }
 
     #[test]

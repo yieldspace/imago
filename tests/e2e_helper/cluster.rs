@@ -93,9 +93,11 @@ impl Cluster {
         let keys = generate_key_material(&cert_dir)?;
         let port = pick_free_port()?;
         let imagod_config_path = work_dir.join("i.toml");
-        let config = format!(
-            "listen_addr = \"127.0.0.1:{port}\"\nstorage_root = \"d\"\n\n[runtime]\nmax_chunks = 128\nchunk_timeout_ms = 10000\nidle_ttl_secs = 300\nhttp_max_body_bytes = 1048576\ntick_interval_ms = 5000\nrunner_ready_timeout_secs = 10\nhttp_queue_memory_budget_bytes = 67108864\nboot_plugin_gc_enabled = false\nboot_restore_enabled = false\n\n[tls]\nserver_key = \"{}\"\nadmin_public_keys = [\"{}\"]\nclient_public_keys = [\"{}\"]\n",
-            toml_escape(keys.server_key_path.to_string_lossy().as_ref()),
+        let control_socket_path = work_dir.join("control.sock");
+        let config = render_imagod_config(
+            port,
+            control_socket_path.as_path(),
+            keys.server_key_path.as_path(),
             self.control_admin_public_hex.as_str(),
             keys.server_public_hex.as_str(),
         );
@@ -287,4 +289,40 @@ fn pick_free_port() -> Result<u16> {
 
 fn toml_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn render_imagod_config(
+    port: u16,
+    control_socket_path: &Path,
+    server_key_path: &Path,
+    control_admin_public_hex: &str,
+    server_public_hex: &str,
+) -> String {
+    format!(
+        "listen_addr = \"127.0.0.1:{port}\"\ncontrol_socket_path = \"{}\"\nstorage_root = \"d\"\n\n[runtime]\nmax_chunks = 128\nchunk_timeout_ms = 10000\nidle_ttl_secs = 300\nhttp_max_body_bytes = 1048576\ntick_interval_ms = 5000\nrunner_ready_timeout_secs = 10\nhttp_queue_memory_budget_bytes = 67108864\nboot_plugin_gc_enabled = false\nboot_restore_enabled = false\n\n[tls]\nserver_key = \"{}\"\nadmin_public_keys = [\"{}\"]\nclient_public_keys = [\"{}\"]\n",
+        toml_escape(control_socket_path.to_string_lossy().as_ref()),
+        toml_escape(server_key_path.to_string_lossy().as_ref()),
+        control_admin_public_hex,
+        server_public_hex,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_imagod_config;
+    use std::path::Path;
+
+    #[test]
+    fn render_imagod_config_sets_absolute_control_socket_path() {
+        let config = render_imagod_config(
+            4443,
+            Path::new("/tmp/imago-e2e/n0/control.sock"),
+            Path::new("/tmp/imago-e2e/n0/c/server.key"),
+            "admin-public-key",
+            "client-public-key",
+        );
+
+        assert!(config.contains("control_socket_path = \"/tmp/imago-e2e/n0/control.sock\""));
+        assert!(!config.contains("/run/imago/imagod.sock"));
+    }
 }
