@@ -1801,7 +1801,7 @@ pub(crate) async fn request_streamed_events<F>(
     mut on_envelope: F,
 ) -> anyhow::Result<StreamRequestTermination>
 where
-    F: FnMut(Envelope) -> anyhow::Result<()>,
+    F: FnMut(Envelope) -> anyhow::Result<bool>,
 {
     let payload = to_cbor(envelope)?;
     let framed = encode_frame(&payload);
@@ -1854,7 +1854,9 @@ where
                 let Some(frame) = next? else {
                     return Ok(StreamRequestTermination::Completed);
                 };
-                on_envelope(decode_response_envelope(&frame)?)?;
+                if on_envelope(decode_response_envelope(&frame)?)? {
+                    return Ok(StreamRequestTermination::Completed);
+                }
             }
         }
         ConnectedTargetTransport::Ssh(ssh_session) => {
@@ -1923,7 +1925,9 @@ where
                 let Some(frame) = next? else {
                     return Ok(StreamRequestTermination::Completed);
                 };
-                on_envelope(decode_response_envelope(&frame)?)?;
+                if on_envelope(decode_response_envelope(&frame)?)? {
+                    return Ok(StreamRequestTermination::Completed);
+                }
             }
         }
     }
