@@ -7,7 +7,6 @@ on:
   release:
     types:
       - published
-      - prereleased
   workflow_dispatch:
   pull_request:
     paths:
