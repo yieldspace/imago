@@ -459,9 +459,10 @@ impl Orchestrator {
         service_name: &str,
         tail_lines: u32,
         follow: bool,
+        with_timestamp: bool,
     ) -> Result<ServiceLogSubscription, ImagodError> {
         self.supervisor
-            .open_logs(service_name, tail_lines, follow)
+            .open_logs(service_name, tail_lines, follow, with_timestamp)
             .await
     }
 

@@ -9,7 +9,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use imagod_common::ImagodError;
-use imagod_control::{ServiceLogEvent, ServiceLogStream, ServiceLogSubscription};
+use imagod_control::{ServiceLogSnapshot, ServiceLogSubscription};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
@@ -111,12 +111,7 @@ pub async fn bench_forward_snapshot_datagrams(snapshot_len: usize) -> usize {
     }
     let subscriptions = vec![ServiceLogSubscription {
         service_name: "svc-bench".to_string(),
-        snapshot_bytes: snapshot.clone(),
-        snapshot_events: vec![ServiceLogEvent {
-            stream: ServiceLogStream::Stdout,
-            bytes: snapshot,
-            timestamp_unix_ms: 1,
-        }],
+        snapshot: ServiceLogSnapshot::Bytes(snapshot),
         receiver: None,
     }];
 

@@ -236,11 +236,32 @@ runner_ready_timeout_secs = 3
 - Required/Optional: Optional.
 - Accepted values / Constraints: `>= 1`.
 - Default: `262144`.
+- Behavior notes:
+  - Defines the total live log payload retained in manager memory for one running service.
+  - This budget applies to running-service capture only; stopped-service retained logs are governed separately by `retained_logs_capacity_bytes`.
 - Example:
 
 ```toml
 [runtime]
 runner_log_buffer_bytes = 262144
+```
+
+- Validation error notes: zero fails validation.
+
+### The `retained_logs_capacity_bytes` field
+
+- Type: `integer` (`usize`)
+- Required/Optional: Optional.
+- Accepted values / Constraints: `>= 1`.
+- Default: `524288`.
+- Behavior notes:
+  - Defines the total file-backed retained-log capacity for stopped services.
+  - This budget is tracked by manager metadata in memory, but the retained log payload itself is stored on disk under the runtime storage root.
+- Example:
+
+```toml
+[runtime]
+retained_logs_capacity_bytes = 524288
 ```
 
 - Validation error notes: zero fails validation.

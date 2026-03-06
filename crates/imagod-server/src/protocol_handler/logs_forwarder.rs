@@ -6,7 +6,9 @@ use imago_protocol::{
     LogChunk, LogEnd, LogError, LogErrorCode, LogStreamKind, MessageType, ProtocolEnvelope, to_cbor,
 };
 use imagod_common::ImagodError;
-use imagod_control::{ServiceLogEvent, ServiceLogStream, ServiceLogSubscription};
+use imagod_control::{
+    ServiceLogEvent, ServiceLogSnapshot, ServiceLogStream, ServiceLogSubscription,
+};
 use tokio::{sync::mpsc, time::Duration};
 use uuid::Uuid;
 
@@ -302,30 +304,47 @@ where
     S: ProtocolSession,
 {
     for subscription in &subscriptions {
-        if sender.with_timestamp {
-            for event in &subscription.snapshot_events {
+        match &subscription.snapshot {
+            ServiceLogSnapshot::Bytes(bytes) => {
                 sender
                     .send_log_data_chunks(
                         seq,
                         &subscription.service_name,
                         LogStreamKind::Composite,
-                        &event.bytes,
-                        Some(event.timestamp_unix_ms),
+                        bytes,
+                        None,
                         last_name,
                     )
                     .await?;
             }
-        } else {
-            sender
-                .send_log_data_chunks(
-                    seq,
-                    &subscription.service_name,
-                    LogStreamKind::Composite,
-                    &subscription.snapshot_bytes,
-                    None,
-                    last_name,
-                )
-                .await?;
+            ServiceLogSnapshot::Events(events) => {
+                if sender.with_timestamp {
+                    for event in events {
+                        sender
+                            .send_log_data_chunks(
+                                seq,
+                                &subscription.service_name,
+                                LogStreamKind::Composite,
+                                &event.bytes,
+                                Some(event.timestamp_unix_ms),
+                                last_name,
+                            )
+                            .await?;
+                    }
+                } else {
+                    let bytes = flatten_log_event_bytes(events);
+                    sender
+                        .send_log_data_chunks(
+                            seq,
+                            &subscription.service_name,
+                            LogStreamKind::Composite,
+                            &bytes,
+                            None,
+                            last_name,
+                        )
+                        .await?;
+                }
+            }
         }
     }
 
@@ -429,6 +448,15 @@ where
 
 pub(crate) fn advance_seq_for_lagged(seq: &mut u64, dropped: u64) {
     *seq = seq.saturating_add(dropped);
+}
+
+fn flatten_log_event_bytes(events: &[ServiceLogEvent]) -> Vec<u8> {
+    let total = events.iter().map(|event| event.bytes.len()).sum();
+    let mut out = Vec::with_capacity(total);
+    for event in events {
+        out.extend_from_slice(&event.bytes);
+    }
+    out
 }
 
 async fn send_datagram_envelope<S, T>(
@@ -669,12 +697,7 @@ mod tests {
     fn sample_subscription(name: &str, snapshot_bytes: &[u8]) -> ServiceLogSubscription {
         ServiceLogSubscription {
             service_name: name.to_string(),
-            snapshot_bytes: snapshot_bytes.to_vec(),
-            snapshot_events: vec![ServiceLogEvent {
-                stream: ServiceLogStream::Stdout,
-                bytes: snapshot_bytes.to_vec(),
-                timestamp_unix_ms: 123,
-            }],
+            snapshot: ServiceLogSnapshot::Bytes(snapshot_bytes.to_vec()),
             receiver: None,
         }
     }
@@ -960,8 +983,7 @@ mod tests {
 
         let subscriptions = vec![ServiceLogSubscription {
             service_name: "svc-follow".to_string(),
-            snapshot_bytes: Vec::new(),
-            snapshot_events: Vec::new(),
+            snapshot: ServiceLogSnapshot::Bytes(Vec::new()),
             receiver: Some(rx),
         }];
         stream_logs_datagrams(&session, &sender, subscriptions, &mut seq, &mut last_name)

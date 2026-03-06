@@ -333,7 +333,7 @@ impl ProtocolHandler {
         for service_name in &service_names {
             let subscription = self
                 .orchestrator
-                .open_logs(service_name, tail_lines, follow)
+                .open_logs(service_name, tail_lines, follow, with_timestamp)
                 .await?;
             subscriptions.push(subscription);
         }
