@@ -1,0 +1,19 @@
+error[E0432]: unresolved imports `nirvash_macros::imago_formal_tests`, `nirvash_macros::imago_invariant`, `nirvash_macros::imago_subsystem_spec`
+ --> tests/fixtures/old_macro_names.rs:2:35
+  |
+2 |     Signature as FormalSignature, imago_formal_tests, imago_invariant, imago_subsystem_spec,
+  |                                   ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^ no `imago_subsystem_spec` in the root
+  |                                   |                   |
+  |                                   |                   no `imago_invariant` in the root
+  |                                   no `imago_formal_tests` in the root
+  |
+help: a similar name exists in the module
+  |
+2 -     Signature as FormalSignature, imago_formal_tests, imago_invariant, imago_subsystem_spec,
+2 +     Signature as FormalSignature, formal_tests, imago_invariant, imago_subsystem_spec,
+  |
+help: a similar name exists in the module
+  |
+2 -     Signature as FormalSignature, imago_formal_tests, imago_invariant, imago_subsystem_spec,
+2 +     Signature as FormalSignature, imago_formal_tests, imago_invariant, subsystem_spec,
+  |

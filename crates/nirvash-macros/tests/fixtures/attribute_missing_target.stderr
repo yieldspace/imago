@@ -1,0 +1,15 @@
+error: missing target spec path; use #[invariant(SpecType)]
+  --> tests/fixtures/attribute_missing_target.rs:29:1
+   |
+29 | #[invariant]
+   | ^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `invariant` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `nirvash_core::StatePredicate`
+ --> tests/fixtures/attribute_missing_target.rs:1:5
+  |
+1 | use nirvash_core::StatePredicate;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

@@ -1,11 +1,10 @@
-use imago_formal_core::{
+use imagod_ipc::{RunnerAppType, RunnerBootstrap};
+use nirvash_core::{
     BoundedDomain, Fairness, Ltl, Signature, StatePredicate, StepPredicate, TransitionSystem,
 };
-use imago_formal_macros::{
-    Signature as FormalSignature, imago_fairness, imago_illegal, imago_invariant, imago_property,
-    imago_subsystem_spec,
+use nirvash_macros::{
+    Signature as FormalSignature, fairness, illegal, invariant, property, subsystem_spec,
 };
-use imagod_ipc::{RunnerAppType, RunnerBootstrap};
 
 use crate::bounds::SPEC_RUNNER_APP_TYPES;
 
@@ -159,28 +158,28 @@ impl RunnerBootstrapSpec {
     }
 }
 
-#[imago_invariant]
+#[invariant(RunnerBootstrapSpec)]
 fn ready_requires_verified_registration() -> StatePredicate<RunnerBootstrapState> {
     StatePredicate::new("ready_requires_verified_registration", |state| {
         !state.ready || (state.registered && matches!(state.auth, AuthProofState::Verified))
     })
 }
 
-#[imago_invariant]
+#[invariant(RunnerBootstrapSpec)]
 fn registration_requires_prepared_endpoint() -> StatePredicate<RunnerBootstrapState> {
     StatePredicate::new("registration_requires_prepared_endpoint", |state| {
         !state.registered || (state.decoded && matches!(state.endpoint, EndpointState::Prepared))
     })
 }
 
-#[imago_invariant]
+#[invariant(RunnerBootstrapSpec)]
 fn rejected_auth_cannot_be_ready() -> StatePredicate<RunnerBootstrapState> {
     StatePredicate::new("rejected_auth_cannot_be_ready", |state| {
         !matches!(state.auth, AuthProofState::Rejected) || !state.ready
     })
 }
 
-#[imago_illegal]
+#[illegal(RunnerBootstrapSpec)]
 fn decode_oversized_payload() -> StepPredicate<RunnerBootstrapState, RunnerBootstrapAction> {
     StepPredicate::new("decode_oversized_payload", |prev, action, _| {
         matches!(action, RunnerBootstrapAction::DecodeBootstrap(_))
@@ -188,7 +187,7 @@ fn decode_oversized_payload() -> StepPredicate<RunnerBootstrapState, RunnerBoots
     })
 }
 
-#[imago_illegal]
+#[illegal(RunnerBootstrapSpec)]
 fn register_without_endpoint() -> StepPredicate<RunnerBootstrapState, RunnerBootstrapAction> {
     StepPredicate::new("register_without_endpoint", |prev, action, _| {
         matches!(action, RunnerBootstrapAction::RegisterRunner)
@@ -196,14 +195,14 @@ fn register_without_endpoint() -> StepPredicate<RunnerBootstrapState, RunnerBoot
     })
 }
 
-#[imago_illegal]
+#[illegal(RunnerBootstrapSpec)]
 fn ready_without_registration() -> StepPredicate<RunnerBootstrapState, RunnerBootstrapAction> {
     StepPredicate::new("ready_without_registration", |prev, action, _| {
         matches!(action, RunnerBootstrapAction::MarkReady) && !prev.registered
     })
 }
 
-#[imago_property]
+#[property(RunnerBootstrapSpec)]
 fn decoded_leads_to_endpoint_prepared() -> Ltl<RunnerBootstrapState, RunnerBootstrapAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("decoded", |state| state.decoded)),
@@ -213,7 +212,7 @@ fn decoded_leads_to_endpoint_prepared() -> Ltl<RunnerBootstrapState, RunnerBoots
     )
 }
 
-#[imago_property]
+#[property(RunnerBootstrapSpec)]
 fn registered_leads_to_ready() -> Ltl<RunnerBootstrapState, RunnerBootstrapAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("registered", |state| state.registered)),
@@ -221,7 +220,7 @@ fn registered_leads_to_ready() -> Ltl<RunnerBootstrapState, RunnerBootstrapActio
     )
 }
 
-#[imago_property]
+#[property(RunnerBootstrapSpec)]
 fn oversized_implies_next_auth_rejected() -> Ltl<RunnerBootstrapState, RunnerBootstrapAction> {
     Ltl::always(Ltl::implies(
         Ltl::pred(StatePredicate::new("oversized", |state| {
@@ -233,7 +232,7 @@ fn oversized_implies_next_auth_rejected() -> Ltl<RunnerBootstrapState, RunnerBoo
     ))
 }
 
-#[imago_fairness]
+#[fairness(RunnerBootstrapSpec)]
 fn endpoint_preparation_fairness() -> Fairness<RunnerBootstrapState, RunnerBootstrapAction> {
     Fairness::weak(StepPredicate::new(
         "prepare_endpoint",
@@ -245,7 +244,7 @@ fn endpoint_preparation_fairness() -> Fairness<RunnerBootstrapState, RunnerBoots
     ))
 }
 
-#[imago_fairness]
+#[fairness(RunnerBootstrapSpec)]
 fn registration_fairness() -> Fairness<RunnerBootstrapState, RunnerBootstrapAction> {
     Fairness::weak(StepPredicate::new(
         "register_runner",
@@ -259,7 +258,7 @@ fn registration_fairness() -> Fairness<RunnerBootstrapState, RunnerBootstrapActi
     ))
 }
 
-#[imago_fairness]
+#[fairness(RunnerBootstrapSpec)]
 fn ready_fairness() -> Fairness<RunnerBootstrapState, RunnerBootstrapAction> {
     Fairness::weak(StepPredicate::new("mark_ready", |prev, action, next| {
         matches!(action, RunnerBootstrapAction::MarkReady)
@@ -269,24 +268,7 @@ fn ready_fairness() -> Fairness<RunnerBootstrapState, RunnerBootstrapAction> {
     }))
 }
 
-#[imago_subsystem_spec(
-    invariants(
-        ready_requires_verified_registration,
-        registration_requires_prepared_endpoint,
-        rejected_auth_cannot_be_ready
-    ),
-    illegal(
-        decode_oversized_payload,
-        register_without_endpoint,
-        ready_without_registration
-    ),
-    properties(
-        decoded_leads_to_endpoint_prepared,
-        registered_leads_to_ready,
-        oversized_implies_next_auth_rejected
-    ),
-    fairness(endpoint_preparation_fairness, registration_fairness, ready_fairness)
-)]
+#[subsystem_spec]
 impl TransitionSystem for RunnerBootstrapSpec {
     type State = RunnerBootstrapState;
     type Action = RunnerBootstrapAction;
@@ -346,7 +328,7 @@ impl TransitionSystem for RunnerBootstrapSpec {
 }
 
 #[cfg(test)]
-#[imago_formal_macros::imago_formal_tests(spec = RunnerBootstrapSpec, init = initial_state)]
+#[nirvash_macros::formal_tests(spec = RunnerBootstrapSpec, init = initial_state)]
 const _: () = ();
 
 #[cfg(test)]

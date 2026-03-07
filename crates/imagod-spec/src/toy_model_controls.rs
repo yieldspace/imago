@@ -1,10 +1,10 @@
-use imago_formal_core::{
+use nirvash_core::{
     ActionConstraint, Fairness, Ltl, OpaqueModelValue, Signature as _, StateConstraint,
     StatePredicate, StepPredicate, TransitionSystem,
 };
-use imago_formal_macros::{
-    Signature as FormalSignature, imago_action_constraint, imago_fairness, imago_formal_tests,
-    imago_invariant, imago_property, imago_state_constraint, imago_subsystem_spec,
+use nirvash_macros::{
+    Signature as FormalSignature, action_constraint, fairness, formal_tests, invariant, property,
+    state_constraint, subsystem_spec,
 };
 
 struct WorkerTag;
@@ -17,9 +17,28 @@ enum ToyPhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[signature(custom)]
 struct ToyState {
     worker: OpaqueModelValue<WorkerTag, 2>,
     phase: ToyPhase,
+}
+
+impl ToyStateSignatureSpec for ToyState {
+    fn representatives() -> nirvash_core::BoundedDomain<Self> {
+        let workers = OpaqueModelValue::<WorkerTag, 2>::bounded_domain().into_vec();
+        let mut states = Vec::with_capacity(workers.len() * 2);
+        for worker in workers {
+            states.push(Self {
+                worker,
+                phase: ToyPhase::Idle,
+            });
+            states.push(Self {
+                worker,
+                phase: ToyPhase::Busy,
+            });
+        }
+        nirvash_core::BoundedDomain::new(states)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
@@ -62,28 +81,28 @@ impl ToyModelControlSpec {
     }
 }
 
-#[imago_invariant]
+#[invariant(ToyModelControlSpec)]
 fn blocked_states_remain_excluded() -> StatePredicate<ToyState> {
     StatePredicate::new("blocked_states_remain_excluded", |state| {
         !matches!(state.phase, ToyPhase::Blocked)
     })
 }
 
-#[imago_state_constraint]
+#[state_constraint(ToyModelControlSpec)]
 fn exclude_blocked_states() -> StateConstraint<ToyState> {
     StateConstraint::new("exclude_blocked_states", |state| {
         !matches!(state.phase, ToyPhase::Blocked)
     })
 }
 
-#[imago_action_constraint]
+#[action_constraint(ToyModelControlSpec)]
 fn disallow_block_transitions() -> ActionConstraint<ToyState, ToyAction> {
     ActionConstraint::new("disallow_block_transitions", |_, action, _| {
         !matches!(action, ToyAction::Block)
     })
 }
 
-#[imago_property]
+#[property(ToyModelControlSpec)]
 fn busy_leads_back_to_idle() -> Ltl<ToyState, ToyAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("busy", |state| {
@@ -95,7 +114,7 @@ fn busy_leads_back_to_idle() -> Ltl<ToyState, ToyAction> {
     )
 }
 
-#[imago_fairness]
+#[fairness(ToyModelControlSpec)]
 fn finish_progress() -> Fairness<ToyState, ToyAction> {
     Fairness::weak(StepPredicate::new(
         "finish_progress",
@@ -107,14 +126,7 @@ fn finish_progress() -> Fairness<ToyState, ToyAction> {
     ))
 }
 
-#[imago_subsystem_spec(
-    invariants(blocked_states_remain_excluded),
-    illegal(),
-    state_constraints(exclude_blocked_states),
-    action_constraints(disallow_block_transitions),
-    properties(busy_leads_back_to_idle),
-    fairness(finish_progress)
-)]
+#[subsystem_spec]
 impl TransitionSystem for ToyModelControlSpec {
     type State = ToyState;
     type Action = ToyAction;
@@ -136,9 +148,6 @@ impl TransitionSystem for ToyModelControlSpec {
             ToyAction::Finish if matches!(prev.phase, ToyPhase::Busy) => {
                 candidate.phase = ToyPhase::Idle;
             }
-            ToyAction::Block if matches!(prev.phase, ToyPhase::Busy) => {
-                candidate.phase = ToyPhase::Blocked;
-            }
             _ => return false,
         }
 
@@ -146,7 +155,7 @@ impl TransitionSystem for ToyModelControlSpec {
     }
 }
 
-#[imago_formal_tests(
+#[formal_tests(
     spec = ToyModelControlSpec,
     init = initial_state,
     cases = model_cases

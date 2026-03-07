@@ -1,9 +1,8 @@
-use imago_formal_core::{
+use nirvash_core::{
     BoundedDomain, Fairness, Ltl, Signature, StatePredicate, StepPredicate, TransitionSystem,
 };
-use imago_formal_macros::{
-    Signature as FormalSignature, imago_fairness, imago_illegal, imago_invariant, imago_property,
-    imago_subsystem_spec,
+use nirvash_macros::{
+    Signature as FormalSignature, fairness, illegal, invariant, property, subsystem_spec,
 };
 
 use crate::bounds::ArtifactChunks;
@@ -132,7 +131,7 @@ impl ArtifactDeploySpec {
     }
 }
 
-#[imago_invariant]
+#[invariant(ArtifactDeploySpec)]
 fn prepared_release_requires_committed_upload() -> StatePredicate<ArtifactDeployState> {
     StatePredicate::new("prepared_release_requires_committed_upload", |state| {
         !matches!(
@@ -145,21 +144,21 @@ fn prepared_release_requires_committed_upload() -> StatePredicate<ArtifactDeploy
     })
 }
 
-#[imago_invariant]
+#[invariant(ArtifactDeploySpec)]
 fn prepared_release_requires_precondition() -> StatePredicate<ArtifactDeployState> {
     StatePredicate::new("prepared_release_requires_precondition", |state| {
         matches!(state.release, ReleaseStage::None) || state.precondition_ok
     })
 }
 
-#[imago_invariant]
+#[invariant(ArtifactDeploySpec)]
 fn rollback_requires_auto_rollback_flag() -> StatePredicate<ArtifactDeployState> {
     StatePredicate::new("rollback_requires_auto_rollback_flag", |state| {
         !matches!(state.release, ReleaseStage::RollbackPending) || state.auto_rollback
     })
 }
 
-#[imago_illegal]
+#[illegal(ArtifactDeploySpec)]
 fn commit_before_complete() -> StepPredicate<ArtifactDeployState, ArtifactDeployAction> {
     StepPredicate::new("commit_before_complete", |prev, action, _| {
         matches!(action, ArtifactDeployAction::CommitUpload)
@@ -167,7 +166,7 @@ fn commit_before_complete() -> StepPredicate<ArtifactDeployState, ArtifactDeploy
     })
 }
 
-#[imago_illegal]
+#[illegal(ArtifactDeploySpec)]
 fn promote_without_prepare() -> StepPredicate<ArtifactDeployState, ArtifactDeployAction> {
     StepPredicate::new("promote_without_prepare", |prev, action, _| {
         matches!(action, ArtifactDeployAction::PromoteRelease)
@@ -175,14 +174,14 @@ fn promote_without_prepare() -> StepPredicate<ArtifactDeployState, ArtifactDeplo
     })
 }
 
-#[imago_illegal]
+#[illegal(ArtifactDeploySpec)]
 fn deploy_on_mismatched_precondition() -> StepPredicate<ArtifactDeployState, ArtifactDeployAction> {
     StepPredicate::new("deploy_on_mismatched_precondition", |_, action, _| {
         matches!(action, ArtifactDeployAction::StartDeployMismatched)
     })
 }
 
-#[imago_property]
+#[property(ArtifactDeploySpec)]
 fn partial_upload_leads_to_complete() -> Ltl<ArtifactDeployState, ArtifactDeployAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("partial_upload", |state| {
@@ -194,7 +193,7 @@ fn partial_upload_leads_to_complete() -> Ltl<ArtifactDeployState, ArtifactDeploy
     )
 }
 
-#[imago_property]
+#[property(ArtifactDeploySpec)]
 fn prepared_release_leads_to_promoted_or_rolled_back()
 -> Ltl<ArtifactDeployState, ArtifactDeployAction> {
     Ltl::leads_to(
@@ -210,7 +209,7 @@ fn prepared_release_leads_to_promoted_or_rolled_back()
     )
 }
 
-#[imago_property]
+#[property(ArtifactDeploySpec)]
 fn rollback_pending_leads_to_rolled_back() -> Ltl<ArtifactDeployState, ArtifactDeployAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("rollback_pending", |state| {
@@ -222,7 +221,7 @@ fn rollback_pending_leads_to_rolled_back() -> Ltl<ArtifactDeployState, ArtifactD
     )
 }
 
-#[imago_fairness]
+#[fairness(ArtifactDeploySpec)]
 fn upload_progress_fairness() -> Fairness<ArtifactDeployState, ArtifactDeployAction> {
     Fairness::weak(StepPredicate::new(
         "complete_upload",
@@ -234,7 +233,7 @@ fn upload_progress_fairness() -> Fairness<ArtifactDeployState, ArtifactDeployAct
     ))
 }
 
-#[imago_fairness]
+#[fairness(ArtifactDeploySpec)]
 fn promote_release_fairness() -> Fairness<ArtifactDeployState, ArtifactDeployAction> {
     Fairness::weak(StepPredicate::new(
         "promote_release",
@@ -246,7 +245,7 @@ fn promote_release_fairness() -> Fairness<ArtifactDeployState, ArtifactDeployAct
     ))
 }
 
-#[imago_fairness]
+#[fairness(ArtifactDeploySpec)]
 fn rollback_finish_fairness() -> Fairness<ArtifactDeployState, ArtifactDeployAction> {
     Fairness::weak(StepPredicate::new(
         "finish_rollback",
@@ -258,28 +257,7 @@ fn rollback_finish_fairness() -> Fairness<ArtifactDeployState, ArtifactDeployAct
     ))
 }
 
-#[imago_subsystem_spec(
-    invariants(
-        prepared_release_requires_committed_upload,
-        prepared_release_requires_precondition,
-        rollback_requires_auto_rollback_flag
-    ),
-    illegal(
-        commit_before_complete,
-        promote_without_prepare,
-        deploy_on_mismatched_precondition
-    ),
-    properties(
-        partial_upload_leads_to_complete,
-        prepared_release_leads_to_promoted_or_rolled_back,
-        rollback_pending_leads_to_rolled_back
-    ),
-    fairness(
-        upload_progress_fairness,
-        promote_release_fairness,
-        rollback_finish_fairness
-    )
-)]
+#[subsystem_spec]
 impl TransitionSystem for ArtifactDeploySpec {
     type State = ArtifactDeployState;
     type Action = ArtifactDeployAction;
@@ -340,7 +318,7 @@ impl TransitionSystem for ArtifactDeploySpec {
 }
 
 #[cfg(test)]
-#[imago_formal_macros::imago_formal_tests(spec = ArtifactDeploySpec, init = initial_state)]
+#[nirvash_macros::formal_tests(spec = ArtifactDeploySpec, init = initial_state)]
 const _: () = ();
 
 #[cfg(test)]

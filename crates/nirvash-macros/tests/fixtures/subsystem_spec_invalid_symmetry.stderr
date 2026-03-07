@@ -1,0 +1,5 @@
+error: #[invariant(SpecType)] 形式へ移行せよ
+  --> tests/fixtures/subsystem_spec_invalid_symmetry.rs:15:18
+   |
+15 | #[subsystem_spec(invariants(legacy_invariant))]
+   |                  ^^^^^^^^^^

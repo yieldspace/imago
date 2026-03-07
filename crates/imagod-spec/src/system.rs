@@ -1,11 +1,10 @@
-use imago_formal_core::{
+use imago_protocol::{CommandState, CommandType};
+use nirvash_core::{
     BoundedDomain, Fairness, Ltl, Signature, StatePredicate, StepPredicate, TransitionSystem,
 };
-use imago_formal_macros::{
-    Signature as FormalSignature, imago_fairness, imago_illegal, imago_invariant, imago_property,
-    imago_system_spec,
+use nirvash_macros::{
+    Signature as FormalSignature, fairness, illegal, invariant, property, system_spec,
 };
-use imago_protocol::{CommandState, CommandType};
 
 use crate::{
     artifact_deploy::{
@@ -145,6 +144,13 @@ impl ImagodSystemStateSignatureSpec for ImagodSystemState {
                 forced_stop_attempted: false,
             },
         };
+        let completed = ImagodSystemState {
+            bootstrap: RunnerBootstrapState {
+                ready: false,
+                ..completed.bootstrap
+            },
+            ..completed
+        };
         BoundedDomain::new(vec![init, running, completed])
     }
 
@@ -198,7 +204,7 @@ impl ImagodSystemSpec {
     }
 }
 
-#[imago_invariant]
+#[invariant(ImagodSystemSpec)]
 fn runtime_serving_requires_ready_and_promoted_release() -> StatePredicate<ImagodSystemState> {
     StatePredicate::new(
         "runtime_serving_requires_ready_and_promoted_release",
@@ -211,7 +217,7 @@ fn runtime_serving_requires_ready_and_promoted_release() -> StatePredicate<Imago
     )
 }
 
-#[imago_invariant]
+#[invariant(ImagodSystemSpec)]
 fn shutdown_requires_transport_gate_and_manager_shutdown() -> StatePredicate<ImagodSystemState> {
     StatePredicate::new(
         "shutdown_requires_transport_gate_and_manager_shutdown",
@@ -226,14 +232,14 @@ fn shutdown_requires_transport_gate_and_manager_shutdown() -> StatePredicate<Ima
     )
 }
 
-#[imago_invariant]
+#[invariant(ImagodSystemSpec)]
 fn ready_runner_requires_running_supervision() -> StatePredicate<ImagodSystemState> {
     StatePredicate::new("ready_runner_requires_running_supervision", |state| {
         !state.bootstrap.ready || matches!(state.supervision.phase, ServicePhase::Running)
     })
 }
 
-#[imago_invariant]
+#[invariant(ImagodSystemSpec)]
 fn active_command_requires_listening_manager() -> StatePredicate<ImagodSystemState> {
     StatePredicate::new("active_command_requires_listening_manager", |state| {
         !matches!(
@@ -243,7 +249,7 @@ fn active_command_requires_listening_manager() -> StatePredicate<ImagodSystemSta
     })
 }
 
-#[imago_illegal]
+#[illegal(ImagodSystemSpec)]
 fn serve_before_runner_ready() -> StepPredicate<ImagodSystemState, ImagodSystemAction> {
     StepPredicate::new("serve_before_runner_ready", |prev, action, _| {
         matches!(
@@ -253,7 +259,7 @@ fn serve_before_runner_ready() -> StepPredicate<ImagodSystemState, ImagodSystemA
     })
 }
 
-#[imago_illegal]
+#[illegal(ImagodSystemSpec)]
 fn accept_after_shutdown() -> StepPredicate<ImagodSystemState, ImagodSystemAction> {
     StepPredicate::new("accept_after_shutdown", |prev, action, _| {
         matches!(
@@ -263,7 +269,7 @@ fn accept_after_shutdown() -> StepPredicate<ImagodSystemState, ImagodSystemActio
     })
 }
 
-#[imago_illegal]
+#[illegal(ImagodSystemSpec)]
 fn runner_ready_without_registration() -> StepPredicate<ImagodSystemState, ImagodSystemAction> {
     StepPredicate::new("runner_ready_without_registration", |prev, action, _| {
         matches!(
@@ -273,7 +279,7 @@ fn runner_ready_without_registration() -> StepPredicate<ImagodSystemState, Imago
     })
 }
 
-#[imago_property]
+#[property(ImagodSystemSpec)]
 fn runtime_can_serve_after_release_and_ready() -> Ltl<ImagodSystemState, ImagodSystemAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("runtime_can_start", |state| {
@@ -287,7 +293,7 @@ fn runtime_can_serve_after_release_and_ready() -> Ltl<ImagodSystemState, ImagodS
     )
 }
 
-#[imago_property]
+#[property(ImagodSystemSpec)]
 fn shutdown_started_leads_to_completed() -> Ltl<ImagodSystemState, ImagodSystemAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("shutdown_started", |state| {
@@ -299,7 +305,7 @@ fn shutdown_started_leads_to_completed() -> Ltl<ImagodSystemState, ImagodSystemA
     )
 }
 
-#[imago_property]
+#[property(ImagodSystemSpec)]
 fn runner_registered_leads_to_ready() -> Ltl<ImagodSystemState, ImagodSystemAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("runner_registered", |state| {
@@ -311,7 +317,7 @@ fn runner_registered_leads_to_ready() -> Ltl<ImagodSystemState, ImagodSystemActi
     )
 }
 
-#[imago_fairness]
+#[fairness(ImagodSystemSpec)]
 fn runtime_start_fairness() -> Fairness<ImagodSystemState, ImagodSystemAction> {
     Fairness::weak(StepPredicate::new(
         "runtime_start_serving",
@@ -327,7 +333,7 @@ fn runtime_start_fairness() -> Fairness<ImagodSystemState, ImagodSystemAction> {
     ))
 }
 
-#[imago_fairness]
+#[fairness(ImagodSystemSpec)]
 fn shutdown_progress_fairness() -> Fairness<ImagodSystemState, ImagodSystemAction> {
     Fairness::weak(StepPredicate::new(
         "shutdown_progress",
@@ -338,7 +344,7 @@ fn shutdown_progress_fairness() -> Fairness<ImagodSystemState, ImagodSystemActio
     ))
 }
 
-#[imago_fairness]
+#[fairness(ImagodSystemSpec)]
 fn runner_ready_fairness() -> Fairness<ImagodSystemState, ImagodSystemAction> {
     Fairness::weak(StepPredicate::new(
         "runner_mark_ready",
@@ -352,40 +358,17 @@ fn runner_ready_fairness() -> Fairness<ImagodSystemState, ImagodSystemAction> {
     ))
 }
 
-#[imago_system_spec(
-    subsystems(
-        "manager_shell",
-        "session_transport",
-        "command_protocol",
-        "artifact_deploy",
-        "service_supervision",
-        "runner_bootstrap",
-        "runner_runtime",
-        "plugin_capability",
-        "shutdown_flow"
-    ),
-    invariants(
-        runtime_serving_requires_ready_and_promoted_release,
-        shutdown_requires_transport_gate_and_manager_shutdown,
-        ready_runner_requires_running_supervision,
-        active_command_requires_listening_manager
-    ),
-    illegal(
-        serve_before_runner_ready,
-        accept_after_shutdown,
-        runner_ready_without_registration
-    ),
-    properties(
-        runtime_can_serve_after_release_and_ready,
-        shutdown_started_leads_to_completed,
-        runner_registered_leads_to_ready
-    ),
-    fairness(
-        runtime_start_fairness,
-        shutdown_progress_fairness,
-        runner_ready_fairness
-    )
-)]
+#[system_spec(subsystems(
+    "manager_shell",
+    "session_transport",
+    "command_protocol",
+    "artifact_deploy",
+    "service_supervision",
+    "runner_bootstrap",
+    "runner_runtime",
+    "plugin_capability",
+    "shutdown_flow"
+))]
 impl TransitionSystem for ImagodSystemSpec {
     type State = ImagodSystemState;
     type Action = ImagodSystemAction;
@@ -614,7 +597,7 @@ fn cross_links_hold(state: &ImagodSystemState) -> bool {
 }
 
 #[cfg(test)]
-#[imago_formal_macros::imago_formal_tests(
+#[nirvash_macros::formal_tests(
     spec = ImagodSystemSpec,
     init = initial_state,
     composition = composition

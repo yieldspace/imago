@@ -1,6 +1,6 @@
-use imago_formal_macros::Signature as FormalSignature;
 use imago_protocol::{CommandState, CommandType, ErrorCode};
 use imagod_ipc::{PluginKind, RunnerAppType};
+use nirvash_macros::Signature as FormalSignature;
 
 pub const MAX_SERVICES: u8 = 2;
 pub const MAX_SESSIONS: u8 = 2;
@@ -90,7 +90,7 @@ pub type TimeSteps = BoundedU8<MAX_TIME_STEPS>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imago_formal_core::Signature;
+    use nirvash_core::Signature;
 
     #[test]
     fn bounded_u8_domain_matches_declared_max() {

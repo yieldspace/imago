@@ -1,5 +1,5 @@
-use imago_formal_core::Signature as _;
-use imago_formal_macros::Signature;
+use nirvash_core::Signature as _;
+use nirvash_macros::Signature;
 
 #[derive(Clone, Debug, PartialEq, Eq, Signature)]
 #[signature(custom)]

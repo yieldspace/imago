@@ -8,16 +8,17 @@ subsystem ごとの仕様を自己検証します。
 
 - 値ドメインは `#[derive(Signature)]` で定義します。
 - complex state は `#[derive(Signature)] #[signature(custom)]` を付け、生成された companion trait に `representatives()` と必要なら `signature_invariant()` を実装します。
-- subsystem spec は `#[imago_subsystem_spec(...)]`、top-level system spec は `#[imago_system_spec(...)]` で `TemporalSpec` を自動生成します。
-- `#[imago_formal_tests(...)]` が init invariant / reachable graph checker / composition regression test を自動生成します。
-- `state_constraints(...)`、`action_constraints(...)`、`symmetry(...)`、`checker_config(...)`、`cases = model_cases` で TLC 相当の model control を Rust API で与えます。
+- subsystem spec は `#[subsystem_spec(...)]`、top-level system spec は `#[system_spec(...)]` で `TemporalSpec` を自動生成します。
+- `#[invariant(SpecType)]`、`#[illegal(SpecType)]`、`#[property(SpecType)]` などの target-spec 付き attribute が registry へ自動登録され、`TemporalSpec` から自動収集されます。
+- `#[formal_tests(...)]` が init invariant / reachable graph checker / composition regression test を自動生成します。
+- `checker_config(...)` と `cases = model_cases` に加え、`#[state_constraint(SpecType)]`、`#[action_constraint(SpecType)]`、`#[symmetry(SpecType)]` で TLC 相当の model control を Rust API で与えます。
 
 ## TLA+ Subset
 
 - `[]`, `<>`, `X`, `U`, `ENABLED`, `~>` を Rust DSL として使います。
 - checker は reachable graph を既定にし、internal stuttering step を含む lasso trace 上で時相性質を評価します。
 - fairness は `Fairness::weak(...)` と `Fairness::strong(...)` で表し、generated tests は公平性を前提に liveness を検証します。
-- quantifier は `imago-formal-core` の `Ltl::forall` / `Ltl::exists` で bounded domain へ展開します。
+- quantifier は `nirvash-core` の `Ltl::forall` / `Ltl::exists` で bounded domain へ展開します。
 - deadlock check、state/action constraint、model case、opaque model value、symmetry reduction を Rust DSL で表現できます。
 
 ## Bounds
