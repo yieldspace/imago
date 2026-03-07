@@ -1,15 +1,12 @@
-use imagod_control::OperationManager;
-use imagod_model::{
-    CommandErrorKind, CommandLifecycleState, CommandProtocolAction, CommandProtocolContext,
-    CommandProtocolObservedState, CommandProtocolOutput, CommandProtocolStageId, OperationPhase,
+use imago_protocol::{
+    CommandErrorKind, CommandLifecycleState, CommandProtocolAction, CommandProtocolObservedState,
+    CommandProtocolOutput, CommandProtocolStageId, OperationPhase,
 };
 use nirvash_core::{
-    CodeConformanceSpec, DocGraphPolicy, ExpectedStep, ModelCheckConfig, Signature, StatePredicate,
-    StepPredicate, TransitionSystem,
+    DocGraphPolicy, ModelCheckConfig, Signature, StatePredicate, StepPredicate, TransitionSystem,
+    conformance::{ExpectedStep, ProtocolConformanceSpec},
 };
-use nirvash_macros::{
-    Signature as FormalSignature, code_tests, illegal, invariant, subsystem_spec,
-};
+use nirvash_macros::{Signature as FormalSignature, illegal, invariant, subsystem_spec};
 
 #[cfg(test)]
 use crate::bounds::{SPEC_COMMAND_STATES, SPEC_ERROR_CODES};
@@ -230,29 +227,17 @@ impl TransitionSystem for CommandProtocolSpec {
     }
 
     fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
-        match <Self as CodeConformanceSpec>::expected_step(self, prev, action) {
+        match <Self as ProtocolConformanceSpec>::expected_step(self, prev, action) {
             ExpectedStep::Allowed { next: expected, .. } => expected == *next && next.invariant(),
             ExpectedStep::Rejected { .. } => false,
         }
     }
 }
 
-impl CodeConformanceSpec for CommandProtocolSpec {
-    type Runtime = OperationManager;
-    type Context = CommandProtocolContext;
+impl ProtocolConformanceSpec for CommandProtocolSpec {
     type ExpectedOutput = CommandProtocolExpectedOutput;
     type ObservedState = CommandProtocolObservedState;
     type ObservedOutput = CommandProtocolOutput;
-
-    async fn fresh_runtime(&self) -> Self::Runtime {
-        OperationManager::new()
-    }
-
-    fn context(&self) -> Self::Context {
-        CommandProtocolContext {
-            request_id: uuid::Uuid::from_u128(1),
-        }
-    }
 
     fn expected_step(
         &self,
@@ -495,47 +480,15 @@ impl CodeConformanceSpec for CommandProtocolSpec {
 #[nirvash_macros::formal_tests(spec = CommandProtocolSpec, init = initial_state)]
 const _: () = ();
 
-#[code_tests(
-    spec = CommandProtocolSpec,
-    init = initial_state
-)]
-const _: () = ();
-
 pub fn initial_state() -> CommandProtocolState {
     CommandProtocolSpec::new().initial_state()
 }
 
 #[cfg(test)]
 mod tests {
-    use imagod_model::CommandKind;
-    use nirvash_core::{ModelChecker, Signature, TemporalSpec, reduce_doc_graph};
+    use nirvash_core::{ModelChecker, TemporalSpec, reduce_doc_graph};
 
     use super::*;
-
-    #[test]
-    fn failing_command_does_not_extend_runtime_state_shape() {
-        let spec = CommandProtocolSpec::new();
-        let prev = CommandProtocolState {
-            tracked: true,
-            lifecycle_state: Some(CommandLifecycleState::Running),
-            cancel_requested: false,
-            phase: Some(OperationPhase::Spawned),
-        };
-
-        let expected = spec.expected_step(
-            &prev,
-            &CommandProtocolAction::FinishFailed(CommandErrorKind::Internal),
-        );
-
-        match expected {
-            ExpectedStep::Allowed { next, .. } => {
-                assert_eq!(next.lifecycle_state, Some(CommandLifecycleState::Failed));
-                assert!(!next.cancel_requested);
-                assert_eq!(next.phase, Some(OperationPhase::Spawned));
-            }
-            ExpectedStep::Rejected { .. } => panic!("finish_failed should be allowed"),
-        }
-    }
 
     #[test]
     fn command_contract_classifiers_cover_public_enums() {
@@ -544,55 +497,6 @@ mod tests {
         }
         for code in SPEC_ERROR_CODES {
             let _ = classify_error_code(code);
-        }
-    }
-
-    #[test]
-    fn bounded_domain_filters_out_partial_tracking_states() {
-        let domain = CommandProtocolState::bounded_domain().into_vec();
-
-        assert!(domain.iter().all(|state| {
-            state.tracked == state.lifecycle_state.is_some()
-                && state.tracked == state.phase.is_some()
-        }));
-        assert!(
-            domain
-                .iter()
-                .all(|state| !state.cancel_requested || state.tracked)
-        );
-    }
-
-    #[test]
-    fn project_output_reduces_runtime_snapshot_to_expected_shape() {
-        let spec = CommandProtocolSpec::new();
-        let projected = spec.project_output(&CommandProtocolOutput::StateSnapshot {
-            state: CommandLifecycleState::Running,
-            stage: "starting".to_owned(),
-            updated_at_unix_secs: 1,
-        });
-        assert_eq!(
-            projected,
-            CommandProtocolExpectedOutput::StateSnapshot {
-                state: CommandLifecycleState::Running,
-                stage_non_empty: true,
-                updated_at_non_zero: true,
-            }
-        );
-    }
-
-    #[test]
-    fn start_action_is_shared_contract_even_without_state_memory() {
-        let spec = CommandProtocolSpec::new();
-        let expected = spec.expected_step(
-            &spec.initial_state(),
-            &CommandProtocolAction::Start(CommandKind::Deploy),
-        );
-        match expected {
-            ExpectedStep::Allowed { next, output } => {
-                assert!(next.tracked);
-                assert_eq!(output, CommandProtocolExpectedOutput::Ack);
-            }
-            ExpectedStep::Rejected { .. } => panic!("start should be allowed from init"),
         }
     }
 

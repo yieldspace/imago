@@ -1,4 +1,5 @@
 mod checker;
+pub mod conformance;
 mod doc_graph;
 mod domain;
 mod dsl_macros;
@@ -14,6 +15,7 @@ pub use checker::{
     Counterexample, CounterexampleKind, ExplorationMode, ModelCheckConfig, ModelCheckError,
     ModelCheckResult, ModelChecker,
 };
+pub use conformance::{ProtocolConformanceSpec, ProtocolRuntimeBinding};
 pub use doc_graph::{
     DocGraphCase, DocGraphEdge, DocGraphPolicy, DocGraphProvider, DocGraphReductionMode,
     DocGraphSnapshot, DocGraphSpec, DocGraphState, ReachableGraphEdge, ReachableGraphSnapshot,
@@ -30,8 +32,7 @@ pub use ltl::Ltl;
 pub use predicate::{ActionConstraint, StateConstraint, StatePredicate, StepPredicate};
 pub use symmetry::SymmetryReducer;
 pub use system::{
-    ActionApplier, CodeConformanceSpec, ExpectedStep, StateObserver, SystemComposition,
-    TemporalSpec, TransitionSystem,
+    ActionApplier, ExpectedStep, StateObserver, SystemComposition, TemporalSpec, TransitionSystem,
 };
 pub use trace::{Trace, TraceStep};
 
@@ -885,50 +886,6 @@ mod tests {
         }
     }
 
-    impl CodeConformanceSpec for TestSpec {
-        type Runtime = TestRuntime;
-        type Context = ();
-        type ExpectedOutput = TestOutput;
-        type ObservedState = TestState;
-        type ObservedOutput = TestOutput;
-
-        async fn fresh_runtime(&self) -> Self::Runtime {
-            TestRuntime {
-                state: Mutex::new(TestState::Idle),
-            }
-        }
-
-        fn context(&self) -> Self::Context {}
-
-        fn expected_step(
-            &self,
-            prev: &Self::State,
-            action: &Self::Action,
-        ) -> ExpectedStep<Self::State, Self::ExpectedOutput> {
-            match (prev, action) {
-                (TestState::Idle, TestAction::Start) => ExpectedStep::Allowed {
-                    next: TestState::Busy,
-                    output: TestOutput::Ack,
-                },
-                (TestState::Busy, TestAction::Stop) => ExpectedStep::Allowed {
-                    next: TestState::Idle,
-                    output: TestOutput::Ack,
-                },
-                _ => ExpectedStep::Rejected {
-                    output: TestOutput::Rejected,
-                },
-            }
-        }
-
-        fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
-            *observed
-        }
-
-        fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {
-            observed.clone()
-        }
-    }
-
     fn block_on_ready<F>(future: F) -> F::Output
     where
         F: Future,
@@ -944,37 +901,29 @@ mod tests {
 
     #[test]
     fn conformance_traits_support_runtime_replay() {
-        let spec = TestSpec;
-        let runtime = block_on_ready(spec.fresh_runtime());
+        let runtime = TestRuntime {
+            state: Mutex::new(TestState::Idle),
+        };
 
-        let initial = block_on_ready(<TestRuntime as StateObserver>::observe_state(
-            &runtime,
-            &spec.context(),
-        ));
+        let initial = block_on_ready(<TestRuntime as StateObserver>::observe_state(&runtime, &()));
         assert_eq!(initial, TestState::Idle);
 
         let start_output = block_on_ready(<TestRuntime as ActionApplier>::execute_action(
             &runtime,
-            &spec.context(),
+            &(),
             &TestAction::Start,
         ));
         assert_eq!(start_output, TestOutput::Ack);
-        let busy = block_on_ready(<TestRuntime as StateObserver>::observe_state(
-            &runtime,
-            &spec.context(),
-        ));
+        let busy = block_on_ready(<TestRuntime as StateObserver>::observe_state(&runtime, &()));
         assert_eq!(busy, TestState::Busy);
 
         let stop_output = block_on_ready(<TestRuntime as ActionApplier>::execute_action(
             &runtime,
-            &spec.context(),
+            &(),
             &TestAction::Stop,
         ));
         assert_eq!(stop_output, TestOutput::Ack);
-        let idle = block_on_ready(<TestRuntime as StateObserver>::observe_state(
-            &runtime,
-            &spec.context(),
-        ));
+        let idle = block_on_ready(<TestRuntime as StateObserver>::observe_state(&runtime, &()));
         assert_eq!(idle, TestState::Idle);
     }
 }

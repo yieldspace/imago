@@ -17,7 +17,7 @@ subsystem ごとの仕様を自己検証します。
 - 加算 DSL として `nirvash_core::invariant!(Spec, name(state) => ...)`、`nirvash_core::property!(Spec, name => leads_to(...))`、`nirvash_core::fairness!(weak Spec, ...)` などの `macro_rules!` 宣言も使えます。
 - `ltl!` 内では Rust に既にある `!` / `&&` / `||` / `=>` を使い、時相演算だけ `always` / `eventually` / `next` / `until` / `enabled` / `leads_to` の単語で補います。
 - `#[formal_tests(...)]` が init invariant / reachable graph checker / composition regression test を自動生成します。
-- `#[code_tests(...)]` は `CodeConformanceSpec` が持つ `Runtime` / `Context` / `fresh_runtime()` / `context()` を使って runtime conformance を自動生成します。現在は `command_protocol` がこの path を使っています。
+- `#[code_tests(...)]` は `nirvash_core::conformance::ProtocolConformanceSpec` と `ProtocolRuntimeBinding` を使って runtime conformance を自動生成します。`command_protocol` では spec 本体は `imagod-spec` に残し、実行は `imagod-control` の integration test 側で行います。
 - `checker_config(...)` と `cases = model_cases` に加え、`#[state_constraint(SpecType)]`、`#[action_constraint(SpecType)]`、`#[symmetry(SpecType)]` で TLC 相当の model control を Rust API で与えます。
 - `build.rs` で `nirvash_docgen::generate()` を呼んでいるため、`cargo doc -p imagod-spec` では各 spec type の `TransitionSystem` impl section に reachable graph 由来の Mermaid `State Graph` と、登録関数一覧を持つ Mermaid `Meta Model` 図が自動表示されます。`State Graph` は docs 専用の boundary-path reduction を通すため、通常経路の中間 state は折り畳まれ、同じ始点/終点に向かう平行 edge も 1 本にまとめられます。分岐/合流/終端/cancel などの edge case が優先的に残ります。Mermaid runtime は local asset として docs 出力に同梱されます。
 
@@ -46,7 +46,7 @@ subsystem ごとの仕様を自己検証します。
 | --- | --- |
 | `manager_shell` | `crates/imagod/src/manager_runtime.rs`, `crates/imagod-config` |
 | `session_transport` | `crates/imagod-server/src/protocol_handler.rs`, `crates/imagod-server/src/transport` |
-| `command_protocol` | `crates/imagod-model/src/command.rs`, `crates/imagod-control/src/operation_state.rs`, `crates/imagod-server/src/protocol_handler/router.rs` |
+| `command_protocol` | `crates/imago-protocol/src/command_contract.rs`, `crates/imagod-control/src/operation_state.rs`, `crates/imagod-server/src/protocol_handler/router.rs` |
 | `artifact_deploy` | `crates/imagod-control/src/artifact_store.rs`, `crates/imagod-control/src/orchestrator.rs` |
 | `service_supervision` | `crates/imagod-control/src/service_supervisor.rs` |
 | `runner_bootstrap` | `crates/imagod-runtime-bootstrap`, `crates/imagod-ipc::RunnerBootstrap` |
@@ -61,5 +61,5 @@ subsystem ごとの仕様を自己検証します。
 - public contracts only; no private implementation state
 - native plugin internal device logic is out of scope
 - model checking は reachable graph semantics を既定とし、必要時だけ bounded lasso mode を使う
-- `imagod-model` と `imagod-control` の command contract は feature gating せず常設し、release 時の負荷は runtime state を最小に保つことで抑える
+- `imago-protocol::command_contract` と `imagod-control` の command contract は常設し、release 時の負荷は runtime state を最小に保つことで抑える
 - `command_protocol` の runtime 正式契約は `OperationManager` に実装された `ActionApplier::execute_action` と `StateObserver::observe_state` であり、spec は projection を通じてこれを比較する

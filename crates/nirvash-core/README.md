@@ -9,7 +9,7 @@
 - `TransitionSystem` / `TemporalSpec`: 状態遷移と時相仕様の記述
 - `Ltl`: `[]`, `<>`, `X`, `U`, `ENABLED`, `~>` を含む Rust DSL
 - `ModelChecker`: reachable graph ベースの model checking
-- `ActionApplier` / `StateObserver` / `CodeConformanceSpec`: 実コード conformance 契約
+- `ActionApplier` / `StateObserver`: 実コード conformance の低レベル capability trait
 - `StatePredicate` / `StepPredicate` / constraints / symmetry / fairness
 - `pred!` / `step!` / `ltl!` と、`invariant!` / `property!` / `fairness!` などの記号寄り `macro_rules!` DSL
 - `bounded_vec_domain` / `into_bounded_domain`: bounds-driven な domain 生成 helper
@@ -96,71 +96,74 @@ field 単位では次を使えます。
 
 ## Runtime Conformance
 
-`nirvash` は spec 単体の model checking だけでなく、runtime 実装が spec と同じ振る舞いをするかも検証できます。正本の runtime 契約は次の 2 つです。
+`nirvash` は spec 単体の model checking だけでなく、runtime 実装が spec と同じ振る舞いをするかも検証できます。conformance API の正本は `nirvash_core::conformance` です。
 
-- `ActionApplier`
-  - `execute_action(Context, Action) -> Output`
-- `StateObserver`
-  - `observe_state(Context) -> ObservedState`
+- runtime capability
+  - `ActionApplier`
+    - `execute_action(Context, Action) -> Output`
+  - `StateObserver`
+    - `observe_state(Context) -> ObservedState`
+- spec 側契約
+  - `ProtocolConformanceSpec`
+    - `expected_step(...)`
+    - `project_state(...)`
+    - `project_output(...)`
+- spec と runtime の結合
+  - `ProtocolRuntimeBinding`
+    - `fresh_runtime(&spec)`
+    - `context(&spec)`
 
-spec 側は `CodeConformanceSpec` を実装し、次を宣言します。
-
-- `type Runtime`
-- `type Context`
-- `fresh_runtime()`
-- `context()`
-- `expected_step(...)`
-- `project_state(...)`
-- `project_output(...)`
-
-`#[code_tests(...)]` はこの契約だけを使って reachable graph を replay し、runtime の observed state/output を spec 側の expected state/output に射影して比較します。runtime 側に spec 専用 field を追加する必要はありません。
+`nirvash_macros::code_tests` はこの契約だけを使って reachable graph を replay し、runtime の observed state/output を spec 側の expected state/output に射影して比較します。runtime 側に spec 専用 field を追加する必要はありません。実運用では spec crate に `ProtocolConformanceSpec` を置き、runtime crate の integration test に `ProtocolRuntimeBinding` と `#[code_tests(...)]` を置く構成が依存方向を最も保ちやすいです。
 
 ```rust
-use nirvash_core::{ActionApplier, CodeConformanceSpec, StateObserver, TransitionSystem};
-use nirvash_macros::{code_tests, Signature as FormalSignature, subsystem_spec};
+use nirvash_core::conformance::{
+    ActionApplier, ExpectedStep, ProtocolConformanceSpec, ProtocolRuntimeBinding, StateObserver,
+};
+use nirvash_core::TransitionSystem;
+use nirvash_macros::{Signature as FormalSignature, code_tests, subsystem_spec};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
-enum State {
+enum SpecState {
     Idle,
     Busy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
-enum Action {
+enum RuntimeAction {
     Start,
     Stop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Context;
+struct RuntimeContext;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Output {
+enum RuntimeOutput {
     Ack,
 }
 
 #[derive(Default)]
-struct Runtime(std::sync::Mutex<State>);
+struct Runtime(std::sync::Mutex<SpecState>);
 
 impl ActionApplier for Runtime {
-    type Action = Action;
-    type Output = Output;
-    type Context = Context;
+    type Action = RuntimeAction;
+    type Output = RuntimeOutput;
+    type Context = RuntimeContext;
 
     async fn execute_action(&self, _context: &Self::Context, action: &Self::Action) -> Self::Output {
         let mut state = self.0.lock().expect("runtime lock");
         *state = match (*state, *action) {
-            (State::Idle, Action::Start) => State::Busy,
-            (State::Busy, Action::Stop) => State::Idle,
+            (SpecState::Idle, RuntimeAction::Start) => SpecState::Busy,
+            (SpecState::Busy, RuntimeAction::Stop) => SpecState::Idle,
             (current, _) => current,
         };
-        Output::Ack
+        RuntimeOutput::Ack
     }
 }
 
 impl StateObserver for Runtime {
-    type ObservedState = State;
-    type Context = Context;
+    type ObservedState = SpecState;
+    type Context = RuntimeContext;
 
     async fn observe_state(&self, _context: &Self::Context) -> Self::ObservedState {
         *self.0.lock().expect("runtime lock")
@@ -172,50 +175,40 @@ struct Spec;
 
 #[subsystem_spec]
 impl TransitionSystem for Spec {
-    type State = State;
-    type Action = Action;
+    type State = SpecState;
+    type Action = RuntimeAction;
 
     fn init(&self, state: &Self::State) -> bool {
-        matches!(state, State::Idle)
+        matches!(state, SpecState::Idle)
     }
 
     fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
         matches!(
             (prev, action, next),
-            (State::Idle, Action::Start, State::Busy)
-                | (State::Busy, Action::Stop, State::Idle)
+            (SpecState::Idle, RuntimeAction::Start, SpecState::Busy)
+                | (SpecState::Busy, RuntimeAction::Stop, SpecState::Idle)
         )
     }
 }
 
-impl CodeConformanceSpec for Spec {
-    type Runtime = Runtime;
-    type Context = Context;
-    type ExpectedOutput = Output;
-    type ObservedState = State;
-    type ObservedOutput = Output;
-
-    async fn fresh_runtime(&self) -> Self::Runtime {
-        Runtime::default()
-    }
-
-    fn context(&self) -> Self::Context {
-        Context
-    }
+impl ProtocolConformanceSpec for Spec {
+    type ExpectedOutput = RuntimeOutput;
+    type ObservedState = SpecState;
+    type ObservedOutput = RuntimeOutput;
 
     fn expected_step(
         &self,
         state: &Self::State,
         action: &Self::Action,
-    ) -> Option<nirvash_core::ExpectedStep<Self::State, Self::ExpectedOutput>> {
+    ) -> Option<ExpectedStep<Self::State, Self::ExpectedOutput>> {
         match (state, action) {
-            (State::Idle, Action::Start) => Some(nirvash_core::ExpectedStep {
-                next_state: State::Busy,
-                output: Output::Ack,
+            (SpecState::Idle, RuntimeAction::Start) => Some(ExpectedStep {
+                next_state: SpecState::Busy,
+                output: RuntimeOutput::Ack,
             }),
-            (State::Busy, Action::Stop) => Some(nirvash_core::ExpectedStep {
-                next_state: State::Idle,
-                output: Output::Ack,
+            (SpecState::Busy, RuntimeAction::Stop) => Some(ExpectedStep {
+                next_state: SpecState::Idle,
+                output: RuntimeOutput::Ack,
             }),
             _ => None,
         }
@@ -230,12 +223,27 @@ impl CodeConformanceSpec for Spec {
     }
 }
 
-#[code_tests(spec = Spec, init = initial_state)]
+struct Binding;
+
+impl ProtocolRuntimeBinding<Spec> for Binding {
+    type Runtime = Runtime;
+    type Context = RuntimeContext;
+
+    async fn fresh_runtime(_spec: &Spec) -> Self::Runtime {
+        Runtime::default()
+    }
+
+    fn context(_spec: &Spec) -> Self::Context {
+        RuntimeContext
+    }
+}
+
+#[code_tests(spec = Spec, binding = Binding, init = initial_state)]
 const _: () = ();
 
 impl Spec {
-    fn initial_state(&self) -> State {
-        State::Idle
+    fn initial_state(&self) -> SpecState {
+        SpecState::Idle
     }
 }
 ```

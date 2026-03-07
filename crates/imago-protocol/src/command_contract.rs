@@ -1,4 +1,4 @@
-//! Shared command-domain types used by runtime and formal specs.
+//! Shared command-domain contracts used by runtime, spec, and wire adapters.
 
 use uuid::Uuid;
 

@@ -1,4 +1,4 @@
-use imagod_model::{CommandKind, CommandLifecycleState, CommandProtocolAction};
+use imago_protocol::{CommandKind, CommandLifecycleState, CommandProtocolAction};
 use nirvash_core::{
     BoundedDomain, Fairness, Ltl, Signature, StatePredicate, StepPredicate, TransitionSystem,
 };

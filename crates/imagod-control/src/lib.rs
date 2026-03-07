@@ -1,6 +1,6 @@
 //! Manager-side control plane state and orchestration primitives.
 
-pub use nirvash_core::{ActionApplier, StateObserver};
+pub use nirvash_core::conformance::{ActionApplier, StateObserver};
 
 /// Artifact upload session and committed artifact storage.
 pub mod artifact_store;

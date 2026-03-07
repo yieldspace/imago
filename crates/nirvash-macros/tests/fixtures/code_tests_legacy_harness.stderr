@@ -1,5 +1,5 @@
-error: harness = ... is no longer supported; declare Runtime, Context, fresh_runtime(), and context() on CodeConformanceSpec
-   --> tests/fixtures/code_tests_legacy_harness.rs:107:49
+error: harness = ... is no longer supported; use binding = ... and implement ProtocolRuntimeBinding<Spec>
+   --> tests/fixtures/code_tests_legacy_harness.rs:118:68
     |
-107 | #[code_tests(spec = Spec, init = initial_state, harness = tests::Harness)]
-    |                                                 ^^^^^^^
+118 | #[code_tests(spec = Spec, binding = Binding, init = initial_state, harness = tests::Harness)]
+    |                                                                    ^^^^^^^

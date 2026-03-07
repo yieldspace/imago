@@ -1,5 +1,5 @@
-error: fresh = ... is no longer supported; declare fresh_runtime() on CodeConformanceSpec
-   --> tests/fixtures/code_tests_legacy_fresh.rs:107:49
+error: fresh = ... is no longer supported; use binding = ... and implement fresh_runtime() on ProtocolRuntimeBinding<Spec>
+   --> tests/fixtures/code_tests_legacy_fresh.rs:118:68
     |
-107 | #[code_tests(spec = Spec, init = initial_state, fresh = tests::fresh_driver)]
-    |                                                 ^^^^^
+118 | #[code_tests(spec = Spec, binding = Binding, init = initial_state, fresh = tests::fresh_driver)]
+    |                                                                    ^^^^^

@@ -126,7 +126,6 @@ imagod-common = { path = "crates/imagod-common", version = "0.2.0" }
 imagod-config = { path = "crates/imagod-config", version = "0.2.0" }
 imagod-control = { path = "crates/imagod-control", version = "0.2.0" }
 imagod-ipc = { path = "crates/imagod-ipc", version = "0.2.0" }
-imagod-model = { path = "crates/imagod-model", version = "0.2.0" }
 imagod-runtime = { path = "crates/imagod-runtime", version = "0.2.0", default-features = false }
 imagod-runtime-bootstrap = { path = "crates/imagod-runtime-bootstrap", version = "0.2.0" }
 imagod-runtime-control = { path = "crates/imagod-runtime-control", version = "0.2.0" }

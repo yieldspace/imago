@@ -7,13 +7,13 @@
 
 ```mermaid
 flowchart LR
-    A["imagod-model<br/>shared contract"] --> B["imagod-spec<br/>TemporalSpec / projection"]
+    A["imago-protocol<br/>shared contract"] --> B["imagod-spec<br/>TemporalSpec / projection"]
     B --> C["nirvash-macros<br/>derive / registry / generated tests"]
-    C --> D["nirvash-core<br/>DSL / checker / conformance traits"]
+    C --> D["nirvash-core<br/>DSL / checker"]
     C --> E["nirvash-docgen<br/>rustdoc graph generation"]
     A --> F["imagod-control<br/>OperationManager / Orchestrator / ServiceSupervisor"]
     F --> G["imagod-server<br/>wire boundary"]
-    B -. "code_tests" .-> F
+    F -. "integration code_tests" .-> B
     E -. "cargo doc" .-> B
 ```
 
@@ -27,17 +27,21 @@ flowchart LR
   - `Signature`、`TransitionSystem`、`TemporalSpec`
   - `Ltl`、`StatePredicate`、`StepPredicate`
   - `ModelChecker`
-  - 実コード conformance 用の `ActionApplier` / `StateObserver` / `CodeConformanceSpec`
+  - `conformance::{ActionApplier, StateObserver, ProtocolConformanceSpec, ProtocolRuntimeBinding}`
 - `crates/nirvash-macros`
   - `#[derive(Signature)]`
   - `#[subsystem_spec]` / `#[system_spec]`
   - `#[formal_tests]` / `#[code_tests]`
   - `#[invariant(...)]` などの registry 登録
+- `crates/imago-protocol`
+  - `command_contract` の shared contract
 - `crates/nirvash-docgen`
   - `cargo doc` 時に spec を走らせ、reachable graph と registration 情報から Mermaid 図を生成
 - `crates/imagod-spec`
   - `imagod` 全体の spec 記述
   - `command_protocol` では projection つきの conformance spec を実装
+- `crates/imagod-control/tests`
+  - `command_protocol` の runtime binding と `code_tests` 実行
 
 ### 構造図
 
@@ -62,8 +66,8 @@ flowchart TD
 
 - spec は `State` / `Action` の bounded domain を持ちます。
 - `formal_tests` は spec 単体を検査します。
-- `code_tests` は `CodeConformanceSpec` が持つ `fresh_runtime()` と `context()` を使って runtime を生成し、`ActionApplier` / `StateObserver` 経由で spec の `expected_step` と比較します。
-- `imagod-model` の shared contract を `imagod-spec` と runtime が共有するため、`imago-protocol` を spec が直接参照しません。
+- `code_tests` は `nirvash_core::conformance::ProtocolConformanceSpec` と `ProtocolRuntimeBinding` を使って runtime を生成し、`ActionApplier` / `StateObserver` 経由で spec の `expected_step` と比較します。
+- shared contract は `imago-protocol`、conformance API は `nirvash-core` にあり、spec 本体は `imagod-spec`、runtime binding と `code_tests` 実行は runtime crate の integration test に置きます。
 
 ## imagod-control のシステム
 
@@ -105,7 +109,7 @@ flowchart TD
 flowchart LR
     A["wire request<br/>command.start / state.request / command.cancel"] --> B["imagod-server router"]
     B --> C["CommandProtocolAction + CommandProtocolContext"]
-    C --> D["OperationManager::execute_action()"]
+    C --> D["ActionApplier::execute_action()"]
     D --> E["CommandProtocolOutput"]
     D --> F["internal operation map"]
     E --> G["wire response / event"]
@@ -133,7 +137,7 @@ flowchart LR
 - `StateObserver::observe_state(&self, &CommandProtocolContext) -> CommandProtocolObservedState`
 
 server はこの trait 契約をそのまま使って command action を適用します。  
-spec 側の `code_tests` も同じ trait 契約だけを前提に runtime を replay するため、spec/runtime 間で「別の adapter API」を挟みません。
+`imagod-control` の integration test に置かれた `code_tests` も同じ trait 契約だけを前提に runtime を replay するため、spec/runtime 間で「別の adapter API」を挟みません。
 
 ## spec と runtime の接続
 
@@ -141,18 +145,21 @@ spec 側の `code_tests` も同じ trait 契約だけを前提に runtime を re
 
 ```mermaid
 flowchart LR
-    A["imagod-model<br/>CommandProtocolAction<br/>CommandProtocolContext<br/>CommandProtocolOutput"] --> B["imagod-spec::command_protocol"]
+    A["imago-protocol::command_contract<br/>CommandProtocolAction<br/>CommandProtocolContext<br/>CommandProtocolOutput"] --> B["imagod-spec::command_protocol"]
     A --> C["imagod-control::OperationManager"]
     B --> D["expected_step(...)"]
+    F["imagod-control/tests<br/>CommandProtocolBinding"] --> G["fresh_runtime / context"]
+    G --> C
     C --> E["execute_action(...)"]
-    C --> F["observe_state(...)"]
-    E --> G["runtime output"]
-    F --> H["observed runtime state"]
-    G --> I["spec-local output projection"]
-    H --> J["spec-local state projection"]
-    D --> K["nirvash code_tests comparison"]
-    I --> K
-    J --> K
+    C --> H["observe_state(...)"]
+    E --> I["runtime output"]
+    H --> J["observed runtime state"]
+    I --> K["spec-local output projection"]
+    J --> L["spec-local state projection"]
+    D --> M["nirvash_macros::code_tests comparison"]
+    G --> M
+    K --> M
+    L --> M
 ```
 
 この接続で保証していることは次です。
@@ -167,7 +174,9 @@ flowchart LR
 - `nirvash-core`: `crates/nirvash-core/src/lib.rs`, `crates/nirvash-core/src/system.rs`, `crates/nirvash-core/src/checker.rs`
 - `nirvash-macros`: `crates/nirvash-macros/src/lib.rs`
 - `nirvash-docgen`: `crates/nirvash-docgen/src/lib.rs`
-- shared contract: `crates/imagod-model/src/command.rs`
+- shared contract: `crates/imago-protocol/src/command_contract.rs`
+- conformance API: `crates/nirvash-core/src/conformance.rs`
 - `imagod-control`: `crates/imagod-control/src/lib.rs`, `crates/imagod-control/src/operation_state.rs`, `crates/imagod-control/src/artifact_store.rs`, `crates/imagod-control/src/orchestrator.rs`, `crates/imagod-control/src/service_supervisor.rs`
 - spec 側接続: `crates/imagod-spec/src/command_protocol.rs`
+- runtime 側 binding: `crates/imagod-control/tests/command_protocol_conformance.rs`
 - wire boundary: `crates/imagod-server/src/protocol_handler/router.rs`

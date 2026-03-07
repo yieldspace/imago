@@ -1,5 +1,5 @@
+use imago_protocol::{CommandErrorKind, CommandKind, CommandLifecycleState};
 use imagod_ipc::{PluginKind, RunnerAppType};
-use imagod_model::{CommandErrorKind, CommandKind, CommandLifecycleState};
 use nirvash_macros::Signature as FormalSignature;
 
 pub const MAX_SERVICES: u8 = 2;

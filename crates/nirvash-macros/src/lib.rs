@@ -368,6 +368,7 @@ impl syn::parse::Parse for TestArgs {
 
 struct CodeTestArgs {
     spec: Path,
+    binding: Path,
     init: Ident,
     cases: Option<Ident>,
 }
@@ -375,6 +376,7 @@ struct CodeTestArgs {
 impl syn::parse::Parse for CodeTestArgs {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
         let mut spec = None;
+        let mut binding = None;
         let mut init = None;
         let mut cases = None;
         while !input.is_empty() {
@@ -382,41 +384,42 @@ impl syn::parse::Parse for CodeTestArgs {
             let _eq: syn::Token![=] = input.parse()?;
             match ident.to_string().as_str() {
                 "spec" => spec = Some(input.parse()?),
+                "binding" => binding = Some(input.parse()?),
                 "init" => init = Some(input.parse()?),
                 "action" => {
                     return Err(syn::Error::new(
                         ident.span(),
-                        "action = ... is no longer supported; declare Runtime, Context, fresh_runtime(), and context() on CodeConformanceSpec",
+                        "action = ... is no longer supported; use binding = ... and implement ProtocolRuntimeBinding<Spec>",
                     ));
                 }
                 "driver" => {
                     return Err(syn::Error::new(
                         ident.span(),
-                        "driver = ... is no longer supported; declare Runtime and fresh_runtime() on CodeConformanceSpec",
+                        "driver = ... is no longer supported; use binding = ... and implement ProtocolRuntimeBinding<Spec>",
                     ));
                 }
                 "fresh" => {
                     return Err(syn::Error::new(
                         ident.span(),
-                        "fresh = ... is no longer supported; declare fresh_runtime() on CodeConformanceSpec",
+                        "fresh = ... is no longer supported; use binding = ... and implement fresh_runtime() on ProtocolRuntimeBinding<Spec>",
                     ));
                 }
                 "context" => {
                     return Err(syn::Error::new(
                         ident.span(),
-                        "context = ... is no longer supported; declare Context and context() on CodeConformanceSpec",
+                        "context = ... is no longer supported; use binding = ... and implement context() on ProtocolRuntimeBinding<Spec>",
                     ));
                 }
                 "harness" => {
                     return Err(syn::Error::new(
                         ident.span(),
-                        "harness = ... is no longer supported; declare Runtime, Context, fresh_runtime(), and context() on CodeConformanceSpec",
+                        "harness = ... is no longer supported; use binding = ... and implement ProtocolRuntimeBinding<Spec>",
                     ));
                 }
                 "probe" => {
                     return Err(syn::Error::new(
                         ident.span(),
-                        "probe = ... is no longer supported; declare Runtime, Context, fresh_runtime(), and context() on CodeConformanceSpec",
+                        "probe = ... is no longer supported; use binding = ... and implement ProtocolRuntimeBinding<Spec>",
                     ));
                 }
                 "cases" => cases = Some(input.parse()?),
@@ -434,6 +437,8 @@ impl syn::parse::Parse for CodeTestArgs {
 
         Ok(Self {
             spec: spec.ok_or_else(|| syn::Error::new(Span::call_site(), "missing spec = ..."))?,
+            binding: binding
+                .ok_or_else(|| syn::Error::new(Span::call_site(), "missing binding = ..."))?,
             init: init.ok_or_else(|| syn::Error::new(Span::call_site(), "missing init = ..."))?,
             cases,
         })
@@ -1650,6 +1655,7 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
 
 fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream> {
     let spec_ty = args.spec;
+    let binding_ty = args.binding;
     let spec_tail = path_tail_ident(&spec_ty)?.clone();
     let init_method = args.init;
     let cases_method = args.cases;
@@ -1668,32 +1674,34 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
         mod #module_ident {
             use super::*;
 
-            type GeneratedState = <#spec_ty as ::nirvash_core::TransitionSystem>::State;
-            type GeneratedAction = <#spec_ty as ::nirvash_core::TransitionSystem>::Action;
-            type GeneratedRuntime = <#spec_ty as ::nirvash_core::CodeConformanceSpec>::Runtime;
-            type GeneratedContext = <#spec_ty as ::nirvash_core::CodeConformanceSpec>::Context;
+            type GeneratedState = <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::State;
+            type GeneratedAction = <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action;
+            type GeneratedRuntime =
+                <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::Runtime;
+            type GeneratedContext =
+                <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::Context;
             type GeneratedExpectedOutput =
-                <#spec_ty as ::nirvash_core::CodeConformanceSpec>::ExpectedOutput;
+                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ExpectedOutput;
             type GeneratedObservedState =
-                <#spec_ty as ::nirvash_core::CodeConformanceSpec>::ObservedState;
+                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ObservedState;
             type GeneratedObservedOutput =
-                <#spec_ty as ::nirvash_core::CodeConformanceSpec>::ObservedOutput;
+                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ObservedOutput;
 
             fn generated_cases() -> ::std::vec::Vec<#spec_ty> {
                 #cases_expr
             }
 
             fn generated_actions() -> ::std::vec::Vec<GeneratedAction> {
-                <GeneratedAction as ::nirvash_core::Signature>::bounded_domain().into_vec()
+                <GeneratedAction as ::nirvash_core::conformance::Signature>::bounded_domain().into_vec()
             }
 
             fn generated_paths(
                 spec: &#spec_ty,
             ) -> (
-                ::nirvash_core::ReachableGraphSnapshot<GeneratedState, GeneratedAction>,
+                ::nirvash_core::conformance::ReachableGraphSnapshot<GeneratedState, GeneratedAction>,
                 ::std::vec::Vec<::std::vec::Vec<GeneratedAction>>,
             ) {
-                let snapshot = ::nirvash_core::ModelChecker::new(spec)
+                let snapshot = ::nirvash_core::conformance::ModelChecker::new(spec)
                     .reachable_graph_snapshot()
                     .expect("reachable graph snapshot should build");
                 let mut paths = vec![::core::option::Option::None; snapshot.states.len()];
@@ -1729,63 +1737,63 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                 context: &GeneratedContext,
             ) -> GeneratedRuntime {
                 let runtime =
-                    <#spec_ty as ::nirvash_core::CodeConformanceSpec>::fresh_runtime(spec).await;
-                let observed = <GeneratedRuntime as ::nirvash_core::StateObserver>::observe_state(
+                    <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::fresh_runtime(spec).await;
+                let observed = <GeneratedRuntime as ::nirvash_core::conformance::StateObserver>::observe_state(
                     &runtime,
                     context,
                 )
                 .await;
                 let mut projected =
-                    <#spec_ty as ::nirvash_core::CodeConformanceSpec>::project_state(
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_state(
                         spec,
                         &observed,
                     );
                 assert_eq!(projected, spec.#init_method());
                 for action in path {
                     let expected =
-                        <#spec_ty as ::nirvash_core::CodeConformanceSpec>::expected_step(
+                        <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::expected_step(
                             spec,
                             &projected,
                             action,
                         );
-                    let output = <GeneratedRuntime as ::nirvash_core::ActionApplier>::execute_action(
+                    let output = <GeneratedRuntime as ::nirvash_core::conformance::ActionApplier>::execute_action(
                         &runtime,
                         context,
                         action,
                     )
                     .await;
                     let projected_output =
-                        <#spec_ty as ::nirvash_core::CodeConformanceSpec>::project_output(
+                        <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_output(
                             spec,
                             &output,
                         );
                     match expected {
-                        ::nirvash_core::ExpectedStep::Allowed { next, output: expected_output } => {
+                        ::nirvash_core::conformance::ExpectedStep::Allowed { next, output: expected_output } => {
                             assert_eq!(projected_output, expected_output);
                             let observed_after =
-                                <GeneratedRuntime as ::nirvash_core::StateObserver>::observe_state(
+                                <GeneratedRuntime as ::nirvash_core::conformance::StateObserver>::observe_state(
                                     &runtime,
                                     context,
                                 )
                                 .await;
                             let projected_after =
-                                <#spec_ty as ::nirvash_core::CodeConformanceSpec>::project_state(
+                                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_state(
                                     spec,
                                     &observed_after,
                                 );
                             assert_eq!(projected_after, next);
                             projected = projected_after;
                         }
-                        ::nirvash_core::ExpectedStep::Rejected { output: expected_output } => {
+                        ::nirvash_core::conformance::ExpectedStep::Rejected { output: expected_output } => {
                             assert_eq!(projected_output, expected_output);
                             let observed_after =
-                                <GeneratedRuntime as ::nirvash_core::StateObserver>::observe_state(
+                                <GeneratedRuntime as ::nirvash_core::conformance::StateObserver>::observe_state(
                                     &runtime,
                                     context,
                                 )
                                 .await;
                             let projected_after =
-                                <#spec_ty as ::nirvash_core::CodeConformanceSpec>::project_state(
+                                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_state(
                                     spec,
                                     &observed_after,
                                 );
@@ -1803,48 +1811,48 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                 action: &GeneratedAction,
                 context: &GeneratedContext,
             ) -> (
-                ::nirvash_core::ExpectedStep<GeneratedState, GeneratedExpectedOutput>,
+                ::nirvash_core::conformance::ExpectedStep<GeneratedState, GeneratedExpectedOutput>,
                 GeneratedExpectedOutput,
                 GeneratedState,
             ) {
                 let runtime = replay_prefix(spec, path, context).await;
                 let observed_before =
-                    <GeneratedRuntime as ::nirvash_core::StateObserver>::observe_state(
+                    <GeneratedRuntime as ::nirvash_core::conformance::StateObserver>::observe_state(
                         &runtime,
                         context,
                     )
                 .await;
                 let projected_before =
-                    <#spec_ty as ::nirvash_core::CodeConformanceSpec>::project_state(
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_state(
                         spec,
                         &observed_before,
                     );
                 assert_eq!(projected_before, *expected_state);
                 let expected =
-                    <#spec_ty as ::nirvash_core::CodeConformanceSpec>::expected_step(
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::expected_step(
                         spec,
                         &projected_before,
                         action,
                     );
-                let output = <GeneratedRuntime as ::nirvash_core::ActionApplier>::execute_action(
+                let output = <GeneratedRuntime as ::nirvash_core::conformance::ActionApplier>::execute_action(
                     &runtime,
                     context,
                     action,
                 )
                 .await;
                 let projected_output =
-                    <#spec_ty as ::nirvash_core::CodeConformanceSpec>::project_output(
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_output(
                         spec,
                         &output,
                     );
                 let observed_after =
-                    <GeneratedRuntime as ::nirvash_core::StateObserver>::observe_state(
+                    <GeneratedRuntime as ::nirvash_core::conformance::StateObserver>::observe_state(
                         &runtime,
                         context,
                     )
                     .await;
                 let projected_after =
-                    <#spec_ty as ::nirvash_core::CodeConformanceSpec>::project_state(
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_state(
                         spec,
                         &observed_after,
                     );
@@ -1856,13 +1864,13 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                 for spec in generated_cases() {
                     let (snapshot, _) = generated_paths(&spec);
                     let all_states =
-                        <GeneratedState as ::nirvash_core::Signature>::bounded_domain().into_vec();
+                        <GeneratedState as ::nirvash_core::conformance::Signature>::bounded_domain().into_vec();
                     for state in &snapshot.states {
                         for action in generated_actions() {
                             let next_states = all_states
                                 .iter()
                                 .filter(|next| {
-                                    <#spec_ty as ::nirvash_core::TransitionSystem>::next(
+                                    <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::next(
                                         &spec,
                                         state,
                                         &action,
@@ -1878,15 +1886,15 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                                 action,
                                 next_states
                             );
-                            match <#spec_ty as ::nirvash_core::CodeConformanceSpec>::expected_step(
+                            match <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::expected_step(
                                 &spec,
                                 state,
                                 &action,
                             ) {
-                                ::nirvash_core::ExpectedStep::Allowed { next, .. } => {
+                                ::nirvash_core::conformance::ExpectedStep::Allowed { next, .. } => {
                                     assert_eq!(next_states, vec![next]);
                                 }
-                                ::nirvash_core::ExpectedStep::Rejected { .. } => {
+                                ::nirvash_core::conformance::ExpectedStep::Rejected { .. } => {
                                     assert!(next_states.is_empty());
                                 }
                             }
@@ -1898,7 +1906,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
             #[tokio::test]
             async fn generated_real_code_accepts_allowed_actions() {
                 for spec in generated_cases() {
-                    let context = <#spec_ty as ::nirvash_core::CodeConformanceSpec>::context(&spec);
+                    let context = <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
                     let (snapshot, paths) = generated_paths(&spec);
                     for (index, state) in snapshot.states.iter().enumerate() {
                         for action in generated_actions() {
@@ -1910,7 +1918,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                                 &context,
                             )
                                     .await;
-                            if let ::nirvash_core::ExpectedStep::Allowed { .. } = expected {
+                            if let ::nirvash_core::conformance::ExpectedStep::Allowed { .. } = expected {
                                 // replay + dispatch already succeeded if we reached here
                             }
                         }
@@ -1921,7 +1929,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
             #[tokio::test]
             async fn generated_real_code_rejects_disallowed_actions() {
                 for spec in generated_cases() {
-                    let context = <#spec_ty as ::nirvash_core::CodeConformanceSpec>::context(&spec);
+                    let context = <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
                     let (snapshot, paths) = generated_paths(&spec);
                     for (index, state) in snapshot.states.iter().enumerate() {
                         for action in generated_actions() {
@@ -1933,7 +1941,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                                 &context,
                             )
                                     .await;
-                            if let ::nirvash_core::ExpectedStep::Rejected { .. } = expected {
+                            if let ::nirvash_core::conformance::ExpectedStep::Rejected { .. } = expected {
                                 assert_eq!(observed_after, *state);
                             }
                         }
@@ -1944,7 +1952,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
             #[tokio::test]
             async fn generated_real_code_state_matches_spec() {
                 for spec in generated_cases() {
-                    let context = <#spec_ty as ::nirvash_core::CodeConformanceSpec>::context(&spec);
+                    let context = <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
                     let (snapshot, paths) = generated_paths(&spec);
                     for (index, state) in snapshot.states.iter().enumerate() {
                         for action in generated_actions() {
@@ -1957,10 +1965,10 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                             )
                                     .await;
                             match expected {
-                                ::nirvash_core::ExpectedStep::Allowed { next, .. } => {
+                                ::nirvash_core::conformance::ExpectedStep::Allowed { next, .. } => {
                                     assert_eq!(observed_after, next);
                                 }
-                                ::nirvash_core::ExpectedStep::Rejected { .. } => {
+                                ::nirvash_core::conformance::ExpectedStep::Rejected { .. } => {
                                     assert_eq!(observed_after, *state);
                                 }
                             }
@@ -1972,7 +1980,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
             #[tokio::test]
             async fn generated_real_code_output_matches_expected() {
                 for spec in generated_cases() {
-                    let context = <#spec_ty as ::nirvash_core::CodeConformanceSpec>::context(&spec);
+                    let context = <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
                     let (snapshot, paths) = generated_paths(&spec);
                     for (index, state) in snapshot.states.iter().enumerate() {
                         for action in generated_actions() {
@@ -1985,11 +1993,11 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                             )
                                     .await;
                             match expected {
-                                ::nirvash_core::ExpectedStep::Allowed {
+                                ::nirvash_core::conformance::ExpectedStep::Allowed {
                                     output: expected_output,
                                     ..
                                 }
-                                | ::nirvash_core::ExpectedStep::Rejected {
+                                | ::nirvash_core::conformance::ExpectedStep::Rejected {
                                     output: expected_output,
                                 } => {
                                     assert_eq!(output, expected_output);

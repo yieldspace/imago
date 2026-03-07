@@ -320,15 +320,14 @@ mod tests {
         session_loop::{read_stream_with_timeout, stream_read_timeout_error},
     };
     use imago_protocol::{
-        ArtifactPushChunkHeader, ArtifactPushRequest, ErrorCode, LogChunk, LogErrorCode,
-        LogStreamKind, MessageType, ProtocolEnvelope, to_cbor,
+        ArtifactPushChunkHeader, ArtifactPushRequest, CommandErrorKind, CommandKind,
+        CommandProtocolAction, CommandProtocolContext, CommandProtocolOutput,
+        CommandProtocolStageId, ErrorCode, LogChunk, LogErrorCode, LogStreamKind, MessageType,
+        ProtocolEnvelope,
+        to_cbor,
     };
     use imagod_common::ImagodError;
-    use imagod_control::{OperationManager, ServiceLogStream};
-    use imagod_model::{
-        CommandErrorKind, CommandKind, CommandProtocolAction, CommandProtocolContext,
-        CommandProtocolOutput, CommandProtocolStageId,
-    };
+    use imagod_control::{ActionApplier, OperationManager, ServiceLogStream};
     use serde_json::Value;
     use std::{sync::atomic::AtomicBool, time::Duration};
     use uuid::Uuid;
@@ -469,13 +468,13 @@ mod tests {
     async fn finalize_terminal_operation_removes_operation_even_when_stream_write_failed() {
         let operations = OperationManager::new();
         let request_id = Uuid::new_v4();
-        <OperationManager as imagod_control::ActionApplier>::execute_action(
+        <OperationManager as ActionApplier>::execute_action(
             &operations,
             &CommandProtocolContext { request_id },
             &CommandProtocolAction::Start(CommandKind::Deploy),
         )
         .await;
-        <OperationManager as imagod_control::ActionApplier>::execute_action(
+        <OperationManager as ActionApplier>::execute_action(
             &operations,
             &CommandProtocolContext { request_id },
             &CommandProtocolAction::SetRunning,
@@ -492,7 +491,7 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        let snapshot = <OperationManager as imagod_control::ActionApplier>::execute_action(
+        let snapshot = <OperationManager as ActionApplier>::execute_action(
             &operations,
             &CommandProtocolContext { request_id },
             &CommandProtocolAction::SnapshotRunning,

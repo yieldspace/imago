@@ -2483,6 +2483,8 @@ name = "imago-protocol"
 version = "0.2.0"
 dependencies = [
  "ciborium",
+ "nirvash-core",
+ "nirvash-macros",
  "serde",
  "serde_bytes",
  "uuid",
@@ -2552,8 +2554,9 @@ dependencies = [
  "imagod-common",
  "imagod-config",
  "imagod-ipc",
- "imagod-model",
+ "imagod-spec",
  "nirvash-core",
+ "nirvash-macros",
  "quinn",
  "rustls 0.23.37",
  "rustls-pemfile",
@@ -2584,15 +2587,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
- "uuid",
-]
-
-[[package]]
-name = "imagod-model"
-version = "0.2.0"
-dependencies = [
- "nirvash-core",
- "nirvash-macros",
  "uuid",
 ]
 
@@ -2701,7 +2695,6 @@ dependencies = [
  "imagod-common",
  "imagod-config",
  "imagod-control",
- "imagod-model",
  "quinn",
  "rustls 0.23.37",
  "rustls-pemfile",
@@ -2718,10 +2711,10 @@ dependencies = [
 name = "imagod-spec"
 version = "0.2.0"
 dependencies = [
+ "imago-protocol",
  "imagod-config",
  "imagod-control",
  "imagod-ipc",
- "imagod-model",
  "nirvash-core",
  "nirvash-docgen",
  "nirvash-macros",

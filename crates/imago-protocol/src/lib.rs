@@ -5,8 +5,10 @@
 //! - request/response payload schemas
 //! - structured error representation
 //! - payload validation helpers used at trust boundaries
+//! - shared command-domain contracts used across runtime and spec
 
 pub mod cbor;
+pub mod command_contract;
 pub mod envelope;
 pub mod error;
 pub mod messages;
@@ -19,6 +21,12 @@ pub const SUPPORTED_PROTOCOL_VERSION_RANGE: &str = ">=0.1.0,<0.2.0";
 
 /// CBOR serialization and deserialization helpers.
 pub use cbor::{CborError, from_cbor, to_cbor};
+/// Shared command-domain contracts used by runtime and spec projections.
+pub use command_contract::{
+    CommandErrorKind, CommandKind, CommandLifecycleState, CommandProtocolAction,
+    CommandProtocolContext, CommandProtocolObservedState, CommandProtocolOutput,
+    CommandProtocolStageId, OperationPhase,
+};
 /// Common protocol envelope used on stream/datagram payloads.
 pub use envelope::ProtocolEnvelope;
 /// Structured protocol error types shared across client/server.

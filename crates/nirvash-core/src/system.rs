@@ -109,30 +109,6 @@ pub trait StateObserver {
     async fn observe_state(&self, context: &Self::Context) -> Self::ObservedState;
 }
 
-#[allow(async_fn_in_trait)]
-pub trait CodeConformanceSpec: TransitionSystem {
-    type Runtime: ActionApplier<Action = Self::Action, Output = Self::ObservedOutput, Context = Self::Context>
-        + StateObserver<ObservedState = Self::ObservedState, Context = Self::Context>;
-    type Context: Clone;
-    type ExpectedOutput: Clone + std::fmt::Debug + PartialEq + Eq;
-    type ObservedState: Clone + std::fmt::Debug;
-    type ObservedOutput: Clone + std::fmt::Debug;
-
-    async fn fresh_runtime(&self) -> Self::Runtime;
-
-    fn context(&self) -> Self::Context;
-
-    fn expected_step(
-        &self,
-        prev: &Self::State,
-        action: &Self::Action,
-    ) -> ExpectedStep<Self::State, Self::ExpectedOutput>;
-
-    fn project_state(&self, observed: &Self::ObservedState) -> Self::State;
-
-    fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput;
-}
-
 #[derive(Debug, Clone)]
 pub struct SystemComposition<S, A> {
     name: &'static str,

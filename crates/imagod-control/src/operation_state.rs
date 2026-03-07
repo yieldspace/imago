@@ -2,15 +2,13 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::UNIX_EPOCH};
 
-use imagod_model::CommandProtocolObservedState;
+use imago_protocol::{
+    CommandErrorKind, CommandLifecycleState, CommandProtocolAction, CommandProtocolContext,
+    CommandProtocolObservedState, CommandProtocolOutput, CommandProtocolStageId, OperationPhase,
+};
+use nirvash_core::conformance::{ActionApplier, StateObserver};
 use tokio::sync::RwLock;
 use uuid::Uuid;
-
-use imagod_model::{
-    CommandErrorKind, CommandLifecycleState, CommandProtocolAction, CommandProtocolContext,
-    CommandProtocolOutput, CommandProtocolStageId, OperationPhase,
-};
-use nirvash_core::{ActionApplier, StateObserver};
 
 #[derive(Debug, Clone)]
 struct OperationEntry {
@@ -301,7 +299,7 @@ fn is_terminal(state: CommandLifecycleState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imagod_model::CommandKind;
+    use imago_protocol::CommandKind;
 
     fn req(id: u128) -> Uuid {
         Uuid::from_u128(id)

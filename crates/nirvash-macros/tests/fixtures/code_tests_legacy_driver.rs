@@ -1,12 +1,20 @@
 use std::sync::Mutex;
 
 use nirvash_core::{
-    ActionApplier, CodeConformanceSpec, ExpectedStep, StateObserver, TransitionSystem,
+    TransitionSystem,
+    conformance::{
+        ActionApplier, ExpectedStep, ProtocolConformanceSpec, ProtocolRuntimeBinding,
+        StateObserver,
+    },
 };
-use nirvash_macros::{Signature as FormalSignature, code_tests};
+use nirvash_macros::code_tests;
+use nirvash_macros::Signature as FormalSignature;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Spec;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Binding;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
 enum State {
@@ -43,22 +51,10 @@ impl TransitionSystem for Spec {
     }
 }
 
-impl CodeConformanceSpec for Spec {
-    type Runtime = Driver;
-    type Context = Context;
+impl ProtocolConformanceSpec for Spec {
     type ExpectedOutput = Output;
     type ObservedState = State;
     type ObservedOutput = Output;
-
-    async fn fresh_runtime(&self) -> Self::Runtime {
-        Driver {
-            state: Mutex::new(State::Idle),
-        }
-    }
-
-    fn context(&self) -> Self::Context {
-        Context
-    }
 
     fn expected_step(
         &self,
@@ -77,6 +73,21 @@ impl CodeConformanceSpec for Spec {
 
     fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {
         observed.clone()
+    }
+}
+
+impl ProtocolRuntimeBinding<Spec> for Binding {
+    type Runtime = Driver;
+    type Context = Context;
+
+    async fn fresh_runtime(_spec: &Spec) -> Self::Runtime {
+        Driver {
+            state: Mutex::new(State::Idle),
+        }
+    }
+
+    fn context(_spec: &Spec) -> Self::Context {
+        Context
     }
 }
 
@@ -104,7 +115,7 @@ fn initial_state() -> State {
     State::Idle
 }
 
-#[code_tests(spec = Spec, init = initial_state, driver = tests::Driver)]
+#[code_tests(spec = Spec, binding = Binding, init = initial_state, driver = tests::Driver)]
 const _: () = ();
 
 fn main() {}

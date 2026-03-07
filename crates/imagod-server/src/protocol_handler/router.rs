@@ -12,17 +12,14 @@ use imago_protocol::messages::{
 use imago_protocol::{
     ArtifactPushRequest, CommandCancelRequest, CommandCancelResponse, CommandEventType,
     CommandPayload, CommandStartRequest, CommandStartResponse, CommandState, CommandType,
-    DeployPrepareRequest, ErrorCode, MessageType, PROTOCOL_VERSION,
-    SUPPORTED_PROTOCOL_VERSION_RANGE, ServiceListRequest, ServiceListResponse, StateRequest,
-    StateResponse, Validate,
+    CommandErrorKind, CommandKind, CommandLifecycleState, CommandProtocolAction,
+    CommandProtocolContext, CommandProtocolOutput, CommandProtocolStageId, DeployPrepareRequest,
+    ErrorCode, MessageType, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSION_RANGE,
+    ServiceListRequest, ServiceListResponse, StateRequest, StateResponse, Validate,
 };
 use imagod_common::ImagodError;
 use imagod_config::upsert_tls_known_client_key;
-use imagod_control::OperationManager;
-use imagod_model::{
-    CommandErrorKind, CommandKind, CommandLifecycleState, CommandProtocolAction,
-    CommandProtocolContext, CommandProtocolOutput, CommandProtocolStageId,
-};
+use imagod_control::{ActionApplier, OperationManager};
 use semver::{Version, VersionReq};
 use serde::Serialize;
 use web_transport_quinn::SendStream;
@@ -188,7 +185,7 @@ impl ProtocolHandler {
             .validate()
             .map_err(|e| bad_request("state.request", e.to_string()))?;
 
-        let response = <OperationManager as imagod_control::ActionApplier>::execute_action(
+        let response = <OperationManager as ActionApplier>::execute_action(
             &self.operations,
             &command_context(payload.request_id),
             &CommandProtocolAction::SnapshotRunning,
@@ -236,7 +233,7 @@ impl ProtocolHandler {
             .validate()
             .map_err(|e| bad_request("command.cancel", e.to_string()))?;
 
-        let response = <OperationManager as imagod_control::ActionApplier>::execute_action(
+        let response = <OperationManager as ActionApplier>::execute_action(
             &self.operations,
             &command_context(payload.request_id),
             &CommandProtocolAction::RequestCancel,
@@ -414,7 +411,7 @@ impl ProtocolHandler {
         };
 
         expect_ack(
-            <OperationManager as imagod_control::ActionApplier>::execute_action(
+            <OperationManager as ActionApplier>::execute_action(
                 &self.operations,
                 &operation_context,
                 &CommandProtocolAction::Start(command_kind_from_wire(payload.command_type)),
@@ -443,7 +440,7 @@ impl ProtocolHandler {
         write_envelope(send, &accepted_event, self.frame_codec.as_ref()).await?;
 
         expect_ack(
-            <OperationManager as imagod_control::ActionApplier>::execute_action(
+            <OperationManager as ActionApplier>::execute_action(
                 &self.operations,
                 &operation_context,
                 &CommandProtocolAction::SetRunning,
@@ -462,7 +459,7 @@ impl ProtocolHandler {
         )?;
         write_envelope(send, &running_event, self.frame_codec.as_ref()).await?;
 
-        let spawn_transition = <OperationManager as imagod_control::ActionApplier>::execute_action(
+        let spawn_transition = <OperationManager as ActionApplier>::execute_action(
             &self.operations,
             &operation_context,
             &CommandProtocolAction::MarkSpawned,
@@ -891,16 +888,12 @@ pub(crate) async fn finalize_operation_after_terminal_event(
     terminal_write_result: Result<(), ImagodError>,
 ) -> Result<(), ImagodError> {
     expect_ack(
-        <OperationManager as imagod_control::ActionApplier>::execute_action(
-            operations,
-            context,
-            &terminal_action,
-        )
-        .await,
+        <OperationManager as ActionApplier>::execute_action(operations, context, &terminal_action)
+            .await,
         CommandProtocolStageId::OperationState,
     )?;
     expect_ack(
-        <OperationManager as imagod_control::ActionApplier>::execute_action(
+        <OperationManager as ActionApplier>::execute_action(
             operations,
             context,
             &CommandProtocolAction::Remove,
@@ -918,12 +911,12 @@ mod tests {
 
     use std::sync::atomic::AtomicBool;
 
-    use imago_protocol::{ArtifactPushChunkHeader, ArtifactPushRequest, CommandState, CommandType};
-    use imagod_control::OperationManager;
-    use imagod_model::{
-        CommandErrorKind, CommandKind, CommandLifecycleState, CommandProtocolAction,
-        CommandProtocolContext, CommandProtocolOutput, CommandProtocolStageId,
+    use imago_protocol::{
+        ArtifactPushChunkHeader, ArtifactPushRequest, CommandErrorKind, CommandKind,
+        CommandLifecycleState, CommandProtocolAction, CommandProtocolContext,
+        CommandProtocolOutput, CommandProtocolStageId, CommandState, CommandType,
     };
+    use imagod_control::{ActionApplier, OperationManager};
     use uuid::Uuid;
 
     use super::{
@@ -1145,13 +1138,13 @@ mod tests {
      {
         let operations = OperationManager::new();
         let request_id = Uuid::new_v4();
-        <OperationManager as imagod_control::ActionApplier>::execute_action(
+        <OperationManager as ActionApplier>::execute_action(
             &operations,
             &CommandProtocolContext { request_id },
             &CommandProtocolAction::Start(CommandKind::Deploy),
         )
         .await;
-        <OperationManager as imagod_control::ActionApplier>::execute_action(
+        <OperationManager as ActionApplier>::execute_action(
             &operations,
             &CommandProtocolContext { request_id },
             &CommandProtocolAction::SetRunning,
@@ -1169,7 +1162,7 @@ mod tests {
         .await;
 
         assert!(result.is_err(), "write error should be returned");
-        let snapshot = <OperationManager as imagod_control::ActionApplier>::execute_action(
+        let snapshot = <OperationManager as ActionApplier>::execute_action(
             &operations,
             &CommandProtocolContext { request_id },
             &CommandProtocolAction::SnapshotRunning,
