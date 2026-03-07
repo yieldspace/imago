@@ -2449,19 +2449,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "imago-plugin-nanokvm-plugin"
-version = "0.1.0"
-dependencies = [
- "imago-plugin-macros",
- "imagod-runtime-wasmtime",
- "serde_json",
- "ureq",
- "url",
- "wasmtime",
- "wasmtime-wasi",
-]
-
-[[package]]
 name = "imago-project-config"
 version = "0.3.0"
 dependencies = [
@@ -3314,16 +3301,6 @@ name = "multimap"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
-
-[[package]]
-name = "nanokvm-imagod"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "imago-plugin-nanokvm-plugin",
- "imagod",
- "tokio",
-]
 
 [[package]]
 name = "nb"
