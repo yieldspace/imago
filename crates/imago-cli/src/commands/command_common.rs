@@ -33,14 +33,14 @@ pub(crate) fn resolve_service_name(
 }
 
 pub(crate) async fn negotiate_hello(
-    session: &web_transport_quinn::Session,
+    session: &deploy::ConnectedTargetSession,
     correlation_id: Uuid,
 ) -> anyhow::Result<HelloSummary> {
     negotiate_hello_with_features(session, correlation_id, &HELLO_REQUIRED_FEATURES).await
 }
 
 pub(crate) async fn negotiate_hello_with_features(
-    session: &web_transport_quinn::Session,
+    session: &deploy::ConnectedTargetSession,
     correlation_id: Uuid,
     required_features: &[&str],
 ) -> anyhow::Result<HelloSummary> {

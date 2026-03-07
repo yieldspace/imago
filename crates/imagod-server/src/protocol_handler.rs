@@ -17,6 +17,8 @@ use imagod_common::ImagodError;
 use imagod_config::{ImagodConfig, parse_ed25519_raw_public_key_hex, resolve_config_path};
 use imagod_control::{ArtifactStore, OperationManager, Orchestrator};
 use serde_json::Value;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use web_transport_quinn::Session;
 
 #[cfg(feature = "bench-internals")]
@@ -30,7 +32,6 @@ mod session_loop;
 
 pub(crate) const MAX_STREAM_BYTES: usize = 1024 * 1024 * 16;
 pub(crate) const STREAM_READ_TIMEOUT_SECS: u64 = 30;
-pub(crate) const LOG_DATAGRAM_TARGET_BYTES: usize = 1024;
 
 const STAGE_DYNAMIC_KEYS: &str = "protocol.keys";
 
@@ -285,6 +286,12 @@ impl ProtocolHandler {
         session_loop::run_session_loop(self, session).await
     }
 
+    #[cfg(unix)]
+    /// Serves one local Unix socket control connection as a single request/response exchange.
+    pub async fn handle_local_stream(&self, stream: UnixStream) -> Result<(), ImagodError> {
+        session_loop::run_local_stream(self, stream).await
+    }
+
     /// Reaps finished services via orchestrator.
     pub async fn reap_finished_services(&self) {
         self.orchestrator.reap_finished_services().await;
@@ -309,8 +316,7 @@ mod tests {
             response_message_type_for_request,
         },
         logs_forwarder::{
-            advance_seq_for_lagged, fixed_log_chunk_size, log_error_from_imagod_error,
-            service_log_stream_to_protocol,
+            advance_seq_for_lagged, log_error_from_imagod_error, service_log_stream_to_protocol,
         },
         router::{
             ensure_command_start_allowed, ensure_command_start_request_id_match,
@@ -321,7 +327,7 @@ mod tests {
     };
     use imago_protocol::{
         ArtifactPushChunkHeader, ArtifactPushRequest, CommandState, CommandType, ErrorCode,
-        LogChunk, LogErrorCode, LogStreamKind, MessageType, ProtocolEnvelope, to_cbor,
+        LogErrorCode, LogStreamKind, MessageType, ProtocolEnvelope,
     };
     use imagod_common::ImagodError;
     use imagod_control::{OperationManager, ServiceLogStream};
@@ -445,12 +451,10 @@ mod tests {
 
     #[tokio::test]
     async fn read_stream_timeout_returns_operation_timeout() {
-        let err = read_stream_with_timeout(
-            std::future::pending::<Result<Vec<u8>, std::io::Error>>(),
-            Duration::from_millis(1),
-        )
-        .await
-        .expect_err("pending read should timeout");
+        let (_writer, mut reader) = tokio::io::duplex(64);
+        let err = read_stream_with_timeout(&mut reader, Duration::from_millis(1))
+            .await
+            .expect_err("pending read should timeout");
         assert_eq!(err.code, imago_protocol::ErrorCode::OperationTimeout);
     }
 
@@ -490,122 +494,6 @@ mod tests {
             snapshot.is_err(),
             "operation should be removed after finalize"
         );
-    }
-
-    #[test]
-    fn fixed_log_chunk_size_is_bounded_by_target_and_datagram_size() {
-        let request_id = Uuid::new_v4();
-        let correlation_id = Uuid::new_v4();
-        let max_datagram_size = 1413usize;
-        let chunk_size = fixed_log_chunk_size(
-            request_id,
-            correlation_id,
-            max_datagram_size,
-            &["svc-a".to_string()],
-            false,
-        )
-        .expect("chunk size should be computed");
-        assert!(chunk_size <= 1024);
-        assert!(chunk_size > 0);
-
-        let probe = ProtocolEnvelope::new(
-            MessageType::LogsChunk,
-            request_id,
-            correlation_id,
-            LogChunk {
-                request_id,
-                seq: u64::MAX,
-                name: "svc-a".to_string(),
-                stream_kind: LogStreamKind::Composite,
-                bytes: vec![0xAB; chunk_size],
-                is_last: false,
-                timestamp_unix_ms: None,
-            },
-        );
-        let encoded = to_cbor(&probe).expect("encoding must succeed");
-        assert!(encoded.len() <= max_datagram_size);
-    }
-
-    #[test]
-    fn fixed_log_chunk_size_handles_long_name() {
-        let request_id = Uuid::new_v4();
-        let correlation_id = Uuid::new_v4();
-        let name = "service-with-very-long-name-".repeat(12);
-        let max_datagram_size = 1413usize;
-        let chunk_size = fixed_log_chunk_size(
-            request_id,
-            correlation_id,
-            max_datagram_size,
-            std::slice::from_ref(&name),
-            false,
-        )
-        .expect("chunk size should be computed");
-        assert!(chunk_size > 0);
-
-        let probe = ProtocolEnvelope::new(
-            MessageType::LogsChunk,
-            request_id,
-            correlation_id,
-            LogChunk {
-                request_id,
-                seq: u64::MAX,
-                name,
-                stream_kind: LogStreamKind::Composite,
-                bytes: vec![0xCD; chunk_size],
-                is_last: false,
-                timestamp_unix_ms: None,
-            },
-        );
-        let encoded = to_cbor(&probe).expect("encoding must succeed");
-        assert!(encoded.len() <= max_datagram_size);
-    }
-
-    #[test]
-    fn fixed_log_chunk_size_rejects_too_small_datagram() {
-        let err = fixed_log_chunk_size(
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            8,
-            &["svc-a".to_string()],
-            false,
-        )
-        .expect_err("small datagram should be rejected");
-        assert_eq!(err.code, ErrorCode::Internal);
-        assert_eq!(err.stage, "logs.datagram");
-    }
-
-    #[test]
-    fn fixed_log_chunk_size_accounts_for_timestamp_overhead() {
-        let request_id = Uuid::new_v4();
-        let correlation_id = Uuid::new_v4();
-        let max_datagram_size = 1413usize;
-        let chunk_size = fixed_log_chunk_size(
-            request_id,
-            correlation_id,
-            max_datagram_size,
-            &["svc-a".to_string()],
-            true,
-        )
-        .expect("chunk size should be computed");
-        assert!(chunk_size <= 1024);
-        assert!(chunk_size > 0);
-
-        let probe = ProtocolEnvelope::new(
-            MessageType::LogsChunk,
-            request_id,
-            correlation_id,
-            LogChunk {
-                request_id,
-                seq: u64::MAX,
-                name: "svc-a".to_string(),
-                stream_kind: LogStreamKind::Composite,
-                bytes: vec![0xEF; chunk_size],
-                is_last: false,
-                timestamp_unix_ms: Some(u64::MAX),
-            },
-        );
-        let encoded = to_cbor(&probe).expect("encoding must succeed");
-        assert!(encoded.len() <= max_datagram_size);
     }
 
     #[test]

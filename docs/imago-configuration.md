@@ -117,7 +117,11 @@ This section configures remote deployment targets.
 
 - Type: `string`
 - Required/Optional: Required for the selected target.
-- Accepted values / Constraints: endpoint string; validated in deploy/run paths.
+- Accepted values / Constraints:
+  - direct target: `host:port`
+  - SSH target: `ssh://root@host` or `ssh://root@host:2222?socket=/path/to/imagod.sock`
+  - SSH query parameters are validated strictly; only `socket=` is accepted.
+  - SSH targets must not include a password, path, or fragment.
 - Default: none.
 - Example:
 
@@ -126,13 +130,20 @@ This section configures remote deployment targets.
 remote = "127.0.0.1:4443"
 ```
 
-- Validation error notes: missing selected target or invalid endpoint causes deploy/run failure.
+```toml
+[target.edge]
+remote = "ssh://root@edge-box?socket=/run/imago/imagod.sock"
+```
+
+- Validation error notes: missing selected target, invalid direct endpoint, invalid SSH URI, or unsupported SSH query parameters cause validation/deploy failure.
+
+When an SSH target uses `?socket=...`, that path must match the remote daemon's `control_socket_path`.
 
 ### The `server_name` field
 
 - Type: `string`
 - Required/Optional: Optional.
-- Accepted values / Constraints: must be a string; used as authority for known-host matching.
+- Accepted values / Constraints: must be a string; used as authority for direct-target TOFU matching in `~/.imago/known_hosts`.
 - Default: none.
 - Example:
 
@@ -141,12 +152,12 @@ remote = "127.0.0.1:4443"
 server_name = "node-a.example.com"
 ```
 
-- Validation error notes: non-string values fail validation.
+- Validation error notes: non-string values fail validation. SSH targets must not set `server_name`.
 
 ### The `client_key` field
 
 - Type: `string` (path)
-- Required/Optional: Optional for `imago artifact build`; required for service deploy/start/stop/logs/ls paths.
+- Required/Optional: Optional for `imago artifact build`; required for direct-target service deploy/start/stop/logs/ls paths.
 - Accepted values / Constraints: non-empty; no path traversal; no backslashes; no Windows drive prefix; relative paths resolve from project root; absolute paths are allowed.
 - Default: none.
 - Example:
@@ -156,7 +167,10 @@ server_name = "node-a.example.com"
 client_key = "certs/client.key"
 ```
 
-- Validation error notes: invalid paths fail validation; missing key in deploy paths fails the command.
+- Validation error notes: invalid paths fail validation; missing key in direct-target deploy paths fails the command. SSH targets must not set `client_key` and instead rely on the system `ssh` command for authentication.
+
+For direct targets, host verification uses `server_name`/`remote` together with `~/.imago/known_hosts`.
+For SSH targets, host verification and authentication are delegated to OpenSSH, and `~/.imago/known_hosts` is not used.
 
 <a id="the-assets-section"></a>
 ## The [[assets]] section

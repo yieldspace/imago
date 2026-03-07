@@ -719,6 +719,24 @@ fn resolve_compose_target(
         }
     };
 
+    if matches!(
+        build::parse_target_remote(&remote)?,
+        build::ParsedTargetRemote::Ssh(_)
+    ) {
+        if server_name.is_some() {
+            return Err(anyhow!(
+                "target '{}' key 'server_name' is not supported for ssh targets",
+                target_name
+            ));
+        }
+        if client_key.is_some() {
+            return Err(anyhow!(
+                "target '{}' key 'client_key' is not supported for ssh targets",
+                target_name
+            ));
+        }
+    }
+
     Ok(build::TargetConfig {
         remote,
         server_name,

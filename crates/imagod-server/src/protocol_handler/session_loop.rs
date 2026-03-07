@@ -1,17 +1,29 @@
-use std::{any::Any, fmt::Write, future::Future, sync::Arc, time::Duration};
+use std::{
+    any::Any,
+    fmt::Write,
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use imago_protocol::{ErrorCode, MessageType};
+use imago_protocol::{ErrorCode, HelloNegotiateRequest, MessageType, Validate};
 use imagod_common::ImagodError;
 use rustls::pki_types::CertificateDer;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use uuid::Uuid;
 use web_transport_quinn::{RecvStream, SendStream, Session};
 
 use super::{
     DynamicClientRole, MAX_STREAM_BYTES, ProtocolHandler, STREAM_READ_TIMEOUT_SECS,
     envelope_io::{
-        error_envelope, finish_stream, parse_single_request_envelope,
+        error_envelope, finish_stream, parse_single_request_envelope, payload_as,
         response_message_type_for_request, write_envelope,
     },
     resolve_dynamic_client_role,
@@ -20,6 +32,7 @@ use super::{
 const ED25519_SPKI_PREFIX: [u8; 12] = [
     0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
 ];
+const LOGS_STREAM_FEATURE: &str = "logs.stream";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionAuthContext {
@@ -27,13 +40,57 @@ struct SessionAuthContext {
     public_key_hex: String,
 }
 
+impl SessionAuthContext {
+    #[cfg(unix)]
+    fn local_admin(public_key_hex: String) -> Self {
+        Self {
+            role: DynamicClientRole::Admin,
+            public_key_hex,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct SessionFeatureState {
+    logs_stream_requested: AtomicBool,
+}
+
+impl SessionFeatureState {
+    fn record_hello_request(&self, request: &super::Envelope) {
+        let Ok(hello) = payload_as::<HelloNegotiateRequest>(request) else {
+            return;
+        };
+        if hello.validate().is_err() {
+            return;
+        }
+        let requested = hello
+            .required_features
+            .iter()
+            .any(|feature| feature == LOGS_STREAM_FEATURE);
+        self.logs_stream_requested
+            .store(requested, Ordering::Relaxed);
+    }
+
+    fn logs_stream_requested(&self) -> bool {
+        self.logs_stream_requested.load(Ordering::Relaxed)
+    }
+}
+
 #[async_trait]
 pub(crate) trait ProtocolSession: Send + Sync {
     async fn accept_bi(&self) -> Option<(SendStream, RecvStream)>;
 
-    fn max_datagram_size(&self) -> usize;
+    fn max_datagram_size(&self) -> Option<usize> {
+        None
+    }
 
-    fn send_datagram(&self, payload: Bytes) -> Result<(), ImagodError>;
+    fn send_datagram(&self, _payload: Bytes) -> Result<(), ImagodError> {
+        Err(ImagodError::new(
+            ErrorCode::Internal,
+            "logs.datagram",
+            "transport does not support datagrams",
+        ))
+    }
 
     fn peer_identity(&self) -> Option<Box<dyn Any>>;
 
@@ -46,8 +103,8 @@ impl ProtocolSession for Session {
         Session::accept_bi(self).await.ok()
     }
 
-    fn max_datagram_size(&self) -> usize {
-        Session::max_datagram_size(self)
+    fn max_datagram_size(&self) -> Option<usize> {
+        Some(Session::max_datagram_size(self))
     }
 
     fn send_datagram(&self, payload: Bytes) -> Result<(), ImagodError> {
@@ -77,19 +134,34 @@ where
     S: ProtocolSession + 'static,
 {
     let auth_context = resolve_session_auth_context(session.as_ref())?;
+    let session_features = Arc::new(SessionFeatureState::default());
     let mut stream_tasks = tokio::task::JoinSet::new();
     let mut first_error = None;
     loop {
         tokio::select! {
             accepted = session.accept_bi() => {
-                let Some((send, recv)) = accepted else {
+                let Some((mut send, mut recv)) = accepted else {
                     break;
                 };
                 let handler = handler.clone();
                 let session = session.clone();
+                let datagram_session: Arc<dyn ProtocolSession> = session.clone();
+                let session_features = session_features.clone();
                 let auth_context = auth_context.clone();
                 stream_tasks.spawn(async move {
-                    run_single_stream(&handler, session, auth_context, send, recv).await
+                    let close_signal = async move {
+                        session.closed().await;
+                    };
+                    run_stream_io(
+                        &handler,
+                        datagram_session,
+                        session_features,
+                        auth_context,
+                        &mut send,
+                        &mut recv,
+                        close_signal,
+                    )
+                    .await
                 });
             }
             joined = stream_tasks.join_next(), if !stream_tasks.is_empty() => {
@@ -113,23 +185,15 @@ where
     Ok(())
 }
 
-async fn run_single_stream<S>(
+#[cfg(unix)]
+pub(crate) async fn run_local_stream(
     handler: &ProtocolHandler,
-    session: Arc<S>,
-    auth_context: SessionAuthContext,
-    mut send: SendStream,
-    mut recv: RecvStream,
-) -> Result<(), ImagodError>
-where
-    S: ProtocolSession + 'static,
-{
-    let buf = match read_stream_with_timeout(
-        recv.read_to_end(MAX_STREAM_BYTES),
-        Duration::from_secs(STREAM_READ_TIMEOUT_SECS),
-    )
-    .await
-    {
-        Ok(buf) => buf,
+    stream: UnixStream,
+) -> Result<(), ImagodError> {
+    let auth_context = resolve_local_auth_context(&stream)?;
+    let (mut recv, mut send) = stream.into_split();
+    let Some(parsed) = (match read_single_local_request_envelope(&mut recv, handler).await {
+        Ok(parsed) => parsed,
         Err(err) => {
             let envelope = error_envelope(
                 MessageType::CommandEvent,
@@ -138,34 +202,126 @@ where
                 err.to_structured(),
             );
             write_envelope(&mut send, &envelope, handler.frame_codec.as_ref()).await?;
-            finish_stream(&mut send)?;
+            finish_stream(&mut send).await?;
             return Ok(());
         }
-    };
-
-    let parsed = match parse_single_request_envelope(&buf, handler.frame_codec.as_ref()) {
-        Ok(v) => v,
-        Err(err) => {
-            let envelope = error_envelope(
-                MessageType::CommandEvent,
-                Uuid::new_v4(),
-                Uuid::new_v4(),
-                err.to_structured(),
-            );
-            write_envelope(&mut send, &envelope, handler.frame_codec.as_ref()).await?;
-            finish_stream(&mut send)?;
-            return Ok(());
-        }
-    };
-    let Some(parsed) = parsed else {
-        finish_stream(&mut send)?;
+    }) else {
+        finish_stream(&mut send).await?;
         return Ok(());
     };
+
+    let close_signal = wait_for_local_disconnect(&mut recv);
+    handle_parsed_request(
+        handler,
+        None,
+        None,
+        auth_context,
+        &mut send,
+        parsed,
+        close_signal,
+    )
+    .await?;
+    finish_stream(&mut send).await?;
+    Ok(())
+}
+
+async fn run_stream_io<R, W, C>(
+    handler: &ProtocolHandler,
+    logs_session: Arc<dyn ProtocolSession>,
+    session_features: Arc<SessionFeatureState>,
+    auth_context: SessionAuthContext,
+    send: &mut W,
+    recv: &mut R,
+    close_signal: C,
+) -> Result<(), ImagodError>
+where
+    R: AsyncRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+    C: Future<Output = ()> + Send,
+{
+    let Some(parsed) = (match read_single_request_envelope(recv, handler).await {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            let envelope = error_envelope(
+                MessageType::CommandEvent,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                err.to_structured(),
+            );
+            write_envelope(send, &envelope, handler.frame_codec.as_ref()).await?;
+            finish_stream(send).await?;
+            return Ok(());
+        }
+    }) else {
+        finish_stream(send).await?;
+        return Ok(());
+    };
+
+    handle_parsed_request(
+        handler,
+        Some(logs_session),
+        Some(session_features),
+        auth_context,
+        send,
+        parsed,
+        close_signal,
+    )
+    .await?;
+    finish_stream(send).await?;
+    Ok(())
+}
+
+async fn read_single_request_envelope<R>(
+    recv: &mut R,
+    handler: &ProtocolHandler,
+) -> Result<Option<super::envelope_io::ParsedSingleRequestEnvelope>, ImagodError>
+where
+    R: AsyncRead + Unpin + Send,
+{
+    let buf = read_stream_with_timeout(recv, Duration::from_secs(STREAM_READ_TIMEOUT_SECS)).await?;
+    parse_single_request_envelope(&buf, handler.frame_codec.as_ref())
+}
+
+#[cfg(unix)]
+async fn read_single_local_request_envelope<R>(
+    recv: &mut R,
+    handler: &ProtocolHandler,
+) -> Result<Option<super::envelope_io::ParsedSingleRequestEnvelope>, ImagodError>
+where
+    R: AsyncRead + Unpin + Send,
+{
+    let buf =
+        read_terminated_stream_with_timeout(recv, Duration::from_secs(STREAM_READ_TIMEOUT_SECS))
+            .await?;
+    match buf {
+        Some(buf) => parse_single_request_envelope(&buf, handler.frame_codec.as_ref()),
+        None => Ok(None),
+    }
+}
+
+async fn handle_parsed_request<W, C>(
+    handler: &ProtocolHandler,
+    logs_session: Option<Arc<dyn ProtocolSession>>,
+    session_features: Option<Arc<SessionFeatureState>>,
+    auth_context: SessionAuthContext,
+    send: &mut W,
+    parsed: super::envelope_io::ParsedSingleRequestEnvelope,
+    close_signal: C,
+) -> Result<(), ImagodError>
+where
+    W: AsyncWrite + Unpin + Send,
+    C: Future<Output = ()> + Send,
+{
     let request = parsed.request;
     let typed_push = parsed.typed_push;
     let request_id = request.request_id;
     let correlation_id = request.correlation_id;
     let request_message_type = request.message_type;
+    if request_message_type == MessageType::HelloNegotiate
+        && let Some(features) = &session_features
+    {
+        features.record_hello_request(&request);
+    }
     if let Err(err) = ensure_message_type_allowed(&request, &auth_context) {
         let response = error_envelope(
             response_message_type_for_request(request_message_type),
@@ -173,8 +329,7 @@ where
             correlation_id,
             err.to_structured(),
         );
-        write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
-        finish_stream(&mut send)?;
+        write_envelope(send, &response, handler.frame_codec.as_ref()).await?;
         return Ok(());
     }
 
@@ -191,8 +346,7 @@ where
                 )
                 .to_structured(),
             );
-            write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
-            finish_stream(&mut send)?;
+            write_envelope(send, &response, handler.frame_codec.as_ref()).await?;
             return Ok(());
         };
         let response = match handler
@@ -207,36 +361,43 @@ where
                 err.to_structured(),
             ),
         };
-        write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
-        finish_stream(&mut send)?;
+        write_envelope(send, &response, handler.frame_codec.as_ref()).await?;
         return Ok(());
     }
 
     if request_message_type == MessageType::CommandStart {
-        if let Err(err) = handler.handle_command_start(request, &mut send).await {
+        if let Err(err) = handler.handle_command_start(request, send).await {
             if !should_wrap_command_start_error(&err) {
                 return Err(err);
             }
             let response = command_start_error_envelope(request_id, correlation_id, err);
-            write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
+            write_envelope(send, &response, handler.frame_codec.as_ref()).await?;
         }
-        finish_stream(&mut send)?;
         return Ok(());
     }
     if request_message_type == MessageType::LogsRequest {
+        let client_requested_logs_stream = session_features
+            .as_ref()
+            .is_some_and(|features| features.logs_stream_requested());
         if let Err(err) = handler
-            .handle_logs_request(session.clone(), request, &mut send)
+            .handle_logs_request(
+                logs_session,
+                client_requested_logs_stream,
+                request,
+                send,
+                close_signal,
+            )
             .await
         {
-            let response = error_envelope(
-                MessageType::LogsRequest,
+            finish_logs_request_error(
+                send,
                 request_id,
                 correlation_id,
-                err.to_structured(),
-            );
-            write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
+                err,
+                handler.frame_codec.as_ref(),
+            )
+            .await?;
         }
-        finish_stream(&mut send)?;
         return Ok(());
     }
 
@@ -249,9 +410,38 @@ where
             err.to_structured(),
         ),
     };
-    write_envelope(&mut send, &response, handler.frame_codec.as_ref()).await?;
-    finish_stream(&mut send)?;
+    write_envelope(send, &response, handler.frame_codec.as_ref()).await?;
     Ok(())
+}
+
+async fn finish_logs_request_error<W>(
+    send: &mut W,
+    request_id: Uuid,
+    correlation_id: Uuid,
+    err: ImagodError,
+    frame_codec: &impl super::codec::FrameCodec,
+) -> Result<(), ImagodError>
+where
+    W: AsyncWrite + Unpin,
+{
+    if is_benign_logs_request_write_error(&err) {
+        return Ok(());
+    }
+
+    let response = error_envelope(
+        MessageType::LogsRequest,
+        request_id,
+        correlation_id,
+        err.to_structured(),
+    );
+    match write_envelope(send, &response, frame_codec).await {
+        Err(write_err) if is_benign_logs_request_write_error(&write_err) => Ok(()),
+        other => other,
+    }
+}
+
+fn is_benign_logs_request_write_error(err: &ImagodError) -> bool {
+    err.stage == "session.write"
 }
 
 fn resolve_session_auth_context<S>(session: &S) -> Result<SessionAuthContext, ImagodError>
@@ -264,6 +454,42 @@ where
         role,
         public_key_hex: encode_hex(&public_key),
     })
+}
+
+#[cfg(unix)]
+fn resolve_local_auth_context(stream: &UnixStream) -> Result<SessionAuthContext, ImagodError> {
+    let peer_cred = stream.peer_cred().map_err(|err| {
+        ImagodError::new(
+            ErrorCode::Unauthorized,
+            "session.auth",
+            format!("failed to inspect local control socket peer credentials: {err}"),
+        )
+    })?;
+    let peer_uid = peer_cred.uid();
+    authorize_local_uid(peer_uid, current_effective_uid())?;
+    Ok(SessionAuthContext::local_admin(format!(
+        "local-control-socket:{peer_uid}"
+    )))
+}
+
+#[cfg(unix)]
+fn authorize_local_uid(peer_uid: libc::uid_t, daemon_euid: libc::uid_t) -> Result<(), ImagodError> {
+    if peer_uid == 0 || peer_uid == daemon_euid {
+        return Ok(());
+    }
+
+    Err(ImagodError::new(
+        ErrorCode::Unauthorized,
+        "session.auth",
+        "local control socket peer uid is not authorized",
+    )
+    .with_detail("peer_uid", peer_uid.to_string())
+    .with_detail("daemon_euid", daemon_euid.to_string()))
+}
+
+#[cfg(unix)]
+fn current_effective_uid() -> libc::uid_t {
+    unsafe { libc::geteuid() }
 }
 
 fn extract_peer_public_key<S>(session: &S) -> Result<[u8; 32], ImagodError>
@@ -426,23 +652,130 @@ fn collect_stream_task_result(
     }
 }
 
-pub(crate) async fn read_stream_with_timeout<F, E>(
-    read_future: F,
+pub(crate) async fn read_stream_with_timeout<R>(
+    recv: &mut R,
     timeout_duration: Duration,
 ) -> Result<Vec<u8>, ImagodError>
 where
-    F: Future<Output = Result<Vec<u8>, E>>,
-    E: std::fmt::Display,
+    R: AsyncRead + Unpin,
 {
-    match tokio::time::timeout(timeout_duration, read_future).await {
-        Ok(result) => result.map_err(|e| {
-            ImagodError::new(
-                imago_protocol::ErrorCode::BadRequest,
-                "session.read",
-                format!("failed to read stream: {e}"),
-            )
-        }),
+    let mut buf = Vec::new();
+    let limit = (MAX_STREAM_BYTES as u64).saturating_add(1);
+    match tokio::time::timeout(timeout_duration, recv.take(limit).read_to_end(&mut buf)).await {
+        Ok(result) => result
+            .map_err(|e| {
+                ImagodError::new(
+                    imago_protocol::ErrorCode::BadRequest,
+                    "session.read",
+                    format!("failed to read stream: {e}"),
+                )
+            })
+            .and_then(|_| {
+                if buf.len() > MAX_STREAM_BYTES {
+                    return Err(ImagodError::new(
+                        imago_protocol::ErrorCode::BadRequest,
+                        "session.read",
+                        format!("stream exceeds max size {MAX_STREAM_BYTES} bytes"),
+                    ));
+                }
+                Ok(buf)
+            }),
         Err(_) => Err(stream_read_timeout_error()),
+    }
+}
+
+#[cfg(unix)]
+async fn read_terminated_stream_with_timeout<R>(
+    recv: &mut R,
+    timeout_duration: Duration,
+) -> Result<Option<Vec<u8>>, ImagodError>
+where
+    R: AsyncRead + Unpin,
+{
+    match tokio::time::timeout(timeout_duration, read_terminated_stream(recv)).await {
+        Ok(result) => result,
+        Err(_) => Err(stream_read_timeout_error()),
+    }
+}
+
+#[cfg(unix)]
+async fn read_terminated_stream<R>(recv: &mut R) -> Result<Option<Vec<u8>>, ImagodError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut buf = Vec::new();
+    loop {
+        let mut header = [0u8; 4];
+        match recv.read_exact(&mut header).await {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof && buf.is_empty() => {
+                return Ok(None);
+            }
+            Err(err) => {
+                return Err(ImagodError::new(
+                    ErrorCode::BadRequest,
+                    "session.read",
+                    format!("failed to read stream: {err}"),
+                ));
+            }
+        }
+
+        let frame_len = u32::from_be_bytes(header) as usize;
+        if frame_len == 0 {
+            if buf.is_empty() {
+                return Err(ImagodError::new(
+                    ErrorCode::BadRequest,
+                    "session.protocol",
+                    "local control socket request must include one framed envelope",
+                ));
+            }
+            return Ok(Some(buf));
+        }
+
+        let projected_len = buf
+            .len()
+            .checked_add(header.len())
+            .and_then(|len| len.checked_add(frame_len))
+            .ok_or_else(|| {
+                ImagodError::new(
+                    ErrorCode::BadRequest,
+                    "session.read",
+                    format!("stream exceeds max size {MAX_STREAM_BYTES} bytes"),
+                )
+            })?;
+        if projected_len > MAX_STREAM_BYTES {
+            return Err(ImagodError::new(
+                ErrorCode::BadRequest,
+                "session.read",
+                format!("stream exceeds max size {MAX_STREAM_BYTES} bytes"),
+            ));
+        }
+
+        let mut payload = vec![0u8; frame_len];
+        recv.read_exact(&mut payload).await.map_err(|err| {
+            ImagodError::new(
+                ErrorCode::BadRequest,
+                "session.read",
+                format!("failed to read stream: {err}"),
+            )
+        })?;
+        buf.extend_from_slice(&header);
+        buf.extend_from_slice(&payload);
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_local_disconnect<R>(recv: &mut R)
+where
+    R: AsyncRead + Unpin + Send,
+{
+    let mut buf = [0u8; 256];
+    loop {
+        match recv.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
     }
 }
 
@@ -461,7 +794,12 @@ pub(crate) fn stream_read_timeout_error() -> ImagodError {
 mod tests {
     #![allow(non_snake_case)]
     #![allow(dead_code)]
-    use std::{any::Any, time::Duration};
+    use std::{
+        any::Any,
+        pin::Pin,
+        task::{Context, Poll},
+        time::Duration,
+    };
 
     use super::*;
     use crate::protocol_handler::{
@@ -469,6 +807,9 @@ mod tests {
         upsert_dynamic_client_public_key,
     };
     use async_trait::async_trait;
+    use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
+    #[cfg(unix)]
+    use tokio::net::UnixStream;
 
     fn hex_32(byte: u8) -> String {
         let mut out = String::with_capacity(64);
@@ -501,14 +842,6 @@ mod tests {
             None
         }
 
-        fn max_datagram_size(&self) -> usize {
-            1200
-        }
-
-        fn send_datagram(&self, _payload: Bytes) -> Result<(), ImagodError> {
-            Ok(())
-        }
-
         fn peer_identity(&self) -> Option<Box<dyn Any>> {
             match self.identity {
                 FakePeerIdentity::Missing => None,
@@ -523,6 +856,18 @@ mod tests {
         }
 
         async fn closed(&self) {}
+    }
+
+    struct FailingRead;
+
+    impl AsyncRead for FailingRead {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Err(std::io::Error::other("boom")))
+        }
     }
 
     #[test]
@@ -567,6 +912,37 @@ mod tests {
         assert!(ensure_message_type_allowed(&request_hello, &client_context).is_ok());
         assert!(ensure_message_type_allowed(&request_rpc, &client_context).is_ok());
         assert!(ensure_message_type_allowed(&request_event, &client_context).is_err());
+    }
+
+    #[test]
+    fn given_hello_requests__when_record_session_features__then_logs_stream_flag_tracks_required_features()
+     {
+        let features = SessionFeatureState::default();
+        let stream_hello = Envelope::new(
+            MessageType::HelloNegotiate,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            serde_json::json!({
+                "client_version": "0.1.0",
+                "required_features": ["logs.request", "logs.stream"],
+            }),
+        );
+
+        features.record_hello_request(&stream_hello);
+        assert!(features.logs_stream_requested());
+
+        let legacy_hello = Envelope::new(
+            MessageType::HelloNegotiate,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            serde_json::json!({
+                "client_version": "0.1.0",
+                "required_features": ["logs.request"],
+            }),
+        );
+
+        features.record_hello_request(&legacy_hello);
+        assert!(!features.logs_stream_requested());
     }
 
     #[test]
@@ -730,6 +1106,31 @@ mod tests {
         assert_eq!(context.public_key_hex, hex_32(0x44));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn given_local_unix_peer__when_resolve_local_auth_context__then_same_euid_is_allowed() {
+        let (server, _client) = UnixStream::pair().expect("unix stream pair should succeed");
+        let context =
+            resolve_local_auth_context(&server).expect("same-euid local peer should be allowed");
+
+        assert_eq!(context.role, DynamicClientRole::Admin);
+        assert!(context.public_key_hex.starts_with("local-control-socket:"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn given_mismatched_uid__when_authorize_local_uid__then_peer_is_rejected() {
+        let err = authorize_local_uid(42, 7).expect_err("mismatched uid should be rejected");
+
+        assert_eq!(err.code, ErrorCode::Unauthorized);
+        assert_eq!(err.stage, "session.auth");
+        assert_eq!(err.details.get("peer_uid").map(String::as_str), Some("42"));
+        assert_eq!(
+            err.details.get("daemon_euid").map(String::as_str),
+            Some("7")
+        );
+    }
+
     #[test]
     fn given_client_role_denial__when_ensure_message_type_allowed__then_details_are_populated() {
         let request = Envelope::new(
@@ -824,27 +1225,119 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn given_read_future_errors_or_times_out__when_read_stream_with_timeout__then_errors_are_mapped()
-     {
-        let err = read_stream_with_timeout(
-            async { Err::<Vec<u8>, _>(std::io::Error::other("boom")) },
-            Duration::from_secs(1),
+    async fn given_logs_request_write_error__when_finish_logs_request_error__then_it_is_ignored() {
+        let mut send = tokio::io::sink();
+        let err = ImagodError::new(ErrorCode::Internal, "session.write", "stream closed");
+
+        finish_logs_request_error(
+            &mut send,
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            err,
+            &crate::protocol_handler::codec::LengthPrefixedFrameCodec,
         )
         .await
-        .expect_err("read failure should be mapped");
+        .expect("logs.request write failures should be ignored");
+    }
+
+    #[tokio::test]
+    async fn given_logs_request_error_response_write_failure__when_finish_logs_request_error__then_it_is_ignored()
+     {
+        struct AlwaysFailWrite;
+
+        impl tokio::io::AsyncWrite for AlwaysFailWrite {
+            fn poll_write(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buf: &[u8],
+            ) -> std::task::Poll<std::io::Result<usize>> {
+                std::task::Poll::Ready(Err(std::io::Error::other("forced write failure")))
+            }
+
+            fn poll_flush(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+
+        let mut send = AlwaysFailWrite;
+        let err = ImagodError::new(ErrorCode::Internal, "logs.request", "open failed");
+
+        finish_logs_request_error(
+            &mut send,
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            err,
+            &crate::protocol_handler::codec::LengthPrefixedFrameCodec,
+        )
+        .await
+        .expect("logs.request error response write failures should be ignored");
+    }
+
+    #[tokio::test]
+    async fn given_read_future_errors_or_times_out__when_read_stream_with_timeout__then_errors_are_mapped()
+     {
+        let mut failing = FailingRead;
+        let err = read_stream_with_timeout(&mut failing, Duration::from_secs(1))
+            .await
+            .expect_err("read failure should be mapped");
         assert_eq!(err.code, ErrorCode::BadRequest);
         assert_eq!(err.stage, "session.read");
         assert!(err.message.contains("failed to read stream"));
 
-        let timeout_err = read_stream_with_timeout(
-            std::future::pending::<Result<Vec<u8>, std::io::Error>>(),
-            Duration::from_millis(1),
-        )
-        .await
-        .expect_err("pending future should timeout");
+        let (_writer, mut reader) = tokio::io::duplex(64);
+        let timeout_err = read_stream_with_timeout(&mut reader, Duration::from_millis(1))
+            .await
+            .expect_err("pending future should timeout");
         assert_eq!(timeout_err.code, ErrorCode::OperationTimeout);
         assert_eq!(timeout_err.stage, "session.read");
         assert!(timeout_err.message.contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn given_local_request_without_disconnect__when_waiting_for_close__then_future_stays_pending_until_peer_drop()
+     {
+        let (mut client, server) = UnixStream::pair().expect("unix stream pair should succeed");
+        let (mut recv, _send) = server.into_split();
+
+        client
+            .write_all(&[0, 0, 0, 5, b'h', b'e', b'l', b'l', b'o'])
+            .await
+            .expect("client should write request frame");
+        client
+            .write_all(&0u32.to_be_bytes())
+            .await
+            .expect("client should write request terminator");
+
+        let request = read_terminated_stream_with_timeout(&mut recv, Duration::from_secs(1))
+            .await
+            .expect("request should read successfully")
+            .expect("request should be present");
+        assert_eq!(request, vec![0, 0, 0, 5, b'h', b'e', b'l', b'l', b'o']);
+
+        let close = wait_for_local_disconnect(&mut recv);
+        tokio::pin!(close);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut close)
+                .await
+                .is_err(),
+            "close future should remain pending while peer stays connected"
+        );
+
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(1), &mut close)
+            .await
+            .expect("close future should resolve after peer drop");
     }
 
     #[test]

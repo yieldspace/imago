@@ -46,7 +46,7 @@ mod tests {
     #![allow(dead_code)]
     use std::path::PathBuf;
 
-    use imagod_config::{ImagodConfig, RuntimeConfig, TlsConfig};
+    use imagod_config::{DEFAULT_CONTROL_SOCKET_PATH, ImagodConfig, RuntimeConfig, TlsConfig};
 
     use super::build_quic_server_config;
 
@@ -58,6 +58,7 @@ mod tests {
     fn sample_config() -> ImagodConfig {
         ImagodConfig {
             listen_addr: "127.0.0.1:4443".to_string(),
+            control_socket_path: PathBuf::from(DEFAULT_CONTROL_SOCKET_PATH),
             tls: TlsConfig {
                 server_key: test_server_key_path(),
                 admin_public_keys: Vec::new(),

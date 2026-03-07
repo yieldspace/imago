@@ -16,6 +16,7 @@ imago-protocol = { workspace = true }
 imagod-common = { workspace = true }
 imagod-config = { workspace = true }
 imagod-control = { workspace = true }
+libc = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
@@ -23,7 +24,7 @@ semver = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "time", "net", "io-util", "sync"] }
 uuid = { workspace = true, features = ["v4"] }
 web-transport-quinn = { workspace = true }
 

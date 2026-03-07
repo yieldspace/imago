@@ -50,7 +50,7 @@ mod tests {
         let target = DeployTargetConfig {
             remote: "127.0.0.1:7443".to_string(),
             server_name: None,
-            client_key: missing_client_key_path(),
+            client_key: Some(missing_client_key_path()),
         };
 
         let direct = super::super::connect_target(&target)

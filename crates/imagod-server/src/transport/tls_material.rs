@@ -227,7 +227,7 @@ mod tests {
         lock_dynamic_public_keys_for_tests, replace_dynamic_public_keys_for_tests,
         upsert_dynamic_client_public_key,
     };
-    use imagod_config::{ImagodConfig, RuntimeConfig, TlsConfig};
+    use imagod_config::{DEFAULT_CONTROL_SOCKET_PATH, ImagodConfig, RuntimeConfig, TlsConfig};
 
     fn ed25519_spki_from_raw(raw: [u8; 32]) -> Vec<u8> {
         let mut spki = ED25519_SPKI_PREFIX.to_vec();
@@ -251,6 +251,7 @@ mod tests {
     fn sample_config_with_server_key(path: PathBuf) -> ImagodConfig {
         ImagodConfig {
             listen_addr: "127.0.0.1:4443".to_string(),
+            control_socket_path: PathBuf::from(DEFAULT_CONTROL_SOCKET_PATH),
             tls: TlsConfig {
                 server_key: path,
                 admin_public_keys: Vec::new(),

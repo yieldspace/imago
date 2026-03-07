@@ -57,8 +57,8 @@ impl ProtocolSession for BenchProtocolSession {
         None
     }
 
-    fn max_datagram_size(&self) -> usize {
-        self.max_datagram_size
+    fn max_datagram_size(&self) -> Option<usize> {
+        Some(self.max_datagram_size)
     }
 
     fn send_datagram(&self, _payload: Bytes) -> Result<(), ImagodError> {

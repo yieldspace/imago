@@ -37,6 +37,22 @@ listen_addr = "[::]:4443"
 
 - Validation error notes: invalid socket addresses fail startup validation.
 
+### The `control_socket_path` field
+
+- Type: `string` (absolute path)
+- Required/Optional: Optional.
+- Accepted values / Constraints: must be an absolute path; used by `imagod proxy-stdio` and the SSH transport bridge.
+- Default: `"/run/imago/imagod.sock"`.
+- Example:
+
+```toml
+control_socket_path = "/run/imago/imagod.sock"
+```
+
+- Validation error notes: empty or relative paths fail validation. `imagod` removes stale socket files and recreates missing parent directories at startup.
+
+For system-managed installs, the default `/run/imago/imagod.sock` is usually appropriate. For local or non-system installs, set `control_socket_path` explicitly to a writable absolute path such as `/tmp/imagod.sock` or `/var/tmp/imago/imagod.sock`.
+
 ### The `storage_root` field
 
 - Type: `string` (path)

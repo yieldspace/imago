@@ -5,8 +5,8 @@ use imago_protocol::{
 use imagod_common::ImagodError;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
-use web_transport_quinn::SendStream;
 
 use super::{Envelope, clock::ServerClock, codec::FrameCodec};
 
@@ -183,11 +183,14 @@ pub(crate) fn parse_single_request_envelope(
     }))
 }
 
-pub(crate) async fn write_envelope(
-    send: &mut SendStream,
+pub(crate) async fn write_envelope<W>(
+    send: &mut W,
     envelope: &Envelope,
     codec: &impl FrameCodec,
-) -> Result<(), ImagodError> {
+) -> Result<(), ImagodError>
+where
+    W: AsyncWrite + Unpin,
+{
     let data = to_cbor(envelope)
         .map_err(|e| bad_request("protocol", format!("cbor encode failed: {e}")))?;
     let framed = codec.encode_frame(&data);
@@ -201,8 +204,11 @@ pub(crate) async fn write_envelope(
     Ok(())
 }
 
-pub(crate) fn finish_stream(send: &mut SendStream) -> Result<(), ImagodError> {
-    send.finish().map_err(|e| {
+pub(crate) async fn finish_stream<W>(send: &mut W) -> Result<(), ImagodError>
+where
+    W: AsyncWrite + Unpin,
+{
+    send.shutdown().await.map_err(|e| {
         ImagodError::new(
             imago_protocol::ErrorCode::Internal,
             "session.write",

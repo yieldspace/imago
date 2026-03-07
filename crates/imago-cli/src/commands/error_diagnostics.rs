@@ -1,14 +1,11 @@
 use anyhow::Error;
 use std::borrow::Cow;
 
-const HINT_UNAUTHORIZED: &str =
-    "Verify target.client_key, ~/.imago/known_hosts, and server_name/remote settings, then retry.";
+const HINT_UNAUTHORIZED: &str = "For direct targets, verify target.client_key, ~/.imago/known_hosts, and server_name/remote. For ssh targets, verify remote and SSH access, then retry.";
 const HINT_BUILD_FAILED: &str =
     "Run `imago artifact build` first and fix build.command errors before retrying service deploy.";
-const HINT_TARGET_CONFIG: &str =
-    "Check `imago.toml` target settings (remote, server_name, client_key) and fix invalid values.";
-const HINT_REMOTE_PARSE: &str =
-    "Fix the target remote format. Use a valid host:port or URL accepted by the command.";
+const HINT_TARGET_CONFIG: &str = "Check `imago.toml` target settings. Direct targets use remote/server_name/client_key; ssh targets use only remote.";
+const HINT_REMOTE_PARSE: &str = "Fix the target remote format. Use host:port for direct targets or ssh://user@host[?socket=/path] for SSH targets.";
 const HINT_TRANSPORT_CONNECT: &str =
     "Check target reachability/TLS settings, then retry the QUIC/WebTransport connection.";
 const HINT_BUSY: &str = "The target is busy. Wait for in-flight operations to finish and retry.";

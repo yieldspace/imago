@@ -96,14 +96,10 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<RunSumm
     let connected = deploy::connect_target(&target).await?;
     let correlation_id = Uuid::new_v4();
     ui::command_stage("service.start", "hello", "negotiating hello");
-    let hello = negotiate_hello(&connected.session, correlation_id).await?;
+    let hello = negotiate_hello(&connected, correlation_id).await?;
     ui::command_info(
         "service.start",
-        &format_peer_context_line(
-            &connected.authority,
-            &connected.resolved_addr.to_string(),
-            &hello,
-        ),
+        &format_peer_context_line(&connected.authority, &connected.resolved_addr, &hello),
     );
     let command_stream_timeout =
         deploy::resolve_command_stream_timeout_from_hello_limits(&hello.limits);
@@ -118,7 +114,7 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<RunSumm
         }),
     )?;
     let responses = deploy::request_command_start_events_with_timeout(
-        &connected.session,
+        &connected,
         &command,
         command_stream_timeout,
     )
