@@ -1,0 +1,11 @@
+[package]
+name = "imagod-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nirvash-core = { workspace = true }
+nirvash-macros = { workspace = true }
+uuid = { workspace = true }

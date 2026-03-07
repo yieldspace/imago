@@ -320,11 +320,15 @@ mod tests {
         session_loop::{read_stream_with_timeout, stream_read_timeout_error},
     };
     use imago_protocol::{
-        ArtifactPushChunkHeader, ArtifactPushRequest, CommandState, CommandType, ErrorCode,
-        LogChunk, LogErrorCode, LogStreamKind, MessageType, ProtocolEnvelope, to_cbor,
+        ArtifactPushChunkHeader, ArtifactPushRequest, ErrorCode, LogChunk, LogErrorCode,
+        LogStreamKind, MessageType, ProtocolEnvelope, to_cbor,
     };
     use imagod_common::ImagodError;
     use imagod_control::{OperationManager, ServiceLogStream};
+    use imagod_model::{
+        CommandErrorKind, CommandKind, CommandProtocolAction, CommandProtocolContext,
+        CommandProtocolOutput, CommandProtocolStageId,
+    };
     use serde_json::Value;
     use std::{sync::atomic::AtomicBool, time::Duration};
     use uuid::Uuid;
@@ -465,29 +469,43 @@ mod tests {
     async fn finalize_terminal_operation_removes_operation_even_when_stream_write_failed() {
         let operations = OperationManager::new();
         let request_id = Uuid::new_v4();
-        operations
-            .start(request_id, CommandType::Deploy)
-            .await
-            .expect("start should succeed");
-        operations
-            .set_state(&request_id, CommandState::Running, "running")
-            .await
-            .expect("state update should succeed");
+        <OperationManager as imagod_control::ActionApplier>::execute_action(
+            &operations,
+            &CommandProtocolContext { request_id },
+            &CommandProtocolAction::Start(CommandKind::Deploy),
+        )
+        .await;
+        <OperationManager as imagod_control::ActionApplier>::execute_action(
+            &operations,
+            &CommandProtocolContext { request_id },
+            &CommandProtocolAction::SetRunning,
+        )
+        .await;
 
         let write_error = ImagodError::new(ErrorCode::Internal, "session.write", "stream closed");
         let result = finalize_operation_after_terminal_event(
             &operations,
-            &request_id,
-            CommandState::Failed,
-            "failed",
+            &CommandProtocolContext { request_id },
+            CommandProtocolAction::FinishFailed(CommandErrorKind::Internal),
             Err(write_error),
         )
         .await;
 
         assert!(result.is_err());
-        let snapshot = operations.snapshot_running(&request_id).await;
+        let snapshot = <OperationManager as imagod_control::ActionApplier>::execute_action(
+            &operations,
+            &CommandProtocolContext { request_id },
+            &CommandProtocolAction::SnapshotRunning,
+        )
+        .await;
         assert!(
-            snapshot.is_err(),
+            matches!(
+                snapshot,
+                CommandProtocolOutput::Rejected {
+                    code: CommandErrorKind::NotFound,
+                    stage: CommandProtocolStageId::StateRequest,
+                }
+            ),
             "operation should be removed after finalize"
         );
     }

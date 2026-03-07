@@ -9,8 +9,10 @@
 - `TransitionSystem` / `TemporalSpec`: 状態遷移と時相仕様の記述
 - `Ltl`: `[]`, `<>`, `X`, `U`, `ENABLED`, `~>` を含む Rust DSL
 - `ModelChecker`: reachable graph ベースの model checking
+- `ActionApplier` / `StateObserver` / `CodeConformanceSpec`: 実コード conformance 契約
 - `StatePredicate` / `StepPredicate` / constraints / symmetry / fairness
 - `pred!` / `step!` / `ltl!` と、`invariant!` / `property!` / `fairness!` などの記号寄り `macro_rules!` DSL
+- `bounded_vec_domain` / `into_bounded_domain`: bounds-driven な domain 生成 helper
 
 ## Minimal Example
 
@@ -79,6 +81,165 @@ assert!(result.is_ok());
 
 `nirvash-core` は runtime / checker / DSL を提供し、`nirvash-macros` は `#[invariant(...)]`、`#[subsystem_spec]`、`#[formal_tests(...)]` などの宣言を自動化します。bang macro 形式の `nirvash_core::invariant!` や `nirvash_core::property!` は内部でこれらの proc macro を使うため、利用 crate には `nirvash-core` と `nirvash-macros` の両方が必要です。`imagod-spec` はその上で `imagod` 全体の仕様を記述する利用例です。
 
+`Signature` derive の推奨順は次です。
+
+- まず field domain の直積に任せる
+- 次に `#[signature(bounds(...))]` と `#[signature(filter(self => ...))]`、必要なら `#[signature_invariant(self => ...)]` で bounded domain を絞る
+- それでも足りない型だけ `#[signature(custom)]` で companion trait を手書きする
+
+field 単位では次を使えます。
+
+- `#[sig(range = "0..=N")]`: scalar/newtype field の有限 range
+- `#[sig(len = "A..=B")]`: `Vec<T>` field の bounded length
+- `#[sig(domain = path)]`: `Vec<T>` / `[T; N]` / `BoundedDomain<T>` を返す関数で field domain を上書き
+- manual fallback を短く書きたい場合は `nirvash_core::signature_spec!(StateSignatureSpec for State, representatives = ..., filter(self) => ..., invariant(self) => ...)` も使えます
+
+## Runtime Conformance
+
+`nirvash` は spec 単体の model checking だけでなく、runtime 実装が spec と同じ振る舞いをするかも検証できます。正本の runtime 契約は次の 2 つです。
+
+- `ActionApplier`
+  - `execute_action(Context, Action) -> Output`
+- `StateObserver`
+  - `observe_state(Context) -> ObservedState`
+
+spec 側は `CodeConformanceSpec` を実装し、次を宣言します。
+
+- `type Runtime`
+- `type Context`
+- `fresh_runtime()`
+- `context()`
+- `expected_step(...)`
+- `project_state(...)`
+- `project_output(...)`
+
+`#[code_tests(...)]` はこの契約だけを使って reachable graph を replay し、runtime の observed state/output を spec 側の expected state/output に射影して比較します。runtime 側に spec 専用 field を追加する必要はありません。
+
+```rust
+use nirvash_core::{ActionApplier, CodeConformanceSpec, StateObserver, TransitionSystem};
+use nirvash_macros::{code_tests, Signature as FormalSignature, subsystem_spec};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+enum State {
+    Idle,
+    Busy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+enum Action {
+    Start,
+    Stop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Context;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Output {
+    Ack,
+}
+
+#[derive(Default)]
+struct Runtime(std::sync::Mutex<State>);
+
+impl ActionApplier for Runtime {
+    type Action = Action;
+    type Output = Output;
+    type Context = Context;
+
+    async fn execute_action(&self, _context: &Self::Context, action: &Self::Action) -> Self::Output {
+        let mut state = self.0.lock().expect("runtime lock");
+        *state = match (*state, *action) {
+            (State::Idle, Action::Start) => State::Busy,
+            (State::Busy, Action::Stop) => State::Idle,
+            (current, _) => current,
+        };
+        Output::Ack
+    }
+}
+
+impl StateObserver for Runtime {
+    type ObservedState = State;
+    type Context = Context;
+
+    async fn observe_state(&self, _context: &Self::Context) -> Self::ObservedState {
+        *self.0.lock().expect("runtime lock")
+    }
+}
+
+#[derive(Default)]
+struct Spec;
+
+#[subsystem_spec]
+impl TransitionSystem for Spec {
+    type State = State;
+    type Action = Action;
+
+    fn init(&self, state: &Self::State) -> bool {
+        matches!(state, State::Idle)
+    }
+
+    fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
+        matches!(
+            (prev, action, next),
+            (State::Idle, Action::Start, State::Busy)
+                | (State::Busy, Action::Stop, State::Idle)
+        )
+    }
+}
+
+impl CodeConformanceSpec for Spec {
+    type Runtime = Runtime;
+    type Context = Context;
+    type ExpectedOutput = Output;
+    type ObservedState = State;
+    type ObservedOutput = Output;
+
+    async fn fresh_runtime(&self) -> Self::Runtime {
+        Runtime::default()
+    }
+
+    fn context(&self) -> Self::Context {
+        Context
+    }
+
+    fn expected_step(
+        &self,
+        state: &Self::State,
+        action: &Self::Action,
+    ) -> Option<nirvash_core::ExpectedStep<Self::State, Self::ExpectedOutput>> {
+        match (state, action) {
+            (State::Idle, Action::Start) => Some(nirvash_core::ExpectedStep {
+                next_state: State::Busy,
+                output: Output::Ack,
+            }),
+            (State::Busy, Action::Stop) => Some(nirvash_core::ExpectedStep {
+                next_state: State::Idle,
+                output: Output::Ack,
+            }),
+            _ => None,
+        }
+    }
+
+    fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
+        *observed
+    }
+
+    fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {
+        *observed
+    }
+}
+
+#[code_tests(spec = Spec, init = initial_state)]
+const _: () = ();
+
+impl Spec {
+    fn initial_state(&self) -> State {
+        State::Idle
+    }
+}
+```
+
 ## `cargo doc` Integration
 
 `cargo doc` で spec の状態遷移図とメタモデル図を自動表示したい場合は、利用 crate に `build.rs` を追加して `nirvash_docgen::generate()` を呼びます。
@@ -89,7 +250,7 @@ fn main() {
 }
 ```
 
-これにより `#[formal_tests(...)]` が付いた spec では reachable graph から生成した Mermaid の `State Graph` section が、すべての spec では registered invariant / property / fairness / constraint / subsystem 一覧を含む Mermaid の `Meta Model` section が rustdoc 上に注入されます。Mermaid runtime は local asset として `target/doc/static.files/` に配置されるため、`cargo doc --open` でも CDN なしでそのまま表示できます。`build.rs` は再帰ビルドを避けるために `NIRVASH_DOCGEN_SKIP` を尊重します。
+これにより `#[formal_tests(...)]` が付いた spec では reachable graph から生成した Mermaid の `State Graph` section が、すべての spec では registered invariant / property / fairness / constraint / subsystem 一覧を含む Mermaid の `Meta Model` section が rustdoc 上に注入されます。`State Graph` は docs 専用の boundary-path reduction を通すため、直線的な通常経路は 1 本の edge に畳まれ、同じ始点/終点に向かう平行 edge も 1 本にまとめられます。分岐/合流/終端/edge case state が優先的に残ります。Mermaid runtime は local asset として `target/doc/static.files/` に配置されるため、`cargo doc --open` でも CDN なしでそのまま表示できます。`build.rs` は再帰ビルドを避けるために `NIRVASH_DOCGEN_SKIP` を尊重します。
 
 ## State Graph Rendering
 

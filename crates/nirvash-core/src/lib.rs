@@ -15,21 +15,35 @@ pub use checker::{
     ModelCheckResult, ModelChecker,
 };
 pub use doc_graph::{
-    DocGraphCase, DocGraphEdge, DocGraphProvider, DocGraphSnapshot, DocGraphSpec, DocGraphState,
-    ReachableGraphEdge, ReachableGraphSnapshot, RegisteredDocGraphProvider,
-    collect_doc_graph_specs, summarize_doc_graph_state, summarize_doc_graph_text,
+    DocGraphCase, DocGraphEdge, DocGraphPolicy, DocGraphProvider, DocGraphReductionMode,
+    DocGraphSnapshot, DocGraphSpec, DocGraphState, ReachableGraphEdge, ReachableGraphSnapshot,
+    ReducedDocGraph, ReducedDocGraphEdge, ReducedDocGraphNode, RegisteredDocGraphProvider,
+    collect_doc_graph_specs, reduce_doc_graph, summarize_doc_graph_state, summarize_doc_graph_text,
 };
-pub use domain::{BoundedDomain, OpaqueModelValue, Signature};
+pub use domain::{
+    BoundedDomain, IntoBoundedDomain, OpaqueModelValue, Signature, bounded_vec_domain,
+    into_bounded_domain,
+};
 pub use fairness::Fairness;
 pub use inventory;
 pub use ltl::Ltl;
 pub use predicate::{ActionConstraint, StateConstraint, StatePredicate, StepPredicate};
 pub use symmetry::SymmetryReducer;
-pub use system::{SystemComposition, TemporalSpec, TransitionSystem};
+pub use system::{
+    ActionApplier, CodeConformanceSpec, ExpectedStep, StateObserver, SystemComposition,
+    TemporalSpec, TransitionSystem,
+};
 pub use trace::{Trace, TraceStep};
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        future::Future,
+        pin::pin,
+        sync::Mutex,
+        task::{Context, Poll, Waker},
+    };
+
     use super::*;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +79,67 @@ mod tests {
             (prev, action, next),
             (TestState::Idle, TestAction::Start, TestState::Busy)
         )
+    }
+
+    #[test]
+    fn bounded_vec_domain_enumerates_lengths_with_cartesian_product() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Tiny {
+            Zero,
+            One,
+        }
+
+        impl Signature for Tiny {
+            fn bounded_domain() -> BoundedDomain<Self> {
+                BoundedDomain::new(vec![Self::Zero, Self::One])
+            }
+        }
+
+        let values = bounded_vec_domain::<Tiny>(0, 2).into_vec();
+        assert_eq!(values.len(), 1 + 2 + 4);
+        assert!(values.contains(&vec![]));
+        assert!(values.contains(&vec![Tiny::Zero]));
+        assert!(values.contains(&vec![Tiny::One, Tiny::Zero]));
+    }
+
+    #[test]
+    fn into_bounded_domain_accepts_vec_and_array() {
+        let from_vec = into_bounded_domain(vec![1_u8, 2, 3]).into_vec();
+        let from_array = into_bounded_domain([4_u8, 5]).into_vec();
+
+        assert_eq!(from_vec, vec![1, 2, 3]);
+        assert_eq!(from_array, vec![4, 5]);
+    }
+
+    #[test]
+    fn signature_spec_macro_filters_manual_domains() {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct ManualState {
+            ready: bool,
+        }
+
+        trait ManualStateSignatureSpec: Sized {
+            fn representatives() -> BoundedDomain<Self>;
+
+            fn signature_invariant(&self) -> bool {
+                true
+            }
+        }
+
+        crate::signature_spec!(
+            ManualStateSignatureSpec for ManualState,
+            representatives = vec![ManualState { ready: false }, ManualState { ready: true }],
+            filter(state) => state.ready,
+            invariant(state) => state.ready,
+        );
+
+        let values = <ManualState as ManualStateSignatureSpec>::representatives().into_vec();
+        assert_eq!(values, vec![ManualState { ready: true }]);
+        assert!(
+            <ManualState as ManualStateSignatureSpec>::signature_invariant(&ManualState {
+                ready: true
+            })
+        );
     }
 
     #[derive(Debug, Clone, Copy, Default)]
@@ -764,5 +839,142 @@ mod tests {
         ));
 
         assert_eq!(formula.describe(), expected.describe());
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum TestOutput {
+        Ack,
+        Rejected,
+    }
+
+    struct TestRuntime {
+        state: Mutex<TestState>,
+    }
+
+    impl ActionApplier for TestRuntime {
+        type Action = TestAction;
+        type Output = TestOutput;
+        type Context = ();
+
+        async fn execute_action(
+            &self,
+            _context: &Self::Context,
+            action: &Self::Action,
+        ) -> Self::Output {
+            let mut state = self.state.lock().expect("lock test runtime state");
+            match (*state, action) {
+                (TestState::Idle, TestAction::Start) => {
+                    *state = TestState::Busy;
+                    TestOutput::Ack
+                }
+                (TestState::Busy, TestAction::Stop) => {
+                    *state = TestState::Idle;
+                    TestOutput::Ack
+                }
+                _ => TestOutput::Rejected,
+            }
+        }
+    }
+
+    impl StateObserver for TestRuntime {
+        type ObservedState = TestState;
+        type Context = ();
+
+        async fn observe_state(&self, _context: &Self::Context) -> Self::ObservedState {
+            *self.state.lock().expect("lock test runtime state")
+        }
+    }
+
+    impl CodeConformanceSpec for TestSpec {
+        type Runtime = TestRuntime;
+        type Context = ();
+        type ExpectedOutput = TestOutput;
+        type ObservedState = TestState;
+        type ObservedOutput = TestOutput;
+
+        async fn fresh_runtime(&self) -> Self::Runtime {
+            TestRuntime {
+                state: Mutex::new(TestState::Idle),
+            }
+        }
+
+        fn context(&self) -> Self::Context {}
+
+        fn expected_step(
+            &self,
+            prev: &Self::State,
+            action: &Self::Action,
+        ) -> ExpectedStep<Self::State, Self::ExpectedOutput> {
+            match (prev, action) {
+                (TestState::Idle, TestAction::Start) => ExpectedStep::Allowed {
+                    next: TestState::Busy,
+                    output: TestOutput::Ack,
+                },
+                (TestState::Busy, TestAction::Stop) => ExpectedStep::Allowed {
+                    next: TestState::Idle,
+                    output: TestOutput::Ack,
+                },
+                _ => ExpectedStep::Rejected {
+                    output: TestOutput::Rejected,
+                },
+            }
+        }
+
+        fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
+            *observed
+        }
+
+        fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {
+            observed.clone()
+        }
+    }
+
+    fn block_on_ready<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = pin!(future);
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("test future unexpectedly returned Pending"),
+        }
+    }
+
+    #[test]
+    fn conformance_traits_support_runtime_replay() {
+        let spec = TestSpec;
+        let runtime = block_on_ready(spec.fresh_runtime());
+
+        let initial = block_on_ready(<TestRuntime as StateObserver>::observe_state(
+            &runtime,
+            &spec.context(),
+        ));
+        assert_eq!(initial, TestState::Idle);
+
+        let start_output = block_on_ready(<TestRuntime as ActionApplier>::execute_action(
+            &runtime,
+            &spec.context(),
+            &TestAction::Start,
+        ));
+        assert_eq!(start_output, TestOutput::Ack);
+        let busy = block_on_ready(<TestRuntime as StateObserver>::observe_state(
+            &runtime,
+            &spec.context(),
+        ));
+        assert_eq!(busy, TestState::Busy);
+
+        let stop_output = block_on_ready(<TestRuntime as ActionApplier>::execute_action(
+            &runtime,
+            &spec.context(),
+            &TestAction::Stop,
+        ));
+        assert_eq!(stop_output, TestOutput::Ack);
+        let idle = block_on_ready(<TestRuntime as StateObserver>::observe_state(
+            &runtime,
+            &spec.context(),
+        ));
+        assert_eq!(idle, TestState::Idle);
     }
 }

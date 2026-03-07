@@ -1,13 +1,17 @@
+use std::collections::BTreeMap;
+
 use proc_macro::TokenStream;
-use proc_macro2::Span;
-use quote::{format_ident, quote};
+use proc_macro2::{Span, TokenStream as TokenStream2, TokenTree};
+use quote::{ToTokens, format_ident, quote};
+use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, Data, DataEnum, DataStruct, DeriveInput, ExprRange, Field, Fields, Ident, ImplItem,
-    ItemConst, ItemFn, ItemImpl, LitStr, Path, RangeLimits, Type, parse_macro_input,
+    Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprRange, Field, Fields, Ident,
+    ImplItem, ItemConst, ItemFn, ItemImpl, LitStr, Path, RangeLimits, Token, Type,
+    parse_macro_input,
 };
 
-#[proc_macro_derive(Signature, attributes(signature))]
+#[proc_macro_derive(Signature, attributes(signature, sig, signature_invariant))]
 pub fn derive_signature(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand_signature_derive(input) {
@@ -41,6 +45,16 @@ pub fn formal_tests(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as TestArgs);
     let _item = parse_macro_input!(item as ItemConst);
     match expand_formal_tests(args) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[proc_macro_attribute]
+pub fn code_tests(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as CodeTestArgs);
+    let _item = parse_macro_input!(item as ItemConst);
+    match expand_code_tests(args) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
@@ -85,12 +99,25 @@ pub fn symmetry(attr: TokenStream, item: TokenStream) -> TokenStream {
 struct SignatureArgs {
     custom: bool,
     range: Option<ExprRange>,
+    filter: Option<Expr>,
+    bounds: BTreeMap<String, FieldSigArgs>,
+    helper_invariant: Option<Expr>,
 }
 
 impl SignatureArgs {
     fn from_attrs(attrs: &[Attribute]) -> syn::Result<Self> {
         let mut args = Self::default();
         for attr in attrs {
+            if attr.path().is_ident("signature_invariant") {
+                if args.helper_invariant.is_some() {
+                    return Err(syn::Error::new(
+                        attr.span(),
+                        "duplicate #[signature_invariant(...)] attribute",
+                    ));
+                }
+                args.helper_invariant = Some(parse_self_expr_attribute(attr)?);
+                continue;
+            }
             if !attr.path().is_ident("signature") {
                 continue;
             }
@@ -119,6 +146,17 @@ impl SignatureArgs {
                     args.range = Some(syn::parse_str(&lit.value())?);
                     return Ok(());
                 }
+                if meta.path.is_ident("filter") {
+                    if args.filter.is_some() {
+                        return Err(meta.error("duplicate signature filter"));
+                    }
+                    args.filter = Some(parse_self_expr_meta(&meta)?);
+                    return Ok(());
+                }
+                if meta.path.is_ident("bounds") {
+                    parse_bounds_meta(&meta, &mut args.bounds)?;
+                    return Ok(());
+                }
                 Err(meta.error("unsupported #[signature(...)] argument"))
             })?;
         }
@@ -126,8 +164,134 @@ impl SignatureArgs {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct FieldSigArgs {
+    range: Option<ExprRange>,
+    len: Option<ExprRange>,
+    optional: bool,
+    domain: Option<Path>,
+}
+
+impl FieldSigArgs {
+    fn from_field_attrs(attrs: &[Attribute]) -> syn::Result<Self> {
+        let mut args = Self::default();
+        for attr in attrs {
+            if !attr.path().is_ident("sig") {
+                continue;
+            }
+            let parsed = attr.parse_args::<FieldSigArgs>()?;
+            args.merge_from_type_level(&parsed);
+        }
+        Ok(args)
+    }
+
+    fn merge_from_type_level(&mut self, parent: &FieldSigArgs) {
+        if self.range.is_none() {
+            self.range = parent.range.clone();
+        }
+        if self.len.is_none() {
+            self.len = parent.len.clone();
+        }
+        if !self.optional {
+            self.optional = parent.optional;
+        }
+        if self.domain.is_none() {
+            self.domain = parent.domain.clone();
+        }
+    }
+}
+
+impl Parse for FieldSigArgs {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let mut args = Self::default();
+        while !input.is_empty() {
+            let ident: Ident = input.parse()?;
+            match ident.to_string().as_str() {
+                "range" => {
+                    let _ = input.parse::<Token![=]>()?;
+                    let lit: LitStr = input.parse()?;
+                    args.range = Some(syn::parse_str(&lit.value())?);
+                }
+                "len" => {
+                    let _ = input.parse::<Token![=]>()?;
+                    let lit: LitStr = input.parse()?;
+                    args.len = Some(syn::parse_str(&lit.value())?);
+                }
+                "optional" => {
+                    args.optional = true;
+                }
+                "domain" => {
+                    let _ = input.parse::<Token![=]>()?;
+                    args.domain = Some(input.parse()?);
+                }
+                _ => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "unsupported #[sig(...)] argument",
+                    ));
+                }
+            }
+            if input.peek(Token![,]) {
+                let _ = input.parse::<Token![,]>()?;
+            }
+        }
+        Ok(args)
+    }
+}
+
+fn parse_bounds_meta(
+    meta: &syn::meta::ParseNestedMeta<'_>,
+    bounds: &mut BTreeMap<String, FieldSigArgs>,
+) -> syn::Result<()> {
+    if meta.input.is_empty() {
+        return Ok(());
+    }
+
+    let content;
+    syn::parenthesized!(content in meta.input);
+    while !content.is_empty() {
+        let field_ident: Ident = content.parse()?;
+        let field_name = field_ident.to_string();
+        let nested;
+        syn::parenthesized!(nested in content);
+        let field_args = nested.parse::<FieldSigArgs>()?;
+        bounds.insert(field_name, field_args);
+        if content.peek(Token![,]) {
+            let _ = content.parse::<Token![,]>()?;
+        }
+    }
+    Ok(())
+}
+
+struct SelfExprAttr {
+    _self_token: Token![self],
+    _arrow: Token![=>],
+    expr: Expr,
+}
+
+impl Parse for SelfExprAttr {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        Ok(Self {
+            _self_token: input.parse()?,
+            _arrow: input.parse()?,
+            expr: input.parse()?,
+        })
+    }
+}
+
+fn parse_self_expr_attribute(attr: &Attribute) -> syn::Result<Expr> {
+    attr.parse_args::<SelfExprAttr>().map(|value| value.expr)
+}
+
+fn parse_self_expr_meta(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<Expr> {
+    let content;
+    syn::parenthesized!(content in meta.input);
+    content.parse::<SelfExprAttr>().map(|value| value.expr)
+}
+
 struct SpecArgs {
     checker_config: Option<Path>,
+    doc_graph_policy: Option<Path>,
     subsystems: Vec<LitStr>,
 }
 
@@ -135,6 +299,7 @@ impl syn::parse::Parse for SpecArgs {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
         let mut args = Self {
             checker_config: None,
+            doc_graph_policy: None,
             subsystems: Vec::new(),
         };
 
@@ -144,6 +309,7 @@ impl syn::parse::Parse for SpecArgs {
             syn::parenthesized!(content in input);
             match ident.to_string().as_str() {
                 "checker_config" => args.checker_config = Some(parse_single_path(&content)?),
+                "doc_graph_policy" => args.doc_graph_policy = Some(parse_single_path(&content)?),
                 "subsystems" => args.subsystems = parse_string_list(&content)?,
                 "invariants" | "illegal" | "state_constraints" | "action_constraints"
                 | "properties" | "fairness" | "symmetry" => {
@@ -196,6 +362,80 @@ impl syn::parse::Parse for TestArgs {
             init: init.ok_or_else(|| syn::Error::new(Span::call_site(), "missing init = ..."))?,
             cases,
             composition,
+        })
+    }
+}
+
+struct CodeTestArgs {
+    spec: Path,
+    init: Ident,
+    cases: Option<Ident>,
+}
+
+impl syn::parse::Parse for CodeTestArgs {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        let mut spec = None;
+        let mut init = None;
+        let mut cases = None;
+        while !input.is_empty() {
+            let ident: Ident = input.parse()?;
+            let _eq: syn::Token![=] = input.parse()?;
+            match ident.to_string().as_str() {
+                "spec" => spec = Some(input.parse()?),
+                "init" => init = Some(input.parse()?),
+                "action" => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "action = ... is no longer supported; declare Runtime, Context, fresh_runtime(), and context() on CodeConformanceSpec",
+                    ));
+                }
+                "driver" => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "driver = ... is no longer supported; declare Runtime and fresh_runtime() on CodeConformanceSpec",
+                    ));
+                }
+                "fresh" => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "fresh = ... is no longer supported; declare fresh_runtime() on CodeConformanceSpec",
+                    ));
+                }
+                "context" => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "context = ... is no longer supported; declare Context and context() on CodeConformanceSpec",
+                    ));
+                }
+                "harness" => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "harness = ... is no longer supported; declare Runtime, Context, fresh_runtime(), and context() on CodeConformanceSpec",
+                    ));
+                }
+                "probe" => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "probe = ... is no longer supported; declare Runtime, Context, fresh_runtime(), and context() on CodeConformanceSpec",
+                    ));
+                }
+                "cases" => cases = Some(input.parse()?),
+                _ => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "unsupported code_tests argument",
+                    ));
+                }
+            }
+            if input.peek(syn::Token![,]) {
+                let _ = input.parse::<syn::Token![,]>()?;
+            }
+        }
+
+        Ok(Self {
+            spec: spec.ok_or_else(|| syn::Error::new(Span::call_site(), "missing spec = ..."))?,
+            init: init.ok_or_else(|| syn::Error::new(Span::call_site(), "missing init = ..."))?,
+            cases,
         })
     }
 }
@@ -380,10 +620,15 @@ fn expand_signature_derive(input: DeriveInput) -> syn::Result<proc_macro2::Token
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let supported_data = ensure_supported_signature_data(&ident, &input.data)?;
 
-    if args.custom && args.range.is_some() {
+    if args.custom
+        && (args.range.is_some()
+            || args.filter.is_some()
+            || !args.bounds.is_empty()
+            || args.helper_invariant.is_some())
+    {
         return Err(syn::Error::new(
             ident.span(),
-            "#[signature(custom)] cannot be combined with #[signature(range = ...)]",
+            "#[signature(custom)] cannot be combined with bounds, filter, range, or #[signature_invariant(...)] helpers",
         ));
     }
 
@@ -463,7 +708,14 @@ fn signature_domain_body(
     data: &Data,
     args: &SignatureArgs,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    if let Some(range) = &args.range {
+    if !args.bounds.is_empty() && !matches!(data, Data::Struct(_)) {
+        return Err(syn::Error::new(
+            ident.span(),
+            "#[signature(bounds(...))] is only supported on named structs",
+        ));
+    }
+
+    let domain = if let Some(range) = &args.range {
         let Data::Struct(data) = data else {
             return Err(syn::Error::new(
                 ident.span(),
@@ -477,18 +729,31 @@ fn signature_domain_body(
             ));
         }
         let iter = range_tokens(range)?;
-        return Ok(quote! {
+        quote! {
             ::nirvash_core::BoundedDomain::new((#iter).map(Self).collect())
-        });
-    }
+        }
+    } else {
+        match data {
+            Data::Enum(data) => enum_domain_body(data)?,
+            Data::Struct(data) => struct_domain_body(data, &args.bounds)?,
+            Data::Union(data) => {
+                return Err(syn::Error::new(
+                    data.union_token.span(),
+                    "Signature derive does not support unions",
+                ));
+            }
+        }
+    };
 
-    match data {
-        Data::Enum(data) => enum_domain_body(data),
-        Data::Struct(data) => struct_domain_body(data),
-        Data::Union(data) => Err(syn::Error::new(
-            data.union_token.span(),
-            "Signature derive does not support unions",
-        )),
+    if let Some(filter_expr) = &args.filter {
+        let binding = format_ident!("__nirvash_self");
+        let rewritten = rewrite_self_expr(filter_expr, &binding);
+        Ok(quote! {{
+            let __nirvash_domain = { #domain };
+            __nirvash_domain.filter(|#binding| { #rewritten })
+        }})
+    } else {
+        Ok(domain)
     }
 }
 
@@ -497,7 +762,7 @@ fn signature_invariant_body(
     data: &Data,
     args: &SignatureArgs,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    if let Some(range) = &args.range {
+    let base = if let Some(range) = &args.range {
         let Data::Struct(data) = data else {
             return Err(syn::Error::new(
                 ident.span(),
@@ -510,15 +775,29 @@ fn signature_invariant_body(
                 "#[signature(range = ...)] requires a single-field newtype",
             ));
         }
-        return Ok(quote! { (#range).contains(&self.0) });
-    }
-    match data {
-        Data::Enum(data) => enum_invariant_body(data),
-        Data::Struct(data) => struct_invariant_body(data),
-        Data::Union(data) => Err(syn::Error::new(
-            data.union_token.span(),
-            "Signature derive does not support unions",
-        )),
+        quote! { (#range).contains(&self.0) }
+    } else {
+        match data {
+            Data::Enum(data) => enum_invariant_body(data)?,
+            Data::Struct(data) => struct_invariant_body(data, &args.bounds)?,
+            Data::Union(data) => {
+                return Err(syn::Error::new(
+                    data.union_token.span(),
+                    "Signature derive does not support unions",
+                ));
+            }
+        }
+    };
+
+    if let Some(invariant_expr) = &args.helper_invariant {
+        let binding = format_ident!("__nirvash_self");
+        let rewritten = rewrite_self_expr(invariant_expr, &binding);
+        Ok(quote! {{
+            let #binding = self;
+            (#base) && { #rewritten }
+        }})
+    } else {
+        Ok(base)
     }
 }
 
@@ -530,17 +809,27 @@ fn enum_domain_body(data: &DataEnum) -> syn::Result<proc_macro2::TokenStream> {
             Fields::Unit => quote! { values.push(Self::#variant_ident); },
             Fields::Unnamed(fields) => {
                 let bindings = field_bindings(&fields.unnamed);
+                let domain_exprs = fields
+                    .unnamed
+                    .iter()
+                    .map(|field| field_domain_expr(field, None))
+                    .collect::<syn::Result<Vec<_>>>()?;
                 let construct = quote! {
                     Self::#variant_ident(#(#bindings.clone()),*)
                 };
                 nested_loops(
                     &bindings,
-                    &fields.unnamed,
+                    &domain_exprs,
                     quote! { values.push(#construct); },
                 )
             }
             Fields::Named(fields) => {
                 let bindings = named_field_bindings(&fields.named);
+                let domain_exprs = fields
+                    .named
+                    .iter()
+                    .map(|field| field_domain_expr(field, None))
+                    .collect::<syn::Result<Vec<_>>>()?;
                 let names = fields
                     .named
                     .iter()
@@ -550,7 +839,7 @@ fn enum_domain_body(data: &DataEnum) -> syn::Result<proc_macro2::TokenStream> {
                 };
                 nested_loops(
                     &bindings,
-                    &fields.named,
+                    &domain_exprs,
                     quote! { values.push(#construct); },
                 )
             }
@@ -564,15 +853,30 @@ fn enum_domain_body(data: &DataEnum) -> syn::Result<proc_macro2::TokenStream> {
     })
 }
 
-fn struct_domain_body(data: &DataStruct) -> syn::Result<proc_macro2::TokenStream> {
+fn struct_domain_body(
+    data: &DataStruct,
+    type_level_bounds: &BTreeMap<String, FieldSigArgs>,
+) -> syn::Result<proc_macro2::TokenStream> {
+    if !type_level_bounds.is_empty() && !matches!(data.fields, Fields::Named(_)) {
+        return Err(syn::Error::new(
+            data.fields.span(),
+            "#[signature(bounds(...))] is only supported on named structs",
+        ));
+    }
+
     match &data.fields {
         Fields::Unit => Ok(quote! { ::nirvash_core::BoundedDomain::singleton(Self) }),
         Fields::Unnamed(fields) => {
             let bindings = field_bindings(&fields.unnamed);
+            let domain_exprs = fields
+                .unnamed
+                .iter()
+                .map(|field| field_domain_expr(field, None))
+                .collect::<syn::Result<Vec<_>>>()?;
             let construct = quote! { Self(#(#bindings.clone()),*) };
             let loops = nested_loops(
                 &bindings,
-                &fields.unnamed,
+                &domain_exprs,
                 quote! { values.push(#construct); },
             );
             Ok(quote! {
@@ -583,6 +887,17 @@ fn struct_domain_body(data: &DataStruct) -> syn::Result<proc_macro2::TokenStream
         }
         Fields::Named(fields) => {
             let bindings = named_field_bindings(&fields.named);
+            let domain_exprs = fields
+                .named
+                .iter()
+                .map(|field| {
+                    let bounds = field
+                        .ident
+                        .as_ref()
+                        .and_then(|ident| type_level_bounds.get(&ident.to_string()));
+                    field_domain_expr(field, bounds)
+                })
+                .collect::<syn::Result<Vec<_>>>()?;
             let names = fields
                 .named
                 .iter()
@@ -590,7 +905,7 @@ fn struct_domain_body(data: &DataStruct) -> syn::Result<proc_macro2::TokenStream
             let construct = quote! { Self { #(#names: #bindings.clone()),* } };
             let loops = nested_loops(
                 &bindings,
-                &fields.named,
+                &domain_exprs,
                 quote! { values.push(#construct); },
             );
             Ok(quote! {
@@ -602,6 +917,114 @@ fn struct_domain_body(data: &DataStruct) -> syn::Result<proc_macro2::TokenStream
     }
 }
 
+fn field_domain_expr(
+    field: &Field,
+    type_level_args: Option<&FieldSigArgs>,
+) -> syn::Result<TokenStream2> {
+    let mut args = FieldSigArgs::from_field_attrs(&field.attrs)?;
+    if let Some(parent) = type_level_args {
+        args.merge_from_type_level(parent);
+    }
+
+    if args.optional && option_inner_type(&field.ty).is_none() {
+        return Err(syn::Error::new(
+            field.ty.span(),
+            "#[sig(optional)] is only supported on Option<T> fields",
+        ));
+    }
+
+    if let Some(domain) = args.domain {
+        return Ok(quote! { ::nirvash_core::into_bounded_domain(#domain()) });
+    }
+
+    if let Some(len) = args.len {
+        let Some(element_ty) = vec_inner_type(&field.ty) else {
+            return Err(syn::Error::new(
+                field.ty.span(),
+                "#[sig(len = ...)] is only supported on Vec<T> fields",
+            ));
+        };
+        let iter = range_tokens(&len)?;
+        return Ok(quote! {{
+            let mut __nirvash_values = Vec::new();
+            for __nirvash_len in #iter {
+                __nirvash_values.extend(
+                    ::nirvash_core::bounded_vec_domain::<#element_ty>(
+                        __nirvash_len as usize,
+                        __nirvash_len as usize,
+                    )
+                    .into_vec(),
+                );
+            }
+            ::nirvash_core::BoundedDomain::new(__nirvash_values)
+        }});
+    }
+
+    if let Some(range) = args.range {
+        let iter = range_tokens(&range)?;
+        return Ok(quote! { ::nirvash_core::BoundedDomain::new((#iter).collect()) });
+    }
+
+    let ty = &field.ty;
+    Ok(quote! { <#ty as ::nirvash_core::Signature>::bounded_domain() })
+}
+
+fn vec_inner_type(ty: &Type) -> Option<&Type> {
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+    let segment = type_path.path.segments.last()?;
+    if segment.ident != "Vec" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    match args.args.first()? {
+        syn::GenericArgument::Type(inner) => Some(inner),
+        _ => None,
+    }
+}
+
+fn option_inner_type(ty: &Type) -> Option<&Type> {
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+    let segment = type_path.path.segments.last()?;
+    if segment.ident != "Option" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    match args.args.first()? {
+        syn::GenericArgument::Type(inner) => Some(inner),
+        _ => None,
+    }
+}
+
+fn rewrite_self_expr(expr: &Expr, replacement: &Ident) -> TokenStream2 {
+    rewrite_self_tokens(expr.to_token_stream(), replacement)
+}
+
+fn rewrite_self_tokens(tokens: TokenStream2, replacement: &Ident) -> TokenStream2 {
+    tokens
+        .into_iter()
+        .map(|token| match token {
+            TokenTree::Group(group) => {
+                let mut rewritten = proc_macro2::Group::new(
+                    group.delimiter(),
+                    rewrite_self_tokens(group.stream(), replacement),
+                );
+                rewritten.set_span(group.span());
+                TokenTree::Group(rewritten)
+            }
+            TokenTree::Ident(ident) if ident == "self" => TokenTree::Ident(replacement.clone()),
+            other => other,
+        })
+        .collect()
+}
+
 fn enum_invariant_body(data: &DataEnum) -> syn::Result<proc_macro2::TokenStream> {
     let arms = data.variants.iter().map(|variant| {
         let ident = &variant.ident;
@@ -609,15 +1032,32 @@ fn enum_invariant_body(data: &DataEnum) -> syn::Result<proc_macro2::TokenStream>
             Fields::Unit => quote! { Self::#ident => true },
             Fields::Unnamed(fields) => {
                 let bindings = field_bindings(&fields.unnamed);
+                let checks = fields
+                    .unnamed
+                    .iter()
+                    .zip(bindings.iter())
+                    .map(|(field, binding)| field_invariant_expr(field, None, quote! { #binding }))
+                    .collect::<syn::Result<Vec<_>>>()
+                    .expect("enum invariant generation");
                 quote! {
-                    Self::#ident(#(#bindings),*) => true #(&& ::nirvash_core::Signature::invariant(#bindings))*
+                    Self::#ident(#(#bindings),*) => true #(&& #checks)*
                 }
             }
             Fields::Named(fields) => {
                 let bindings = named_field_bindings(&fields.named);
-                let names = fields.named.iter().map(|field| field.ident.as_ref().expect("named"));
+                let names = fields
+                    .named
+                    .iter()
+                    .map(|field| field.ident.as_ref().expect("named"));
+                let checks = fields
+                    .named
+                    .iter()
+                    .zip(bindings.iter())
+                    .map(|(field, binding)| field_invariant_expr(field, None, quote! { #binding }))
+                    .collect::<syn::Result<Vec<_>>>()
+                    .expect("enum invariant generation");
                 quote! {
-                    Self::#ident { #(#names: #bindings),* } => true #(&& ::nirvash_core::Signature::invariant(#bindings))*
+                    Self::#ident { #(#names: #bindings),* } => true #(&& #checks)*
                 }
             }
         }
@@ -625,24 +1065,75 @@ fn enum_invariant_body(data: &DataEnum) -> syn::Result<proc_macro2::TokenStream>
     Ok(quote! { match self { #(#arms),* } })
 }
 
-fn struct_invariant_body(data: &DataStruct) -> syn::Result<proc_macro2::TokenStream> {
+fn struct_invariant_body(
+    data: &DataStruct,
+    type_level_bounds: &BTreeMap<String, FieldSigArgs>,
+) -> syn::Result<proc_macro2::TokenStream> {
     match &data.fields {
         Fields::Unit => Ok(quote! { true }),
         Fields::Unnamed(fields) => {
-            let checks = fields.unnamed.iter().enumerate().map(|(index, _)| {
-                let access = syn::Index::from(index);
-                quote! { ::nirvash_core::Signature::invariant(&self.#access) }
-            });
+            let checks = fields
+                .unnamed
+                .iter()
+                .enumerate()
+                .map(|(index, field)| {
+                    let access = syn::Index::from(index);
+                    field_invariant_expr(field, None, quote! { self.#access })
+                })
+                .collect::<syn::Result<Vec<_>>>()?;
             Ok(quote! { true #(&& #checks)* })
         }
         Fields::Named(fields) => {
-            let checks = fields.named.iter().map(|field| {
-                let ident = field.ident.as_ref().expect("named");
-                quote! { ::nirvash_core::Signature::invariant(&self.#ident) }
-            });
+            let checks = fields
+                .named
+                .iter()
+                .map(|field| {
+                    let ident = field.ident.as_ref().expect("named");
+                    let bounds = type_level_bounds.get(&ident.to_string());
+                    field_invariant_expr(field, bounds, quote! { self.#ident })
+                })
+                .collect::<syn::Result<Vec<_>>>()?;
             Ok(quote! { true #(&& #checks)* })
         }
     }
+}
+
+fn field_invariant_expr(
+    field: &Field,
+    type_level_args: Option<&FieldSigArgs>,
+    access: TokenStream2,
+) -> syn::Result<TokenStream2> {
+    let mut args = FieldSigArgs::from_field_attrs(&field.attrs)?;
+    if let Some(parent) = type_level_args {
+        args.merge_from_type_level(parent);
+    }
+
+    if let Some(range) = args.range {
+        return Ok(quote! { (#range).contains(&#access) });
+    }
+
+    if let Some(len) = args.len {
+        let Some(element_ty) = vec_inner_type(&field.ty) else {
+            return Err(syn::Error::new(
+                field.ty.span(),
+                "#[sig(len = ...)] is only supported on Vec<T> fields",
+            ));
+        };
+        return Ok(quote! {
+            (#len).contains(&#access.len())
+                && #access.iter().all(<#element_ty as ::nirvash_core::Signature>::invariant)
+        });
+    }
+
+    if args.optional && option_inner_type(&field.ty).is_none() {
+        return Err(syn::Error::new(
+            field.ty.span(),
+            "#[sig(optional)] is only supported on Option<T> fields",
+        ));
+    }
+
+    let ty = &field.ty;
+    Ok(quote! { <#ty as ::nirvash_core::Signature>::invariant(&#access) })
 }
 
 fn field_bindings(fields: &syn::punctuated::Punctuated<Field, syn::token::Comma>) -> Vec<Ident> {
@@ -670,17 +1161,19 @@ fn named_field_bindings(
 
 fn nested_loops(
     bindings: &[Ident],
-    fields: &syn::punctuated::Punctuated<Field, syn::token::Comma>,
+    domain_exprs: &[TokenStream2],
     inner: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     bindings
         .iter()
-        .zip(fields.iter())
+        .enumerate()
+        .zip(domain_exprs.iter())
         .rev()
-        .fold(inner, |acc, (binding, field)| {
-            let ty = &field.ty;
+        .fold(inner, |acc, ((index, binding), domain_expr)| {
+            let domain_ident = format_ident!("__nirvash_domain_{index}");
             quote! {
-                for #binding in &<#ty as ::nirvash_core::Signature>::bounded_domain().into_vec() {
+                let #domain_ident = #domain_expr;
+                for #binding in &#domain_ident.into_vec() {
                     #acc
                 }
             }
@@ -713,6 +1206,7 @@ fn expand_temporal_spec(
     let action_ty = associated_type(&item, "Action")?;
 
     let checker_config = args.checker_config;
+    let doc_graph_policy = args.doc_graph_policy;
     let subsystems = args.subsystems;
 
     if !emit_composition && !subsystems.is_empty() {
@@ -726,6 +1220,11 @@ fn expand_temporal_spec(
         quote! { #checker_config() }
     } else {
         quote! { ::nirvash_core::ModelCheckConfig::default() }
+    };
+    let doc_graph_policy_expr = if let Some(doc_graph_policy) = doc_graph_policy {
+        quote! { #doc_graph_policy() }
+    } else {
+        quote! { ::nirvash_core::DocGraphPolicy::default() }
     };
 
     let composition_impl = if emit_composition {
@@ -819,6 +1318,10 @@ fn expand_temporal_spec(
 
             fn checker_config(&self) -> ::nirvash_core::ModelCheckConfig {
                 #checker_config_expr
+            }
+
+            fn doc_graph_policy(&self) -> ::nirvash_core::DocGraphPolicy<Self::State> {
+                #doc_graph_policy_expr
             }
         }
 
@@ -931,9 +1434,23 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                         } else {
                             "default".to_owned()
                         };
+                        let doc_graph_policy =
+                            <#spec_ty as ::nirvash_core::TemporalSpec>::doc_graph_policy(&spec);
                         let snapshot = ::nirvash_core::ModelChecker::new(&spec)
                             .reachable_graph_snapshot()
                             .expect("reachable graph snapshot should build for docs");
+                        let focus_indices = snapshot
+                            .states
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(state_index, state)| {
+                                doc_graph_policy
+                                    .focus_states
+                                    .iter()
+                                    .any(|predicate| predicate.eval(state))
+                                    .then_some(state_index)
+                            })
+                            .collect::<::std::vec::Vec<_>>();
                         ::nirvash_core::DocGraphCase {
                             label,
                             graph: ::nirvash_core::DocGraphSnapshot {
@@ -959,6 +1476,9 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                                 deadlocks: snapshot.deadlocks,
                                 truncated: snapshot.truncated,
                                 stutter_omitted: snapshot.stutter_omitted,
+                                focus_indices,
+                                reduction: doc_graph_policy.reduction,
+                                max_edge_actions_in_label: doc_graph_policy.max_edge_actions_in_label,
                             },
                         }
                     })
@@ -1124,6 +1644,361 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
             }
 
             #composition_test
+        }
+    })
+}
+
+fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream> {
+    let spec_ty = args.spec;
+    let spec_tail = path_tail_ident(&spec_ty)?.clone();
+    let init_method = args.init;
+    let cases_method = args.cases;
+    let module_ident = format_ident!(
+        "__nirvash_code_tests_{}",
+        spec_tail.to_string().to_lowercase()
+    );
+    let cases_expr = if let Some(cases_method) = cases_method {
+        quote! { #cases_method() }
+    } else {
+        quote! { vec![<#spec_ty as ::core::default::Default>::default()] }
+    };
+
+    Ok(quote! {
+        #[cfg(test)]
+        mod #module_ident {
+            use super::*;
+
+            type GeneratedState = <#spec_ty as ::nirvash_core::TransitionSystem>::State;
+            type GeneratedAction = <#spec_ty as ::nirvash_core::TransitionSystem>::Action;
+            type GeneratedRuntime = <#spec_ty as ::nirvash_core::CodeConformanceSpec>::Runtime;
+            type GeneratedContext = <#spec_ty as ::nirvash_core::CodeConformanceSpec>::Context;
+            type GeneratedExpectedOutput =
+                <#spec_ty as ::nirvash_core::CodeConformanceSpec>::ExpectedOutput;
+            type GeneratedObservedState =
+                <#spec_ty as ::nirvash_core::CodeConformanceSpec>::ObservedState;
+            type GeneratedObservedOutput =
+                <#spec_ty as ::nirvash_core::CodeConformanceSpec>::ObservedOutput;
+
+            fn generated_cases() -> ::std::vec::Vec<#spec_ty> {
+                #cases_expr
+            }
+
+            fn generated_actions() -> ::std::vec::Vec<GeneratedAction> {
+                <GeneratedAction as ::nirvash_core::Signature>::bounded_domain().into_vec()
+            }
+
+            fn generated_paths(
+                spec: &#spec_ty,
+            ) -> (
+                ::nirvash_core::ReachableGraphSnapshot<GeneratedState, GeneratedAction>,
+                ::std::vec::Vec<::std::vec::Vec<GeneratedAction>>,
+            ) {
+                let snapshot = ::nirvash_core::ModelChecker::new(spec)
+                    .reachable_graph_snapshot()
+                    .expect("reachable graph snapshot should build");
+                let mut paths = vec![::core::option::Option::None; snapshot.states.len()];
+                let mut queue = ::std::collections::VecDeque::new();
+                for &index in &snapshot.initial_indices {
+                    paths[index] = ::core::option::Option::Some(::std::vec::Vec::new());
+                    queue.push_back(index);
+                }
+                while let ::core::option::Option::Some(source) = queue.pop_front() {
+                    let prefix = paths[source]
+                        .clone()
+                        .expect("reachable source should already have a path");
+                    for edge in &snapshot.edges[source] {
+                        if paths[edge.target].is_none() {
+                            let mut next_path = prefix.clone();
+                            next_path.push(edge.action.clone());
+                            paths[edge.target] = ::core::option::Option::Some(next_path);
+                            queue.push_back(edge.target);
+                        }
+                    }
+                }
+                (
+                    snapshot,
+                    paths.into_iter()
+                        .map(|path| path.expect("reachable state should have canonical path"))
+                        .collect(),
+                )
+            }
+
+            async fn replay_prefix(
+                spec: &#spec_ty,
+                path: &[GeneratedAction],
+                context: &GeneratedContext,
+            ) -> GeneratedRuntime {
+                let runtime =
+                    <#spec_ty as ::nirvash_core::CodeConformanceSpec>::fresh_runtime(spec).await;
+                let observed = <GeneratedRuntime as ::nirvash_core::StateObserver>::observe_state(
+                    &runtime,
+                    context,
+                )
+                .await;
+                let mut projected =
+                    <#spec_ty as ::nirvash_core::CodeConformanceSpec>::project_state(
+                        spec,
+                        &observed,
+                    );
+                assert_eq!(projected, spec.#init_method());
+                for action in path {
+                    let expected =
+                        <#spec_ty as ::nirvash_core::CodeConformanceSpec>::expected_step(
+                            spec,
+                            &projected,
+                            action,
+                        );
+                    let output = <GeneratedRuntime as ::nirvash_core::ActionApplier>::execute_action(
+                        &runtime,
+                        context,
+                        action,
+                    )
+                    .await;
+                    let projected_output =
+                        <#spec_ty as ::nirvash_core::CodeConformanceSpec>::project_output(
+                            spec,
+                            &output,
+                        );
+                    match expected {
+                        ::nirvash_core::ExpectedStep::Allowed { next, output: expected_output } => {
+                            assert_eq!(projected_output, expected_output);
+                            let observed_after =
+                                <GeneratedRuntime as ::nirvash_core::StateObserver>::observe_state(
+                                    &runtime,
+                                    context,
+                                )
+                                .await;
+                            let projected_after =
+                                <#spec_ty as ::nirvash_core::CodeConformanceSpec>::project_state(
+                                    spec,
+                                    &observed_after,
+                                );
+                            assert_eq!(projected_after, next);
+                            projected = projected_after;
+                        }
+                        ::nirvash_core::ExpectedStep::Rejected { output: expected_output } => {
+                            assert_eq!(projected_output, expected_output);
+                            let observed_after =
+                                <GeneratedRuntime as ::nirvash_core::StateObserver>::observe_state(
+                                    &runtime,
+                                    context,
+                                )
+                                .await;
+                            let projected_after =
+                                <#spec_ty as ::nirvash_core::CodeConformanceSpec>::project_state(
+                                    spec,
+                                    &observed_after,
+                                );
+                            assert_eq!(projected_after, projected);
+                        }
+                    }
+                }
+                runtime
+            }
+
+            async fn execute_from_state(
+                spec: &#spec_ty,
+                path: &[GeneratedAction],
+                expected_state: &GeneratedState,
+                action: &GeneratedAction,
+                context: &GeneratedContext,
+            ) -> (
+                ::nirvash_core::ExpectedStep<GeneratedState, GeneratedExpectedOutput>,
+                GeneratedExpectedOutput,
+                GeneratedState,
+            ) {
+                let runtime = replay_prefix(spec, path, context).await;
+                let observed_before =
+                    <GeneratedRuntime as ::nirvash_core::StateObserver>::observe_state(
+                        &runtime,
+                        context,
+                    )
+                .await;
+                let projected_before =
+                    <#spec_ty as ::nirvash_core::CodeConformanceSpec>::project_state(
+                        spec,
+                        &observed_before,
+                    );
+                assert_eq!(projected_before, *expected_state);
+                let expected =
+                    <#spec_ty as ::nirvash_core::CodeConformanceSpec>::expected_step(
+                        spec,
+                        &projected_before,
+                        action,
+                    );
+                let output = <GeneratedRuntime as ::nirvash_core::ActionApplier>::execute_action(
+                    &runtime,
+                    context,
+                    action,
+                )
+                .await;
+                let projected_output =
+                    <#spec_ty as ::nirvash_core::CodeConformanceSpec>::project_output(
+                        spec,
+                        &output,
+                    );
+                let observed_after =
+                    <GeneratedRuntime as ::nirvash_core::StateObserver>::observe_state(
+                        &runtime,
+                        context,
+                    )
+                    .await;
+                let projected_after =
+                    <#spec_ty as ::nirvash_core::CodeConformanceSpec>::project_state(
+                        spec,
+                        &observed_after,
+                    );
+                (expected, projected_output, projected_after)
+            }
+
+            #[test]
+            fn generated_spec_is_deterministic_for_code_conformance() {
+                for spec in generated_cases() {
+                    let (snapshot, _) = generated_paths(&spec);
+                    let all_states =
+                        <GeneratedState as ::nirvash_core::Signature>::bounded_domain().into_vec();
+                    for state in &snapshot.states {
+                        for action in generated_actions() {
+                            let next_states = all_states
+                                .iter()
+                                .filter(|next| {
+                                    <#spec_ty as ::nirvash_core::TransitionSystem>::next(
+                                        &spec,
+                                        state,
+                                        &action,
+                                        next,
+                                    )
+                                })
+                                .cloned()
+                                .collect::<::std::vec::Vec<_>>();
+                            assert!(
+                                next_states.len() <= 1,
+                                "spec is nondeterministic for state {:?} and action {:?}: {:?}",
+                                state,
+                                action,
+                                next_states
+                            );
+                            match <#spec_ty as ::nirvash_core::CodeConformanceSpec>::expected_step(
+                                &spec,
+                                state,
+                                &action,
+                            ) {
+                                ::nirvash_core::ExpectedStep::Allowed { next, .. } => {
+                                    assert_eq!(next_states, vec![next]);
+                                }
+                                ::nirvash_core::ExpectedStep::Rejected { .. } => {
+                                    assert!(next_states.is_empty());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            #[tokio::test]
+            async fn generated_real_code_accepts_allowed_actions() {
+                for spec in generated_cases() {
+                    let context = <#spec_ty as ::nirvash_core::CodeConformanceSpec>::context(&spec);
+                    let (snapshot, paths) = generated_paths(&spec);
+                    for (index, state) in snapshot.states.iter().enumerate() {
+                        for action in generated_actions() {
+                            let (expected, _, _) = execute_from_state(
+                                &spec,
+                                &paths[index],
+                                state,
+                                &action,
+                                &context,
+                            )
+                                    .await;
+                            if let ::nirvash_core::ExpectedStep::Allowed { .. } = expected {
+                                // replay + dispatch already succeeded if we reached here
+                            }
+                        }
+                    }
+                }
+            }
+
+            #[tokio::test]
+            async fn generated_real_code_rejects_disallowed_actions() {
+                for spec in generated_cases() {
+                    let context = <#spec_ty as ::nirvash_core::CodeConformanceSpec>::context(&spec);
+                    let (snapshot, paths) = generated_paths(&spec);
+                    for (index, state) in snapshot.states.iter().enumerate() {
+                        for action in generated_actions() {
+                            let (expected, _, observed_after) = execute_from_state(
+                                &spec,
+                                &paths[index],
+                                state,
+                                &action,
+                                &context,
+                            )
+                                    .await;
+                            if let ::nirvash_core::ExpectedStep::Rejected { .. } = expected {
+                                assert_eq!(observed_after, *state);
+                            }
+                        }
+                    }
+                }
+            }
+
+            #[tokio::test]
+            async fn generated_real_code_state_matches_spec() {
+                for spec in generated_cases() {
+                    let context = <#spec_ty as ::nirvash_core::CodeConformanceSpec>::context(&spec);
+                    let (snapshot, paths) = generated_paths(&spec);
+                    for (index, state) in snapshot.states.iter().enumerate() {
+                        for action in generated_actions() {
+                            let (expected, _, observed_after) = execute_from_state(
+                                &spec,
+                                &paths[index],
+                                state,
+                                &action,
+                                &context,
+                            )
+                                    .await;
+                            match expected {
+                                ::nirvash_core::ExpectedStep::Allowed { next, .. } => {
+                                    assert_eq!(observed_after, next);
+                                }
+                                ::nirvash_core::ExpectedStep::Rejected { .. } => {
+                                    assert_eq!(observed_after, *state);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            #[tokio::test]
+            async fn generated_real_code_output_matches_expected() {
+                for spec in generated_cases() {
+                    let context = <#spec_ty as ::nirvash_core::CodeConformanceSpec>::context(&spec);
+                    let (snapshot, paths) = generated_paths(&spec);
+                    for (index, state) in snapshot.states.iter().enumerate() {
+                        for action in generated_actions() {
+                            let (expected, output, _) = execute_from_state(
+                                &spec,
+                                &paths[index],
+                                state,
+                                &action,
+                                &context,
+                            )
+                                    .await;
+                            match expected {
+                                ::nirvash_core::ExpectedStep::Allowed {
+                                    output: expected_output,
+                                    ..
+                                }
+                                | ::nirvash_core::ExpectedStep::Rejected {
+                                    output: expected_output,
+                                } => {
+                                    assert_eq!(output, expected_output);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     })
 }

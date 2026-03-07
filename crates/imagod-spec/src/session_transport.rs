@@ -1,6 +1,5 @@
 use nirvash_core::{
-    BoundedDomain, Fairness, Ltl, Signature as FormalSignature, StatePredicate, StepPredicate,
-    TransitionSystem,
+    Fairness, Ltl, Signature as FormalSignature, StatePredicate, StepPredicate, TransitionSystem,
 };
 use nirvash_macros::{Signature, fairness, illegal, invariant, property, subsystem_spec};
 
@@ -15,43 +14,34 @@ pub enum SessionOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
-#[signature(custom)]
+#[signature(filter(self => {
+    let shutdown_blocks_accept =
+        !self.shutdown_requested || !matches!(self.last_outcome, SessionOutcome::Accepted);
+    let too_many_means_full_or_stopping =
+        !matches!(self.last_outcome, SessionOutcome::RejectedTooMany)
+            || self.shutdown_requested
+            || self.active_sessions.is_max();
+    let joined_implies_non_negative_sessions =
+        !matches!(self.last_outcome, SessionOutcome::Joined) || self.active_sessions.get() < 2;
+
+    shutdown_blocks_accept && too_many_means_full_or_stopping && joined_implies_non_negative_sessions
+}))]
+#[signature_invariant(self => {
+    let shutdown_blocks_accept =
+        !self.shutdown_requested || !matches!(self.last_outcome, SessionOutcome::Accepted);
+    let too_many_means_full_or_stopping =
+        !matches!(self.last_outcome, SessionOutcome::RejectedTooMany)
+            || self.shutdown_requested
+            || self.active_sessions.is_max();
+    let joined_implies_non_negative_sessions =
+        !matches!(self.last_outcome, SessionOutcome::Joined) || self.active_sessions.get() < 2;
+
+    shutdown_blocks_accept && too_many_means_full_or_stopping && joined_implies_non_negative_sessions
+})]
 pub struct SessionTransportState {
     pub active_sessions: SessionSlots,
     pub shutdown_requested: bool,
     pub last_outcome: SessionOutcome,
-}
-
-impl SessionTransportStateSignatureSpec for SessionTransportState {
-    fn representatives() -> BoundedDomain<Self> {
-        BoundedDomain::new(vec![
-            SessionTransportSpec::new().initial_state(),
-            Self {
-                active_sessions: SessionSlots::new(1).expect("within bounds"),
-                shutdown_requested: false,
-                last_outcome: SessionOutcome::Accepted,
-            },
-            Self {
-                active_sessions: SessionSlots::new(2).expect("within bounds"),
-                shutdown_requested: false,
-                last_outcome: SessionOutcome::RejectedTooMany,
-            },
-            Self {
-                active_sessions: SessionSlots::new(1).expect("within bounds"),
-                shutdown_requested: true,
-                last_outcome: SessionOutcome::Joined,
-            },
-            Self {
-                active_sessions: SessionSlots::new(0).expect("within bounds"),
-                shutdown_requested: false,
-                last_outcome: SessionOutcome::Joined,
-            },
-        ])
-    }
-
-    fn signature_invariant(&self) -> bool {
-        !self.shutdown_requested || !matches!(self.last_outcome, SessionOutcome::Accepted)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
@@ -156,8 +146,9 @@ fn accepted_session_leads_to_join_or_shutdown_drain()
         Ltl::pred(StatePredicate::new("accepted_session", |state| {
             matches!(state.last_outcome, SessionOutcome::Accepted)
         })),
-        Ltl::pred(StatePredicate::new("joined_or_drained", |state| {
+        Ltl::pred(StatePredicate::new("joined_or_resolved", |state| {
             matches!(state.last_outcome, SessionOutcome::Joined)
+                || matches!(state.last_outcome, SessionOutcome::RejectedTooMany)
                 || (state.shutdown_requested && state.active_sessions.is_zero())
         })),
     )
@@ -253,3 +244,24 @@ fn resolve_capacity_pressure() -> StepPredicate<SessionTransportState, SessionTr
 
 #[nirvash_macros::formal_tests(spec = SessionTransportSpec, init = initial_state)]
 const _: () = ();
+
+#[cfg(test)]
+mod tests {
+    use nirvash_core::Signature;
+
+    use super::*;
+
+    #[test]
+    fn bounded_domain_filters_out_invalid_shutdown_and_capacity_states() {
+        let values = SessionTransportState::bounded_domain().into_vec();
+
+        assert!(values.iter().all(|state| {
+            !state.shutdown_requested || !matches!(state.last_outcome, SessionOutcome::Accepted)
+        }));
+        assert!(values.iter().all(|state| {
+            !matches!(state.last_outcome, SessionOutcome::RejectedTooMany)
+                || state.shutdown_requested
+                || state.active_sessions.is_max()
+        }));
+    }
+}

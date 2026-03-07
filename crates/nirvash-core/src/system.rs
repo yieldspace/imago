@@ -1,6 +1,6 @@
 use crate::{
-    ActionConstraint, Fairness, Ltl, ModelCheckConfig, Signature, StateConstraint, StatePredicate,
-    StepPredicate, SymmetryReducer,
+    ActionConstraint, DocGraphPolicy, Fairness, Ltl, ModelCheckConfig, Signature, StateConstraint,
+    StatePredicate, StepPredicate, SymmetryReducer,
 };
 
 pub trait TransitionSystem {
@@ -66,11 +66,7 @@ pub trait TemporalSpec: TransitionSystem {
     }
 
     fn properties(&self) -> Vec<Ltl<Self::State, Self::Action>> {
-        self.progress_properties()
-    }
-
-    fn progress_properties(&self) -> Vec<Ltl<Self::State, Self::Action>> {
-        self.properties()
+        Vec::new()
     }
 
     fn fairness(&self) -> Vec<Fairness<Self::State, Self::Action>> {
@@ -84,6 +80,57 @@ pub trait TemporalSpec: TransitionSystem {
     fn checker_config(&self) -> ModelCheckConfig {
         ModelCheckConfig::default()
     }
+
+    fn doc_graph_policy(&self) -> DocGraphPolicy<Self::State> {
+        DocGraphPolicy::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpectedStep<S, O> {
+    Allowed { next: S, output: O },
+    Rejected { output: O },
+}
+
+#[allow(async_fn_in_trait)]
+pub trait ActionApplier {
+    type Action;
+    type Output;
+    type Context;
+
+    async fn execute_action(&self, context: &Self::Context, action: &Self::Action) -> Self::Output;
+}
+
+#[allow(async_fn_in_trait)]
+pub trait StateObserver {
+    type ObservedState;
+    type Context;
+
+    async fn observe_state(&self, context: &Self::Context) -> Self::ObservedState;
+}
+
+#[allow(async_fn_in_trait)]
+pub trait CodeConformanceSpec: TransitionSystem {
+    type Runtime: ActionApplier<Action = Self::Action, Output = Self::ObservedOutput, Context = Self::Context>
+        + StateObserver<ObservedState = Self::ObservedState, Context = Self::Context>;
+    type Context: Clone;
+    type ExpectedOutput: Clone + std::fmt::Debug + PartialEq + Eq;
+    type ObservedState: Clone + std::fmt::Debug;
+    type ObservedOutput: Clone + std::fmt::Debug;
+
+    async fn fresh_runtime(&self) -> Self::Runtime;
+
+    fn context(&self) -> Self::Context;
+
+    fn expected_step(
+        &self,
+        prev: &Self::State,
+        action: &Self::Action,
+    ) -> ExpectedStep<Self::State, Self::ExpectedOutput>;
+
+    fn project_state(&self, observed: &Self::ObservedState) -> Self::State;
+
+    fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput;
 }
 
 #[derive(Debug, Clone)]
@@ -146,10 +193,6 @@ impl<S, A> SystemComposition<S, A> {
         self
     }
 
-    pub fn with_progress_property(self, property: Ltl<S, A>) -> Self {
-        self.with_property(property)
-    }
-
     pub fn with_fairness(mut self, fairness: Fairness<S, A>) -> Self {
         self.fairness.push(fairness);
         self
@@ -191,10 +234,6 @@ impl<S, A> SystemComposition<S, A> {
 
     pub fn properties(&self) -> &[Ltl<S, A>] {
         &self.properties
-    }
-
-    pub fn progress_properties(&self) -> &[Ltl<S, A>] {
-        self.properties()
     }
 
     pub fn fairness(&self) -> &[Fairness<S, A>] {

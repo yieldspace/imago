@@ -1,0 +1,5 @@
+error: #[sig(len = ...)] is only supported on Vec<T> fields
+ --> tests/fixtures/derive_signature_invalid_len.rs:6:12
+  |
+6 |     ready: bool,
+  |            ^^^^

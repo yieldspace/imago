@@ -10,14 +10,19 @@ use imago_protocol::messages::{
     BindingsCertUploadRequest, BindingsCertUploadResponse, RpcInvokeRequest, RpcInvokeResponse,
 };
 use imago_protocol::{
-    ArtifactPushRequest, CommandCancelRequest, CommandEventType, CommandPayload,
-    CommandStartRequest, CommandStartResponse, CommandState, CommandType, DeployPrepareRequest,
-    MessageType, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSION_RANGE, ServiceListRequest,
-    ServiceListResponse, StateRequest, Validate,
+    ArtifactPushRequest, CommandCancelRequest, CommandCancelResponse, CommandEventType,
+    CommandPayload, CommandStartRequest, CommandStartResponse, CommandState, CommandType,
+    DeployPrepareRequest, ErrorCode, MessageType, PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSION_RANGE, ServiceListRequest, ServiceListResponse, StateRequest,
+    StateResponse, Validate,
 };
 use imagod_common::ImagodError;
 use imagod_config::upsert_tls_known_client_key;
-use imagod_control::{OperationManager, SpawnTransition};
+use imagod_control::OperationManager;
+use imagod_model::{
+    CommandErrorKind, CommandKind, CommandLifecycleState, CommandProtocolAction,
+    CommandProtocolContext, CommandProtocolOutput, CommandProtocolStageId,
+};
 use semver::{Version, VersionReq};
 use serde::Serialize;
 use web_transport_quinn::SendStream;
@@ -183,10 +188,13 @@ impl ProtocolHandler {
             .validate()
             .map_err(|e| bad_request("state.request", e.to_string()))?;
 
-        let response = self
-            .operations
-            .snapshot_running(&payload.request_id)
-            .await?;
+        let response = <OperationManager as imagod_control::ActionApplier>::execute_action(
+            &self.operations,
+            &command_context(payload.request_id),
+            &CommandProtocolAction::SnapshotRunning,
+        )
+        .await;
+        let response = state_response_from_output(payload.request_id, response)?;
         response_envelope(
             MessageType::StateResponse,
             request_id,
@@ -228,7 +236,13 @@ impl ProtocolHandler {
             .validate()
             .map_err(|e| bad_request("command.cancel", e.to_string()))?;
 
-        let response = self.operations.request_cancel(&payload.request_id).await?;
+        let response = <OperationManager as imagod_control::ActionApplier>::execute_action(
+            &self.operations,
+            &command_context(payload.request_id),
+            &CommandProtocolAction::RequestCancel,
+        )
+        .await;
+        let response = cancel_response_from_output(response)?;
         response_envelope(
             MessageType::CommandCancel,
             request_id,
@@ -389,6 +403,7 @@ impl ProtocolHandler {
         ensure_command_start_request_id_match(request_id, payload.request_id)?;
         ensure_command_start_allowed(&self.shutdown_requested)?;
         let operation_id = request_id;
+        let operation_context = command_context(operation_id);
         let deploy_id_for_cleanup = if payload.command_type == CommandType::Deploy {
             match &payload.payload {
                 CommandPayload::Deploy(deploy_payload) => Some(deploy_payload.deploy_id.clone()),
@@ -398,9 +413,15 @@ impl ProtocolHandler {
             None
         };
 
-        self.operations
-            .start(operation_id, payload.command_type)
-            .await?;
+        expect_ack(
+            <OperationManager as imagod_control::ActionApplier>::execute_action(
+                &self.operations,
+                &operation_context,
+                &CommandProtocolAction::Start(command_kind_from_wire(payload.command_type)),
+            )
+            .await,
+            CommandProtocolStageId::CommandStart,
+        )?;
 
         let accepted = response_envelope(
             MessageType::CommandStart,
@@ -421,9 +442,15 @@ impl ProtocolHandler {
         )?;
         write_envelope(send, &accepted_event, self.frame_codec.as_ref()).await?;
 
-        self.operations
-            .set_state(&operation_id, CommandState::Running, "starting")
-            .await?;
+        expect_ack(
+            <OperationManager as imagod_control::ActionApplier>::execute_action(
+                &self.operations,
+                &operation_context,
+                &CommandProtocolAction::SetRunning,
+            )
+            .await,
+            CommandProtocolStageId::OperationState,
+        )?;
         let running_event = event_envelope(
             self.clock.as_ref(),
             operation_id,
@@ -435,11 +462,13 @@ impl ProtocolHandler {
         )?;
         write_envelope(send, &running_event, self.frame_codec.as_ref()).await?;
 
-        let spawn_transition = self
-            .operations
-            .mark_spawned_if_not_canceled(&operation_id, "spawned")
-            .await?;
-        if spawn_transition == SpawnTransition::Canceled {
+        let spawn_transition = <OperationManager as imagod_control::ActionApplier>::execute_action(
+            &self.operations,
+            &operation_context,
+            &CommandProtocolAction::MarkSpawned,
+        )
+        .await;
+        if is_spawn_canceled(&spawn_transition)? {
             let canceled = event_envelope(
                 self.clock.as_ref(),
                 operation_id,
@@ -452,9 +481,8 @@ impl ProtocolHandler {
             let canceled_write = write_envelope(send, &canceled, self.frame_codec.as_ref()).await;
             let finalize_result = finalize_operation_after_terminal_event(
                 &self.operations,
-                &operation_id,
-                CommandState::Canceled,
-                "canceled",
+                &operation_context,
+                CommandProtocolAction::FinishCanceled,
                 canceled_write,
             )
             .await;
@@ -529,9 +557,8 @@ impl ProtocolHandler {
                     write_envelope(send, &succeeded, self.frame_codec.as_ref()).await;
                 let finalize_result = finalize_operation_after_terminal_event(
                     &self.operations,
-                    &operation_id,
-                    CommandState::Succeeded,
-                    success_stage,
+                    &operation_context,
+                    CommandProtocolAction::FinishSucceeded,
                     succeeded_write,
                 )
                 .await;
@@ -556,9 +583,8 @@ impl ProtocolHandler {
                 let failed_write = write_envelope(send, &failed, self.frame_codec.as_ref()).await;
                 let finalize_result = finalize_operation_after_terminal_event(
                     &self.operations,
-                    &operation_id,
-                    CommandState::Failed,
-                    "failed",
+                    &operation_context,
+                    CommandProtocolAction::FinishFailed(command_error_kind_from_wire(err.code)),
                     failed_write,
                 )
                 .await;
@@ -593,6 +619,174 @@ impl ProtocolHandler {
                 deploy_id, err.code, err.stage, err.message
             );
         }
+    }
+}
+
+fn command_kind_from_wire(command_type: CommandType) -> CommandKind {
+    match command_type {
+        CommandType::Deploy => CommandKind::Deploy,
+        CommandType::Run => CommandKind::Run,
+        CommandType::Stop => CommandKind::Stop,
+    }
+}
+
+fn command_state_to_wire(state: CommandLifecycleState) -> CommandState {
+    match state {
+        CommandLifecycleState::Accepted => CommandState::Accepted,
+        CommandLifecycleState::Running => CommandState::Running,
+        CommandLifecycleState::Succeeded => CommandState::Succeeded,
+        CommandLifecycleState::Failed => CommandState::Failed,
+        CommandLifecycleState::Canceled => CommandState::Canceled,
+    }
+}
+
+fn command_error_kind_from_wire(code: ErrorCode) -> CommandErrorKind {
+    match code {
+        ErrorCode::Unauthorized => CommandErrorKind::Unauthorized,
+        ErrorCode::BadRequest => CommandErrorKind::BadRequest,
+        ErrorCode::BadManifest => CommandErrorKind::BadManifest,
+        ErrorCode::Busy => CommandErrorKind::Busy,
+        ErrorCode::NotFound => CommandErrorKind::NotFound,
+        ErrorCode::Internal => CommandErrorKind::Internal,
+        ErrorCode::IdempotencyConflict => CommandErrorKind::IdempotencyConflict,
+        ErrorCode::RangeInvalid => CommandErrorKind::RangeInvalid,
+        ErrorCode::ChunkHashMismatch => CommandErrorKind::ChunkHashMismatch,
+        ErrorCode::ArtifactIncomplete => CommandErrorKind::ArtifactIncomplete,
+        ErrorCode::PreconditionFailed => CommandErrorKind::PreconditionFailed,
+        ErrorCode::OperationTimeout => CommandErrorKind::OperationTimeout,
+        ErrorCode::RollbackFailed => CommandErrorKind::RollbackFailed,
+        ErrorCode::StorageQuota => CommandErrorKind::StorageQuota,
+    }
+}
+
+fn command_error_kind_to_wire(code: CommandErrorKind) -> ErrorCode {
+    match code {
+        CommandErrorKind::Unauthorized => ErrorCode::Unauthorized,
+        CommandErrorKind::BadRequest => ErrorCode::BadRequest,
+        CommandErrorKind::BadManifest => ErrorCode::BadManifest,
+        CommandErrorKind::Busy => ErrorCode::Busy,
+        CommandErrorKind::NotFound => ErrorCode::NotFound,
+        CommandErrorKind::Internal => ErrorCode::Internal,
+        CommandErrorKind::IdempotencyConflict => ErrorCode::IdempotencyConflict,
+        CommandErrorKind::RangeInvalid => ErrorCode::RangeInvalid,
+        CommandErrorKind::ChunkHashMismatch => ErrorCode::ChunkHashMismatch,
+        CommandErrorKind::ArtifactIncomplete => ErrorCode::ArtifactIncomplete,
+        CommandErrorKind::PreconditionFailed => ErrorCode::PreconditionFailed,
+        CommandErrorKind::OperationTimeout => ErrorCode::OperationTimeout,
+        CommandErrorKind::RollbackFailed => ErrorCode::RollbackFailed,
+        CommandErrorKind::StorageQuota => ErrorCode::StorageQuota,
+    }
+}
+
+fn command_context(request_id: uuid::Uuid) -> CommandProtocolContext {
+    CommandProtocolContext { request_id }
+}
+
+fn command_rejection_message(
+    stage: CommandProtocolStageId,
+    code: CommandErrorKind,
+) -> &'static str {
+    match (stage, code) {
+        (CommandProtocolStageId::CommandStart, CommandErrorKind::Busy) => {
+            "request_id is already running"
+        }
+        (CommandProtocolStageId::StateRequest, CommandErrorKind::NotFound)
+        | (CommandProtocolStageId::CommandCancel, CommandErrorKind::NotFound)
+        | (CommandProtocolStageId::OperationState, CommandErrorKind::NotFound)
+        | (CommandProtocolStageId::OperationRemove, CommandErrorKind::NotFound) => {
+            "request_id is not running"
+        }
+        _ => "command action rejected",
+    }
+}
+
+fn imagod_error_from_rejected_output(
+    code: CommandErrorKind,
+    stage: CommandProtocolStageId,
+) -> ImagodError {
+    ImagodError::new(
+        command_error_kind_to_wire(code),
+        stage.as_wire(),
+        command_rejection_message(stage, code),
+    )
+}
+
+fn state_response_from_output(
+    request_id: uuid::Uuid,
+    output: CommandProtocolOutput,
+) -> Result<StateResponse, ImagodError> {
+    match output {
+        CommandProtocolOutput::StateSnapshot {
+            state,
+            stage,
+            updated_at_unix_secs,
+        } => Ok(StateResponse {
+            request_id,
+            state: command_state_to_wire(state),
+            stage,
+            updated_at: updated_at_unix_secs.to_string(),
+        }),
+        CommandProtocolOutput::Rejected { code, stage } => {
+            Err(imagod_error_from_rejected_output(code, stage))
+        }
+        other => Err(ImagodError::new(
+            ErrorCode::Internal,
+            "state.request",
+            format!("unexpected state.request output: {other:?}"),
+        )),
+    }
+}
+
+fn cancel_response_from_output(
+    output: CommandProtocolOutput,
+) -> Result<CommandCancelResponse, ImagodError> {
+    match output {
+        CommandProtocolOutput::CancelResponse {
+            cancellable,
+            final_state,
+        } => Ok(CommandCancelResponse {
+            cancellable,
+            final_state: command_state_to_wire(final_state),
+        }),
+        CommandProtocolOutput::Rejected { code, stage } => {
+            Err(imagod_error_from_rejected_output(code, stage))
+        }
+        other => Err(ImagodError::new(
+            ErrorCode::Internal,
+            "command.cancel",
+            format!("unexpected command.cancel output: {other:?}"),
+        )),
+    }
+}
+
+fn expect_ack(
+    output: CommandProtocolOutput,
+    expected_stage: CommandProtocolStageId,
+) -> Result<(), ImagodError> {
+    match output {
+        CommandProtocolOutput::Ack => Ok(()),
+        CommandProtocolOutput::Rejected { code, stage } => {
+            Err(imagod_error_from_rejected_output(code, stage))
+        }
+        other => Err(ImagodError::new(
+            ErrorCode::Internal,
+            expected_stage.as_wire(),
+            format!("unexpected ack output: {other:?}"),
+        )),
+    }
+}
+
+fn is_spawn_canceled(output: &CommandProtocolOutput) -> Result<bool, ImagodError> {
+    match output {
+        CommandProtocolOutput::SpawnResult { spawned, canceled } => Ok(!spawned && *canceled),
+        CommandProtocolOutput::Rejected { code, stage } => {
+            Err(imagod_error_from_rejected_output(*code, *stage))
+        }
+        other => Err(ImagodError::new(
+            ErrorCode::Internal,
+            "operation.state",
+            format!("unexpected spawn output: {other:?}"),
+        )),
     }
 }
 
@@ -692,15 +886,28 @@ fn resolve_logs_request_service_names(
 /// Finalizes operation bookkeeping after writing terminal event.
 pub(crate) async fn finalize_operation_after_terminal_event(
     operations: &OperationManager,
-    request_id: &uuid::Uuid,
-    terminal_state: CommandState,
-    stage: impl Into<String>,
+    context: &CommandProtocolContext,
+    terminal_action: CommandProtocolAction,
     terminal_write_result: Result<(), ImagodError>,
 ) -> Result<(), ImagodError> {
-    operations
-        .finish(request_id, terminal_state, stage.into())
-        .await;
-    operations.remove(request_id).await;
+    expect_ack(
+        <OperationManager as imagod_control::ActionApplier>::execute_action(
+            operations,
+            context,
+            &terminal_action,
+        )
+        .await,
+        CommandProtocolStageId::OperationState,
+    )?;
+    expect_ack(
+        <OperationManager as imagod_control::ActionApplier>::execute_action(
+            operations,
+            context,
+            &CommandProtocolAction::Remove,
+        )
+        .await,
+        CommandProtocolStageId::OperationRemove,
+    )?;
     terminal_write_result
 }
 
@@ -713,12 +920,18 @@ mod tests {
 
     use imago_protocol::{ArtifactPushChunkHeader, ArtifactPushRequest, CommandState, CommandType};
     use imagod_control::OperationManager;
+    use imagod_model::{
+        CommandErrorKind, CommandKind, CommandLifecycleState, CommandProtocolAction,
+        CommandProtocolContext, CommandProtocolOutput, CommandProtocolStageId,
+    };
     use uuid::Uuid;
 
     use super::{
-        ensure_command_start_allowed, ensure_command_start_request_id_match,
-        finalize_operation_after_terminal_event, protocol_compatibility_announcement,
-        resolve_logs_request_service_names, should_purge_deploy_session_after_terminal,
+        cancel_response_from_output, command_error_kind_from_wire, command_error_kind_to_wire,
+        command_kind_from_wire, command_state_to_wire, ensure_command_start_allowed,
+        ensure_command_start_request_id_match, finalize_operation_after_terminal_event,
+        protocol_compatibility_announcement, resolve_logs_request_service_names,
+        should_purge_deploy_session_after_terminal, state_response_from_output,
         validate_push_payload,
     };
     use imago_protocol::ErrorCode;
@@ -794,6 +1007,79 @@ mod tests {
     }
 
     #[test]
+    fn given_wire_command_values__when_converted_to_model__then_mapping_is_exhaustive() {
+        assert_eq!(
+            command_kind_from_wire(CommandType::Deploy),
+            CommandKind::Deploy
+        );
+        assert_eq!(command_kind_from_wire(CommandType::Run), CommandKind::Run);
+        assert_eq!(command_kind_from_wire(CommandType::Stop), CommandKind::Stop);
+
+        assert_eq!(
+            command_state_to_wire(CommandLifecycleState::Accepted),
+            CommandState::Accepted
+        );
+        assert_eq!(
+            command_state_to_wire(CommandLifecycleState::Running),
+            CommandState::Running
+        );
+        assert_eq!(
+            command_state_to_wire(CommandLifecycleState::Succeeded),
+            CommandState::Succeeded
+        );
+        assert_eq!(
+            command_state_to_wire(CommandLifecycleState::Failed),
+            CommandState::Failed
+        );
+        assert_eq!(
+            command_state_to_wire(CommandLifecycleState::Canceled),
+            CommandState::Canceled
+        );
+
+        assert_eq!(
+            command_error_kind_from_wire(ErrorCode::Internal),
+            CommandErrorKind::Internal
+        );
+        assert_eq!(
+            command_error_kind_from_wire(ErrorCode::Busy),
+            CommandErrorKind::Busy
+        );
+        assert_eq!(
+            command_error_kind_from_wire(ErrorCode::NotFound),
+            CommandErrorKind::NotFound
+        );
+        assert_eq!(
+            command_error_kind_to_wire(CommandErrorKind::Internal),
+            ErrorCode::Internal
+        );
+    }
+
+    #[test]
+    fn given_internal_operation_views__when_wrapped_for_wire__then_protocol_contract_is_preserved()
+    {
+        let state = state_response_from_output(
+            Uuid::from_u128(1),
+            CommandProtocolOutput::StateSnapshot {
+                state: CommandLifecycleState::Running,
+                stage: "running".to_string(),
+                updated_at_unix_secs: 1,
+            },
+        )
+        .expect("snapshot output should convert");
+        assert_eq!(state.state, CommandState::Running);
+        assert_eq!(state.stage, "running");
+        assert_eq!(state.updated_at, "1");
+
+        let cancel = cancel_response_from_output(CommandProtocolOutput::CancelResponse {
+            cancellable: true,
+            final_state: CommandLifecycleState::Canceled,
+        })
+        .expect("cancel output should convert");
+        assert!(cancel.cancellable);
+        assert_eq!(cancel.final_state, CommandState::Canceled);
+    }
+
+    #[test]
     fn given_invalid_artifact_push_payload__when_validate_push_payload__then_bad_request_is_returned()
      {
         let payload = ArtifactPushRequest {
@@ -859,30 +1145,44 @@ mod tests {
      {
         let operations = OperationManager::new();
         let request_id = Uuid::new_v4();
-        operations
-            .start(request_id, CommandType::Deploy)
-            .await
-            .expect("start should succeed");
-        operations
-            .set_state(&request_id, CommandState::Running, "running")
-            .await
-            .expect("set_state should succeed");
+        <OperationManager as imagod_control::ActionApplier>::execute_action(
+            &operations,
+            &CommandProtocolContext { request_id },
+            &CommandProtocolAction::Start(CommandKind::Deploy),
+        )
+        .await;
+        <OperationManager as imagod_control::ActionApplier>::execute_action(
+            &operations,
+            &CommandProtocolContext { request_id },
+            &CommandProtocolAction::SetRunning,
+        )
+        .await;
 
         let write_error =
             imagod_common::ImagodError::new(ErrorCode::Internal, "session.write", "stream closed");
         let result = finalize_operation_after_terminal_event(
             &operations,
-            &request_id,
-            CommandState::Failed,
-            "failed",
+            &CommandProtocolContext { request_id },
+            CommandProtocolAction::FinishFailed(CommandErrorKind::Internal),
             Err(write_error),
         )
         .await;
 
         assert!(result.is_err(), "write error should be returned");
-        let snapshot = operations.snapshot_running(&request_id).await;
+        let snapshot = <OperationManager as imagod_control::ActionApplier>::execute_action(
+            &operations,
+            &CommandProtocolContext { request_id },
+            &CommandProtocolAction::SnapshotRunning,
+        )
+        .await;
         assert!(
-            snapshot.is_err(),
+            matches!(
+                snapshot,
+                CommandProtocolOutput::Rejected {
+                    code: CommandErrorKind::NotFound,
+                    stage: CommandProtocolStageId::StateRequest,
+                }
+            ),
             "operation should be removed even on write error"
         );
     }

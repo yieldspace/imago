@@ -1,6 +1,8 @@
-use std::fmt::Debug;
+use std::{collections::BTreeMap, collections::BTreeSet, fmt::Debug};
 
 use serde::{Deserialize, Serialize};
+
+use crate::StatePredicate;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReachableGraphEdge<A> {
@@ -30,6 +32,53 @@ pub struct DocGraphEdge {
     pub target: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DocGraphReductionMode {
+    Full,
+    BoundaryPaths,
+}
+
+#[derive(Debug, Clone)]
+pub struct DocGraphPolicy<S> {
+    pub reduction: DocGraphReductionMode,
+    pub focus_states: Vec<StatePredicate<S>>,
+    pub max_edge_actions_in_label: usize,
+}
+
+impl<S> DocGraphPolicy<S> {
+    pub fn full() -> Self {
+        Self {
+            reduction: DocGraphReductionMode::Full,
+            focus_states: Vec::new(),
+            max_edge_actions_in_label: 2,
+        }
+    }
+
+    pub fn boundary_paths() -> Self {
+        Self::default()
+    }
+
+    pub fn with_focus_state(mut self, predicate: StatePredicate<S>) -> Self {
+        self.focus_states.push(predicate);
+        self
+    }
+
+    pub fn with_max_edge_actions_in_label(mut self, max_edge_actions_in_label: usize) -> Self {
+        self.max_edge_actions_in_label = max_edge_actions_in_label.max(1);
+        self
+    }
+}
+
+impl<S> Default for DocGraphPolicy<S> {
+    fn default() -> Self {
+        Self {
+            reduction: DocGraphReductionMode::BoundaryPaths,
+            focus_states: Vec::new(),
+            max_edge_actions_in_label: 2,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocGraphSnapshot {
     pub states: Vec<DocGraphState>,
@@ -38,6 +87,9 @@ pub struct DocGraphSnapshot {
     pub deadlocks: Vec<usize>,
     pub truncated: bool,
     pub stutter_omitted: bool,
+    pub focus_indices: Vec<usize>,
+    pub reduction: DocGraphReductionMode,
+    pub max_edge_actions_in_label: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +113,30 @@ pub trait DocGraphProvider {
 pub struct RegisteredDocGraphProvider {
     pub spec_name: &'static str,
     pub build: fn() -> Box<dyn DocGraphProvider>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReducedDocGraphNode {
+    pub original_index: usize,
+    pub state: DocGraphState,
+    pub is_initial: bool,
+    pub is_deadlock: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReducedDocGraphEdge {
+    pub source: usize,
+    pub target: usize,
+    pub label: String,
+    pub collapsed_state_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReducedDocGraph {
+    pub states: Vec<ReducedDocGraphNode>,
+    pub edges: Vec<ReducedDocGraphEdge>,
+    pub truncated: bool,
+    pub stutter_omitted: bool,
 }
 
 inventory::collect!(RegisteredDocGraphProvider);
@@ -152,6 +228,218 @@ pub fn collect_doc_graph_specs() -> Vec<DocGraphSpec> {
     specs
 }
 
+pub fn reduce_doc_graph(snapshot: &DocGraphSnapshot) -> ReducedDocGraph {
+    match snapshot.reduction {
+        DocGraphReductionMode::Full => full_doc_graph(snapshot),
+        DocGraphReductionMode::BoundaryPaths => boundary_path_reduced_graph(snapshot),
+    }
+}
+
+fn full_doc_graph(snapshot: &DocGraphSnapshot) -> ReducedDocGraph {
+    ReducedDocGraph {
+        states: (0..snapshot.states.len())
+            .map(|index| ReducedDocGraphNode {
+                original_index: index,
+                state: snapshot.states[index].clone(),
+                is_initial: snapshot.initial_indices.contains(&index),
+                is_deadlock: snapshot.deadlocks.contains(&index),
+            })
+            .collect(),
+        edges: snapshot
+            .edges
+            .iter()
+            .enumerate()
+            .flat_map(|(source, outgoing)| {
+                outgoing.iter().map(move |edge| ReducedDocGraphEdge {
+                    source,
+                    target: edge.target,
+                    label: summarize_reduced_edge_labels(
+                        &[edge.label.as_str()],
+                        snapshot.max_edge_actions_in_label,
+                    ),
+                    collapsed_state_indices: Vec::new(),
+                })
+            })
+            .collect(),
+        truncated: snapshot.truncated,
+        stutter_omitted: snapshot.stutter_omitted,
+    }
+}
+
+fn boundary_path_reduced_graph(snapshot: &DocGraphSnapshot) -> ReducedDocGraph {
+    let keep_indices = keep_state_indices(snapshot);
+    let keep = (0..snapshot.states.len())
+        .map(|index| keep_indices.contains(&index))
+        .collect::<Vec<_>>();
+
+    let states = keep_indices
+        .iter()
+        .copied()
+        .map(|index| ReducedDocGraphNode {
+            original_index: index,
+            state: snapshot.states[index].clone(),
+            is_initial: snapshot.initial_indices.contains(&index),
+            is_deadlock: snapshot.deadlocks.contains(&index),
+        })
+        .collect::<Vec<_>>();
+
+    let mut edges = Vec::new();
+    for &source in &keep_indices {
+        for edge in &snapshot.edges[source] {
+            edges.push(collapse_edge_path(snapshot, &keep, source, edge));
+        }
+    }
+    let edges = coalesce_reduced_edges(edges, snapshot.max_edge_actions_in_label);
+
+    ReducedDocGraph {
+        states,
+        edges,
+        truncated: snapshot.truncated,
+        stutter_omitted: snapshot.stutter_omitted,
+    }
+}
+
+fn keep_state_indices(snapshot: &DocGraphSnapshot) -> Vec<usize> {
+    let in_degree = incoming_edge_counts(snapshot);
+
+    (0..snapshot.states.len())
+        .filter(|&index| {
+            snapshot.initial_indices.contains(&index)
+                || snapshot.deadlocks.contains(&index)
+                || snapshot.focus_indices.contains(&index)
+                || snapshot.edges[index]
+                    .iter()
+                    .any(|edge| edge.target == index)
+                || in_degree[index] != 1
+                || snapshot.edges[index].len() != 1
+        })
+        .collect()
+}
+
+fn incoming_edge_counts(snapshot: &DocGraphSnapshot) -> Vec<usize> {
+    let mut counts = vec![0; snapshot.states.len()];
+    for outgoing in &snapshot.edges {
+        for edge in outgoing {
+            if let Some(count) = counts.get_mut(edge.target) {
+                *count += 1;
+            }
+        }
+    }
+    counts
+}
+
+fn collapse_edge_path(
+    snapshot: &DocGraphSnapshot,
+    keep: &[bool],
+    source: usize,
+    first_edge: &DocGraphEdge,
+) -> ReducedDocGraphEdge {
+    let mut labels = vec![first_edge.label.as_str()];
+    let mut collapsed_state_indices = Vec::new();
+    let mut current = first_edge.target;
+    let mut visited = BTreeSet::new();
+
+    while !keep[current] && visited.insert(current) {
+        collapsed_state_indices.push(current);
+        let outgoing = &snapshot.edges[current];
+        if outgoing.len() != 1 {
+            break;
+        }
+        let next_edge = &outgoing[0];
+        labels.push(next_edge.label.as_str());
+        current = next_edge.target;
+    }
+
+    ReducedDocGraphEdge {
+        source,
+        target: current,
+        label: summarize_reduced_edge_labels(&labels, snapshot.max_edge_actions_in_label),
+        collapsed_state_indices,
+    }
+}
+
+fn coalesce_reduced_edges(
+    edges: Vec<ReducedDocGraphEdge>,
+    max_edge_actions_in_label: usize,
+) -> Vec<ReducedDocGraphEdge> {
+    let mut groups = BTreeMap::<(usize, usize, Vec<usize>), Vec<String>>::new();
+    for edge in edges {
+        groups
+            .entry((edge.source, edge.target, edge.collapsed_state_indices))
+            .or_default()
+            .push(edge.label);
+    }
+
+    groups
+        .into_iter()
+        .map(
+            |((source, target, collapsed_state_indices), labels)| ReducedDocGraphEdge {
+                source,
+                target,
+                label: summarize_parallel_edge_labels(&labels, max_edge_actions_in_label),
+                collapsed_state_indices,
+            },
+        )
+        .collect()
+}
+
+fn summarize_reduced_edge_labels(labels: &[&str], max_edge_actions_in_label: usize) -> String {
+    let summarized = labels
+        .iter()
+        .map(|label| summarize_single_edge_action_label(label))
+        .collect::<Vec<_>>();
+
+    match summarized.len() {
+        0 => String::new(),
+        1 => summarized[0].clone(),
+        len if len <= max_edge_actions_in_label => summarized.join(" -> "),
+        len => format!(
+            "{} -> ... -> {} ({len} steps)",
+            summarized.first().expect("first"),
+            summarized.last().expect("last")
+        ),
+    }
+}
+
+fn summarize_parallel_edge_labels(labels: &[String], max_edge_actions_in_label: usize) -> String {
+    let mut unique = BTreeSet::new();
+    let summarized = labels
+        .iter()
+        .filter(|label| unique.insert((*label).clone()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    match summarized.len() {
+        0 => String::new(),
+        1 => summarized[0].clone(),
+        len if len <= max_edge_actions_in_label => summarized.join(" | "),
+        len => format!(
+            "{} | ... | {} ({len} actions)",
+            summarized.first().expect("first"),
+            summarized.last().expect("last")
+        ),
+    }
+}
+
+fn summarize_single_edge_action_label(label: &str) -> String {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if let Some(index) = trimmed.find('{') {
+        return format!("{}{{...}}", trimmed[..index].trim_end());
+    }
+    if let Some(index) = trimmed.find('(') {
+        return format!("{}(...)", trimmed[..index].trim_end());
+    }
+    if let Some(index) = trimmed.find('[') {
+        return format!("{}[...]", trimmed[..index].trim_end());
+    }
+
+    trimmed.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +476,206 @@ mod tests {
         assert!(summarized.contains("line8"));
         assert!(!summarized.contains("line10"));
         assert!(summarized.ends_with("..."));
+    }
+
+    fn demo_state(name: &str) -> DocGraphState {
+        DocGraphState {
+            summary: name.to_owned(),
+            full: name.to_owned(),
+        }
+    }
+
+    fn demo_snapshot() -> DocGraphSnapshot {
+        DocGraphSnapshot {
+            states: vec![
+                demo_state("S0"),
+                demo_state("S1"),
+                demo_state("S2"),
+                demo_state("S3"),
+                demo_state("S4"),
+            ],
+            edges: vec![
+                vec![DocGraphEdge {
+                    label: "A".to_owned(),
+                    target: 1,
+                }],
+                vec![DocGraphEdge {
+                    label: "B".to_owned(),
+                    target: 2,
+                }],
+                vec![
+                    DocGraphEdge {
+                        label: "C".to_owned(),
+                        target: 3,
+                    },
+                    DocGraphEdge {
+                        label: "D".to_owned(),
+                        target: 4,
+                    },
+                ],
+                Vec::new(),
+                Vec::new(),
+            ],
+            initial_indices: vec![0],
+            deadlocks: vec![3, 4],
+            truncated: false,
+            stutter_omitted: false,
+            focus_indices: Vec::new(),
+            reduction: DocGraphReductionMode::BoundaryPaths,
+            max_edge_actions_in_label: 2,
+        }
+    }
+
+    #[test]
+    fn boundary_path_reduction_collapses_linear_chain_into_one_edge() {
+        let reduced = reduce_doc_graph(&demo_snapshot());
+
+        assert_eq!(
+            reduced
+                .states
+                .iter()
+                .map(|state| state.original_index)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 3, 4]
+        );
+        assert!(
+            reduced
+                .edges
+                .iter()
+                .any(|edge| edge.source == 0 && edge.target == 2 && edge.label == "A -> B")
+        );
+    }
+
+    #[test]
+    fn boundary_path_reduction_preserves_branches_and_deadlocks() {
+        let reduced = reduce_doc_graph(&demo_snapshot());
+
+        assert!(
+            reduced
+                .edges
+                .iter()
+                .any(|edge| edge.source == 2 && edge.target == 3 && edge.label == "C")
+        );
+        assert!(
+            reduced
+                .edges
+                .iter()
+                .any(|edge| edge.source == 2 && edge.target == 4 && edge.label == "D")
+        );
+        assert!(reduced.states.iter().any(|state| state.is_deadlock));
+    }
+
+    #[test]
+    fn boundary_path_reduction_preserves_self_loops_and_focus_states() {
+        let snapshot = DocGraphSnapshot {
+            states: vec![demo_state("S0"), demo_state("S1"), demo_state("S2")],
+            edges: vec![
+                vec![DocGraphEdge {
+                    label: "Advance".to_owned(),
+                    target: 1,
+                }],
+                vec![DocGraphEdge {
+                    label: "Loop".to_owned(),
+                    target: 1,
+                }],
+                Vec::new(),
+            ],
+            initial_indices: vec![0],
+            deadlocks: vec![2],
+            truncated: false,
+            stutter_omitted: false,
+            focus_indices: vec![1],
+            reduction: DocGraphReductionMode::BoundaryPaths,
+            max_edge_actions_in_label: 2,
+        };
+
+        let reduced = reduce_doc_graph(&snapshot);
+
+        assert!(reduced.states.iter().any(|state| state.original_index == 1));
+        assert!(
+            reduced
+                .edges
+                .iter()
+                .any(|edge| edge.source == 1 && edge.target == 1 && edge.label == "Loop")
+        );
+    }
+
+    #[test]
+    fn boundary_path_reduction_summarizes_long_edge_paths() {
+        let snapshot = DocGraphSnapshot {
+            states: vec![
+                demo_state("S0"),
+                demo_state("S1"),
+                demo_state("S2"),
+                demo_state("S3"),
+            ],
+            edges: vec![
+                vec![DocGraphEdge {
+                    label: "A".to_owned(),
+                    target: 1,
+                }],
+                vec![DocGraphEdge {
+                    label: "B".to_owned(),
+                    target: 2,
+                }],
+                vec![DocGraphEdge {
+                    label: "C".to_owned(),
+                    target: 3,
+                }],
+                Vec::new(),
+            ],
+            initial_indices: vec![0],
+            deadlocks: vec![3],
+            truncated: false,
+            stutter_omitted: false,
+            focus_indices: Vec::new(),
+            reduction: DocGraphReductionMode::BoundaryPaths,
+            max_edge_actions_in_label: 2,
+        };
+
+        let reduced = reduce_doc_graph(&snapshot);
+
+        assert!(reduced.edges.iter().any(|edge| edge.source == 0
+            && edge.target == 3
+            && edge.label == "A -> ... -> C (3 steps)"));
+    }
+
+    #[test]
+    fn boundary_path_reduction_coalesces_parallel_edges() {
+        let snapshot = DocGraphSnapshot {
+            states: vec![demo_state("S0"), demo_state("S1")],
+            edges: vec![
+                vec![
+                    DocGraphEdge {
+                        label: "Start(CommandKind::Deploy)".to_owned(),
+                        target: 1,
+                    },
+                    DocGraphEdge {
+                        label: "SetRunning".to_owned(),
+                        target: 1,
+                    },
+                    DocGraphEdge {
+                        label: "RequestCancel".to_owned(),
+                        target: 1,
+                    },
+                ],
+                Vec::new(),
+            ],
+            initial_indices: vec![0],
+            deadlocks: vec![1],
+            truncated: false,
+            stutter_omitted: false,
+            focus_indices: Vec::new(),
+            reduction: DocGraphReductionMode::BoundaryPaths,
+            max_edge_actions_in_label: 2,
+        };
+
+        let reduced = reduce_doc_graph(&snapshot);
+
+        assert_eq!(reduced.edges.len(), 1);
+        assert_eq!(
+            reduced.edges[0].label,
+            "Start(...) | ... | RequestCancel (3 actions)"
+        );
     }
 }

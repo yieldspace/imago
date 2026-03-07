@@ -1,4 +1,4 @@
-use nirvash_core::{BoundedDomain, Signature};
+use nirvash_core::Signature;
 use nirvash_macros::Signature;
 
 #[derive(Clone, Debug, PartialEq, Eq, Signature)]
@@ -7,30 +7,21 @@ enum Leaf {
     Busy,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Signature)]
-#[signature(custom)]
-struct State {
-    leaf: Leaf,
-    ready: bool,
+fn busy_only_domain() -> [Leaf; 1] {
+    [Leaf::Busy]
 }
 
-impl StateSignatureSpec for State {
-    fn representatives() -> BoundedDomain<Self> {
-        BoundedDomain::new(vec![
-            Self {
-                leaf: Leaf::Idle,
-                ready: false,
-            },
-            Self {
-                leaf: Leaf::Busy,
-                ready: true,
-            },
-        ])
-    }
-
-    fn signature_invariant(&self) -> bool {
-        !self.ready || matches!(self.leaf, Leaf::Busy)
-    }
+#[derive(Clone, Debug, PartialEq, Eq, Signature)]
+#[signature(
+    bounds(count(range = "0..=1"), entries(len = "0..=1")),
+    filter(self => !self.entries.is_empty() || self.count == 0)
+)]
+#[signature_invariant(self => !self.entries.is_empty() || self.count == 0)]
+struct AutoState {
+    count: u8,
+    entries: Vec<Leaf>,
+    #[sig(domain = busy_only_domain)]
+    leaf: Leaf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Signature)]
@@ -38,8 +29,12 @@ impl StateSignatureSpec for State {
 struct Counter(u8);
 
 fn main() {
-    let values = State::bounded_domain().into_vec();
-    assert_eq!(values.len(), 2);
-    assert!(values[1].invariant());
-    assert_eq!(Counter::bounded_domain().into_vec(), vec![Counter(0), Counter(1), Counter(2)]);
+    let values = AutoState::bounded_domain().into_vec();
+    assert_eq!(values.len(), 5);
+    assert!(values.iter().all(Signature::invariant));
+    assert!(values.iter().all(|value| matches!(value.leaf, Leaf::Busy)));
+    assert_eq!(
+        Counter::bounded_domain().into_vec(),
+        vec![Counter(0), Counter(1), Counter(2)]
+    );
 }

@@ -1,5 +1,5 @@
-use imago_protocol::{CommandState, CommandType, ErrorCode};
 use imagod_ipc::{PluginKind, RunnerAppType};
+use imagod_model::{CommandErrorKind, CommandKind, CommandLifecycleState};
 use nirvash_macros::Signature as FormalSignature;
 
 pub const MAX_SERVICES: u8 = 2;
@@ -11,30 +11,30 @@ pub const MAX_HTTP_QUEUE_DEPTH: u8 = 2;
 pub const MAX_EPOCH_TICKS: u8 = 3;
 pub const MAX_TIME_STEPS: u8 = 4;
 
-pub const SPEC_COMMAND_TYPES: [CommandType; 3] =
-    [CommandType::Deploy, CommandType::Run, CommandType::Stop];
-pub const SPEC_COMMAND_STATES: [CommandState; 5] = [
-    CommandState::Accepted,
-    CommandState::Running,
-    CommandState::Succeeded,
-    CommandState::Failed,
-    CommandState::Canceled,
+pub const SPEC_COMMAND_TYPES: [CommandKind; 3] =
+    [CommandKind::Deploy, CommandKind::Run, CommandKind::Stop];
+pub const SPEC_COMMAND_STATES: [CommandLifecycleState; 5] = [
+    CommandLifecycleState::Accepted,
+    CommandLifecycleState::Running,
+    CommandLifecycleState::Succeeded,
+    CommandLifecycleState::Failed,
+    CommandLifecycleState::Canceled,
 ];
-pub const SPEC_ERROR_CODES: [ErrorCode; 14] = [
-    ErrorCode::Unauthorized,
-    ErrorCode::BadRequest,
-    ErrorCode::BadManifest,
-    ErrorCode::Busy,
-    ErrorCode::NotFound,
-    ErrorCode::Internal,
-    ErrorCode::IdempotencyConflict,
-    ErrorCode::RangeInvalid,
-    ErrorCode::ChunkHashMismatch,
-    ErrorCode::ArtifactIncomplete,
-    ErrorCode::PreconditionFailed,
-    ErrorCode::OperationTimeout,
-    ErrorCode::RollbackFailed,
-    ErrorCode::StorageQuota,
+pub const SPEC_ERROR_CODES: [CommandErrorKind; 14] = [
+    CommandErrorKind::Unauthorized,
+    CommandErrorKind::BadRequest,
+    CommandErrorKind::BadManifest,
+    CommandErrorKind::Busy,
+    CommandErrorKind::NotFound,
+    CommandErrorKind::Internal,
+    CommandErrorKind::IdempotencyConflict,
+    CommandErrorKind::RangeInvalid,
+    CommandErrorKind::ChunkHashMismatch,
+    CommandErrorKind::ArtifactIncomplete,
+    CommandErrorKind::PreconditionFailed,
+    CommandErrorKind::OperationTimeout,
+    CommandErrorKind::RollbackFailed,
+    CommandErrorKind::StorageQuota,
 ];
 pub const SPEC_RUNNER_APP_TYPES: [RunnerAppType; 4] = [
     RunnerAppType::Cli,

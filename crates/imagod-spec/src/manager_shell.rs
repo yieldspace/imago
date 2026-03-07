@@ -1,6 +1,4 @@
-use nirvash_core::{
-    BoundedDomain, ModelCheckConfig, Signature as FormalSignature, TransitionSystem,
-};
+use nirvash_core::{ModelCheckConfig, Signature as FormalSignature, TransitionSystem};
 use nirvash_macros::{Signature, subsystem_spec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
@@ -21,106 +19,44 @@ pub enum ManagerShellPhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
-#[signature(custom)]
+#[signature(filter(self => match self.phase {
+    ManagerShellPhase::Booting => {
+        !self.config_loaded
+            && matches!(self.plugin_gc, TaskState::NotStarted)
+            && matches!(self.boot_restore, TaskState::NotStarted)
+    }
+    ManagerShellPhase::ConfigReady => self.config_loaded,
+    ManagerShellPhase::Restoring => {
+        self.config_loaded && !matches!(self.plugin_gc, TaskState::NotStarted)
+    }
+    ManagerShellPhase::Listening
+    | ManagerShellPhase::ShutdownRequested
+    | ManagerShellPhase::Stopped => {
+        self.config_loaded && !matches!(self.boot_restore, TaskState::NotStarted)
+    }
+}))]
+#[signature_invariant(self => match self.phase {
+    ManagerShellPhase::Booting => {
+        !self.config_loaded
+            && matches!(self.plugin_gc, TaskState::NotStarted)
+            && matches!(self.boot_restore, TaskState::NotStarted)
+    }
+    ManagerShellPhase::ConfigReady => self.config_loaded,
+    ManagerShellPhase::Restoring => {
+        self.config_loaded && !matches!(self.plugin_gc, TaskState::NotStarted)
+    }
+    ManagerShellPhase::Listening
+    | ManagerShellPhase::ShutdownRequested
+    | ManagerShellPhase::Stopped => {
+        self.config_loaded && !matches!(self.boot_restore, TaskState::NotStarted)
+    }
+})]
 pub struct ManagerShellState {
     pub phase: ManagerShellPhase,
     pub config_loaded: bool,
     pub created_default: bool,
     pub plugin_gc: TaskState,
     pub boot_restore: TaskState,
-}
-
-impl ManagerShellStateSignatureSpec for ManagerShellState {
-    fn representatives() -> BoundedDomain<Self> {
-        let mut states = vec![ManagerShellSpec::new().initial_state()];
-
-        for created_default in [false, true] {
-            states.push(Self {
-                phase: ManagerShellPhase::ConfigReady,
-                config_loaded: true,
-                created_default,
-                plugin_gc: TaskState::NotStarted,
-                boot_restore: TaskState::NotStarted,
-            });
-
-            states.push(Self {
-                phase: ManagerShellPhase::Listening,
-                config_loaded: true,
-                created_default,
-                plugin_gc: TaskState::NotStarted,
-                boot_restore: TaskState::Succeeded,
-            });
-            states.push(Self {
-                phase: ManagerShellPhase::ShutdownRequested,
-                config_loaded: true,
-                created_default,
-                plugin_gc: TaskState::NotStarted,
-                boot_restore: TaskState::Succeeded,
-            });
-            states.push(Self {
-                phase: ManagerShellPhase::Stopped,
-                config_loaded: true,
-                created_default,
-                plugin_gc: TaskState::NotStarted,
-                boot_restore: TaskState::Succeeded,
-            });
-
-            for plugin_gc in [TaskState::Succeeded, TaskState::Failed] {
-                states.push(Self {
-                    phase: ManagerShellPhase::Restoring,
-                    config_loaded: true,
-                    created_default,
-                    plugin_gc,
-                    boot_restore: TaskState::NotStarted,
-                });
-
-                for boot_restore in [TaskState::Succeeded, TaskState::Failed] {
-                    states.push(Self {
-                        phase: ManagerShellPhase::Listening,
-                        config_loaded: true,
-                        created_default,
-                        plugin_gc,
-                        boot_restore,
-                    });
-                    states.push(Self {
-                        phase: ManagerShellPhase::ShutdownRequested,
-                        config_loaded: true,
-                        created_default,
-                        plugin_gc,
-                        boot_restore,
-                    });
-                    states.push(Self {
-                        phase: ManagerShellPhase::Stopped,
-                        config_loaded: true,
-                        created_default,
-                        plugin_gc,
-                        boot_restore,
-                    });
-                }
-            }
-        }
-
-        BoundedDomain::new(states)
-    }
-
-    fn signature_invariant(&self) -> bool {
-        match self.phase {
-            ManagerShellPhase::Booting => {
-                !self.config_loaded
-                    && matches!(self.plugin_gc, TaskState::NotStarted)
-                    && matches!(self.boot_restore, TaskState::NotStarted)
-            }
-            ManagerShellPhase::ConfigReady => self.config_loaded,
-            ManagerShellPhase::Restoring => {
-                self.config_loaded && !matches!(self.plugin_gc, TaskState::NotStarted)
-            }
-            ManagerShellPhase::Listening
-            | ManagerShellPhase::ShutdownRequested
-            | ManagerShellPhase::Stopped => {
-                self.config_loaded && !matches!(self.boot_restore, TaskState::NotStarted)
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
@@ -348,3 +284,32 @@ impl TransitionSystem for ManagerShellSpec {
 
 #[nirvash_macros::formal_tests(spec = ManagerShellSpec, init = initial_state)]
 const _: () = ();
+
+#[cfg(test)]
+mod tests {
+    use nirvash_core::Signature;
+
+    use super::*;
+
+    #[test]
+    fn bounded_domain_filters_out_phase_inconsistent_states() {
+        let values = ManagerShellState::bounded_domain().into_vec();
+
+        assert!(values.iter().all(|state| match state.phase {
+            ManagerShellPhase::Booting => {
+                !state.config_loaded
+                    && matches!(state.plugin_gc, TaskState::NotStarted)
+                    && matches!(state.boot_restore, TaskState::NotStarted)
+            }
+            ManagerShellPhase::ConfigReady => state.config_loaded,
+            ManagerShellPhase::Restoring => {
+                state.config_loaded && !matches!(state.plugin_gc, TaskState::NotStarted)
+            }
+            ManagerShellPhase::Listening
+            | ManagerShellPhase::ShutdownRequested
+            | ManagerShellPhase::Stopped => {
+                state.config_loaded && !matches!(state.boot_restore, TaskState::NotStarted)
+            }
+        }));
+    }
+}

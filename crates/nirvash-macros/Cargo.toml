@@ -16,4 +16,5 @@ syn = { workspace = true, features = ["full", "extra-traits"] }
 [dev-dependencies]
 nirvash-core = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 trybuild = { workspace = true }

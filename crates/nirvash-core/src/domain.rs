@@ -102,6 +102,75 @@ impl<T> From<Vec<T>> for BoundedDomain<T> {
     }
 }
 
+impl<T, const N: usize> From<[T; N]> for BoundedDomain<T> {
+    fn from(values: [T; N]) -> Self {
+        Self::new(values.into_iter().collect())
+    }
+}
+
+pub trait IntoBoundedDomain<T> {
+    fn into_bounded_domain(self) -> BoundedDomain<T>;
+}
+
+impl<T> IntoBoundedDomain<T> for BoundedDomain<T> {
+    fn into_bounded_domain(self) -> BoundedDomain<T> {
+        self
+    }
+}
+
+impl<T> IntoBoundedDomain<T> for Vec<T> {
+    fn into_bounded_domain(self) -> BoundedDomain<T> {
+        BoundedDomain::new(self)
+    }
+}
+
+impl<T, const N: usize> IntoBoundedDomain<T> for [T; N] {
+    fn into_bounded_domain(self) -> BoundedDomain<T> {
+        BoundedDomain::from(self)
+    }
+}
+
+pub fn into_bounded_domain<T, D>(values: D) -> BoundedDomain<T>
+where
+    D: IntoBoundedDomain<T>,
+{
+    values.into_bounded_domain()
+}
+
+pub fn bounded_vec_domain<T>(min_len: usize, max_len: usize) -> BoundedDomain<Vec<T>>
+where
+    T: Signature,
+{
+    let element_domain = T::bounded_domain().into_vec();
+    let mut values = Vec::new();
+    for len in min_len..=max_len {
+        enumerate_vecs(
+            &element_domain,
+            len,
+            &mut Vec::with_capacity(len),
+            &mut values,
+        );
+    }
+    BoundedDomain::new(values)
+}
+
+fn enumerate_vecs<T: Clone>(
+    domain: &[T],
+    remaining: usize,
+    current: &mut Vec<T>,
+    values: &mut Vec<Vec<T>>,
+) {
+    if remaining == 0 {
+        values.push(current.clone());
+        return;
+    }
+    for value in domain {
+        current.push(value.clone());
+        enumerate_vecs(domain, remaining - 1, current, values);
+        current.pop();
+    }
+}
+
 pub trait Signature: Sized + Clone + Debug + Eq + 'static {
     fn bounded_domain() -> BoundedDomain<Self>;
 

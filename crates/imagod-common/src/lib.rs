@@ -62,4 +62,24 @@ impl ImagodError {
             details: self.details.clone(),
         }
     }
+
+    /// Returns a stable symbolic name for the wire-oriented protocol error code.
+    pub fn code_name(&self) -> &'static str {
+        match self.code {
+            ErrorCode::Unauthorized => "Unauthorized",
+            ErrorCode::BadRequest => "BadRequest",
+            ErrorCode::BadManifest => "BadManifest",
+            ErrorCode::Busy => "Busy",
+            ErrorCode::NotFound => "NotFound",
+            ErrorCode::Internal => "Internal",
+            ErrorCode::IdempotencyConflict => "IdempotencyConflict",
+            ErrorCode::RangeInvalid => "RangeInvalid",
+            ErrorCode::ChunkHashMismatch => "ChunkHashMismatch",
+            ErrorCode::ArtifactIncomplete => "ArtifactIncomplete",
+            ErrorCode::PreconditionFailed => "PreconditionFailed",
+            ErrorCode::OperationTimeout => "OperationTimeout",
+            ErrorCode::RollbackFailed => "RollbackFailed",
+            ErrorCode::StorageQuota => "StorageQuota",
+        }
+    }
 }

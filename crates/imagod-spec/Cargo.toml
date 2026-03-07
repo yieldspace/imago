@@ -5,12 +5,20 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lib]
+doctest = false
+
 [dependencies]
 nirvash-core = { workspace = true }
 nirvash-macros = { workspace = true }
-imago-protocol = { workspace = true }
 imagod-config = { workspace = true }
 imagod-ipc = { workspace = true }
+imagod-control = { workspace = true }
+imagod-model = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [build-dependencies]
 nirvash-docgen = { workspace = true }

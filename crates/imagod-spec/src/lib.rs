@@ -2,6 +2,7 @@ pub mod artifact_deploy;
 pub mod bounds;
 pub mod command_protocol;
 pub mod manager_shell;
+pub mod model;
 pub mod plugin_capability;
 pub mod runner_bootstrap;
 pub mod runner_runtime;

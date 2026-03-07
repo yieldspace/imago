@@ -7,14 +7,19 @@ subsystem ごとの仕様を自己検証します。
 ## DSL
 
 - 値ドメインは `#[derive(Signature)]` で定義します。
-- complex state は `#[derive(Signature)] #[signature(custom)]` を付け、生成された companion trait に `representatives()` と必要なら `signature_invariant()` を実装します。
+- 推奨順は 3 段階です。
+  - まず auto derive に任せる
+  - 次に `#[signature(bounds(...))]` と `#[signature(filter(self => ...))]`、必要なら `#[signature_invariant(self => ...)]` で bounded domain を絞る
+  - それでも表現しきれない型だけ `#[signature(custom)]` にして companion trait を手書きするか、`nirvash_core::signature_spec!(StateSignatureSpec for State, ...)` で sugar を使う
+- field ごとの bounded domain は `#[sig(range = "...")]`、`#[sig(len = "A..=B")]`、`#[sig(domain = path)]` で上書きできます。`Option<T>` はデフォルトで `None + T::bounded_domain()` を使います。
 - subsystem spec は `#[subsystem_spec(...)]`、top-level system spec は `#[system_spec(...)]` で `TemporalSpec` を自動生成します。
 - `#[invariant(SpecType)]`、`#[illegal(SpecType)]`、`#[property(SpecType)]` などの target-spec 付き attribute が registry へ自動登録され、`TemporalSpec` から自動収集されます。
 - 加算 DSL として `nirvash_core::invariant!(Spec, name(state) => ...)`、`nirvash_core::property!(Spec, name => leads_to(...))`、`nirvash_core::fairness!(weak Spec, ...)` などの `macro_rules!` 宣言も使えます。
 - `ltl!` 内では Rust に既にある `!` / `&&` / `||` / `=>` を使い、時相演算だけ `always` / `eventually` / `next` / `until` / `enabled` / `leads_to` の単語で補います。
 - `#[formal_tests(...)]` が init invariant / reachable graph checker / composition regression test を自動生成します。
+- `#[code_tests(...)]` は `CodeConformanceSpec` が持つ `Runtime` / `Context` / `fresh_runtime()` / `context()` を使って runtime conformance を自動生成します。現在は `command_protocol` がこの path を使っています。
 - `checker_config(...)` と `cases = model_cases` に加え、`#[state_constraint(SpecType)]`、`#[action_constraint(SpecType)]`、`#[symmetry(SpecType)]` で TLC 相当の model control を Rust API で与えます。
-- `build.rs` で `nirvash_docgen::generate()` を呼んでいるため、`cargo doc -p imagod-spec` では各 spec type の `TransitionSystem` impl section に reachable graph 由来の Mermaid `State Graph` と、登録関数一覧を持つ Mermaid `Meta Model` 図が自動表示されます。Mermaid runtime は local asset として docs 出力に同梱されます。
+- `build.rs` で `nirvash_docgen::generate()` を呼んでいるため、`cargo doc -p imagod-spec` では各 spec type の `TransitionSystem` impl section に reachable graph 由来の Mermaid `State Graph` と、登録関数一覧を持つ Mermaid `Meta Model` 図が自動表示されます。`State Graph` は docs 専用の boundary-path reduction を通すため、通常経路の中間 state は折り畳まれ、同じ始点/終点に向かう平行 edge も 1 本にまとめられます。分岐/合流/終端/cancel などの edge case が優先的に残ります。Mermaid runtime は local asset として docs 出力に同梱されます。
 
 ## TLA+ Subset
 
@@ -41,7 +46,7 @@ subsystem ごとの仕様を自己検証します。
 | --- | --- |
 | `manager_shell` | `crates/imagod/src/manager_runtime.rs`, `crates/imagod-config` |
 | `session_transport` | `crates/imagod-server/src/protocol_handler.rs`, `crates/imagod-server/src/transport` |
-| `command_protocol` | `crates/imago-protocol/src/messages/command.rs`, `crates/imagod-control/src/operation_state.rs` |
+| `command_protocol` | `crates/imagod-model/src/command.rs`, `crates/imagod-control/src/operation_state.rs`, `crates/imagod-server/src/protocol_handler/router.rs` |
 | `artifact_deploy` | `crates/imagod-control/src/artifact_store.rs`, `crates/imagod-control/src/orchestrator.rs` |
 | `service_supervision` | `crates/imagod-control/src/service_supervisor.rs` |
 | `runner_bootstrap` | `crates/imagod-runtime-bootstrap`, `crates/imagod-ipc::RunnerBootstrap` |
@@ -56,3 +61,5 @@ subsystem ごとの仕様を自己検証します。
 - public contracts only; no private implementation state
 - native plugin internal device logic is out of scope
 - model checking は reachable graph semantics を既定とし、必要時だけ bounded lasso mode を使う
+- `imagod-model` と `imagod-control` の command contract は feature gating せず常設し、release 時の負荷は runtime state を最小に保つことで抑える
+- `command_protocol` の runtime 正式契約は `OperationManager` に実装された `ActionApplier::execute_action` と `StateObserver::observe_state` であり、spec は projection を通じてこれを比較する

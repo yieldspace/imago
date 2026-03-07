@@ -1,4 +1,4 @@
-use imago_protocol::{CommandState, CommandType};
+use imagod_model::{CommandKind, CommandLifecycleState, CommandProtocolAction};
 use nirvash_core::{
     BoundedDomain, Fairness, Ltl, Signature, StatePredicate, StepPredicate, TransitionSystem,
 };
@@ -10,7 +10,7 @@ use crate::{
     artifact_deploy::{
         ArtifactDeployAction, ArtifactDeploySpec, ArtifactDeployState, ReleaseStage,
     },
-    command_protocol::{CommandProtocolAction, CommandProtocolSpec, CommandProtocolState},
+    command_protocol::{CommandProtocolSpec, CommandProtocolState},
     manager_shell::{ManagerShellAction, ManagerShellPhase, ManagerShellSpec, ManagerShellState},
     plugin_capability::{PluginCapabilityAction, PluginCapabilitySpec, PluginCapabilityState},
     runner_bootstrap::{RunnerBootstrapAction, RunnerBootstrapSpec, RunnerBootstrapState},
@@ -365,8 +365,8 @@ fn ready_runner_requires_running_supervision() -> StatePredicate<ImagodSystemSta
 fn active_command_requires_listening_manager() -> StatePredicate<ImagodSystemState> {
     StatePredicate::new("active_command_requires_listening_manager", |state| {
         !matches!(
-            state.command.command_state,
-            Some(CommandState::Accepted | CommandState::Running)
+            state.command.lifecycle_state,
+            Some(CommandLifecycleState::Accepted | CommandLifecycleState::Running)
         ) || matches!(state.manager.phase, ManagerShellPhase::Listening)
     })
 }
@@ -565,7 +565,7 @@ impl TransitionSystem for ImagodSystemSpec {
                 if matches!(
                     command_action,
                     CommandProtocolAction::Start(
-                        CommandType::Deploy | CommandType::Run | CommandType::Stop
+                        CommandKind::Deploy | CommandKind::Run | CommandKind::Stop
                     )
                 ) && !matches!(prev.manager.phase, ManagerShellPhase::Listening)
                 {
@@ -717,8 +717,8 @@ fn cross_links_hold(state: &ImagodSystemState) -> bool {
                 )))
         && (!state.bootstrap.ready || matches!(state.supervision.phase, ServicePhase::Running))
         && (!matches!(
-            state.command.command_state,
-            Some(CommandState::Accepted | CommandState::Running)
+            state.command.lifecycle_state,
+            Some(CommandLifecycleState::Accepted | CommandLifecycleState::Running)
         ) || matches!(state.manager.phase, ManagerShellPhase::Listening))
 }
 

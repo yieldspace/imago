@@ -166,3 +166,37 @@ macro_rules! fairness {
         }
     };
 }
+
+/// Implement a generated companion signature trait with less boilerplate.
+///
+/// This is a manual fallback for `#[derive(Signature)] #[signature(custom)]` cases
+/// where bounds/filter attributes are not expressive enough.
+#[macro_export]
+macro_rules! signature_spec {
+    (
+        $trait:ident for $ty:ty,
+        representatives = $representatives:expr
+        $(, filter($filter_self:ident) => $filter:expr)?
+        $(, invariant($invariant_self:ident) => $invariant:expr)?
+        $(,)?
+    ) => {
+        impl $trait for $ty {
+            fn representatives() -> $crate::BoundedDomain<Self> {
+                let __nirvash_domain = $crate::into_bounded_domain($representatives);
+                $(
+                    let __nirvash_domain = __nirvash_domain.filter(|$filter_self| $filter);
+                )?
+                __nirvash_domain
+            }
+
+            fn signature_invariant(&self) -> bool {
+                true $(
+                    && {
+                        let $invariant_self = self;
+                        $invariant
+                    }
+                )?
+            }
+        }
+    };
+}

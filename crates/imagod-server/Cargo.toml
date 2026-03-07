@@ -16,6 +16,7 @@ imago-protocol = { workspace = true }
 imagod-common = { workspace = true }
 imagod-config = { workspace = true }
 imagod-control = { workspace = true }
+imagod-model = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }

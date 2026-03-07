@@ -1,0 +1,5 @@
+error: probe = ... is no longer supported; declare Runtime, Context, fresh_runtime(), and context() on CodeConformanceSpec
+   --> tests/fixtures/code_tests_legacy_probe.rs:107:49
+    |
+107 | #[code_tests(spec = Spec, init = initial_state, probe = tests::Probe)]
+    |                                                 ^^^^^

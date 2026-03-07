@@ -6,6 +6,7 @@ This documentation is organized for quick onboarding first, then direct source r
 ## Basics
 
 - [Architecture](./architecture.md)
+- [nirvash と imagod-control の現状アーキテクチャ](./nirvash-and-imagod-control.md)
 - [imago.toml Reference](./imago-configuration.md)
 - [imagod.toml Reference](./imagod-configuration.md)
 - [CLI Output Contract](./cli-output-contract.md)

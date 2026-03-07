@@ -1,0 +1,5 @@
+error: expected `self`
+ --> tests/fixtures/derive_signature_invalid_filter.rs:4:20
+  |
+4 | #[signature(filter(value => value.ready))]
+  |                    ^^^^^
