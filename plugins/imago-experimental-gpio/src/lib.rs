@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsStr,
     path::{Path, PathBuf},
     sync::{
         Mutex, OnceLock,
@@ -120,6 +121,7 @@ const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 const GPIO_RESOURCE_KEY: &str = "gpio";
 const GPIO_RESOURCE_DIGITAL_PINS_KEY: &str = "digital_pins";
+const GPIO_SYSFS_BASE_PATH: &str = "/sys/class/gpio";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DigitalPinSpec {
@@ -361,12 +363,30 @@ fn normalize_digital_value_path(value_path: &str) -> Result<String, GpioError> {
             _ => normalized.push(component.as_os_str()),
         }
     }
-    let normalized = normalized.to_string_lossy().into_owned();
-    if normalized.is_empty() {
+    if normalized.as_os_str().is_empty() {
         return Err(GpioError::Other(
             "resources.gpio.digital_pins[].value_path must not normalize to empty path".to_string(),
         ));
     }
+    if !normalized.is_absolute() {
+        return Err(GpioError::Other(
+            "resources.gpio.digital_pins[].value_path must be an absolute path".to_string(),
+        ));
+    }
+
+    let gpio_base_path = Path::new(GPIO_SYSFS_BASE_PATH);
+    if !normalized.starts_with(gpio_base_path) {
+        return Err(GpioError::Other(format!(
+            "resources.gpio.digital_pins[].value_path must stay under {GPIO_SYSFS_BASE_PATH}"
+        )));
+    }
+    if normalized.file_name() != Some(OsStr::new("value")) {
+        return Err(GpioError::Other(
+            "resources.gpio.digital_pins[].value_path must target a GPIO value file".to_string(),
+        ));
+    }
+
+    let normalized = normalized.to_string_lossy().into_owned();
     Ok(normalized)
 }
 
@@ -2279,6 +2299,93 @@ mod tests {
         };
         assert!(
             message.contains("value_path is duplicated"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_digital_pin_catalog_rejects_relative_value_path() {
+        let resources = BTreeMap::from([(
+            "gpio".to_string(),
+            json!({
+                "digital_pins": [
+                    {
+                        "label": "GPIO17",
+                        "value_path": "sys/class/gpio/gpio17/value",
+                        "supports_input": true,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": true
+                    }
+                ]
+            }),
+        )]);
+        let err =
+            parse_digital_pin_catalog(&resources).expect_err("relative value_path should fail");
+        let message = match err {
+            GpioError::Other(message) => message,
+            _ => panic!("expected other error"),
+        };
+        assert!(
+            message.contains("must be an absolute path"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_digital_pin_catalog_rejects_value_path_outside_gpio_sysfs() {
+        let resources = BTreeMap::from([(
+            "gpio".to_string(),
+            json!({
+                "digital_pins": [
+                    {
+                        "label": "GPIO17",
+                        "value_path": "/etc/hosts",
+                        "supports_input": true,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": true
+                    }
+                ]
+            }),
+        )]);
+        let err = parse_digital_pin_catalog(&resources)
+            .expect_err("value_path outside sysfs should fail");
+        let message = match err {
+            GpioError::Other(message) => message,
+            _ => panic!("expected other error"),
+        };
+        assert!(
+            message.contains("must stay under /sys/class/gpio"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_digital_pin_catalog_rejects_non_value_gpio_file() {
+        let resources = BTreeMap::from([(
+            "gpio".to_string(),
+            json!({
+                "digital_pins": [
+                    {
+                        "label": "GPIO17",
+                        "value_path": "/sys/class/gpio/gpio17/direction",
+                        "supports_input": true,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": true
+                    }
+                ]
+            }),
+        )]);
+        let err =
+            parse_digital_pin_catalog(&resources).expect_err("non-value file path should fail");
+        let message = match err {
+            GpioError::Other(message) => message,
+            _ => panic!("expected other error"),
+        };
+        assert!(
+            message.contains("must target a GPIO value file"),
             "unexpected error: {message}"
         );
     }
