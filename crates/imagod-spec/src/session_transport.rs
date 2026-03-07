@@ -251,6 +251,5 @@ fn resolve_capacity_pressure() -> StepPredicate<SessionTransportState, SessionTr
     })
 }
 
-#[cfg(test)]
 #[nirvash_macros::formal_tests(spec = SessionTransportSpec, init = initial_state)]
 const _: () = ();

@@ -708,6 +708,7 @@ fn expand_temporal_spec(
     emit_composition: bool,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let self_ty = (*item.self_ty).clone();
+    let doc_attrs = doc_fragment_attrs(&self_ty)?;
     let state_ty = associated_type(&item, "State")?;
     let action_ty = associated_type(&item, "Action")?;
 
@@ -778,6 +779,7 @@ fn expand_temporal_spec(
     };
 
     Ok(quote! {
+        #(#doc_attrs)*
         #item
 
         impl ::nirvash_core::TemporalSpec for #self_ty {
@@ -836,16 +838,27 @@ fn associated_type(item: &ItemImpl, name: &str) -> syn::Result<Type> {
 
 fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> {
     let spec_ty = args.spec;
+    let spec_tail = path_tail_ident(&spec_ty)?.clone();
     let init_method = args.init;
     let cases_method = args.cases;
     let composition_method = args.composition;
     let module_ident = format_ident!(
         "__nirvash_formal_tests_{}",
-        path_tail_ident(&spec_ty)?.to_string().to_lowercase()
+        spec_tail.to_string().to_lowercase()
     );
+    let doc_provider_ident = format_ident!("__NirvashDocGraphProvider{}", spec_tail);
+    let doc_provider_build_ident = format_ident!(
+        "__nirvash_doc_graph_provider_build_{}",
+        spec_tail.to_string().to_lowercase()
+    );
+    let doc_provider_link_ident = format_ident!(
+        "__nirvash_doc_graph_provider_link_{}",
+        spec_tail.to_string().to_lowercase()
+    );
+    let spec_name = LitStr::new(&spec_tail.to_string(), spec_tail.span());
 
     let cases_expr = if let Some(cases_method) = cases_method {
-        quote! { <#spec_ty>::#cases_method() }
+        quote! { #cases_method() }
     } else {
         quote! { vec![<#spec_ty as ::core::default::Default>::default()] }
     };
@@ -898,6 +911,78 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
     });
 
     Ok(quote! {
+        #[doc(hidden)]
+        struct #doc_provider_ident;
+
+        impl ::nirvash_core::DocGraphProvider for #doc_provider_ident {
+            fn spec_name(&self) -> &'static str {
+                #spec_name
+            }
+
+            fn cases(&self) -> ::std::vec::Vec<::nirvash_core::DocGraphCase> {
+                let specs = #cases_expr;
+                let multiple_cases = specs.len() > 1;
+                specs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, spec)| {
+                        let label = if multiple_cases {
+                            format!("case-{index}")
+                        } else {
+                            "default".to_owned()
+                        };
+                        let snapshot = ::nirvash_core::ModelChecker::new(&spec)
+                            .reachable_graph_snapshot()
+                            .expect("reachable graph snapshot should build for docs");
+                        ::nirvash_core::DocGraphCase {
+                            label,
+                            graph: ::nirvash_core::DocGraphSnapshot {
+                                states: snapshot
+                                    .states
+                                    .into_iter()
+                                    .map(|state| ::nirvash_core::summarize_doc_graph_state(&state))
+                                    .collect(),
+                                edges: snapshot
+                                    .edges
+                                    .into_iter()
+                                    .map(|outgoing| {
+                                        outgoing
+                                            .into_iter()
+                                            .map(|edge| ::nirvash_core::DocGraphEdge {
+                                                label: format!("{:?}", edge.action),
+                                                target: edge.target,
+                                            })
+                                            .collect()
+                                    })
+                                    .collect(),
+                                initial_indices: snapshot.initial_indices,
+                                deadlocks: snapshot.deadlocks,
+                                truncated: snapshot.truncated,
+                                stutter_omitted: snapshot.stutter_omitted,
+                            },
+                        }
+                    })
+                    .collect()
+            }
+        }
+
+        #[doc(hidden)]
+        fn #doc_provider_build_ident() -> ::std::boxed::Box<dyn ::nirvash_core::DocGraphProvider> {
+            ::std::boxed::Box::new(#doc_provider_ident)
+        }
+
+        #[doc(hidden)]
+        pub fn #doc_provider_link_ident() {
+            let _ = #doc_provider_build_ident as fn() -> ::std::boxed::Box<dyn ::nirvash_core::DocGraphProvider>;
+        }
+
+        ::nirvash_core::inventory::submit! {
+            ::nirvash_core::RegisteredDocGraphProvider {
+                spec_name: #spec_name,
+                build: #doc_provider_build_ident,
+            }
+        }
+
         #[cfg(test)]
         mod #module_ident {
             use super::*;
@@ -1048,4 +1133,65 @@ fn path_tail_ident(path: &Path) -> syn::Result<&Ident> {
         .last()
         .map(|segment| &segment.ident)
         .ok_or_else(|| syn::Error::new(path.span(), "path cannot be empty"))
+}
+
+fn doc_fragment_attrs(self_ty: &Type) -> syn::Result<Vec<proc_macro2::TokenStream>> {
+    let Some(env_key) = doc_fragment_env_key(self_ty)? else {
+        return Ok(Vec::new());
+    };
+    let Ok(path) = ::std::env::var(&env_key) else {
+        return Ok(Vec::new());
+    };
+    let contents = ::std::fs::read_to_string(&path).map_err(|error| {
+        syn::Error::new(
+            self_ty.span(),
+            format!("failed to read nirvash doc fragment `{path}`: {error}"),
+        )
+    })?;
+    Ok(contents
+        .lines()
+        .map(|line| {
+            let lit = LitStr::new(line, Span::call_site());
+            quote! { #[doc = #lit] }
+        })
+        .collect())
+}
+
+fn doc_fragment_env_key(self_ty: &Type) -> syn::Result<Option<String>> {
+    let Type::Path(type_path) = self_ty else {
+        return Ok(None);
+    };
+    if type_path.qself.is_some() {
+        return Ok(None);
+    }
+    let Some(segment) = type_path.path.segments.last() else {
+        return Ok(None);
+    };
+    Ok(Some(format!(
+        "NIRVASH_DOC_FRAGMENT_{}",
+        to_upper_snake(&segment.ident.to_string())
+    )))
+}
+
+fn to_upper_snake(input: &str) -> String {
+    let mut output = String::new();
+    let mut previous_is_lower = false;
+    for character in input.chars() {
+        if character.is_ascii_uppercase() {
+            if previous_is_lower && !output.ends_with('_') {
+                output.push('_');
+            }
+            output.push(character);
+            previous_is_lower = false;
+        } else if character.is_ascii_alphanumeric() {
+            output.push(character.to_ascii_uppercase());
+            previous_is_lower = true;
+        } else {
+            if !output.ends_with('_') && !output.is_empty() {
+                output.push('_');
+            }
+            previous_is_lower = false;
+        }
+    }
+    output
 }

@@ -327,7 +327,6 @@ impl TransitionSystem for RunnerBootstrapSpec {
     }
 }
 
-#[cfg(test)]
 #[nirvash_macros::formal_tests(spec = RunnerBootstrapSpec, init = initial_state)]
 const _: () = ();
 

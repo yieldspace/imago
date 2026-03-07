@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
 
 use crate::{
-    ActionConstraint, Fairness, Signature, StateConstraint, TemporalSpec, Trace, TraceStep,
+    ActionConstraint, Fairness, ReachableGraphEdge, ReachableGraphSnapshot, Signature,
+    StateConstraint, TemporalSpec, Trace, TraceStep,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +131,7 @@ struct ReachableGraph<S, A> {
     depths: Vec<usize>,
     deadlocks: Vec<usize>,
     transitions: usize,
+    truncated: bool,
 }
 
 type TraceList<S, A> = Vec<Trace<S, A>>;
@@ -163,6 +165,13 @@ where
 
     pub fn with_config(spec: &'a T, config: ModelCheckConfig) -> Self {
         Self { spec, config }
+    }
+
+    pub fn reachable_graph_snapshot(
+        &self,
+    ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
+        let graph = self.build_reachable_graph_for_docs()?;
+        Ok(self.snapshot_from_graph(&graph))
     }
 
     pub fn check_invariants(
@@ -243,6 +252,7 @@ where
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
         let graph = self.build_reachable_graph()?;
+        self.ensure_untruncated(&graph)?;
         for (index, state) in graph.states.iter().enumerate() {
             if !state.invariant() {
                 return Ok(ModelCheckResult::with_violation(Counterexample {
@@ -270,6 +280,7 @@ where
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
         let graph = self.build_reachable_graph()?;
+        self.ensure_untruncated(&graph)?;
         for (source, edges) in graph.edges.iter().enumerate() {
             for edge in edges {
                 let TraceStep::Action(action) = &edge.step else {
@@ -295,6 +306,7 @@ where
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
         let graph = self.build_reachable_graph()?;
+        self.ensure_untruncated(&graph)?;
         if let Some(deadlock) = graph.deadlocks.first() {
             return Ok(ModelCheckResult::with_violation(Counterexample {
                 kind: CounterexampleKind::Deadlock,
@@ -318,6 +330,7 @@ where
         }
 
         let graph = self.build_reachable_graph()?;
+        self.ensure_untruncated(&graph)?;
         let traces = self.graph_lasso_traces(&graph);
         let mut best: Option<Counterexample<T::State, T::Action>> = None;
 
@@ -411,6 +424,22 @@ where
     fn build_reachable_graph(
         &self,
     ) -> Result<ReachableGraph<T::State, T::Action>, ModelCheckError> {
+        self.build_reachable_graph_with_config(self.config)
+    }
+
+    fn build_reachable_graph_for_docs(
+        &self,
+    ) -> Result<ReachableGraph<T::State, T::Action>, ModelCheckError> {
+        let mut config = self.config;
+        config.exploration = ExplorationMode::ReachableGraph;
+        config.stop_on_first_violation = false;
+        self.build_reachable_graph_with_config(config)
+    }
+
+    fn build_reachable_graph_with_config(
+        &self,
+        config: ModelCheckConfig,
+    ) -> Result<ReachableGraph<T::State, T::Action>, ModelCheckError> {
         let initial_states = self.initial_states_filtered()?;
         let mut graph = ReachableGraph {
             states: Vec::new(),
@@ -420,17 +449,27 @@ where
             depths: Vec::new(),
             deadlocks: Vec::new(),
             transitions: 0,
+            truncated: false,
         };
         let mut queue = VecDeque::new();
 
         for state in initial_states {
-            let index = self.push_state(&mut graph, state, None, 0, &mut queue)?;
+            let Some(index) = self.push_state(&mut graph, state, None, 0, &mut queue, config)?
+            else {
+                break;
+            };
             if !graph.initial_indices.contains(&index) {
                 graph.initial_indices.push(index);
+            }
+            if graph.truncated {
+                break;
             }
         }
 
         while let Some(index) = queue.pop_front() {
+            if graph.truncated {
+                break;
+            }
             let current = graph.states[index].clone();
             let next_depth = graph.depths[index] + 1;
             let mut edges = Vec::new();
@@ -445,34 +484,46 @@ where
                     continue;
                 }
 
-                let next_index = self.push_state(
+                let Some(next_index) = self.push_state(
                     &mut graph,
                     next,
                     Some((index, TraceStep::Action(action.clone()))),
                     next_depth,
                     &mut queue,
-                )?;
+                    config,
+                )?
+                else {
+                    break;
+                };
                 let edge = GraphEdge {
                     step: TraceStep::Action(action),
                     target: next_index,
                 };
                 if !edges.contains(&edge) {
+                    if self.transition_limit_reached(&graph, config) {
+                        graph.truncated = true;
+                        break;
+                    }
                     edges.push(edge);
                     graph.transitions += 1;
-                    self.ensure_transition_limit(&graph)?;
                 }
             }
 
-            if self.spec.allow_stutter() {
+            if !graph.truncated && self.spec.allow_stutter() {
                 let stutter = self.canonicalize_state(&self.spec.stutter_state(&current));
                 if self.state_constraints_allow(&stutter) {
-                    let next_index = self.push_state(
+                    let Some(next_index) = self.push_state(
                         &mut graph,
                         stutter,
                         Some((index, TraceStep::Stutter)),
                         next_depth,
                         &mut queue,
-                    )?;
+                        config,
+                    )?
+                    else {
+                        graph.truncated = true;
+                        break;
+                    };
                     let edge = GraphEdge {
                         step: TraceStep::Stutter,
                         target: next_index,
@@ -500,9 +551,15 @@ where
         parent: Option<(usize, TraceStep<T::Action>)>,
         depth: usize,
         queue: &mut VecDeque<usize>,
-    ) -> Result<usize, ModelCheckError> {
+        config: ModelCheckConfig,
+    ) -> Result<Option<usize>, ModelCheckError> {
         if let Some(existing) = graph.state_index(&state) {
-            return Ok(existing);
+            return Ok(Some(existing));
+        }
+
+        if self.state_limit_reached(graph, config) {
+            graph.truncated = true;
+            return Ok(None);
         }
 
         graph.states.push(state);
@@ -511,42 +568,27 @@ where
         graph.depths.push(depth);
         let index = graph.states.len() - 1;
         queue.push_back(index);
-        self.ensure_state_limit(graph)?;
-        Ok(index)
+        Ok(Some(index))
     }
 
-    fn ensure_state_limit(
+    fn state_limit_reached(
         &self,
         graph: &ReachableGraph<T::State, T::Action>,
-    ) -> Result<(), ModelCheckError> {
-        if self
-            .config
+        config: ModelCheckConfig,
+    ) -> bool {
+        config
             .max_states
-            .is_some_and(|max_states| graph.states.len() > max_states)
-        {
-            return Err(ModelCheckError::ExplorationLimitReached {
-                states: graph.states.len(),
-                transitions: graph.transitions,
-            });
-        }
-        Ok(())
+            .is_some_and(|max_states| graph.states.len() >= max_states)
     }
 
-    fn ensure_transition_limit(
+    fn transition_limit_reached(
         &self,
         graph: &ReachableGraph<T::State, T::Action>,
-    ) -> Result<(), ModelCheckError> {
-        if self
-            .config
+        config: ModelCheckConfig,
+    ) -> bool {
+        config
             .max_transitions
-            .is_some_and(|max_transitions| graph.transitions > max_transitions)
-        {
-            return Err(ModelCheckError::ExplorationLimitReached {
-                states: graph.states.len(),
-                transitions: graph.transitions,
-            });
-        }
-        Ok(())
+            .is_some_and(|max_transitions| graph.transitions >= max_transitions)
     }
 
     fn initial_states_filtered(&self) -> Result<Vec<T::State>, ModelCheckError> {
@@ -616,6 +658,48 @@ where
         }
 
         values
+    }
+
+    fn ensure_untruncated(
+        &self,
+        graph: &ReachableGraph<T::State, T::Action>,
+    ) -> Result<(), ModelCheckError> {
+        if graph.truncated {
+            return Err(ModelCheckError::ExplorationLimitReached {
+                states: graph.states.len(),
+                transitions: graph.transitions,
+            });
+        }
+        Ok(())
+    }
+
+    fn snapshot_from_graph(
+        &self,
+        graph: &ReachableGraph<T::State, T::Action>,
+    ) -> ReachableGraphSnapshot<T::State, T::Action> {
+        ReachableGraphSnapshot {
+            states: graph.states.clone(),
+            edges: graph
+                .edges
+                .iter()
+                .map(|edges| {
+                    edges
+                        .iter()
+                        .filter_map(|edge| match &edge.step {
+                            TraceStep::Action(action) => Some(ReachableGraphEdge {
+                                action: action.clone(),
+                                target: edge.target,
+                            }),
+                            TraceStep::Stutter => None,
+                        })
+                        .collect()
+                })
+                .collect(),
+            initial_indices: graph.initial_indices.clone(),
+            deadlocks: graph.deadlocks.clone(),
+            truncated: graph.truncated,
+            stutter_omitted: self.spec.allow_stutter(),
+        }
     }
 
     fn search_invariants_lasso(

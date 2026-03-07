@@ -1,0 +1,168 @@
+/// Build a named state predicate from a Rust boolean expression.
+#[macro_export]
+macro_rules! pred {
+    ($name:ident ($state:pat_param) => $expr:expr $(,)?) => {
+        $crate::StatePredicate::new(stringify!($name), |$state| $expr)
+    };
+}
+
+/// Build a named transition predicate from a Rust boolean expression.
+#[macro_export]
+macro_rules! step {
+    ($name:ident ($prev:pat_param, $action:pat_param, $next:pat_param) => $expr:expr $(,)?) => {
+        $crate::StepPredicate::new(stringify!($name), |$prev, $action, $next| $expr)
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __nirvash_state_constraint_pred {
+    ($name:ident ($state:pat_param) => $expr:expr $(,)?) => {
+        $crate::StateConstraint::new(stringify!($name), |$state| $expr)
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __nirvash_action_constraint_pred {
+    ($name:ident ($prev:pat_param, $action:pat_param, $next:pat_param) => $expr:expr $(,)?) => {
+        $crate::ActionConstraint::new(stringify!($name), |$prev, $action, $next| $expr)
+    };
+}
+
+/// Build an LTL formula using Rust boolean operators and temporal keywords.
+#[macro_export]
+macro_rules! ltl {
+    (true) => {
+        $crate::Ltl::truth()
+    };
+    (false) => {
+        $crate::Ltl::falsity()
+    };
+    (pred!($name:ident ($state:pat_param) => $expr:expr $(,)?)) => {
+        $crate::Ltl::pred($crate::pred!($name($state) => $expr))
+    };
+    (step!($name:ident ($prev:pat_param, $action:pat_param, $next:pat_param) => $expr:expr $(,)?)) => {
+        $crate::Ltl::step($crate::step!($name($prev, $action, $next) => $expr))
+    };
+    (enabled(step!($name:ident ($prev:pat_param, $action:pat_param, $next:pat_param) => $expr:expr $(,)?))) => {
+        $crate::Ltl::enabled($crate::step!($name($prev, $action, $next) => $expr))
+    };
+    ((! $($inner:tt)+)) => {
+        $crate::Ltl::negate($crate::ltl!($($inner)+))
+    };
+    (always($($inner:tt)+)) => {
+        $crate::Ltl::always($crate::ltl!($($inner)+))
+    };
+    (eventually($($inner:tt)+)) => {
+        $crate::Ltl::eventually($crate::ltl!($($inner)+))
+    };
+    (next($($inner:tt)+)) => {
+        $crate::Ltl::next($crate::ltl!($($inner)+))
+    };
+    (($lhs:tt && $rhs:tt)) => {
+        $crate::Ltl::and($crate::ltl!($lhs), $crate::ltl!($rhs))
+    };
+    (($lhs:tt || $rhs:tt)) => {
+        $crate::Ltl::or($crate::ltl!($lhs), $crate::ltl!($rhs))
+    };
+    (($lhs:tt => $rhs:tt)) => {
+        $crate::Ltl::implies($crate::ltl!($lhs), $crate::ltl!($rhs))
+    };
+    (until($lhs:tt, $rhs:tt)) => {
+        $crate::Ltl::until($crate::ltl!($lhs), $crate::ltl!($rhs))
+    };
+    (leads_to($lhs:tt, $rhs:tt)) => {
+        $crate::Ltl::leads_to($crate::ltl!($lhs), $crate::ltl!($rhs))
+    };
+    (($($inner:tt)+)) => {
+        $crate::ltl!($($inner)+)
+    };
+}
+
+/// Declare and register an invariant with the proc-macro registry.
+#[macro_export]
+macro_rules! invariant {
+    ($spec:path, $name:ident ($state:pat_param) => $expr:expr $(,)?) => {
+        #[::nirvash_macros::invariant($spec)]
+        fn $name() -> $crate::StatePredicate<<$spec as $crate::TransitionSystem>::State> {
+            $crate::pred!($name($state) => $expr)
+        }
+    };
+}
+
+/// Declare and register an illegal transition predicate.
+#[macro_export]
+macro_rules! illegal {
+    ($spec:path, $name:ident ($prev:pat_param, $action:pat_param, $next:pat_param) => $expr:expr $(,)?) => {
+        #[::nirvash_macros::illegal($spec)]
+        fn $name() -> $crate::StepPredicate<
+            <$spec as $crate::TransitionSystem>::State,
+            <$spec as $crate::TransitionSystem>::Action,
+        > {
+            $crate::step!($name($prev, $action, $next) => $expr)
+        }
+    };
+}
+
+/// Declare and register a state constraint.
+#[macro_export]
+macro_rules! state_constraint {
+    ($spec:path, $name:ident ($state:pat_param) => $expr:expr $(,)?) => {
+        #[::nirvash_macros::state_constraint($spec)]
+        fn $name() -> $crate::StateConstraint<<$spec as $crate::TransitionSystem>::State> {
+            $crate::__nirvash_state_constraint_pred!($name($state) => $expr)
+        }
+    };
+}
+
+/// Declare and register an action constraint.
+#[macro_export]
+macro_rules! action_constraint {
+    ($spec:path, $name:ident ($prev:pat_param, $action:pat_param, $next:pat_param) => $expr:expr $(,)?) => {
+        #[::nirvash_macros::action_constraint($spec)]
+        fn $name() -> $crate::ActionConstraint<
+            <$spec as $crate::TransitionSystem>::State,
+            <$spec as $crate::TransitionSystem>::Action,
+        > {
+            $crate::__nirvash_action_constraint_pred!($name($prev, $action, $next) => $expr)
+        }
+    };
+}
+
+/// Declare and register an LTL property.
+#[macro_export]
+macro_rules! property {
+    ($spec:path, $name:ident => $($formula:tt)+) => {
+        #[::nirvash_macros::property($spec)]
+        fn $name() -> $crate::Ltl<
+            <$spec as $crate::TransitionSystem>::State,
+            <$spec as $crate::TransitionSystem>::Action,
+        > {
+            $crate::ltl!($($formula)+)
+        }
+    };
+}
+
+/// Declare and register a weak or strong fairness assumption.
+#[macro_export]
+macro_rules! fairness {
+    (weak $spec:path, $name:ident ($prev:pat_param, $action:pat_param, $next:pat_param) => $expr:expr $(,)?) => {
+        #[::nirvash_macros::fairness($spec)]
+        fn $name() -> $crate::Fairness<
+            <$spec as $crate::TransitionSystem>::State,
+            <$spec as $crate::TransitionSystem>::Action,
+        > {
+            $crate::Fairness::weak($crate::step!($name($prev, $action, $next) => $expr))
+        }
+    };
+    (strong $spec:path, $name:ident ($prev:pat_param, $action:pat_param, $next:pat_param) => $expr:expr $(,)?) => {
+        #[::nirvash_macros::fairness($spec)]
+        fn $name() -> $crate::Fairness<
+            <$spec as $crate::TransitionSystem>::State,
+            <$spec as $crate::TransitionSystem>::Action,
+        > {
+            $crate::Fairness::strong($crate::step!($name($prev, $action, $next) => $expr))
+        }
+    };
+}

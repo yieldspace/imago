@@ -11,3 +11,6 @@ nirvash-macros = { workspace = true }
 imago-protocol = { workspace = true }
 imagod-config = { workspace = true }
 imagod-ipc = { workspace = true }
+
+[build-dependencies]
+nirvash-docgen = { workspace = true }

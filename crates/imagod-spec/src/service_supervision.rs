@@ -329,6 +329,5 @@ impl TransitionSystem for ServiceSupervisionSpec {
     }
 }
 
-#[cfg(test)]
 #[nirvash_macros::formal_tests(spec = ServiceSupervisionSpec, init = initial_state)]
 const _: () = ();

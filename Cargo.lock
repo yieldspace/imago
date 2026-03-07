@@ -2710,6 +2710,7 @@ dependencies = [
  "imagod-config",
  "imagod-ipc",
  "nirvash-core",
+ "nirvash-docgen",
  "nirvash-macros",
 ]
 
@@ -3360,6 +3361,20 @@ name = "nirvash-core"
 version = "0.2.0"
 dependencies = [
  "inventory",
+ "serde",
+]
+
+[[package]]
+name = "nirvash-docgen"
+version = "0.2.0"
+dependencies = [
+ "nirvash-core",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn",
+ "tempfile",
 ]
 
 [[package]]
@@ -3370,6 +3385,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+ "tempfile",
  "trybuild",
 ]
 

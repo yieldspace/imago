@@ -10,8 +10,11 @@ subsystem ごとの仕様を自己検証します。
 - complex state は `#[derive(Signature)] #[signature(custom)]` を付け、生成された companion trait に `representatives()` と必要なら `signature_invariant()` を実装します。
 - subsystem spec は `#[subsystem_spec(...)]`、top-level system spec は `#[system_spec(...)]` で `TemporalSpec` を自動生成します。
 - `#[invariant(SpecType)]`、`#[illegal(SpecType)]`、`#[property(SpecType)]` などの target-spec 付き attribute が registry へ自動登録され、`TemporalSpec` から自動収集されます。
+- 加算 DSL として `nirvash_core::invariant!(Spec, name(state) => ...)`、`nirvash_core::property!(Spec, name => leads_to(...))`、`nirvash_core::fairness!(weak Spec, ...)` などの `macro_rules!` 宣言も使えます。
+- `ltl!` 内では Rust に既にある `!` / `&&` / `||` / `=>` を使い、時相演算だけ `always` / `eventually` / `next` / `until` / `enabled` / `leads_to` の単語で補います。
 - `#[formal_tests(...)]` が init invariant / reachable graph checker / composition regression test を自動生成します。
 - `checker_config(...)` と `cases = model_cases` に加え、`#[state_constraint(SpecType)]`、`#[action_constraint(SpecType)]`、`#[symmetry(SpecType)]` で TLC 相当の model control を Rust API で与えます。
+- `build.rs` で `nirvash_docgen::generate()` を呼んでいるため、`cargo doc -p imagod-spec` では各 spec type の `TransitionSystem` impl section に reachable graph 由来の Mermaid `State Graph` と、登録関数一覧を持つ Mermaid `Meta Model` 図が自動表示されます。Mermaid runtime は local asset として docs 出力に同梱されます。
 
 ## TLA+ Subset
 

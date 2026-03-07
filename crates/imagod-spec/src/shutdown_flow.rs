@@ -365,6 +365,5 @@ impl TransitionSystem for ShutdownFlowSpec {
     }
 }
 
-#[cfg(test)]
 #[nirvash_macros::formal_tests(spec = ShutdownFlowSpec, init = initial_state)]
 const _: () = ();
