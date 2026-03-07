@@ -1100,12 +1100,11 @@ mod tests {
         engine: &Engine,
         resources: imagod_ipc::ResourceMap,
     ) -> Store<WasiState> {
-        let state = WasiState {
-            table: wasmtime::component::ResourceTable::new(),
-            wasi: wasmtime_wasi::WasiCtxBuilder::new().build(),
-            http: wasmtime_wasi_http::WasiHttpCtx::new(),
-            wasi_http_outbound: Vec::new(),
-            native_plugin_context: crate::NativePluginContext::new(
+        let state = WasiState::new(
+            wasmtime_wasi::WasiCtxBuilder::new().build(),
+            wasmtime_wasi_http::WasiHttpCtx::new(),
+            Vec::new(),
+            crate::NativePluginContext::new(
                 "svc-test".to_string(),
                 "release-test".to_string(),
                 "runner-test".to_string(),
@@ -1114,7 +1113,7 @@ mod tests {
                 "secret".to_string(),
                 resources,
             ),
-        };
+        );
         Store::new(engine, state)
     }
 

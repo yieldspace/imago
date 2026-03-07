@@ -192,6 +192,7 @@ mode = "0644"
 ```
 
 - Validation error notes: missing/unsafe path fails validation. Additional keys are accepted and forwarded to `manifest.assets[]` as JSON values.
+- Usage note: pair `[[assets]]` with `[[resources.read_only_mounts]]` when guest code needs to open bundled files directly, for example `wasi:nn` model files under `/app/assets`.
 
 <a id="the-http-section"></a>
 ## The [http] section
@@ -405,6 +406,7 @@ guest_path = "/app/readonly"
 ```
 
 - Validation error notes: non-absolute or duplicate guest path fails validation.
+- Usage note: this is the recommended way to expose bundled model files to guest code that calls `wasi:nn`; the runtime does not preload models from `assets`.
 
 ### The `usb.paths` field
 
@@ -586,6 +588,7 @@ wasi = true
 ```
 
 - Validation error notes: wrong value types fail validation.
+- Usage note: this allowlist also governs imports such as `wasi:nn/*`; guest-side `wasi-nn` calls require the corresponding WASI capability rules.
 
 <a id="the-bindings-section"></a>
 ## The [[bindings]] section

@@ -1,0 +1,27 @@
+name = "local-imagod-wasi-nn-openvino-person-detection-app"
+main = "target/wasm32-wasip2/release/local-imagod-wasi-nn-openvino-person-detection-app.wasm"
+type = "cli"
+
+[build]
+command = "CARGO_TARGET_DIR=target cargo build --target wasm32-wasip2 --release"
+
+[[assets]]
+path = "assets/model.xml"
+
+[[assets]]
+path = "assets/model.bin"
+
+[[assets]]
+path = "assets/people.ppm"
+
+[[resources.read_only_mounts]]
+asset_dir = "assets"
+guest_path = "/app/assets"
+
+[capabilities]
+wasi = true
+
+[target.default]
+remote = "127.0.0.1:4443"
+server_name = "localhost"
+client_key = "certs/client.key"

@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | `examples/local-imagod` | `imago service deploy` の最小構成 | `examples/local-imagod/README.md` |
 | `examples/local-imagod-http` | `type=http` の実行例 | `examples/local-imagod-http/README.md` |
+| `examples/local-imagod-wasi-nn-openvino-person-detection` | `wasi-nn` と asset 同梱 OpenVINO 人物検出 model の実行例 | `examples/local-imagod-wasi-nn-openvino-person-detection/README.md` |
 | `examples/local-imagod-socket` | `type=socket` の実行例 | `examples/local-imagod-socket/README.md` |
 | `examples/local-imagod-plugin-hello` | Wasm plugin 依存の実行例 | `examples/local-imagod-plugin-hello/README.md` |
 | `examples/local-imagod-plugin-native-admin` | native plugin 依存の実行例 | `examples/local-imagod-plugin-native-admin/README.md` |
