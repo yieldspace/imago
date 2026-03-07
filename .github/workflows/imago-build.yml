@@ -232,3 +232,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber
+
+      - name: Promote GitHub Release to stable latest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          release_id="$(gh release view "${{ github.event.release.tag_name }}" --json databaseId --jq '.databaseId')"
+          if [ -z "${release_id}" ] || [ "${release_id}" = "null" ]; then
+            echo "error: failed to resolve release id for ${{ github.event.release.tag_name }}" >&2
+            exit 1
+          fi
+          gh api -X PATCH "repos/{owner}/{repo}/releases/${release_id}" \
+            -F prerelease=false \
+            -f make_latest=true
