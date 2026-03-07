@@ -2,7 +2,6 @@
 
 `nirvash` は、Rust から時相論理ベースの仕様を書き、そのまま形式検証できるライブラリです。  
 `nirvash-core` はその中核で、bounded domain、reachable graph 探索、LTL/TLA+ practical subset、fairness、counterexample trace、structural exhaustive test の土台を提供します。
-`nirvash` は Rust から時相論理の仕様を書き、そのまま形式検証するためのライブラリです。
 
 ## What It Provides
 
@@ -90,4 +89,11 @@ fn main() {
 }
 ```
 
-これにより `#[formal_tests(...)]` が付いた spec では reachable graph から生成した Mermaid の `State Graph` section が、すべての spec では registered invariant / property / fairness / constraint / subsystem 一覧を含む Mermaid の `Meta Model` section が rustdoc 上に注入されます。Mermaid runtime は local asset として `target/doc/static.files/` に配置されるため、生成物は CDN なしでそのまま表示できます。`build.rs` は再帰ビルドを避けるために `NIRVASH_DOCGEN_SKIP` を尊重します。
+これにより `#[formal_tests(...)]` が付いた spec では reachable graph から生成した Mermaid の `State Graph` section が、すべての spec では registered invariant / property / fairness / constraint / subsystem 一覧を含む Mermaid の `Meta Model` section が rustdoc 上に注入されます。Mermaid runtime は local asset として `target/doc/static.files/` に配置されるため、`cargo doc --open` でも CDN なしでそのまま表示できます。`build.rs` は再帰ビルドを避けるために `NIRVASH_DOCGEN_SKIP` を尊重します。
+
+## State Graph Rendering
+
+- `State Graph` の node は Mermaid の丸ノードで描画されます。
+- node label は full state 全体ではなく、`initial` か `from Sx` に続く「前状態から変化した行」だけを表示します。
+- full state の `Debug` 出力は図の下の `<details>` に畳み込まれた `Full State Legend` に残るため、図自体は密度を抑えつつ詳細も追えます。
+- edge label は Mermaid parser が壊れないよう quoted label として出力されるため、`Manager(LoadExistingConfig)` のような括弧付き action 名もそのまま扱えます。
