@@ -396,7 +396,6 @@ impl TransitionSystem for CommandProtocolSpec {
     }
 }
 
-#[cfg(test)]
 #[nirvash_macros::formal_tests(spec = CommandProtocolSpec, init = initial_state)]
 const _: () = ();
 

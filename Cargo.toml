@@ -116,6 +116,7 @@ imago-plugin-imago-usb = { path = "plugins/imago-usb", version = "0.2.0" }
 imago-plugin-nanokvm-plugin = { path = "plugins/imago-plugin-nanokvm-plugin", version = "0.1.0" }
 imago-plugin-macros = { path = "crates/imago-plugin-macros", version = "0.2.0" }
 nirvash-core = { path = "crates/nirvash-core", version = "0.2.0" }
+nirvash-docgen = { path = "crates/nirvash-docgen", version = "0.2.0" }
 nirvash-macros = { path = "crates/nirvash-macros", version = "0.2.0" }
 imago-project-config = { path = "crates/imago-project-config", version = "0.2.0" }
 imago-protocol = { path = "crates/imago-protocol", version = "0.2.0" }

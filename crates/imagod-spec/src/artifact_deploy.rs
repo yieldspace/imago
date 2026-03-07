@@ -317,7 +317,6 @@ impl TransitionSystem for ArtifactDeploySpec {
     }
 }
 
-#[cfg(test)]
 #[nirvash_macros::formal_tests(spec = ArtifactDeploySpec, init = initial_state)]
 const _: () = ();
 

@@ -40,7 +40,27 @@ impl ImagodSystemStateSignatureSpec for ImagodSystemState {
     fn representatives() -> BoundedDomain<Self> {
         let spec = ImagodSystemSpec::new();
         let init = spec.initial_state();
-        let running = ImagodSystemState {
+        let manager_config_ready = ImagodSystemState {
+            manager: ManagerShellState {
+                phase: ManagerShellPhase::ConfigReady,
+                config_loaded: true,
+                created_default: false,
+                plugin_gc: crate::manager_shell::TaskState::NotStarted,
+                boot_restore: crate::manager_shell::TaskState::NotStarted,
+            },
+            ..init.clone()
+        };
+        let manager_restoring = ImagodSystemState {
+            manager: ManagerShellState {
+                phase: ManagerShellPhase::Restoring,
+                config_loaded: true,
+                created_default: false,
+                plugin_gc: crate::manager_shell::TaskState::Succeeded,
+                boot_restore: crate::manager_shell::TaskState::NotStarted,
+            },
+            ..init.clone()
+        };
+        let manager_listening = ImagodSystemState {
             manager: ManagerShellState {
                 phase: ManagerShellPhase::Listening,
                 config_loaded: true,
@@ -48,110 +68,212 @@ impl ImagodSystemStateSignatureSpec for ImagodSystemState {
                 plugin_gc: crate::manager_shell::TaskState::Succeeded,
                 boot_restore: crate::manager_shell::TaskState::Succeeded,
             },
-            transport: SessionTransportState {
-                active_sessions: crate::bounds::SessionSlots::new(1).expect("within bounds"),
-                shutdown_requested: false,
-                last_outcome: crate::session_transport::SessionOutcome::Accepted,
+            ..init.clone()
+        };
+        let upload_partial = ImagodSystemState {
+            deploy: ArtifactDeployState {
+                upload: crate::artifact_deploy::UploadStage::Partial,
+                release: ReleaseStage::None,
+                precondition_ok: false,
+                auto_rollback: true,
+                chunks: crate::bounds::ArtifactChunks::new(1).expect("within bounds"),
             },
-            command: CommandProtocolState {
-                command_type: Some(CommandType::Run),
-                command_state: Some(CommandState::Running),
-                cancel_requested: false,
-                last_error: None,
-                state_poll_allowed: true,
+            ..manager_listening.clone()
+        };
+        let upload_complete = ImagodSystemState {
+            deploy: ArtifactDeployState {
+                upload: crate::artifact_deploy::UploadStage::Complete,
+                ..upload_partial.deploy
             },
+            ..upload_partial.clone()
+        };
+        let upload_committed = ImagodSystemState {
             deploy: ArtifactDeployState {
                 upload: crate::artifact_deploy::UploadStage::Committed,
-                release: ReleaseStage::Promoted,
-                precondition_ok: true,
-                auto_rollback: true,
-                chunks: crate::bounds::ArtifactChunks::new(2).expect("within bounds"),
+                ..upload_complete.deploy
             },
+            ..upload_complete.clone()
+        };
+        let deploy_prepared = ImagodSystemState {
+            deploy: ArtifactDeployState {
+                release: ReleaseStage::Prepared,
+                precondition_ok: true,
+                ..upload_committed.deploy
+            },
+            ..upload_committed.clone()
+        };
+        let deploy_promoted = ImagodSystemState {
+            deploy: ArtifactDeployState {
+                release: ReleaseStage::Promoted,
+                ..deploy_prepared.deploy
+            },
+            ..deploy_prepared.clone()
+        };
+        let service_starting = ImagodSystemState {
             supervision: ServiceSupervisionState {
                 active_services: crate::bounds::ServiceSlots::new(1).expect("within bounds"),
-                phase: ServicePhase::Running,
+                phase: ServicePhase::Starting,
                 retained_logs: false,
             },
+            ..deploy_promoted.clone()
+        };
+        let service_waiting_ready = ImagodSystemState {
+            supervision: ServiceSupervisionState {
+                phase: ServicePhase::WaitingReady,
+                ..service_starting.supervision
+            },
+            ..service_starting.clone()
+        };
+        let bootstrap_decoded = ImagodSystemState {
             bootstrap: RunnerBootstrapState {
                 size: crate::runner_bootstrap::BootstrapSizeClass::WithinBounds,
                 decoded: true,
                 app_type: Some(imagod_ipc::RunnerAppType::Rpc),
+                endpoint: crate::runner_bootstrap::EndpointState::Missing,
+                auth: crate::runner_bootstrap::AuthProofState::Pending,
+                registered: false,
+                ready: false,
+            },
+            ..service_waiting_ready.clone()
+        };
+        let bootstrap_endpoint_prepared = ImagodSystemState {
+            bootstrap: RunnerBootstrapState {
+                endpoint: crate::runner_bootstrap::EndpointState::Prepared,
+                ..bootstrap_decoded.bootstrap
+            },
+            ..bootstrap_decoded.clone()
+        };
+        let runner_registered = ImagodSystemState {
+            bootstrap: RunnerBootstrapState {
                 endpoint: crate::runner_bootstrap::EndpointState::Prepared,
                 auth: crate::runner_bootstrap::AuthProofState::Verified,
                 registered: true,
-                ready: true,
+                ..bootstrap_endpoint_prepared.bootstrap
             },
+            ..bootstrap_endpoint_prepared.clone()
+        };
+        let runner_ready_running = ImagodSystemState {
+            bootstrap: RunnerBootstrapState {
+                ready: true,
+                ..runner_registered.bootstrap
+            },
+            supervision: ServiceSupervisionState {
+                phase: ServicePhase::Running,
+                ..runner_registered.supervision
+            },
+            ..runner_registered.clone()
+        };
+        let runtime_mode_selected = ImagodSystemState {
             runtime: RunnerRuntimeState {
                 mode: Some(imagod_ipc::RunnerAppType::Rpc),
-                phase: RuntimePhase::Serving,
+                phase: RuntimePhase::Idle,
                 http_queue_depth: crate::bounds::HttpQueueDepth::new(0).expect("within bounds"),
-                epoch_ticks: crate::bounds::EpochTicks::new(1).expect("within bounds"),
-                component: crate::runner_runtime::ComponentLoadClass::Loadable,
+                epoch_ticks: crate::bounds::EpochTicks::new(0).expect("within bounds"),
+                component: crate::runner_runtime::ComponentLoadClass::Unknown,
                 tuning: crate::runner_runtime::WasmTuningClass::Default,
                 socket_policy: crate::runner_runtime::SocketPolicyClass::NotApplicable,
             },
-            plugin: PluginCapabilityState {
-                plugin_kind: Some(imagod_ipc::PluginKind::Wasm),
-                graph: crate::plugin_capability::DependencyGraphClass::Acyclic,
-                provider: crate::plugin_capability::ProviderResolutionClass::Dependency,
-                capability: crate::plugin_capability::CapabilityDecision::Allowed,
-                http_outbound: crate::plugin_capability::HttpOutboundClass::Host,
-            },
-            shutdown: ShutdownFlowState {
-                phase: ShutdownPhase::Idle,
-                accepts_stopped: false,
-                sessions_drained: false,
-                services_stopped: false,
-                maintenance_stopped: false,
-                forced_stop_attempted: false,
-            },
+            ..runner_ready_running.clone()
         };
-        let completed = ImagodSystemState {
+        let runtime_component_validated = ImagodSystemState {
+            runtime: RunnerRuntimeState {
+                phase: RuntimePhase::ComponentValidated,
+                component: crate::runner_runtime::ComponentLoadClass::Loadable,
+                ..runtime_mode_selected.runtime
+            },
+            ..runtime_mode_selected.clone()
+        };
+        let runtime_serving = ImagodSystemState {
+            runtime: RunnerRuntimeState {
+                phase: RuntimePhase::Serving,
+                ..runtime_component_validated.runtime
+            },
+            ..runtime_component_validated.clone()
+        };
+        let shutdown_signal_received = ImagodSystemState {
             manager: ManagerShellState {
-                phase: ManagerShellPhase::Stopped,
-                ..running.manager
+                phase: ManagerShellPhase::ShutdownRequested,
+                ..runtime_serving.manager
             },
             transport: SessionTransportState {
-                active_sessions: crate::bounds::SessionSlots::new(0).expect("within bounds"),
                 shutdown_requested: true,
-                last_outcome: crate::session_transport::SessionOutcome::Joined,
+                last_outcome: crate::session_transport::SessionOutcome::None,
+                ..runtime_serving.transport
             },
-            command: CommandProtocolState {
-                command_type: None,
-                command_state: None,
-                cancel_requested: false,
-                last_error: None,
-                state_poll_allowed: false,
+            shutdown: ShutdownFlowState {
+                phase: ShutdownPhase::SignalReceived,
+                ..runtime_serving.shutdown
             },
-            deploy: running.deploy,
-            supervision: ServiceSupervisionState {
-                active_services: crate::bounds::ServiceSlots::new(0).expect("within bounds"),
-                phase: ServicePhase::Reaped,
-                retained_logs: true,
+            ..runtime_serving.clone()
+        };
+        let shutdown_draining_sessions = ImagodSystemState {
+            shutdown: ShutdownFlowState {
+                phase: ShutdownPhase::DrainingSessions,
+                accepts_stopped: true,
+                ..shutdown_signal_received.shutdown
             },
-            bootstrap: running.bootstrap,
-            runtime: RunnerRuntimeState {
-                phase: RuntimePhase::Failed,
-                ..running.runtime
+            ..shutdown_signal_received.clone()
+        };
+        let shutdown_stopping_services = ImagodSystemState {
+            shutdown: ShutdownFlowState {
+                phase: ShutdownPhase::StoppingServices,
+                sessions_drained: true,
+                ..shutdown_draining_sessions.shutdown
             },
-            plugin: running.plugin.clone(),
+            ..shutdown_draining_sessions.clone()
+        };
+        let shutdown_stopping_maintenance = ImagodSystemState {
+            shutdown: ShutdownFlowState {
+                phase: ShutdownPhase::StoppingMaintenance,
+                services_stopped: true,
+                ..shutdown_stopping_services.shutdown
+            },
+            ..shutdown_stopping_services.clone()
+        };
+        let shutdown_maintenance_stopped = ImagodSystemState {
+            shutdown: ShutdownFlowState {
+                maintenance_stopped: true,
+                ..shutdown_stopping_maintenance.shutdown
+            },
+            ..shutdown_stopping_maintenance.clone()
+        };
+        let shutdown_completed = ImagodSystemState {
+            manager: ManagerShellState {
+                phase: ManagerShellPhase::Stopped,
+                ..shutdown_maintenance_stopped.manager
+            },
             shutdown: ShutdownFlowState {
                 phase: ShutdownPhase::Completed,
-                accepts_stopped: true,
-                sessions_drained: true,
-                services_stopped: true,
-                maintenance_stopped: true,
-                forced_stop_attempted: false,
+                ..shutdown_maintenance_stopped.shutdown
             },
+            ..shutdown_maintenance_stopped.clone()
         };
-        let completed = ImagodSystemState {
-            bootstrap: RunnerBootstrapState {
-                ready: false,
-                ..completed.bootstrap
-            },
-            ..completed
-        };
-        BoundedDomain::new(vec![init, running, completed])
+        BoundedDomain::new(vec![
+            init,
+            manager_config_ready,
+            manager_restoring,
+            manager_listening,
+            upload_partial,
+            upload_complete,
+            upload_committed,
+            deploy_prepared,
+            deploy_promoted,
+            service_starting,
+            service_waiting_ready,
+            bootstrap_decoded,
+            bootstrap_endpoint_prepared,
+            runner_registered,
+            runner_ready_running,
+            runtime_mode_selected,
+            runtime_component_validated,
+            runtime_serving,
+            shutdown_signal_received,
+            shutdown_draining_sessions,
+            shutdown_stopping_services,
+            shutdown_stopping_maintenance,
+            shutdown_maintenance_stopped,
+            shutdown_completed,
+        ])
     }
 
     fn signature_invariant(&self) -> bool {
@@ -286,6 +408,11 @@ fn runtime_can_serve_after_release_and_ready() -> Ltl<ImagodSystemState, ImagodS
             matches!(state.deploy.release, ReleaseStage::Promoted)
                 && state.bootstrap.ready
                 && matches!(state.supervision.phase, ServicePhase::Running)
+                && matches!(state.runtime.phase, RuntimePhase::ComponentValidated)
+                && matches!(
+                    state.runtime.component,
+                    crate::runner_runtime::ComponentLoadClass::Loadable
+                )
         })),
         Ltl::pred(StatePredicate::new("runtime_serving", |state| {
             matches!(state.runtime.phase, RuntimePhase::Serving)
@@ -338,8 +465,7 @@ fn shutdown_progress_fairness() -> Fairness<ImagodSystemState, ImagodSystemActio
     Fairness::weak(StepPredicate::new(
         "shutdown_progress",
         |prev, action, next| {
-            matches!(action, ImagodSystemAction::Shutdown(_))
-                && prev.shutdown.phase != next.shutdown.phase
+            matches!(action, ImagodSystemAction::Shutdown(_)) && prev.shutdown != next.shutdown
         },
     ))
 }
@@ -596,7 +722,6 @@ fn cross_links_hold(state: &ImagodSystemState) -> bool {
         ) || matches!(state.manager.phase, ManagerShellPhase::Listening))
 }
 
-#[cfg(test)]
 #[nirvash_macros::formal_tests(
     spec = ImagodSystemSpec,
     init = initial_state,
@@ -607,6 +732,8 @@ const _: () = ();
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nirvash_core::ModelChecker;
+
     use crate::{
         manager_shell::TaskState,
         runner_bootstrap::{AuthProofState, BootstrapSizeClass, EndpointState},
@@ -712,5 +839,27 @@ mod tests {
             &ImagodSystemAction::Shutdown(ShutdownFlowAction::ReceiveSignal),
             &next,
         ));
+    }
+
+    #[test]
+    fn reachable_graph_contains_listening_serving_and_completed_checkpoints() {
+        let spec = ImagodSystemSpec::new();
+        let snapshot = ModelChecker::new(&spec)
+            .reachable_graph_snapshot()
+            .expect("reachable graph snapshot");
+
+        assert!(snapshot.states.iter().any(|state| {
+            matches!(state.manager.phase, ManagerShellPhase::Listening)
+                && matches!(state.deploy.release, ReleaseStage::Promoted)
+        }));
+        assert!(snapshot.states.iter().any(|state| {
+            matches!(state.runtime.phase, RuntimePhase::Serving)
+                && state.bootstrap.ready
+                && matches!(state.supervision.phase, ServicePhase::Running)
+        }));
+        assert!(snapshot.states.iter().any(|state| {
+            matches!(state.shutdown.phase, ShutdownPhase::Completed)
+                && matches!(state.manager.phase, ManagerShellPhase::Stopped)
+        }));
     }
 }

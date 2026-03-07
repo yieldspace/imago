@@ -1,0 +1,1875 @@
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    env,
+    error::Error,
+    fmt, fs, io,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+use nirvash_core::DocGraphSpec;
+use quote::ToTokens;
+use serde::Deserialize;
+use syn::{
+    Attribute, ImplItem, Item, ItemFn, ItemImpl, ItemMacro, ItemMod, LitStr, Path as SynPath,
+    PathArguments, Type,
+};
+
+type DynError = Box<dyn Error>;
+
+const CATEGORY_ORDER: [RegistrationKind; 7] = [
+    RegistrationKind::Invariant,
+    RegistrationKind::Illegal,
+    RegistrationKind::Property,
+    RegistrationKind::Fairness,
+    RegistrationKind::StateConstraint,
+    RegistrationKind::ActionConstraint,
+    RegistrationKind::Symmetry,
+];
+const MERMAID_ASSET_SOURCE: &str = "assets/mermaid/mermaid.min.js";
+const MERMAID_ASSET_DIR: &str = "nirvash-mermaid";
+const MERMAID_ASSET_FILE: &str = "mermaid.min.js";
+const MERMAID_RENDER_SCRIPT: &str = r#"<script>
+(() => {
+  const meta = document.querySelector('meta[name="rustdoc-vars"]');
+  const staticRoot = meta?.getAttribute('data-static-root-path') ?? '../static.files/';
+  const registry = globalThis.__nirvashMermaidRegistry ??= {
+    loading: false,
+    loaded: false,
+    initialized: false,
+    nextId: 0,
+  };
+
+  const currentTheme = () => {
+    const rustdocTheme = globalThis.localStorage?.getItem('rustdoc-theme');
+    return rustdocTheme === 'dark' || rustdocTheme === 'ayu' ? 'dark' : 'default';
+  };
+
+  const renderBlocks = async () => {
+    const mermaid = globalThis.mermaid;
+    if (!mermaid) {
+      return;
+    }
+
+    if (!registry.initialized) {
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: 'loose',
+        theme: currentTheme(),
+      });
+      registry.initialized = true;
+    }
+
+    const blocks = [...document.querySelectorAll('pre.nirvash-mermaid:not([data-nirvash-rendered="true"])')];
+    for (const block of blocks) {
+      block.dataset.nirvashRendered = 'true';
+      const source = block.textContent ?? '';
+      const id = `nirvash-mermaid-${registry.nextId++}`;
+      try {
+        const { svg } = await mermaid.render(id, source);
+        const container = document.createElement('div');
+        container.className = 'nirvash-mermaid-diagram';
+        container.innerHTML = svg;
+        block.replaceWith(container);
+      } catch (error) {
+        console.error('nirvash mermaid render failed', error);
+      }
+    }
+  };
+
+  if (registry.loaded && globalThis.mermaid) {
+    void renderBlocks();
+    return;
+  }
+
+  if (registry.loading) {
+    return;
+  }
+
+  registry.loading = true;
+  const script = document.createElement('script');
+  script.src = `${staticRoot}nirvash-mermaid/mermaid.min.js`;
+  script.async = true;
+  script.onload = () => {
+    registry.loading = false;
+    registry.loaded = true;
+    void renderBlocks();
+  };
+  script.onerror = (error) => {
+    registry.loading = false;
+    console.error('nirvash mermaid runtime failed to load', error);
+  };
+  document.head.appendChild(script);
+})();
+</script>"#;
+
+/// Generate rustdoc fragments for `nirvash` specs in the current crate.
+pub fn generate() -> Result<(), Box<dyn Error>> {
+    if env::var_os("NIRVASH_DOCGEN_SKIP").is_some() {
+        return Ok(());
+    }
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
+    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
+    let output = generate_at(&manifest_dir, &out_dir)?;
+    for path in &output.rerun_if_changed {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    for path in copy_doc_assets(&out_dir)? {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    for fragment in &output.fragments {
+        println!(
+            "cargo:rustc-env={}={}",
+            fragment.env_key,
+            fragment.path.display()
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct MessageError(String);
+
+impl fmt::Display for MessageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Error for MessageError {}
+
+fn err(message: impl Into<String>) -> DynError {
+    Box::new(MessageError(message.into()))
+}
+
+fn copy_doc_assets(out_dir: &Path) -> Result<Vec<PathBuf>, DynError> {
+    let asset_source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(MERMAID_ASSET_SOURCE);
+    let target_dir = doc_static_files_dir(out_dir).join(MERMAID_ASSET_DIR);
+    fs::create_dir_all(&target_dir).map_err(|error| {
+        err(format!(
+            "failed to create rustdoc asset directory {}: {error}",
+            target_dir.display()
+        ))
+    })?;
+
+    let destination = target_dir.join(MERMAID_ASSET_FILE);
+    copy_if_changed(&asset_source, &destination).map_err(|error| {
+        err(format!(
+            "failed to copy mermaid asset {} -> {}: {error}",
+            asset_source.display(),
+            destination.display()
+        ))
+    })?;
+
+    Ok(vec![asset_source])
+}
+
+fn doc_static_files_dir(out_dir: &Path) -> PathBuf {
+    for ancestor in out_dir.ancestors() {
+        if ancestor.file_name().and_then(|value| value.to_str()) == Some("target") {
+            return ancestor.join("doc").join("static.files");
+        }
+    }
+    out_dir.join("doc").join("static.files")
+}
+
+fn copy_if_changed(source: &Path, destination: &Path) -> io::Result<()> {
+    let needs_copy = match fs::read(destination) {
+        Ok(existing) => existing != fs::read(source)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error),
+    };
+
+    if needs_copy {
+        fs::copy(source, destination)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct GenerationOutput {
+    fragments: Vec<GeneratedFragment>,
+    rerun_if_changed: Vec<PathBuf>,
+}
+
+#[derive(Debug)]
+struct GeneratedFragment {
+    env_key: String,
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpecKind {
+    Subsystem,
+    System,
+}
+
+impl SpecKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Subsystem => "subsystem_spec",
+            Self::System => "system_spec",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RegistrationKind {
+    Invariant,
+    Illegal,
+    Property,
+    Fairness,
+    StateConstraint,
+    ActionConstraint,
+    Symmetry,
+}
+
+impl RegistrationKind {
+    fn attr_name(self) -> &'static str {
+        match self {
+            Self::Invariant => "invariant",
+            Self::Illegal => "illegal",
+            Self::Property => "property",
+            Self::Fairness => "fairness",
+            Self::StateConstraint => "state_constraint",
+            Self::ActionConstraint => "action_constraint",
+            Self::Symmetry => "symmetry",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        self.attr_name()
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct SpecDoc {
+    kind: Option<SpecKind>,
+    full_path: Vec<String>,
+    tail_ident: String,
+    state_ty: String,
+    action_ty: String,
+    checker_config: Option<String>,
+    subsystems: Vec<String>,
+    registrations: BTreeMap<RegistrationKind, Vec<String>>,
+    doc_graphs: Vec<nirvash_core::DocGraphCase>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingSpec {
+    kind: SpecKind,
+    full_path: Vec<String>,
+    tail_ident: String,
+    state_ty: String,
+    action_ty: String,
+    checker_config: Option<String>,
+    subsystems: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingRegistration {
+    kind: RegistrationKind,
+    target_spec: Vec<String>,
+    function_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoMetadata {
+    packages: Vec<CargoPackage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoPackage {
+    name: String,
+    manifest_path: PathBuf,
+    targets: Vec<CargoTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoTarget {
+    kind: Vec<String>,
+}
+
+struct SourceCollector {
+    visited: HashSet<PathBuf>,
+    rerun_if_changed: BTreeSet<PathBuf>,
+    specs: Vec<PendingSpec>,
+    registrations: Vec<PendingRegistration>,
+}
+
+impl SourceCollector {
+    fn new() -> Self {
+        Self {
+            visited: HashSet::new(),
+            rerun_if_changed: BTreeSet::new(),
+            specs: Vec::new(),
+            registrations: Vec::new(),
+        }
+    }
+
+    fn collect_root(&mut self, manifest_dir: &Path) -> Result<(), DynError> {
+        let src_dir = manifest_dir.join("src");
+        let root = src_dir.join("lib.rs");
+        self.collect_file(&root, &[], &src_dir)
+    }
+
+    fn collect_file(
+        &mut self,
+        file: &Path,
+        module_path: &[String],
+        module_dir: &Path,
+    ) -> Result<(), DynError> {
+        let canonical = fs::canonicalize(file)
+            .map_err(|error| err(format!("failed to resolve {}: {error}", file.display())))?;
+        if !self.visited.insert(canonical) {
+            return Ok(());
+        }
+        self.rerun_if_changed.insert(file.to_path_buf());
+
+        let source = fs::read_to_string(file)
+            .map_err(|error| err(format!("failed to read {}: {error}", file.display())))?;
+        let parsed = syn::parse_file(&source)
+            .map_err(|error| err(format!("failed to parse {}: {error}", file.display())))?;
+        self.collect_items(&parsed.items, module_path, module_dir)
+    }
+
+    fn collect_items(
+        &mut self,
+        items: &[Item],
+        module_path: &[String],
+        module_dir: &Path,
+    ) -> Result<(), DynError> {
+        for item in items {
+            let attrs = item_attrs(item);
+            if is_cfg_test(attrs) {
+                continue;
+            }
+            match item {
+                Item::Mod(item_mod) => self.collect_module(item_mod, module_path, module_dir)?,
+                Item::Impl(item_impl) => self.collect_spec(item_impl, module_path)?,
+                Item::Fn(item_fn) => self.collect_registration(item_fn, module_path)?,
+                Item::Macro(item_macro) => {
+                    self.collect_macro_registration(item_macro, module_path)?
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_module(
+        &mut self,
+        item_mod: &ItemMod,
+        module_path: &[String],
+        module_dir: &Path,
+    ) -> Result<(), DynError> {
+        if has_path_attr(&item_mod.attrs) {
+            return Err(err(format!(
+                "unsupported #[path = ...] on module `{}` in nirvash-docgen",
+                item_mod.ident
+            )));
+        }
+
+        let mut next_module_path = module_path.to_vec();
+        next_module_path.push(item_mod.ident.to_string());
+        let next_module_dir = module_dir.join(item_mod.ident.to_string());
+
+        if let Some((_, items)) = &item_mod.content {
+            return self.collect_items(items, &next_module_path, &next_module_dir);
+        }
+
+        let file = resolve_module_file(item_mod, module_dir)?;
+        self.collect_file(&file, &next_module_path, &next_module_dir)
+    }
+
+    fn collect_spec(
+        &mut self,
+        item_impl: &ItemImpl,
+        module_path: &[String],
+    ) -> Result<(), DynError> {
+        let mut spec_kind = None;
+        let mut args = ParsedSpecArgs::default();
+        for attr in &item_impl.attrs {
+            if attr.path().is_ident("subsystem_spec") {
+                spec_kind = Some(SpecKind::Subsystem);
+                args = parse_spec_args(attr)?;
+            } else if attr.path().is_ident("system_spec") {
+                spec_kind = Some(SpecKind::System);
+                args = parse_spec_args(attr)?;
+            }
+        }
+        let Some(kind) = spec_kind else {
+            return Ok(());
+        };
+
+        let self_path = match &*item_impl.self_ty {
+            Type::Path(type_path) if type_path.qself.is_none() => &type_path.path,
+            _ => {
+                return Err(err(
+                    "nirvash-docgen only supports impl TransitionSystem for <simple path>",
+                ));
+            }
+        };
+        let full_path = normalize_path(self_path, module_path)?;
+        let tail_ident = full_path
+            .last()
+            .cloned()
+            .ok_or_else(|| err("spec path cannot be empty"))?;
+
+        let state_ty = associated_type_string(item_impl, "State")?;
+        let action_ty = associated_type_string(item_impl, "Action")?;
+
+        self.specs.push(PendingSpec {
+            kind,
+            full_path,
+            tail_ident,
+            state_ty,
+            action_ty,
+            checker_config: args.checker_config,
+            subsystems: args.subsystems,
+        });
+        Ok(())
+    }
+
+    fn collect_registration(
+        &mut self,
+        item_fn: &ItemFn,
+        module_path: &[String],
+    ) -> Result<(), DynError> {
+        for attr in &item_fn.attrs {
+            let Some(kind) = registration_kind(attr) else {
+                continue;
+            };
+            let target: SynPath = attr.parse_args().map_err(|error| {
+                err(format!(
+                    "failed to parse #[{}(...)] on `{}`: {error}",
+                    kind.attr_name(),
+                    item_fn.sig.ident
+                ))
+            })?;
+            self.registrations.push(PendingRegistration {
+                kind,
+                target_spec: normalize_path(&target, module_path)?,
+                function_name: item_fn.sig.ident.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn collect_macro_registration(
+        &mut self,
+        item_macro: &ItemMacro,
+        module_path: &[String],
+    ) -> Result<(), DynError> {
+        let Some(kind) = registration_kind_for_path(&item_macro.mac.path) else {
+            return Ok(());
+        };
+
+        let parsed = if kind == RegistrationKind::Fairness {
+            let parsed: ParsedFairnessMacroRegistration =
+                syn::parse2(item_macro.mac.tokens.clone()).map_err(|error| {
+                    err(format!(
+                        "failed to parse `{}` declaration macro: {error}",
+                        pretty_tokens(&item_macro.mac.path)
+                    ))
+                })?;
+            ParsedMacroRegistration {
+                target_spec: parsed.target_spec,
+                function_name: parsed.function_name,
+            }
+        } else {
+            syn::parse2::<ParsedMacroRegistration>(item_macro.mac.tokens.clone()).map_err(
+                |error| {
+                    err(format!(
+                        "failed to parse `{}` declaration macro: {error}",
+                        pretty_tokens(&item_macro.mac.path)
+                    ))
+                },
+            )?
+        };
+
+        self.registrations.push(PendingRegistration {
+            kind,
+            target_spec: normalize_path(&parsed.target_spec, module_path)?,
+            function_name: parsed.function_name,
+        });
+        Ok(())
+    }
+
+    fn finish(self, manifest_dir: &Path, out_dir: &Path) -> Result<GenerationOutput, DynError> {
+        let mut by_path = BTreeMap::<String, SpecDoc>::new();
+        let mut tail_to_path = HashMap::<String, String>::new();
+
+        for spec in self.specs {
+            let path_key = path_key(&spec.full_path);
+            if let Some(existing) = tail_to_path.get(&spec.tail_ident) {
+                return Err(err(format!(
+                    "duplicate spec tail ident `{}` for `{existing}` and `{}`",
+                    spec.tail_ident, path_key
+                )));
+            }
+            tail_to_path.insert(spec.tail_ident.clone(), path_key.clone());
+            by_path.insert(
+                path_key,
+                SpecDoc {
+                    kind: Some(spec.kind),
+                    full_path: spec.full_path,
+                    tail_ident: spec.tail_ident,
+                    state_ty: spec.state_ty,
+                    action_ty: spec.action_ty,
+                    checker_config: spec.checker_config,
+                    subsystems: spec.subsystems,
+                    registrations: BTreeMap::new(),
+                    doc_graphs: Vec::new(),
+                },
+            );
+        }
+
+        for registration in self.registrations {
+            let key = path_key(&registration.target_spec);
+            let Some(spec) = by_path.get_mut(&key) else {
+                return Err(err(format!(
+                    "registration `{}` targets unknown spec `{}`",
+                    registration.function_name, key
+                )));
+            };
+            spec.registrations
+                .entry(registration.kind)
+                .or_default()
+                .push(registration.function_name);
+        }
+
+        let runtime_spec_paths = by_path
+            .values()
+            .map(|spec| spec.full_path.clone())
+            .collect::<Vec<_>>();
+        for runtime_spec in collect_runtime_graphs(manifest_dir, out_dir, &runtime_spec_paths)? {
+            if let Some(path_key) = tail_to_path.get(&runtime_spec.spec_name)
+                && let Some(spec) = by_path.get_mut(path_key)
+            {
+                spec.doc_graphs = runtime_spec.cases;
+            }
+        }
+
+        let doc_dir = out_dir.join("nirvash-doc");
+        fs::create_dir_all(&doc_dir).map_err(|error| {
+            err(format!(
+                "failed to create documentation fragment directory {}: {error}",
+                doc_dir.display()
+            ))
+        })?;
+
+        let mut fragments = Vec::new();
+        for spec in by_path.values_mut() {
+            for names in spec.registrations.values_mut() {
+                names.sort();
+            }
+            let env_key = format!("NIRVASH_DOC_FRAGMENT_{}", to_upper_snake(&spec.tail_ident));
+            let path = doc_dir.join(format!("{}.md", spec.tail_ident));
+            fs::write(&path, render_fragment(spec)).map_err(|error| {
+                err(format!(
+                    "failed to write documentation fragment {}: {error}",
+                    path.display()
+                ))
+            })?;
+            fragments.push(GeneratedFragment { env_key, path });
+        }
+
+        fragments.sort_by(|left, right| left.env_key.cmp(&right.env_key));
+
+        Ok(GenerationOutput {
+            fragments,
+            rerun_if_changed: self.rerun_if_changed.into_iter().collect(),
+        })
+    }
+}
+
+#[derive(Default)]
+struct ParsedSpecArgs {
+    checker_config: Option<String>,
+    subsystems: Vec<String>,
+}
+
+impl syn::parse::Parse for ParsedSpecArgs {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        let mut args = Self::default();
+
+        while !input.is_empty() {
+            let ident: syn::Ident = input.parse()?;
+            let content;
+            syn::parenthesized!(content in input);
+            match ident.to_string().as_str() {
+                "checker_config" => {
+                    let path: SynPath = content.parse()?;
+                    if !content.is_empty() {
+                        return Err(syn::Error::new(
+                            content.span(),
+                            "expected checker_config(...) to contain exactly one function path",
+                        ));
+                    }
+                    args.checker_config = Some(path_to_string_syn(&path)?);
+                }
+                "subsystems" => {
+                    while !content.is_empty() {
+                        let value: LitStr = content.parse()?;
+                        args.subsystems.push(value.value());
+                        if content.peek(syn::Token![,]) {
+                            let _ = content.parse::<syn::Token![,]>()?;
+                        }
+                    }
+                }
+                other => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        format!("unsupported nirvash spec argument `{other}`"),
+                    ));
+                }
+            }
+
+            if input.peek(syn::Token![,]) {
+                let _ = input.parse::<syn::Token![,]>()?;
+            }
+        }
+
+        Ok(args)
+    }
+}
+
+fn generate_at(manifest_dir: &Path, out_dir: &Path) -> Result<GenerationOutput, DynError> {
+    let mut collector = SourceCollector::new();
+    collector.collect_root(manifest_dir)?;
+    collector
+        .rerun_if_changed
+        .insert(manifest_dir.join("Cargo.toml"));
+    collector.finish(manifest_dir, out_dir)
+}
+
+fn collect_runtime_graphs(
+    manifest_dir: &Path,
+    out_dir: &Path,
+    spec_paths: &[Vec<String>],
+) -> Result<Vec<DocGraphSpec>, DynError> {
+    let manifest_path = manifest_dir.join("Cargo.toml");
+    if !manifest_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let metadata = read_cargo_metadata(&manifest_path)?;
+    let canonical_manifest = fs::canonicalize(&manifest_path).map_err(|error| {
+        err(format!(
+            "failed to resolve manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    let current_package = metadata
+        .packages
+        .iter()
+        .find(|package| {
+            fs::canonicalize(&package.manifest_path)
+                .map(|path| path == canonical_manifest)
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| {
+            err(format!(
+                "failed to locate current package for {} in cargo metadata",
+                manifest_path.display()
+            ))
+        })?;
+    current_package
+        .targets
+        .iter()
+        .find(|target| target.kind.iter().any(|kind| kind == "lib"))
+        .ok_or_else(|| {
+            err(format!(
+                "nirvash-docgen requires a library target in package `{}`",
+                current_package.name
+            ))
+        })?;
+    let nirvash_core_manifest = metadata
+        .packages
+        .iter()
+        .find(|package| package.name == "nirvash-core")
+        .and_then(|package| package.manifest_path.parent().map(Path::to_path_buf))
+        .ok_or_else(|| err("failed to locate `nirvash-core` package in cargo metadata"))?;
+
+    let runner_dir = out_dir.join("nirvash-doc-runner");
+    let runner_src_dir = runner_dir.join("src");
+    fs::create_dir_all(&runner_src_dir).map_err(|error| {
+        err(format!(
+            "failed to create runtime graph runner directory {}: {error}",
+            runner_src_dir.display()
+        ))
+    })?;
+
+    let runner_manifest = runner_dir.join("Cargo.toml");
+    let runner_main = runner_src_dir.join("main.rs");
+    fs::write(
+        &runner_manifest,
+        render_runner_manifest(manifest_dir, &current_package.name, &nirvash_core_manifest),
+    )
+    .map_err(|error| {
+        err(format!(
+            "failed to write runtime graph runner manifest {}: {error}",
+            runner_manifest.display()
+        ))
+    })?;
+    fs::write(&runner_main, render_runner_main(spec_paths)).map_err(|error| {
+        err(format!(
+            "failed to write runtime graph runner source {}: {error}",
+            runner_main.display()
+        ))
+    })?;
+
+    let output = Command::new(cargo_binary())
+        .arg("run")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(&runner_manifest)
+        .arg("--target-dir")
+        .arg(out_dir.join("nirvash-doc-runner-target"))
+        .env("NIRVASH_DOCGEN_SKIP", "1")
+        .output()
+        .map_err(|error| {
+            err(format!(
+                "failed to execute runtime graph runner {}: {error}",
+                runner_manifest.display()
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(err(format!(
+            "runtime graph runner failed for {}:\n{}",
+            runner_manifest.display(),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+
+    serde_json::from_slice(&output.stdout).map_err(|error| {
+        err(format!(
+            "failed to parse runtime graph output from {}: {error}",
+            runner_manifest.display()
+        ))
+    })
+}
+
+fn read_cargo_metadata(manifest_path: &Path) -> Result<CargoMetadata, DynError> {
+    let output = Command::new(cargo_binary())
+        .arg("metadata")
+        .arg("--format-version")
+        .arg("1")
+        .arg("--manifest-path")
+        .arg(manifest_path)
+        .output()
+        .map_err(|error| {
+            err(format!(
+                "failed to execute `cargo metadata` for {}: {error}",
+                manifest_path.display()
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(err(format!(
+            "`cargo metadata` failed for {}:\n{}",
+            manifest_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+
+    serde_json::from_slice(&output.stdout).map_err(|error| {
+        err(format!(
+            "failed to parse `cargo metadata` output for {}: {error}",
+            manifest_path.display()
+        ))
+    })
+}
+
+fn cargo_binary() -> String {
+    env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned())
+}
+
+fn render_runner_manifest(
+    manifest_dir: &Path,
+    current_package_name: &str,
+    nirvash_core_dir: &Path,
+) -> String {
+    format!(
+        "[package]\nname = \"nirvash-doc-runner\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n[dependencies]\nserde_json = \"1\"\nnirvash_core = {{ package = \"nirvash-core\", path = \"{}\" }}\ndoc_target = {{ package = \"{}\", path = \"{}\" }}\n\n[profile.dev]\ndebug = 0\nincremental = false\n",
+        escape_toml_path(nirvash_core_dir),
+        escape_toml_str(current_package_name),
+        escape_toml_path(manifest_dir),
+    )
+}
+
+fn render_runner_main(spec_paths: &[Vec<String>]) -> String {
+    let mut output = String::from("extern crate doc_target;\n\nfn main() {\n");
+    for path in spec_paths {
+        output.push_str("    ");
+        output.push_str(&render_link_call(path));
+        output.push('\n');
+    }
+    output.push_str(
+        "    let specs = nirvash_core::collect_doc_graph_specs();\n    println!(\"{}\", serde_json::to_string(&specs).expect(\"serialize doc graphs\"));\n}\n",
+    );
+    output
+}
+
+fn escape_toml_path(path: &Path) -> String {
+    path.display().to_string().replace('\\', "\\\\")
+}
+
+fn escape_toml_str(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn render_link_call(spec_path: &[String]) -> String {
+    let (tail, modules) = spec_path
+        .split_last()
+        .expect("spec path always contains at least one segment");
+    let mut path = String::from("doc_target");
+    for module in modules {
+        path.push_str("::");
+        path.push_str(module);
+    }
+    path.push_str("::__nirvash_doc_graph_provider_link_");
+    path.push_str(&tail.to_lowercase());
+    path.push_str("();");
+    path
+}
+
+fn parse_spec_args(attr: &Attribute) -> Result<ParsedSpecArgs, DynError> {
+    if matches!(attr.meta, syn::Meta::Path(_)) {
+        return Ok(ParsedSpecArgs::default());
+    }
+    attr.parse_args::<ParsedSpecArgs>().map_err(|error| {
+        err(format!(
+            "failed to parse #[{}(...)] arguments: {error}",
+            attr.path().to_token_stream()
+        ))
+    })
+}
+
+fn registration_kind(attr: &Attribute) -> Option<RegistrationKind> {
+    registration_kind_for_path(attr.path())
+}
+
+fn registration_kind_for_path(path: &SynPath) -> Option<RegistrationKind> {
+    match path.segments.last()?.ident.to_string().as_str() {
+        "invariant" => Some(RegistrationKind::Invariant),
+        "illegal" => Some(RegistrationKind::Illegal),
+        "property" => Some(RegistrationKind::Property),
+        "fairness" => Some(RegistrationKind::Fairness),
+        "state_constraint" => Some(RegistrationKind::StateConstraint),
+        "action_constraint" => Some(RegistrationKind::ActionConstraint),
+        "symmetry" => Some(RegistrationKind::Symmetry),
+        _ => None,
+    }
+}
+
+struct ParsedMacroRegistration {
+    target_spec: SynPath,
+    function_name: String,
+}
+
+impl syn::parse::Parse for ParsedMacroRegistration {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        let target_spec: SynPath = input.parse()?;
+        input.parse::<syn::Token![,]>()?;
+        let function_name: syn::Ident = input.parse()?;
+        if input.peek(syn::token::Paren) {
+            let content;
+            syn::parenthesized!(content in input);
+            let _: proc_macro2::TokenStream = content.parse()?;
+        }
+        input.parse::<syn::Token![=>]>()?;
+        let _: proc_macro2::TokenStream = input.parse()?;
+        Ok(Self {
+            target_spec,
+            function_name: function_name.to_string(),
+        })
+    }
+}
+
+struct ParsedFairnessMacroRegistration {
+    target_spec: SynPath,
+    function_name: String,
+}
+
+impl syn::parse::Parse for ParsedFairnessMacroRegistration {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        let strength: syn::Ident = input.parse()?;
+        match strength.to_string().as_str() {
+            "weak" | "strong" => {}
+            _ => {
+                return Err(syn::Error::new(
+                    strength.span(),
+                    "fairness! expects `weak` or `strong` before the spec path",
+                ));
+            }
+        }
+
+        let target_spec: SynPath = input.parse()?;
+        input.parse::<syn::Token![,]>()?;
+        let function_name: syn::Ident = input.parse()?;
+        let content;
+        syn::parenthesized!(content in input);
+        let _: proc_macro2::TokenStream = content.parse()?;
+        input.parse::<syn::Token![=>]>()?;
+        let _: proc_macro2::TokenStream = input.parse()?;
+        Ok(Self {
+            target_spec,
+            function_name: function_name.to_string(),
+        })
+    }
+}
+
+fn item_attrs(item: &Item) -> &[Attribute] {
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::ExternCrate(item) => &item.attrs,
+        Item::Fn(item) => &item.attrs,
+        Item::ForeignMod(item) => &item.attrs,
+        Item::Impl(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::TraitAlias(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        Item::Use(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+fn is_cfg_test(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        (attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr"))
+            && attr.meta.to_token_stream().to_string().contains("test")
+    })
+}
+
+fn has_path_attr(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attr| attr.path().is_ident("path"))
+}
+
+fn resolve_module_file(item_mod: &ItemMod, module_dir: &Path) -> Result<PathBuf, DynError> {
+    let module_name = item_mod.ident.to_string();
+    let flat = module_dir.join(format!("{module_name}.rs"));
+    let nested = module_dir.join(&module_name).join("mod.rs");
+
+    match (flat.exists(), nested.exists()) {
+        (true, false) => Ok(flat),
+        (false, true) => Ok(nested),
+        (false, false) => Err(err(format!(
+            "failed to resolve module `{module_name}` under {}",
+            module_dir.display()
+        ))),
+        (true, true) => Err(err(format!(
+            "module `{module_name}` is ambiguous under {}",
+            module_dir.display()
+        ))),
+    }
+}
+
+fn associated_type_string(item_impl: &ItemImpl, name: &str) -> Result<String, DynError> {
+    item_impl
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ImplItem::Type(assoc) if assoc.ident == name => Some(pretty_tokens(&assoc.ty)),
+            _ => None,
+        })
+        .ok_or_else(|| err(format!("missing type {name} = ... in spec impl")))
+}
+
+fn normalize_path(path: &SynPath, module_path: &[String]) -> Result<Vec<String>, DynError> {
+    if path.segments.is_empty() {
+        return Err(err("path cannot be empty"));
+    }
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| {
+            if !matches!(segment.arguments, PathArguments::None) {
+                return Err(err(format!(
+                    "unsupported path argument in `{}`",
+                    segment.ident
+                )));
+            }
+            Ok(segment.ident.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut absolute = Vec::new();
+    let mut index = 0;
+    match segments.first().map(String::as_str) {
+        Some("crate") => index = 1,
+        Some("self") => {
+            absolute.extend_from_slice(module_path);
+            index = 1;
+        }
+        Some("super") => {
+            absolute.extend_from_slice(module_path);
+            while matches!(segments.get(index).map(String::as_str), Some("super")) {
+                if absolute.pop().is_none() {
+                    return Err(err(format!(
+                        "path `{}` escapes above crate root",
+                        path_to_string(path)?
+                    )));
+                }
+                index += 1;
+            }
+        }
+        _ => absolute.extend_from_slice(module_path),
+    }
+
+    absolute.extend(segments.into_iter().skip(index));
+    if absolute.is_empty() {
+        return Err(err("normalized path cannot be empty"));
+    }
+    Ok(absolute)
+}
+
+fn path_key(path: &[String]) -> String {
+    format!("crate::{}", path.join("::"))
+}
+
+fn path_to_string(path: &SynPath) -> Result<String, DynError> {
+    for segment in &path.segments {
+        if !matches!(segment.arguments, PathArguments::None) {
+            return Err(err(format!(
+                "unsupported path argument in `{}`",
+                segment.ident
+            )));
+        }
+    }
+    Ok(path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::"))
+}
+
+fn path_to_string_syn(path: &SynPath) -> syn::Result<String> {
+    for segment in &path.segments {
+        if !matches!(segment.arguments, PathArguments::None) {
+            return Err(syn::Error::new(
+                segment.ident.span(),
+                format!("unsupported path argument in `{}`", segment.ident),
+            ));
+        }
+    }
+    Ok(path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::"))
+}
+
+fn pretty_tokens(value: &impl ToTokens) -> String {
+    let mut text = value.to_token_stream().to_string();
+    for (from, to) in [
+        (" :: ", "::"),
+        (" < ", "<"),
+        (" > ", ">"),
+        (" , ", ", "),
+        (" ( ", "("),
+        (" ) ", ")"),
+        (" [ ", "["),
+        (" ] ", "]"),
+        (" & ", "&"),
+    ] {
+        text = text.replace(from, to);
+    }
+    text
+}
+
+fn to_upper_snake(input: &str) -> String {
+    let mut output = String::new();
+    let mut previous_is_lower = false;
+    for character in input.chars() {
+        if character.is_ascii_uppercase() {
+            if previous_is_lower && !output.ends_with('_') {
+                output.push('_');
+            }
+            output.push(character);
+            previous_is_lower = false;
+        } else if character.is_ascii_alphanumeric() {
+            output.push(character.to_ascii_uppercase());
+            previous_is_lower = true;
+        } else {
+            if !output.ends_with('_') && !output.is_empty() {
+                output.push('_');
+            }
+            previous_is_lower = false;
+        }
+    }
+    output
+}
+
+fn render_fragment(spec: &SpecDoc) -> String {
+    let mut output = String::new();
+    if !spec.doc_graphs.is_empty() {
+        output.push_str(&render_state_graph_section(spec));
+        output.push_str("\n\n");
+    }
+
+    let mermaid = render_meta_model_mermaid(spec);
+    let checker_config = spec.checker_config.as_deref().unwrap_or("default");
+    output.push_str("## Meta Model\n\n");
+    output.push_str(&render_mermaid_block(&mermaid));
+    output.push_str("\n\nLegend:\n\n");
+    output.push_str(&format!("- kind: `{}`\n", spec.kind.unwrap().label()));
+    output.push_str(&format!("- state: `{}`\n", spec.state_ty));
+    output.push_str(&format!("- action: `{}`\n", spec.action_ty));
+    output.push_str(&format!("- checker_config = `{checker_config}`\n"));
+    if spec.kind == Some(SpecKind::System) {
+        let subsystems = if spec.subsystems.is_empty() {
+            "none".to_string()
+        } else {
+            spec.subsystems
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        output.push_str(&format!("- subsystems: {subsystems}\n"));
+    }
+    output.push_str("\nRegistered functions:\n\n");
+    for kind in CATEGORY_ORDER {
+        let names = spec
+            .registrations
+            .get(&kind)
+            .filter(|values| !values.is_empty())
+            .map(|values| {
+                values
+                    .iter()
+                    .map(|value| format!("`{value}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_else(|| "none".to_string());
+        output.push_str(&format!("- {}: {}\n", kind.label(), names));
+    }
+    output.push('\n');
+    output.push_str(MERMAID_RENDER_SCRIPT);
+    output
+}
+
+fn render_state_graph_section(spec: &SpecDoc) -> String {
+    let mut output = String::from("## State Graph\n\n");
+    for case in &spec.doc_graphs {
+        output.push_str(&format!("### {}\n\n", case.label));
+        if case.graph.truncated {
+            output.push_str("Warning: truncated by checker limits.\n\n");
+        }
+        if case.graph.stutter_omitted {
+            output.push_str("Note: stutter omitted from rendered edges.\n\n");
+        }
+        output.push_str(&render_mermaid_block(&render_state_graph_mermaid(
+            spec, case,
+        )));
+        output.push_str("\n\n<details><summary>Full State Legend</summary>\n\n");
+        for (index, state) in case.graph.states.iter().enumerate() {
+            output.push_str(&format!(
+                "#### S{index}\n\n```text\n{}\n```\n\n",
+                state.full
+            ));
+        }
+        if !case.graph.initial_indices.is_empty() {
+            output.push_str(&format!(
+                "- initial: {}\n",
+                case.graph
+                    .initial_indices
+                    .iter()
+                    .map(|index| format!("S{index}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !case.graph.deadlocks.is_empty() {
+            output.push_str(&format!(
+                "- deadlocks: {}\n",
+                case.graph
+                    .deadlocks
+                    .iter()
+                    .map(|index| format!("S{index}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        output.push_str("\n</details>\n\n");
+    }
+    output
+}
+
+fn render_state_graph_mermaid(spec: &SpecDoc, case: &nirvash_core::DocGraphCase) -> String {
+    let mut output = String::from("flowchart TD\n");
+    output
+        .push_str("classDef initial fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#0f172a;\n");
+    output.push_str(
+        "classDef deadlock fill:#fecaca,stroke:#b91c1c,stroke-width:2px,color:#0f172a;\n",
+    );
+    output.push_str(
+        "classDef initial_deadlock fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#0f172a;\n",
+    );
+    output.push_str(
+        "classDef reachable fill:#f8fafc,stroke:#334155,stroke-width:2px,color:#0f172a;\n",
+    );
+    output.push_str(&format!(
+        "%% reachable state graph for {} ({})\n",
+        spec.tail_ident, case.label
+    ));
+
+    for (index, state) in case.graph.states.iter().enumerate() {
+        let label = render_state_node_label(case, index, state);
+        output.push_str(&format!("S{index}((\"{label}\"))\n"));
+    }
+
+    for (source, outgoing) in case.graph.edges.iter().enumerate() {
+        for edge in outgoing {
+            output.push_str(&format!(
+                "S{source} -->|\"{}\"| S{}\n",
+                escape_mermaid_label(&edge.label),
+                edge.target
+            ));
+        }
+    }
+
+    for index in 0..case.graph.states.len() {
+        let class_name = match (
+            case.graph.initial_indices.contains(&index),
+            case.graph.deadlocks.contains(&index),
+        ) {
+            (true, true) => "initial_deadlock",
+            (true, false) => "initial",
+            (false, true) => "deadlock",
+            (false, false) => "reachable",
+        };
+        output.push_str(&format!("class S{index} {class_name};\n"));
+    }
+
+    output
+}
+
+fn render_state_node_label(
+    case: &nirvash_core::DocGraphCase,
+    index: usize,
+    state: &nirvash_core::DocGraphState,
+) -> String {
+    let mut parts = vec![format!("S{index}")];
+
+    let is_initial = case.graph.initial_indices.contains(&index);
+    if is_initial {
+        parts.push("initial".to_owned());
+    } else if let Some(predecessor) = preferred_predecessor(case, index) {
+        parts.push(format!("from S{predecessor}"));
+        if let Some(delta) = state_delta_summary(&case.graph.states[predecessor].full, &state.full)
+        {
+            parts.push(delta);
+        }
+    }
+
+    mermaid_multiline(&parts.join("\n"))
+}
+
+fn preferred_predecessor(case: &nirvash_core::DocGraphCase, target: usize) -> Option<usize> {
+    let mut candidates = case
+        .graph
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(source, outgoing)| {
+            *source != target && outgoing.iter().any(|edge| edge.target == target)
+        })
+        .map(|(source, _)| source)
+        .collect::<Vec<_>>();
+    candidates.sort_unstable();
+    candidates.into_iter().next()
+}
+
+fn state_delta_summary(previous: &str, current: &str) -> Option<String> {
+    let previous_lines = normalized_debug_lines(previous);
+    let current_lines = normalized_debug_lines(current);
+    let changed = current_lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            (previous_lines.get(index) != Some(line)).then_some(line.clone())
+        })
+        .collect::<Vec<_>>();
+    if changed.is_empty() {
+        None
+    } else {
+        Some(nirvash_core::summarize_doc_graph_text(&changed.join("\n")))
+    }
+}
+
+fn normalized_debug_lines(input: &str) -> Vec<String> {
+    input
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !is_structural_debug_line(line))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn is_structural_debug_line(line: &str) -> bool {
+    line.chars()
+        .all(|character| matches!(character, '{' | '}' | '[' | ']' | '(' | ')' | ','))
+}
+
+fn render_meta_model_mermaid(spec: &SpecDoc) -> String {
+    let mut output = String::from("flowchart LR\n");
+    output.push_str("classDef spec fill:#dceeff,stroke:#1d4ed8,stroke-width:2px,color:#0f172a;\n");
+    output.push_str("classDef state fill:#e7f7e7,stroke:#15803d,stroke-width:2px,color:#0f172a;\n");
+    output
+        .push_str("classDef action fill:#fff1d6,stroke:#b45309,stroke-width:2px,color:#0f172a;\n");
+    output
+        .push_str("classDef system fill:#ffe8f2,stroke:#be185d,stroke-width:2px,color:#0f172a;\n");
+    output.push_str(
+        "classDef category fill:#ffffff,stroke:#334155,stroke-width:2px,color:#0f172a;\n",
+    );
+
+    output.push_str(&format!(
+        "spec[\"{}<br/>kind={}<br/>path={}\"]\n",
+        escape_mermaid_label(&spec.tail_ident),
+        spec.kind.expect("kind").label(),
+        escape_mermaid_label(&path_key(&spec.full_path))
+    ));
+    output.push_str(&format!(
+        "state[\"State<br/>{}\"]\n",
+        escape_mermaid_label(&spec.state_ty)
+    ));
+    output.push_str(&format!(
+        "action[\"Action<br/>{}\"]\n",
+        escape_mermaid_label(&spec.action_ty)
+    ));
+    output.push_str("spec --> state\n");
+    output.push_str("spec --> action\n");
+    output.push_str("class spec spec;\nclass state state;\nclass action action;\n");
+
+    if spec.kind == Some(SpecKind::System) {
+        let subsystem_label = if spec.subsystems.is_empty() {
+            "Subsystems<br/>none".to_owned()
+        } else {
+            format!(
+                "Subsystems<br/>{}",
+                mermaid_multiline(&spec.subsystems.join("\n"))
+            )
+        };
+        output.push_str(&format!("subsystems[\"{subsystem_label}\"]\n"));
+        output.push_str(
+            "composition[\"SystemComposition<br/>invariants<br/>properties<br/>fairness<br/>constraints\"]\n",
+        );
+        output.push_str("spec --> subsystems\n");
+        output.push_str("spec --> composition\n");
+        output.push_str("class subsystems system;\nclass composition system;\n");
+    }
+
+    for kind in CATEGORY_ORDER {
+        let names = spec
+            .registrations
+            .get(&kind)
+            .filter(|values| !values.is_empty())
+            .map(|values| values.join("<br/>"))
+            .unwrap_or_else(|| "none".to_owned());
+        let node_id = format!("category_{}", kind.label());
+        output.push_str(&format!(
+            "{node_id}[\"{}<br/>{}\"]\n",
+            kind.label(),
+            mermaid_multiline(&names.replace("<br/>", "\n"))
+        ));
+        output.push_str(&format!("spec --> {node_id}\n"));
+        output.push_str(&format!("class {node_id} category;\n"));
+    }
+
+    output
+}
+
+fn render_mermaid_block(diagram: &str) -> String {
+    format!(
+        "<pre class=\"mermaid nirvash-mermaid\">{}</pre>",
+        escape_html(diagram)
+    )
+}
+
+fn escape_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn escape_mermaid_label(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn mermaid_multiline(input: &str) -> String {
+    input
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(escape_mermaid_label)
+        .collect::<Vec<_>>()
+        .join("<br/>")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    #[test]
+    fn generate_collects_supported_module_tree_and_renders_mermaid() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_dir = dir.path();
+        let src_dir = manifest_dir.join("src");
+        let out_dir = manifest_dir.join("out");
+        fs::create_dir_all(&src_dir).expect("src");
+
+        fs::write(
+            src_dir.join("lib.rs"),
+            r#"
+pub mod child;
+pub mod system;
+
+mod inline_parent {
+    use nirvash_core::{Ltl, StatePredicate, TransitionSystem};
+    use nirvash_macros::{invariant, property, subsystem_spec};
+
+    pub struct InlineState;
+    pub struct InlineAction;
+    pub struct InlineSpec;
+
+    #[subsystem_spec(checker_config(inline_checker_config))]
+    impl TransitionSystem for InlineSpec {
+        type State = InlineState;
+        type Action = InlineAction;
+
+        fn init(&self, _: &Self::State) -> bool { true }
+        fn next(&self, _: &Self::State, _: &Self::Action, _: &Self::State) -> bool { true }
+    }
+
+    nirvash_core::invariant!(self::InlineSpec, inline_invariant(state) => {
+        let _ = state;
+        true
+    });
+
+    mod nested {
+        use super::{InlineAction, InlineState};
+        use nirvash_core::{Ltl, StatePredicate};
+        use nirvash_macros::{invariant, property};
+
+        #[invariant(super::InlineSpec)]
+        fn super_invariant() -> StatePredicate<InlineState> { todo!() }
+
+        #[property(crate::inline_parent::InlineSpec)]
+        fn crate_property() -> Ltl<InlineState, InlineAction> { todo!() }
+    }
+
+    fn inline_checker_config() {}
+}
+"#,
+        )
+        .expect("lib.rs");
+
+        fs::write(
+            src_dir.join("child.rs"),
+            r#"
+use nirvash_core::{
+    ActionConstraint, Fairness, Ltl, StateConstraint, StatePredicate, StepPredicate,
+    TransitionSystem,
+};
+use nirvash_macros::{illegal, invariant, property, subsystem_spec};
+
+pub struct ChildState;
+pub struct ChildAction;
+pub struct ChildSpec;
+
+#[subsystem_spec]
+impl TransitionSystem for ChildSpec {
+    type State = ChildState;
+    type Action = ChildAction;
+
+    fn init(&self, _: &Self::State) -> bool { true }
+    fn next(&self, _: &Self::State, _: &Self::Action, _: &Self::State) -> bool { true }
+}
+
+nirvash_core::invariant!(ChildSpec, child_invariant(state) => {
+    let _ = state;
+    true
+});
+
+nirvash_core::illegal!(ChildSpec, child_illegal(prev, action, next) => {
+    let _ = (prev, action, next);
+    true
+});
+
+nirvash_core::state_constraint!(ChildSpec, child_state_constraint(state) => {
+    let _ = state;
+    true
+});
+
+nirvash_core::action_constraint!(ChildSpec, child_action_constraint(prev, action, next) => {
+    let _ = (prev, action, next);
+    true
+});
+
+nirvash_core::property!(ChildSpec, child_property => leads_to(
+    (pred!(child_busy(state) => {
+        let _ = state;
+        true
+    })),
+    (pred!(child_idle(state) => {
+        let _ = state;
+        true
+    }))
+));
+
+nirvash_core::fairness!(weak ChildSpec, child_fairness(prev, action, next) => {
+    let _ = (prev, action, next);
+    true
+});
+"#,
+        )
+        .expect("child.rs");
+
+        fs::write(
+            src_dir.join("system.rs"),
+            r#"
+use nirvash_core::{Ltl, StatePredicate, TransitionSystem};
+use nirvash_macros::{invariant, property, system_spec};
+
+pub struct SystemState;
+pub struct SystemAction;
+pub struct RootSystemSpec;
+
+#[system_spec(subsystems("child", "inline_parent"), checker_config(system_checker_config))]
+impl TransitionSystem for RootSystemSpec {
+    type State = SystemState;
+    type Action = SystemAction;
+
+    fn init(&self, _: &Self::State) -> bool { true }
+    fn next(&self, _: &Self::State, _: &Self::Action, _: &Self::State) -> bool { true }
+}
+
+#[invariant(RootSystemSpec)]
+fn system_invariant() -> StatePredicate<SystemState> { todo!() }
+
+#[property(RootSystemSpec)]
+fn system_property() -> Ltl<SystemState, SystemAction> { todo!() }
+
+fn system_checker_config() {}
+"#,
+        )
+        .expect("system.rs");
+
+        let output = generate_at(manifest_dir, &out_dir).expect("docgen succeeds");
+        let env_keys = output
+            .fragments
+            .iter()
+            .map(|fragment| fragment.env_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            env_keys,
+            vec![
+                "NIRVASH_DOC_FRAGMENT_CHILD_SPEC",
+                "NIRVASH_DOC_FRAGMENT_INLINE_SPEC",
+                "NIRVASH_DOC_FRAGMENT_ROOT_SYSTEM_SPEC",
+            ]
+        );
+
+        let inline_fragment = output
+            .fragments
+            .iter()
+            .find(|fragment| fragment.env_key == "NIRVASH_DOC_FRAGMENT_INLINE_SPEC")
+            .expect("inline fragment");
+        let inline_doc = fs::read_to_string(&inline_fragment.path).expect("inline doc");
+        assert!(inline_doc.contains("## Meta Model"));
+        assert!(inline_doc.contains("<pre class=\"mermaid nirvash-mermaid\">"));
+        assert!(inline_doc.contains("flowchart LR"));
+        assert!(inline_doc.contains("InlineSpec"));
+        assert!(inline_doc.contains("inline_invariant"));
+        assert!(inline_doc.contains("super_invariant"));
+        assert!(inline_doc.contains("crate_property"));
+        assert!(inline_doc.contains("checker_config = `inline_checker_config`"));
+        assert!(inline_doc.contains(MERMAID_RENDER_SCRIPT));
+        assert!(inline_doc.contains("nirvash-mermaid/mermaid.min.js"));
+        assert!(!inline_doc.contains("type=\"module\""));
+
+        let child_fragment = output
+            .fragments
+            .iter()
+            .find(|fragment| fragment.env_key == "NIRVASH_DOC_FRAGMENT_CHILD_SPEC")
+            .expect("child fragment");
+        let child_doc = fs::read_to_string(&child_fragment.path).expect("child doc");
+        assert!(child_doc.contains("child_invariant"));
+        assert!(child_doc.contains("child_illegal"));
+        assert!(child_doc.contains("child_property"));
+        assert!(child_doc.contains("child_fairness"));
+        assert!(child_doc.contains("child_state_constraint"));
+        assert!(child_doc.contains("child_action_constraint"));
+
+        let system_fragment = output
+            .fragments
+            .iter()
+            .find(|fragment| fragment.env_key == "NIRVASH_DOC_FRAGMENT_ROOT_SYSTEM_SPEC")
+            .expect("system fragment");
+        let system_doc = fs::read_to_string(&system_fragment.path).expect("system doc");
+        assert!(system_doc.contains("RootSystemSpec"));
+        assert!(system_doc.contains("SystemComposition"));
+        assert!(system_doc.contains("child"));
+        assert!(system_doc.contains("inline_parent"));
+        assert!(system_doc.contains("system_invariant"));
+
+        assert_eq!(
+            output.rerun_if_changed,
+            vec![
+                manifest_dir.join("Cargo.toml"),
+                src_dir.join("child.rs"),
+                src_dir.join("lib.rs"),
+                src_dir.join("system.rs"),
+            ]
+        );
+    }
+
+    #[test]
+    fn generate_rejects_duplicate_spec_tail_ident() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_dir = dir.path();
+        let src_dir = manifest_dir.join("src");
+        fs::create_dir_all(&src_dir).expect("src");
+
+        fs::write(src_dir.join("lib.rs"), "pub mod left;\npub mod right;\n").expect("lib.rs");
+
+        for module in ["left", "right"] {
+            fs::write(
+                src_dir.join(format!("{module}.rs")),
+                r#"
+use nirvash_core::TransitionSystem;
+use nirvash_macros::subsystem_spec;
+
+pub struct State;
+pub struct Action;
+pub struct DuplicateSpec;
+
+#[subsystem_spec]
+impl TransitionSystem for DuplicateSpec {
+    type State = State;
+    type Action = Action;
+
+    fn init(&self, _: &Self::State) -> bool { true }
+    fn next(&self, _: &Self::State, _: &Self::Action, _: &Self::State) -> bool { true }
+}
+"#,
+            )
+            .expect("module");
+        }
+
+        let error = generate_at(manifest_dir, &manifest_dir.join("out"))
+            .expect_err("duplicate spec tail idents must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate spec tail ident `DuplicateSpec`")
+        );
+    }
+
+    #[test]
+    fn render_fragment_prefers_runtime_state_graph_when_present() {
+        let fragment = render_fragment(&SpecDoc {
+            kind: Some(SpecKind::Subsystem),
+            full_path: vec!["demo".to_owned(), "DemoSpec".to_owned()],
+            tail_ident: "DemoSpec".to_owned(),
+            state_ty: "DemoState".to_owned(),
+            action_ty: "DemoAction".to_owned(),
+            checker_config: Some("demo_checker_config".to_owned()),
+            subsystems: Vec::new(),
+            registrations: BTreeMap::from([
+                (
+                    RegistrationKind::Invariant,
+                    vec!["demo_invariant".to_owned()],
+                ),
+                (RegistrationKind::Property, vec!["demo_property".to_owned()]),
+            ]),
+            doc_graphs: vec![nirvash_core::DocGraphCase {
+                label: "default".to_owned(),
+                graph: nirvash_core::DocGraphSnapshot {
+                    states: vec![
+                        nirvash_core::DocGraphState {
+                            summary: "Idle".to_owned(),
+                            full: "Idle".to_owned(),
+                        },
+                        nirvash_core::DocGraphState {
+                            summary: "Busy".to_owned(),
+                            full: "Busy".to_owned(),
+                        },
+                    ],
+                    edges: vec![
+                        vec![nirvash_core::DocGraphEdge {
+                            label: "Start".to_owned(),
+                            target: 1,
+                        }],
+                        vec![nirvash_core::DocGraphEdge {
+                            label: "Stop".to_owned(),
+                            target: 0,
+                        }],
+                    ],
+                    initial_indices: vec![0],
+                    deadlocks: vec![],
+                    truncated: false,
+                    stutter_omitted: true,
+                },
+            }],
+        });
+
+        assert!(fragment.contains("## State Graph"));
+        assert!(fragment.contains("<pre class=\"mermaid nirvash-mermaid\">"));
+        assert!(fragment.contains("flowchart TD"));
+        assert!(fragment.contains("default"));
+        assert!(fragment.contains("S0((&quot;S0&lt;br/&gt;initial&quot;))"));
+        assert!(fragment.contains("S1((&quot;S1&lt;br/&gt;from S0&lt;br/&gt;Busy&quot;))"));
+        assert!(fragment.contains("Note: stutter omitted"));
+        assert!(fragment.contains("## Meta Model"));
+        assert!(fragment.contains("flowchart LR"));
+        assert!(fragment.contains("#### S0"));
+        assert!(fragment.contains("```text\nIdle\n```"));
+        assert!(fragment.contains("nirvash-mermaid/mermaid.min.js"));
+        assert!(fragment.contains("<details><summary>Full State Legend</summary>"));
+    }
+
+    #[test]
+    fn render_state_graph_quotes_edge_labels_with_parentheses() {
+        let diagram = render_state_graph_mermaid(
+            &SpecDoc {
+                kind: Some(SpecKind::Subsystem),
+                full_path: vec!["demo".to_owned(), "DemoSpec".to_owned()],
+                tail_ident: "DemoSpec".to_owned(),
+                state_ty: "DemoState".to_owned(),
+                action_ty: "DemoAction".to_owned(),
+                checker_config: None,
+                subsystems: Vec::new(),
+                registrations: BTreeMap::new(),
+                doc_graphs: Vec::new(),
+            },
+            &nirvash_core::DocGraphCase {
+                label: "default".to_owned(),
+                graph: nirvash_core::DocGraphSnapshot {
+                    states: vec![
+                        nirvash_core::DocGraphState {
+                            summary: "Init".to_owned(),
+                            full: "Init".to_owned(),
+                        },
+                        nirvash_core::DocGraphState {
+                            summary: "Next".to_owned(),
+                            full: "Next".to_owned(),
+                        },
+                    ],
+                    edges: vec![
+                        vec![nirvash_core::DocGraphEdge {
+                            label: "Manager(LoadExistingConfig)".to_owned(),
+                            target: 1,
+                        }],
+                        Vec::new(),
+                    ],
+                    initial_indices: vec![0],
+                    deadlocks: vec![],
+                    truncated: false,
+                    stutter_omitted: false,
+                },
+            },
+        );
+
+        assert!(diagram.contains("S0 -->|\"Manager(LoadExistingConfig)\"| S1"));
+    }
+
+    #[test]
+    fn render_state_graph_uses_circle_nodes_and_delta_only_labels() {
+        let diagram = render_state_graph_mermaid(
+            &SpecDoc {
+                kind: Some(SpecKind::Subsystem),
+                full_path: vec!["demo".to_owned(), "DemoSpec".to_owned()],
+                tail_ident: "DemoSpec".to_owned(),
+                state_ty: "DemoState".to_owned(),
+                action_ty: "DemoAction".to_owned(),
+                checker_config: None,
+                subsystems: Vec::new(),
+                registrations: BTreeMap::new(),
+                doc_graphs: Vec::new(),
+            },
+            &nirvash_core::DocGraphCase {
+                label: "default".to_owned(),
+                graph: nirvash_core::DocGraphSnapshot {
+                    states: vec![
+                        nirvash_core::DocGraphState {
+                            summary: "State { phase: Booting, unchanged: false }".to_owned(),
+                            full: "State {\n    phase: Booting,\n    unchanged: false,\n}\n"
+                                .to_owned(),
+                        },
+                        nirvash_core::DocGraphState {
+                            summary: "State { phase: Listening, unchanged: false }".to_owned(),
+                            full: "State {\n    phase: Listening,\n    unchanged: false,\n}\n"
+                                .to_owned(),
+                        },
+                    ],
+                    edges: vec![
+                        vec![nirvash_core::DocGraphEdge {
+                            label: "Advance".to_owned(),
+                            target: 1,
+                        }],
+                        Vec::new(),
+                    ],
+                    initial_indices: vec![0],
+                    deadlocks: vec![],
+                    truncated: false,
+                    stutter_omitted: false,
+                },
+            },
+        );
+
+        assert!(diagram.contains("S0((\"S0<br/>initial\"))"));
+        assert!(diagram.contains("S1((\"S1<br/>from S0<br/>phase: Listening,\"))"));
+        assert!(!diagram.contains("unchanged: false"));
+    }
+
+    #[test]
+    fn copy_doc_assets_places_local_mermaid_runtime() {
+        let dir = tempdir().expect("tempdir");
+        let out_dir = dir.path().join("build-out");
+        fs::create_dir_all(&out_dir).expect("out");
+
+        let rerun_files = copy_doc_assets(&out_dir).expect("asset copy succeeds");
+        assert_eq!(
+            rerun_files,
+            vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(MERMAID_ASSET_SOURCE)]
+        );
+
+        let copied = out_dir
+            .join("doc")
+            .join("static.files")
+            .join(MERMAID_ASSET_DIR)
+            .join(MERMAID_ASSET_FILE);
+        assert!(
+            copied.exists(),
+            "expected copied asset at {}",
+            copied.display()
+        );
+    }
+
+    #[test]
+    fn upper_snake_names_match_fragment_keys() {
+        assert_eq!(to_upper_snake("ImagodSystemSpec"), "IMAGOD_SYSTEM_SPEC");
+        assert_eq!(to_upper_snake("HTTPState"), "HTTPSTATE");
+    }
+}

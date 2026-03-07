@@ -1,5 +1,7 @@
 mod checker;
+mod doc_graph;
 mod domain;
+mod dsl_macros;
 mod fairness;
 mod ltl;
 mod predicate;
@@ -11,6 +13,11 @@ mod trace;
 pub use checker::{
     Counterexample, CounterexampleKind, ExplorationMode, ModelCheckConfig, ModelCheckError,
     ModelCheckResult, ModelChecker,
+};
+pub use doc_graph::{
+    DocGraphCase, DocGraphEdge, DocGraphProvider, DocGraphSnapshot, DocGraphSpec, DocGraphState,
+    ReachableGraphEdge, ReachableGraphSnapshot, RegisteredDocGraphProvider,
+    collect_doc_graph_specs, summarize_doc_graph_state, summarize_doc_graph_text,
 };
 pub use domain::{BoundedDomain, OpaqueModelValue, Signature};
 pub use fairness::Fairness;
@@ -554,6 +561,49 @@ mod tests {
     }
 
     #[test]
+    fn reachable_graph_snapshot_exposes_states_edges_and_initials() {
+        let snapshot = ModelChecker::new(&TestSpec)
+            .reachable_graph_snapshot()
+            .expect("snapshot should build");
+
+        assert_eq!(snapshot.states, vec![TestState::Idle, TestState::Busy]);
+        assert_eq!(snapshot.initial_indices, vec![0]);
+        assert!(snapshot.deadlocks.is_empty());
+        assert!(!snapshot.truncated);
+        assert!(snapshot.stutter_omitted);
+        assert_eq!(
+            snapshot.edges[0],
+            vec![ReachableGraphEdge {
+                action: TestAction::Start,
+                target: 1,
+            }]
+        );
+        assert_eq!(
+            snapshot.edges[1],
+            vec![ReachableGraphEdge {
+                action: TestAction::Stop,
+                target: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn reachable_graph_snapshot_omits_stutter_edges_but_marks_deadlocks() {
+        let snapshot = ModelChecker::new(&StutterSpec)
+            .reachable_graph_snapshot()
+            .expect("snapshot should build");
+
+        assert_eq!(
+            snapshot.states,
+            vec![StutterState::Cold, StutterState::Warm]
+        );
+        assert!(snapshot.edges.iter().all(Vec::is_empty));
+        assert_eq!(snapshot.initial_indices, vec![0]);
+        assert_eq!(snapshot.deadlocks, vec![0, 1]);
+        assert!(snapshot.stutter_omitted);
+    }
+
+    #[test]
     fn constraints_prune_problematic_edges_from_the_graph() {
         let unconstrained = ConstraintSpec { constrained: false };
         let constrained = ConstraintSpec { constrained: true };
@@ -577,6 +627,57 @@ mod tests {
     }
 
     #[test]
+    fn reachable_graph_snapshot_respects_constraints_and_symmetry() {
+        let constrained = ConstraintSpec { constrained: true };
+        let constrained_snapshot = ModelChecker::with_config(
+            &constrained,
+            ModelCheckConfig {
+                check_deadlocks: false,
+                ..ModelCheckConfig::default()
+            },
+        )
+        .reachable_graph_snapshot()
+        .expect("snapshot should build");
+        assert_eq!(
+            constrained_snapshot.states,
+            vec![ControlState::Idle, ControlState::Busy]
+        );
+        assert_eq!(
+            constrained_snapshot.edges[0],
+            vec![ReachableGraphEdge {
+                action: ControlAction::Start,
+                target: 1,
+            }]
+        );
+        assert_eq!(
+            constrained_snapshot.edges[1],
+            vec![ReachableGraphEdge {
+                action: ControlAction::Stop,
+                target: 0,
+            }]
+        );
+
+        let symmetry_snapshot = ModelChecker::with_config(
+            &SymmetrySpec,
+            ModelCheckConfig {
+                check_deadlocks: false,
+                ..ModelCheckConfig::default()
+            },
+        )
+        .reachable_graph_snapshot()
+        .expect("snapshot should build");
+        assert_eq!(symmetry_snapshot.states, vec![SymmetryState::Left]);
+        assert_eq!(symmetry_snapshot.initial_indices, vec![0]);
+        assert_eq!(
+            symmetry_snapshot.edges[0],
+            vec![ReachableGraphEdge {
+                action: SymmetryAction::Swap,
+                target: 0,
+            }]
+        );
+    }
+
+    #[test]
     fn symmetry_with_temporal_properties_fails_closed() {
         let spec = SymmetrySpec;
         let err = ModelChecker::new(&spec).check_properties().unwrap_err();
@@ -591,5 +692,77 @@ mod tests {
         assert_eq!(domain.len(), 3);
         assert_eq!(domain[0].index(), 0);
         assert_eq!(domain[2].index(), 2);
+    }
+
+    #[test]
+    fn pred_and_step_macros_preserve_names_and_behavior() {
+        let idle = crate::pred!(idle(state) => matches!(state, TestState::Idle));
+        let start = crate::step!(start(prev, action, next) => matches!(
+            (prev, action, next),
+            (TestState::Idle, TestAction::Start, TestState::Busy)
+        ));
+
+        assert_eq!(idle.name(), "idle");
+        assert!(idle.eval(&TestState::Idle));
+        assert!(!idle.eval(&TestState::Busy));
+
+        assert_eq!(start.name(), "start");
+        assert!(start.eval(&TestState::Idle, &TestAction::Start, &TestState::Busy));
+        assert!(!start.eval(&TestState::Busy, &TestAction::Start, &TestState::Busy));
+    }
+
+    #[test]
+    fn ltl_macro_builds_expected_formula_shape() {
+        let formula: Ltl<TestState, TestAction> = crate::ltl!(always(until(
+            (pred!(idle(state) => matches!(state, TestState::Idle))),
+            ((step!(start(prev, action, next) => matches!(
+                (prev, action, next),
+                (TestState::Idle, TestAction::Start, TestState::Busy)
+            ))) && (enabled(step!(stop(prev, action, next) => matches!(
+                (prev, action, next),
+                (TestState::Busy, TestAction::Stop, TestState::Idle)
+            )))))
+        )));
+
+        let expected: Ltl<TestState, TestAction> = Ltl::always(Ltl::until(
+            Ltl::pred(StatePredicate::new("idle", |state| {
+                matches!(state, TestState::Idle)
+            })),
+            Ltl::and(
+                Ltl::step(StepPredicate::new("start", |prev, action, next| {
+                    matches!(
+                        (prev, action, next),
+                        (TestState::Idle, TestAction::Start, TestState::Busy)
+                    )
+                })),
+                Ltl::enabled(StepPredicate::new("stop", |prev, action, next| {
+                    matches!(
+                        (prev, action, next),
+                        (TestState::Busy, TestAction::Stop, TestState::Idle)
+                    )
+                })),
+            ),
+        ));
+
+        assert_eq!(formula.describe(), expected.describe());
+    }
+
+    #[test]
+    fn ltl_macro_supports_boolean_and_temporal_operators() {
+        let formula: Ltl<TestState, TestAction> = crate::ltl!(always(
+            (((! pred!(idle(state) => matches!(state, TestState::Idle))))
+                => (eventually(pred!(busy(state) => matches!(state, TestState::Busy)))))
+        ));
+
+        let expected: Ltl<TestState, TestAction> = Ltl::always(Ltl::implies(
+            Ltl::negate(Ltl::pred(StatePredicate::new("idle", |state| {
+                matches!(state, TestState::Idle)
+            }))),
+            Ltl::eventually(Ltl::pred(StatePredicate::new("busy", |state| {
+                matches!(state, TestState::Busy)
+            }))),
+        ));
+
+        assert_eq!(formula.describe(), expected.describe());
     }
 }

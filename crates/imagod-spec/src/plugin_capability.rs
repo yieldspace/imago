@@ -426,7 +426,6 @@ impl TransitionSystem for PluginCapabilitySpec {
     }
 }
 
-#[cfg(test)]
 #[nirvash_macros::formal_tests(spec = PluginCapabilitySpec, init = initial_state)]
 const _: () = ();
 
