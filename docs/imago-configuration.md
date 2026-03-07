@@ -535,7 +535,7 @@ bulk_ring_chunk_bytes = 16384
 bulk_ring_slots = 16
 ```
 
-- Validation error notes: empty keys fail validation. `resources.gpio.digital_pins` rejects duplicated `label` and duplicated `value_path`; `resources.usb` rejects invalid path/limit settings during runtime startup.
+- Validation error notes: empty keys fail validation. `resources.gpio.digital_pins` rejects duplicated `label` and duplicated `value_path`, and requires each `value_path` to be an absolute `/sys/class/gpio/.../value` path; `resources.usb` rejects invalid path/limit settings during runtime startup.
 
 <a id="the-capabilities-section"></a>
 ## The [capabilities] section
