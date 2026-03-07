@@ -1437,7 +1437,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "e2e"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "wasi 0.14.7+wasi-0.2.4",
  "wit-bindgen 0.53.1",
@@ -2331,7 +2331,7 @@ dependencies = [
 
 [[package]]
 name = "imago"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -2382,7 +2382,7 @@ dependencies = [
 
 [[package]]
 name = "imago-plugin-imago-admin"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "imago-plugin-macros",
  "imagod-runtime-wasmtime",
@@ -2391,7 +2391,7 @@ dependencies = [
 
 [[package]]
 name = "imago-plugin-imago-experimental-gpio"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "imago-plugin-macros",
  "imagod-runtime-wasmtime",
@@ -2403,7 +2403,7 @@ dependencies = [
 
 [[package]]
 name = "imago-plugin-imago-experimental-i2c"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "embedded-hal",
  "imago-plugin-macros",
@@ -2415,7 +2415,7 @@ dependencies = [
 
 [[package]]
 name = "imago-plugin-imago-node"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "imago-protocol",
  "imagod-ipc",
@@ -2427,7 +2427,7 @@ dependencies = [
 
 [[package]]
 name = "imago-plugin-imago-usb"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "imago-plugin-macros",
  "imagod-runtime-wasmtime",
@@ -2440,7 +2440,7 @@ dependencies = [
 
 [[package]]
 name = "imago-plugin-macros"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2463,7 +2463,7 @@ dependencies = [
 
 [[package]]
 name = "imago-project-config"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "schemars 1.2.1",
@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "imago-protocol"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ciborium",
  "serde",
@@ -2484,7 +2484,7 @@ dependencies = [
 
 [[package]]
 name = "imago-schema-gen"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "imago-project-config",
@@ -2496,7 +2496,7 @@ dependencies = [
 
 [[package]]
 name = "imagod"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2518,7 +2518,7 @@ dependencies = [
 
 [[package]]
 name = "imagod-common"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "imago-protocol",
  "thiserror 2.0.18",
@@ -2526,7 +2526,7 @@ dependencies = [
 
 [[package]]
 name = "imagod-config"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "imago-protocol",
  "imagod-common",
@@ -2538,7 +2538,7 @@ dependencies = [
 
 [[package]]
 name = "imagod-control"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "criterion",
@@ -2566,7 +2566,7 @@ dependencies = [
 
 [[package]]
 name = "imagod-ipc"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -2582,7 +2582,7 @@ dependencies = [
 
 [[package]]
 name = "imagod-runtime"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2602,7 +2602,7 @@ dependencies = [
 
 [[package]]
 name = "imagod-runtime-bootstrap"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "imago-protocol",
  "imagod-common",
@@ -2612,7 +2612,7 @@ dependencies = [
 
 [[package]]
 name = "imagod-runtime-control"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "imago-protocol",
@@ -2624,7 +2624,7 @@ dependencies = [
 
 [[package]]
 name = "imagod-runtime-ingress"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2640,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "imagod-runtime-internal"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2651,7 +2651,7 @@ dependencies = [
 
 [[package]]
 name = "imagod-runtime-wasmtime"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2676,7 +2676,7 @@ dependencies = [
 
 [[package]]
 name = "imagod-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3086,18 +3086,18 @@ checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
 
 [[package]]
 name = "local-imagod-app"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "local-imagod-http-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "wasi 0.14.7+wasi-0.2.4",
 ]
 
 [[package]]
 name = "local-imagod-plugin-hello-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "wasi 0.14.7+wasi-0.2.4",
  "wit-bindgen 0.53.1",
@@ -3105,7 +3105,7 @@ dependencies = [
 
 [[package]]
 name = "local-imagod-plugin-native-admin-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "wasi 0.14.7+wasi-0.2.4",
  "wit-bindgen 0.53.1",
@@ -3113,7 +3113,7 @@ dependencies = [
 
 [[package]]
 name = "local-imagod-plugin-native-experimental-gpio-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "wasi 0.14.7+wasi-0.2.4",
  "wit-bindgen 0.53.1",
@@ -3121,7 +3121,7 @@ dependencies = [
 
 [[package]]
 name = "local-imagod-plugin-native-experimental-i2c-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "wasi 0.14.7+wasi-0.2.4",
  "wit-bindgen 0.53.1",
@@ -3129,7 +3129,7 @@ dependencies = [
 
 [[package]]
 name = "local-imagod-socket-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "tokio",
 ]
@@ -4069,7 +4069,7 @@ dependencies = [
 
 [[package]]
 name = "prup"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
