@@ -156,6 +156,29 @@ known_public_keys = { "rpc://node-a:4443" = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 This section controls transfer limits, worker settings, Wasmtime memory tuning, and startup behavior toggles.
 
+### The `features` field
+
+- Type: `boolean` or `array(string)`.
+- Required/Optional: Optional.
+- Accepted values / Constraints:
+  - `true`: enable all built-in native plugins shipped by `imagod`.
+  - `false` or `[]`: keep only the default built-in set (`imago:admin`, `imago:node`).
+  - `["imago:usb", "imago:experimental-gpio"]`: add named built-in plugins on top of the default set.
+  - Array items must be canonical built-in package names: `imago:admin`, `imago:node`, `imago:experimental-gpio`, `imago:experimental-i2c`, `imago:usb`.
+- Default: `false` (effective allowlist is `["imago:admin", "imago:node"]`).
+- Behavior notes:
+  - Arrays extend the default built-in set rather than replacing it.
+  - Custom plugins injected by embedding `imagod` are not configured through this field.
+  - Existing configs that rely on `imago:experimental-gpio`, `imago:experimental-i2c`, or `imago:usb` must now set `features = true` or add those package names explicitly.
+- Example:
+
+```toml
+[runtime]
+features = ["imago:usb"]
+```
+
+- Validation error notes: unknown package names or non-boolean / non-array values fail validation.
+
 ### The `chunk_size` field
 
 - Type: `integer` (`usize`)

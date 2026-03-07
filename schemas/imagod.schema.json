@@ -41,6 +41,30 @@
           "minimum": 0,
           "type": "integer"
         },
+        "features": {
+          "anyOf": [
+            {
+              "description": "true enables all built-in native plugins; false keeps only the default set",
+              "type": "boolean"
+            },
+            {
+              "description": "Additional built-in native plugin package names enabled beyond the default set",
+              "items": {
+                "enum": [
+                  "imago:admin",
+                  "imago:node",
+                  "imago:experimental-gpio",
+                  "imago:experimental-i2c",
+                  "imago:usb"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "default": false,
+          "description": "Built-in native plugin loading policy for runner startup."
+        },
         "http_queue_memory_budget_bytes": {
           "default": 33554432,
           "description": "Total memory budget for queued HTTP request bodies in bytes.",
@@ -247,6 +271,7 @@
         "committed_session_ttl_secs": 120,
         "deploy_stream_timeout_secs": 15,
         "epoch_tick_interval_ms": 50,
+        "features": false,
         "http_queue_memory_budget_bytes": 33554432,
         "http_worker_count": 2,
         "http_worker_queue_capacity": 4,

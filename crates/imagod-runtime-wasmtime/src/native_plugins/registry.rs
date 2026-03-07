@@ -46,6 +46,19 @@ impl NativePluginRegistry {
             .map(|plugin| plugin.supports_symbol(symbol))
             .unwrap_or(false)
     }
+
+    pub fn filtered(
+        &self,
+        mut include: impl FnMut(&str) -> bool,
+    ) -> Result<NativePluginRegistry, ImagodError> {
+        let mut builder = NativePluginRegistryBuilder::new();
+        for (package_name, plugin) in self.plugins.iter() {
+            if include(package_name) {
+                builder.register_plugin(plugin.clone())?;
+            }
+        }
+        Ok(builder.build())
+    }
 }
 
 #[derive(Default)]
@@ -176,5 +189,21 @@ mod tests {
             !registry.has_symbol("test:plugin", "test:plugin/runtime@0.1.0.unknown"),
             "unexpected symbol should be rejected"
         );
+    }
+
+    #[test]
+    fn filtered_registry_keeps_only_matching_packages() {
+        let mut builder = NativePluginRegistryBuilder::new();
+        builder
+            .register_plugin(Arc::new(TestPlugin))
+            .expect("register should succeed");
+        let registry = builder.build();
+
+        let filtered = registry
+            .filtered(|package_name| package_name == "test:plugin")
+            .expect("filter should succeed");
+
+        assert!(filtered.has_plugin("test:plugin"));
+        assert!(!filtered.has_plugin("test:other"));
     }
 }

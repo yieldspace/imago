@@ -558,6 +558,7 @@ mod tests {
             resources: BTreeMap::new(),
             bindings: Vec::new(),
             plugin_dependencies: Vec::new(),
+            enabled_native_plugins: vec!["imago:admin".to_string(), "imago:node".to_string()],
             capabilities: imagod_ipc::CapabilityPolicy::default(),
             manager_control_endpoint: root.join("manager-control.sock"),
             runner_endpoint: root.join(runner_socket_name),

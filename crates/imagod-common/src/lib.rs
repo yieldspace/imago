@@ -6,6 +6,12 @@ use imago_protocol::{ErrorCode, StructuredError};
 use thiserror::Error;
 
 mod builders;
+mod builtin_native_plugins;
+
+pub use builtin_native_plugins::{
+    BUILTIN_NATIVE_PLUGIN_DESCRIPTORS, BuiltinNativePluginDescriptor,
+    is_builtin_native_plugin_package_name,
+};
 
 /// Default Wasmtime linear-memory reservation size in bytes.
 pub const DEFAULT_WASM_MEMORY_RESERVATION_BYTES: u64 = 64 * 1024 * 1024;

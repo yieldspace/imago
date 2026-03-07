@@ -61,7 +61,12 @@ pub(crate) async fn run_manager(config_path: Option<PathBuf>) -> Result<(), anyh
         config.runtime.wasm_guard_before_linear_memory,
         config.runtime.wasm_parallel_compilation,
     )
-    .with_http_queue_memory_budget_bytes(config.runtime.http_queue_memory_budget_bytes);
+    .with_http_queue_memory_budget_bytes(config.runtime.http_queue_memory_budget_bytes)
+    .with_enabled_native_plugins(
+        config
+            .runtime
+            .effective_builtin_native_plugin_package_names(),
+    );
     let orchestrator = Orchestrator::new(&config.storage_root, artifacts.clone(), supervisor);
     let mut server = build_server(&config).map_err(anyhow::Error::new)?;
     #[cfg(unix)]
