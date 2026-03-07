@@ -31,7 +31,7 @@ jobs:
         run: |
           has_release_label="${{ contains(github.event.pull_request.labels.*.name, 'release') }}"
           has_release_title="${{ startsWith(github.event.pull_request.title, 'ci(release):') }}"
-          is_trusted_release_branch="${{ !github.event.pull_request.isCrossRepository && startsWith(github.event.pull_request.head.ref, 'codex/prup-release-') }}"
+          is_trusted_release_branch="${{ github.event.pull_request.head.repo.fork == false && startsWith(github.event.pull_request.head.ref, 'codex/prup-release-') }}"
 
           if [[ "$has_release_label" == "true" || ( "$has_release_title" == "true" && "$is_trusted_release_branch" == "true" ) ]]; then
             echo "is_release=true" >> "$GITHUB_OUTPUT"
