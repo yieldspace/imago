@@ -1,0 +1,1149 @@
+use std::collections::VecDeque;
+
+use crate::{
+    ActionConstraint, Fairness, Signature, StateConstraint, TemporalSpec, Trace, TraceStep,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExplorationMode {
+    ReachableGraph,
+    BoundedLasso,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelCheckConfig {
+    pub exploration: ExplorationMode,
+    pub bounded_depth: Option<usize>,
+    pub max_states: Option<usize>,
+    pub max_transitions: Option<usize>,
+    pub check_deadlocks: bool,
+    pub stop_on_first_violation: bool,
+}
+
+impl ModelCheckConfig {
+    pub const fn reachable_graph() -> Self {
+        Self {
+            exploration: ExplorationMode::ReachableGraph,
+            bounded_depth: None,
+            max_states: None,
+            max_transitions: None,
+            check_deadlocks: true,
+            stop_on_first_violation: true,
+        }
+    }
+
+    pub const fn bounded_lasso(depth: usize) -> Self {
+        Self {
+            exploration: ExplorationMode::BoundedLasso,
+            bounded_depth: Some(depth),
+            max_states: None,
+            max_transitions: None,
+            check_deadlocks: true,
+            stop_on_first_violation: true,
+        }
+    }
+}
+
+impl Default for ModelCheckConfig {
+    fn default() -> Self {
+        Self::reachable_graph()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelCheckError {
+    UnsupportedConfiguration(&'static str),
+    ExplorationLimitReached { states: usize, transitions: usize },
+    NoInitialStates,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CounterexampleKind {
+    Invariant,
+    IllegalTransition,
+    Deadlock,
+    StateConstraint,
+    ActionConstraint,
+    Property,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Counterexample<S, A> {
+    pub kind: CounterexampleKind,
+    pub name: String,
+    pub trace: Trace<S, A>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelCheckResult<S, A> {
+    violations: Vec<Counterexample<S, A>>,
+}
+
+impl<S, A> ModelCheckResult<S, A> {
+    pub fn ok() -> Self {
+        Self {
+            violations: Vec::new(),
+        }
+    }
+
+    pub fn with_violation(violation: Counterexample<S, A>) -> Self {
+        Self {
+            violations: vec![violation],
+        }
+    }
+
+    pub fn is_ok(&self) -> bool {
+        self.violations.is_empty()
+    }
+
+    pub fn violations(&self) -> &[Counterexample<S, A>] {
+        &self.violations
+    }
+
+    pub fn push(&mut self, violation: Counterexample<S, A>) {
+        self.violations.push(violation);
+    }
+
+    pub fn extend(&mut self, other: Self) {
+        self.violations.extend(other.violations);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GraphEdge<A> {
+    step: TraceStep<A>,
+    target: usize,
+}
+
+impl<A> GraphEdge<A> {
+    fn is_stutter(&self) -> bool {
+        matches!(self.step, TraceStep::Stutter)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ReachableGraph<S, A> {
+    states: Vec<S>,
+    edges: Vec<Vec<GraphEdge<A>>>,
+    initial_indices: Vec<usize>,
+    parents: Vec<Option<(usize, TraceStep<A>)>>,
+    depths: Vec<usize>,
+    deadlocks: Vec<usize>,
+    transitions: usize,
+}
+
+type TraceList<S, A> = Vec<Trace<S, A>>;
+
+impl<S, A> ReachableGraph<S, A> {
+    fn state_index(&self, state: &S) -> Option<usize>
+    where
+        S: PartialEq,
+    {
+        self.states.iter().position(|candidate| candidate == state)
+    }
+}
+
+pub struct ModelChecker<'a, T: TemporalSpec> {
+    spec: &'a T,
+    config: ModelCheckConfig,
+}
+
+impl<'a, T> ModelChecker<'a, T>
+where
+    T: TemporalSpec,
+    T::State: PartialEq,
+    T::Action: PartialEq,
+{
+    pub fn new(spec: &'a T) -> Self {
+        Self {
+            spec,
+            config: spec.checker_config(),
+        }
+    }
+
+    pub fn with_config(spec: &'a T, config: ModelCheckConfig) -> Self {
+        Self { spec, config }
+    }
+
+    pub fn check_invariants(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        match self.config.exploration {
+            ExplorationMode::ReachableGraph => self.check_invariants_graph(),
+            ExplorationMode::BoundedLasso => self.check_invariants_lasso(),
+        }
+    }
+
+    pub fn check_illegal_transitions(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        match self.config.exploration {
+            ExplorationMode::ReachableGraph => self.check_illegal_graph(),
+            ExplorationMode::BoundedLasso => self.check_illegal_lasso(),
+        }
+    }
+
+    pub fn check_deadlocks(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        if !self.config.check_deadlocks {
+            return Ok(ModelCheckResult::ok());
+        }
+
+        match self.config.exploration {
+            ExplorationMode::ReachableGraph => self.check_deadlocks_graph(),
+            ExplorationMode::BoundedLasso => self.check_deadlocks_lasso(),
+        }
+    }
+
+    pub fn check_properties(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        if self.spec.properties().is_empty() {
+            return Ok(ModelCheckResult::ok());
+        }
+
+        match self.config.exploration {
+            ExplorationMode::ReachableGraph => self.check_properties_graph(),
+            ExplorationMode::BoundedLasso => self.check_properties_lasso(),
+        }
+    }
+
+    pub fn check_all(&self) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let mut result = ModelCheckResult::ok();
+
+        let invariants = self.check_invariants()?;
+        if self.config.stop_on_first_violation && !invariants.is_ok() {
+            return Ok(invariants);
+        }
+        result.extend(invariants);
+
+        let illegal = self.check_illegal_transitions()?;
+        if self.config.stop_on_first_violation && !illegal.is_ok() {
+            return Ok(illegal);
+        }
+        result.extend(illegal);
+
+        let deadlocks = self.check_deadlocks()?;
+        if self.config.stop_on_first_violation && !deadlocks.is_ok() {
+            return Ok(deadlocks);
+        }
+        result.extend(deadlocks);
+
+        let properties = self.check_properties()?;
+        if self.config.stop_on_first_violation && !properties.is_ok() {
+            return Ok(properties);
+        }
+        result.extend(properties);
+
+        Ok(result)
+    }
+
+    fn check_invariants_graph(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let graph = self.build_reachable_graph()?;
+        for (index, state) in graph.states.iter().enumerate() {
+            if !state.invariant() {
+                return Ok(ModelCheckResult::with_violation(Counterexample {
+                    kind: CounterexampleKind::Invariant,
+                    name: "state_invariant".to_owned(),
+                    trace: self.trace_to_state(&graph, index),
+                }));
+            }
+
+            for predicate in self.spec.invariants() {
+                if !predicate.eval(state) {
+                    return Ok(ModelCheckResult::with_violation(Counterexample {
+                        kind: CounterexampleKind::Invariant,
+                        name: predicate.name().to_owned(),
+                        trace: self.trace_to_state(&graph, index),
+                    }));
+                }
+            }
+        }
+
+        Ok(ModelCheckResult::ok())
+    }
+
+    fn check_illegal_graph(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let graph = self.build_reachable_graph()?;
+        for (source, edges) in graph.edges.iter().enumerate() {
+            for edge in edges {
+                let TraceStep::Action(action) = &edge.step else {
+                    continue;
+                };
+
+                for predicate in self.spec.illegal_transitions() {
+                    if predicate.eval(&graph.states[source], action, &graph.states[edge.target]) {
+                        return Ok(ModelCheckResult::with_violation(Counterexample {
+                            kind: CounterexampleKind::IllegalTransition,
+                            name: predicate.name().to_owned(),
+                            trace: self.trace_to_transition(&graph, source, edge),
+                        }));
+                    }
+                }
+            }
+        }
+
+        Ok(ModelCheckResult::ok())
+    }
+
+    fn check_deadlocks_graph(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let graph = self.build_reachable_graph()?;
+        if let Some(deadlock) = graph.deadlocks.first() {
+            return Ok(ModelCheckResult::with_violation(Counterexample {
+                kind: CounterexampleKind::Deadlock,
+                name: "deadlock".to_owned(),
+                trace: self.trace_to_state(&graph, *deadlock),
+            }));
+        }
+
+        Ok(ModelCheckResult::ok())
+    }
+
+    fn check_properties_graph(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        if self.spec.symmetry().is_some()
+            && (!self.spec.properties().is_empty() || !self.spec.fairness().is_empty())
+        {
+            return Err(ModelCheckError::UnsupportedConfiguration(
+                "symmetry reduction cannot be combined with temporal properties or fairness",
+            ));
+        }
+
+        let graph = self.build_reachable_graph()?;
+        let traces = self.graph_lasso_traces(&graph);
+        let mut best: Option<Counterexample<T::State, T::Action>> = None;
+
+        for property in self.spec.properties() {
+            let description = property.describe();
+            for trace in &traces {
+                if !self.trace_satisfies_fairness_graph(trace, &graph) {
+                    continue;
+                }
+                if !self.eval_formula(trace, &property)[0] {
+                    self.consider_violation(
+                        &mut best,
+                        Counterexample {
+                            kind: CounterexampleKind::Property,
+                            name: description.clone(),
+                            trace: trace.clone(),
+                        },
+                    );
+                }
+            }
+        }
+
+        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
+    }
+
+    fn check_invariants_lasso(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let mut best = None;
+        for init in self.initial_states_filtered()? {
+            self.search_invariants_lasso(vec![init], Vec::new(), &mut best);
+        }
+        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
+    }
+
+    fn check_illegal_lasso(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let mut best = None;
+        for init in self.initial_states_filtered()? {
+            self.search_illegal_lasso(vec![init], Vec::new(), &mut best);
+        }
+        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
+    }
+
+    fn check_deadlocks_lasso(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let mut best = None;
+        for init in self.initial_states_filtered()? {
+            self.search_deadlocks_lasso(vec![init], Vec::new(), &mut best);
+        }
+        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
+    }
+
+    fn check_properties_lasso(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        if self.spec.symmetry().is_some()
+            && (!self.spec.properties().is_empty() || !self.spec.fairness().is_empty())
+        {
+            return Err(ModelCheckError::UnsupportedConfiguration(
+                "symmetry reduction cannot be combined with temporal properties or fairness",
+            ));
+        }
+
+        let traces = self.bounded_lasso_traces()?;
+        let mut best = None;
+        for property in self.spec.properties() {
+            let description = property.describe();
+            for trace in &traces {
+                if !self.trace_satisfies_fairness_lasso(trace) {
+                    continue;
+                }
+                if !self.eval_formula(trace, &property)[0] {
+                    self.consider_violation(
+                        &mut best,
+                        Counterexample {
+                            kind: CounterexampleKind::Property,
+                            name: description.clone(),
+                            trace: trace.clone(),
+                        },
+                    );
+                }
+            }
+        }
+
+        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
+    }
+
+    fn build_reachable_graph(
+        &self,
+    ) -> Result<ReachableGraph<T::State, T::Action>, ModelCheckError> {
+        let initial_states = self.initial_states_filtered()?;
+        let mut graph = ReachableGraph {
+            states: Vec::new(),
+            edges: Vec::new(),
+            initial_indices: Vec::new(),
+            parents: Vec::new(),
+            depths: Vec::new(),
+            deadlocks: Vec::new(),
+            transitions: 0,
+        };
+        let mut queue = VecDeque::new();
+
+        for state in initial_states {
+            let index = self.push_state(&mut graph, state, None, 0, &mut queue)?;
+            if !graph.initial_indices.contains(&index) {
+                graph.initial_indices.push(index);
+            }
+        }
+
+        while let Some(index) = queue.pop_front() {
+            let current = graph.states[index].clone();
+            let next_depth = graph.depths[index] + 1;
+            let mut edges = Vec::new();
+
+            for (action, next_raw) in self.spec.successors(&current) {
+                if !self.action_constraints_allow(&current, &action, &next_raw) {
+                    continue;
+                }
+
+                let next = self.canonicalize_state(&next_raw);
+                if !self.state_constraints_allow(&next) {
+                    continue;
+                }
+
+                let next_index = self.push_state(
+                    &mut graph,
+                    next,
+                    Some((index, TraceStep::Action(action.clone()))),
+                    next_depth,
+                    &mut queue,
+                )?;
+                let edge = GraphEdge {
+                    step: TraceStep::Action(action),
+                    target: next_index,
+                };
+                if !edges.contains(&edge) {
+                    edges.push(edge);
+                    graph.transitions += 1;
+                    self.ensure_transition_limit(&graph)?;
+                }
+            }
+
+            if self.spec.allow_stutter() {
+                let stutter = self.canonicalize_state(&self.spec.stutter_state(&current));
+                if self.state_constraints_allow(&stutter) {
+                    let next_index = self.push_state(
+                        &mut graph,
+                        stutter,
+                        Some((index, TraceStep::Stutter)),
+                        next_depth,
+                        &mut queue,
+                    )?;
+                    let edge = GraphEdge {
+                        step: TraceStep::Stutter,
+                        target: next_index,
+                    };
+                    if !edges.contains(&edge) {
+                        edges.push(edge);
+                    }
+                }
+            }
+
+            if edges.iter().all(GraphEdge::is_stutter) {
+                graph.deadlocks.push(index);
+            }
+
+            graph.edges[index] = edges;
+        }
+
+        Ok(graph)
+    }
+
+    fn push_state(
+        &self,
+        graph: &mut ReachableGraph<T::State, T::Action>,
+        state: T::State,
+        parent: Option<(usize, TraceStep<T::Action>)>,
+        depth: usize,
+        queue: &mut VecDeque<usize>,
+    ) -> Result<usize, ModelCheckError> {
+        if let Some(existing) = graph.state_index(&state) {
+            return Ok(existing);
+        }
+
+        graph.states.push(state);
+        graph.edges.push(Vec::new());
+        graph.parents.push(parent);
+        graph.depths.push(depth);
+        let index = graph.states.len() - 1;
+        queue.push_back(index);
+        self.ensure_state_limit(graph)?;
+        Ok(index)
+    }
+
+    fn ensure_state_limit(
+        &self,
+        graph: &ReachableGraph<T::State, T::Action>,
+    ) -> Result<(), ModelCheckError> {
+        if self
+            .config
+            .max_states
+            .is_some_and(|max_states| graph.states.len() > max_states)
+        {
+            return Err(ModelCheckError::ExplorationLimitReached {
+                states: graph.states.len(),
+                transitions: graph.transitions,
+            });
+        }
+        Ok(())
+    }
+
+    fn ensure_transition_limit(
+        &self,
+        graph: &ReachableGraph<T::State, T::Action>,
+    ) -> Result<(), ModelCheckError> {
+        if self
+            .config
+            .max_transitions
+            .is_some_and(|max_transitions| graph.transitions > max_transitions)
+        {
+            return Err(ModelCheckError::ExplorationLimitReached {
+                states: graph.states.len(),
+                transitions: graph.transitions,
+            });
+        }
+        Ok(())
+    }
+
+    fn initial_states_filtered(&self) -> Result<Vec<T::State>, ModelCheckError> {
+        let states = self
+            .spec
+            .initial_states()
+            .into_iter()
+            .map(|state| self.canonicalize_state(&state))
+            .filter(|state| self.state_constraints_allow(state))
+            .fold(Vec::new(), |mut acc, state| {
+                if !acc.contains(&state) {
+                    acc.push(state);
+                }
+                acc
+            });
+
+        if states.is_empty() {
+            return Err(ModelCheckError::NoInitialStates);
+        }
+
+        Ok(states)
+    }
+
+    fn canonicalize_state(&self, state: &T::State) -> T::State {
+        self.spec
+            .symmetry()
+            .map(|symmetry| symmetry.canonicalize(state))
+            .unwrap_or_else(|| state.clone())
+    }
+
+    fn state_constraints_allow(&self, state: &T::State) -> bool {
+        self.spec
+            .state_constraints()
+            .into_iter()
+            .all(|constraint: StateConstraint<T::State>| constraint.eval(state))
+    }
+
+    fn action_constraints_allow(
+        &self,
+        prev: &T::State,
+        action: &T::Action,
+        next: &T::State,
+    ) -> bool {
+        self.spec.action_constraints().into_iter().all(
+            |constraint: ActionConstraint<T::State, T::Action>| constraint.eval(prev, action, next),
+        )
+    }
+
+    fn constrained_successors(&self, state: &T::State) -> Vec<(TraceStep<T::Action>, T::State)> {
+        let mut values = Vec::new();
+        for (action, next_raw) in self.spec.successors(state) {
+            if !self.action_constraints_allow(state, &action, &next_raw) {
+                continue;
+            }
+            let next = self.canonicalize_state(&next_raw);
+            if !self.state_constraints_allow(&next) {
+                continue;
+            }
+            values.push((TraceStep::Action(action), next));
+        }
+
+        if self.spec.allow_stutter() {
+            let stutter = self.canonicalize_state(&self.spec.stutter_state(state));
+            if self.state_constraints_allow(&stutter) {
+                values.push((TraceStep::Stutter, stutter));
+            }
+        }
+
+        values
+    }
+
+    fn search_invariants_lasso(
+        &self,
+        states: Vec<T::State>,
+        steps: Vec<TraceStep<T::Action>>,
+        best: &mut Option<Counterexample<T::State, T::Action>>,
+    ) {
+        let depth = steps.len();
+        let current = states.last().expect("states always non-empty");
+
+        if !current.invariant() {
+            self.consider_violation(
+                best,
+                Counterexample {
+                    kind: CounterexampleKind::Invariant,
+                    name: "state_invariant".to_owned(),
+                    trace: self.terminal_trace(states.clone(), steps.clone()),
+                },
+            );
+            return;
+        }
+
+        for predicate in self.spec.invariants() {
+            if !predicate.eval(current) {
+                self.consider_violation(
+                    best,
+                    Counterexample {
+                        kind: CounterexampleKind::Invariant,
+                        name: predicate.name().to_owned(),
+                        trace: self.terminal_trace(states.clone(), steps.clone()),
+                    },
+                );
+                return;
+            }
+        }
+
+        if self.reached_bounded_depth(depth) {
+            return;
+        }
+
+        for (step, next) in self.constrained_successors(current) {
+            let mut next_states = states.clone();
+            next_states.push(next);
+            let mut next_steps = steps.clone();
+            next_steps.push(step);
+            self.search_invariants_lasso(next_states, next_steps, best);
+        }
+    }
+
+    fn search_illegal_lasso(
+        &self,
+        states: Vec<T::State>,
+        steps: Vec<TraceStep<T::Action>>,
+        best: &mut Option<Counterexample<T::State, T::Action>>,
+    ) {
+        let depth = steps.len();
+        let current = states.last().expect("states always non-empty");
+
+        if self.reached_bounded_depth(depth) {
+            return;
+        }
+
+        for (step, next) in self.constrained_successors(current) {
+            if let TraceStep::Action(action) = &step {
+                for predicate in self.spec.illegal_transitions() {
+                    if predicate.eval(current, action, &next) {
+                        let mut violation_states = states.clone();
+                        violation_states.push(next);
+                        let mut violation_steps = steps.clone();
+                        violation_steps.push(step);
+                        self.consider_violation(
+                            best,
+                            Counterexample {
+                                kind: CounterexampleKind::IllegalTransition,
+                                name: predicate.name().to_owned(),
+                                trace: self.terminal_trace(violation_states, violation_steps),
+                            },
+                        );
+                        return;
+                    }
+                }
+            }
+
+            let mut next_states = states.clone();
+            next_states.push(next);
+            let mut next_steps = steps.clone();
+            next_steps.push(step);
+            self.search_illegal_lasso(next_states, next_steps, best);
+        }
+    }
+
+    fn search_deadlocks_lasso(
+        &self,
+        states: Vec<T::State>,
+        steps: Vec<TraceStep<T::Action>>,
+        best: &mut Option<Counterexample<T::State, T::Action>>,
+    ) {
+        let depth = steps.len();
+        let current = states.last().expect("states always non-empty");
+
+        let has_non_stutter = self
+            .constrained_successors(current)
+            .iter()
+            .any(|(step, _)| matches!(step, TraceStep::Action(_)));
+        if !has_non_stutter {
+            self.consider_violation(
+                best,
+                Counterexample {
+                    kind: CounterexampleKind::Deadlock,
+                    name: "deadlock".to_owned(),
+                    trace: self.terminal_trace(states.clone(), steps.clone()),
+                },
+            );
+            return;
+        }
+
+        if self.reached_bounded_depth(depth) {
+            return;
+        }
+
+        for (step, next) in self.constrained_successors(current) {
+            let mut next_states = states.clone();
+            next_states.push(next);
+            let mut next_steps = steps.clone();
+            next_steps.push(step);
+            self.search_deadlocks_lasso(next_states, next_steps, best);
+        }
+    }
+
+    fn bounded_lasso_traces(&self) -> Result<TraceList<T::State, T::Action>, ModelCheckError> {
+        let mut traces = Vec::new();
+        for init in self.initial_states_filtered()? {
+            self.enumerate_lasso(vec![init], Vec::new(), &mut traces);
+        }
+        Ok(traces)
+    }
+
+    fn enumerate_lasso(
+        &self,
+        states: Vec<T::State>,
+        steps: Vec<TraceStep<T::Action>>,
+        traces: &mut TraceList<T::State, T::Action>,
+    ) {
+        traces.push(self.terminal_trace(states.clone(), steps.clone()));
+
+        if self.reached_bounded_depth(steps.len()) {
+            return;
+        }
+
+        let current = states.last().expect("states always non-empty");
+        for (step, next) in self.constrained_successors(current) {
+            if let Some(loop_start) = states.iter().position(|state| state == &next) {
+                let mut lasso_steps = steps.clone();
+                lasso_steps.push(step);
+                traces.push(Trace::new(states.clone(), lasso_steps, loop_start));
+                continue;
+            }
+
+            let mut next_states = states.clone();
+            next_states.push(next);
+            let mut next_steps = steps.clone();
+            next_steps.push(step);
+            self.enumerate_lasso(next_states, next_steps, traces);
+        }
+    }
+
+    fn graph_lasso_traces(
+        &self,
+        graph: &ReachableGraph<T::State, T::Action>,
+    ) -> TraceList<T::State, T::Action> {
+        let mut traces = Vec::new();
+        for &initial in &graph.initial_indices {
+            self.enumerate_graph_lassos(graph, vec![initial], Vec::new(), &mut traces);
+        }
+        traces
+    }
+
+    fn enumerate_graph_lassos(
+        &self,
+        graph: &ReachableGraph<T::State, T::Action>,
+        path_states: Vec<usize>,
+        path_steps: Vec<TraceStep<T::Action>>,
+        traces: &mut TraceList<T::State, T::Action>,
+    ) {
+        let current = *path_states.last().expect("path has at least one state");
+        for edge in &graph.edges[current] {
+            if let Some(loop_start) = path_states.iter().position(|state| *state == edge.target) {
+                let states = path_states
+                    .iter()
+                    .map(|index| graph.states[*index].clone())
+                    .collect();
+                let mut steps = path_steps.clone();
+                steps.push(edge.step.clone());
+                traces.push(Trace::new(states, steps, loop_start));
+                continue;
+            }
+
+            if matches!(self.config.exploration, ExplorationMode::BoundedLasso)
+                && self.reached_bounded_depth(path_steps.len() + 1)
+            {
+                continue;
+            }
+
+            let mut next_states = path_states.clone();
+            next_states.push(edge.target);
+            let mut next_steps = path_steps.clone();
+            next_steps.push(edge.step.clone());
+            self.enumerate_graph_lassos(graph, next_states, next_steps, traces);
+        }
+    }
+
+    fn trace_to_state(
+        &self,
+        graph: &ReachableGraph<T::State, T::Action>,
+        target: usize,
+    ) -> Trace<T::State, T::Action> {
+        let (states, steps) = self.reconstruct_path(graph, target);
+        self.terminal_trace(states, steps)
+    }
+
+    fn trace_to_transition(
+        &self,
+        graph: &ReachableGraph<T::State, T::Action>,
+        source: usize,
+        edge: &GraphEdge<T::Action>,
+    ) -> Trace<T::State, T::Action> {
+        let (mut states, mut steps) = self.reconstruct_path(graph, source);
+        states.push(graph.states[edge.target].clone());
+        steps.push(edge.step.clone());
+        self.terminal_trace(states, steps)
+    }
+
+    fn reconstruct_path(
+        &self,
+        graph: &ReachableGraph<T::State, T::Action>,
+        target: usize,
+    ) -> (Vec<T::State>, Vec<TraceStep<T::Action>>) {
+        let mut states = vec![target];
+        let mut steps = Vec::new();
+        let mut cursor = target;
+        while let Some((parent, step)) = &graph.parents[cursor] {
+            states.push(*parent);
+            steps.push(step.clone());
+            cursor = *parent;
+        }
+        states.reverse();
+        steps.reverse();
+        let states = states
+            .into_iter()
+            .map(|index| graph.states[index].clone())
+            .collect();
+        (states, steps)
+    }
+
+    fn terminal_trace(
+        &self,
+        states: Vec<T::State>,
+        steps: Vec<TraceStep<T::Action>>,
+    ) -> Trace<T::State, T::Action> {
+        let mut trace_steps = steps;
+        trace_steps.push(TraceStep::Stutter);
+        let loop_start = trace_steps.len() - 1;
+        Trace::new(states, trace_steps, loop_start)
+    }
+
+    fn reached_bounded_depth(&self, depth: usize) -> bool {
+        matches!(self.config.exploration, ExplorationMode::BoundedLasso)
+            && self
+                .config
+                .bounded_depth
+                .is_some_and(|bounded_depth| depth >= bounded_depth)
+    }
+
+    fn consider_violation(
+        &self,
+        best: &mut Option<Counterexample<T::State, T::Action>>,
+        candidate: Counterexample<T::State, T::Action>,
+    ) {
+        let replace = best
+            .as_ref()
+            .is_none_or(|current| candidate.trace.len() < current.trace.len());
+        if replace {
+            *best = Some(candidate);
+        }
+    }
+
+    fn trace_satisfies_fairness_graph(
+        &self,
+        trace: &Trace<T::State, T::Action>,
+        graph: &ReachableGraph<T::State, T::Action>,
+    ) -> bool {
+        self.spec
+            .fairness()
+            .into_iter()
+            .all(|fairness| self.eval_fairness_graph(trace, graph, fairness))
+    }
+
+    fn eval_fairness_graph(
+        &self,
+        trace: &Trace<T::State, T::Action>,
+        graph: &ReachableGraph<T::State, T::Action>,
+        fairness: Fairness<T::State, T::Action>,
+    ) -> bool {
+        let predicate = fairness.predicate();
+        let occurs = trace.cycle_indices().any(|index| {
+            let next_index = trace.next_index(index);
+            match &trace.steps()[index] {
+                TraceStep::Action(action) => {
+                    predicate.eval(&trace.states()[index], action, &trace.states()[next_index])
+                }
+                TraceStep::Stutter => false,
+            }
+        });
+        let enabled_any = trace.cycle_indices().any(|index| {
+            graph
+                .state_index(&trace.states()[index])
+                .into_iter()
+                .flat_map(|state_index| &graph.edges[state_index])
+                .filter_map(|edge| match &edge.step {
+                    TraceStep::Action(action) => Some((action, edge.target)),
+                    TraceStep::Stutter => None,
+                })
+                .any(|(action, target)| {
+                    predicate.eval(&trace.states()[index], action, &graph.states[target])
+                })
+        });
+        let enabled_all = trace.cycle_indices().all(|index| {
+            graph
+                .state_index(&trace.states()[index])
+                .into_iter()
+                .flat_map(|state_index| &graph.edges[state_index])
+                .filter_map(|edge| match &edge.step {
+                    TraceStep::Action(action) => Some((action, edge.target)),
+                    TraceStep::Stutter => None,
+                })
+                .any(|(action, target)| {
+                    predicate.eval(&trace.states()[index], action, &graph.states[target])
+                })
+        });
+
+        match fairness {
+            Fairness::Weak(_) => !enabled_all || occurs,
+            Fairness::Strong(_) => !enabled_any || occurs,
+        }
+    }
+
+    fn trace_satisfies_fairness_lasso(&self, trace: &Trace<T::State, T::Action>) -> bool {
+        self.spec
+            .fairness()
+            .into_iter()
+            .all(|fairness| self.eval_fairness_lasso(trace, fairness))
+    }
+
+    fn eval_fairness_lasso(
+        &self,
+        trace: &Trace<T::State, T::Action>,
+        fairness: Fairness<T::State, T::Action>,
+    ) -> bool {
+        let predicate = fairness.predicate();
+        let occurs = trace.cycle_indices().any(|index| {
+            let next_index = trace.next_index(index);
+            match &trace.steps()[index] {
+                TraceStep::Action(action) => {
+                    predicate.eval(&trace.states()[index], action, &trace.states()[next_index])
+                }
+                TraceStep::Stutter => false,
+            }
+        });
+        let enabled_any = trace.cycle_indices().any(|index| {
+            self.constrained_successors(&trace.states()[index])
+                .into_iter()
+                .filter_map(|(step, next)| match step {
+                    TraceStep::Action(action) => Some((action, next)),
+                    TraceStep::Stutter => None,
+                })
+                .any(|(action, next)| predicate.eval(&trace.states()[index], &action, &next))
+        });
+        let enabled_all = trace.cycle_indices().all(|index| {
+            self.constrained_successors(&trace.states()[index])
+                .into_iter()
+                .filter_map(|(step, next)| match step {
+                    TraceStep::Action(action) => Some((action, next)),
+                    TraceStep::Stutter => None,
+                })
+                .any(|(action, next)| predicate.eval(&trace.states()[index], &action, &next))
+        });
+
+        match fairness {
+            Fairness::Weak(_) => !enabled_all || occurs,
+            Fairness::Strong(_) => !enabled_any || occurs,
+        }
+    }
+
+    fn eval_formula(
+        &self,
+        trace: &Trace<T::State, T::Action>,
+        formula: &crate::Ltl<T::State, T::Action>,
+    ) -> Vec<bool> {
+        let len = trace.len();
+        match formula {
+            crate::Ltl::True => vec![true; len],
+            crate::Ltl::False => vec![false; len],
+            crate::Ltl::Pred(predicate) => trace
+                .states()
+                .iter()
+                .map(|state| predicate.eval(state))
+                .collect(),
+            crate::Ltl::StepPred(predicate) => (0..len)
+                .map(|index| {
+                    let next_index = trace.next_index(index);
+                    match &trace.steps()[index] {
+                        TraceStep::Action(action) => predicate.eval(
+                            &trace.states()[index],
+                            action,
+                            &trace.states()[next_index],
+                        ),
+                        TraceStep::Stutter => false,
+                    }
+                })
+                .collect(),
+            crate::Ltl::Not(inner) => self
+                .eval_formula(trace, inner)
+                .into_iter()
+                .map(|value| !value)
+                .collect(),
+            crate::Ltl::And(lhs, rhs) => self
+                .eval_formula(trace, lhs)
+                .into_iter()
+                .zip(self.eval_formula(trace, rhs))
+                .map(|(lhs, rhs)| lhs && rhs)
+                .collect(),
+            crate::Ltl::Or(lhs, rhs) => self
+                .eval_formula(trace, lhs)
+                .into_iter()
+                .zip(self.eval_formula(trace, rhs))
+                .map(|(lhs, rhs)| lhs || rhs)
+                .collect(),
+            crate::Ltl::Implies(lhs, rhs) => self
+                .eval_formula(trace, lhs)
+                .into_iter()
+                .zip(self.eval_formula(trace, rhs))
+                .map(|(lhs, rhs)| !lhs || rhs)
+                .collect(),
+            crate::Ltl::Next(inner) => {
+                let inner = self.eval_formula(trace, inner);
+                (0..len)
+                    .map(|index| inner[trace.next_index(index)])
+                    .collect()
+            }
+            crate::Ltl::Always(inner) => self.eval_always(trace, &self.eval_formula(trace, inner)),
+            crate::Ltl::Eventually(inner) => {
+                self.eval_eventually(trace, &self.eval_formula(trace, inner))
+            }
+            crate::Ltl::Until(lhs, rhs) => self.eval_until(
+                trace,
+                &self.eval_formula(trace, lhs),
+                &self.eval_formula(trace, rhs),
+            ),
+            crate::Ltl::Enabled(predicate) => trace
+                .states()
+                .iter()
+                .map(|state| {
+                    self.constrained_successors(state)
+                        .into_iter()
+                        .filter_map(|(step, next)| match step {
+                            TraceStep::Action(action) => Some((action, next)),
+                            TraceStep::Stutter => None,
+                        })
+                        .any(|(action, next)| predicate.eval(state, &action, &next))
+                })
+                .collect(),
+        }
+    }
+
+    fn eval_eventually(&self, trace: &Trace<T::State, T::Action>, inner: &[bool]) -> Vec<bool> {
+        let len = trace.len();
+        let mut result = inner.to_vec();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for index in (0..len).rev() {
+                let candidate = inner[index] || result[trace.next_index(index)];
+                if candidate != result[index] {
+                    result[index] = candidate;
+                    changed = true;
+                }
+            }
+        }
+        result
+    }
+
+    fn eval_always(&self, trace: &Trace<T::State, T::Action>, inner: &[bool]) -> Vec<bool> {
+        let len = trace.len();
+        let mut result = vec![true; len];
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for index in (0..len).rev() {
+                let candidate = inner[index] && result[trace.next_index(index)];
+                if candidate != result[index] {
+                    result[index] = candidate;
+                    changed = true;
+                }
+            }
+        }
+        result
+    }
+
+    fn eval_until(
+        &self,
+        trace: &Trace<T::State, T::Action>,
+        lhs: &[bool],
+        rhs: &[bool],
+    ) -> Vec<bool> {
+        let len = trace.len();
+        let mut result = rhs.to_vec();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for index in (0..len).rev() {
+                let candidate = rhs[index] || (lhs[index] && result[trace.next_index(index)]);
+                if candidate != result[index] {
+                    result[index] = candidate;
+                    changed = true;
+                }
+            }
+        }
+        result
+    }
+}

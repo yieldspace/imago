@@ -1,0 +1,5 @@
+error: #[signature(custom)] cannot be combined with #[signature(range = ...)]
+ --> tests/fixtures/derive_signature_custom_with_range.rs:5:8
+  |
+5 | struct Counter(u8);
+  |        ^^^^^^^
