@@ -1,10 +1,10 @@
-use imago_formal_core::{
+use nirvash_core::{
     ActionConstraint, ModelCheckConfig, StateConstraint, StatePredicate, SymmetryReducer,
     TemporalSpec, TransitionSystem,
 };
-use imago_formal_macros::{
-    Signature as FormalSignature, imago_action_constraint, imago_formal_tests, imago_invariant,
-    imago_property, imago_state_constraint, imago_subsystem_spec, imago_symmetry,
+use nirvash_macros::{
+    Signature as FormalSignature, action_constraint, formal_tests, invariant,
+    property, state_constraint, subsystem_spec, symmetry,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
@@ -22,16 +22,7 @@ enum Action {
 #[derive(Default)]
 struct Spec;
 
-#[imago_subsystem_spec(
-    invariants(idle_is_valid),
-    illegal(),
-    state_constraints(allow_declared_states),
-    action_constraints(allow_declared_edges),
-    properties(busy_leads_to_idle),
-    fairness(),
-    symmetry(identity_symmetry),
-    checker_config(spec_checker_config)
-)]
+#[subsystem_spec(checker_config(spec_checker_config))]
 impl TransitionSystem for Spec {
     type State = State;
     type Action = Action;
@@ -49,30 +40,30 @@ impl TransitionSystem for Spec {
     }
 }
 
-#[imago_invariant]
+#[invariant(Spec)]
 fn idle_is_valid() -> StatePredicate<State> {
     StatePredicate::new("idle_is_valid", |_| true)
 }
 
-#[imago_property]
-fn busy_leads_to_idle() -> imago_formal_core::Ltl<State, Action> {
-    imago_formal_core::Ltl::leads_to(
-        imago_formal_core::Ltl::pred(StatePredicate::new("busy", |state| matches!(state, State::Busy))),
-        imago_formal_core::Ltl::pred(StatePredicate::new("idle", |state| matches!(state, State::Idle))),
+#[property(Spec)]
+fn busy_leads_to_idle() -> nirvash_core::Ltl<State, Action> {
+    nirvash_core::Ltl::leads_to(
+        nirvash_core::Ltl::pred(StatePredicate::new("busy", |state| matches!(state, State::Busy))),
+        nirvash_core::Ltl::pred(StatePredicate::new("idle", |state| matches!(state, State::Idle))),
     )
 }
 
-#[imago_state_constraint]
+#[state_constraint(Spec)]
 fn allow_declared_states() -> StateConstraint<State> {
     StateConstraint::new("allow_declared_states", |_| true)
 }
 
-#[imago_action_constraint]
+#[action_constraint(Spec)]
 fn allow_declared_edges() -> ActionConstraint<State, Action> {
     ActionConstraint::new("allow_declared_edges", |_, _, _| true)
 }
 
-#[imago_symmetry]
+#[symmetry(Spec)]
 fn identity_symmetry() -> SymmetryReducer<State> {
     SymmetryReducer::new("identity", |state| *state)
 }
@@ -88,7 +79,7 @@ fn model_cases() -> Vec<Spec> {
     vec![Spec]
 }
 
-#[imago_formal_tests(spec = Spec, init = initial_state, cases = model_cases)]
+#[formal_tests(spec = Spec, init = initial_state, cases = model_cases)]
 const _: () = ();
 
 impl Spec {

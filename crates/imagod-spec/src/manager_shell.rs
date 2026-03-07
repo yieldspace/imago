@@ -1,10 +1,8 @@
-use imago_formal_core::{
+use nirvash_core::{
     BoundedDomain, Fairness, Ltl, ModelCheckConfig, Signature as FormalSignature, StatePredicate,
     StepPredicate, TransitionSystem,
 };
-use imago_formal_macros::{
-    Signature, imago_fairness, imago_illegal, imago_invariant, imago_property, imago_subsystem_spec,
-};
+use nirvash_macros::{Signature, fairness, illegal, invariant, property, subsystem_spec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
 pub enum TaskState {
@@ -165,7 +163,7 @@ fn manager_shell_checker_config() -> ModelCheckConfig {
     }
 }
 
-#[imago_invariant]
+#[invariant(ManagerShellSpec)]
 fn listening_requires_config() -> StatePredicate<ManagerShellState> {
     StatePredicate::new("listening_requires_config", |state| {
         !matches!(
@@ -177,7 +175,7 @@ fn listening_requires_config() -> StatePredicate<ManagerShellState> {
     })
 }
 
-#[imago_invariant]
+#[invariant(ManagerShellSpec)]
 fn restore_depends_on_plugin_gc() -> StatePredicate<ManagerShellState> {
     StatePredicate::new("restore_depends_on_plugin_gc", |state| {
         !matches!(state.phase, ManagerShellPhase::Restoring)
@@ -185,7 +183,7 @@ fn restore_depends_on_plugin_gc() -> StatePredicate<ManagerShellState> {
     })
 }
 
-#[imago_invariant]
+#[invariant(ManagerShellSpec)]
 fn booting_keeps_boot_tasks_idle() -> StatePredicate<ManagerShellState> {
     StatePredicate::new("booting_keeps_boot_tasks_idle", |state| {
         !matches!(state.phase, ManagerShellPhase::Booting)
@@ -194,14 +192,14 @@ fn booting_keeps_boot_tasks_idle() -> StatePredicate<ManagerShellState> {
     })
 }
 
-#[imago_illegal]
+#[illegal(ManagerShellSpec)]
 fn listen_without_config() -> StepPredicate<ManagerShellState, ManagerShellAction> {
     StepPredicate::new("listen_without_config", |prev, action, _| {
         matches!(action, ManagerShellAction::StartListening) && !prev.config_loaded
     })
 }
 
-#[imago_illegal]
+#[illegal(ManagerShellSpec)]
 fn shutdown_before_listen() -> StepPredicate<ManagerShellState, ManagerShellAction> {
     StepPredicate::new("shutdown_before_listen", |prev, action, _| {
         matches!(action, ManagerShellAction::BeginShutdown)
@@ -209,7 +207,7 @@ fn shutdown_before_listen() -> StepPredicate<ManagerShellState, ManagerShellActi
     })
 }
 
-#[imago_illegal]
+#[illegal(ManagerShellSpec)]
 fn restore_before_plugin_gc() -> StepPredicate<ManagerShellState, ManagerShellAction> {
     StepPredicate::new("restore_before_plugin_gc", |prev, action, _| {
         matches!(
@@ -219,7 +217,7 @@ fn restore_before_plugin_gc() -> StepPredicate<ManagerShellState, ManagerShellAc
     })
 }
 
-#[imago_property]
+#[property(ManagerShellSpec)]
 fn booting_leads_to_config_ready() -> Ltl<ManagerShellState, ManagerShellAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("booting", |state| {
@@ -231,7 +229,7 @@ fn booting_leads_to_config_ready() -> Ltl<ManagerShellState, ManagerShellAction>
     )
 }
 
-#[imago_property]
+#[property(ManagerShellSpec)]
 fn config_ready_leads_to_listening() -> Ltl<ManagerShellState, ManagerShellAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("config_ready", |state| {
@@ -243,7 +241,7 @@ fn config_ready_leads_to_listening() -> Ltl<ManagerShellState, ManagerShellActio
     )
 }
 
-#[imago_property]
+#[property(ManagerShellSpec)]
 fn shutdown_requested_leads_to_stopped() -> Ltl<ManagerShellState, ManagerShellAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("shutdown_requested", |state| {
@@ -255,7 +253,7 @@ fn shutdown_requested_leads_to_stopped() -> Ltl<ManagerShellState, ManagerShellA
     )
 }
 
-#[imago_fairness]
+#[fairness(ManagerShellSpec)]
 fn boot_config_progress() -> Fairness<ManagerShellState, ManagerShellAction> {
     Fairness::weak(StepPredicate::new(
         "boot_config_progress",
@@ -271,7 +269,7 @@ fn boot_config_progress() -> Fairness<ManagerShellState, ManagerShellAction> {
     ))
 }
 
-#[imago_fairness]
+#[fairness(ManagerShellSpec)]
 fn config_ready_progress() -> Fairness<ManagerShellState, ManagerShellAction> {
     Fairness::weak(StepPredicate::new(
         "config_ready_progress",
@@ -291,7 +289,7 @@ fn config_ready_progress() -> Fairness<ManagerShellState, ManagerShellAction> {
     ))
 }
 
-#[imago_fairness]
+#[fairness(ManagerShellSpec)]
 fn shutdown_completion_progress() -> Fairness<ManagerShellState, ManagerShellAction> {
     Fairness::weak(StepPredicate::new(
         "shutdown_completion_progress",
@@ -303,7 +301,7 @@ fn shutdown_completion_progress() -> Fairness<ManagerShellState, ManagerShellAct
     ))
 }
 
-#[imago_fairness]
+#[fairness(ManagerShellSpec)]
 fn restore_progress() -> Fairness<ManagerShellState, ManagerShellAction> {
     Fairness::weak(StepPredicate::new(
         "restore_progress",
@@ -319,30 +317,7 @@ fn restore_progress() -> Fairness<ManagerShellState, ManagerShellAction> {
     ))
 }
 
-#[imago_subsystem_spec(
-    invariants(
-        listening_requires_config,
-        restore_depends_on_plugin_gc,
-        booting_keeps_boot_tasks_idle
-    ),
-    illegal(
-        listen_without_config,
-        shutdown_before_listen,
-        restore_before_plugin_gc
-    ),
-    properties(
-        booting_leads_to_config_ready,
-        config_ready_leads_to_listening,
-        shutdown_requested_leads_to_stopped
-    ),
-    fairness(
-        boot_config_progress,
-        config_ready_progress,
-        restore_progress,
-        shutdown_completion_progress
-    ),
-    checker_config(manager_shell_checker_config)
-)]
+#[subsystem_spec(checker_config(manager_shell_checker_config))]
 impl TransitionSystem for ManagerShellSpec {
     type State = ManagerShellState;
     type Action = ManagerShellAction;
@@ -420,5 +395,5 @@ impl TransitionSystem for ManagerShellSpec {
 }
 
 #[cfg(test)]
-#[imago_formal_macros::imago_formal_tests(spec = ManagerShellSpec, init = initial_state)]
+#[nirvash_macros::formal_tests(spec = ManagerShellSpec, init = initial_state)]
 const _: () = ();

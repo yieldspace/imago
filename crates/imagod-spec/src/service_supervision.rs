@@ -1,10 +1,8 @@
-use imago_formal_core::{
+use nirvash_core::{
     BoundedDomain, Fairness, Ltl, Signature as FormalSignature, StatePredicate, StepPredicate,
     TransitionSystem,
 };
-use imago_formal_macros::{
-    Signature, imago_fairness, imago_illegal, imago_invariant, imago_property, imago_subsystem_spec,
-};
+use nirvash_macros::{Signature, fairness, illegal, invariant, property, subsystem_spec};
 
 use crate::bounds::ServiceSlots;
 
@@ -114,7 +112,7 @@ impl ServiceSupervisionSpec {
     }
 }
 
-#[imago_invariant]
+#[invariant(ServiceSupervisionSpec)]
 fn running_requires_active_service() -> StatePredicate<ServiceSupervisionState> {
     StatePredicate::new("running_requires_active_service", |state| {
         !matches!(
@@ -128,21 +126,21 @@ fn running_requires_active_service() -> StatePredicate<ServiceSupervisionState> 
     })
 }
 
-#[imago_invariant]
+#[invariant(ServiceSupervisionSpec)]
 fn reaped_clears_active_service_count() -> StatePredicate<ServiceSupervisionState> {
     StatePredicate::new("reaped_clears_active_service_count", |state| {
         !matches!(state.phase, ServicePhase::Reaped) || state.active_services.is_zero()
     })
 }
 
-#[imago_invariant]
+#[invariant(ServiceSupervisionSpec)]
 fn logs_are_only_retained_after_reap() -> StatePredicate<ServiceSupervisionState> {
     StatePredicate::new("logs_are_only_retained_after_reap", |state| {
         !state.retained_logs || matches!(state.phase, ServicePhase::Reaped | ServicePhase::Idle)
     })
 }
 
-#[imago_illegal]
+#[illegal(ServiceSupervisionSpec)]
 fn ready_without_registration() -> StepPredicate<ServiceSupervisionState, ServiceSupervisionAction>
 {
     StepPredicate::new("ready_without_registration", |prev, action, _| {
@@ -151,7 +149,7 @@ fn ready_without_registration() -> StepPredicate<ServiceSupervisionState, Servic
     })
 }
 
-#[imago_illegal]
+#[illegal(ServiceSupervisionSpec)]
 fn reap_without_stop() -> StepPredicate<ServiceSupervisionState, ServiceSupervisionAction> {
     StepPredicate::new("reap_without_stop", |prev, action, _| {
         matches!(action, ServiceSupervisionAction::ReapService)
@@ -162,7 +160,7 @@ fn reap_without_stop() -> StepPredicate<ServiceSupervisionState, ServiceSupervis
     })
 }
 
-#[imago_illegal]
+#[illegal(ServiceSupervisionSpec)]
 fn clear_logs_before_reap() -> StepPredicate<ServiceSupervisionState, ServiceSupervisionAction> {
     StepPredicate::new("clear_logs_before_reap", |prev, action, _| {
         matches!(action, ServiceSupervisionAction::ClearRetainedLogs)
@@ -170,7 +168,7 @@ fn clear_logs_before_reap() -> StepPredicate<ServiceSupervisionState, ServiceSup
     })
 }
 
-#[imago_property]
+#[property(ServiceSupervisionSpec)]
 fn starting_leads_to_ready_or_running() -> Ltl<ServiceSupervisionState, ServiceSupervisionAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("starting", |state| {
@@ -185,7 +183,7 @@ fn starting_leads_to_ready_or_running() -> Ltl<ServiceSupervisionState, ServiceS
     )
 }
 
-#[imago_property]
+#[property(ServiceSupervisionSpec)]
 fn running_leads_to_stopping_or_reaped() -> Ltl<ServiceSupervisionState, ServiceSupervisionAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("running", |state| {
@@ -200,7 +198,7 @@ fn running_leads_to_stopping_or_reaped() -> Ltl<ServiceSupervisionState, Service
     )
 }
 
-#[imago_property]
+#[property(ServiceSupervisionSpec)]
 fn retained_logs_eventually_clear() -> Ltl<ServiceSupervisionState, ServiceSupervisionAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("retained_logs", |state| {
@@ -212,7 +210,7 @@ fn retained_logs_eventually_clear() -> Ltl<ServiceSupervisionState, ServiceSuper
     )
 }
 
-#[imago_fairness]
+#[fairness(ServiceSupervisionSpec)]
 fn bootstrap_progress() -> Fairness<ServiceSupervisionState, ServiceSupervisionAction> {
     Fairness::weak(StepPredicate::new(
         "bootstrap_progress",
@@ -232,7 +230,7 @@ fn bootstrap_progress() -> Fairness<ServiceSupervisionState, ServiceSupervisionA
     ))
 }
 
-#[imago_fairness]
+#[fairness(ServiceSupervisionSpec)]
 fn stop_progress() -> Fairness<ServiceSupervisionState, ServiceSupervisionAction> {
     Fairness::weak(StepPredicate::new("stop_progress", |prev, action, next| {
         matches!(prev.phase, ServicePhase::Running | ServicePhase::Stopping)
@@ -249,7 +247,7 @@ fn stop_progress() -> Fairness<ServiceSupervisionState, ServiceSupervisionAction
     }))
 }
 
-#[imago_fairness]
+#[fairness(ServiceSupervisionSpec)]
 fn log_cleanup_progress() -> Fairness<ServiceSupervisionState, ServiceSupervisionAction> {
     Fairness::weak(StepPredicate::new(
         "log_cleanup_progress",
@@ -262,20 +260,7 @@ fn log_cleanup_progress() -> Fairness<ServiceSupervisionState, ServiceSupervisio
     ))
 }
 
-#[imago_subsystem_spec(
-    invariants(
-        running_requires_active_service,
-        reaped_clears_active_service_count,
-        logs_are_only_retained_after_reap
-    ),
-    illegal(ready_without_registration, reap_without_stop, clear_logs_before_reap),
-    properties(
-        starting_leads_to_ready_or_running,
-        running_leads_to_stopping_or_reaped,
-        retained_logs_eventually_clear
-    ),
-    fairness(bootstrap_progress, stop_progress, log_cleanup_progress)
-)]
+#[subsystem_spec]
 impl TransitionSystem for ServiceSupervisionSpec {
     type State = ServiceSupervisionState;
     type Action = ServiceSupervisionAction;
@@ -345,5 +330,5 @@ impl TransitionSystem for ServiceSupervisionSpec {
 }
 
 #[cfg(test)]
-#[imago_formal_macros::imago_formal_tests(spec = ServiceSupervisionSpec, init = initial_state)]
+#[nirvash_macros::formal_tests(spec = ServiceSupervisionSpec, init = initial_state)]
 const _: () = ();

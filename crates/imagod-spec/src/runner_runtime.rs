@@ -1,11 +1,10 @@
-use imago_formal_core::{
+use imagod_ipc::RunnerAppType;
+use nirvash_core::{
     BoundedDomain, Fairness, Ltl, Signature, StatePredicate, StepPredicate, TransitionSystem,
 };
-use imago_formal_macros::{
-    Signature as FormalSignature, imago_fairness, imago_illegal, imago_invariant, imago_property,
-    imago_subsystem_spec,
+use nirvash_macros::{
+    Signature as FormalSignature, fairness, illegal, invariant, property, subsystem_spec,
 };
-use imagod_ipc::RunnerAppType;
 
 use crate::bounds::{EpochTicks, HttpQueueDepth, SPEC_RUNNER_APP_TYPES};
 
@@ -182,7 +181,7 @@ impl RunnerRuntimeSpec {
     }
 }
 
-#[imago_invariant]
+#[invariant(RunnerRuntimeSpec)]
 fn serving_requires_loadable_component() -> StatePredicate<RunnerRuntimeState> {
     StatePredicate::new("serving_requires_loadable_component", |state| {
         !matches!(state.phase, RuntimePhase::Serving)
@@ -190,7 +189,7 @@ fn serving_requires_loadable_component() -> StatePredicate<RunnerRuntimeState> {
     })
 }
 
-#[imago_invariant]
+#[invariant(RunnerRuntimeSpec)]
 fn http_queue_requires_http_mode() -> StatePredicate<RunnerRuntimeState> {
     StatePredicate::new("http_queue_requires_http_mode", |state| {
         state.http_queue_depth.is_zero()
@@ -199,7 +198,7 @@ fn http_queue_requires_http_mode() -> StatePredicate<RunnerRuntimeState> {
     })
 }
 
-#[imago_invariant]
+#[invariant(RunnerRuntimeSpec)]
 fn socket_policy_requires_socket_mode() -> StatePredicate<RunnerRuntimeState> {
     StatePredicate::new("socket_policy_requires_socket_mode", |state| {
         matches!(state.socket_policy, SocketPolicyClass::NotApplicable)
@@ -207,7 +206,7 @@ fn socket_policy_requires_socket_mode() -> StatePredicate<RunnerRuntimeState> {
     })
 }
 
-#[imago_illegal]
+#[illegal(RunnerRuntimeSpec)]
 fn accept_http_in_non_http_mode() -> StepPredicate<RunnerRuntimeState, RunnerRuntimeAction> {
     StepPredicate::new("accept_http_in_non_http_mode", |prev, action, _| {
         matches!(action, RunnerRuntimeAction::AcceptHttpRequest)
@@ -215,7 +214,7 @@ fn accept_http_in_non_http_mode() -> StepPredicate<RunnerRuntimeState, RunnerRun
     })
 }
 
-#[imago_illegal]
+#[illegal(RunnerRuntimeSpec)]
 fn serve_invalid_component() -> StepPredicate<RunnerRuntimeState, RunnerRuntimeAction> {
     StepPredicate::new("serve_invalid_component", |prev, action, _| {
         matches!(action, RunnerRuntimeAction::StartServing)
@@ -223,7 +222,7 @@ fn serve_invalid_component() -> StepPredicate<RunnerRuntimeState, RunnerRuntimeA
     })
 }
 
-#[imago_illegal]
+#[illegal(RunnerRuntimeSpec)]
 fn serve_with_invalid_tuning() -> StepPredicate<RunnerRuntimeState, RunnerRuntimeAction> {
     StepPredicate::new("serve_with_invalid_tuning", |prev, action, _| {
         matches!(action, RunnerRuntimeAction::StartServing)
@@ -231,7 +230,7 @@ fn serve_with_invalid_tuning() -> StepPredicate<RunnerRuntimeState, RunnerRuntim
     })
 }
 
-#[imago_property]
+#[property(RunnerRuntimeSpec)]
 fn component_validated_leads_to_serving_or_failed() -> Ltl<RunnerRuntimeState, RunnerRuntimeAction>
 {
     Ltl::leads_to(
@@ -244,7 +243,7 @@ fn component_validated_leads_to_serving_or_failed() -> Ltl<RunnerRuntimeState, R
     )
 }
 
-#[imago_property]
+#[property(RunnerRuntimeSpec)]
 fn http_queue_full_leads_to_not_full() -> Ltl<RunnerRuntimeState, RunnerRuntimeAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("http_queue_full", |state| {
@@ -256,7 +255,7 @@ fn http_queue_full_leads_to_not_full() -> Ltl<RunnerRuntimeState, RunnerRuntimeA
     )
 }
 
-#[imago_property]
+#[property(RunnerRuntimeSpec)]
 fn invalid_tuning_leads_to_failure() -> Ltl<RunnerRuntimeState, RunnerRuntimeAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("invalid_tuning", |state| {
@@ -268,7 +267,7 @@ fn invalid_tuning_leads_to_failure() -> Ltl<RunnerRuntimeState, RunnerRuntimeAct
     )
 }
 
-#[imago_fairness]
+#[fairness(RunnerRuntimeSpec)]
 fn serve_or_fail_fairness() -> Fairness<RunnerRuntimeState, RunnerRuntimeAction> {
     Fairness::weak(StepPredicate::new("serve_or_fail", |prev, action, next| {
         matches!(prev.phase, RuntimePhase::ComponentValidated)
@@ -280,7 +279,7 @@ fn serve_or_fail_fairness() -> Fairness<RunnerRuntimeState, RunnerRuntimeAction>
     }))
 }
 
-#[imago_fairness]
+#[fairness(RunnerRuntimeSpec)]
 fn http_drain_fairness() -> Fairness<RunnerRuntimeState, RunnerRuntimeAction> {
     Fairness::weak(StepPredicate::new(
         "drain_http_request",
@@ -293,7 +292,7 @@ fn http_drain_fairness() -> Fairness<RunnerRuntimeState, RunnerRuntimeAction> {
     ))
 }
 
-#[imago_fairness]
+#[fairness(RunnerRuntimeSpec)]
 fn failure_fairness() -> Fairness<RunnerRuntimeState, RunnerRuntimeAction> {
     Fairness::weak(StepPredicate::new("fail_runtime", |_, action, next| {
         matches!(action, RunnerRuntimeAction::FailRuntime)
@@ -301,24 +300,7 @@ fn failure_fairness() -> Fairness<RunnerRuntimeState, RunnerRuntimeAction> {
     }))
 }
 
-#[imago_subsystem_spec(
-    invariants(
-        serving_requires_loadable_component,
-        http_queue_requires_http_mode,
-        socket_policy_requires_socket_mode
-    ),
-    illegal(
-        accept_http_in_non_http_mode,
-        serve_invalid_component,
-        serve_with_invalid_tuning
-    ),
-    properties(
-        component_validated_leads_to_serving_or_failed,
-        http_queue_full_leads_to_not_full,
-        invalid_tuning_leads_to_failure
-    ),
-    fairness(serve_or_fail_fairness, http_drain_fairness, failure_fairness)
-)]
+#[subsystem_spec]
 impl TransitionSystem for RunnerRuntimeSpec {
     type State = RunnerRuntimeState;
     type Action = RunnerRuntimeAction;
@@ -411,7 +393,7 @@ impl TransitionSystem for RunnerRuntimeSpec {
 }
 
 #[cfg(test)]
-#[imago_formal_macros::imago_formal_tests(spec = RunnerRuntimeSpec, init = initial_state)]
+#[nirvash_macros::formal_tests(spec = RunnerRuntimeSpec, init = initial_state)]
 const _: () = ();
 
 #[cfg(test)]

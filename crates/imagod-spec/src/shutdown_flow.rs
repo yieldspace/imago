@@ -1,10 +1,8 @@
-use imago_formal_core::{
+use nirvash_core::{
     BoundedDomain, Fairness, Ltl, ModelCheckConfig, Signature as FormalSignature, StatePredicate,
     StepPredicate, TransitionSystem,
 };
-use imago_formal_macros::{
-    Signature, imago_fairness, imago_illegal, imago_invariant, imago_property, imago_subsystem_spec,
-};
+use nirvash_macros::{Signature, fairness, illegal, invariant, property, subsystem_spec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
 pub enum ShutdownPhase {
@@ -157,7 +155,7 @@ fn shutdown_checker_config() -> ModelCheckConfig {
     }
 }
 
-#[imago_invariant]
+#[invariant(ShutdownFlowSpec)]
 fn completed_requires_all_shutdown_steps() -> StatePredicate<ShutdownFlowState> {
     StatePredicate::new("completed_requires_all_shutdown_steps", |state| {
         !matches!(state.phase, ShutdownPhase::Completed)
@@ -168,21 +166,21 @@ fn completed_requires_all_shutdown_steps() -> StatePredicate<ShutdownFlowState> 
     })
 }
 
-#[imago_invariant]
+#[invariant(ShutdownFlowSpec)]
 fn maintenance_stops_after_services() -> StatePredicate<ShutdownFlowState> {
     StatePredicate::new("maintenance_stops_after_services", |state| {
         !state.maintenance_stopped || state.services_stopped
     })
 }
 
-#[imago_invariant]
+#[invariant(ShutdownFlowSpec)]
 fn services_stop_after_session_drain() -> StatePredicate<ShutdownFlowState> {
     StatePredicate::new("services_stop_after_session_drain", |state| {
         !state.services_stopped || state.sessions_drained
     })
 }
 
-#[imago_illegal]
+#[illegal(ShutdownFlowSpec)]
 fn stop_accepting_before_signal() -> StepPredicate<ShutdownFlowState, ShutdownFlowAction> {
     StepPredicate::new("stop_accepting_before_signal", |prev, action, _| {
         matches!(action, ShutdownFlowAction::StopAccepting)
@@ -190,7 +188,7 @@ fn stop_accepting_before_signal() -> StepPredicate<ShutdownFlowState, ShutdownFl
     })
 }
 
-#[imago_illegal]
+#[illegal(ShutdownFlowSpec)]
 fn stop_services_before_sessions_drained() -> StepPredicate<ShutdownFlowState, ShutdownFlowAction> {
     StepPredicate::new(
         "stop_services_before_sessions_drained",
@@ -203,14 +201,14 @@ fn stop_services_before_sessions_drained() -> StepPredicate<ShutdownFlowState, S
     )
 }
 
-#[imago_illegal]
+#[illegal(ShutdownFlowSpec)]
 fn finalize_before_maintenance_stops() -> StepPredicate<ShutdownFlowState, ShutdownFlowAction> {
     StepPredicate::new("finalize_before_maintenance_stops", |prev, action, _| {
         matches!(action, ShutdownFlowAction::Finalize) && !prev.maintenance_stopped
     })
 }
 
-#[imago_property]
+#[property(ShutdownFlowSpec)]
 fn signal_received_leads_to_accepts_stopped() -> Ltl<ShutdownFlowState, ShutdownFlowAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("signal_received", |state| {
@@ -222,7 +220,7 @@ fn signal_received_leads_to_accepts_stopped() -> Ltl<ShutdownFlowState, Shutdown
     )
 }
 
-#[imago_property]
+#[property(ShutdownFlowSpec)]
 fn draining_leads_to_services_stopped() -> Ltl<ShutdownFlowState, ShutdownFlowAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("sessions_draining", |state| {
@@ -234,7 +232,7 @@ fn draining_leads_to_services_stopped() -> Ltl<ShutdownFlowState, ShutdownFlowAc
     )
 }
 
-#[imago_property]
+#[property(ShutdownFlowSpec)]
 fn maintenance_stopping_leads_to_completed() -> Ltl<ShutdownFlowState, ShutdownFlowAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("maintenance_stopping", |state| {
@@ -249,7 +247,7 @@ fn maintenance_stopping_leads_to_completed() -> Ltl<ShutdownFlowState, ShutdownF
     )
 }
 
-#[imago_fairness]
+#[fairness(ShutdownFlowSpec)]
 fn accept_stop_progress() -> Fairness<ShutdownFlowState, ShutdownFlowAction> {
     Fairness::weak(StepPredicate::new(
         "accept_stop_progress",
@@ -261,7 +259,7 @@ fn accept_stop_progress() -> Fairness<ShutdownFlowState, ShutdownFlowAction> {
     ))
 }
 
-#[imago_fairness]
+#[fairness(ShutdownFlowSpec)]
 fn service_stop_progress() -> Fairness<ShutdownFlowState, ShutdownFlowAction> {
     Fairness::weak(StepPredicate::new(
         "service_stop_progress",
@@ -279,7 +277,7 @@ fn service_stop_progress() -> Fairness<ShutdownFlowState, ShutdownFlowAction> {
     ))
 }
 
-#[imago_fairness]
+#[fairness(ShutdownFlowSpec)]
 fn maintenance_stop_progress() -> Fairness<ShutdownFlowState, ShutdownFlowAction> {
     Fairness::weak(StepPredicate::new(
         "maintenance_stop_progress",
@@ -292,7 +290,7 @@ fn maintenance_stop_progress() -> Fairness<ShutdownFlowState, ShutdownFlowAction
     ))
 }
 
-#[imago_fairness]
+#[fairness(ShutdownFlowSpec)]
 fn finalize_progress() -> Fairness<ShutdownFlowState, ShutdownFlowAction> {
     Fairness::weak(StepPredicate::new(
         "finalize_progress",
@@ -305,30 +303,7 @@ fn finalize_progress() -> Fairness<ShutdownFlowState, ShutdownFlowAction> {
     ))
 }
 
-#[imago_subsystem_spec(
-    invariants(
-        completed_requires_all_shutdown_steps,
-        maintenance_stops_after_services,
-        services_stop_after_session_drain
-    ),
-    illegal(
-        stop_accepting_before_signal,
-        stop_services_before_sessions_drained,
-        finalize_before_maintenance_stops
-    ),
-    properties(
-        signal_received_leads_to_accepts_stopped,
-        draining_leads_to_services_stopped,
-        maintenance_stopping_leads_to_completed
-    ),
-    fairness(
-        accept_stop_progress,
-        service_stop_progress,
-        maintenance_stop_progress,
-        finalize_progress
-    ),
-    checker_config(shutdown_checker_config)
-)]
+#[subsystem_spec(checker_config(shutdown_checker_config))]
 impl TransitionSystem for ShutdownFlowSpec {
     type State = ShutdownFlowState;
     type Action = ShutdownFlowAction;
@@ -391,5 +366,5 @@ impl TransitionSystem for ShutdownFlowSpec {
 }
 
 #[cfg(test)]
-#[imago_formal_macros::imago_formal_tests(spec = ShutdownFlowSpec, init = initial_state)]
+#[nirvash_macros::formal_tests(spec = ShutdownFlowSpec, init = initial_state)]
 const _: () = ();

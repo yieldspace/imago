@@ -2387,21 +2387,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "imago-formal-core"
-version = "0.2.0"
-
-[[package]]
-name = "imago-formal-macros"
-version = "0.2.0"
-dependencies = [
- "imago-formal-core",
- "proc-macro2",
- "quote",
- "syn",
- "trybuild",
-]
-
-[[package]]
 name = "imago-plugin-imago-admin"
 version = "0.2.0"
 dependencies = [
@@ -2721,11 +2706,11 @@ dependencies = [
 name = "imagod-spec"
 version = "0.2.0"
 dependencies = [
- "imago-formal-core",
- "imago-formal-macros",
  "imago-protocol",
  "imagod-config",
  "imagod-ipc",
+ "nirvash-core",
+ "nirvash-macros",
 ]
 
 [[package]]
@@ -2791,6 +2776,15 @@ checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "block-padding",
  "generic-array",
+]
+
+[[package]]
+name = "inventory"
+version = "0.3.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "009ae045c87e7082cb72dab0ccd01ae075dd00141ddc108f43a0ea150a9e7227"
+dependencies = [
+ "rustversion",
 ]
 
 [[package]]
@@ -3360,6 +3354,24 @@ name = "nb"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d5439c4ad607c3c23abf66de8c8bf57ba8adcd1f129e699851a6e43935d339d"
+
+[[package]]
+name = "nirvash-core"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+]
+
+[[package]]
+name = "nirvash-macros"
+version = "0.2.0"
+dependencies = [
+ "nirvash-core",
+ "proc-macro2",
+ "quote",
+ "syn",
+ "trybuild",
+]
 
 [[package]]
 name = "nix"

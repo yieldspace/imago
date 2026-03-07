@@ -1,11 +1,10 @@
-use imago_formal_core::{
+use imago_protocol::{CommandState, CommandType, ErrorCode};
+use nirvash_core::{
     BoundedDomain, Fairness, Ltl, Signature, StatePredicate, StepPredicate, TransitionSystem,
 };
-use imago_formal_macros::{
-    Signature as FormalSignature, imago_fairness, imago_illegal, imago_invariant, imago_property,
-    imago_subsystem_spec,
+use nirvash_macros::{
+    Signature as FormalSignature, fairness, illegal, invariant, property, subsystem_spec,
 };
-use imago_protocol::{CommandState, CommandType, ErrorCode};
 
 use crate::bounds::{SPEC_COMMAND_TYPES, SPEC_ERROR_CODES};
 
@@ -180,21 +179,21 @@ impl CommandProtocolSpec {
     }
 }
 
-#[imago_invariant]
+#[invariant(CommandProtocolSpec)]
 fn command_state_requires_type() -> StatePredicate<CommandProtocolState> {
     StatePredicate::new("command_state_requires_type", |state| {
         state.command_state.is_some() == state.command_type.is_some()
     })
 }
 
-#[imago_invariant]
+#[invariant(CommandProtocolSpec)]
 fn failed_requires_error() -> StatePredicate<CommandProtocolState> {
     StatePredicate::new("failed_requires_error", |state| {
         state.last_error.is_some() == matches!(state.command_state, Some(CommandState::Failed))
     })
 }
 
-#[imago_invariant]
+#[invariant(CommandProtocolSpec)]
 fn cancel_only_when_inflight() -> StatePredicate<CommandProtocolState> {
     StatePredicate::new("cancel_only_when_inflight", |state| {
         !state.cancel_requested
@@ -205,28 +204,28 @@ fn cancel_only_when_inflight() -> StatePredicate<CommandProtocolState> {
     })
 }
 
-#[imago_illegal]
+#[illegal(CommandProtocolSpec)]
 fn poll_idle_command() -> StepPredicate<CommandProtocolState, CommandProtocolAction> {
     StepPredicate::new("poll_idle_command", |prev, action, _| {
         matches!(action, CommandProtocolAction::PollState) && prev.command_state.is_none()
     })
 }
 
-#[imago_illegal]
+#[illegal(CommandProtocolSpec)]
 fn cancel_without_request() -> StepPredicate<CommandProtocolState, CommandProtocolAction> {
     StepPredicate::new("cancel_without_request", |prev, action, _| {
         matches!(action, CommandProtocolAction::EmitCanceled) && !prev.cancel_requested
     })
 }
 
-#[imago_illegal]
+#[illegal(CommandProtocolSpec)]
 fn start_while_busy() -> StepPredicate<CommandProtocolState, CommandProtocolAction> {
     StepPredicate::new("start_while_busy", |prev, action, _| {
         matches!(action, CommandProtocolAction::Start(_)) && prev.command_state.is_some()
     })
 }
 
-#[imago_property]
+#[property(CommandProtocolSpec)]
 fn inflight_leads_to_terminal() -> Ltl<CommandProtocolState, CommandProtocolAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("inflight", |state| {
@@ -244,7 +243,7 @@ fn inflight_leads_to_terminal() -> Ltl<CommandProtocolState, CommandProtocolActi
     )
 }
 
-#[imago_property]
+#[property(CommandProtocolSpec)]
 fn cancel_request_leads_to_terminal() -> Ltl<CommandProtocolState, CommandProtocolAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("cancel_requested", |state| {
@@ -259,7 +258,7 @@ fn cancel_request_leads_to_terminal() -> Ltl<CommandProtocolState, CommandProtoc
     )
 }
 
-#[imago_property]
+#[property(CommandProtocolSpec)]
 fn terminal_leads_to_cleared() -> Ltl<CommandProtocolState, CommandProtocolAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("terminal_pending_clear", |state| {
@@ -274,7 +273,7 @@ fn terminal_leads_to_cleared() -> Ltl<CommandProtocolState, CommandProtocolActio
     )
 }
 
-#[imago_fairness]
+#[fairness(CommandProtocolSpec)]
 fn terminal_emission_fairness() -> Fairness<CommandProtocolState, CommandProtocolAction> {
     Fairness::weak(StepPredicate::new("emit_terminal", |_, action, next| {
         matches!(
@@ -289,7 +288,7 @@ fn terminal_emission_fairness() -> Fairness<CommandProtocolState, CommandProtoco
     }))
 }
 
-#[imago_fairness]
+#[fairness(CommandProtocolSpec)]
 fn clear_terminal_fairness() -> Fairness<CommandProtocolState, CommandProtocolAction> {
     Fairness::weak(StepPredicate::new(
         "clear_terminal",
@@ -304,20 +303,7 @@ fn clear_terminal_fairness() -> Fairness<CommandProtocolState, CommandProtocolAc
     ))
 }
 
-#[imago_subsystem_spec(
-    invariants(
-        command_state_requires_type,
-        failed_requires_error,
-        cancel_only_when_inflight
-    ),
-    illegal(poll_idle_command, cancel_without_request, start_while_busy),
-    properties(
-        inflight_leads_to_terminal,
-        cancel_request_leads_to_terminal,
-        terminal_leads_to_cleared
-    ),
-    fairness(terminal_emission_fairness, clear_terminal_fairness)
-)]
+#[subsystem_spec]
 impl TransitionSystem for CommandProtocolSpec {
     type State = CommandProtocolState;
     type Action = CommandProtocolAction;
@@ -411,7 +397,7 @@ impl TransitionSystem for CommandProtocolSpec {
 }
 
 #[cfg(test)]
-#[imago_formal_macros::imago_formal_tests(spec = CommandProtocolSpec, init = initial_state)]
+#[nirvash_macros::formal_tests(spec = CommandProtocolSpec, init = initial_state)]
 const _: () = ();
 
 #[cfg(test)]

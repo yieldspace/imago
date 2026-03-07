@@ -1,10 +1,8 @@
-use imago_formal_core::{
+use nirvash_core::{
     BoundedDomain, Fairness, Ltl, Signature as FormalSignature, StatePredicate, StepPredicate,
     TransitionSystem,
 };
-use imago_formal_macros::{
-    Signature, imago_fairness, imago_illegal, imago_invariant, imago_property, imago_subsystem_spec,
-};
+use nirvash_macros::{Signature, fairness, illegal, invariant, property, subsystem_spec};
 
 use crate::bounds::SessionSlots;
 
@@ -81,14 +79,14 @@ impl SessionTransportSpec {
     }
 }
 
-#[imago_invariant]
+#[invariant(SessionTransportSpec)]
 fn shutdown_blocks_accept() -> StatePredicate<SessionTransportState> {
     StatePredicate::new("shutdown_blocks_accept", |state| {
         !state.shutdown_requested || !matches!(state.last_outcome, SessionOutcome::Accepted)
     })
 }
 
-#[imago_invariant]
+#[invariant(SessionTransportSpec)]
 fn too_many_means_full_or_stopping() -> StatePredicate<SessionTransportState> {
     StatePredicate::new("too_many_means_full_or_stopping", |state| {
         !matches!(state.last_outcome, SessionOutcome::RejectedTooMany)
@@ -97,35 +95,35 @@ fn too_many_means_full_or_stopping() -> StatePredicate<SessionTransportState> {
     })
 }
 
-#[imago_invariant]
+#[invariant(SessionTransportSpec)]
 fn joined_implies_non_negative_sessions() -> StatePredicate<SessionTransportState> {
     StatePredicate::new("joined_implies_non_negative_sessions", |state| {
         !matches!(state.last_outcome, SessionOutcome::Joined) || state.active_sessions.get() < 2
     })
 }
 
-#[imago_illegal]
+#[illegal(SessionTransportSpec)]
 fn accept_after_shutdown() -> StepPredicate<SessionTransportState, SessionTransportAction> {
     StepPredicate::new("accept_after_shutdown", |prev, action, _| {
         matches!(action, SessionTransportAction::AcceptSession) && prev.shutdown_requested
     })
 }
 
-#[imago_illegal]
+#[illegal(SessionTransportSpec)]
 fn accept_over_capacity() -> StepPredicate<SessionTransportState, SessionTransportAction> {
     StepPredicate::new("accept_over_capacity", |prev, action, _| {
         matches!(action, SessionTransportAction::AcceptSession) && prev.active_sessions.is_max()
     })
 }
 
-#[imago_illegal]
+#[illegal(SessionTransportSpec)]
 fn join_when_idle() -> StepPredicate<SessionTransportState, SessionTransportAction> {
     StepPredicate::new("join_when_idle", |prev, action, _| {
         matches!(action, SessionTransportAction::JoinSession) && prev.active_sessions.is_zero()
     })
 }
 
-#[imago_property]
+#[property(SessionTransportSpec)]
 fn shutdown_requested_leads_to_idle_sessions() -> Ltl<SessionTransportState, SessionTransportAction>
 {
     Ltl::leads_to(
@@ -138,7 +136,7 @@ fn shutdown_requested_leads_to_idle_sessions() -> Ltl<SessionTransportState, Ses
     )
 }
 
-#[imago_property]
+#[property(SessionTransportSpec)]
 fn full_capacity_leads_to_resolution() -> Ltl<SessionTransportState, SessionTransportAction> {
     Ltl::always(Ltl::implies(
         Ltl::enabled(resolve_capacity_pressure()),
@@ -151,7 +149,7 @@ fn full_capacity_leads_to_resolution() -> Ltl<SessionTransportState, SessionTran
     ))
 }
 
-#[imago_property]
+#[property(SessionTransportSpec)]
 fn accepted_session_leads_to_join_or_shutdown_drain()
 -> Ltl<SessionTransportState, SessionTransportAction> {
     Ltl::leads_to(
@@ -165,7 +163,7 @@ fn accepted_session_leads_to_join_or_shutdown_drain()
     )
 }
 
-#[imago_fairness]
+#[fairness(SessionTransportSpec)]
 fn shutdown_drain_progress() -> Fairness<SessionTransportState, SessionTransportAction> {
     Fairness::weak(StepPredicate::new(
         "shutdown_drain_progress",
@@ -178,12 +176,12 @@ fn shutdown_drain_progress() -> Fairness<SessionTransportState, SessionTransport
     ))
 }
 
-#[imago_fairness]
+#[fairness(SessionTransportSpec)]
 fn capacity_resolution_progress() -> Fairness<SessionTransportState, SessionTransportAction> {
     Fairness::weak(resolve_capacity_pressure())
 }
 
-#[imago_fairness]
+#[fairness(SessionTransportSpec)]
 fn accepted_session_progress() -> Fairness<SessionTransportState, SessionTransportAction> {
     Fairness::weak(StepPredicate::new(
         "accepted_session_progress",
@@ -197,24 +195,7 @@ fn accepted_session_progress() -> Fairness<SessionTransportState, SessionTranspo
     ))
 }
 
-#[imago_subsystem_spec(
-    invariants(
-        shutdown_blocks_accept,
-        too_many_means_full_or_stopping,
-        joined_implies_non_negative_sessions
-    ),
-    illegal(accept_after_shutdown, accept_over_capacity, join_when_idle),
-    properties(
-        shutdown_requested_leads_to_idle_sessions,
-        full_capacity_leads_to_resolution,
-        accepted_session_leads_to_join_or_shutdown_drain
-    ),
-    fairness(
-        shutdown_drain_progress,
-        capacity_resolution_progress,
-        accepted_session_progress
-    )
-)]
+#[subsystem_spec]
 impl TransitionSystem for SessionTransportSpec {
     type State = SessionTransportState;
     type Action = SessionTransportAction;
@@ -271,5 +252,5 @@ fn resolve_capacity_pressure() -> StepPredicate<SessionTransportState, SessionTr
 }
 
 #[cfg(test)]
-#[imago_formal_macros::imago_formal_tests(spec = SessionTransportSpec, init = initial_state)]
+#[nirvash_macros::formal_tests(spec = SessionTransportSpec, init = initial_state)]
 const _: () = ();

@@ -1,4 +1,4 @@
-use imago_formal_macros::Signature;
+use nirvash_macros::Signature;
 
 #[derive(Clone, Debug, PartialEq, Eq, Signature)]
 #[signature(range = "0..=3")]

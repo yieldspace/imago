@@ -1,11 +1,10 @@
-use imago_formal_core::{
+use imagod_ipc::PluginKind;
+use nirvash_core::{
     BoundedDomain, Fairness, Ltl, Signature, StatePredicate, StepPredicate, TransitionSystem,
 };
-use imago_formal_macros::{
-    Signature as FormalSignature, imago_fairness, imago_illegal, imago_invariant, imago_property,
-    imago_subsystem_spec,
+use nirvash_macros::{
+    Signature as FormalSignature, fairness, illegal, invariant, property, subsystem_spec,
 };
-use imagod_ipc::PluginKind;
 
 use crate::bounds::SPEC_PLUGIN_KINDS;
 
@@ -170,7 +169,7 @@ impl PluginCapabilitySpec {
     }
 }
 
-#[imago_invariant]
+#[invariant(PluginCapabilitySpec)]
 fn resolved_provider_requires_acyclic_graph() -> StatePredicate<PluginCapabilityState> {
     StatePredicate::new("resolved_provider_requires_acyclic_graph", |state| {
         !matches!(
@@ -180,7 +179,7 @@ fn resolved_provider_requires_acyclic_graph() -> StatePredicate<PluginCapability
     })
 }
 
-#[imago_invariant]
+#[invariant(PluginCapabilitySpec)]
 fn http_outbound_requires_provider_resolution() -> StatePredicate<PluginCapabilityState> {
     StatePredicate::new("http_outbound_requires_provider_resolution", |state| {
         matches!(state.http_outbound, HttpOutboundClass::None)
@@ -191,7 +190,7 @@ fn http_outbound_requires_provider_resolution() -> StatePredicate<PluginCapabili
     })
 }
 
-#[imago_invariant]
+#[invariant(PluginCapabilitySpec)]
 fn privileged_mode_requires_resolved_provider() -> StatePredicate<PluginCapabilityState> {
     StatePredicate::new("privileged_mode_requires_resolved_provider", |state| {
         !matches!(state.capability, CapabilityDecision::Privileged)
@@ -199,7 +198,7 @@ fn privileged_mode_requires_resolved_provider() -> StatePredicate<PluginCapabili
     })
 }
 
-#[imago_illegal]
+#[illegal(PluginCapabilitySpec)]
 fn resolve_dependency_without_acyclic_graph()
 -> StepPredicate<PluginCapabilityState, PluginCapabilityAction> {
     StepPredicate::new(
@@ -211,7 +210,7 @@ fn resolve_dependency_without_acyclic_graph()
     )
 }
 
-#[imago_illegal]
+#[illegal(PluginCapabilitySpec)]
 fn grant_privileged_without_provider()
 -> StepPredicate<PluginCapabilityState, PluginCapabilityAction> {
     StepPredicate::new("grant_privileged_without_provider", |prev, action, _| {
@@ -223,7 +222,7 @@ fn grant_privileged_without_provider()
     })
 }
 
-#[imago_illegal]
+#[illegal(PluginCapabilitySpec)]
 fn allow_http_without_provider() -> StepPredicate<PluginCapabilityState, PluginCapabilityAction> {
     StepPredicate::new("allow_http_without_provider", |prev, action, _| {
         matches!(
@@ -238,7 +237,7 @@ fn allow_http_without_provider() -> StepPredicate<PluginCapabilityState, PluginC
     })
 }
 
-#[imago_property]
+#[property(PluginCapabilitySpec)]
 fn plugin_registered_leads_to_graph_classified()
 -> Ltl<PluginCapabilityState, PluginCapabilityAction> {
     Ltl::leads_to(
@@ -251,7 +250,7 @@ fn plugin_registered_leads_to_graph_classified()
     )
 }
 
-#[imago_property]
+#[property(PluginCapabilitySpec)]
 fn graph_acyclic_leads_to_provider_resolved() -> Ltl<PluginCapabilityState, PluginCapabilityAction>
 {
     Ltl::leads_to(
@@ -267,7 +266,7 @@ fn graph_acyclic_leads_to_provider_resolved() -> Ltl<PluginCapabilityState, Plug
     )
 }
 
-#[imago_property]
+#[property(PluginCapabilitySpec)]
 fn provider_resolved_leads_to_capability_decided()
 -> Ltl<PluginCapabilityState, PluginCapabilityAction> {
     Ltl::leads_to(
@@ -284,7 +283,7 @@ fn provider_resolved_leads_to_capability_decided()
     )
 }
 
-#[imago_fairness]
+#[fairness(PluginCapabilitySpec)]
 fn graph_classification_fairness() -> Fairness<PluginCapabilityState, PluginCapabilityAction> {
     Fairness::weak(StepPredicate::new(
         "classify_graph",
@@ -301,7 +300,7 @@ fn graph_classification_fairness() -> Fairness<PluginCapabilityState, PluginCapa
     ))
 }
 
-#[imago_fairness]
+#[fairness(PluginCapabilitySpec)]
 fn provider_resolution_fairness() -> Fairness<PluginCapabilityState, PluginCapabilityAction> {
     Fairness::weak(StepPredicate::new("resolve_provider", |_, action, next| {
         matches!(
@@ -313,7 +312,7 @@ fn provider_resolution_fairness() -> Fairness<PluginCapabilityState, PluginCapab
     }))
 }
 
-#[imago_fairness]
+#[fairness(PluginCapabilitySpec)]
 fn capability_decision_fairness() -> Fairness<PluginCapabilityState, PluginCapabilityAction> {
     Fairness::weak(StepPredicate::new(
         "decide_capability",
@@ -329,28 +328,7 @@ fn capability_decision_fairness() -> Fairness<PluginCapabilityState, PluginCapab
     ))
 }
 
-#[imago_subsystem_spec(
-    invariants(
-        resolved_provider_requires_acyclic_graph,
-        http_outbound_requires_provider_resolution,
-        privileged_mode_requires_resolved_provider
-    ),
-    illegal(
-        resolve_dependency_without_acyclic_graph,
-        grant_privileged_without_provider,
-        allow_http_without_provider
-    ),
-    properties(
-        plugin_registered_leads_to_graph_classified,
-        graph_acyclic_leads_to_provider_resolved,
-        provider_resolved_leads_to_capability_decided
-    ),
-    fairness(
-        graph_classification_fairness,
-        provider_resolution_fairness,
-        capability_decision_fairness
-    )
-)]
+#[subsystem_spec]
 impl TransitionSystem for PluginCapabilitySpec {
     type State = PluginCapabilityState;
     type Action = PluginCapabilityAction;
@@ -449,7 +427,7 @@ impl TransitionSystem for PluginCapabilitySpec {
 }
 
 #[cfg(test)]
-#[imago_formal_macros::imago_formal_tests(spec = PluginCapabilitySpec, init = initial_state)]
+#[nirvash_macros::formal_tests(spec = PluginCapabilitySpec, init = initial_state)]
 const _: () = ();
 
 #[cfg(test)]

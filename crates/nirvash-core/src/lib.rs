@@ -3,6 +3,7 @@ mod domain;
 mod fairness;
 mod ltl;
 mod predicate;
+pub mod registry;
 mod symmetry;
 mod system;
 mod trace;
@@ -13,6 +14,7 @@ pub use checker::{
 };
 pub use domain::{BoundedDomain, OpaqueModelValue, Signature};
 pub use fairness::Fairness;
+pub use inventory;
 pub use ltl::Ltl;
 pub use predicate::{ActionConstraint, StateConstraint, StatePredicate, StepPredicate};
 pub use symmetry::SymmetryReducer;
