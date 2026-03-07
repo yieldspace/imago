@@ -201,7 +201,7 @@ jobs:
           if-no-files-found: error
           name: ${{ matrix.target }}-binaries-${{ github.sha }}
           path: dist/*
-          retention-days: 7
+          retention-days: 1
 
       - name: Show sccache stats
         if: always()
