@@ -4,7 +4,9 @@
 //! validation used before network/session runtime components are initialized.
 
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
+    collections::BTreeSet,
     fs,
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
@@ -17,9 +19,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use imagod_common::{
-    DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY, DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES,
-    DEFAULT_WASM_MEMORY_RESERVATION_BYTES, DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES,
-    DEFAULT_WASM_PARALLEL_COMPILATION, ImagodError,
+    BUILTIN_NATIVE_PLUGIN_DESCRIPTORS, DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY,
+    DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES, DEFAULT_WASM_MEMORY_RESERVATION_BYTES,
+    DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES, DEFAULT_WASM_PARALLEL_COMPILATION,
+    ImagodError,
 };
 
 mod load;
@@ -75,6 +78,84 @@ pub struct TlsConfig {
     #[serde(default)]
     /// TOFU-known remote authorities mapped to Ed25519 raw public key hex.
     pub known_public_keys: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+/// Built-in native plugin loading policy configured via `[runtime].features`.
+pub enum RuntimeFeatures {
+    /// `true` enables all built-in plugins; `false` keeps only the default set.
+    Enabled(bool),
+    /// Additional built-in package names enabled beyond the default set.
+    Packages(Vec<String>),
+}
+
+impl Default for RuntimeFeatures {
+    fn default() -> Self {
+        Self::Enabled(false)
+    }
+}
+
+impl RuntimeFeatures {
+    /// Returns the effective built-in native plugin allowlist in canonical package order.
+    pub fn effective_builtin_native_plugin_package_names(&self) -> Vec<String> {
+        let requested = match self {
+            Self::Enabled(true) => None,
+            Self::Enabled(false) => Some(BTreeSet::new()),
+            Self::Packages(package_names) => Some(
+                package_names
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>(),
+            ),
+        };
+
+        BUILTIN_NATIVE_PLUGIN_DESCRIPTORS
+            .iter()
+            .filter(|descriptor| {
+                descriptor.default_enabled
+                    || requested.is_none()
+                    || requested
+                        .as_ref()
+                        .is_some_and(|requested| requested.contains(descriptor.package_name))
+            })
+            .map(|descriptor| descriptor.package_name.to_string())
+            .collect()
+    }
+}
+
+impl JsonSchema for RuntimeFeatures {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "RuntimeFeatures".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let allowed_packages = BUILTIN_NATIVE_PLUGIN_DESCRIPTORS
+            .iter()
+            .map(|descriptor| descriptor.package_name.to_string())
+            .collect::<Vec<_>>();
+
+        schemars::json_schema!({
+            "anyOf": [
+                {
+                    "type": "boolean",
+                    "description": "true enables all built-in native plugins; false keeps only the default set"
+                },
+                {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": allowed_packages
+                    },
+                    "description": "Additional built-in native plugin package names enabled beyond the default set"
+                }
+            ]
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -158,6 +239,9 @@ pub struct RuntimeConfig {
     #[serde(default = "default_boot_restore_enabled")]
     /// Whether restart-policy boot restore runs at manager boot.
     pub boot_restore_enabled: bool,
+    #[serde(default)]
+    /// Built-in native plugin loading policy for runner startup.
+    pub features: RuntimeFeatures,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -207,7 +291,16 @@ impl Default for RuntimeConfig {
             transport_max_idle_timeout_secs: default_transport_max_idle_timeout_secs(),
             boot_plugin_gc_enabled: default_boot_plugin_gc_enabled(),
             boot_restore_enabled: default_boot_restore_enabled(),
+            features: RuntimeFeatures::default(),
         }
+    }
+}
+
+impl RuntimeConfig {
+    /// Returns the canonical built-in native plugin allowlist for runner startup.
+    pub fn effective_builtin_native_plugin_package_names(&self) -> Vec<String> {
+        self.features
+            .effective_builtin_native_plugin_package_names()
     }
 }
 
@@ -977,6 +1070,12 @@ client_public_keys = ["111111111111111111111111111111111111111111111111111111111
         assert_eq!(config.runtime.transport_max_idle_timeout_secs, 180);
         assert!(config.runtime.boot_plugin_gc_enabled);
         assert!(config.runtime.boot_restore_enabled);
+        assert_eq!(
+            config
+                .runtime
+                .effective_builtin_native_plugin_package_names(),
+            vec!["imago:admin".to_string(), "imago:node".to_string()]
+        );
 
         cleanup_temp_path(path);
     }
@@ -1048,6 +1147,154 @@ boot_restore_enabled = false
         let config = ImagodConfig::load(&path).expect("config should load");
         assert!(!config.runtime.boot_plugin_gc_enabled);
         assert!(!config.runtime.boot_restore_enabled);
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn runtime_features_true_enables_all_builtin_plugins() {
+        let path = write_temp_config(
+            "runtime_features_true_enables_all_builtin_plugins",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago-explicit"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+
+[runtime]
+features = true
+"#,
+        );
+
+        let config = ImagodConfig::load(&path).expect("config should load");
+        assert_eq!(
+            config
+                .runtime
+                .effective_builtin_native_plugin_package_names(),
+            BUILTIN_NATIVE_PLUGIN_DESCRIPTORS
+                .iter()
+                .map(|descriptor| descriptor.package_name.to_string())
+                .collect::<Vec<_>>()
+        );
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn runtime_features_false_keeps_default_builtin_plugins() {
+        let path = write_temp_config(
+            "runtime_features_false_keeps_default_builtin_plugins",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago-explicit"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+
+[runtime]
+features = false
+"#,
+        );
+
+        let config = ImagodConfig::load(&path).expect("config should load");
+        assert_eq!(
+            config
+                .runtime
+                .effective_builtin_native_plugin_package_names(),
+            vec!["imago:admin".to_string(), "imago:node".to_string()]
+        );
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn runtime_features_empty_array_keeps_default_builtin_plugins() {
+        let path = write_temp_config(
+            "runtime_features_empty_array_keeps_default_builtin_plugins",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago-explicit"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+
+[runtime]
+features = []
+"#,
+        );
+
+        let config = ImagodConfig::load(&path).expect("config should load");
+        assert_eq!(
+            config
+                .runtime
+                .effective_builtin_native_plugin_package_names(),
+            vec!["imago:admin".to_string(), "imago:node".to_string()]
+        );
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn runtime_features_array_adds_named_builtin_plugins() {
+        let path = write_temp_config(
+            "runtime_features_array_adds_named_builtin_plugins",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago-explicit"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+
+[runtime]
+features = ["imago:usb", "imago:admin", "imago:usb"]
+"#,
+        );
+
+        let config = ImagodConfig::load(&path).expect("config should load");
+        assert_eq!(
+            config
+                .runtime
+                .effective_builtin_native_plugin_package_names(),
+            vec![
+                "imago:admin".to_string(),
+                "imago:node".to_string(),
+                "imago:usb".to_string()
+            ]
+        );
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn runtime_features_rejects_unknown_builtin_plugin_name() {
+        let path = write_temp_config(
+            "runtime_features_rejects_unknown_builtin_plugin_name",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago-explicit"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+
+[runtime]
+features = ["imago:unknown"]
+"#,
+        );
+
+        let err = ImagodConfig::load(&path).expect_err("config should reject unknown builtin");
+        assert!(err.to_string().contains("runtime.features[0]"));
+        assert!(err.to_string().contains("imago:unknown"));
 
         cleanup_temp_path(path);
     }

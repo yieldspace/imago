@@ -3,12 +3,14 @@
 //! The runner startup path decodes bootstrap metadata, registers with manager,
 //! starts inbound control handlers, and then executes component runtime flow.
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 #[cfg(not(feature = "runtime-wasmtime"))]
 use async_trait::async_trait;
 use imago_protocol::ErrorCode;
-use imagod_common::ImagodError;
+use imagod_common::{
+    BUILTIN_NATIVE_PLUGIN_DESCRIPTORS, ImagodError, is_builtin_native_plugin_package_name,
+};
 use imagod_ipc::{RunnerAppType, RunnerBootstrap};
 use imagod_runtime_bootstrap::{
     STAGE_RUNNER, SocketCleanupGuard, prepare_socket_path, read_runner_bootstrap,
@@ -319,6 +321,8 @@ fn create_runtime_backend(
 ) -> Result<Arc<RuntimeBackend>, ImagodError> {
     #[cfg(feature = "runtime-wasmtime")]
     {
+        let native_plugin_registry =
+            filter_registry_for_bootstrap(native_plugin_registry, bootstrap)?;
         let tuning = WasmEngineTuning {
             memory_reservation_bytes: bootstrap.wasm_memory_reservation_bytes,
             memory_reservation_for_growth_bytes: bootstrap.wasm_memory_reservation_for_growth_bytes,
@@ -327,7 +331,7 @@ fn create_runtime_backend(
             parallel_compilation: bootstrap.wasm_parallel_compilation,
         };
         Ok(Arc::new(WasmRuntime::new_with_native_plugins_and_tuning(
-            native_plugin_registry.clone(),
+            native_plugin_registry,
             tuning,
         )?))
     }
@@ -338,6 +342,31 @@ fn create_runtime_backend(
         let _ = bootstrap;
         Err(runtime_backend_unavailable_error())
     }
+}
+
+#[cfg(feature = "runtime-wasmtime")]
+fn filter_registry_for_bootstrap(
+    native_plugin_registry: &NativePluginRegistry,
+    bootstrap: &RunnerBootstrap,
+) -> Result<NativePluginRegistry, ImagodError> {
+    let enabled_native_plugins = if bootstrap.enabled_native_plugins.is_empty() {
+        BUILTIN_NATIVE_PLUGIN_DESCRIPTORS
+            .iter()
+            .filter(|descriptor| descriptor.default_enabled)
+            .map(|descriptor| descriptor.package_name)
+            .collect::<BTreeSet<_>>()
+    } else {
+        bootstrap
+            .enabled_native_plugins
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
+    };
+
+    native_plugin_registry.filtered(|package_name| {
+        !is_builtin_native_plugin_package_name(package_name)
+            || enabled_native_plugins.contains(package_name)
+    })
 }
 
 /// Observes run task during startup confirmation window.
@@ -431,7 +460,6 @@ mod tests {
     use super::*;
     use tokio::sync::oneshot;
 
-    #[cfg(not(feature = "runtime-wasmtime"))]
     fn sample_bootstrap() -> RunnerBootstrap {
         RunnerBootstrap {
             runner_id: "runner-a".to_string(),
@@ -451,6 +479,7 @@ mod tests {
             resources: std::collections::BTreeMap::new(),
             bindings: vec![],
             plugin_dependencies: vec![],
+            enabled_native_plugins: vec!["imago:admin".to_string(), "imago:node".to_string()],
             capabilities: imagod_ipc::CapabilityPolicy::default(),
             manager_control_endpoint: std::path::PathBuf::from("/tmp/manager.sock"),
             runner_endpoint: std::path::PathBuf::from("/tmp/runner.sock"),
@@ -480,6 +509,96 @@ mod tests {
             "unexpected message: {}",
             err.message
         );
+    }
+
+    #[cfg(feature = "runtime-wasmtime")]
+    #[test]
+    fn filter_registry_for_bootstrap_keeps_custom_plugins_and_enabled_builtins() {
+        use std::sync::Arc;
+
+        use imagod_runtime_wasmtime::native_plugins::{
+            NativePlugin, NativePluginLinker, NativePluginRegistryBuilder, NativePluginResult,
+        };
+
+        struct CustomPlugin;
+        struct AdminBuiltinPlugin;
+        struct UsbBuiltinPlugin;
+
+        impl NativePlugin for CustomPlugin {
+            fn package_name(&self) -> &'static str {
+                "test:custom"
+            }
+
+            fn supports_import(&self, import_name: &str) -> bool {
+                import_name == "test:custom/runtime@0.1.0"
+            }
+
+            fn symbols(&self) -> &'static [&'static str] {
+                &["test:custom/runtime@0.1.0.ping"]
+            }
+
+            fn add_to_linker(&self, _linker: &mut NativePluginLinker) -> NativePluginResult<()> {
+                Ok(())
+            }
+        }
+
+        impl NativePlugin for AdminBuiltinPlugin {
+            fn package_name(&self) -> &'static str {
+                "imago:admin"
+            }
+
+            fn supports_import(&self, import_name: &str) -> bool {
+                import_name == "imago:admin/runtime@0.1.0"
+            }
+
+            fn symbols(&self) -> &'static [&'static str] {
+                &["imago:admin/runtime@0.1.0.ping"]
+            }
+
+            fn add_to_linker(&self, _linker: &mut NativePluginLinker) -> NativePluginResult<()> {
+                Ok(())
+            }
+        }
+
+        impl NativePlugin for UsbBuiltinPlugin {
+            fn package_name(&self) -> &'static str {
+                "imago:usb"
+            }
+
+            fn supports_import(&self, import_name: &str) -> bool {
+                import_name == "imago:usb/runtime@0.1.0"
+            }
+
+            fn symbols(&self) -> &'static [&'static str] {
+                &["imago:usb/runtime@0.1.0.ping"]
+            }
+
+            fn add_to_linker(&self, _linker: &mut NativePluginLinker) -> NativePluginResult<()> {
+                Ok(())
+            }
+        }
+
+        let mut builder = NativePluginRegistryBuilder::new();
+        builder
+            .register_plugin(Arc::new(CustomPlugin))
+            .expect("custom plugin should register");
+        builder
+            .register_plugin(Arc::new(AdminBuiltinPlugin))
+            .expect("admin plugin should register");
+        builder
+            .register_plugin(Arc::new(UsbBuiltinPlugin))
+            .expect("usb plugin should register");
+        let registry = builder.build();
+
+        let mut bootstrap = sample_bootstrap();
+        bootstrap.enabled_native_plugins = vec!["imago:admin".to_string()];
+
+        let filtered =
+            filter_registry_for_bootstrap(&registry, &bootstrap).expect("filter should succeed");
+
+        assert!(filtered.has_plugin("test:custom"));
+        assert!(filtered.has_plugin("imago:admin"));
+        assert!(!filtered.has_plugin("imago:usb"));
     }
 
     #[test]

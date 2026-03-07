@@ -8,9 +8,10 @@ use std::path::Path;
 
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
+use imagod_common::{BUILTIN_NATIVE_PLUGIN_DESCRIPTORS, is_builtin_native_plugin_package_name};
 
 use crate::{
-    ImagodConfig, MAX_CHUNK_SIZE_BYTES, MAX_HTTP_QUEUE_MEMORY_BUDGET_BYTES,
+    ImagodConfig, MAX_CHUNK_SIZE_BYTES, MAX_HTTP_QUEUE_MEMORY_BUDGET_BYTES, RuntimeFeatures,
     parse_ed25519_raw_public_key_hex,
 };
 
@@ -77,6 +78,7 @@ pub(crate) fn validate(config: &ImagodConfig) -> Result<(), ImagodError> {
         parse_unique_public_key_hexes(&config.tls.client_public_keys, "tls.client_public_keys")?;
     parse_unique_public_key_hexes(&config.tls.admin_public_keys, "tls.admin_public_keys")?;
     parse_known_public_key_map(&config.tls.known_public_keys)?;
+    validate_runtime_features(&config.runtime.features)?;
 
     for (index, key_hex) in config.tls.admin_public_keys.iter().enumerate() {
         let decoded = parse_ed25519_raw_public_key_hex(key_hex).map_err(|reason| {
@@ -280,6 +282,34 @@ pub(crate) fn validate(config: &ImagodConfig) -> Result<(), ImagodError> {
             "config.load",
             "runtime.max_inflight_chunks must be greater than 0",
         ));
+    }
+
+    Ok(())
+}
+
+fn validate_runtime_features(features: &RuntimeFeatures) -> Result<(), ImagodError> {
+    let RuntimeFeatures::Packages(package_names) = features else {
+        return Ok(());
+    };
+
+    let supported = BUILTIN_NATIVE_PLUGIN_DESCRIPTORS
+        .iter()
+        .map(|descriptor| descriptor.package_name)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    for (index, package_name) in package_names.iter().enumerate() {
+        if is_builtin_native_plugin_package_name(package_name) {
+            continue;
+        }
+
+        return Err(ImagodError::new(
+            ErrorCode::BadRequest,
+            "config.load",
+            format!("runtime.features[{index}] must be one of: {supported} (got '{package_name}')"),
+        )
+        .with_detail("index", index.to_string())
+        .with_detail("value", package_name));
     }
 
     Ok(())

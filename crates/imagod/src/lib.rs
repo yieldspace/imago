@@ -9,6 +9,7 @@ use imago_plugin_imago_experimental_i2c::ImagoExperimentalI2cPlugin;
 use imago_plugin_imago_node::ImagoNodePlugin;
 use imago_plugin_imago_usb::ImagoUsbPlugin;
 use imago_protocol::PROTOCOL_VERSION;
+use imagod_common::BUILTIN_NATIVE_PLUGIN_DESCRIPTORS;
 use imagod_config::DEFAULT_CONTROL_SOCKET_PATH;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -111,21 +112,9 @@ pub async fn dispatch_from_env_with_registry(
 pub fn register_builtin_native_plugins(
     builder: &mut NativePluginRegistryBuilder,
 ) -> Result<(), anyhow::Error> {
-    builder
-        .register_plugin(Arc::new(ImagoAdminPlugin))
-        .map_err(anyhow::Error::new)?;
-    builder
-        .register_plugin(Arc::new(ImagoNodePlugin))
-        .map_err(anyhow::Error::new)?;
-    builder
-        .register_plugin(Arc::new(ImagoExperimentalGpioPlugin))
-        .map_err(anyhow::Error::new)?;
-    builder
-        .register_plugin(Arc::new(ImagoExperimentalI2cPlugin))
-        .map_err(anyhow::Error::new)?;
-    builder
-        .register_plugin(Arc::new(ImagoUsbPlugin))
-        .map_err(anyhow::Error::new)?;
+    for descriptor in BUILTIN_NATIVE_PLUGIN_DESCRIPTORS {
+        register_builtin_native_plugin(builder, descriptor.package_name)?;
+    }
     Ok(())
 }
 
@@ -134,6 +123,37 @@ pub fn builtin_native_plugin_registry() -> Result<NativePluginRegistry, anyhow::
     let mut builder = NativePluginRegistryBuilder::new();
     register_builtin_native_plugins(&mut builder)?;
     Ok(builder.build())
+}
+
+fn register_builtin_native_plugin(
+    builder: &mut NativePluginRegistryBuilder,
+    package_name: &str,
+) -> Result<(), anyhow::Error> {
+    match package_name {
+        "imago:admin" => builder
+            .register_plugin(Arc::new(ImagoAdminPlugin))
+            .map_err(anyhow::Error::new)?,
+        "imago:node" => builder
+            .register_plugin(Arc::new(ImagoNodePlugin))
+            .map_err(anyhow::Error::new)?,
+        "imago:experimental-gpio" => builder
+            .register_plugin(Arc::new(ImagoExperimentalGpioPlugin))
+            .map_err(anyhow::Error::new)?,
+        "imago:experimental-i2c" => builder
+            .register_plugin(Arc::new(ImagoExperimentalI2cPlugin))
+            .map_err(anyhow::Error::new)?,
+        "imago:usb" => builder
+            .register_plugin(Arc::new(ImagoUsbPlugin))
+            .map_err(anyhow::Error::new)?,
+        other => {
+            return Err(anyhow::anyhow!(
+                "unsupported built-in native plugin package '{}'",
+                other
+            ));
+        }
+    };
+
+    Ok(())
 }
 
 fn install_rustls_provider() {
@@ -620,11 +640,31 @@ mod tests {
         #[test]
         fn builtin_registry_contains_default_plugins() {
             let registry = builtin_native_plugin_registry().expect("registry should build");
-            assert!(registry.has_plugin("imago:admin"));
-            assert!(registry.has_plugin("imago:node"));
-            assert!(registry.has_plugin("imago:experimental-gpio"));
-            assert!(registry.has_plugin("imago:experimental-i2c"));
-            assert!(registry.has_plugin("imago:usb"));
+            for descriptor in BUILTIN_NATIVE_PLUGIN_DESCRIPTORS {
+                assert!(
+                    registry.has_plugin(descriptor.package_name),
+                    "missing builtin plugin {}",
+                    descriptor.package_name
+                );
+            }
+        }
+
+        #[test]
+        fn builtin_registry_can_be_filtered_to_default_plugins() {
+            let registry = builtin_native_plugin_registry().expect("registry should build");
+            let filtered = registry
+                .filtered(|package_name| {
+                    BUILTIN_NATIVE_PLUGIN_DESCRIPTORS.iter().any(|descriptor| {
+                        descriptor.default_enabled && descriptor.package_name == package_name
+                    })
+                })
+                .expect("filtered registry should build");
+
+            assert!(filtered.has_plugin("imago:admin"));
+            assert!(filtered.has_plugin("imago:node"));
+            assert!(!filtered.has_plugin("imago:experimental-gpio"));
+            assert!(!filtered.has_plugin("imago:experimental-i2c"));
+            assert!(!filtered.has_plugin("imago:usb"));
         }
 
         #[test]
@@ -636,11 +676,13 @@ mod tests {
                 .register_plugin(Arc::new(TestPlugin))
                 .expect("custom plugin registration should work");
             let registry = builder.build();
-            assert!(registry.has_plugin("imago:admin"));
-            assert!(registry.has_plugin("imago:node"));
-            assert!(registry.has_plugin("imago:experimental-gpio"));
-            assert!(registry.has_plugin("imago:experimental-i2c"));
-            assert!(registry.has_plugin("imago:usb"));
+            for descriptor in BUILTIN_NATIVE_PLUGIN_DESCRIPTORS {
+                assert!(
+                    registry.has_plugin(descriptor.package_name),
+                    "missing builtin plugin {}",
+                    descriptor.package_name
+                );
+            }
             assert!(registry.has_plugin("test:custom"));
         }
 

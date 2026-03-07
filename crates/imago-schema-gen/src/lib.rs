@@ -105,6 +105,8 @@ mod tests {
 
         let imago_json: JsonValue =
             serde_json::from_str(&first_imago).expect("imago schema should parse as json");
+        let imagod_json: JsonValue =
+            serde_json::from_str(&first_imagod).expect("imagod schema should parse as json");
         let props = imago_json
             .get("properties")
             .and_then(JsonValue::as_object)
@@ -148,6 +150,27 @@ mod tests {
             .and_then(|entry| entry.get("required"))
             .and_then(JsonValue::as_array)
             .expect("BindingEntry.required should be array");
+        let imagod_defs = imagod_json
+            .get("$defs")
+            .and_then(JsonValue::as_object)
+            .expect("imagod $defs should be object");
+        let imagod_runtime_props = imagod_defs
+            .get("RuntimeConfig")
+            .and_then(|entry| entry.get("properties"))
+            .and_then(JsonValue::as_object)
+            .expect("imagod RuntimeConfig.properties should be object");
+        let features_any_of = imagod_runtime_props
+            .get("features")
+            .and_then(|entry| entry.get("anyOf"))
+            .and_then(JsonValue::as_array)
+            .expect("imagod RuntimeConfig.features.anyOf should be array");
+        let feature_items_enum = features_any_of
+            .iter()
+            .find(|entry| entry.get("type").and_then(JsonValue::as_str) == Some("array"))
+            .and_then(|entry| entry.get("items"))
+            .and_then(|entry| entry.get("enum"))
+            .and_then(JsonValue::as_array)
+            .expect("imagod RuntimeConfig.features array schema should enumerate package names");
 
         assert!(
             !props.contains_key("capabilirties"),
@@ -214,6 +237,30 @@ mod tests {
         assert!(
             !defs.contains_key("LegacyRuntimeSection"),
             "legacy runtime section type must not be exposed in schema definitions"
+        );
+        assert!(
+            features_any_of
+                .iter()
+                .any(|entry| entry.get("type").and_then(JsonValue::as_str) == Some("boolean")),
+            "imagod RuntimeConfig.features should accept booleans"
+        );
+        assert!(
+            feature_items_enum
+                .iter()
+                .any(|value| value.as_str() == Some("imago:admin")),
+            "imagod RuntimeConfig.features should enumerate imago:admin"
+        );
+        assert!(
+            feature_items_enum
+                .iter()
+                .any(|value| value.as_str() == Some("imago:node")),
+            "imagod RuntimeConfig.features should enumerate imago:node"
+        );
+        assert!(
+            feature_items_enum
+                .iter()
+                .any(|value| value.as_str() == Some("imago:usb")),
+            "imagod RuntimeConfig.features should enumerate imago:usb"
         );
     }
 }

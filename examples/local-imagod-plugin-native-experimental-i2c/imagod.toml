@@ -8,6 +8,7 @@ admin_public_keys = ["cd89018994ede35b4c80b21d7958a4a6fc2684637846f6938175b0a87c
 client_public_keys = ["c067e1cd0edd79ebd91e2bdb81c131ed601906af13c82c4e8f02ad6c4cfc5960"]
 
 [runtime]
+features = ["imago:experimental-i2c"]
 chunk_size = 1048576
 max_inflight_chunks = 16
 upload_session_ttl_secs = 900

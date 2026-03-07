@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::Sha256;
 
-use imagod_common::ImagodError;
+use imagod_common::{ImagodError, is_builtin_native_plugin_package_name};
 
 /// DBus-like peer-to-peer transport implementation over Unix domain sockets.
 pub mod dbus_p2p;
@@ -690,6 +690,9 @@ pub struct RunnerBootstrap {
     /// Plugin dependencies available for this app/plugin execution context.
     #[serde(default)]
     pub plugin_dependencies: Vec<PluginDependency>,
+    /// Effective built-in native plugin allowlist propagated from manager config.
+    #[serde(default)]
+    pub enabled_native_plugins: Vec<String>,
     /// App-level capability policy.
     #[serde(default)]
     pub capabilities: CapabilityPolicy,
@@ -789,6 +792,15 @@ impl Validate for RunnerBootstrap {
         }
         for dependency in &self.plugin_dependencies {
             dependency.validate()?;
+        }
+        for package_name in &self.enabled_native_plugins {
+            validate_non_empty(package_name, "enabled_native_plugins")?;
+            if !is_builtin_native_plugin_package_name(package_name) {
+                return Err(ValidationError::invalid(
+                    "enabled_native_plugins",
+                    "must contain only built-in native plugin package names",
+                ));
+            }
         }
         self.capabilities.validate()?;
 
@@ -1378,6 +1390,7 @@ mod tests {
             resources: BTreeMap::new(),
             bindings: vec![],
             plugin_dependencies: vec![],
+            enabled_native_plugins: vec!["imago:admin".to_string(), "imago:node".to_string()],
             capabilities: CapabilityPolicy::default(),
             manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
             runner_endpoint: PathBuf::from("/tmp/runner.sock"),
@@ -1411,6 +1424,17 @@ mod tests {
         bootstrap
             .validate()
             .expect("rpc app type should be validated like cli");
+    }
+
+    #[test]
+    fn runner_bootstrap_rejects_unknown_enabled_native_plugin() {
+        let mut bootstrap = valid_http_bootstrap();
+        bootstrap.enabled_native_plugins = vec!["imago:unknown".to_string()];
+
+        let err = bootstrap
+            .validate()
+            .expect_err("unknown builtin plugin should fail bootstrap validation");
+        assert_eq!(err.field, "enabled_native_plugins");
     }
 
     #[test]
@@ -1455,6 +1479,11 @@ mod tests {
                 component: None,
                 capabilities: CapabilityPolicy::default(),
             }],
+            enabled_native_plugins: vec![
+                "imago:admin".to_string(),
+                "imago:node".to_string(),
+                "imago:usb".to_string(),
+            ],
             capabilities: CapabilityPolicy {
                 privileged: false,
                 deps: BTreeMap::from([(
@@ -1506,6 +1535,14 @@ mod tests {
         assert_eq!(
             decoded.plugin_dependencies[0].name,
             "yieldspace:plugin/example"
+        );
+        assert_eq!(
+            decoded.enabled_native_plugins,
+            vec![
+                "imago:admin".to_string(),
+                "imago:node".to_string(),
+                "imago:usb".to_string()
+            ]
         );
         assert!(
             decoded

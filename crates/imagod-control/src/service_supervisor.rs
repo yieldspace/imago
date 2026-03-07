@@ -22,9 +22,10 @@ use std::{
 
 use imago_protocol::ErrorCode;
 use imagod_common::{
-    DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY, DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES,
-    DEFAULT_WASM_MEMORY_RESERVATION_BYTES, DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES,
-    DEFAULT_WASM_PARALLEL_COMPILATION, ImagodError,
+    BUILTIN_NATIVE_PLUGIN_DESCRIPTORS, DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY,
+    DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES, DEFAULT_WASM_MEMORY_RESERVATION_BYTES,
+    DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES, DEFAULT_WASM_PARALLEL_COMPILATION,
+    ImagodError,
 };
 use imagod_ipc::{
     CapabilityPolicy, PluginDependency, ResourceMap, RunnerAppType, RunnerBootstrap,
@@ -225,6 +226,7 @@ pub struct ServiceSupervisor {
     wasm_memory_guard_size_bytes: u64,
     wasm_guard_before_linear_memory: bool,
     wasm_parallel_compilation: bool,
+    enabled_native_plugins: Vec<String>,
     runner_log_buffer_bytes: usize,
     epoch_tick_interval_ms: u64,
     manager_control_endpoint: PathBuf,
@@ -366,6 +368,11 @@ impl ServiceSupervisor {
             wasm_memory_guard_size_bytes: DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES,
             wasm_guard_before_linear_memory: DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY,
             wasm_parallel_compilation: DEFAULT_WASM_PARALLEL_COMPILATION,
+            enabled_native_plugins: BUILTIN_NATIVE_PLUGIN_DESCRIPTORS
+                .iter()
+                .filter(|descriptor| descriptor.default_enabled)
+                .map(|descriptor| descriptor.package_name.to_string())
+                .collect(),
             runner_log_buffer_bytes,
             epoch_tick_interval_ms: epoch_tick_interval_ms.max(1),
             manager_control_endpoint,
@@ -409,6 +416,12 @@ impl ServiceSupervisor {
         self
     }
 
+    /// Overrides the effective built-in native plugin allowlist propagated to runners.
+    pub fn with_enabled_native_plugins(mut self, enabled_native_plugins: Vec<String>) -> Self {
+        self.enabled_native_plugins = enabled_native_plugins;
+        self
+    }
+
     /// Starts a service by spawning a runner child process.
     pub async fn start(&self, launch: ServiceLaunch) -> Result<(), ImagodError> {
         self.start_internal(launch, false).await
@@ -448,6 +461,7 @@ impl ServiceSupervisor {
                 resources: launch.resources.clone(),
                 bindings: launch.bindings.clone(),
                 plugin_dependencies: launch.plugin_dependencies.clone(),
+                enabled_native_plugins: self.enabled_native_plugins.clone(),
                 capabilities: launch.capabilities.clone(),
                 manager_control_endpoint: self.manager_control_endpoint.clone(),
                 runner_endpoint: runner_endpoint.clone(),
