@@ -48,6 +48,7 @@ use crate::{
         DefaultPluginResolver, instantiate_plugin_dependencies, register_plugin_import_shims,
     },
     rpc_values::{decode_payload_values, encode_payload_values, placeholder_values},
+    wasi_nn,
 };
 
 /// Wasmtime engine-level memory tuning knobs propagated from manager runtime config.
@@ -238,13 +239,12 @@ impl WasmRuntime {
             configure_socket_policy(&mut builder, socket)?;
         }
 
-        let state = WasiState {
-            table: wasmtime::component::ResourceTable::new(),
-            wasi: builder.build(),
-            http: wasmtime_wasi_http::WasiHttpCtx::new(),
-            wasi_http_outbound: wasi_http_outbound.to_vec(),
+        let state = WasiState::new(
+            builder.build(),
+            wasmtime_wasi_http::WasiHttpCtx::new(),
+            wasi_http_outbound.to_vec(),
             native_plugin_context,
-        };
+        );
         let mut store = Store::new(&self.engine, state);
         store.set_epoch_deadline(1);
         store.epoch_deadline_async_yield_and_update(1);
@@ -284,7 +284,38 @@ impl WasmRuntime {
             .map_err(|e| map_runtime_error(format!("failed to add WASI linker: {e}")))?;
         add_only_http_to_linker_async(&mut linker)
             .map_err(|e| map_runtime_error(format!("failed to add WASI HTTP linker: {e}")))?;
+        wasi_nn::add_to_linker(&mut linker)?;
         Ok(linker)
+    }
+
+    fn component_requires_wasi_nn(&self, component: &Component) -> bool {
+        component
+            .component_type()
+            .imports(&self.engine)
+            .any(|(name, _)| name.starts_with("wasi:nn/"))
+    }
+
+    fn ensure_wasi_nn_component_support(&self, component: &Component) -> Result<(), ImagodError> {
+        if !self.component_requires_wasi_nn(component) {
+            return Ok(());
+        }
+
+        if !wasi_nn::has_enabled_feature() {
+            return Err(map_runtime_error(
+                "wasi-nn backend is not enabled; rebuild imagod with feature 'wasi-nn-openvino' or 'wasi-nn-onnx'"
+                    .to_string(),
+            ));
+        }
+
+        let available_backends = wasi_nn::available_backend_names();
+        if available_backends.is_empty() {
+            return Err(map_runtime_error(format!(
+                "wasi-nn backend is enabled but no backends are available on this target (enabled features: {})",
+                wasi_nn::enabled_feature_names().join(", ")
+            )));
+        }
+
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -342,6 +373,7 @@ impl WasmRuntime {
             &available_plugins,
             None,
         )?;
+        self.ensure_wasi_nn_component_support(component.as_ref())?;
 
         let run_future = async {
             let command = Command::instantiate_async(&mut store, component.as_ref(), &linker)
@@ -430,6 +462,7 @@ impl WasmRuntime {
             &available_plugins,
             None,
         )?;
+        self.ensure_wasi_nn_component_support(component.as_ref())?;
 
         let proxy = Proxy::instantiate_async(&mut store, component.as_ref(), &linker)
             .await
@@ -539,6 +572,7 @@ impl WasmRuntime {
             &available_plugins,
             None,
         )?;
+        self.ensure_wasi_nn_component_support(component.as_ref())?;
 
         let instance = linker
             .instantiate_async(&mut store, component.as_ref())
@@ -1176,6 +1210,139 @@ interface types {
         }
     }
 
+    struct WasiNnFixture {
+        _temp_dir: TempDir,
+        component_path: PathBuf,
+    }
+
+    fn write_wasi_nn_component(prefix: &str) -> WasiNnFixture {
+        let temp_dir = TempDirBuilder::new()
+            .prefix(&format!("imago-runtime-wasi-nn-{prefix}-"))
+            .tempdir()
+            .expect("temp dir should be created");
+        let root = temp_dir.path();
+        let nn_deps_dir = root.join("deps/nn");
+        fs::create_dir_all(&nn_deps_dir).expect("wasi:nn deps directory should be created");
+        fs::write(
+            root.join("world.wit"),
+            r#"
+package test:wasi-nn-import@0.1.0;
+
+world app {
+  import wasi:nn/graph@0.2.0-rc-2024-10-28;
+}
+"#,
+        )
+        .expect("wit source should be written");
+        fs::write(
+            nn_deps_dir.join("package.wit"),
+            r#"
+package wasi:nn@0.2.0-rc-2024-10-28;
+
+interface errors {
+  enum error-code {
+    invalid-argument,
+    invalid-encoding,
+    timeout,
+    runtime-error,
+    unsupported-operation,
+    too-large,
+    not-found,
+    security,
+    unknown,
+  }
+
+  resource error {
+    code: func() -> error-code;
+    data: func() -> string;
+  }
+}
+
+interface tensor {
+  type tensor-dimensions = list<u32>;
+  enum tensor-type {
+    FP16,
+    FP32,
+    FP64,
+    BF16,
+    U8,
+    I32,
+    I64,
+  }
+  type tensor-data = list<u8>;
+
+  resource tensor {
+    constructor(dimensions: tensor-dimensions, ty: tensor-type, data: tensor-data);
+  }
+}
+
+interface inference {
+  use errors.{error};
+  use tensor.{tensor};
+
+  type named-tensor = tuple<string, tensor>;
+
+  resource graph-execution-context {
+    compute: func(inputs: list<named-tensor>) -> result<list<named-tensor>, error>;
+  }
+}
+
+interface graph {
+  use errors.{error};
+  use inference.{graph-execution-context};
+
+  resource graph {
+    init-execution-context: func() -> result<graph-execution-context, error>;
+  }
+
+  enum graph-encoding {
+    openvino,
+    onnx,
+    tensorflow,
+    pytorch,
+    tensorflowlite,
+    ggml,
+    autodetect,
+  }
+
+  enum execution-target {
+    cpu,
+    gpu,
+    tpu,
+  }
+
+  type graph-builder = list<u8>;
+
+  load: func(builder: list<graph-builder>, encoding: graph-encoding, target: execution-target) -> result<graph, error>;
+  load-by-name: func(name: string) -> result<graph, error>;
+}
+"#,
+        )
+        .expect("wasi:nn fixture should be written");
+
+        let mut resolve = Resolve::default();
+        let (pkg, _) = resolve
+            .push_dir(root)
+            .expect("fixture WIT directory should parse");
+        let world = resolve
+            .select_world(&[pkg], Some("app"))
+            .expect("world 'app' should exist");
+        let mut module = dummy_module(&resolve, world, ManglingAndAbi::Standard32);
+        wit_component::embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8)
+            .expect("component metadata embedding should succeed");
+        let component = ComponentEncoder::default()
+            .module(&module)
+            .expect("component encoder should accept module")
+            .encode()
+            .expect("component encoding should succeed");
+        let component_path = root.join("component.wasm");
+        fs::write(&component_path, component).expect("component bytes should be written");
+        WasiNnFixture {
+            _temp_dir: temp_dir,
+            component_path,
+        }
+    }
+
     fn collect_component_import_names(runtime: &WasmRuntime, component_path: &Path) -> Vec<String> {
         let component =
             Component::from_file(&runtime.engine, component_path).expect("component should load");
@@ -1365,6 +1532,104 @@ interface types {
         );
     }
 
+    #[cfg(any(feature = "wasi-nn-openvino", feature = "wasi-nn-onnx"))]
+    #[tokio::test]
+    async fn cli_type_with_wasi_nn_import_does_not_fail_with_missing_nn_linker() {
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let fixture = write_wasi_nn_component("cli-nn-linker");
+        let imports = collect_component_import_names(&runtime, &fixture.component_path);
+        assert!(
+            imports
+                .iter()
+                .any(|name| name == "wasi:nn/graph@0.2.0-rc-2024-10-28"),
+            "component should import wasi:nn/graph@0.2.0-rc-2024-10-28, got: {imports:?}"
+        );
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let err = runtime
+            .run_component(RuntimeRunRequest {
+                app_type: RunnerAppType::Cli,
+                runner_id: "runner-test".to_string(),
+                service_name: "svc-test".to_string(),
+                release_hash: "release-test".to_string(),
+                component_path: fixture.component_path.clone(),
+                args: Vec::new(),
+                envs: BTreeMap::new(),
+                wasi_mounts: Vec::new(),
+                wasi_http_outbound: Vec::new(),
+                resources: std::collections::BTreeMap::new(),
+                socket: None,
+                plugin_dependencies: Vec::new(),
+                capabilities: allow_all_wasi_capabilities(),
+                bindings: Vec::new(),
+                manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+                manager_auth_secret: "secret".to_string(),
+                shutdown: shutdown_rx,
+                epoch_tick_interval_ms: 50,
+                http_worker_count: 2,
+                http_worker_queue_capacity: 4,
+                http_ready_tx: None,
+            })
+            .await
+            .expect_err("component without wasi:cli/run export should fail");
+        let _ = shutdown_tx.send(true);
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(
+            !err.message
+                .contains("matching implementation was not found in the linker"),
+            "unexpected missing-linker error: {}",
+            err.message
+        );
+    }
+
+    #[cfg(not(any(feature = "wasi-nn-openvino", feature = "wasi-nn-onnx")))]
+    #[tokio::test]
+    async fn cli_type_with_wasi_nn_import_requires_backend_feature() {
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let fixture = write_wasi_nn_component("cli-nn-disabled");
+        let imports = collect_component_import_names(&runtime, &fixture.component_path);
+        assert!(
+            imports
+                .iter()
+                .any(|name| name == "wasi:nn/graph@0.2.0-rc-2024-10-28"),
+            "component should import wasi:nn/graph@0.2.0-rc-2024-10-28, got: {imports:?}"
+        );
+
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let err = runtime
+            .run_component(RuntimeRunRequest {
+                app_type: RunnerAppType::Cli,
+                runner_id: "runner-test".to_string(),
+                service_name: "svc-test".to_string(),
+                release_hash: "release-test".to_string(),
+                component_path: fixture.component_path.clone(),
+                args: Vec::new(),
+                envs: BTreeMap::new(),
+                wasi_mounts: Vec::new(),
+                wasi_http_outbound: Vec::new(),
+                resources: std::collections::BTreeMap::new(),
+                socket: None,
+                plugin_dependencies: Vec::new(),
+                capabilities: allow_all_wasi_capabilities(),
+                bindings: Vec::new(),
+                manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+                manager_auth_secret: "secret".to_string(),
+                shutdown: shutdown_rx,
+                epoch_tick_interval_ms: 50,
+                http_worker_count: 2,
+                http_worker_queue_capacity: 4,
+                http_ready_tx: None,
+            })
+            .await
+            .expect_err("missing backend feature should reject wasi:nn import");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(
+            err.message.contains("wasi-nn backend is not enabled"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
+
     #[tokio::test]
     async fn rpc_type_returns_without_loading_component_when_shutdown_already_signaled() {
         let runtime = WasmRuntime::new().expect("runtime should initialize");
@@ -1528,6 +1793,53 @@ interface types {
             })
             .await
             .expect_err("missing capability should reject wasi:http import");
+        assert_eq!(err.code, ErrorCode::Unauthorized);
+        assert!(
+            err.message.contains("capability denied"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_type_with_wasi_nn_import_stays_unauthorized_without_capability() {
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let fixture = write_wasi_nn_component("cli-nn-unauthorized");
+        let imports = collect_component_import_names(&runtime, &fixture.component_path);
+        assert!(
+            imports
+                .iter()
+                .any(|name| name == "wasi:nn/graph@0.2.0-rc-2024-10-28"),
+            "component should import wasi:nn/graph@0.2.0-rc-2024-10-28, got: {imports:?}"
+        );
+
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let err = runtime
+            .run_component(RuntimeRunRequest {
+                app_type: RunnerAppType::Cli,
+                runner_id: "runner-test".to_string(),
+                service_name: "svc-test".to_string(),
+                release_hash: "release-test".to_string(),
+                component_path: fixture.component_path.clone(),
+                args: Vec::new(),
+                envs: BTreeMap::new(),
+                wasi_mounts: Vec::new(),
+                wasi_http_outbound: Vec::new(),
+                resources: std::collections::BTreeMap::new(),
+                socket: None,
+                plugin_dependencies: Vec::new(),
+                capabilities: CapabilityPolicy::default(),
+                bindings: Vec::new(),
+                manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+                manager_auth_secret: "secret".to_string(),
+                shutdown: shutdown_rx,
+                epoch_tick_interval_ms: 50,
+                http_worker_count: 2,
+                http_worker_queue_capacity: 4,
+                http_ready_tx: None,
+            })
+            .await
+            .expect_err("missing capability should reject wasi:nn import");
         assert_eq!(err.code, ErrorCode::Unauthorized);
         assert!(
             err.message.contains("capability denied"),

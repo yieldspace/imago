@@ -8,6 +8,8 @@ publish = true
 [features]
 default = ["runtime-wasmtime"]
 runtime-wasmtime = ["imagod-runtime/runtime-wasmtime"]
+wasi-nn-openvino = ["runtime-wasmtime", "imagod-runtime/wasi-nn-openvino"]
+wasi-nn-onnx = ["runtime-wasmtime", "imagod-runtime/wasi-nn-onnx"]
 
 [lib]
 name = "imagod"

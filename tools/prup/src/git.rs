@@ -225,6 +225,7 @@ mod tests {
             &repo_root,
             ["config", "user.email", "prup-test@example.com"],
         );
+        git_ok(&repo_root, ["config", "commit.gpgsign", "false"]);
         repo_root
     }
 

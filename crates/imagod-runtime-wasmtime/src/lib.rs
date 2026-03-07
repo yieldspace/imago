@@ -8,6 +8,7 @@ mod plugin_resolver;
 pub mod rpc_bridge;
 mod rpc_values;
 mod runtime_entry;
+mod wasi_nn;
 
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
@@ -101,11 +102,28 @@ pub struct WasiState {
     pub(crate) table: ResourceTable,
     pub(crate) wasi: WasiCtx,
     pub(crate) http: WasiHttpCtx,
+    pub(crate) wasi_nn: wasmtime_wasi_nn::wit::WasiNnCtx,
     pub(crate) wasi_http_outbound: Vec<WasiHttpOutboundRule>,
     pub(crate) native_plugin_context: NativePluginContext,
 }
 
 impl WasiState {
+    pub(crate) fn new(
+        wasi: WasiCtx,
+        http: WasiHttpCtx,
+        wasi_http_outbound: Vec<WasiHttpOutboundRule>,
+        native_plugin_context: NativePluginContext,
+    ) -> Self {
+        Self {
+            table: ResourceTable::new(),
+            wasi,
+            http,
+            wasi_nn: wasi_nn::new_context(),
+            wasi_http_outbound,
+            native_plugin_context,
+        }
+    }
+
     pub fn native_plugin_context(&self) -> &NativePluginContext {
         &self.native_plugin_context
     }
@@ -258,14 +276,13 @@ mod tests {
 
     #[test]
     fn send_request_rejects_non_allowlisted_authority_with_http_request_denied() {
-        let mut state = WasiState {
-            table: ResourceTable::new(),
-            wasi: WasiCtx::builder().build(),
-            http: WasiHttpCtx::new(),
-            wasi_http_outbound: vec![WasiHttpOutboundRule::Host {
+        let mut state = WasiState::new(
+            WasiCtx::builder().build(),
+            WasiHttpCtx::new(),
+            vec![WasiHttpOutboundRule::Host {
                 host: "localhost".to_string(),
             }],
-            native_plugin_context: NativePluginContext::new(
+            NativePluginContext::new(
                 "svc-test".to_string(),
                 "release-test".to_string(),
                 "runner-test".to_string(),
@@ -274,7 +291,7 @@ mod tests {
                 "secret".to_string(),
                 std::collections::BTreeMap::new(),
             ),
-        };
+        );
         let request = hyper::Request::builder()
             .uri("http://example.com/")
             .body(

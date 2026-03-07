@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
+
+[features]
+default = []
+wasi-nn-openvino = ["wasmtime-wasi-nn/openvino"]
+wasi-nn-onnx = ["wasmtime-wasi-nn/onnx"]
+
 [dependencies]
 async-trait = { workspace = true }
 bytes = { workspace = true }
@@ -19,6 +25,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 wasmtime = { workspace = true, features = ["component-model"] }
 wasmtime-wasi = { workspace = true }
 wasmtime-wasi-http = { workspace = true }
+wasmtime-wasi-nn = { workspace = true, default-features = false }
 
 [dev-dependencies]
 libc = { workspace = true }
