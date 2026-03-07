@@ -1,0 +1,13 @@
+[package]
+name = "imagod-spec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+imago-formal-core = { workspace = true }
+imago-formal-macros = { workspace = true }
+imago-protocol = { workspace = true }
+imagod-config = { workspace = true }
+imagod-ipc = { workspace = true }

@@ -1,0 +1,17 @@
+error[E0277]: the trait bound `State: StateSignatureSpec` is not satisfied
+ --> tests/fixtures/derive_signature_custom_missing_impl.rs:4:39
+  |
+4 | #[derive(Clone, Debug, PartialEq, Eq, Signature)]
+  |                                       ^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `StateSignatureSpec` is not implemented for `State`
+ --> tests/fixtures/derive_signature_custom_missing_impl.rs:6:1
+  |
+6 | struct State {
+  | ^^^^^^^^^^^^
+help: this trait has no implementations, consider adding one
+ --> tests/fixtures/derive_signature_custom_missing_impl.rs:4:39
+  |
+4 | #[derive(Clone, Debug, PartialEq, Eq, Signature)]
+  |                                       ^^^^^^^^^
+  = note: this error originates in the derive macro `Signature` (in Nightly builds, run with -Z macro-backtrace for more info)

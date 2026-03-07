@@ -1,0 +1,18 @@
+[package]
+name = "imago-formal-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true, features = ["full", "extra-traits"] }
+
+[dev-dependencies]
+imago-formal-core = { workspace = true }
+trybuild = { workspace = true }

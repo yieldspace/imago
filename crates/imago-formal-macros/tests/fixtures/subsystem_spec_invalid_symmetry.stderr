@@ -1,0 +1,21 @@
+error: at most one symmetry(...) entry is supported
+  --> tests/fixtures/subsystem_spec_invalid_symmetry.rs:19:1
+   |
+19 | / #[imago_subsystem_spec(
+20 | |     invariants(idle_is_valid),
+21 | |     illegal(),
+22 | |     properties(),
+23 | |     fairness(),
+24 | |     symmetry(identity_symmetry, duplicate_symmetry)
+25 | | )]
+   | |__^
+   |
+   = note: this error originates in the attribute macro `imago_subsystem_spec` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `TransitionSystem`
+ --> tests/fixtures/subsystem_spec_invalid_symmetry.rs:1:58
+  |
+1 | use imago_formal_core::{StatePredicate, SymmetryReducer, TransitionSystem};
+  |                                                          ^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
