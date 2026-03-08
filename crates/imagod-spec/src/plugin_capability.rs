@@ -65,6 +65,7 @@ pub enum PluginCapabilityAction {
     ClassifyGraphCyclic,
     ClassifyGraphMissingDependency,
     ResolveProviderSelf,
+    ResolveProviderDependency,
     ResolveProviderMissing,
     AllowCapability,
     GrantPrivilegedCapability,
@@ -98,6 +99,7 @@ impl PluginCapabilitySpec {
             PluginCapabilityAction::ClassifyGraphCyclic,
             PluginCapabilityAction::ClassifyGraphMissingDependency,
             PluginCapabilityAction::ResolveProviderSelf,
+            PluginCapabilityAction::ResolveProviderDependency,
             PluginCapabilityAction::ResolveProviderMissing,
             PluginCapabilityAction::AllowCapability,
             PluginCapabilityAction::GrantPrivilegedCapability,
@@ -143,6 +145,13 @@ impl PluginCapabilitySpec {
                     && matches!(prev.provider, ProviderResolutionClass::Unresolved) =>
             {
                 candidate.provider = ProviderResolutionClass::SelfComponent;
+                true
+            }
+            PluginCapabilityAction::ResolveProviderDependency
+                if matches!(prev.graph, DependencyGraphClass::Acyclic)
+                    && matches!(prev.provider, ProviderResolutionClass::Unresolved) =>
+            {
+                candidate.provider = ProviderResolutionClass::Dependency;
                 true
             }
             PluginCapabilityAction::ResolveProviderMissing
@@ -297,6 +306,7 @@ fn provider_resolution_fairness() -> Fairness<PluginCapabilityState, PluginCapab
         matches!(
             action,
             PluginCapabilityAction::ResolveProviderSelf
+                | PluginCapabilityAction::ResolveProviderDependency
                 | PluginCapabilityAction::ResolveProviderMissing
         ) && !matches!(next.provider, ProviderResolutionClass::Unresolved)
     }))
@@ -311,8 +321,7 @@ fn capability_decision_fairness() -> Fairness<PluginCapabilityState, PluginCapab
                 action,
                 PluginCapabilityAction::AllowCapability
                     | PluginCapabilityAction::GrantPrivilegedCapability
-            ) && prev.provider != next.provider
-                || next.capability != prev.capability
+            ) && next.capability != prev.capability
         },
     ))
 }
@@ -345,11 +354,25 @@ const _: () = ();
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nirvash_core::ModelChecker;
 
     #[test]
     fn plugin_kind_classifier_covers_public_kinds() {
         for kind in SPEC_PLUGIN_KINDS.iter() {
             let _ = classify_plugin_kind(kind);
         }
+    }
+
+    #[test]
+    fn reachable_graph_contains_dependency_provider_path() {
+        let spec = PluginCapabilitySpec::new();
+        let snapshot = ModelChecker::new(&spec)
+            .reachable_graph_snapshot()
+            .expect("reachable graph snapshot");
+
+        assert!(snapshot.states.iter().any(|state| {
+            matches!(state.provider, ProviderResolutionClass::Dependency)
+                && matches!(state.graph, DependencyGraphClass::Acyclic)
+        }));
     }
 }

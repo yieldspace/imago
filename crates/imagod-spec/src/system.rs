@@ -1,23 +1,29 @@
-use imago_protocol::{CommandLifecycleState, CommandProtocolAction};
+use imago_protocol::{CommandErrorKind, CommandKind, CommandLifecycleState, CommandProtocolAction};
+use imagod_ipc::{PluginKind, RunnerAppType};
 use nirvash_core::{
-    Fairness, Ltl, ModelCase, ModelCaseSource, StatePredicate, StepPredicate, TemporalSpec,
+    ActionConstraint, ModelCase, ModelCaseSource, ModelCheckConfig, StatePredicate, TemporalSpec,
     TransitionSystem,
 };
-use nirvash_macros::{fairness, invariant, property, system_spec};
+use nirvash_macros::{invariant, system_spec};
 
 use crate::{
     artifact_deploy::{
         ArtifactDeployAction, ArtifactDeploySpec, ArtifactDeployState, ReleaseStage,
     },
-    command_protocol::{CommandProtocolSpec, CommandProtocolState},
+    command_protocol::CommandProtocolSpec,
     manager_shell::{ManagerShellAction, ManagerShellPhase, ManagerShellSpec, ManagerShellState},
-    plugin_capability::{PluginCapabilityAction, PluginCapabilitySpec, PluginCapabilityState},
+    plugin_capability::{
+        DependencyGraphClass, PluginCapabilityAction, PluginCapabilitySpec, PluginCapabilityState,
+        ProviderResolutionClass,
+    },
     runner_bootstrap::{RunnerBootstrapAction, RunnerBootstrapSpec, RunnerBootstrapState},
     runner_runtime::{RunnerRuntimeAction, RunnerRuntimeSpec, RunnerRuntimeState, RuntimePhase},
     service_supervision::{
         ServicePhase, ServiceSupervisionAction, ServiceSupervisionSpec, ServiceSupervisionState,
     },
-    session_transport::{SessionTransportAction, SessionTransportSpec, SessionTransportState},
+    session_transport::{
+        SessionOutcome, SessionTransportAction, SessionTransportSpec, SessionTransportState,
+    },
     shutdown_flow::{ShutdownFlowAction, ShutdownFlowSpec, ShutdownFlowState, ShutdownPhase},
 };
 
@@ -25,7 +31,7 @@ use crate::{
 pub struct ImagodSystemState {
     pub manager: ManagerShellState,
     pub transport: SessionTransportState,
-    pub command: CommandProtocolState,
+    pub command: crate::command_protocol::CommandProtocolState,
     pub deploy: ArtifactDeployState,
     pub supervision: ServiceSupervisionState,
     pub bootstrap: RunnerBootstrapState,
@@ -72,15 +78,67 @@ impl ImagodSystemSpec {
     fn action_vocabulary(&self) -> Vec<ImagodSystemAction> {
         vec![
             ImagodSystemAction::Manager(ManagerShellAction::LoadExistingConfig),
+            ImagodSystemAction::Manager(ManagerShellAction::CreateDefaultConfig),
+            ImagodSystemAction::Manager(ManagerShellAction::RunPluginGcSucceeded),
+            ImagodSystemAction::Manager(ManagerShellAction::RunPluginGcFailed),
+            ImagodSystemAction::Manager(ManagerShellAction::RunBootRestoreSucceeded),
+            ImagodSystemAction::Manager(ManagerShellAction::RunBootRestoreFailed),
+            ImagodSystemAction::Manager(ManagerShellAction::StartListening),
+            ImagodSystemAction::Command(CommandProtocolAction::Start(CommandKind::Run)),
+            ImagodSystemAction::Command(CommandProtocolAction::SetRunning),
+            ImagodSystemAction::Command(CommandProtocolAction::RequestCancel),
+            ImagodSystemAction::Command(CommandProtocolAction::MarkSpawned),
+            ImagodSystemAction::Command(CommandProtocolAction::FinishCanceled),
+            ImagodSystemAction::Command(CommandProtocolAction::FinishFailed(
+                CommandErrorKind::Internal,
+            )),
+            ImagodSystemAction::Command(CommandProtocolAction::Remove),
+            ImagodSystemAction::Session(SessionTransportAction::AcceptSession),
+            ImagodSystemAction::Session(SessionTransportAction::RejectTooMany),
+            ImagodSystemAction::Session(SessionTransportAction::JoinSession),
+            ImagodSystemAction::Deploy(ArtifactDeployAction::ReceiveChunk),
+            ImagodSystemAction::Deploy(ArtifactDeployAction::CompleteUpload),
+            ImagodSystemAction::Deploy(ArtifactDeployAction::CommitUpload),
             ImagodSystemAction::Deploy(ArtifactDeployAction::StartDeployMatched),
+            ImagodSystemAction::Deploy(ArtifactDeployAction::StartDeployMismatched),
             ImagodSystemAction::Deploy(ArtifactDeployAction::PromoteRelease),
+            ImagodSystemAction::Deploy(ArtifactDeployAction::TriggerRollback),
+            ImagodSystemAction::Deploy(ArtifactDeployAction::FinishRollback),
             ImagodSystemAction::Supervision(ServiceSupervisionAction::StartService),
+            ImagodSystemAction::Bootstrap(RunnerBootstrapAction::ReadWithinBounds),
+            ImagodSystemAction::Bootstrap(RunnerBootstrapAction::ReadOversized),
+            ImagodSystemAction::Bootstrap(RunnerBootstrapAction::DecodeBootstrap(
+                RunnerAppType::Rpc,
+            )),
+            ImagodSystemAction::Bootstrap(RunnerBootstrapAction::PrepareEndpoint),
             ImagodSystemAction::Bootstrap(RunnerBootstrapAction::RegisterRunner),
+            ImagodSystemAction::Bootstrap(RunnerBootstrapAction::RejectAuthProof),
             ImagodSystemAction::Bootstrap(RunnerBootstrapAction::MarkReady),
+            ImagodSystemAction::Runtime(RunnerRuntimeAction::SelectMode(RunnerAppType::Rpc)),
+            ImagodSystemAction::Runtime(RunnerRuntimeAction::ApplyDefaultTuning),
+            ImagodSystemAction::Runtime(RunnerRuntimeAction::ApplyInvalidTuning),
             ImagodSystemAction::Runtime(RunnerRuntimeAction::ValidateComponentLoadable),
+            ImagodSystemAction::Runtime(RunnerRuntimeAction::ValidateComponentInvalid),
             ImagodSystemAction::Runtime(RunnerRuntimeAction::StartServing),
+            ImagodSystemAction::Runtime(RunnerRuntimeAction::FailRuntime),
+            ImagodSystemAction::Plugin(PluginCapabilityAction::RegisterPlugin(PluginKind::Wasm)),
+            ImagodSystemAction::Plugin(PluginCapabilityAction::ClassifyGraphAcyclic),
+            ImagodSystemAction::Plugin(PluginCapabilityAction::ClassifyGraphMissingDependency),
+            ImagodSystemAction::Plugin(PluginCapabilityAction::ResolveProviderSelf),
+            ImagodSystemAction::Plugin(PluginCapabilityAction::ResolveProviderDependency),
+            ImagodSystemAction::Plugin(PluginCapabilityAction::ResolveProviderMissing),
+            ImagodSystemAction::Plugin(PluginCapabilityAction::AllowCapability),
+            ImagodSystemAction::Plugin(PluginCapabilityAction::GrantPrivilegedCapability),
+            ImagodSystemAction::Plugin(PluginCapabilityAction::AllowHttpHost),
+            ImagodSystemAction::Plugin(PluginCapabilityAction::DenyHttpOutbound),
             ImagodSystemAction::Manager(ManagerShellAction::BeginShutdown),
+            ImagodSystemAction::Shutdown(ShutdownFlowAction::StopAccepting),
+            ImagodSystemAction::Shutdown(ShutdownFlowAction::DrainSessions),
+            ImagodSystemAction::Shutdown(ShutdownFlowAction::StopServicesGraceful),
+            ImagodSystemAction::Shutdown(ShutdownFlowAction::StopServicesForced),
+            ImagodSystemAction::Shutdown(ShutdownFlowAction::StopMaintenance),
             ImagodSystemAction::Shutdown(ShutdownFlowAction::Finalize),
+            ImagodSystemAction::Manager(ManagerShellAction::FinishShutdown),
         ]
     }
 
@@ -89,112 +147,342 @@ impl ImagodSystemSpec {
         prev: &ImagodSystemState,
         action: &ImagodSystemAction,
     ) -> Option<ImagodSystemState> {
+        let manager_spec = ManagerShellSpec::new();
+        let transport_spec = SessionTransportSpec::new();
+        let command_spec = CommandProtocolSpec::new();
+        let deploy_spec = ArtifactDeploySpec::new();
+        let supervision_spec = ServiceSupervisionSpec::new();
+        let bootstrap_spec = RunnerBootstrapSpec::new();
+        let runtime_spec = RunnerRuntimeSpec::new();
+        let plugin_spec = PluginCapabilitySpec::new();
+        let shutdown_spec = ShutdownFlowSpec::new();
+
         let mut candidate = prev.clone();
-        let allowed = match action {
-            ImagodSystemAction::Manager(ManagerShellAction::LoadExistingConfig)
-                if matches!(prev.manager.phase, ManagerShellPhase::Booting) =>
-            {
-                candidate.manager.phase = ManagerShellPhase::Listening;
-                candidate.manager.config_loaded = true;
-                candidate.manager.plugin_gc = crate::manager_shell::TaskState::Succeeded;
-                candidate.manager.boot_restore = crate::manager_shell::TaskState::Succeeded;
-                true
+        match action {
+            ImagodSystemAction::Manager(ManagerShellAction::BeginShutdown) => {
+                candidate.manager =
+                    manager_spec.transition(&prev.manager, &ManagerShellAction::BeginShutdown)?;
+                candidate.transport = transport_spec
+                    .transition(&prev.transport, &SessionTransportAction::BeginShutdown)?;
+                candidate.shutdown =
+                    shutdown_spec.transition(&prev.shutdown, &ShutdownFlowAction::ReceiveSignal)?;
             }
-            ImagodSystemAction::Deploy(ArtifactDeployAction::StartDeployMatched)
-                if matches!(prev.manager.phase, ManagerShellPhase::Listening)
-                    && matches!(prev.deploy.release, ReleaseStage::None) =>
-            {
-                candidate.deploy.upload = crate::artifact_deploy::UploadStage::Committed;
-                candidate.deploy.chunks =
-                    crate::bounds::ArtifactChunks::new(1).expect("within bounds");
-                candidate.deploy.release = ReleaseStage::Prepared;
-                candidate.deploy.precondition_ok = true;
-                true
+            ImagodSystemAction::Manager(ManagerShellAction::FinishShutdown) => {
+                if !matches!(prev.shutdown.phase, ShutdownPhase::Completed) {
+                    return None;
+                }
+                candidate.manager =
+                    manager_spec.transition(&prev.manager, &ManagerShellAction::FinishShutdown)?;
             }
-            ImagodSystemAction::Deploy(ArtifactDeployAction::PromoteRelease)
-                if matches!(prev.manager.phase, ManagerShellPhase::Listening)
-                    && matches!(prev.deploy.release, ReleaseStage::Prepared) =>
-            {
-                candidate.deploy.release = ReleaseStage::Promoted;
-                true
+            ImagodSystemAction::Manager(manager_action) => {
+                candidate.manager = manager_spec.transition(&prev.manager, manager_action)?;
             }
-            ImagodSystemAction::Supervision(ServiceSupervisionAction::StartService)
-                if matches!(prev.manager.phase, ManagerShellPhase::Listening)
-                    && matches!(prev.deploy.release, ReleaseStage::Promoted)
-                    && matches!(prev.supervision.phase, ServicePhase::Idle) =>
-            {
-                candidate.supervision.phase = ServicePhase::WaitingReady;
-                candidate.supervision.active_services =
-                    candidate.supervision.active_services.saturating_inc();
-                true
+            ImagodSystemAction::Session(session_action) => {
+                candidate.transport = transport_spec.transition(&prev.transport, session_action)?;
             }
-            ImagodSystemAction::Bootstrap(RunnerBootstrapAction::RegisterRunner)
-                if matches!(prev.supervision.phase, ServicePhase::WaitingReady)
-                    && !prev.bootstrap.registered =>
-            {
-                candidate.bootstrap.decoded = true;
-                candidate.bootstrap.app_type = Some(imagod_ipc::RunnerAppType::Rpc);
-                candidate.bootstrap.endpoint = crate::runner_bootstrap::EndpointState::Prepared;
-                candidate.bootstrap.registered = true;
-                candidate.bootstrap.auth = crate::runner_bootstrap::AuthProofState::Verified;
-                true
+            ImagodSystemAction::Command(command_action) => {
+                candidate.command = command_spec.transition(&prev.command, command_action)?;
             }
-            ImagodSystemAction::Bootstrap(RunnerBootstrapAction::MarkReady)
-                if prev.bootstrap.registered && !prev.bootstrap.ready =>
-            {
-                candidate.bootstrap.ready = true;
-                candidate.supervision.phase = ServicePhase::Running;
-                true
+            ImagodSystemAction::Deploy(deploy_action) => {
+                candidate.deploy = deploy_spec.transition(&prev.deploy, deploy_action)?;
             }
-            ImagodSystemAction::Runtime(RunnerRuntimeAction::ValidateComponentLoadable)
-                if prev.bootstrap.ready
-                    && matches!(
-                        prev.runtime.component,
-                        crate::runner_runtime::ComponentLoadClass::Unknown
-                    ) =>
-            {
-                candidate.runtime.mode = Some(imagod_ipc::RunnerAppType::Rpc);
-                candidate.runtime.phase = RuntimePhase::ComponentValidated;
-                candidate.runtime.component = crate::runner_runtime::ComponentLoadClass::Loadable;
-                true
+            ImagodSystemAction::Supervision(supervision_action) => {
+                candidate.supervision =
+                    supervision_spec.transition(&prev.supervision, supervision_action)?;
             }
-            ImagodSystemAction::Runtime(RunnerRuntimeAction::StartServing)
-                if prev.bootstrap.ready
-                    && matches!(prev.supervision.phase, ServicePhase::Running)
-                    && matches!(prev.deploy.release, ReleaseStage::Promoted)
-                    && matches!(prev.runtime.phase, RuntimePhase::ComponentValidated) =>
-            {
-                candidate.runtime.phase = RuntimePhase::Serving;
-                true
+            ImagodSystemAction::Bootstrap(RunnerBootstrapAction::RegisterRunner) => {
+                candidate.bootstrap = bootstrap_spec
+                    .transition(&prev.bootstrap, &RunnerBootstrapAction::RegisterRunner)?;
+                candidate.supervision = supervision_spec
+                    .transition(&prev.supervision, &ServiceSupervisionAction::RegisterRunner)?;
             }
-            ImagodSystemAction::Manager(ManagerShellAction::BeginShutdown)
-                if matches!(prev.manager.phase, ManagerShellPhase::Listening) =>
-            {
-                candidate.manager.phase = ManagerShellPhase::ShutdownRequested;
-                candidate.transport.shutdown_requested = true;
-                candidate.transport.last_outcome = crate::session_transport::SessionOutcome::None;
-                candidate.shutdown.phase = ShutdownPhase::SignalReceived;
-                true
+            ImagodSystemAction::Bootstrap(RunnerBootstrapAction::MarkReady) => {
+                candidate.bootstrap = bootstrap_spec
+                    .transition(&prev.bootstrap, &RunnerBootstrapAction::MarkReady)?;
+                candidate.supervision = supervision_spec.transition(
+                    &prev.supervision,
+                    &ServiceSupervisionAction::MarkRunnerReady,
+                )?;
             }
-            ImagodSystemAction::Shutdown(ShutdownFlowAction::Finalize)
-                if matches!(prev.shutdown.phase, ShutdownPhase::SignalReceived) =>
-            {
-                candidate.shutdown.accepts_stopped = true;
-                candidate.shutdown.sessions_drained = true;
-                candidate.shutdown.phase = ShutdownPhase::Completed;
-                candidate.shutdown.services_stopped = true;
-                candidate.shutdown.maintenance_stopped = true;
-                candidate.manager.phase = ManagerShellPhase::Stopped;
-                true
+            ImagodSystemAction::Bootstrap(bootstrap_action) => {
+                candidate.bootstrap =
+                    bootstrap_spec.transition(&prev.bootstrap, bootstrap_action)?;
             }
-            _ => false,
-        };
-        (allowed && system_state_valid(&candidate)).then_some(candidate)
+            ImagodSystemAction::Runtime(runtime_action) => {
+                candidate.runtime = runtime_spec.transition(&prev.runtime, runtime_action)?;
+            }
+            ImagodSystemAction::Plugin(plugin_action) => {
+                candidate.plugin = plugin_spec.transition(&prev.plugin, plugin_action)?;
+            }
+            ImagodSystemAction::Shutdown(shutdown_action) => {
+                candidate.shutdown = shutdown_spec.transition(&prev.shutdown, shutdown_action)?;
+            }
+        }
+
+        system_state_valid(&candidate).then_some(candidate)
     }
 }
 
 fn system_model_cases() -> Vec<ModelCase<ImagodSystemState, ImagodSystemAction>> {
-    vec![ModelCase::default().with_check_deadlocks(false)]
+    vec![
+        startup_command_model_case(),
+        deploy_runtime_serving_model_case(),
+        deploy_rollback_model_case(),
+        bootstrap_runtime_failure_model_case(),
+        plugin_dependency_model_case(),
+        shutdown_model_case(),
+    ]
+}
+
+fn startup_command_model_case() -> ModelCase<ImagodSystemState, ImagodSystemAction> {
+    ModelCase::new("startup_command")
+        .with_checker_config(system_checker_config())
+        .with_action_constraint(startup_command_action_constraint())
+}
+
+fn deploy_runtime_serving_model_case() -> ModelCase<ImagodSystemState, ImagodSystemAction> {
+    ModelCase::new("deploy_runtime_serving")
+        .with_checker_config(system_checker_config())
+        .with_action_constraint(deploy_runtime_serving_action_constraint())
+}
+
+fn deploy_rollback_model_case() -> ModelCase<ImagodSystemState, ImagodSystemAction> {
+    ModelCase::new("deploy_rollback")
+        .with_checker_config(system_checker_config())
+        .with_action_constraint(deploy_rollback_action_constraint())
+}
+
+fn bootstrap_runtime_failure_model_case() -> ModelCase<ImagodSystemState, ImagodSystemAction> {
+    ModelCase::new("bootstrap_runtime_failure")
+        .with_checker_config(system_checker_config())
+        .with_action_constraint(bootstrap_runtime_failure_action_constraint())
+}
+
+fn plugin_dependency_model_case() -> ModelCase<ImagodSystemState, ImagodSystemAction> {
+    ModelCase::new("plugin_dependency")
+        .with_checker_config(system_checker_config())
+        .with_action_constraint(plugin_dependency_action_constraint())
+}
+
+fn shutdown_model_case() -> ModelCase<ImagodSystemState, ImagodSystemAction> {
+    ModelCase::new("shutdown")
+        .with_checker_config(system_checker_config())
+        .with_action_constraint(shutdown_action_constraint())
+}
+
+fn system_checker_config() -> ModelCheckConfig {
+    ModelCheckConfig::reachable_graph()
+}
+
+fn startup_command_action_constraint() -> ActionConstraint<ImagodSystemState, ImagodSystemAction> {
+    ActionConstraint::new("startup_command_actions", |prev, action, _| {
+        startup_command_session_progress_allowed(prev, action)
+            || startup_command_non_session_action_allowed(action)
+    })
+}
+
+fn deploy_runtime_serving_action_constraint()
+-> ActionConstraint<ImagodSystemState, ImagodSystemAction> {
+    ActionConstraint::new("deploy_runtime_serving_actions", |prev, action, _| {
+        deterministic_session_cycle_allowed(prev, action)
+            || deploy_runtime_serving_non_session_action_allowed(action)
+    })
+}
+
+fn deploy_rollback_action_constraint() -> ActionConstraint<ImagodSystemState, ImagodSystemAction> {
+    ActionConstraint::new("deploy_rollback_actions", |prev, action, _| {
+        deterministic_session_cycle_allowed(prev, action)
+            || deploy_rollback_non_session_action_allowed(action)
+    })
+}
+
+fn bootstrap_runtime_failure_action_constraint()
+-> ActionConstraint<ImagodSystemState, ImagodSystemAction> {
+    ActionConstraint::new("bootstrap_runtime_failure_actions", |prev, action, _| {
+        deterministic_session_cycle_allowed(prev, action)
+            || bootstrap_runtime_failure_non_session_action_allowed(action)
+    })
+}
+
+fn plugin_dependency_action_constraint() -> ActionConstraint<ImagodSystemState, ImagodSystemAction>
+{
+    ActionConstraint::new("plugin_dependency_actions", |prev, action, _| {
+        deterministic_session_cycle_allowed(prev, action)
+            || plugin_dependency_non_session_action_allowed(action)
+    })
+}
+
+fn shutdown_action_constraint() -> ActionConstraint<ImagodSystemState, ImagodSystemAction> {
+    ActionConstraint::new("shutdown_actions", |prev, action, _| {
+        shutdown_session_progress_allowed(prev, action)
+            || shutdown_non_session_action_allowed(action)
+    })
+}
+
+fn deterministic_session_cycle_allowed(
+    prev: &ImagodSystemState,
+    action: &ImagodSystemAction,
+) -> bool {
+    match (prev.transport.active_sessions.get(), action) {
+        (0, ImagodSystemAction::Session(SessionTransportAction::AcceptSession)) => true,
+        (1, ImagodSystemAction::Session(SessionTransportAction::JoinSession)) => true,
+        _ => false,
+    }
+}
+
+fn startup_command_non_session_action_allowed(action: &ImagodSystemAction) -> bool {
+    matches!(
+        action,
+        ImagodSystemAction::Manager(ManagerShellAction::LoadExistingConfig)
+            | ImagodSystemAction::Manager(ManagerShellAction::CreateDefaultConfig)
+            | ImagodSystemAction::Manager(ManagerShellAction::RunPluginGcSucceeded)
+            | ImagodSystemAction::Manager(ManagerShellAction::RunPluginGcFailed)
+            | ImagodSystemAction::Manager(ManagerShellAction::RunBootRestoreSucceeded)
+            | ImagodSystemAction::Manager(ManagerShellAction::RunBootRestoreFailed)
+            | ImagodSystemAction::Manager(ManagerShellAction::StartListening)
+            | ImagodSystemAction::Command(CommandProtocolAction::Start(CommandKind::Run))
+            | ImagodSystemAction::Command(CommandProtocolAction::SetRunning)
+            | ImagodSystemAction::Command(CommandProtocolAction::RequestCancel)
+            | ImagodSystemAction::Command(CommandProtocolAction::MarkSpawned)
+            | ImagodSystemAction::Command(CommandProtocolAction::FinishCanceled)
+            | ImagodSystemAction::Command(CommandProtocolAction::FinishFailed(
+                CommandErrorKind::Internal
+            ))
+            | ImagodSystemAction::Command(CommandProtocolAction::Remove)
+    )
+}
+
+fn startup_command_session_progress_allowed(
+    prev: &ImagodSystemState,
+    action: &ImagodSystemAction,
+) -> bool {
+    match (
+        prev.transport.active_sessions.get(),
+        prev.transport.last_outcome,
+        action,
+    ) {
+        (0, _, ImagodSystemAction::Session(SessionTransportAction::AcceptSession)) => true,
+        (
+            1,
+            SessionOutcome::Accepted,
+            ImagodSystemAction::Session(SessionTransportAction::AcceptSession),
+        ) => true,
+        (
+            1,
+            SessionOutcome::Joined,
+            ImagodSystemAction::Session(SessionTransportAction::JoinSession),
+        ) => true,
+        (
+            2,
+            SessionOutcome::Accepted,
+            ImagodSystemAction::Session(SessionTransportAction::RejectTooMany),
+        ) => true,
+        (
+            2,
+            SessionOutcome::RejectedTooMany,
+            ImagodSystemAction::Session(SessionTransportAction::JoinSession),
+        ) => true,
+        _ => false,
+    }
+}
+
+fn deploy_runtime_serving_non_session_action_allowed(action: &ImagodSystemAction) -> bool {
+    matches!(
+        action,
+        ImagodSystemAction::Deploy(ArtifactDeployAction::ReceiveChunk)
+            | ImagodSystemAction::Deploy(ArtifactDeployAction::CompleteUpload)
+            | ImagodSystemAction::Deploy(ArtifactDeployAction::CommitUpload)
+            | ImagodSystemAction::Deploy(ArtifactDeployAction::StartDeployMatched)
+            | ImagodSystemAction::Deploy(ArtifactDeployAction::PromoteRelease)
+            | ImagodSystemAction::Supervision(ServiceSupervisionAction::StartService)
+            | ImagodSystemAction::Bootstrap(RunnerBootstrapAction::DecodeBootstrap(
+                RunnerAppType::Rpc
+            ))
+            | ImagodSystemAction::Bootstrap(RunnerBootstrapAction::PrepareEndpoint)
+            | ImagodSystemAction::Bootstrap(RunnerBootstrapAction::RegisterRunner)
+            | ImagodSystemAction::Bootstrap(RunnerBootstrapAction::MarkReady)
+            | ImagodSystemAction::Runtime(RunnerRuntimeAction::SelectMode(RunnerAppType::Rpc))
+            | ImagodSystemAction::Runtime(RunnerRuntimeAction::ValidateComponentLoadable)
+            | ImagodSystemAction::Runtime(RunnerRuntimeAction::StartServing)
+    )
+}
+
+fn bootstrap_runtime_failure_non_session_action_allowed(action: &ImagodSystemAction) -> bool {
+    matches!(
+        action,
+        ImagodSystemAction::Bootstrap(RunnerBootstrapAction::ReadOversized)
+            | ImagodSystemAction::Bootstrap(RunnerBootstrapAction::DecodeBootstrap(
+                RunnerAppType::Rpc
+            ))
+            | ImagodSystemAction::Bootstrap(RunnerBootstrapAction::PrepareEndpoint)
+            | ImagodSystemAction::Bootstrap(RunnerBootstrapAction::RejectAuthProof)
+            | ImagodSystemAction::Runtime(RunnerRuntimeAction::SelectMode(RunnerAppType::Rpc))
+            | ImagodSystemAction::Runtime(RunnerRuntimeAction::ApplyInvalidTuning)
+            | ImagodSystemAction::Runtime(RunnerRuntimeAction::ValidateComponentInvalid)
+            | ImagodSystemAction::Runtime(RunnerRuntimeAction::FailRuntime)
+    )
+}
+
+fn deploy_rollback_non_session_action_allowed(action: &ImagodSystemAction) -> bool {
+    matches!(
+        action,
+        ImagodSystemAction::Deploy(ArtifactDeployAction::ReceiveChunk)
+            | ImagodSystemAction::Deploy(ArtifactDeployAction::CompleteUpload)
+            | ImagodSystemAction::Deploy(ArtifactDeployAction::CommitUpload)
+            | ImagodSystemAction::Deploy(ArtifactDeployAction::StartDeployMatched)
+            | ImagodSystemAction::Deploy(ArtifactDeployAction::StartDeployMismatched)
+            | ImagodSystemAction::Deploy(ArtifactDeployAction::PromoteRelease)
+            | ImagodSystemAction::Deploy(ArtifactDeployAction::TriggerRollback)
+            | ImagodSystemAction::Deploy(ArtifactDeployAction::FinishRollback)
+    )
+}
+
+fn plugin_dependency_non_session_action_allowed(action: &ImagodSystemAction) -> bool {
+    matches!(
+        action,
+        ImagodSystemAction::Plugin(PluginCapabilityAction::RegisterPlugin(PluginKind::Wasm))
+            | ImagodSystemAction::Plugin(PluginCapabilityAction::ClassifyGraphAcyclic)
+            | ImagodSystemAction::Plugin(PluginCapabilityAction::ClassifyGraphMissingDependency)
+            | ImagodSystemAction::Plugin(PluginCapabilityAction::ResolveProviderSelf)
+            | ImagodSystemAction::Plugin(PluginCapabilityAction::ResolveProviderDependency)
+            | ImagodSystemAction::Plugin(PluginCapabilityAction::ResolveProviderMissing)
+            | ImagodSystemAction::Plugin(PluginCapabilityAction::AllowCapability)
+            | ImagodSystemAction::Plugin(PluginCapabilityAction::GrantPrivilegedCapability)
+            | ImagodSystemAction::Plugin(PluginCapabilityAction::AllowHttpHost)
+            | ImagodSystemAction::Plugin(PluginCapabilityAction::DenyHttpOutbound)
+    )
+}
+
+fn shutdown_non_session_action_allowed(action: &ImagodSystemAction) -> bool {
+    matches!(
+        action,
+        ImagodSystemAction::Manager(ManagerShellAction::LoadExistingConfig)
+            | ImagodSystemAction::Manager(ManagerShellAction::RunPluginGcSucceeded)
+            | ImagodSystemAction::Manager(ManagerShellAction::RunBootRestoreSucceeded)
+            | ImagodSystemAction::Manager(ManagerShellAction::BeginShutdown)
+            | ImagodSystemAction::Manager(ManagerShellAction::FinishShutdown)
+            | ImagodSystemAction::Shutdown(ShutdownFlowAction::StopAccepting)
+            | ImagodSystemAction::Shutdown(ShutdownFlowAction::DrainSessions)
+            | ImagodSystemAction::Shutdown(ShutdownFlowAction::StopServicesGraceful)
+            | ImagodSystemAction::Shutdown(ShutdownFlowAction::StopServicesForced)
+            | ImagodSystemAction::Shutdown(ShutdownFlowAction::StopMaintenance)
+            | ImagodSystemAction::Shutdown(ShutdownFlowAction::Finalize)
+    )
+}
+
+fn shutdown_session_progress_allowed(
+    prev: &ImagodSystemState,
+    action: &ImagodSystemAction,
+) -> bool {
+    if !prev.transport.shutdown_requested {
+        return false;
+    }
+
+    match (prev.transport.active_sessions.get(), action) {
+        (0, ImagodSystemAction::Session(SessionTransportAction::RejectTooMany)) => true,
+        (1 | 2, ImagodSystemAction::Session(SessionTransportAction::JoinSession)) => true,
+        _ => false,
+    }
 }
 
 fn state_respects_spec<T>(spec: &T, state: &T::State) -> bool
@@ -269,87 +557,23 @@ fn active_command_requires_listening_manager() -> StatePredicate<ImagodSystemSta
     })
 }
 
-#[property(ImagodSystemSpec)]
-fn runtime_can_serve_after_release_and_ready() -> Ltl<ImagodSystemState, ImagodSystemAction> {
-    Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("runtime_can_start", |state| {
-            matches!(state.deploy.release, ReleaseStage::Promoted)
-                && state.bootstrap.ready
-                && matches!(state.supervision.phase, ServicePhase::Running)
-                && matches!(state.runtime.phase, RuntimePhase::ComponentValidated)
-                && matches!(
-                    state.runtime.component,
-                    crate::runner_runtime::ComponentLoadClass::Loadable
-                )
-        })),
-        Ltl::pred(StatePredicate::new("runtime_serving", |state| {
-            matches!(state.runtime.phase, RuntimePhase::Serving)
-        })),
-    )
+#[invariant(ImagodSystemSpec)]
+fn stopped_manager_requires_completed_shutdown() -> StatePredicate<ImagodSystemState> {
+    StatePredicate::new("stopped_manager_requires_completed_shutdown", |state| {
+        !matches!(state.manager.phase, ManagerShellPhase::Stopped)
+            || matches!(state.shutdown.phase, ShutdownPhase::Completed)
+    })
 }
 
-#[property(ImagodSystemSpec)]
-fn shutdown_started_leads_to_completed() -> Ltl<ImagodSystemState, ImagodSystemAction> {
-    Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("shutdown_started", |state| {
-            !matches!(state.shutdown.phase, ShutdownPhase::Idle)
-        })),
-        Ltl::pred(StatePredicate::new("shutdown_completed", |state| {
-            matches!(state.shutdown.phase, ShutdownPhase::Completed)
-        })),
-    )
-}
-
-#[property(ImagodSystemSpec)]
-fn runner_registered_leads_to_ready() -> Ltl<ImagodSystemState, ImagodSystemAction> {
-    Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("runner_registered", |state| {
-            state.bootstrap.registered
-        })),
-        Ltl::pred(StatePredicate::new("runner_ready", |state| {
-            state.bootstrap.ready
-        })),
-    )
-}
-
-#[fairness(ImagodSystemSpec)]
-fn runtime_start_fairness() -> Fairness<ImagodSystemState, ImagodSystemAction> {
-    Fairness::weak(StepPredicate::new(
-        "runtime_start_serving",
-        |prev, action, next| {
-            matches!(
-                action,
-                ImagodSystemAction::Runtime(RunnerRuntimeAction::StartServing)
-            ) && matches!(prev.deploy.release, ReleaseStage::Promoted)
-                && prev.bootstrap.ready
-                && matches!(prev.supervision.phase, ServicePhase::Running)
-                && matches!(next.runtime.phase, RuntimePhase::Serving)
+#[invariant(ImagodSystemSpec)]
+fn dependency_provider_requires_acyclic_plugin_graph() -> StatePredicate<ImagodSystemState> {
+    StatePredicate::new(
+        "dependency_provider_requires_acyclic_plugin_graph",
+        |state| {
+            !matches!(state.plugin.provider, ProviderResolutionClass::Dependency)
+                || matches!(state.plugin.graph, DependencyGraphClass::Acyclic)
         },
-    ))
-}
-
-#[fairness(ImagodSystemSpec)]
-fn shutdown_progress_fairness() -> Fairness<ImagodSystemState, ImagodSystemAction> {
-    Fairness::weak(StepPredicate::new(
-        "shutdown_progress",
-        |prev, action, next| {
-            matches!(action, ImagodSystemAction::Shutdown(_)) && prev.shutdown != next.shutdown
-        },
-    ))
-}
-
-#[fairness(ImagodSystemSpec)]
-fn runner_ready_fairness() -> Fairness<ImagodSystemState, ImagodSystemAction> {
-    Fairness::weak(StepPredicate::new(
-        "runner_mark_ready",
-        |prev, action, next| {
-            matches!(
-                action,
-                ImagodSystemAction::Bootstrap(RunnerBootstrapAction::MarkReady)
-            ) && prev.bootstrap.registered
-                && next.bootstrap.ready
-        },
-    ))
+    )
 }
 
 #[system_spec(
@@ -403,6 +627,10 @@ fn cross_links_hold(state: &ImagodSystemState) -> bool {
             state.command.lifecycle_state,
             Some(CommandLifecycleState::Accepted | CommandLifecycleState::Running)
         ) || matches!(state.manager.phase, ManagerShellPhase::Listening))
+        && (!matches!(state.manager.phase, ManagerShellPhase::Stopped)
+            || matches!(state.shutdown.phase, ShutdownPhase::Completed))
+        && (!matches!(state.plugin.provider, ProviderResolutionClass::Dependency)
+            || matches!(state.plugin.graph, DependencyGraphClass::Acyclic))
 }
 
 #[nirvash_macros::formal_tests(
@@ -413,15 +641,56 @@ const _: () = ();
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use nirvash_core::ModelChecker;
+    use nirvash_core::{ModelCaseSource, ModelChecker};
 
+    use super::*;
     use crate::{
+        bounds::SessionSlots,
         manager_shell::TaskState,
+        plugin_capability::CapabilityDecision,
         runner_bootstrap::{AuthProofState, BootstrapSizeClass, EndpointState},
-        runner_runtime::{ComponentLoadClass, SocketPolicyClass, WasmTuningClass},
+        runner_runtime::{ComponentLoadClass, HttpQueueClass, SocketPolicyClass, WasmTuningClass},
         session_transport::SessionOutcome,
     };
+
+    fn model_case(
+        spec: &ImagodSystemSpec,
+        label: &str,
+    ) -> ModelCase<ImagodSystemState, ImagodSystemAction> {
+        spec.model_cases()
+            .into_iter()
+            .find(|model_case| model_case.label() == label)
+            .unwrap_or_else(|| panic!("missing system model case: {label}"))
+    }
+
+    fn reachable_snapshot_for_case(
+        spec: &ImagodSystemSpec,
+        label: &str,
+    ) -> nirvash_core::ReachableGraphSnapshot<ImagodSystemState, ImagodSystemAction> {
+        ModelChecker::for_case(spec, model_case(spec, label))
+            .reachable_graph_snapshot()
+            .expect("reachable graph snapshot")
+    }
+
+    fn listening_state(spec: &ImagodSystemSpec) -> ImagodSystemState {
+        let config_ready = spec
+            .transition(
+                &spec.initial_state(),
+                &ImagodSystemAction::Manager(ManagerShellAction::LoadExistingConfig),
+            )
+            .expect("config should load");
+        let restoring = spec
+            .transition(
+                &config_ready,
+                &ImagodSystemAction::Manager(ManagerShellAction::RunPluginGcSucceeded),
+            )
+            .expect("plugin gc should complete");
+        spec.transition(
+            &restoring,
+            &ImagodSystemAction::Manager(ManagerShellAction::RunBootRestoreSucceeded),
+        )
+        .expect("boot restore should complete")
+    }
 
     #[test]
     fn runtime_cannot_start_serving_before_runner_ready() {
@@ -435,7 +704,7 @@ mod tests {
                 boot_restore: TaskState::Succeeded,
             },
             transport: SessionTransportState {
-                active_sessions: crate::bounds::SessionSlots::new(0).expect("within bounds"),
+                active_sessions: SessionSlots::new(0).expect("within bounds"),
                 shutdown_requested: false,
                 last_outcome: SessionOutcome::None,
             },
@@ -455,16 +724,16 @@ mod tests {
             bootstrap: RunnerBootstrapState {
                 size: BootstrapSizeClass::WithinBounds,
                 decoded: true,
-                app_type: Some(imagod_ipc::RunnerAppType::Rpc),
+                app_type: Some(RunnerAppType::Rpc),
                 endpoint: EndpointState::Prepared,
                 auth: AuthProofState::Verified,
                 registered: true,
                 ready: false,
             },
             runtime: RunnerRuntimeState {
-                mode: Some(imagod_ipc::RunnerAppType::Rpc),
+                mode: Some(RunnerAppType::Rpc),
                 phase: RuntimePhase::ComponentValidated,
-                http_queue: crate::runner_runtime::HttpQueueClass::Empty,
+                http_queue: HttpQueueClass::Empty,
                 component: ComponentLoadClass::Loadable,
                 tuning: WasmTuningClass::Default,
                 socket_policy: SocketPolicyClass::NotApplicable,
@@ -487,56 +756,259 @@ mod tests {
     }
 
     #[test]
-    fn begin_shutdown_propagates_manager_and_transport_links() {
+    fn startup_sequence_requires_config_and_restore_intermediates() {
         let spec = ImagodSystemSpec::new();
-        let prev = ImagodSystemState {
-            manager: ManagerShellState {
-                phase: ManagerShellPhase::Listening,
-                config_loaded: true,
-                created_default: false,
-                plugin_gc: TaskState::Succeeded,
-                boot_restore: TaskState::Succeeded,
-            },
-            ..spec.initial_state()
-        };
-        let next = ImagodSystemState {
-            manager: ManagerShellState {
-                phase: ManagerShellPhase::ShutdownRequested,
-                ..prev.manager
-            },
-            transport: SessionTransportState {
-                shutdown_requested: true,
-                last_outcome: SessionOutcome::None,
-                ..prev.transport
-            },
-            shutdown: ShutdownFlowState {
-                phase: ShutdownPhase::SignalReceived,
-                ..prev.shutdown
-            },
-            ..prev.clone()
-        };
-        assert!(spec.contains_transition(
-            &prev,
-            &ImagodSystemAction::Manager(ManagerShellAction::BeginShutdown),
-            &next,
+        let initial = spec.initial_state();
+        let config_ready = spec
+            .transition(
+                &initial,
+                &ImagodSystemAction::Manager(ManagerShellAction::LoadExistingConfig),
+            )
+            .expect("config load should advance to config ready");
+        let restoring = spec
+            .transition(
+                &config_ready,
+                &ImagodSystemAction::Manager(ManagerShellAction::RunPluginGcSucceeded),
+            )
+            .expect("plugin gc should advance to restoring");
+        let listening = spec
+            .transition(
+                &restoring,
+                &ImagodSystemAction::Manager(ManagerShellAction::RunBootRestoreSucceeded),
+            )
+            .expect("boot restore should advance to listening");
+
+        assert!(matches!(
+            config_ready.manager.phase,
+            ManagerShellPhase::ConfigReady
         ));
+        assert!(matches!(
+            restoring.manager.phase,
+            ManagerShellPhase::Restoring
+        ));
+        assert!(matches!(
+            listening.manager.phase,
+            ManagerShellPhase::Listening
+        ));
+        assert!(
+            spec.transition(
+                &initial,
+                &ImagodSystemAction::Manager(ManagerShellAction::StartListening),
+            )
+            .is_none()
+        );
     }
 
     #[test]
-    fn reachable_graph_contains_listening_serving_and_completed_checkpoints() {
+    fn shutdown_path_requires_explicit_manager_finish() {
         let spec = ImagodSystemSpec::new();
-        let snapshot = ModelChecker::new(&spec)
-            .reachable_graph_snapshot()
-            .expect("reachable graph snapshot");
+        let listening = listening_state(&spec);
+        let signal_received = spec
+            .transition(
+                &listening,
+                &ImagodSystemAction::Manager(ManagerShellAction::BeginShutdown),
+            )
+            .expect("begin shutdown should synchronize manager, transport, and shutdown");
+        let draining = spec
+            .transition(
+                &signal_received,
+                &ImagodSystemAction::Shutdown(ShutdownFlowAction::StopAccepting),
+            )
+            .expect("stop accepting should advance shutdown");
+        let stopping_services = spec
+            .transition(
+                &draining,
+                &ImagodSystemAction::Shutdown(ShutdownFlowAction::DrainSessions),
+            )
+            .expect("drain sessions should advance shutdown");
+        let stopping_maintenance = spec
+            .transition(
+                &stopping_services,
+                &ImagodSystemAction::Shutdown(ShutdownFlowAction::StopServicesGraceful),
+            )
+            .expect("service stop should advance shutdown");
+        let maintenance_stopped = spec
+            .transition(
+                &stopping_maintenance,
+                &ImagodSystemAction::Shutdown(ShutdownFlowAction::StopMaintenance),
+            )
+            .expect("maintenance stop should set maintenance flag");
+        let completed = spec
+            .transition(
+                &maintenance_stopped,
+                &ImagodSystemAction::Shutdown(ShutdownFlowAction::Finalize),
+            )
+            .expect("finalize should complete shutdown");
+        let finished = spec
+            .transition(
+                &completed,
+                &ImagodSystemAction::Manager(ManagerShellAction::FinishShutdown),
+            )
+            .expect("manager finish should stop manager after shutdown completion");
 
+        assert!(matches!(
+            signal_received.shutdown.phase,
+            ShutdownPhase::SignalReceived
+        ));
+        assert!(signal_received.transport.shutdown_requested);
+        assert!(matches!(
+            signal_received.manager.phase,
+            ManagerShellPhase::ShutdownRequested
+        ));
+        assert!(matches!(completed.shutdown.phase, ShutdownPhase::Completed));
+        assert!(matches!(
+            completed.manager.phase,
+            ManagerShellPhase::ShutdownRequested
+        ));
+        assert!(matches!(finished.manager.phase, ManagerShellPhase::Stopped));
+        assert!(
+            spec.transition(
+                &stopping_maintenance,
+                &ImagodSystemAction::Manager(ManagerShellAction::FinishShutdown),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn startup_command_case_contains_cancel_failure_and_backpressure_paths() {
+        let spec = ImagodSystemSpec::new();
+        let snapshot = reachable_snapshot_for_case(&spec, "startup_command");
+
+        assert!(
+            snapshot
+                .states
+                .iter()
+                .any(|state| matches!(state.manager.phase, ManagerShellPhase::ConfigReady))
+        );
+        assert!(
+            snapshot
+                .states
+                .iter()
+                .any(|state| matches!(state.manager.phase, ManagerShellPhase::Restoring))
+        );
+        assert!(
+            snapshot
+                .states
+                .iter()
+                .any(|state| matches!(state.manager.phase, ManagerShellPhase::Listening))
+        );
         assert!(snapshot.states.iter().any(|state| {
-            matches!(state.manager.phase, ManagerShellPhase::Listening)
-                && matches!(state.deploy.release, ReleaseStage::Promoted)
+            matches!(
+                state.command.lifecycle_state,
+                Some(CommandLifecycleState::Canceled)
+            )
         }));
+        assert!(snapshot.states.iter().any(|state| {
+            matches!(
+                state.command.lifecycle_state,
+                Some(CommandLifecycleState::Failed)
+            )
+        }));
+        assert!(snapshot.states.iter().any(|state| {
+            matches!(
+                state.transport.last_outcome,
+                SessionOutcome::RejectedTooMany
+            )
+        }));
+    }
+
+    #[test]
+    fn deploy_runtime_serving_case_contains_serving_path() {
+        let spec = ImagodSystemSpec::new();
+        let snapshot = reachable_snapshot_for_case(&spec, "deploy_runtime_serving");
+
+        assert!(
+            snapshot
+                .states
+                .iter()
+                .any(|state| matches!(state.deploy.release, ReleaseStage::Promoted))
+        );
         assert!(snapshot.states.iter().any(|state| {
             matches!(state.runtime.phase, RuntimePhase::Serving)
                 && state.bootstrap.ready
                 && matches!(state.supervision.phase, ServicePhase::Running)
+                && matches!(state.deploy.release, ReleaseStage::Promoted)
+        }));
+    }
+
+    #[test]
+    fn deploy_rollback_case_contains_rollback_path() {
+        let spec = ImagodSystemSpec::new();
+        let snapshot = reachable_snapshot_for_case(&spec, "deploy_rollback");
+
+        assert!(
+            snapshot
+                .states
+                .iter()
+                .any(|state| matches!(state.deploy.release, ReleaseStage::Promoted))
+        );
+        assert!(
+            snapshot
+                .states
+                .iter()
+                .any(|state| matches!(state.deploy.release, ReleaseStage::RollbackPending))
+        );
+        assert!(
+            snapshot
+                .states
+                .iter()
+                .any(|state| matches!(state.deploy.release, ReleaseStage::RolledBack))
+        );
+    }
+
+    #[test]
+    fn bootstrap_runtime_failure_case_contains_oversized_auth_reject_and_invalid_runtime() {
+        let spec = ImagodSystemSpec::new();
+        let snapshot = reachable_snapshot_for_case(&spec, "bootstrap_runtime_failure");
+
+        assert!(snapshot.states.iter().any(|state| {
+            matches!(state.bootstrap.size, BootstrapSizeClass::Oversized)
+                && matches!(state.bootstrap.auth, AuthProofState::Rejected)
+        }));
+        assert!(snapshot.states.iter().any(|state| {
+            state.bootstrap.decoded
+                && matches!(state.bootstrap.endpoint, EndpointState::Prepared)
+                && matches!(state.bootstrap.auth, AuthProofState::Rejected)
+        }));
+        assert!(snapshot.states.iter().any(|state| {
+            matches!(state.runtime.phase, RuntimePhase::Failed)
+                && matches!(state.runtime.component, ComponentLoadClass::Invalid)
+        }));
+        assert!(
+            snapshot
+                .states
+                .iter()
+                .any(|state| { matches!(state.runtime.tuning, WasmTuningClass::Invalid) })
+        );
+    }
+
+    #[test]
+    fn plugin_dependency_case_contains_dependency_provider_path() {
+        let spec = ImagodSystemSpec::new();
+        let snapshot = reachable_snapshot_for_case(&spec, "plugin_dependency");
+
+        assert!(
+            snapshot.states.iter().any(|state| {
+                matches!(state.plugin.provider, ProviderResolutionClass::Dependency)
+            })
+        );
+        assert!(snapshot.states.iter().any(|state| {
+            matches!(
+                state.plugin.capability,
+                CapabilityDecision::Allowed | CapabilityDecision::Privileged
+            ) && matches!(state.plugin.provider, ProviderResolutionClass::Dependency)
+        }));
+    }
+
+    #[test]
+    fn shutdown_case_reaches_completed_and_stopped_manager_states() {
+        let spec = ImagodSystemSpec::new();
+        let snapshot = reachable_snapshot_for_case(&spec, "shutdown");
+
+        assert!(snapshot.states.iter().any(|state| {
+            matches!(state.shutdown.phase, ShutdownPhase::Completed)
+                && matches!(state.manager.phase, ManagerShellPhase::ShutdownRequested)
         }));
         assert!(snapshot.states.iter().any(|state| {
             matches!(state.shutdown.phase, ShutdownPhase::Completed)

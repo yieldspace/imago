@@ -69,6 +69,13 @@ impl CommandProtocolState {
         self.lifecycle_state
             .is_some_and(CommandLifecycleState::is_terminal)
     }
+
+    fn is_inflight(self) -> bool {
+        matches!(
+            self.lifecycle_state,
+            Some(CommandLifecycleState::Accepted | CommandLifecycleState::Running)
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,17 +152,17 @@ impl CommandProtocolSpec {
                     })
                 }
             }
-            CommandProtocolAction::SetRunning => {
-                if !prev.tracked {
-                    None
-                } else {
-                    let mut next = *prev;
-                    next.lifecycle_state = Some(CommandLifecycleState::Running);
-                    Some(next)
-                }
+            CommandProtocolAction::SetRunning
+                if prev.tracked
+                    && matches!(prev.lifecycle_state, Some(CommandLifecycleState::Accepted))
+                    && matches!(prev.phase, Some(OperationPhase::Starting)) =>
+            {
+                let mut next = *prev;
+                next.lifecycle_state = Some(CommandLifecycleState::Running);
+                Some(next)
             }
             CommandProtocolAction::RequestCancel => {
-                if !prev.tracked || prev.is_terminal() {
+                if !prev.tracked || !prev.is_inflight() {
                     None
                 } else if prev.phase == Some(OperationPhase::Spawned) {
                     Some(*prev)
@@ -166,66 +173,59 @@ impl CommandProtocolSpec {
                 }
             }
             CommandProtocolAction::SnapshotRunning => {
-                if !prev.tracked || prev.is_terminal() {
+                if !prev.tracked || !prev.is_inflight() {
                     None
                 } else {
                     Some(*prev)
                 }
             }
-            CommandProtocolAction::MarkSpawned => {
-                if !prev.tracked {
-                    None
-                } else {
-                    let mut next = *prev;
-                    next.phase = Some(OperationPhase::Spawned);
-                    if prev.cancel_requested {
-                        next.cancel_requested = false;
-                        Some(next)
-                    } else {
-                        Some(next)
-                    }
-                }
+            CommandProtocolAction::MarkSpawned
+                if prev.tracked
+                    && matches!(prev.lifecycle_state, Some(CommandLifecycleState::Running))
+                    && matches!(prev.phase, Some(OperationPhase::Starting)) =>
+            {
+                let mut next = *prev;
+                next.phase = Some(OperationPhase::Spawned);
+                next.cancel_requested = false;
+                Some(next)
             }
-            CommandProtocolAction::FinishSucceeded => {
-                if !prev.tracked {
-                    Some(*prev)
-                } else {
-                    let mut next = *prev;
-                    next.lifecycle_state = Some(CommandLifecycleState::Succeeded);
-                    next.cancel_requested = false;
-                    next.phase = Some(OperationPhase::Spawned);
-                    Some(next)
-                }
+            CommandProtocolAction::FinishSucceeded
+                if prev.tracked
+                    && prev.is_inflight()
+                    && matches!(prev.phase, Some(OperationPhase::Spawned)) =>
+            {
+                let mut next = *prev;
+                next.lifecycle_state = Some(CommandLifecycleState::Succeeded);
+                next.cancel_requested = false;
+                next.phase = Some(OperationPhase::Spawned);
+                Some(next)
             }
-            CommandProtocolAction::FinishFailed(_) => {
-                if !prev.tracked {
-                    Some(*prev)
-                } else {
-                    let mut next = *prev;
-                    next.lifecycle_state = Some(CommandLifecycleState::Failed);
-                    next.cancel_requested = false;
-                    next.phase = Some(OperationPhase::Spawned);
-                    Some(next)
-                }
+            CommandProtocolAction::FinishFailed(_)
+                if prev.tracked
+                    && prev.is_inflight()
+                    && matches!(prev.phase, Some(OperationPhase::Spawned)) =>
+            {
+                let mut next = *prev;
+                next.lifecycle_state = Some(CommandLifecycleState::Failed);
+                next.cancel_requested = false;
+                next.phase = Some(OperationPhase::Spawned);
+                Some(next)
             }
-            CommandProtocolAction::FinishCanceled => {
-                if !prev.tracked {
-                    Some(*prev)
-                } else {
-                    let mut next = *prev;
-                    next.lifecycle_state = Some(CommandLifecycleState::Canceled);
-                    next.cancel_requested = false;
-                    next.phase = Some(OperationPhase::Spawned);
-                    Some(next)
-                }
+            CommandProtocolAction::FinishCanceled
+                if prev.tracked
+                    && prev.is_inflight()
+                    && matches!(prev.phase, Some(OperationPhase::Spawned)) =>
+            {
+                let mut next = *prev;
+                next.lifecycle_state = Some(CommandLifecycleState::Canceled);
+                next.cancel_requested = false;
+                next.phase = Some(OperationPhase::Spawned);
+                Some(next)
             }
-            CommandProtocolAction::Remove => {
-                if prev.tracked && prev.is_terminal() {
-                    Some(self.initial_state())
-                } else {
-                    None
-                }
+            CommandProtocolAction::Remove if prev.tracked && prev.is_terminal() => {
+                Some(self.initial_state())
             }
+            _ => None,
         }
     }
 
@@ -264,10 +264,15 @@ impl CommandProtocolSpec {
                 code: CommandErrorKind::NotFound,
                 stage: CommandProtocolStageId::OperationRemove,
             },
-            (CommandProtocolAction::Start(_), Some(_))
-            | (CommandProtocolAction::FinishSucceeded, None)
+            (CommandProtocolAction::FinishSucceeded, None)
             | (CommandProtocolAction::FinishFailed(_), None)
-            | (CommandProtocolAction::FinishCanceled, None)
+            | (CommandProtocolAction::FinishCanceled, None) => {
+                CommandProtocolExpectedOutput::Rejected {
+                    code: CommandErrorKind::NotFound,
+                    stage: CommandProtocolStageId::OperationState,
+                }
+            }
+            (CommandProtocolAction::Start(_), Some(_))
             | (CommandProtocolAction::SetRunning, Some(_))
             | (CommandProtocolAction::FinishSucceeded, Some(_))
             | (CommandProtocolAction::FinishFailed(_), Some(_))
@@ -322,6 +327,33 @@ fn cancel_only_while_inflight() -> StatePredicate<CommandProtocolState> {
                 state.lifecycle_state,
                 Some(CommandLifecycleState::Accepted | CommandLifecycleState::Running)
             )
+    })
+}
+
+#[invariant(CommandProtocolSpec)]
+fn spawned_phase_requires_running_or_terminal_lifecycle() -> StatePredicate<CommandProtocolState> {
+    StatePredicate::new(
+        "spawned_phase_requires_running_or_terminal_lifecycle",
+        |state| {
+            !matches!(state.phase, Some(OperationPhase::Spawned))
+                || matches!(
+                    state.lifecycle_state,
+                    Some(
+                        CommandLifecycleState::Running
+                            | CommandLifecycleState::Succeeded
+                            | CommandLifecycleState::Failed
+                            | CommandLifecycleState::Canceled
+                    )
+                )
+        },
+    )
+}
+
+#[invariant(CommandProtocolSpec)]
+fn accepted_state_stays_in_starting_phase() -> StatePredicate<CommandProtocolState> {
+    StatePredicate::new("accepted_state_stays_in_starting_phase", |state| {
+        !matches!(state.lifecycle_state, Some(CommandLifecycleState::Accepted))
+            || matches!(state.phase, Some(OperationPhase::Starting))
     })
 }
 
@@ -537,5 +569,96 @@ mod tests {
                     .iter()
                     .any(|edge| !edge.collapsed_state_indices.is_empty())
         );
+    }
+
+    #[test]
+    fn terminal_states_cannot_resume_running_or_spawn() {
+        let spec = CommandProtocolSpec::new();
+        let terminal = CommandProtocolState {
+            tracked: true,
+            lifecycle_state: Some(CommandLifecycleState::Succeeded),
+            cancel_requested: false,
+            phase: Some(OperationPhase::Spawned),
+        };
+
+        assert!(
+            spec.transition(&terminal, &CommandProtocolAction::SetRunning)
+                .is_none()
+        );
+        assert!(
+            spec.transition(&terminal, &CommandProtocolAction::MarkSpawned)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn finish_actions_reject_missing_and_pre_spawn_states() {
+        let spec = CommandProtocolSpec::new();
+        let missing = spec.initial_state();
+        let accepted = CommandProtocolState {
+            tracked: true,
+            lifecycle_state: Some(CommandLifecycleState::Accepted),
+            cancel_requested: false,
+            phase: Some(OperationPhase::Starting),
+        };
+
+        for state in [missing, accepted] {
+            let next = spec.transition(&state, &CommandProtocolAction::FinishSucceeded);
+            assert!(next.is_none());
+            assert_eq!(
+                spec.transition_output(
+                    &state,
+                    &CommandProtocolAction::FinishSucceeded,
+                    next.as_ref(),
+                ),
+                CommandProtocolExpectedOutput::Rejected {
+                    code: CommandErrorKind::NotFound,
+                    stage: CommandProtocolStageId::OperationState,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn cancel_pending_path_is_preserved_until_finish() {
+        let spec = CommandProtocolSpec::new();
+        let running_starting = CommandProtocolState {
+            tracked: true,
+            lifecycle_state: Some(CommandLifecycleState::Running),
+            cancel_requested: true,
+            phase: Some(OperationPhase::Starting),
+        };
+
+        let spawned = spec
+            .transition(&running_starting, &CommandProtocolAction::MarkSpawned)
+            .expect("cancel-pending running state should still reach spawned");
+        assert_eq!(
+            spawned,
+            CommandProtocolState {
+                cancel_requested: false,
+                phase: Some(OperationPhase::Spawned),
+                ..running_starting
+            }
+        );
+        assert_eq!(
+            spec.transition_output(
+                &running_starting,
+                &CommandProtocolAction::MarkSpawned,
+                Some(&spawned),
+            ),
+            CommandProtocolExpectedOutput::SpawnResult {
+                spawned: false,
+                canceled: true,
+            }
+        );
+
+        let canceled = spec
+            .transition(&spawned, &CommandProtocolAction::FinishCanceled)
+            .expect("spawned state should still allow terminal cancellation");
+        assert_eq!(
+            canceled.lifecycle_state,
+            Some(CommandLifecycleState::Canceled)
+        );
+        assert_eq!(canceled.phase, Some(OperationPhase::Spawned));
     }
 }

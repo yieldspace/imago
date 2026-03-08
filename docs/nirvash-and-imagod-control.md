@@ -39,9 +39,10 @@ flowchart LR
   - `cargo doc` 時に spec を走らせ、reachable graph と registration 情報から Mermaid 図を生成
 - `crates/imagod-spec`
   - `imagod` 全体の spec 記述
-  - `command_protocol` では projection つきの conformance spec を実装
+  - `command_protocol` では intended contract の projection つき conformance spec を実装
+  - `system` は subsystem transition を同期させる代表合成モデルで、top-level では cross-link invariant と scenario model case を主に持つ
 - `crates/imagod-control/tests`
-  - `command_protocol` の runtime binding と `code_tests` 実行
+  - `command_protocol` の `OperationManager` runtime binding と `code_tests` 実行
 
 ### 構造図
 
@@ -67,7 +68,7 @@ flowchart TD
 - spec の正本は `TransitionSystem::initial_states()`、`TransitionSystem::actions()`、`TransitionSystem::transition()` です。`successors()` はそこから導出されます。
 - `Signature` は helper enum/newtype や projection 型の bounded domain 付与にだけ使います。
 - `formal_tests` は spec 単体を検査します。
-- `code_tests` は `nirvash_core::conformance::ProtocolConformanceSpec` と `ProtocolRuntimeBinding` を使って runtime を生成し、`ActionApplier` / `StateObserver` 経由で spec の `transition` と `expected_output` を比較します。
+- `code_tests` は `nirvash_core::conformance::ProtocolConformanceSpec` と `ProtocolRuntimeBinding` を使って runtime を生成し、`ActionApplier` / `StateObserver` 経由で spec の `transition` と `expected_output` を比較します。現在の `command_protocol` binding は `OperationManager` に限定され、router 側の request validation / event sequencing はこの比較対象に含みません。
 - shared contract は `imago-protocol`、conformance API は `nirvash-core` にあり、spec 本体は `imagod-spec`、runtime binding と `code_tests` 実行は runtime crate の integration test に置きます。
 
 ## imagod-control のシステム
@@ -139,6 +140,7 @@ flowchart LR
 
 server はこの trait 契約をそのまま使って command action を適用します。  
 `imagod-control` の integration test に置かれた `code_tests` も同じ trait 契約だけを前提に runtime を replay するため、spec/runtime 間で「別の adapter API」を挟みません。
+ただし、現在の binding は `OperationManager` に限定されていて、`imagod-server` router の wire validation や event ordering は別境界です。
 
 ## spec と runtime の接続
 
@@ -169,6 +171,9 @@ flowchart LR
 - spec で拒否される action は、実コードでも拒否される
 - 実コードの observed state を spec 側へ射影した結果が `transition` の next state と一致する
 - 実コードの output を spec 側へ射影した結果が `expected_output` と一致する
+
+`system` spec は別に、subsystem の `transition()` を同期適用する代表合成モデルとして維持しています。  
+full implementation をそのまま複製するのではなく、boot / command / deploy / runtime / plugin / shutdown の代表経路を cross-link invariant 付きで検証する役割です。
 
 ## Source References
 
