@@ -323,8 +323,7 @@ mod tests {
         ArtifactPushChunkHeader, ArtifactPushRequest, CommandErrorKind, CommandKind,
         CommandProtocolAction, CommandProtocolContext, CommandProtocolOutput,
         CommandProtocolStageId, ErrorCode, LogChunk, LogErrorCode, LogStreamKind, MessageType,
-        ProtocolEnvelope,
-        to_cbor,
+        ProtocolEnvelope, to_cbor,
     };
     use imagod_common::ImagodError;
     use imagod_control::{ActionApplier, OperationManager, ServiceLogStream};

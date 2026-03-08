@@ -1,25 +1,25 @@
 # imagod-spec
 
 Rust DSL ベースで `imagod` 全体の system spec を表現する crate です。  
-bounded な state/action universe、LTL/TLA+ practical subset、generated tests を使って
-subsystem ごとの仕様を自己検証します。
+`initial_states + actions + transition` を正本にした reachable graph、LTL/TLA+ practical subset、generated tests を使って subsystem ごとの仕様を自己検証します。
 
 ## DSL
 
-- 値ドメインは `#[derive(Signature)]` で定義します。
+- spec state の正本は `TransitionSystem::initial_states()`、`TransitionSystem::actions()`、`TransitionSystem::transition()` です。`successors()` はそこから導出されます。`CommandProtocolState`、`ManagerShellState`、`SessionTransportState` のような spec-local state 自体には原則 `Signature` を付けません。
+- `#[derive(Signature)]` は helper enum/newtype、projection 型、bounded data 用に使います。
 - 推奨順は 3 段階です。
-  - まず auto derive に任せる
-  - 次に `#[signature(bounds(...))]` と `#[signature(filter(self => ...))]`、必要なら `#[signature_invariant(self => ...)]` で bounded domain を絞る
+  - まず helper 型の auto derive に任せる
+  - 次に `#[signature(bounds(...))]` と `#[signature(filter(self => ...))]`、必要なら `#[signature_invariant(self => ...)]` で bounded helper domain を絞る
   - それでも表現しきれない型だけ `#[signature(custom)]` にして companion trait を手書きするか、`nirvash_core::signature_spec!(StateSignatureSpec for State, ...)` で sugar を使う
 - field ごとの bounded domain は `#[sig(range = "...")]`、`#[sig(len = "A..=B")]`、`#[sig(domain = path)]` で上書きできます。`Option<T>` はデフォルトで `None + T::bounded_domain()` を使います。
 - subsystem spec は `#[subsystem_spec(...)]`、top-level system spec は `#[system_spec(...)]` で `TemporalSpec` を自動生成します。
-- `#[invariant(SpecType)]`、`#[illegal(SpecType)]`、`#[property(SpecType)]` などの target-spec 付き attribute が registry へ自動登録され、`TemporalSpec` から自動収集されます。
+- `#[invariant(SpecType)]`、`#[property(SpecType)]`、`#[fairness(SpecType)]`、`#[state_constraint(SpecType)]` などの target-spec 付き attribute が registry へ自動登録され、`TemporalSpec` と `ModelCase` から自動収集されます。
 - 加算 DSL として `nirvash_core::invariant!(Spec, name(state) => ...)`、`nirvash_core::property!(Spec, name => leads_to(...))`、`nirvash_core::fairness!(weak Spec, ...)` などの `macro_rules!` 宣言も使えます。
 - `ltl!` 内では Rust に既にある `!` / `&&` / `||` / `=>` を使い、時相演算だけ `always` / `eventually` / `next` / `until` / `enabled` / `leads_to` の単語で補います。
-- `#[formal_tests(...)]` が init invariant / reachable graph checker / composition regression test を自動生成します。
-- `#[code_tests(...)]` は `nirvash_core::conformance::ProtocolConformanceSpec` と `ProtocolRuntimeBinding` を使って runtime conformance を自動生成します。`command_protocol` では spec 本体は `imagod-spec` に残し、実行は `imagod-control` の integration test 側で行います。
+- `#[formal_tests(...)]` が初期状態 invariant / reachable graph checker / composition regression test を自動生成します。
+- `#[code_tests(...)]` は `nirvash_core::conformance::ProtocolConformanceSpec` と `ProtocolRuntimeBinding` を使って runtime conformance を自動生成します。`transition(state, action)` が allowed/rejected の正本で、`expected_output(state, action, next)` が output 契約の正本です。`command_protocol` では spec 本体は `imagod-spec` に残し、実行は `imagod-control` の integration test 側で行います。
 - `checker_config(...)` と `cases = model_cases` に加え、`#[state_constraint(SpecType)]`、`#[action_constraint(SpecType)]`、`#[symmetry(SpecType)]` で TLC 相当の model control を Rust API で与えます。
-- `build.rs` で `nirvash_docgen::generate()` を呼んでいるため、`cargo doc -p imagod-spec` では各 spec type の `TransitionSystem` impl section に reachable graph 由来の Mermaid `State Graph` と、登録関数一覧を持つ Mermaid `Meta Model` 図が自動表示されます。`State Graph` は docs 専用の boundary-path reduction を通すため、通常経路の中間 state は折り畳まれ、同じ始点/終点に向かう平行 edge も 1 本にまとめられます。分岐/合流/終端/cancel などの edge case が優先的に残ります。Mermaid runtime は local asset として docs 出力に同梱されます。
+- `build.rs` で `nirvash_docgen::generate()` を呼んでいるため、`cargo doc -p imagod-spec` では各 spec type の `TransitionSystem` impl section に reachable graph 由来の Mermaid `State Graph` と、登録関数一覧を持つ Mermaid `Meta Model` 図が自動表示されます。`State Graph` は docs 専用の boundary-path reduction を通すため、通常経路の中間 state は折り畳まれ、同じ始点/終点に向かう平行 edge も 1 本にまとめられます。分岐/合流/終端/cancel などの edge case が優先的に残ります。Mermaid runtime は doc fragment に inline で埋め込まれるため、`cargo doc --open` でも `file://` の local asset 読み込みに依存しません。
 
 ## TLA+ Subset
 
@@ -61,5 +61,6 @@ subsystem ごとの仕様を自己検証します。
 - public contracts only; no private implementation state
 - native plugin internal device logic is out of scope
 - model checking は reachable graph semantics を既定とし、必要時だけ bounded lasso mode を使う
+- `Signature` は bounded helper data に限定し、state space の正本には使わない
 - `imago-protocol::command_contract` と `imagod-control` の command contract は常設し、release 時の負荷は runtime state を最小に保つことで抑える
 - `command_protocol` の runtime 正式契約は `OperationManager` に実装された `ActionApplier::execute_action` と `StateObserver::observe_state` であり、spec は projection を通じてこれを比較する

@@ -1,46 +1,43 @@
 use crate::{
-    ActionConstraint, DocGraphPolicy, Fairness, Ltl, ModelCheckConfig, Signature, StateConstraint,
-    StatePredicate, StepPredicate, SymmetryReducer,
+    ActionConstraint, DocGraphPolicy, Fairness, Ltl, ModelCheckConfig, StateConstraint,
+    StatePredicate, SymmetryReducer,
 };
 
 pub trait TransitionSystem {
-    type State: Signature;
-    type Action: Signature;
+    type State: Clone + std::fmt::Debug + Eq + 'static;
+    type Action: Clone + std::fmt::Debug + Eq + 'static;
 
     fn name(&self) -> &'static str {
         std::any::type_name::<Self>()
     }
 
-    fn init(&self, state: &Self::State) -> bool;
+    fn initial_states(&self) -> Vec<Self::State>;
 
-    fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool;
+    fn actions(&self) -> Vec<Self::Action>;
 
-    fn initial_states(&self) -> Vec<Self::State> {
-        Self::State::bounded_domain()
-            .filter(|state| self.init(state))
-            .into_vec()
-    }
+    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State>;
 
     fn successors(&self, state: &Self::State) -> Vec<(Self::Action, Self::State)> {
-        let mut values = Vec::new();
-        for action in Self::Action::bounded_domain().into_vec() {
-            for next in Self::State::bounded_domain().into_vec() {
-                if self.next(state, &action, &next) {
-                    values.push((action.clone(), next));
-                }
-            }
-        }
-        values
+        self.actions()
+            .into_iter()
+            .filter_map(|action| self.transition(state, &action).map(|next| (action, next)))
+            .collect()
     }
 
-    fn enabled(
+    fn contains_initial(&self, state: &Self::State) -> bool {
+        self.initial_states()
+            .iter()
+            .any(|candidate| candidate == state)
+    }
+
+    fn contains_transition(
         &self,
-        state: &Self::State,
-        predicate: StepPredicate<Self::State, Self::Action>,
+        prev: &Self::State,
+        action: &Self::Action,
+        next: &Self::State,
     ) -> bool {
-        self.successors(state)
-            .into_iter()
-            .any(|(action, next)| predicate.eval(state, &action, &next))
+        self.transition(prev, action)
+            .is_some_and(|candidate_next| candidate_next == *next)
     }
 
     fn allow_stutter(&self) -> bool {
@@ -55,16 +52,6 @@ pub trait TransitionSystem {
 pub trait TemporalSpec: TransitionSystem {
     fn invariants(&self) -> Vec<StatePredicate<Self::State>>;
 
-    fn illegal_transitions(&self) -> Vec<StepPredicate<Self::State, Self::Action>>;
-
-    fn state_constraints(&self) -> Vec<StateConstraint<Self::State>> {
-        Vec::new()
-    }
-
-    fn action_constraints(&self) -> Vec<ActionConstraint<Self::State, Self::Action>> {
-        Vec::new()
-    }
-
     fn properties(&self) -> Vec<Ltl<Self::State, Self::Action>> {
         Vec::new()
     }
@@ -72,24 +59,112 @@ pub trait TemporalSpec: TransitionSystem {
     fn fairness(&self) -> Vec<Fairness<Self::State, Self::Action>> {
         Vec::new()
     }
+}
 
-    fn symmetry(&self) -> Option<SymmetryReducer<Self::State>> {
-        None
-    }
-
-    fn checker_config(&self) -> ModelCheckConfig {
-        ModelCheckConfig::default()
-    }
-
-    fn doc_graph_policy(&self) -> DocGraphPolicy<Self::State> {
-        DocGraphPolicy::default()
+pub trait ModelCaseSource: TransitionSystem {
+    fn model_cases(&self) -> Vec<ModelCase<Self::State, Self::Action>> {
+        vec![ModelCase::default()]
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExpectedStep<S, O> {
-    Allowed { next: S, output: O },
-    Rejected { output: O },
+#[derive(Debug, Clone)]
+pub struct ModelCase<S, A> {
+    label: &'static str,
+    state_constraints: Vec<StateConstraint<S>>,
+    action_constraints: Vec<ActionConstraint<S, A>>,
+    symmetry: Option<SymmetryReducer<S>>,
+    checker_config: ModelCheckConfig,
+    check_deadlocks: bool,
+    doc_graph_policy: DocGraphPolicy<S>,
+}
+
+impl<S, A> ModelCase<S, A> {
+    pub fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            state_constraints: Vec::new(),
+            action_constraints: Vec::new(),
+            symmetry: None,
+            checker_config: ModelCheckConfig::default(),
+            check_deadlocks: true,
+            doc_graph_policy: DocGraphPolicy::default(),
+        }
+    }
+
+    pub const fn label(&self) -> &'static str {
+        self.label
+    }
+
+    pub fn with_label(mut self, label: &'static str) -> Self {
+        self.label = label;
+        self
+    }
+
+    pub fn with_state_constraint(mut self, constraint: StateConstraint<S>) -> Self {
+        self.state_constraints.push(constraint);
+        self
+    }
+
+    pub fn with_action_constraint(mut self, constraint: ActionConstraint<S, A>) -> Self {
+        self.action_constraints.push(constraint);
+        self
+    }
+
+    pub fn with_symmetry(mut self, symmetry: SymmetryReducer<S>) -> Self {
+        self.symmetry = Some(symmetry);
+        self
+    }
+
+    pub fn with_checker_config(mut self, config: ModelCheckConfig) -> Self {
+        self.checker_config = config;
+        self
+    }
+
+    pub fn with_check_deadlocks(mut self, check_deadlocks: bool) -> Self {
+        self.check_deadlocks = check_deadlocks;
+        self
+    }
+
+    pub fn with_doc_graph_policy(mut self, doc_graph_policy: DocGraphPolicy<S>) -> Self {
+        self.doc_graph_policy = doc_graph_policy;
+        self
+    }
+
+    pub fn state_constraints(&self) -> &[StateConstraint<S>] {
+        &self.state_constraints
+    }
+
+    pub fn action_constraints(&self) -> &[ActionConstraint<S, A>] {
+        &self.action_constraints
+    }
+
+    pub fn symmetry(&self) -> Option<SymmetryReducer<S>> {
+        self.symmetry
+    }
+
+    pub const fn checker_config(&self) -> ModelCheckConfig {
+        self.checker_config
+    }
+
+    pub const fn check_deadlocks(&self) -> bool {
+        self.check_deadlocks
+    }
+
+    pub fn effective_checker_config(&self) -> ModelCheckConfig {
+        let mut config = self.checker_config;
+        config.check_deadlocks = self.check_deadlocks;
+        config
+    }
+
+    pub fn doc_graph_policy(&self) -> &DocGraphPolicy<S> {
+        &self.doc_graph_policy
+    }
+}
+
+impl<S, A> Default for ModelCase<S, A> {
+    fn default() -> Self {
+        Self::new("default")
+    }
 }
 
 #[allow(async_fn_in_trait)]
@@ -114,13 +189,9 @@ pub struct SystemComposition<S, A> {
     name: &'static str,
     subsystems: Vec<&'static str>,
     invariants: Vec<StatePredicate<S>>,
-    illegal_transitions: Vec<StepPredicate<S, A>>,
-    state_constraints: Vec<StateConstraint<S>>,
-    action_constraints: Vec<ActionConstraint<S, A>>,
     properties: Vec<Ltl<S, A>>,
     fairness: Vec<Fairness<S, A>>,
-    symmetry: Option<SymmetryReducer<S>>,
-    checker_config: ModelCheckConfig,
+    model_cases: Vec<ModelCase<S, A>>,
 }
 
 impl<S, A> SystemComposition<S, A> {
@@ -129,13 +200,9 @@ impl<S, A> SystemComposition<S, A> {
             name,
             subsystems: Vec::new(),
             invariants: Vec::new(),
-            illegal_transitions: Vec::new(),
-            state_constraints: Vec::new(),
-            action_constraints: Vec::new(),
             properties: Vec::new(),
             fairness: Vec::new(),
-            symmetry: None,
-            checker_config: ModelCheckConfig::default(),
+            model_cases: Vec::new(),
         }
     }
 
@@ -149,21 +216,6 @@ impl<S, A> SystemComposition<S, A> {
         self
     }
 
-    pub fn with_illegal_transition(mut self, transition: StepPredicate<S, A>) -> Self {
-        self.illegal_transitions.push(transition);
-        self
-    }
-
-    pub fn with_state_constraint(mut self, constraint: StateConstraint<S>) -> Self {
-        self.state_constraints.push(constraint);
-        self
-    }
-
-    pub fn with_action_constraint(mut self, constraint: ActionConstraint<S, A>) -> Self {
-        self.action_constraints.push(constraint);
-        self
-    }
-
     pub fn with_property(mut self, property: Ltl<S, A>) -> Self {
         self.properties.push(property);
         self
@@ -174,13 +226,8 @@ impl<S, A> SystemComposition<S, A> {
         self
     }
 
-    pub fn with_symmetry(mut self, symmetry: SymmetryReducer<S>) -> Self {
-        self.symmetry = Some(symmetry);
-        self
-    }
-
-    pub fn with_checker_config(mut self, config: ModelCheckConfig) -> Self {
-        self.checker_config = config;
+    pub fn with_model_case(mut self, model_case: ModelCase<S, A>) -> Self {
+        self.model_cases.push(model_case);
         self
     }
 
@@ -196,18 +243,6 @@ impl<S, A> SystemComposition<S, A> {
         &self.invariants
     }
 
-    pub fn illegal_transitions(&self) -> &[StepPredicate<S, A>] {
-        &self.illegal_transitions
-    }
-
-    pub fn state_constraints(&self) -> &[StateConstraint<S>] {
-        &self.state_constraints
-    }
-
-    pub fn action_constraints(&self) -> &[ActionConstraint<S, A>] {
-        &self.action_constraints
-    }
-
     pub fn properties(&self) -> &[Ltl<S, A>] {
         &self.properties
     }
@@ -216,11 +251,7 @@ impl<S, A> SystemComposition<S, A> {
         &self.fairness
     }
 
-    pub fn symmetry(&self) -> Option<SymmetryReducer<S>> {
-        self.symmetry
-    }
-
-    pub const fn checker_config(&self) -> ModelCheckConfig {
-        self.checker_config
+    pub fn model_cases(&self) -> &[ModelCase<S, A>] {
+        &self.model_cases
     }
 }

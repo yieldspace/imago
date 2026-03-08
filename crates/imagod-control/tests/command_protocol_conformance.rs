@@ -23,9 +23,5 @@ impl ProtocolRuntimeBinding<CommandProtocolSpec> for CommandProtocolBinding {
     }
 }
 
-#[code_tests(
-    spec = CommandProtocolSpec,
-    binding = CommandProtocolBinding,
-    init = initial_state
-)]
+#[code_tests(spec = CommandProtocolSpec, binding = CommandProtocolBinding)]
 const _: () = ();

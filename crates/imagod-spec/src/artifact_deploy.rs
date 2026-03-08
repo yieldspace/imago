@@ -1,9 +1,5 @@
-use nirvash_core::{
-    BoundedDomain, Fairness, Ltl, Signature, StatePredicate, StepPredicate, TransitionSystem,
-};
-use nirvash_macros::{
-    Signature as FormalSignature, fairness, illegal, invariant, property, subsystem_spec,
-};
+use nirvash_core::{Fairness, Ltl, StatePredicate, StepPredicate, TransitionSystem};
+use nirvash_macros::{Signature as FormalSignature, fairness, invariant, property, subsystem_spec};
 
 use crate::bounds::ArtifactChunks;
 
@@ -24,80 +20,13 @@ pub enum ReleaseStage {
     RolledBack,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
-#[signature(custom)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArtifactDeployState {
     pub upload: UploadStage,
     pub release: ReleaseStage,
     pub precondition_ok: bool,
     pub auto_rollback: bool,
     pub chunks: ArtifactChunks,
-}
-
-impl ArtifactDeployStateSignatureSpec for ArtifactDeployState {
-    fn representatives() -> BoundedDomain<Self> {
-        let mut states = vec![ArtifactDeploySpec::new().initial_state()];
-
-        for chunks in [1_u8, 2_u8] {
-            let chunks = ArtifactChunks::new(chunks).expect("within bounds");
-            states.push(Self {
-                upload: UploadStage::Partial,
-                release: ReleaseStage::None,
-                precondition_ok: false,
-                auto_rollback: true,
-                chunks,
-            });
-            states.push(Self {
-                upload: UploadStage::Complete,
-                release: ReleaseStage::None,
-                precondition_ok: false,
-                auto_rollback: true,
-                chunks,
-            });
-            states.push(Self {
-                upload: UploadStage::Committed,
-                release: ReleaseStage::None,
-                precondition_ok: false,
-                auto_rollback: true,
-                chunks,
-            });
-
-            for release in [
-                ReleaseStage::Prepared,
-                ReleaseStage::Promoted,
-                ReleaseStage::RollbackPending,
-                ReleaseStage::RolledBack,
-            ] {
-                states.push(Self {
-                    upload: UploadStage::Committed,
-                    release,
-                    precondition_ok: true,
-                    auto_rollback: true,
-                    chunks,
-                });
-            }
-        }
-
-        BoundedDomain::new(states)
-    }
-
-    fn signature_invariant(&self) -> bool {
-        let promoted_requires_commit = matches!(
-            self.release,
-            ReleaseStage::Prepared
-                | ReleaseStage::Promoted
-                | ReleaseStage::RollbackPending
-                | ReleaseStage::RolledBack
-        )
-        .then_some(matches!(self.upload, UploadStage::Committed))
-        .unwrap_or(true);
-        let precondition_matches_release =
-            self.precondition_ok || matches!(self.release, ReleaseStage::None);
-        let rollback_requires_flag =
-            !matches!(self.release, ReleaseStage::RollbackPending) || self.auto_rollback;
-
-        promoted_requires_commit && precondition_matches_release && rollback_requires_flag
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
@@ -131,6 +60,24 @@ impl ArtifactDeploySpec {
     }
 }
 
+fn artifact_deploy_state_valid(state: &ArtifactDeployState) -> bool {
+    let promoted_requires_commit = matches!(
+        state.release,
+        ReleaseStage::Prepared
+            | ReleaseStage::Promoted
+            | ReleaseStage::RollbackPending
+            | ReleaseStage::RolledBack
+    )
+    .then_some(matches!(state.upload, UploadStage::Committed))
+    .unwrap_or(true);
+    let precondition_matches_release =
+        state.precondition_ok || matches!(state.release, ReleaseStage::None);
+    let rollback_requires_flag =
+        !matches!(state.release, ReleaseStage::RollbackPending) || state.auto_rollback;
+
+    promoted_requires_commit && precondition_matches_release && rollback_requires_flag
+}
+
 #[invariant(ArtifactDeploySpec)]
 fn prepared_release_requires_committed_upload() -> StatePredicate<ArtifactDeployState> {
     StatePredicate::new("prepared_release_requires_committed_upload", |state| {
@@ -155,29 +102,6 @@ fn prepared_release_requires_precondition() -> StatePredicate<ArtifactDeployStat
 fn rollback_requires_auto_rollback_flag() -> StatePredicate<ArtifactDeployState> {
     StatePredicate::new("rollback_requires_auto_rollback_flag", |state| {
         !matches!(state.release, ReleaseStage::RollbackPending) || state.auto_rollback
-    })
-}
-
-#[illegal(ArtifactDeploySpec)]
-fn commit_before_complete() -> StepPredicate<ArtifactDeployState, ArtifactDeployAction> {
-    StepPredicate::new("commit_before_complete", |prev, action, _| {
-        matches!(action, ArtifactDeployAction::CommitUpload)
-            && !matches!(prev.upload, UploadStage::Complete)
-    })
-}
-
-#[illegal(ArtifactDeploySpec)]
-fn promote_without_prepare() -> StepPredicate<ArtifactDeployState, ArtifactDeployAction> {
-    StepPredicate::new("promote_without_prepare", |prev, action, _| {
-        matches!(action, ArtifactDeployAction::PromoteRelease)
-            && !matches!(prev.release, ReleaseStage::Prepared)
-    })
-}
-
-#[illegal(ArtifactDeploySpec)]
-fn deploy_on_mismatched_precondition() -> StepPredicate<ArtifactDeployState, ArtifactDeployAction> {
-    StepPredicate::new("deploy_on_mismatched_precondition", |_, action, _| {
-        matches!(action, ArtifactDeployAction::StartDeployMismatched)
     })
 }
 
@@ -266,59 +190,92 @@ impl TransitionSystem for ArtifactDeploySpec {
         "artifact_deploy"
     }
 
-    fn init(&self, state: &Self::State) -> bool {
-        *state == self.initial_state()
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![self.initial_state()]
     }
 
-    fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
-        let mut candidate = *prev;
-        match action {
-            ArtifactDeployAction::ReceiveChunk
-                if !matches!(prev.upload, UploadStage::Committed) && !prev.chunks.is_max() =>
-            {
-                candidate.upload = UploadStage::Partial;
-                candidate.chunks = prev.chunks.saturating_inc();
-            }
-            ArtifactDeployAction::CompleteUpload
-                if matches!(prev.upload, UploadStage::Missing | UploadStage::Partial)
-                    && !prev.chunks.is_zero() =>
-            {
-                candidate.upload = UploadStage::Complete;
-            }
-            ArtifactDeployAction::CommitUpload if matches!(prev.upload, UploadStage::Complete) => {
-                candidate.upload = UploadStage::Committed;
-            }
-            ArtifactDeployAction::StartDeployMatched
-                if matches!(prev.upload, UploadStage::Committed)
-                    && matches!(prev.release, ReleaseStage::None | ReleaseStage::RolledBack) =>
-            {
-                candidate.release = ReleaseStage::Prepared;
-                candidate.precondition_ok = true;
-            }
-            ArtifactDeployAction::PromoteRelease
-                if matches!(prev.release, ReleaseStage::Prepared) && prev.precondition_ok =>
-            {
-                candidate.release = ReleaseStage::Promoted;
-            }
-            ArtifactDeployAction::TriggerRollback
-                if matches!(prev.release, ReleaseStage::Promoted) && prev.auto_rollback =>
-            {
-                candidate.release = ReleaseStage::RollbackPending;
-            }
-            ArtifactDeployAction::FinishRollback
-                if matches!(prev.release, ReleaseStage::RollbackPending) =>
-            {
-                candidate.release = ReleaseStage::RolledBack;
-            }
-            _ => return false,
-        }
+    fn actions(&self) -> Vec<Self::Action> {
+        action_vocabulary()
+    }
 
-        candidate == *next && candidate.invariant()
+    fn transition(&self, prev: &Self::State, action: &Self::Action) -> Option<Self::State> {
+        transition_state(prev, action)
     }
 }
 
-#[nirvash_macros::formal_tests(spec = ArtifactDeploySpec, init = initial_state)]
+#[nirvash_macros::formal_tests(spec = ArtifactDeploySpec)]
 const _: () = ();
+
+fn action_vocabulary() -> Vec<ArtifactDeployAction> {
+    vec![
+        ArtifactDeployAction::ReceiveChunk,
+        ArtifactDeployAction::CompleteUpload,
+        ArtifactDeployAction::CommitUpload,
+        ArtifactDeployAction::StartDeployMatched,
+        ArtifactDeployAction::StartDeployMismatched,
+        ArtifactDeployAction::PromoteRelease,
+        ArtifactDeployAction::TriggerRollback,
+        ArtifactDeployAction::FinishRollback,
+    ]
+}
+
+fn transition_state(
+    prev: &ArtifactDeployState,
+    action: &ArtifactDeployAction,
+) -> Option<ArtifactDeployState> {
+    let mut candidate = *prev;
+    let allowed = match action {
+        ArtifactDeployAction::ReceiveChunk
+            if !matches!(prev.upload, UploadStage::Committed) && !prev.chunks.is_max() =>
+        {
+            candidate.upload = UploadStage::Partial;
+            candidate.chunks = prev.chunks.saturating_inc();
+            true
+        }
+        ArtifactDeployAction::CompleteUpload
+            if matches!(prev.upload, UploadStage::Missing | UploadStage::Partial)
+                && !prev.chunks.is_zero() =>
+        {
+            candidate.upload = UploadStage::Complete;
+            true
+        }
+        ArtifactDeployAction::CommitUpload if matches!(prev.upload, UploadStage::Complete) => {
+            candidate.upload = UploadStage::Committed;
+            true
+        }
+        ArtifactDeployAction::StartDeployMatched
+            if matches!(prev.upload, UploadStage::Committed)
+                && matches!(prev.release, ReleaseStage::None | ReleaseStage::RolledBack) =>
+        {
+            candidate.release = ReleaseStage::Prepared;
+            candidate.precondition_ok = true;
+            true
+        }
+        ArtifactDeployAction::PromoteRelease
+            if matches!(prev.release, ReleaseStage::Prepared) && prev.precondition_ok =>
+        {
+            candidate.release = ReleaseStage::Promoted;
+            true
+        }
+        ArtifactDeployAction::TriggerRollback
+            if matches!(prev.release, ReleaseStage::Promoted) && prev.auto_rollback =>
+        {
+            candidate.release = ReleaseStage::RollbackPending;
+            true
+        }
+        ArtifactDeployAction::FinishRollback
+            if matches!(prev.release, ReleaseStage::RollbackPending) =>
+        {
+            candidate.release = ReleaseStage::RolledBack;
+            true
+        }
+        _ => false,
+    };
+
+    allowed
+        .then_some(candidate)
+        .filter(artifact_deploy_state_valid)
+}
 
 #[cfg(test)]
 mod tests {
@@ -338,6 +295,6 @@ mod tests {
             release: ReleaseStage::Promoted,
             ..prev
         };
-        assert!(spec.next(&prev, &ArtifactDeployAction::PromoteRelease, &next));
+        assert!(spec.contains_transition(&prev, &ArtifactDeployAction::PromoteRelease, &next,));
     }
 }

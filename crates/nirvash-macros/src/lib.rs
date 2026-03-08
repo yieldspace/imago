@@ -66,11 +66,6 @@ pub fn invariant(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
-pub fn illegal(attr: TokenStream, item: TokenStream) -> TokenStream {
-    expand_registration_attr(attr, item, RegistrationKind::Illegal)
-}
-
-#[proc_macro_attribute]
 pub fn property(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand_registration_attr(attr, item, RegistrationKind::Property)
 }
@@ -290,16 +285,14 @@ fn parse_self_expr_meta(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<Ex
 }
 
 struct SpecArgs {
-    checker_config: Option<Path>,
-    doc_graph_policy: Option<Path>,
+    model_cases: Option<Path>,
     subsystems: Vec<LitStr>,
 }
 
 impl syn::parse::Parse for SpecArgs {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
         let mut args = Self {
-            checker_config: None,
-            doc_graph_policy: None,
+            model_cases: None,
             subsystems: Vec::new(),
         };
 
@@ -308,11 +301,16 @@ impl syn::parse::Parse for SpecArgs {
             let content;
             syn::parenthesized!(content in input);
             match ident.to_string().as_str() {
-                "checker_config" => args.checker_config = Some(parse_single_path(&content)?),
-                "doc_graph_policy" => args.doc_graph_policy = Some(parse_single_path(&content)?),
+                "model_cases" => args.model_cases = Some(parse_single_path(&content)?),
+                "checker_config" | "doc_graph_policy" => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "checker_config/doc_graph_policy は廃止されました。#[subsystem_spec(model_cases(...))] へ移行してください",
+                    ));
+                }
                 "subsystems" => args.subsystems = parse_string_list(&content)?,
-                "invariants" | "illegal" | "state_constraints" | "action_constraints"
-                | "properties" | "fairness" | "symmetry" => {
+                "invariants" | "state_constraints" | "action_constraints" | "properties"
+                | "fairness" | "symmetry" => {
                     return Err(syn::Error::new(
                         ident.span(),
                         "#[invariant(SpecType)] 形式へ移行せよ",
@@ -331,7 +329,6 @@ impl syn::parse::Parse for SpecArgs {
 
 struct TestArgs {
     spec: Path,
-    init: Ident,
     cases: Option<Ident>,
     composition: Option<Ident>,
 }
@@ -339,7 +336,6 @@ struct TestArgs {
 impl syn::parse::Parse for TestArgs {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
         let mut spec = None;
-        let mut init = None;
         let mut cases = None;
         let mut composition = None;
         while !input.is_empty() {
@@ -347,7 +343,12 @@ impl syn::parse::Parse for TestArgs {
             let _eq: syn::Token![=] = input.parse()?;
             match ident.to_string().as_str() {
                 "spec" => spec = Some(input.parse()?),
-                "init" => init = Some(input.parse()?),
+                "init" => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "init = ... is no longer supported; TransitionSystem::initial_states() is the canonical source of initial states",
+                    ));
+                }
                 "cases" => cases = Some(input.parse()?),
                 "composition" => composition = Some(input.parse()?),
                 _ => return Err(syn::Error::new(ident.span(), "unsupported test argument")),
@@ -359,7 +360,6 @@ impl syn::parse::Parse for TestArgs {
 
         Ok(Self {
             spec: spec.ok_or_else(|| syn::Error::new(Span::call_site(), "missing spec = ..."))?,
-            init: init.ok_or_else(|| syn::Error::new(Span::call_site(), "missing init = ..."))?,
             cases,
             composition,
         })
@@ -369,7 +369,6 @@ impl syn::parse::Parse for TestArgs {
 struct CodeTestArgs {
     spec: Path,
     binding: Path,
-    init: Ident,
     cases: Option<Ident>,
 }
 
@@ -377,7 +376,6 @@ impl syn::parse::Parse for CodeTestArgs {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
         let mut spec = None;
         let mut binding = None;
-        let mut init = None;
         let mut cases = None;
         while !input.is_empty() {
             let ident: Ident = input.parse()?;
@@ -385,7 +383,12 @@ impl syn::parse::Parse for CodeTestArgs {
             match ident.to_string().as_str() {
                 "spec" => spec = Some(input.parse()?),
                 "binding" => binding = Some(input.parse()?),
-                "init" => init = Some(input.parse()?),
+                "init" => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "init = ... is no longer supported; TransitionSystem::initial_states() is the canonical source of initial states",
+                    ));
+                }
                 "action" => {
                     return Err(syn::Error::new(
                         ident.span(),
@@ -439,7 +442,6 @@ impl syn::parse::Parse for CodeTestArgs {
             spec: spec.ok_or_else(|| syn::Error::new(Span::call_site(), "missing spec = ..."))?,
             binding: binding
                 .ok_or_else(|| syn::Error::new(Span::call_site(), "missing binding = ..."))?,
-            init: init.ok_or_else(|| syn::Error::new(Span::call_site(), "missing init = ..."))?,
             cases,
         })
     }
@@ -482,7 +484,6 @@ impl syn::parse::Parse for TargetSpecArg {
 #[derive(Clone, Copy)]
 enum RegistrationKind {
     Invariant,
-    Illegal,
     Property,
     Fairness,
     StateConstraint,
@@ -494,7 +495,6 @@ impl RegistrationKind {
     fn label(self) -> &'static str {
         match self {
             Self::Invariant => "invariant",
-            Self::Illegal => "illegal",
             Self::Property => "property",
             Self::Fairness => "fairness",
             Self::StateConstraint => "state_constraint",
@@ -506,7 +506,6 @@ impl RegistrationKind {
     fn registry_ident(self) -> Ident {
         match self {
             Self::Invariant => format_ident!("RegisteredInvariant"),
-            Self::Illegal => format_ident!("RegisteredIllegal"),
             Self::Property => format_ident!("RegisteredProperty"),
             Self::Fairness => format_ident!("RegisteredFairness"),
             Self::StateConstraint => format_ident!("RegisteredStateConstraint"),
@@ -519,9 +518,6 @@ impl RegistrationKind {
         match self {
             Self::Invariant => {
                 quote! { ::nirvash_core::StatePredicate<<#spec as ::nirvash_core::TransitionSystem>::State> }
-            }
-            Self::Illegal => {
-                quote! { ::nirvash_core::StepPredicate<<#spec as ::nirvash_core::TransitionSystem>::State, <#spec as ::nirvash_core::TransitionSystem>::Action> }
             }
             Self::Property => {
                 quote! { ::nirvash_core::Ltl<<#spec as ::nirvash_core::TransitionSystem>::State, <#spec as ::nirvash_core::TransitionSystem>::Action> }
@@ -1210,8 +1206,7 @@ fn expand_temporal_spec(
     let state_ty = associated_type(&item, "State")?;
     let action_ty = associated_type(&item, "Action")?;
 
-    let checker_config = args.checker_config;
-    let doc_graph_policy = args.doc_graph_policy;
+    let model_cases = args.model_cases;
     let subsystems = args.subsystems;
 
     if !emit_composition && !subsystems.is_empty() {
@@ -1221,15 +1216,10 @@ fn expand_temporal_spec(
         ));
     }
 
-    let checker_config_expr = if let Some(checker_config) = checker_config {
-        quote! { #checker_config() }
+    let model_cases_expr = if let Some(model_cases) = model_cases {
+        quote! { #model_cases() }
     } else {
-        quote! { ::nirvash_core::ModelCheckConfig::default() }
-    };
-    let doc_graph_policy_expr = if let Some(doc_graph_policy) = doc_graph_policy {
-        quote! { #doc_graph_policy() }
-    } else {
-        quote! { ::nirvash_core::DocGraphPolicy::default() }
+        quote! { vec![::nirvash_core::ModelCase::default()] }
     };
 
     let composition_impl = if emit_composition {
@@ -1246,22 +1236,10 @@ fn expand_temporal_spec(
                 }
 
                 pub fn composition(&self) -> ::nirvash_core::SystemComposition<#state_ty, #action_ty> {
-                    let mut composition = ::nirvash_core::SystemComposition::new(self.name())
-                        .with_checker_config(
-                            <#self_ty as ::nirvash_core::TemporalSpec>::checker_config(self)
-                        );
+                    let mut composition = ::nirvash_core::SystemComposition::new(self.name());
                     #(#subsystem_calls)*
                     for invariant in <#self_ty as ::nirvash_core::TemporalSpec>::invariants(self) {
                         composition = composition.with_invariant(invariant);
-                    }
-                    for illegal in <#self_ty as ::nirvash_core::TemporalSpec>::illegal_transitions(self) {
-                        composition = composition.with_illegal_transition(illegal);
-                    }
-                    for constraint in <#self_ty as ::nirvash_core::TemporalSpec>::state_constraints(self) {
-                        composition = composition.with_state_constraint(constraint);
-                    }
-                    for constraint in <#self_ty as ::nirvash_core::TemporalSpec>::action_constraints(self) {
-                        composition = composition.with_action_constraint(constraint);
                     }
                     for property in <#self_ty as ::nirvash_core::TemporalSpec>::properties(self) {
                         composition = composition.with_property(property);
@@ -1269,10 +1247,8 @@ fn expand_temporal_spec(
                     for fairness in <#self_ty as ::nirvash_core::TemporalSpec>::fairness(self) {
                         composition = composition.with_fairness(fairness);
                     }
-                    if let ::core::option::Option::Some(symmetry) =
-                        <#self_ty as ::nirvash_core::TemporalSpec>::symmetry(self)
-                    {
-                        composition = composition.with_symmetry(symmetry);
+                    for model_case in <#self_ty as ::nirvash_core::ModelCaseSource>::model_cases(self) {
+                        composition = composition.with_model_case(model_case);
                     }
                     composition
                 }
@@ -1291,24 +1267,6 @@ fn expand_temporal_spec(
                 ::nirvash_core::registry::collect_invariants::<Self>()
             }
 
-            fn illegal_transitions(
-                &self,
-            ) -> Vec<::nirvash_core::StepPredicate<Self::State, Self::Action>> {
-                ::nirvash_core::registry::collect_illegal::<Self>()
-            }
-
-            fn state_constraints(
-                &self,
-            ) -> Vec<::nirvash_core::StateConstraint<Self::State>> {
-                ::nirvash_core::registry::collect_state_constraints::<Self>()
-            }
-
-            fn action_constraints(
-                &self,
-            ) -> Vec<::nirvash_core::ActionConstraint<Self::State, Self::Action>> {
-                ::nirvash_core::registry::collect_action_constraints::<Self>()
-            }
-
             fn properties(&self) -> Vec<::nirvash_core::Ltl<Self::State, Self::Action>> {
                 ::nirvash_core::registry::collect_properties::<Self>()
             }
@@ -1316,17 +1274,33 @@ fn expand_temporal_spec(
             fn fairness(&self) -> Vec<::nirvash_core::Fairness<Self::State, Self::Action>> {
                 ::nirvash_core::registry::collect_fairness::<Self>()
             }
+        }
 
-            fn symmetry(&self) -> ::core::option::Option<::nirvash_core::SymmetryReducer<Self::State>> {
-                ::nirvash_core::registry::collect_symmetry::<Self>()
-            }
-
-            fn checker_config(&self) -> ::nirvash_core::ModelCheckConfig {
-                #checker_config_expr
-            }
-
-            fn doc_graph_policy(&self) -> ::nirvash_core::DocGraphPolicy<Self::State> {
-                #doc_graph_policy_expr
+        impl ::nirvash_core::ModelCaseSource for #self_ty {
+            fn model_cases(&self) -> Vec<::nirvash_core::ModelCase<Self::State, Self::Action>> {
+                let mut model_cases = #model_cases_expr;
+                if model_cases.is_empty() {
+                    model_cases.push(::nirvash_core::ModelCase::default());
+                }
+                let state_constraints = ::nirvash_core::registry::collect_state_constraints::<Self>();
+                let action_constraints = ::nirvash_core::registry::collect_action_constraints::<Self>();
+                let symmetry = ::nirvash_core::registry::collect_symmetry::<Self>();
+                for model_case in &mut model_cases {
+                    let mut next_model_case = ::core::mem::take(model_case);
+                    for constraint in &state_constraints {
+                        next_model_case = next_model_case.with_state_constraint(*constraint);
+                    }
+                    for constraint in &action_constraints {
+                        next_model_case = next_model_case.with_action_constraint(*constraint);
+                    }
+                    if next_model_case.symmetry().is_none() {
+                        if let ::core::option::Option::Some(symmetry) = symmetry {
+                            next_model_case = next_model_case.with_symmetry(symmetry);
+                        }
+                    }
+                    *model_case = next_model_case;
+                }
+                model_cases
             }
         }
 
@@ -1347,7 +1321,6 @@ fn associated_type(item: &ItemImpl, name: &str) -> syn::Result<Type> {
 fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> {
     let spec_ty = args.spec;
     let spec_tail = path_tail_ident(&spec_ty)?.clone();
-    let init_method = args.init;
     let cases_method = args.cases;
     let composition_method = args.composition;
     let module_ident = format_ident!(
@@ -1381,18 +1354,6 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                         .into_iter()
                         .map(|predicate| predicate.name())
                         .collect::<::std::vec::Vec<_>>();
-                    let expected_illegal = <#spec_ty as ::nirvash_core::TemporalSpec>::illegal_transitions(&spec)
-                        .into_iter()
-                        .map(|predicate| predicate.name())
-                        .collect::<::std::vec::Vec<_>>();
-                    let expected_state_constraints = <#spec_ty as ::nirvash_core::TemporalSpec>::state_constraints(&spec)
-                        .into_iter()
-                        .map(|constraint| constraint.name())
-                        .collect::<::std::vec::Vec<_>>();
-                    let expected_action_constraints = <#spec_ty as ::nirvash_core::TemporalSpec>::action_constraints(&spec)
-                        .into_iter()
-                        .map(|constraint| constraint.name())
-                        .collect::<::std::vec::Vec<_>>();
                     let expected_properties = <#spec_ty as ::nirvash_core::TemporalSpec>::properties(&spec)
                         .into_iter()
                         .map(|property| property.describe())
@@ -1401,18 +1362,32 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                         .into_iter()
                         .map(|fairness| fairness.name())
                         .collect::<::std::vec::Vec<_>>();
-                    let expected_symmetry = <#spec_ty as ::nirvash_core::TemporalSpec>::symmetry(&spec)
-                        .map(|symmetry| symmetry.name());
+                    let expected_model_cases = <#spec_ty as ::nirvash_core::ModelCaseSource>::model_cases(&spec);
 
                     assert_eq!(composition.subsystems(), <#spec_ty>::registered_subsystems());
                     assert_eq!(composition.invariants().iter().map(|predicate| predicate.name()).collect::<::std::vec::Vec<_>>(), expected_invariants);
-                    assert_eq!(composition.illegal_transitions().iter().map(|predicate| predicate.name()).collect::<::std::vec::Vec<_>>(), expected_illegal);
-                    assert_eq!(composition.state_constraints().iter().map(|constraint| constraint.name()).collect::<::std::vec::Vec<_>>(), expected_state_constraints);
-                    assert_eq!(composition.action_constraints().iter().map(|constraint| constraint.name()).collect::<::std::vec::Vec<_>>(), expected_action_constraints);
                     assert_eq!(composition.properties().iter().map(|property| property.describe()).collect::<::std::vec::Vec<_>>(), expected_properties);
                     assert_eq!(composition.fairness().iter().map(|fairness| fairness.name()).collect::<::std::vec::Vec<_>>(), expected_fairness);
-                    assert_eq!(composition.symmetry().map(|symmetry| symmetry.name()), expected_symmetry);
-                    assert_eq!(composition.checker_config(), <#spec_ty as ::nirvash_core::TemporalSpec>::checker_config(&spec));
+                    assert_eq!(composition.model_cases().len(), expected_model_cases.len());
+                    for (actual, expected) in composition.model_cases().iter().zip(expected_model_cases.iter()) {
+                        assert_eq!(actual.label(), expected.label());
+                        assert_eq!(
+                            actual.state_constraints().iter().map(|constraint| constraint.name()).collect::<::std::vec::Vec<_>>(),
+                            expected.state_constraints().iter().map(|constraint| constraint.name()).collect::<::std::vec::Vec<_>>()
+                        );
+                        assert_eq!(
+                            actual.action_constraints().iter().map(|constraint| constraint.name()).collect::<::std::vec::Vec<_>>(),
+                            expected.action_constraints().iter().map(|constraint| constraint.name()).collect::<::std::vec::Vec<_>>()
+                        );
+                        assert_eq!(actual.symmetry().map(|symmetry| symmetry.name()), expected.symmetry().map(|symmetry| symmetry.name()));
+                        assert_eq!(actual.effective_checker_config(), expected.effective_checker_config());
+                        assert_eq!(actual.doc_graph_policy().reduction, expected.doc_graph_policy().reduction);
+                        assert_eq!(actual.doc_graph_policy().max_edge_actions_in_label, expected.doc_graph_policy().max_edge_actions_in_label);
+                        assert_eq!(
+                            actual.doc_graph_policy().focus_states.iter().map(|predicate| predicate.name()).collect::<::std::vec::Vec<_>>(),
+                            expected.doc_graph_policy().focus_states.iter().map(|predicate| predicate.name()).collect::<::std::vec::Vec<_>>()
+                        );
+                    }
                 }
             }
         }
@@ -1433,59 +1408,76 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                 specs
                     .into_iter()
                     .enumerate()
-                    .map(|(index, spec)| {
-                        let label = if multiple_cases {
-                            format!("case-{index}")
-                        } else {
-                            "default".to_owned()
-                        };
-                        let doc_graph_policy =
-                            <#spec_ty as ::nirvash_core::TemporalSpec>::doc_graph_policy(&spec);
-                        let snapshot = ::nirvash_core::ModelChecker::new(&spec)
-                            .reachable_graph_snapshot()
-                            .expect("reachable graph snapshot should build for docs");
-                        let focus_indices = snapshot
-                            .states
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(state_index, state)| {
-                                doc_graph_policy
-                                    .focus_states
+                    .flat_map(|(index, spec)| {
+                        let model_cases = <#spec_ty as ::nirvash_core::ModelCaseSource>::model_cases(&spec);
+                        let multiple_model_cases = model_cases.len() > 1;
+                        model_cases
+                            .into_iter()
+                            .map(move |model_case| {
+                                let label = match (multiple_cases, multiple_model_cases) {
+                                    (false, false) => "default".to_owned(),
+                                    (false, true) => model_case.label().to_owned(),
+                                    (true, false) => format!("case-{index}"),
+                                    (true, true) => format!("case-{index}/{}", model_case.label()),
+                                };
+                                let snapshot = ::nirvash_core::ModelChecker::for_case(&spec, model_case.clone())
+                                    .reachable_graph_snapshot()
+                                    .expect("reachable graph snapshot should build for docs");
+                                let states = snapshot.states;
+                                let actions = <#spec_ty as ::nirvash_core::TransitionSystem>::actions(&spec);
+                                let edges = states
                                     .iter()
-                                    .any(|predicate| predicate.eval(state))
-                                    .then_some(state_index)
-                            })
-                            .collect::<::std::vec::Vec<_>>();
-                        ::nirvash_core::DocGraphCase {
-                            label,
-                            graph: ::nirvash_core::DocGraphSnapshot {
-                                states: snapshot
-                                    .states
-                                    .into_iter()
-                                    .map(|state| ::nirvash_core::summarize_doc_graph_state(&state))
-                                    .collect(),
-                                edges: snapshot
-                                    .edges
-                                    .into_iter()
-                                    .map(|outgoing| {
-                                        outgoing
-                                            .into_iter()
-                                            .map(|edge| ::nirvash_core::DocGraphEdge {
-                                                label: format!("{:?}", edge.action),
-                                                target: edge.target,
+                                    .map(|state| {
+                                        actions
+                                            .iter()
+                                            .filter_map(|action| {
+                                                <#spec_ty as ::nirvash_core::TransitionSystem>::transition(
+                                                    &spec,
+                                                    state,
+                                                    action,
+                                                )
+                                                .and_then(|next| {
+                                                    states.iter().position(|candidate| *candidate == next)
+                                                })
+                                                .map(|target| ::nirvash_core::DocGraphEdge {
+                                                    label: format!("{:?}", action),
+                                                    target,
+                                                })
                                             })
-                                            .collect()
+                                            .collect::<::std::vec::Vec<_>>()
                                     })
-                                    .collect(),
-                                initial_indices: snapshot.initial_indices,
-                                deadlocks: snapshot.deadlocks,
-                                truncated: snapshot.truncated,
-                                stutter_omitted: snapshot.stutter_omitted,
-                                focus_indices,
-                                reduction: doc_graph_policy.reduction,
-                                max_edge_actions_in_label: doc_graph_policy.max_edge_actions_in_label,
-                            },
-                        }
+                                    .collect::<::std::vec::Vec<_>>();
+                                let focus_indices = states
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(state_index, state)| {
+                                        model_case
+                                            .doc_graph_policy()
+                                            .focus_states
+                                            .iter()
+                                            .any(|predicate| predicate.eval(state))
+                                            .then_some(state_index)
+                                    })
+                                    .collect::<::std::vec::Vec<_>>();
+                                ::nirvash_core::DocGraphCase {
+                                    label,
+                                    graph: ::nirvash_core::DocGraphSnapshot {
+                                        states: states
+                                            .into_iter()
+                                            .map(|state| ::nirvash_core::summarize_doc_graph_state(&state))
+                                            .collect(),
+                                        edges,
+                                        initial_indices: snapshot.initial_indices,
+                                        deadlocks: snapshot.deadlocks,
+                                        truncated: snapshot.truncated,
+                                        stutter_omitted: snapshot.stutter_omitted,
+                                        focus_indices,
+                                        reduction: model_case.doc_graph_policy().reduction,
+                                        max_edge_actions_in_label: model_case.doc_graph_policy().max_edge_actions_in_label,
+                                    },
+                                }
+                            })
+                            .collect::<::std::vec::Vec<_>>()
                     })
                     .collect()
             }
@@ -1514,134 +1506,103 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
 
             type GeneratedState = <#spec_ty as ::nirvash_core::TransitionSystem>::State;
             type GeneratedAction = <#spec_ty as ::nirvash_core::TransitionSystem>::Action;
+            type GeneratedModelCase = ::nirvash_core::ModelCase<GeneratedState, GeneratedAction>;
 
             fn generated_cases() -> ::std::vec::Vec<#spec_ty> {
                 #cases_expr
             }
 
-            fn generated_states() -> ::std::vec::Vec<GeneratedState> {
-                <GeneratedState as ::nirvash_core::Signature>::bounded_domain().into_vec()
+            fn generated_model_cases(spec: &#spec_ty) -> ::std::vec::Vec<GeneratedModelCase> {
+                <#spec_ty as ::nirvash_core::ModelCaseSource>::model_cases(spec)
             }
 
-            fn generated_actions() -> ::std::vec::Vec<GeneratedAction> {
-                <GeneratedAction as ::nirvash_core::Signature>::bounded_domain().into_vec()
-            }
-
-            #[test]
-            fn generated_init_state_satisfies_invariants() {
-                for spec in generated_cases() {
-                    let init = spec.#init_method();
-                    assert!(<#spec_ty as ::nirvash_core::TransitionSystem>::init(&spec, &init));
-                    assert!(::nirvash_core::Signature::invariant(&init));
-                    assert!(
-                        <#spec_ty as ::nirvash_core::TemporalSpec>::invariants(&spec)
-                            .iter()
-                            .all(|predicate| predicate.eval(&init))
-                    );
-                }
+            fn generated_snapshot(
+                spec: &#spec_ty,
+                model_case: GeneratedModelCase,
+            ) -> ::nirvash_core::ReachableGraphSnapshot<GeneratedState, GeneratedAction> {
+                ::nirvash_core::ModelChecker::for_case(spec, model_case)
+                    .reachable_graph_snapshot()
+                    .expect("reachable graph snapshot should build")
             }
 
             #[test]
-            fn generated_model_checker_accepts_spec() {
-                for spec in generated_cases() {
-                    let checker = ::nirvash_core::ModelChecker::new(&spec);
-                    let result = checker.check_all().expect("model checker should run");
-                    assert!(result.is_ok(), "{:?}", result.violations());
-                }
-            }
-
-            #[test]
-            fn generated_state_domain_satisfies_signature_invariant() {
-                for state in generated_states() {
-                    assert!(
-                        <GeneratedState as ::nirvash_core::Signature>::invariant(&state),
-                        "state domain violates signature invariant: {:?}",
-                        state
-                    );
-                }
-            }
-
-            #[test]
-            fn generated_action_domain_satisfies_signature_invariant() {
-                for action in generated_actions() {
-                    assert!(
-                        <GeneratedAction as ::nirvash_core::Signature>::invariant(&action),
-                        "action domain violates signature invariant: {:?}",
-                        action
-                    );
-                }
-            }
-
-            #[test]
-            fn generated_state_domain_satisfies_registered_state_predicates() {
+            fn generated_initial_states_satisfy_invariants() {
                 for spec in generated_cases() {
                     let invariants = <#spec_ty as ::nirvash_core::TemporalSpec>::invariants(&spec);
-                    let state_constraints = <#spec_ty as ::nirvash_core::TemporalSpec>::state_constraints(&spec);
-                    for state in generated_states() {
-                        assert!(
-                            invariants.iter().all(|predicate| predicate.eval(&state)),
-                            "registered invariant failed for state {:?}",
-                            state
-                        );
-                        assert!(
-                            state_constraints.iter().all(|constraint| constraint.eval(&state)),
-                            "state constraint failed for state {:?}",
-                            state
-                        );
-                    }
-                }
-            }
-
-            #[test]
-            fn generated_illegal_predicates_exclude_transitions() {
-                for spec in generated_cases() {
-                    let illegal = <#spec_ty as ::nirvash_core::TemporalSpec>::illegal_transitions(&spec);
-                    for prev in generated_states() {
-                        for action in generated_actions() {
-                            for next in generated_states() {
-                                let is_illegal = illegal.iter().any(|predicate| predicate.eval(&prev, &action, &next));
-                                if is_illegal {
-                                    assert!(
-                                        !<#spec_ty as ::nirvash_core::TransitionSystem>::next(&spec, &prev, &action, &next),
-                                        "illegal predicate allowed transition: {:?} -- {:?} --> {:?}",
-                                        prev,
-                                        action,
-                                        next
-                                    );
-                                }
-                            }
+                    for model_case in generated_model_cases(&spec) {
+                        let initial_states = <#spec_ty as ::nirvash_core::TransitionSystem>::initial_states(&spec);
+                        assert!(!initial_states.is_empty(), "spec should declare at least one initial state");
+                        for state in initial_states {
+                            assert!(<#spec_ty as ::nirvash_core::TransitionSystem>::contains_initial(&spec, &state));
+                            assert!(
+                                invariants.iter().all(|predicate| predicate.eval(&state)),
+                                "registered invariant failed for initial state {:?}",
+                                state
+                            );
+                            assert!(
+                                model_case.state_constraints().iter().all(|constraint| constraint.eval(&state)),
+                                "state constraint failed for initial state {:?}",
+                                state
+                            );
                         }
                     }
                 }
             }
 
             #[test]
-            fn generated_allowed_transitions_respect_constraints() {
+            fn generated_model_checker_accepts_spec() {
                 for spec in generated_cases() {
-                    let state_constraints = <#spec_ty as ::nirvash_core::TemporalSpec>::state_constraints(&spec);
-                    let action_constraints = <#spec_ty as ::nirvash_core::TemporalSpec>::action_constraints(&spec);
-                    for prev in generated_states() {
-                        for action in generated_actions() {
-                            for next in generated_states() {
-                                if <#spec_ty as ::nirvash_core::TransitionSystem>::next(&spec, &prev, &action, &next) {
-                                    assert!(
-                                        <GeneratedState as ::nirvash_core::Signature>::invariant(&next),
-                                        "allowed transition produced state violating signature invariant: {:?}",
-                                        next
-                                    );
-                                    assert!(
-                                        state_constraints.iter().all(|constraint| constraint.eval(&next)),
-                                        "allowed transition produced state violating state constraints: {:?}",
-                                        next
-                                    );
-                                    assert!(
-                                        action_constraints.iter().all(|constraint| constraint.eval(&prev, &action, &next)),
-                                        "allowed transition violated action constraints: {:?} -- {:?} --> {:?}",
-                                        prev,
-                                        action,
-                                        next
-                                    );
-                                }
+                    for model_case in generated_model_cases(&spec) {
+                        let checker = ::nirvash_core::ModelChecker::for_case(&spec, model_case);
+                        let result = checker.check_all().expect("model checker should run");
+                        assert!(result.is_ok(), "{:?}", result.violations());
+                    }
+                }
+            }
+
+            #[test]
+            fn generated_reachable_states_satisfy_registered_state_predicates() {
+                for spec in generated_cases() {
+                    let invariants = <#spec_ty as ::nirvash_core::TemporalSpec>::invariants(&spec);
+                    for model_case in generated_model_cases(&spec) {
+                        let snapshot = generated_snapshot(&spec, model_case.clone());
+                        for state in snapshot.states {
+                            assert!(
+                                invariants.iter().all(|predicate| predicate.eval(&state)),
+                                "registered invariant failed for state {:?}",
+                                state
+                            );
+                            assert!(
+                                model_case.state_constraints().iter().all(|constraint| constraint.eval(&state)),
+                                "state constraint failed for state {:?}",
+                                state
+                            );
+                        }
+                    }
+                }
+            }
+
+            #[test]
+            fn generated_reachable_transitions_respect_constraints() {
+                for spec in generated_cases() {
+                    for model_case in generated_model_cases(&spec) {
+                        let snapshot = generated_snapshot(&spec, model_case.clone());
+                        for (source, edges) in snapshot.edges.iter().enumerate() {
+                            let prev = &snapshot.states[source];
+                            for edge in edges {
+                                let next = &snapshot.states[edge.target];
+                                assert!(
+                                    model_case.state_constraints().iter().all(|constraint| constraint.eval(next)),
+                                    "reachable transition produced state violating state constraints: {:?}",
+                                    next
+                                );
+                                assert!(
+                                    model_case.action_constraints().iter().all(|constraint| constraint.eval(prev, &edge.action, next)),
+                                    "reachable transition violated action constraints: {:?} -- {:?} --> {:?}",
+                                    prev,
+                                    edge.action,
+                                    next
+                                );
                             }
                         }
                     }
@@ -1657,7 +1618,6 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
     let spec_ty = args.spec;
     let binding_ty = args.binding;
     let spec_tail = path_tail_ident(&spec_ty)?.clone();
-    let init_method = args.init;
     let cases_method = args.cases;
     let module_ident = format_ident!(
         "__nirvash_code_tests_{}",
@@ -1676,6 +1636,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
 
             type GeneratedState = <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::State;
             type GeneratedAction = <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action;
+            type GeneratedModelCase = ::nirvash_core::conformance::ModelCase<GeneratedState, GeneratedAction>;
             type GeneratedRuntime =
                 <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::Runtime;
             type GeneratedContext =
@@ -1691,17 +1652,18 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                 #cases_expr
             }
 
-            fn generated_actions() -> ::std::vec::Vec<GeneratedAction> {
-                <GeneratedAction as ::nirvash_core::conformance::Signature>::bounded_domain().into_vec()
+            fn generated_model_cases(spec: &#spec_ty) -> ::std::vec::Vec<GeneratedModelCase> {
+                <#spec_ty as ::nirvash_core::conformance::ModelCaseSource>::model_cases(spec)
             }
 
             fn generated_paths(
                 spec: &#spec_ty,
+                model_case: GeneratedModelCase,
             ) -> (
                 ::nirvash_core::conformance::ReachableGraphSnapshot<GeneratedState, GeneratedAction>,
                 ::std::vec::Vec<::std::vec::Vec<GeneratedAction>>,
             ) {
-                let snapshot = ::nirvash_core::conformance::ModelChecker::new(spec)
+                let snapshot = ::nirvash_core::conformance::ModelChecker::for_case(spec, model_case)
                     .reachable_graph_snapshot()
                     .expect("reachable graph snapshot should build");
                 let mut paths = vec![::core::option::Option::None; snapshot.states.len()];
@@ -1748,13 +1710,27 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                         spec,
                         &observed,
                     );
-                assert_eq!(projected, spec.#init_method());
+                let initial_states =
+                    <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::initial_states(spec);
+                assert!(
+                    initial_states.iter().any(|state| *state == projected),
+                    "runtime initial state {:?} must be one of the declared initial states {:?}",
+                    projected,
+                    initial_states,
+                );
                 for action in path {
-                    let expected =
-                        <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::expected_step(
+                    let expected_next =
+                        <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::transition(
                             spec,
                             &projected,
                             action,
+                        );
+                    let expected_output =
+                        <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::expected_output(
+                            spec,
+                            &projected,
+                            action,
+                            expected_next.as_ref(),
                         );
                     let output = <GeneratedRuntime as ::nirvash_core::conformance::ActionApplier>::execute_action(
                         &runtime,
@@ -1767,36 +1743,24 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                             spec,
                             &output,
                         );
-                    match expected {
-                        ::nirvash_core::conformance::ExpectedStep::Allowed { next, output: expected_output } => {
-                            assert_eq!(projected_output, expected_output);
-                            let observed_after =
-                                <GeneratedRuntime as ::nirvash_core::conformance::StateObserver>::observe_state(
-                                    &runtime,
-                                    context,
-                                )
-                                .await;
-                            let projected_after =
-                                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_state(
-                                    spec,
-                                    &observed_after,
-                                );
+                    assert_eq!(projected_output, expected_output);
+                    let observed_after =
+                        <GeneratedRuntime as ::nirvash_core::conformance::StateObserver>::observe_state(
+                            &runtime,
+                            context,
+                        )
+                        .await;
+                    let projected_after =
+                        <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_state(
+                            spec,
+                            &observed_after,
+                        );
+                    match expected_next {
+                        ::core::option::Option::Some(next) => {
                             assert_eq!(projected_after, next);
                             projected = projected_after;
                         }
-                        ::nirvash_core::conformance::ExpectedStep::Rejected { output: expected_output } => {
-                            assert_eq!(projected_output, expected_output);
-                            let observed_after =
-                                <GeneratedRuntime as ::nirvash_core::conformance::StateObserver>::observe_state(
-                                    &runtime,
-                                    context,
-                                )
-                                .await;
-                            let projected_after =
-                                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_state(
-                                    spec,
-                                    &observed_after,
-                                );
+                        ::core::option::Option::None => {
                             assert_eq!(projected_after, projected);
                         }
                     }
@@ -1811,7 +1775,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                 action: &GeneratedAction,
                 context: &GeneratedContext,
             ) -> (
-                ::nirvash_core::conformance::ExpectedStep<GeneratedState, GeneratedExpectedOutput>,
+                ::core::option::Option<GeneratedState>,
                 GeneratedExpectedOutput,
                 GeneratedState,
             ) {
@@ -1828,11 +1792,18 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                         &observed_before,
                     );
                 assert_eq!(projected_before, *expected_state);
-                let expected =
-                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::expected_step(
+                let expected_next =
+                    <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::transition(
                         spec,
                         &projected_before,
                         action,
+                    );
+                let expected_output =
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::expected_output(
+                        spec,
+                        &projected_before,
+                        action,
+                        expected_next.as_ref(),
                     );
                 let output = <GeneratedRuntime as ::nirvash_core::conformance::ActionApplier>::execute_action(
                     &runtime,
@@ -1856,46 +1827,43 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                         spec,
                         &observed_after,
                     );
-                (expected, projected_output, projected_after)
+                assert_eq!(projected_output, expected_output);
+                (expected_next, projected_output, projected_after)
             }
 
             #[test]
             fn generated_spec_is_deterministic_for_code_conformance() {
                 for spec in generated_cases() {
-                    let (snapshot, _) = generated_paths(&spec);
-                    let all_states =
-                        <GeneratedState as ::nirvash_core::conformance::Signature>::bounded_domain().into_vec();
-                    for state in &snapshot.states {
-                        for action in generated_actions() {
-                            let next_states = all_states
-                                .iter()
-                                .filter(|next| {
-                                    <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::next(
-                                        &spec,
-                                        state,
-                                        &action,
-                                        next,
-                                    )
-                                })
-                                .cloned()
-                                .collect::<::std::vec::Vec<_>>();
-                            assert!(
-                                next_states.len() <= 1,
-                                "spec is nondeterministic for state {:?} and action {:?}: {:?}",
-                                state,
-                                action,
-                                next_states
-                            );
-                            match <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::expected_step(
-                                &spec,
-                                state,
-                                &action,
-                            ) {
-                                ::nirvash_core::conformance::ExpectedStep::Allowed { next, .. } => {
-                                    assert_eq!(next_states, vec![next]);
-                                }
-                                ::nirvash_core::conformance::ExpectedStep::Rejected { .. } => {
-                                    assert!(next_states.is_empty());
+                    for model_case in generated_model_cases(&spec) {
+                        let (snapshot, _) = generated_paths(&spec, model_case);
+                        for state in &snapshot.states {
+                            for action in <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::actions(&spec) {
+                                let next_states = <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::successors(
+                                    &spec,
+                                    state,
+                                )
+                                    .into_iter()
+                                    .filter(|(candidate_action, _)| *candidate_action == action)
+                                    .map(|(_, next)| next)
+                                    .collect::<::std::vec::Vec<_>>();
+                                assert!(
+                                    next_states.len() <= 1,
+                                    "spec is nondeterministic for state {:?} and action {:?}: {:?}",
+                                    state,
+                                    action,
+                                    next_states
+                                );
+                                match <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::transition(
+                                    &spec,
+                                    state,
+                                    &action,
+                                ) {
+                                    ::core::option::Option::Some(next) => {
+                                        assert_eq!(next_states, vec![next]);
+                                    }
+                                    ::core::option::Option::None => {
+                                        assert!(next_states.is_empty());
+                                    }
                                 }
                             }
                         }
@@ -1906,20 +1874,22 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
             #[tokio::test]
             async fn generated_real_code_accepts_allowed_actions() {
                 for spec in generated_cases() {
-                    let context = <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
-                    let (snapshot, paths) = generated_paths(&spec);
-                    for (index, state) in snapshot.states.iter().enumerate() {
-                        for action in generated_actions() {
-                            let (expected, _, _) = execute_from_state(
-                                &spec,
-                                &paths[index],
-                                state,
-                                &action,
-                                &context,
-                            )
-                                    .await;
-                            if let ::nirvash_core::conformance::ExpectedStep::Allowed { .. } = expected {
-                                // replay + dispatch already succeeded if we reached here
+                    for model_case in generated_model_cases(&spec) {
+                        let context = <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
+                        let (snapshot, paths) = generated_paths(&spec, model_case);
+                        for (index, state) in snapshot.states.iter().enumerate() {
+                            for action in <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::actions(&spec) {
+                                let (expected_next, _, _) = execute_from_state(
+                                    &spec,
+                                    &paths[index],
+                                    state,
+                                    &action,
+                                    &context,
+                                )
+                                        .await;
+                                if expected_next.is_some() {
+                                    // replay + dispatch already succeeded if we reached here
+                                }
                             }
                         }
                     }
@@ -1929,20 +1899,22 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
             #[tokio::test]
             async fn generated_real_code_rejects_disallowed_actions() {
                 for spec in generated_cases() {
-                    let context = <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
-                    let (snapshot, paths) = generated_paths(&spec);
-                    for (index, state) in snapshot.states.iter().enumerate() {
-                        for action in generated_actions() {
-                            let (expected, _, observed_after) = execute_from_state(
-                                &spec,
-                                &paths[index],
-                                state,
-                                &action,
-                                &context,
-                            )
-                                    .await;
-                            if let ::nirvash_core::conformance::ExpectedStep::Rejected { .. } = expected {
-                                assert_eq!(observed_after, *state);
+                    for model_case in generated_model_cases(&spec) {
+                        let context = <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
+                        let (snapshot, paths) = generated_paths(&spec, model_case);
+                        for (index, state) in snapshot.states.iter().enumerate() {
+                            for action in <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::actions(&spec) {
+                                let (expected_next, _, observed_after) = execute_from_state(
+                                    &spec,
+                                    &paths[index],
+                                    state,
+                                    &action,
+                                    &context,
+                                )
+                                        .await;
+                                if expected_next.is_none() {
+                                    assert_eq!(observed_after, *state);
+                                }
                             }
                         }
                     }
@@ -1952,24 +1924,26 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
             #[tokio::test]
             async fn generated_real_code_state_matches_spec() {
                 for spec in generated_cases() {
-                    let context = <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
-                    let (snapshot, paths) = generated_paths(&spec);
-                    for (index, state) in snapshot.states.iter().enumerate() {
-                        for action in generated_actions() {
-                            let (expected, _, observed_after) = execute_from_state(
-                                &spec,
-                                &paths[index],
-                                state,
-                                &action,
-                                &context,
-                            )
-                                    .await;
-                            match expected {
-                                ::nirvash_core::conformance::ExpectedStep::Allowed { next, .. } => {
-                                    assert_eq!(observed_after, next);
-                                }
-                                ::nirvash_core::conformance::ExpectedStep::Rejected { .. } => {
-                                    assert_eq!(observed_after, *state);
+                    for model_case in generated_model_cases(&spec) {
+                        let context = <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
+                        let (snapshot, paths) = generated_paths(&spec, model_case);
+                        for (index, state) in snapshot.states.iter().enumerate() {
+                            for action in <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::actions(&spec) {
+                                let (expected_next, _, observed_after) = execute_from_state(
+                                    &spec,
+                                    &paths[index],
+                                    state,
+                                    &action,
+                                    &context,
+                                )
+                                        .await;
+                                match expected_next {
+                                    ::core::option::Option::Some(next) => {
+                                        assert_eq!(observed_after, next);
+                                    }
+                                    ::core::option::Option::None => {
+                                        assert_eq!(observed_after, *state);
+                                    }
                                 }
                             }
                         }
@@ -1980,28 +1954,27 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
             #[tokio::test]
             async fn generated_real_code_output_matches_expected() {
                 for spec in generated_cases() {
-                    let context = <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
-                    let (snapshot, paths) = generated_paths(&spec);
-                    for (index, state) in snapshot.states.iter().enumerate() {
-                        for action in generated_actions() {
-                            let (expected, output, _) = execute_from_state(
-                                &spec,
-                                &paths[index],
-                                state,
-                                &action,
-                                &context,
-                            )
-                                    .await;
-                            match expected {
-                                ::nirvash_core::conformance::ExpectedStep::Allowed {
-                                    output: expected_output,
-                                    ..
-                                }
-                                | ::nirvash_core::conformance::ExpectedStep::Rejected {
-                                    output: expected_output,
-                                } => {
-                                    assert_eq!(output, expected_output);
-                                }
+                    for model_case in generated_model_cases(&spec) {
+                        let context = <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
+                        let (snapshot, paths) = generated_paths(&spec, model_case);
+                        for (index, state) in snapshot.states.iter().enumerate() {
+                            for action in <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::actions(&spec) {
+                                let (expected_next, output, _) = execute_from_state(
+                                    &spec,
+                                    &paths[index],
+                                    state,
+                                    &action,
+                                    &context,
+                                )
+                                        .await;
+                                let expected_output =
+                                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::expected_output(
+                                        &spec,
+                                        state,
+                                        &action,
+                                        expected_next.as_ref(),
+                                    );
+                                assert_eq!(output, expected_output);
                             }
                         }
                     }

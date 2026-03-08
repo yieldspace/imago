@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     env,
     error::Error,
-    fmt, fs, io,
+    fmt, fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -17,91 +17,15 @@ use syn::{
 
 type DynError = Box<dyn Error>;
 
-const CATEGORY_ORDER: [RegistrationKind; 7] = [
+const CATEGORY_ORDER: [RegistrationKind; 6] = [
     RegistrationKind::Invariant,
-    RegistrationKind::Illegal,
     RegistrationKind::Property,
     RegistrationKind::Fairness,
     RegistrationKind::StateConstraint,
     RegistrationKind::ActionConstraint,
     RegistrationKind::Symmetry,
 ];
-const MERMAID_ASSET_SOURCE: &str = "assets/mermaid/mermaid.min.js";
-const MERMAID_ASSET_DIR: &str = "nirvash-mermaid";
-const MERMAID_ASSET_FILE: &str = "mermaid.min.js";
-const MERMAID_RENDER_SCRIPT: &str = r#"<script>
-(() => {
-  const meta = document.querySelector('meta[name="rustdoc-vars"]');
-  const staticRoot = meta?.getAttribute('data-static-root-path') ?? '../static.files/';
-  const registry = globalThis.__nirvashMermaidRegistry ??= {
-    loading: false,
-    loaded: false,
-    initialized: false,
-    nextId: 0,
-  };
-
-  const currentTheme = () => {
-    const rustdocTheme = globalThis.localStorage?.getItem('rustdoc-theme');
-    return rustdocTheme === 'dark' || rustdocTheme === 'ayu' ? 'dark' : 'default';
-  };
-
-  const renderBlocks = async () => {
-    const mermaid = globalThis.mermaid;
-    if (!mermaid) {
-      return;
-    }
-
-    if (!registry.initialized) {
-      mermaid.initialize({
-        startOnLoad: false,
-        securityLevel: 'loose',
-        theme: currentTheme(),
-      });
-      registry.initialized = true;
-    }
-
-    const blocks = [...document.querySelectorAll('pre.nirvash-mermaid:not([data-nirvash-rendered="true"])')];
-    for (const block of blocks) {
-      block.dataset.nirvashRendered = 'true';
-      const source = block.textContent ?? '';
-      const id = `nirvash-mermaid-${registry.nextId++}`;
-      try {
-        const { svg } = await mermaid.render(id, source);
-        const container = document.createElement('div');
-        container.className = 'nirvash-mermaid-diagram';
-        container.innerHTML = svg;
-        block.replaceWith(container);
-      } catch (error) {
-        console.error('nirvash mermaid render failed', error);
-      }
-    }
-  };
-
-  if (registry.loaded && globalThis.mermaid) {
-    void renderBlocks();
-    return;
-  }
-
-  if (registry.loading) {
-    return;
-  }
-
-  registry.loading = true;
-  const script = document.createElement('script');
-  script.src = `${staticRoot}nirvash-mermaid/mermaid.min.js`;
-  script.async = true;
-  script.onload = () => {
-    registry.loading = false;
-    registry.loaded = true;
-    void renderBlocks();
-  };
-  script.onerror = (error) => {
-    registry.loading = false;
-    console.error('nirvash mermaid runtime failed to load', error);
-  };
-  document.head.appendChild(script);
-})();
-</script>"#;
+const MERMAID_RUNTIME_SOURCE: &str = include_str!("../assets/mermaid/mermaid.min.js");
 
 /// Generate rustdoc fragments for `nirvash` specs in the current crate.
 pub fn generate() -> Result<(), Box<dyn Error>> {
@@ -114,9 +38,12 @@ pub fn generate() -> Result<(), Box<dyn Error>> {
     for path in &output.rerun_if_changed {
         println!("cargo:rerun-if-changed={}", path.display());
     }
-    for path in copy_doc_assets(&out_dir)? {
-        println!("cargo:rerun-if-changed={}", path.display());
-    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/mermaid/mermaid.min.js")
+            .display()
+    );
     for fragment in &output.fragments {
         println!(
             "cargo:rustc-env={}={}",
@@ -142,48 +69,65 @@ fn err(message: impl Into<String>) -> DynError {
     Box::new(MessageError(message.into()))
 }
 
-fn copy_doc_assets(out_dir: &Path) -> Result<Vec<PathBuf>, DynError> {
-    let asset_source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(MERMAID_ASSET_SOURCE);
-    let target_dir = doc_static_files_dir(out_dir).join(MERMAID_ASSET_DIR);
-    fs::create_dir_all(&target_dir).map_err(|error| {
-        err(format!(
-            "failed to create rustdoc asset directory {}: {error}",
-            target_dir.display()
-        ))
-    })?;
+fn mermaid_render_script() -> String {
+    let runtime_source =
+        serde_json::to_string(MERMAID_RUNTIME_SOURCE).expect("mermaid runtime escapes");
+    format!(
+        r#"<script>
+(() => {{
+  const registry = globalThis.__nirvashMermaidRegistry ??= {{
+    initialized: false,
+    nextId: 0,
+  }};
 
-    let destination = target_dir.join(MERMAID_ASSET_FILE);
-    copy_if_changed(&asset_source, &destination).map_err(|error| {
-        err(format!(
-            "failed to copy mermaid asset {} -> {}: {error}",
-            asset_source.display(),
-            destination.display()
-        ))
-    })?;
+  if (!globalThis.mermaid) {{
+    const runtime = document.createElement('script');
+    runtime.textContent = {runtime_source};
+    document.head.appendChild(runtime);
+  }}
 
-    Ok(vec![asset_source])
-}
+  const currentTheme = () => {{
+    const rustdocTheme = globalThis.localStorage?.getItem('rustdoc-theme');
+    return rustdocTheme === 'dark' || rustdocTheme === 'ayu' ? 'dark' : 'default';
+  }};
 
-fn doc_static_files_dir(out_dir: &Path) -> PathBuf {
-    for ancestor in out_dir.ancestors() {
-        if ancestor.file_name().and_then(|value| value.to_str()) == Some("target") {
-            return ancestor.join("doc").join("static.files");
-        }
-    }
-    out_dir.join("doc").join("static.files")
-}
+  const renderBlocks = async () => {{
+    const mermaid = globalThis.mermaid;
+    if (!mermaid) {{
+      console.error('nirvash mermaid runtime failed to initialize');
+      return;
+    }}
 
-fn copy_if_changed(source: &Path, destination: &Path) -> io::Result<()> {
-    let needs_copy = match fs::read(destination) {
-        Ok(existing) => existing != fs::read(source)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
-        Err(error) => return Err(error),
-    };
+    if (!registry.initialized) {{
+      mermaid.initialize({{
+        startOnLoad: false,
+        securityLevel: 'loose',
+        theme: currentTheme(),
+      }});
+      registry.initialized = true;
+    }}
 
-    if needs_copy {
-        fs::copy(source, destination)?;
-    }
-    Ok(())
+    const blocks = [...document.querySelectorAll('pre.nirvash-mermaid:not([data-nirvash-rendered="true"])')];
+    for (const block of blocks) {{
+      block.dataset.nirvashRendered = 'true';
+      const source = block.textContent ?? '';
+      const id = `nirvash-mermaid-${{registry.nextId++}}`;
+      try {{
+        const {{ svg }} = await mermaid.render(id, source);
+        const container = document.createElement('div');
+        container.className = 'nirvash-mermaid-diagram';
+        container.innerHTML = svg;
+        block.replaceWith(container);
+      }} catch (error) {{
+        console.error('nirvash mermaid render failed', error);
+      }}
+    }}
+  }};
+
+  void renderBlocks();
+}})();
+</script>"#
+    )
 }
 
 #[derive(Debug)]
@@ -216,7 +160,6 @@ impl SpecKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum RegistrationKind {
     Invariant,
-    Illegal,
     Property,
     Fairness,
     StateConstraint,
@@ -228,7 +171,6 @@ impl RegistrationKind {
     fn attr_name(self) -> &'static str {
         match self {
             Self::Invariant => "invariant",
-            Self::Illegal => "illegal",
             Self::Property => "property",
             Self::Fairness => "fairness",
             Self::StateConstraint => "state_constraint",
@@ -249,7 +191,7 @@ struct SpecDoc {
     tail_ident: String,
     state_ty: String,
     action_ty: String,
-    checker_config: Option<String>,
+    model_cases: Option<String>,
     subsystems: Vec<String>,
     registrations: BTreeMap<RegistrationKind, Vec<String>>,
     doc_graphs: Vec<nirvash_core::DocGraphCase>,
@@ -262,7 +204,7 @@ struct PendingSpec {
     tail_ident: String,
     state_ty: String,
     action_ty: String,
-    checker_config: Option<String>,
+    model_cases: Option<String>,
     subsystems: Vec<String>,
 }
 
@@ -425,7 +367,7 @@ impl SourceCollector {
             tail_ident,
             state_ty,
             action_ty,
-            checker_config: args.checker_config,
+            model_cases: args.model_cases,
             subsystems: args.subsystems,
         });
         Ok(())
@@ -517,7 +459,7 @@ impl SourceCollector {
                     tail_ident: spec.tail_ident,
                     state_ty: spec.state_ty,
                     action_ty: spec.action_ty,
-                    checker_config: spec.checker_config,
+                    model_cases: spec.model_cases,
                     subsystems: spec.subsystems,
                     registrations: BTreeMap::new(),
                     doc_graphs: Vec::new(),
@@ -586,8 +528,7 @@ impl SourceCollector {
 
 #[derive(Default)]
 struct ParsedSpecArgs {
-    checker_config: Option<String>,
-    doc_graph_policy: Option<String>,
+    model_cases: Option<String>,
     subsystems: Vec<String>,
 }
 
@@ -600,25 +541,15 @@ impl syn::parse::Parse for ParsedSpecArgs {
             let content;
             syn::parenthesized!(content in input);
             match ident.to_string().as_str() {
-                "checker_config" => {
+                "model_cases" => {
                     let path: SynPath = content.parse()?;
                     if !content.is_empty() {
                         return Err(syn::Error::new(
                             content.span(),
-                            "expected checker_config(...) to contain exactly one function path",
+                            "expected model_cases(...) to contain exactly one function path",
                         ));
                     }
-                    args.checker_config = Some(path_to_string_syn(&path)?);
-                }
-                "doc_graph_policy" => {
-                    let path: SynPath = content.parse()?;
-                    if !content.is_empty() {
-                        return Err(syn::Error::new(
-                            content.span(),
-                            "expected doc_graph_policy(...) to contain exactly one function path",
-                        ));
-                    }
-                    args.doc_graph_policy = Some(path_to_string_syn(&path)?);
+                    args.model_cases = Some(path_to_string_syn(&path)?);
                 }
                 "subsystems" => {
                     while !content.is_empty() {
@@ -866,7 +797,6 @@ fn registration_kind(attr: &Attribute) -> Option<RegistrationKind> {
 fn registration_kind_for_path(path: &SynPath) -> Option<RegistrationKind> {
     match path.segments.last()?.ident.to_string().as_str() {
         "invariant" => Some(RegistrationKind::Invariant),
-        "illegal" => Some(RegistrationKind::Illegal),
         "property" => Some(RegistrationKind::Property),
         "fairness" => Some(RegistrationKind::Fairness),
         "state_constraint" => Some(RegistrationKind::StateConstraint),
@@ -1130,14 +1060,14 @@ fn render_fragment(spec: &SpecDoc) -> String {
     }
 
     let mermaid = render_meta_model_mermaid(spec);
-    let checker_config = spec.checker_config.as_deref().unwrap_or("default");
+    let model_cases = spec.model_cases.as_deref().unwrap_or("default");
     output.push_str("## Meta Model\n\n");
     output.push_str(&render_mermaid_block(&mermaid));
     output.push_str("\n\nLegend:\n\n");
     output.push_str(&format!("- kind: `{}`\n", spec.kind.unwrap().label()));
     output.push_str(&format!("- state: `{}`\n", spec.state_ty));
     output.push_str(&format!("- action: `{}`\n", spec.action_ty));
-    output.push_str(&format!("- checker_config = `{checker_config}`\n"));
+    output.push_str(&format!("- model_cases = `{model_cases}`\n"));
     if spec.kind == Some(SpecKind::System) {
         let subsystems = if spec.subsystems.is_empty() {
             "none".to_string()
@@ -1167,7 +1097,7 @@ fn render_fragment(spec: &SpecDoc) -> String {
         output.push_str(&format!("- {}: {}\n", kind.label(), names));
     }
     output.push('\n');
-    output.push_str(MERMAID_RENDER_SCRIPT);
+    output.push_str(&mermaid_render_script());
     output
 }
 
@@ -1227,18 +1157,7 @@ fn render_state_graph_mermaid(
     graph: &nirvash_core::ReducedDocGraph,
     visible_edges: &[&nirvash_core::ReducedDocGraphEdge],
 ) -> String {
-    let mut output = String::from("flowchart TD\n");
-    output
-        .push_str("classDef initial fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#0f172a;\n");
-    output.push_str(
-        "classDef deadlock fill:#fecaca,stroke:#b91c1c,stroke-width:2px,color:#0f172a;\n",
-    );
-    output.push_str(
-        "classDef initial_deadlock fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#0f172a;\n",
-    );
-    output.push_str(
-        "classDef reachable fill:#f8fafc,stroke:#334155,stroke-width:2px,color:#0f172a;\n",
-    );
+    let mut output = String::from("stateDiagram-v2\n");
     output.push_str(&format!(
         "%% reachable state graph for {}\n",
         spec.tail_ident
@@ -1246,26 +1165,26 @@ fn render_state_graph_mermaid(
 
     for state in &graph.states {
         let label = render_state_node_label(graph, state);
-        output.push_str(&format!("S{}((\"{label}\"))\n", state.original_index));
-    }
-
-    for edge in visible_edges {
         output.push_str(&format!(
-            "S{} -->|\"{}\"| S{}\n",
-            edge.source,
-            escape_mermaid_label(&edge.label),
-            edge.target
+            "state \"{}\" as S{}\n",
+            escape_mermaid_label(&label),
+            state.original_index
         ));
     }
 
     for state in &graph.states {
-        let class_name = match (state.is_initial, state.is_deadlock) {
-            (true, true) => "initial_deadlock",
-            (true, false) => "initial",
-            (false, true) => "deadlock",
-            (false, false) => "reachable",
-        };
-        output.push_str(&format!("class S{} {class_name};\n", state.original_index));
+        if state.is_initial {
+            output.push_str(&format!("[*] --> S{}\n", state.original_index));
+        }
+    }
+
+    for edge in visible_edges {
+        output.push_str(&format!(
+            "S{} --> S{}: {}\n",
+            edge.source,
+            edge.target,
+            escape_mermaid_label(&edge.label)
+        ));
     }
 
     output
@@ -1293,9 +1212,12 @@ fn render_state_node_label(
     state: &nirvash_core::ReducedDocGraphNode,
 ) -> String {
     let mut parts = vec![format!("S{}", state.original_index)];
+    if state.is_deadlock {
+        parts.push("deadlock".to_string());
+    }
     parts.extend(state_display_lines(graph, state));
 
-    mermaid_multiline(&parts.join("\n"))
+    mermaid_state_label(&parts.join("\n"))
 }
 
 fn state_display_lines(
@@ -1359,6 +1281,15 @@ fn render_collapsed_path_details(
     }
     output.push_str("</details>\n\n");
     output
+}
+
+fn mermaid_state_label(input: &str) -> String {
+    input
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(escape_mermaid_label)
+        .collect::<Vec<_>>()
+        .join("\\n")
 }
 
 fn state_delta_lines(previous: &str, current: &str) -> Option<Vec<String>> {
@@ -1603,7 +1534,6 @@ fn mermaid_multiline(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use tempfile::tempdir;
 
     #[test]
@@ -1628,13 +1558,14 @@ mod inline_parent {
     pub struct InlineAction;
     pub struct InlineSpec;
 
-    #[subsystem_spec(checker_config(inline_checker_config))]
+    #[subsystem_spec(model_cases(inline_model_cases))]
     impl TransitionSystem for InlineSpec {
         type State = InlineState;
         type Action = InlineAction;
 
-        fn init(&self, _: &Self::State) -> bool { true }
-        fn next(&self, _: &Self::State, _: &Self::Action, _: &Self::State) -> bool { true }
+        fn initial_states(&self) -> Vec<Self::State> { vec![InlineState] }
+        fn actions(&self) -> Vec<Self::Action> { vec![InlineAction] }
+        fn transition(&self, _: &Self::State, _: &Self::Action) -> Option<Self::State> { Some(InlineState) }
     }
 
     nirvash_core::invariant!(self::InlineSpec, inline_invariant(state) => {
@@ -1654,7 +1585,7 @@ mod inline_parent {
         fn crate_property() -> Ltl<InlineState, InlineAction> { todo!() }
     }
 
-    fn inline_checker_config() {}
+    fn inline_model_cases() {}
 }
 "#,
         )
@@ -1664,10 +1595,9 @@ mod inline_parent {
             src_dir.join("child.rs"),
             r#"
 use nirvash_core::{
-    ActionConstraint, Fairness, Ltl, StateConstraint, StatePredicate, StepPredicate,
-    TransitionSystem,
+    ActionConstraint, Fairness, Ltl, StateConstraint, StatePredicate, TransitionSystem,
 };
-use nirvash_macros::{illegal, invariant, property, subsystem_spec};
+use nirvash_macros::{invariant, property, subsystem_spec};
 
 pub struct ChildState;
 pub struct ChildAction;
@@ -1678,17 +1608,15 @@ impl TransitionSystem for ChildSpec {
     type State = ChildState;
     type Action = ChildAction;
 
-    fn init(&self, _: &Self::State) -> bool { true }
-    fn next(&self, _: &Self::State, _: &Self::Action, _: &Self::State) -> bool { true }
+    fn initial_states(&self) -> Vec<Self::State> { vec![ChildState] }
+    fn actions(&self) -> Vec<Self::Action> { vec![ChildAction] }
+    fn transition(&self, _: &Self::State, _: &Self::Action) -> Option<Self::State> {
+        Some(ChildState)
+    }
 }
 
 nirvash_core::invariant!(ChildSpec, child_invariant(state) => {
     let _ = state;
-    true
-});
-
-nirvash_core::illegal!(ChildSpec, child_illegal(prev, action, next) => {
-    let _ = (prev, action, next);
     true
 });
 
@@ -1731,13 +1659,15 @@ pub struct SystemState;
 pub struct SystemAction;
 pub struct RootSystemSpec;
 
-#[system_spec(subsystems("child", "inline_parent"), checker_config(system_checker_config))]
+#[system_spec(subsystems("child", "inline_parent"), model_cases(system_model_cases))]
 impl TransitionSystem for RootSystemSpec {
     type State = SystemState;
     type Action = SystemAction;
 
-    fn init(&self, _: &Self::State) -> bool { true }
-    fn next(&self, _: &Self::State, _: &Self::Action, _: &Self::State) -> bool { true }
+    fn initial_states(&self) -> Vec<Self::State> { vec![SystemState] }
+    fn successors(&self, _: &Self::State) -> Vec<(Self::Action, Self::State)> {
+        vec![(SystemAction, SystemState)]
+    }
 }
 
 #[invariant(RootSystemSpec)]
@@ -1746,7 +1676,7 @@ fn system_invariant() -> StatePredicate<SystemState> { todo!() }
 #[property(RootSystemSpec)]
 fn system_property() -> Ltl<SystemState, SystemAction> { todo!() }
 
-fn system_checker_config() {}
+fn system_model_cases() {}
 "#,
         )
         .expect("system.rs");
@@ -1779,9 +1709,10 @@ fn system_checker_config() {}
         assert!(inline_doc.contains("inline_invariant"));
         assert!(inline_doc.contains("super_invariant"));
         assert!(inline_doc.contains("crate_property"));
-        assert!(inline_doc.contains("checker_config = `inline_checker_config`"));
-        assert!(inline_doc.contains(MERMAID_RENDER_SCRIPT));
-        assert!(inline_doc.contains("nirvash-mermaid/mermaid.min.js"));
+        assert!(inline_doc.contains("model_cases = `inline_model_cases`"));
+        assert!(inline_doc.contains("nirvash mermaid runtime failed to initialize"));
+        assert!(inline_doc.contains("runtime.textContent = "));
+        assert!(!inline_doc.contains("mermaid.min.js"));
         assert!(!inline_doc.contains("type=\"module\""));
 
         let child_fragment = output
@@ -1791,7 +1722,6 @@ fn system_checker_config() {}
             .expect("child fragment");
         let child_doc = fs::read_to_string(&child_fragment.path).expect("child doc");
         assert!(child_doc.contains("child_invariant"));
-        assert!(child_doc.contains("child_illegal"));
         assert!(child_doc.contains("child_property"));
         assert!(child_doc.contains("child_fairness"));
         assert!(child_doc.contains("child_state_constraint"));
@@ -1845,8 +1775,10 @@ impl TransitionSystem for DuplicateSpec {
     type State = State;
     type Action = Action;
 
-    fn init(&self, _: &Self::State) -> bool { true }
-    fn next(&self, _: &Self::State, _: &Self::Action, _: &Self::State) -> bool { true }
+    fn initial_states(&self) -> Vec<Self::State> { vec![State] }
+    fn successors(&self, _: &Self::State) -> Vec<(Self::Action, Self::State)> {
+        vec![(Action, State)]
+    }
 }
 "#,
             )
@@ -1870,7 +1802,7 @@ impl TransitionSystem for DuplicateSpec {
             tail_ident: "DemoSpec".to_owned(),
             state_ty: "DemoState".to_owned(),
             action_ty: "DemoAction".to_owned(),
-            checker_config: Some("demo_checker_config".to_owned()),
+            model_cases: Some("demo_model_cases".to_owned()),
             subsystems: Vec::new(),
             registrations: BTreeMap::from([
                 (
@@ -1914,10 +1846,11 @@ impl TransitionSystem for DuplicateSpec {
         });
         assert!(fragment.contains("## State Graph"));
         assert!(fragment.contains("<pre class=\"mermaid nirvash-mermaid\">"));
-        assert!(fragment.contains("flowchart TD"));
+        assert!(fragment.contains("stateDiagram-v2"));
         assert!(fragment.contains("default"));
-        assert!(fragment.contains("S0((&quot;S0&lt;br/&gt;Idle&quot;))"));
-        assert!(!fragment.contains("S1((&quot;S1&lt;br/&gt;Busy&quot;))"));
+        assert!(fragment.contains("state &quot;S0\\nIdle&quot; as S0"));
+        assert!(!fragment.contains("state &quot;S1\\nBusy&quot; as S1"));
+        assert!(fragment.contains("[*] --&gt; S0") || fragment.contains("[*] --> S0"));
         assert!(
             fragment.contains("Start -&amp;gt; Stop")
                 || fragment.contains("Start -&gt; Stop")
@@ -1932,7 +1865,7 @@ impl TransitionSystem for DuplicateSpec {
         assert!(fragment.contains("#### S0"));
         assert!(fragment.contains("```text\nIdle\n```"));
         assert!(fragment.contains("```text\nBusy\n```"));
-        assert!(fragment.contains("nirvash-mermaid/mermaid.min.js"));
+        assert!(fragment.contains("runtime.textContent = "));
         assert!(fragment.contains("<details><summary>Full State Legend</summary>"));
     }
 
@@ -1944,7 +1877,7 @@ impl TransitionSystem for DuplicateSpec {
             tail_ident: "DemoSpec".to_owned(),
             state_ty: "DemoState".to_owned(),
             action_ty: "DemoAction".to_owned(),
-            checker_config: None,
+            model_cases: None,
             subsystems: Vec::new(),
             registrations: BTreeMap::new(),
             doc_graphs: Vec::new(),
@@ -1978,7 +1911,7 @@ impl TransitionSystem for DuplicateSpec {
         let visible_edges = visible_reduced_edges(&graph);
         let diagram = render_state_graph_mermaid(&spec, &graph, &visible_edges);
 
-        assert!(diagram.contains("S0 -->|\"Manager(...)\"| S1"));
+        assert!(diagram.contains("S0 --> S1: Manager(...)"));
     }
 
     #[test]
@@ -1989,7 +1922,7 @@ impl TransitionSystem for DuplicateSpec {
             tail_ident: "DemoSpec".to_owned(),
             state_ty: "DemoState".to_owned(),
             action_ty: "DemoAction".to_owned(),
-            checker_config: None,
+            model_cases: None,
             subsystems: Vec::new(),
             registrations: BTreeMap::new(),
             doc_graphs: Vec::new(),
@@ -2023,10 +1956,9 @@ impl TransitionSystem for DuplicateSpec {
         let visible_edges = visible_reduced_edges(&graph);
         let diagram = render_state_graph_mermaid(&spec, &graph, &visible_edges);
 
-        assert!(diagram.contains("S0((\"S0<br/>phase: Booting\"))"));
-        assert!(diagram.contains("S1((\"S1<br/>phase: Listening\"))"));
+        assert!(diagram.contains("state \"S0\\nphase: Booting\" as S0"));
+        assert!(diagram.contains("state \"S1\\nphase: Listening\" as S1"));
         assert!(!diagram.contains("unchanged: false"));
-        assert!(!diagram.contains("from S0"));
     }
 
     #[test]
@@ -2037,7 +1969,7 @@ impl TransitionSystem for DuplicateSpec {
             tail_ident: "DemoSpec".to_owned(),
             state_ty: "DemoState".to_owned(),
             action_ty: "DemoAction".to_owned(),
-            checker_config: None,
+            model_cases: None,
             subsystems: Vec::new(),
             registrations: BTreeMap::new(),
             doc_graphs: Vec::new(),
@@ -2071,7 +2003,7 @@ impl TransitionSystem for DuplicateSpec {
         let visible_edges = visible_reduced_edges(&graph);
         let diagram = render_state_graph_mermaid(&spec, &graph, &visible_edges);
 
-        assert!(diagram.contains("S0 -->|\"Start{...}\"| S1"));
+        assert!(diagram.contains("S0 --> S1: Start{...}"));
     }
 
     #[test]
@@ -2082,7 +2014,7 @@ impl TransitionSystem for DuplicateSpec {
             tail_ident: "DemoSpec".to_owned(),
             state_ty: "DemoState".to_owned(),
             action_ty: "DemoAction".to_owned(),
-            checker_config: None,
+            model_cases: None,
             subsystems: Vec::new(),
             registrations: BTreeMap::new(),
             doc_graphs: Vec::new(),
@@ -2134,9 +2066,9 @@ impl TransitionSystem for DuplicateSpec {
         let visible_edges = visible_reduced_edges(&graph);
         let diagram = render_state_graph_mermaid(&spec, &graph, &visible_edges);
 
-        assert!(!diagram.contains("S0 -->|\"Retry\"| S0"));
-        assert!(diagram.contains("S0 -->|\"Advance\"| S1"));
-        assert!(diagram.contains("S1 -->|\"Loop\"| S1"));
+        assert!(!diagram.contains("S0 --> S0: Retry"));
+        assert!(diagram.contains("S0 --> S1: Advance"));
+        assert!(diagram.contains("S1 --> S1: Loop"));
     }
 
     #[test]
@@ -2147,7 +2079,7 @@ impl TransitionSystem for DuplicateSpec {
             tail_ident: "DemoSpec".to_owned(),
             state_ty: "DemoState".to_owned(),
             action_ty: "DemoAction".to_owned(),
-            checker_config: None,
+            model_cases: None,
             subsystems: Vec::new(),
             registrations: BTreeMap::new(),
             doc_graphs: vec![nirvash_core::DocGraphCase {
@@ -2195,32 +2127,18 @@ impl TransitionSystem for DuplicateSpec {
     }
 
     #[test]
-    fn copy_doc_assets_places_local_mermaid_runtime() {
-        let dir = tempdir().expect("tempdir");
-        let out_dir = dir.path().join("build-out");
-        fs::create_dir_all(&out_dir).expect("out");
-
-        let rerun_files = copy_doc_assets(&out_dir).expect("asset copy succeeds");
-        assert_eq!(
-            rerun_files,
-            vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(MERMAID_ASSET_SOURCE)]
-        );
-
-        let copied = out_dir
-            .join("doc")
-            .join("static.files")
-            .join(MERMAID_ASSET_DIR)
-            .join(MERMAID_ASSET_FILE);
-        assert!(
-            copied.exists(),
-            "expected copied asset at {}",
-            copied.display()
-        );
-    }
-
-    #[test]
     fn upper_snake_names_match_fragment_keys() {
         assert_eq!(to_upper_snake("ImagodSystemSpec"), "IMAGOD_SYSTEM_SPEC");
         assert_eq!(to_upper_snake("HTTPState"), "HTTPSTATE");
+    }
+
+    #[test]
+    fn mermaid_render_script_embeds_runtime_inline() {
+        let script = mermaid_render_script();
+
+        assert!(script.contains("runtime.textContent = "));
+        assert!(script.contains("nirvash mermaid runtime failed to initialize"));
+        assert!(!script.contains("mermaid.min.js"));
+        assert!(!script.contains("static.files"));
     }
 }

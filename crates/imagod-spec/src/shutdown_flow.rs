@@ -1,8 +1,5 @@
-use nirvash_core::{
-    BoundedDomain, Fairness, Ltl, ModelCheckConfig, Signature as FormalSignature, StatePredicate,
-    StepPredicate, TransitionSystem,
-};
-use nirvash_macros::{Signature, fairness, illegal, invariant, property, subsystem_spec};
+use nirvash_core::{Fairness, Ltl, ModelCase, StatePredicate, StepPredicate, TransitionSystem};
+use nirvash_macros::{Signature, fairness, invariant, property, subsystem_spec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
 pub enum ShutdownPhase {
@@ -14,8 +11,7 @@ pub enum ShutdownPhase {
     Completed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
-#[signature(custom)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShutdownFlowState {
     pub phase: ShutdownPhase,
     pub accepts_stopped: bool,
@@ -23,98 +19,6 @@ pub struct ShutdownFlowState {
     pub services_stopped: bool,
     pub maintenance_stopped: bool,
     pub forced_stop_attempted: bool,
-}
-
-impl ShutdownFlowStateSignatureSpec for ShutdownFlowState {
-    fn representatives() -> BoundedDomain<Self> {
-        BoundedDomain::new(vec![
-            ShutdownFlowSpec::new().initial_state(),
-            Self {
-                phase: ShutdownPhase::SignalReceived,
-                accepts_stopped: false,
-                sessions_drained: false,
-                services_stopped: false,
-                maintenance_stopped: false,
-                forced_stop_attempted: false,
-            },
-            Self {
-                phase: ShutdownPhase::DrainingSessions,
-                accepts_stopped: true,
-                sessions_drained: false,
-                services_stopped: false,
-                maintenance_stopped: false,
-                forced_stop_attempted: false,
-            },
-            Self {
-                phase: ShutdownPhase::StoppingServices,
-                accepts_stopped: true,
-                sessions_drained: true,
-                services_stopped: false,
-                maintenance_stopped: false,
-                forced_stop_attempted: false,
-            },
-            Self {
-                phase: ShutdownPhase::StoppingMaintenance,
-                accepts_stopped: true,
-                sessions_drained: true,
-                services_stopped: true,
-                maintenance_stopped: false,
-                forced_stop_attempted: false,
-            },
-            Self {
-                phase: ShutdownPhase::StoppingMaintenance,
-                accepts_stopped: true,
-                sessions_drained: true,
-                services_stopped: true,
-                maintenance_stopped: false,
-                forced_stop_attempted: true,
-            },
-            Self {
-                phase: ShutdownPhase::StoppingMaintenance,
-                accepts_stopped: true,
-                sessions_drained: true,
-                services_stopped: true,
-                maintenance_stopped: true,
-                forced_stop_attempted: false,
-            },
-            Self {
-                phase: ShutdownPhase::StoppingMaintenance,
-                accepts_stopped: true,
-                sessions_drained: true,
-                services_stopped: true,
-                maintenance_stopped: true,
-                forced_stop_attempted: true,
-            },
-            Self {
-                phase: ShutdownPhase::Completed,
-                accepts_stopped: true,
-                sessions_drained: true,
-                services_stopped: true,
-                maintenance_stopped: true,
-                forced_stop_attempted: false,
-            },
-            Self {
-                phase: ShutdownPhase::Completed,
-                accepts_stopped: true,
-                sessions_drained: true,
-                services_stopped: true,
-                maintenance_stopped: true,
-                forced_stop_attempted: true,
-            },
-        ])
-    }
-
-    fn signature_invariant(&self) -> bool {
-        let completed_requires_all_flags = !matches!(self.phase, ShutdownPhase::Completed)
-            || (self.accepts_stopped
-                && self.sessions_drained
-                && self.services_stopped
-                && self.maintenance_stopped);
-        let maintenance_after_services = !self.maintenance_stopped || self.services_stopped;
-        let services_after_sessions = !self.services_stopped || self.sessions_drained;
-
-        completed_requires_all_flags && maintenance_after_services && services_after_sessions
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
@@ -146,13 +50,92 @@ impl ShutdownFlowSpec {
             forced_stop_attempted: false,
         }
     }
+
+    fn action_vocabulary(&self) -> Vec<ShutdownFlowAction> {
+        vec![
+            ShutdownFlowAction::ReceiveSignal,
+            ShutdownFlowAction::StopAccepting,
+            ShutdownFlowAction::DrainSessions,
+            ShutdownFlowAction::StopServicesGraceful,
+            ShutdownFlowAction::StopServicesForced,
+            ShutdownFlowAction::StopMaintenance,
+            ShutdownFlowAction::Finalize,
+        ]
+    }
+
+    fn transition_state(
+        &self,
+        prev: &ShutdownFlowState,
+        action: &ShutdownFlowAction,
+    ) -> Option<ShutdownFlowState> {
+        let mut candidate = *prev;
+        let allowed = match action {
+            ShutdownFlowAction::ReceiveSignal if matches!(prev.phase, ShutdownPhase::Idle) => {
+                candidate.phase = ShutdownPhase::SignalReceived;
+                true
+            }
+            ShutdownFlowAction::StopAccepting
+                if matches!(prev.phase, ShutdownPhase::SignalReceived) =>
+            {
+                candidate.phase = ShutdownPhase::DrainingSessions;
+                candidate.accepts_stopped = true;
+                true
+            }
+            ShutdownFlowAction::DrainSessions
+                if matches!(prev.phase, ShutdownPhase::DrainingSessions) =>
+            {
+                candidate.phase = ShutdownPhase::StoppingServices;
+                candidate.sessions_drained = true;
+                true
+            }
+            ShutdownFlowAction::StopServicesGraceful
+                if matches!(prev.phase, ShutdownPhase::StoppingServices) =>
+            {
+                candidate.phase = ShutdownPhase::StoppingMaintenance;
+                candidate.services_stopped = true;
+                true
+            }
+            ShutdownFlowAction::StopServicesForced
+                if matches!(prev.phase, ShutdownPhase::StoppingServices) =>
+            {
+                candidate.phase = ShutdownPhase::StoppingMaintenance;
+                candidate.services_stopped = true;
+                candidate.forced_stop_attempted = true;
+                true
+            }
+            ShutdownFlowAction::StopMaintenance
+                if matches!(prev.phase, ShutdownPhase::StoppingMaintenance) =>
+            {
+                candidate.maintenance_stopped = true;
+                true
+            }
+            ShutdownFlowAction::Finalize
+                if matches!(prev.phase, ShutdownPhase::StoppingMaintenance)
+                    && prev.maintenance_stopped =>
+            {
+                candidate.phase = ShutdownPhase::Completed;
+                true
+            }
+            _ => false,
+        };
+        (allowed && shutdown_flow_state_valid(&candidate)).then_some(candidate)
+    }
 }
 
-fn shutdown_checker_config() -> ModelCheckConfig {
-    ModelCheckConfig {
-        check_deadlocks: false,
-        ..ModelCheckConfig::default()
-    }
+fn shutdown_flow_state_valid(state: &ShutdownFlowState) -> bool {
+    let completed_requires_all_flags = !matches!(state.phase, ShutdownPhase::Completed)
+        || (state.accepts_stopped
+            && state.sessions_drained
+            && state.services_stopped
+            && state.maintenance_stopped);
+    let maintenance_after_services = !state.maintenance_stopped || state.services_stopped;
+    let services_after_sessions = !state.services_stopped || state.sessions_drained;
+
+    completed_requires_all_flags && maintenance_after_services && services_after_sessions
+}
+
+fn shutdown_model_cases() -> Vec<ModelCase<ShutdownFlowState, ShutdownFlowAction>> {
+    vec![ModelCase::default().with_check_deadlocks(false)]
 }
 
 #[invariant(ShutdownFlowSpec)]
@@ -177,34 +160,6 @@ fn maintenance_stops_after_services() -> StatePredicate<ShutdownFlowState> {
 fn services_stop_after_session_drain() -> StatePredicate<ShutdownFlowState> {
     StatePredicate::new("services_stop_after_session_drain", |state| {
         !state.services_stopped || state.sessions_drained
-    })
-}
-
-#[illegal(ShutdownFlowSpec)]
-fn stop_accepting_before_signal() -> StepPredicate<ShutdownFlowState, ShutdownFlowAction> {
-    StepPredicate::new("stop_accepting_before_signal", |prev, action, _| {
-        matches!(action, ShutdownFlowAction::StopAccepting)
-            && !matches!(prev.phase, ShutdownPhase::SignalReceived)
-    })
-}
-
-#[illegal(ShutdownFlowSpec)]
-fn stop_services_before_sessions_drained() -> StepPredicate<ShutdownFlowState, ShutdownFlowAction> {
-    StepPredicate::new(
-        "stop_services_before_sessions_drained",
-        |prev, action, _| {
-            matches!(
-                action,
-                ShutdownFlowAction::StopServicesGraceful | ShutdownFlowAction::StopServicesForced
-            ) && !prev.sessions_drained
-        },
-    )
-}
-
-#[illegal(ShutdownFlowSpec)]
-fn finalize_before_maintenance_stops() -> StepPredicate<ShutdownFlowState, ShutdownFlowAction> {
-    StepPredicate::new("finalize_before_maintenance_stops", |prev, action, _| {
-        matches!(action, ShutdownFlowAction::Finalize) && !prev.maintenance_stopped
     })
 }
 
@@ -303,7 +258,7 @@ fn finalize_progress() -> Fairness<ShutdownFlowState, ShutdownFlowAction> {
     ))
 }
 
-#[subsystem_spec(checker_config(shutdown_checker_config))]
+#[subsystem_spec(model_cases(shutdown_model_cases))]
 impl TransitionSystem for ShutdownFlowSpec {
     type State = ShutdownFlowState;
     type Action = ShutdownFlowAction;
@@ -312,58 +267,18 @@ impl TransitionSystem for ShutdownFlowSpec {
         "shutdown_flow"
     }
 
-    fn init(&self, state: &Self::State) -> bool {
-        *state == self.initial_state()
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![self.initial_state()]
     }
 
-    fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
-        let mut candidate = *prev;
-        match action {
-            ShutdownFlowAction::ReceiveSignal if matches!(prev.phase, ShutdownPhase::Idle) => {
-                candidate.phase = ShutdownPhase::SignalReceived;
-            }
-            ShutdownFlowAction::StopAccepting
-                if matches!(prev.phase, ShutdownPhase::SignalReceived) =>
-            {
-                candidate.phase = ShutdownPhase::DrainingSessions;
-                candidate.accepts_stopped = true;
-            }
-            ShutdownFlowAction::DrainSessions
-                if matches!(prev.phase, ShutdownPhase::DrainingSessions) =>
-            {
-                candidate.phase = ShutdownPhase::StoppingServices;
-                candidate.sessions_drained = true;
-            }
-            ShutdownFlowAction::StopServicesGraceful
-                if matches!(prev.phase, ShutdownPhase::StoppingServices) =>
-            {
-                candidate.phase = ShutdownPhase::StoppingMaintenance;
-                candidate.services_stopped = true;
-            }
-            ShutdownFlowAction::StopServicesForced
-                if matches!(prev.phase, ShutdownPhase::StoppingServices) =>
-            {
-                candidate.phase = ShutdownPhase::StoppingMaintenance;
-                candidate.services_stopped = true;
-                candidate.forced_stop_attempted = true;
-            }
-            ShutdownFlowAction::StopMaintenance
-                if matches!(prev.phase, ShutdownPhase::StoppingMaintenance) =>
-            {
-                candidate.maintenance_stopped = true;
-            }
-            ShutdownFlowAction::Finalize
-                if matches!(prev.phase, ShutdownPhase::StoppingMaintenance)
-                    && prev.maintenance_stopped =>
-            {
-                candidate.phase = ShutdownPhase::Completed;
-            }
-            _ => return false,
-        }
+    fn actions(&self) -> Vec<Self::Action> {
+        self.action_vocabulary()
+    }
 
-        candidate == *next && candidate.invariant()
+    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+        self.transition_state(state, action)
     }
 }
 
-#[nirvash_macros::formal_tests(spec = ShutdownFlowSpec, init = initial_state)]
+#[nirvash_macros::formal_tests(spec = ShutdownFlowSpec)]
 const _: () = ();

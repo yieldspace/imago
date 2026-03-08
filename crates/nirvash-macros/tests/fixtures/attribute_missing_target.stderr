@@ -1,7 +1,7 @@
 error: missing target spec path; use #[invariant(SpecType)]
-  --> tests/fixtures/attribute_missing_target.rs:29:1
+  --> tests/fixtures/attribute_missing_target.rs:33:1
    |
-29 | #[invariant]
+33 | #[invariant]
    | ^^^^^^^^^^^^
    |
    = note: this error originates in the attribute macro `invariant` (in Nightly builds, run with -Z macro-backtrace for more info)

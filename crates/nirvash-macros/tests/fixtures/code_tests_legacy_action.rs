@@ -3,12 +3,11 @@ use std::sync::Mutex;
 use nirvash_core::{
     TransitionSystem,
     conformance::{
-        ActionApplier, ExpectedStep, ProtocolConformanceSpec, ProtocolRuntimeBinding,
-        StateObserver,
+        ActionApplier, ProtocolConformanceSpec, ProtocolRuntimeBinding, StateObserver,
     },
 };
-use nirvash_macros::code_tests;
 use nirvash_macros::Signature as FormalSignature;
+use nirvash_macros::code_tests;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Spec;
@@ -42,12 +41,20 @@ impl TransitionSystem for Spec {
     type State = State;
     type Action = Action;
 
-    fn init(&self, state: &Self::State) -> bool {
-        matches!(state, State::Idle)
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![State::Idle]
     }
 
-    fn next(&self, _prev: &Self::State, _action: &Self::Action, next: &Self::State) -> bool {
-        matches!(next, State::Idle)
+    fn actions(&self) -> Vec<Self::Action> {
+        vec![Action::Tick]
+    }
+
+    fn transition(&self, _state: &Self::State, _action: &Self::Action) -> Option<Self::State> {
+        Some(State::Idle)
+    }
+
+    fn successors(&self, _state: &Self::State) -> Vec<(Self::Action, Self::State)> {
+        vec![(Action::Tick, State::Idle)]
     }
 }
 
@@ -56,15 +63,13 @@ impl ProtocolConformanceSpec for Spec {
     type ObservedState = State;
     type ObservedOutput = Output;
 
-    fn expected_step(
+    fn expected_output(
         &self,
         _prev: &Self::State,
         _action: &Self::Action,
-    ) -> ExpectedStep<Self::State, Self::ExpectedOutput> {
-        ExpectedStep::Allowed {
-            next: State::Idle,
-            output: Output::Ack,
-        }
+        _next: Option<&Self::State>,
+    ) -> Self::ExpectedOutput {
+        Output::Ack
     }
 
     fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
@@ -111,11 +116,7 @@ impl StateObserver for Driver {
     }
 }
 
-fn initial_state() -> State {
-    State::Idle
-}
-
-#[code_tests(spec = Spec, binding = Binding, init = initial_state, action = Action)]
+#[code_tests(spec = Spec, binding = Binding, action = Action)]
 const _: () = ();
 
 fn main() {}

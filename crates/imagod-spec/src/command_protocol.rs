@@ -3,10 +3,10 @@ use imago_protocol::{
     CommandProtocolOutput, CommandProtocolStageId, OperationPhase,
 };
 use nirvash_core::{
-    DocGraphPolicy, ModelCheckConfig, Signature, StatePredicate, StepPredicate, TransitionSystem,
-    conformance::{ExpectedStep, ProtocolConformanceSpec},
+    DocGraphPolicy, ModelCase, StatePredicate, TransitionSystem,
+    conformance::ProtocolConformanceSpec,
 };
-use nirvash_macros::{Signature as FormalSignature, illegal, invariant, subsystem_spec};
+use nirvash_macros::{invariant, subsystem_spec};
 
 #[cfg(test)]
 use crate::bounds::{SPEC_COMMAND_STATES, SPEC_ERROR_CODES};
@@ -56,29 +56,7 @@ pub fn classify_error_code(code: CommandErrorKind) -> ErrorCodeClass {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
-#[signature(filter(self => {
-    let tracked_matches_fields =
-        self.tracked == self.lifecycle_state.is_some() && self.tracked == self.phase.is_some();
-    let cancel_matches_state = !self.cancel_requested
-        || matches!(
-            self.lifecycle_state,
-            Some(CommandLifecycleState::Accepted | CommandLifecycleState::Running)
-        );
-
-    tracked_matches_fields && cancel_matches_state
-}))]
-#[signature_invariant(self => {
-    let tracked_matches_fields =
-        self.tracked == self.lifecycle_state.is_some() && self.tracked == self.phase.is_some();
-    let cancel_matches_state = !self.cancel_requested
-        || matches!(
-            self.lifecycle_state,
-            Some(CommandLifecycleState::Accepted | CommandLifecycleState::Running)
-        );
-
-    tracked_matches_fields && cancel_matches_state
-})]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandProtocolState {
     pub tracked: bool,
     pub lifecycle_state: Option<CommandLifecycleState>,
@@ -131,6 +109,202 @@ impl CommandProtocolSpec {
             phase: None,
         }
     }
+
+    fn action_vocabulary(&self) -> Vec<CommandProtocolAction> {
+        vec![
+            CommandProtocolAction::Start(imago_protocol::CommandKind::Deploy),
+            CommandProtocolAction::Start(imago_protocol::CommandKind::Run),
+            CommandProtocolAction::Start(imago_protocol::CommandKind::Stop),
+            CommandProtocolAction::SetRunning,
+            CommandProtocolAction::RequestCancel,
+            CommandProtocolAction::SnapshotRunning,
+            CommandProtocolAction::MarkSpawned,
+            CommandProtocolAction::FinishSucceeded,
+            CommandProtocolAction::FinishFailed(CommandErrorKind::Internal),
+            CommandProtocolAction::FinishFailed(CommandErrorKind::Busy),
+            CommandProtocolAction::FinishCanceled,
+            CommandProtocolAction::Remove,
+        ]
+    }
+
+    fn transition_state(
+        &self,
+        prev: &CommandProtocolState,
+        action: &CommandProtocolAction,
+    ) -> Option<CommandProtocolState> {
+        match action {
+            CommandProtocolAction::Start(_) => {
+                if prev.tracked {
+                    None
+                } else {
+                    Some(CommandProtocolState {
+                        tracked: true,
+                        lifecycle_state: Some(CommandLifecycleState::Accepted),
+                        cancel_requested: false,
+                        phase: Some(OperationPhase::Starting),
+                    })
+                }
+            }
+            CommandProtocolAction::SetRunning => {
+                if !prev.tracked {
+                    None
+                } else {
+                    let mut next = *prev;
+                    next.lifecycle_state = Some(CommandLifecycleState::Running);
+                    Some(next)
+                }
+            }
+            CommandProtocolAction::RequestCancel => {
+                if !prev.tracked || prev.is_terminal() {
+                    None
+                } else if prev.phase == Some(OperationPhase::Spawned) {
+                    Some(*prev)
+                } else {
+                    let mut next = *prev;
+                    next.cancel_requested = true;
+                    Some(next)
+                }
+            }
+            CommandProtocolAction::SnapshotRunning => {
+                if !prev.tracked || prev.is_terminal() {
+                    None
+                } else {
+                    Some(*prev)
+                }
+            }
+            CommandProtocolAction::MarkSpawned => {
+                if !prev.tracked {
+                    None
+                } else {
+                    let mut next = *prev;
+                    next.phase = Some(OperationPhase::Spawned);
+                    if prev.cancel_requested {
+                        next.cancel_requested = false;
+                        Some(next)
+                    } else {
+                        Some(next)
+                    }
+                }
+            }
+            CommandProtocolAction::FinishSucceeded => {
+                if !prev.tracked {
+                    Some(*prev)
+                } else {
+                    let mut next = *prev;
+                    next.lifecycle_state = Some(CommandLifecycleState::Succeeded);
+                    next.cancel_requested = false;
+                    next.phase = Some(OperationPhase::Spawned);
+                    Some(next)
+                }
+            }
+            CommandProtocolAction::FinishFailed(_) => {
+                if !prev.tracked {
+                    Some(*prev)
+                } else {
+                    let mut next = *prev;
+                    next.lifecycle_state = Some(CommandLifecycleState::Failed);
+                    next.cancel_requested = false;
+                    next.phase = Some(OperationPhase::Spawned);
+                    Some(next)
+                }
+            }
+            CommandProtocolAction::FinishCanceled => {
+                if !prev.tracked {
+                    Some(*prev)
+                } else {
+                    let mut next = *prev;
+                    next.lifecycle_state = Some(CommandLifecycleState::Canceled);
+                    next.cancel_requested = false;
+                    next.phase = Some(OperationPhase::Spawned);
+                    Some(next)
+                }
+            }
+            CommandProtocolAction::Remove => {
+                if prev.tracked && prev.is_terminal() {
+                    Some(self.initial_state())
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn transition_output(
+        &self,
+        prev: &CommandProtocolState,
+        action: &CommandProtocolAction,
+        next: Option<&CommandProtocolState>,
+    ) -> CommandProtocolExpectedOutput {
+        match (action, next) {
+            (CommandProtocolAction::Start(_), None) => CommandProtocolExpectedOutput::Rejected {
+                code: CommandErrorKind::Busy,
+                stage: CommandProtocolStageId::CommandStart,
+            },
+            (CommandProtocolAction::SetRunning, None) => CommandProtocolExpectedOutput::Rejected {
+                code: CommandErrorKind::NotFound,
+                stage: CommandProtocolStageId::OperationState,
+            },
+            (CommandProtocolAction::RequestCancel, None) => {
+                CommandProtocolExpectedOutput::Rejected {
+                    code: CommandErrorKind::NotFound,
+                    stage: CommandProtocolStageId::CommandCancel,
+                }
+            }
+            (CommandProtocolAction::SnapshotRunning, None) => {
+                CommandProtocolExpectedOutput::Rejected {
+                    code: CommandErrorKind::NotFound,
+                    stage: CommandProtocolStageId::StateRequest,
+                }
+            }
+            (CommandProtocolAction::MarkSpawned, None) => CommandProtocolExpectedOutput::Rejected {
+                code: CommandErrorKind::NotFound,
+                stage: CommandProtocolStageId::OperationState,
+            },
+            (CommandProtocolAction::Remove, None) => CommandProtocolExpectedOutput::Rejected {
+                code: CommandErrorKind::NotFound,
+                stage: CommandProtocolStageId::OperationRemove,
+            },
+            (CommandProtocolAction::Start(_), Some(_))
+            | (CommandProtocolAction::FinishSucceeded, None)
+            | (CommandProtocolAction::FinishFailed(_), None)
+            | (CommandProtocolAction::FinishCanceled, None)
+            | (CommandProtocolAction::SetRunning, Some(_))
+            | (CommandProtocolAction::FinishSucceeded, Some(_))
+            | (CommandProtocolAction::FinishFailed(_), Some(_))
+            | (CommandProtocolAction::FinishCanceled, Some(_))
+            | (CommandProtocolAction::Remove, Some(_)) => CommandProtocolExpectedOutput::Ack,
+            (CommandProtocolAction::SnapshotRunning, Some(_)) => {
+                CommandProtocolExpectedOutput::StateSnapshot {
+                    state: prev
+                        .lifecycle_state
+                        .expect("tracked states always carry lifecycle state"),
+                    stage_non_empty: true,
+                    updated_at_non_zero: true,
+                }
+            }
+            (CommandProtocolAction::RequestCancel, Some(_)) => {
+                if prev.phase == Some(OperationPhase::Spawned) {
+                    CommandProtocolExpectedOutput::CancelResponse {
+                        cancellable: false,
+                        final_state: prev
+                            .lifecycle_state
+                            .expect("tracked states always carry lifecycle state"),
+                    }
+                } else {
+                    CommandProtocolExpectedOutput::CancelResponse {
+                        cancellable: true,
+                        final_state: CommandLifecycleState::Canceled,
+                    }
+                }
+            }
+            (CommandProtocolAction::MarkSpawned, Some(_)) => {
+                CommandProtocolExpectedOutput::SpawnResult {
+                    spawned: !prev.cancel_requested,
+                    canceled: prev.cancel_requested,
+                }
+            }
+        }
+    }
 }
 
 #[invariant(CommandProtocolSpec)]
@@ -149,44 +323,6 @@ fn cancel_only_while_inflight() -> StatePredicate<CommandProtocolState> {
                 Some(CommandLifecycleState::Accepted | CommandLifecycleState::Running)
             )
     })
-}
-
-#[illegal(CommandProtocolSpec)]
-fn start_while_tracked() -> StepPredicate<CommandProtocolState, CommandProtocolAction> {
-    StepPredicate::new("start_while_tracked", |prev, action, _| {
-        matches!(action, CommandProtocolAction::Start(_)) && prev.tracked
-    })
-}
-
-#[illegal(CommandProtocolSpec)]
-fn snapshot_when_absent_or_terminal() -> StepPredicate<CommandProtocolState, CommandProtocolAction>
-{
-    StepPredicate::new("snapshot_when_absent_or_terminal", |prev, action, _| {
-        matches!(action, CommandProtocolAction::SnapshotRunning)
-            && (!prev.tracked || prev.is_terminal())
-    })
-}
-
-#[illegal(CommandProtocolSpec)]
-fn cancel_when_absent_or_terminal() -> StepPredicate<CommandProtocolState, CommandProtocolAction> {
-    StepPredicate::new("cancel_when_absent_or_terminal", |prev, action, _| {
-        matches!(action, CommandProtocolAction::RequestCancel)
-            && (!prev.tracked || prev.is_terminal())
-    })
-}
-
-#[illegal(CommandProtocolSpec)]
-fn remove_when_absent_or_inflight() -> StepPredicate<CommandProtocolState, CommandProtocolAction> {
-    StepPredicate::new("remove_when_absent_or_inflight", |prev, action, _| {
-        matches!(action, CommandProtocolAction::Remove) && (!prev.tracked || !prev.is_terminal())
-    })
-}
-
-fn command_protocol_checker_config() -> ModelCheckConfig {
-    ModelCheckConfig {
-        check_deadlocks: false,
-        ..ModelCheckConfig::default()
-    }
 }
 
 fn command_protocol_doc_graph_policy() -> DocGraphPolicy<CommandProtocolState> {
@@ -210,10 +346,15 @@ fn command_protocol_doc_graph_policy() -> DocGraphPolicy<CommandProtocolState> {
         ))
 }
 
-#[subsystem_spec(
-    checker_config(command_protocol_checker_config),
-    doc_graph_policy(command_protocol_doc_graph_policy)
-)]
+fn command_protocol_model_cases() -> Vec<ModelCase<CommandProtocolState, CommandProtocolAction>> {
+    vec![
+        ModelCase::default()
+            .with_check_deadlocks(false)
+            .with_doc_graph_policy(command_protocol_doc_graph_policy()),
+    ]
+}
+
+#[subsystem_spec(model_cases(command_protocol_model_cases))]
 impl TransitionSystem for CommandProtocolSpec {
     type State = CommandProtocolState;
     type Action = CommandProtocolAction;
@@ -222,15 +363,16 @@ impl TransitionSystem for CommandProtocolSpec {
         "command_protocol"
     }
 
-    fn init(&self, state: &Self::State) -> bool {
-        *state == self.initial_state()
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![self.initial_state()]
     }
 
-    fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
-        match <Self as ProtocolConformanceSpec>::expected_step(self, prev, action) {
-            ExpectedStep::Allowed { next: expected, .. } => expected == *next && next.invariant(),
-            ExpectedStep::Rejected { .. } => false,
-        }
+    fn actions(&self) -> Vec<Self::Action> {
+        self.action_vocabulary()
+    }
+
+    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+        self.transition_state(state, action)
     }
 }
 
@@ -239,198 +381,13 @@ impl ProtocolConformanceSpec for CommandProtocolSpec {
     type ObservedState = CommandProtocolObservedState;
     type ObservedOutput = CommandProtocolOutput;
 
-    fn expected_step(
+    fn expected_output(
         &self,
         prev: &Self::State,
         action: &Self::Action,
-    ) -> ExpectedStep<Self::State, Self::ExpectedOutput> {
-        match action {
-            CommandProtocolAction::Start(_) => {
-                if prev.tracked {
-                    ExpectedStep::Rejected {
-                        output: CommandProtocolExpectedOutput::Rejected {
-                            code: CommandErrorKind::Busy,
-                            stage: CommandProtocolStageId::CommandStart,
-                        },
-                    }
-                } else {
-                    ExpectedStep::Allowed {
-                        next: CommandProtocolState {
-                            tracked: true,
-                            lifecycle_state: Some(CommandLifecycleState::Accepted),
-                            cancel_requested: false,
-                            phase: Some(OperationPhase::Starting),
-                        },
-                        output: CommandProtocolExpectedOutput::Ack,
-                    }
-                }
-            }
-            CommandProtocolAction::SetRunning => {
-                if !prev.tracked {
-                    ExpectedStep::Rejected {
-                        output: CommandProtocolExpectedOutput::Rejected {
-                            code: CommandErrorKind::NotFound,
-                            stage: CommandProtocolStageId::OperationState,
-                        },
-                    }
-                } else {
-                    let mut next = *prev;
-                    next.lifecycle_state = Some(CommandLifecycleState::Running);
-                    ExpectedStep::Allowed {
-                        next,
-                        output: CommandProtocolExpectedOutput::Ack,
-                    }
-                }
-            }
-            CommandProtocolAction::RequestCancel => {
-                if !prev.tracked || prev.is_terminal() {
-                    ExpectedStep::Rejected {
-                        output: CommandProtocolExpectedOutput::Rejected {
-                            code: CommandErrorKind::NotFound,
-                            stage: CommandProtocolStageId::CommandCancel,
-                        },
-                    }
-                } else if prev.phase == Some(OperationPhase::Spawned) {
-                    ExpectedStep::Allowed {
-                        next: *prev,
-                        output: CommandProtocolExpectedOutput::CancelResponse {
-                            cancellable: false,
-                            final_state: prev
-                                .lifecycle_state
-                                .expect("tracked states always carry lifecycle state"),
-                        },
-                    }
-                } else {
-                    let mut next = *prev;
-                    next.cancel_requested = true;
-                    ExpectedStep::Allowed {
-                        next,
-                        output: CommandProtocolExpectedOutput::CancelResponse {
-                            cancellable: true,
-                            final_state: CommandLifecycleState::Canceled,
-                        },
-                    }
-                }
-            }
-            CommandProtocolAction::SnapshotRunning => {
-                if !prev.tracked || prev.is_terminal() {
-                    ExpectedStep::Rejected {
-                        output: CommandProtocolExpectedOutput::Rejected {
-                            code: CommandErrorKind::NotFound,
-                            stage: CommandProtocolStageId::StateRequest,
-                        },
-                    }
-                } else {
-                    ExpectedStep::Allowed {
-                        next: *prev,
-                        output: CommandProtocolExpectedOutput::StateSnapshot {
-                            state: prev
-                                .lifecycle_state
-                                .expect("tracked states always carry lifecycle state"),
-                            stage_non_empty: true,
-                            updated_at_non_zero: true,
-                        },
-                    }
-                }
-            }
-            CommandProtocolAction::MarkSpawned => {
-                if !prev.tracked {
-                    ExpectedStep::Rejected {
-                        output: CommandProtocolExpectedOutput::Rejected {
-                            code: CommandErrorKind::NotFound,
-                            stage: CommandProtocolStageId::OperationState,
-                        },
-                    }
-                } else {
-                    let mut next = *prev;
-                    next.phase = Some(OperationPhase::Spawned);
-                    if prev.cancel_requested {
-                        next.cancel_requested = false;
-                        ExpectedStep::Allowed {
-                            next,
-                            output: CommandProtocolExpectedOutput::SpawnResult {
-                                spawned: false,
-                                canceled: true,
-                            },
-                        }
-                    } else {
-                        ExpectedStep::Allowed {
-                            next,
-                            output: CommandProtocolExpectedOutput::SpawnResult {
-                                spawned: true,
-                                canceled: false,
-                            },
-                        }
-                    }
-                }
-            }
-            CommandProtocolAction::FinishSucceeded => {
-                if !prev.tracked {
-                    ExpectedStep::Allowed {
-                        next: *prev,
-                        output: CommandProtocolExpectedOutput::Ack,
-                    }
-                } else {
-                    let mut next = *prev;
-                    next.lifecycle_state = Some(CommandLifecycleState::Succeeded);
-                    next.cancel_requested = false;
-                    next.phase = Some(OperationPhase::Spawned);
-                    ExpectedStep::Allowed {
-                        next,
-                        output: CommandProtocolExpectedOutput::Ack,
-                    }
-                }
-            }
-            CommandProtocolAction::FinishFailed(_) => {
-                if !prev.tracked {
-                    ExpectedStep::Allowed {
-                        next: *prev,
-                        output: CommandProtocolExpectedOutput::Ack,
-                    }
-                } else {
-                    let mut next = *prev;
-                    next.lifecycle_state = Some(CommandLifecycleState::Failed);
-                    next.cancel_requested = false;
-                    next.phase = Some(OperationPhase::Spawned);
-                    ExpectedStep::Allowed {
-                        next,
-                        output: CommandProtocolExpectedOutput::Ack,
-                    }
-                }
-            }
-            CommandProtocolAction::FinishCanceled => {
-                if !prev.tracked {
-                    ExpectedStep::Allowed {
-                        next: *prev,
-                        output: CommandProtocolExpectedOutput::Ack,
-                    }
-                } else {
-                    let mut next = *prev;
-                    next.lifecycle_state = Some(CommandLifecycleState::Canceled);
-                    next.cancel_requested = false;
-                    next.phase = Some(OperationPhase::Spawned);
-                    ExpectedStep::Allowed {
-                        next,
-                        output: CommandProtocolExpectedOutput::Ack,
-                    }
-                }
-            }
-            CommandProtocolAction::Remove => {
-                if prev.tracked && prev.is_terminal() {
-                    ExpectedStep::Allowed {
-                        next: self.initial_state(),
-                        output: CommandProtocolExpectedOutput::Ack,
-                    }
-                } else {
-                    ExpectedStep::Rejected {
-                        output: CommandProtocolExpectedOutput::Rejected {
-                            code: CommandErrorKind::NotFound,
-                            stage: CommandProtocolStageId::OperationRemove,
-                        },
-                    }
-                }
-            }
-        }
+        next: Option<&Self::State>,
+    ) -> Self::ExpectedOutput {
+        self.transition_output(prev, action, next)
     }
 
     fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
@@ -477,7 +434,7 @@ impl ProtocolConformanceSpec for CommandProtocolSpec {
     }
 }
 
-#[nirvash_macros::formal_tests(spec = CommandProtocolSpec, init = initial_state)]
+#[nirvash_macros::formal_tests(spec = CommandProtocolSpec)]
 const _: () = ();
 
 pub fn initial_state() -> CommandProtocolState {
@@ -486,7 +443,7 @@ pub fn initial_state() -> CommandProtocolState {
 
 #[cfg(test)]
 mod tests {
-    use nirvash_core::{ModelChecker, TemporalSpec, reduce_doc_graph};
+    use nirvash_core::{ModelCaseSource, ModelChecker, reduce_doc_graph};
 
     use super::*;
 
@@ -503,7 +460,8 @@ mod tests {
     #[test]
     fn doc_graph_policy_keeps_cancel_and_terminal_edge_cases() {
         let spec = CommandProtocolSpec::new();
-        let snapshot = ModelChecker::new(&spec)
+        let model_case = spec.model_cases().into_iter().next().expect("model case");
+        let snapshot = ModelChecker::for_case(&spec, model_case.clone())
             .reachable_graph_snapshot()
             .expect("reachable graph snapshot");
         let original_edge_count = snapshot.edges.iter().map(Vec::len).sum::<usize>();
@@ -512,7 +470,8 @@ mod tests {
             .iter()
             .enumerate()
             .filter_map(|(index, state)| {
-                spec.doc_graph_policy()
+                model_case
+                    .doc_graph_policy()
                     .focus_states
                     .iter()
                     .any(|predicate| predicate.eval(state))
@@ -543,8 +502,8 @@ mod tests {
             truncated: snapshot.truncated,
             stutter_omitted: snapshot.stutter_omitted,
             focus_indices,
-            reduction: spec.doc_graph_policy().reduction,
-            max_edge_actions_in_label: spec.doc_graph_policy().max_edge_actions_in_label,
+            reduction: model_case.doc_graph_policy().reduction,
+            max_edge_actions_in_label: model_case.doc_graph_policy().max_edge_actions_in_label,
         });
 
         assert!(

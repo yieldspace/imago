@@ -1,5 +1,5 @@
 error: context = ... is no longer supported; use binding = ... and implement context() on ProtocolRuntimeBinding<Spec>
-   --> tests/fixtures/code_tests_legacy_context.rs:118:68
+   --> tests/fixtures/code_tests_legacy_context.rs:119:46
     |
-118 | #[code_tests(spec = Spec, binding = Binding, init = initial_state, context = tests::driver_context)]
-    |                                                                    ^^^^^^^
+119 | #[code_tests(spec = Spec, binding = Binding, context = tests::driver_context)]
+    |                                              ^^^^^^^

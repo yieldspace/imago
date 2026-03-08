@@ -1,4 +1,4 @@
-use nirvash_core::{ModelCheckConfig, Signature as FormalSignature, TransitionSystem};
+use nirvash_core::{ModelCase, TransitionSystem};
 use nirvash_macros::{Signature, subsystem_spec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
@@ -18,39 +18,7 @@ pub enum ManagerShellPhase {
     Stopped,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
-#[signature(filter(self => match self.phase {
-    ManagerShellPhase::Booting => {
-        !self.config_loaded
-            && matches!(self.plugin_gc, TaskState::NotStarted)
-            && matches!(self.boot_restore, TaskState::NotStarted)
-    }
-    ManagerShellPhase::ConfigReady => self.config_loaded,
-    ManagerShellPhase::Restoring => {
-        self.config_loaded && !matches!(self.plugin_gc, TaskState::NotStarted)
-    }
-    ManagerShellPhase::Listening
-    | ManagerShellPhase::ShutdownRequested
-    | ManagerShellPhase::Stopped => {
-        self.config_loaded && !matches!(self.boot_restore, TaskState::NotStarted)
-    }
-}))]
-#[signature_invariant(self => match self.phase {
-    ManagerShellPhase::Booting => {
-        !self.config_loaded
-            && matches!(self.plugin_gc, TaskState::NotStarted)
-            && matches!(self.boot_restore, TaskState::NotStarted)
-    }
-    ManagerShellPhase::ConfigReady => self.config_loaded,
-    ManagerShellPhase::Restoring => {
-        self.config_loaded && !matches!(self.plugin_gc, TaskState::NotStarted)
-    }
-    ManagerShellPhase::Listening
-    | ManagerShellPhase::ShutdownRequested
-    | ManagerShellPhase::Stopped => {
-        self.config_loaded && !matches!(self.boot_restore, TaskState::NotStarted)
-    }
-})]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ManagerShellState {
     pub phase: ManagerShellPhase,
     pub config_loaded: bool,
@@ -91,11 +59,8 @@ impl ManagerShellSpec {
     }
 }
 
-fn manager_shell_checker_config() -> ModelCheckConfig {
-    ModelCheckConfig {
-        check_deadlocks: false,
-        ..ModelCheckConfig::default()
-    }
+fn manager_shell_model_cases() -> Vec<ModelCase<ManagerShellState, ManagerShellAction>> {
+    vec![ModelCase::default().with_check_deadlocks(false)]
 }
 
 nirvash_core::invariant!(ManagerShellSpec, listening_requires_config(state) => {
@@ -116,25 +81,6 @@ nirvash_core::invariant!(ManagerShellSpec, booting_keeps_boot_tasks_idle(state) 
     !matches!(state.phase, ManagerShellPhase::Booting)
         || (matches!(state.plugin_gc, TaskState::NotStarted)
             && matches!(state.boot_restore, TaskState::NotStarted))
-});
-
-nirvash_core::illegal!(ManagerShellSpec, listen_without_config(prev, action, next) => {
-    let _ = next;
-    matches!(action, ManagerShellAction::StartListening) && !prev.config_loaded
-});
-
-nirvash_core::illegal!(ManagerShellSpec, shutdown_before_listen(prev, action, next) => {
-    let _ = next;
-    matches!(action, ManagerShellAction::BeginShutdown)
-        && !matches!(prev.phase, ManagerShellPhase::Listening)
-});
-
-nirvash_core::illegal!(ManagerShellSpec, restore_before_plugin_gc(prev, action, next) => {
-    let _ = next;
-    matches!(
-        action,
-        ManagerShellAction::RunBootRestoreSucceeded | ManagerShellAction::RunBootRestoreFailed
-    ) && matches!(prev.plugin_gc, TaskState::NotStarted)
 });
 
 nirvash_core::property!(ManagerShellSpec, booting_leads_to_config_ready => leads_to(
@@ -205,7 +151,7 @@ nirvash_core::fairness!(weak ManagerShellSpec, restore_progress(prev, action, ne
         && matches!(next.phase, ManagerShellPhase::Listening)
 });
 
-#[subsystem_spec(checker_config(manager_shell_checker_config))]
+#[subsystem_spec(model_cases(manager_shell_model_cases))]
 impl TransitionSystem for ManagerShellSpec {
     type State = ManagerShellState;
     type Action = ManagerShellAction;
@@ -214,102 +160,103 @@ impl TransitionSystem for ManagerShellSpec {
         "manager_shell"
     }
 
-    fn init(&self, state: &Self::State) -> bool {
-        *state == self.initial_state()
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![self.initial_state()]
     }
 
-    fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
-        let mut candidate = *prev;
-        match action {
-            ManagerShellAction::LoadExistingConfig
-                if matches!(prev.phase, ManagerShellPhase::Booting) =>
-            {
-                candidate.phase = ManagerShellPhase::ConfigReady;
-                candidate.config_loaded = true;
-                candidate.created_default = false;
-            }
-            ManagerShellAction::CreateDefaultConfig
-                if matches!(prev.phase, ManagerShellPhase::Booting) =>
-            {
-                candidate.phase = ManagerShellPhase::ConfigReady;
-                candidate.config_loaded = true;
-                candidate.created_default = true;
-            }
-            ManagerShellAction::RunPluginGcSucceeded
-                if matches!(prev.phase, ManagerShellPhase::ConfigReady) =>
-            {
-                candidate.phase = ManagerShellPhase::Restoring;
-                candidate.plugin_gc = TaskState::Succeeded;
-            }
-            ManagerShellAction::RunPluginGcFailed
-                if matches!(prev.phase, ManagerShellPhase::ConfigReady) =>
-            {
-                candidate.phase = ManagerShellPhase::Restoring;
-                candidate.plugin_gc = TaskState::Failed;
-            }
-            ManagerShellAction::RunBootRestoreSucceeded
-                if matches!(prev.phase, ManagerShellPhase::Restoring) =>
-            {
-                candidate.phase = ManagerShellPhase::Listening;
-                candidate.boot_restore = TaskState::Succeeded;
-            }
-            ManagerShellAction::RunBootRestoreFailed
-                if matches!(prev.phase, ManagerShellPhase::Restoring) =>
-            {
-                candidate.phase = ManagerShellPhase::Listening;
-                candidate.boot_restore = TaskState::Failed;
-            }
-            ManagerShellAction::StartListening
-                if matches!(prev.phase, ManagerShellPhase::ConfigReady) =>
-            {
-                candidate.phase = ManagerShellPhase::Listening;
-                candidate.boot_restore = TaskState::Succeeded;
-            }
-            ManagerShellAction::BeginShutdown
-                if matches!(prev.phase, ManagerShellPhase::Listening) =>
-            {
-                candidate.phase = ManagerShellPhase::ShutdownRequested;
-            }
-            ManagerShellAction::FinishShutdown
-                if matches!(prev.phase, ManagerShellPhase::ShutdownRequested) =>
-            {
-                candidate.phase = ManagerShellPhase::Stopped;
-            }
-            _ => return false,
-        }
+    fn actions(&self) -> Vec<Self::Action> {
+        action_vocabulary()
+    }
 
-        candidate == *next && candidate.invariant()
+    fn transition(&self, prev: &Self::State, action: &Self::Action) -> Option<Self::State> {
+        transition_state(prev, action)
     }
 }
 
-#[nirvash_macros::formal_tests(spec = ManagerShellSpec, init = initial_state)]
+#[nirvash_macros::formal_tests(spec = ManagerShellSpec)]
 const _: () = ();
 
-#[cfg(test)]
-mod tests {
-    use nirvash_core::Signature;
+fn action_vocabulary() -> Vec<ManagerShellAction> {
+    vec![
+        ManagerShellAction::LoadExistingConfig,
+        ManagerShellAction::CreateDefaultConfig,
+        ManagerShellAction::RunPluginGcSucceeded,
+        ManagerShellAction::RunPluginGcFailed,
+        ManagerShellAction::RunBootRestoreSucceeded,
+        ManagerShellAction::RunBootRestoreFailed,
+        ManagerShellAction::StartListening,
+        ManagerShellAction::BeginShutdown,
+        ManagerShellAction::FinishShutdown,
+    ]
+}
 
-    use super::*;
-
-    #[test]
-    fn bounded_domain_filters_out_phase_inconsistent_states() {
-        let values = ManagerShellState::bounded_domain().into_vec();
-
-        assert!(values.iter().all(|state| match state.phase {
-            ManagerShellPhase::Booting => {
-                !state.config_loaded
-                    && matches!(state.plugin_gc, TaskState::NotStarted)
-                    && matches!(state.boot_restore, TaskState::NotStarted)
-            }
-            ManagerShellPhase::ConfigReady => state.config_loaded,
-            ManagerShellPhase::Restoring => {
-                state.config_loaded && !matches!(state.plugin_gc, TaskState::NotStarted)
-            }
-            ManagerShellPhase::Listening
-            | ManagerShellPhase::ShutdownRequested
-            | ManagerShellPhase::Stopped => {
-                state.config_loaded && !matches!(state.boot_restore, TaskState::NotStarted)
-            }
-        }));
+fn transition_state(
+    prev: &ManagerShellState,
+    action: &ManagerShellAction,
+) -> Option<ManagerShellState> {
+    let mut candidate = *prev;
+    match action {
+        ManagerShellAction::LoadExistingConfig
+            if matches!(prev.phase, ManagerShellPhase::Booting) =>
+        {
+            candidate.phase = ManagerShellPhase::ConfigReady;
+            candidate.config_loaded = true;
+            candidate.created_default = false;
+            Some(candidate)
+        }
+        ManagerShellAction::CreateDefaultConfig
+            if matches!(prev.phase, ManagerShellPhase::Booting) =>
+        {
+            candidate.phase = ManagerShellPhase::ConfigReady;
+            candidate.config_loaded = true;
+            candidate.created_default = true;
+            Some(candidate)
+        }
+        ManagerShellAction::RunPluginGcSucceeded
+            if matches!(prev.phase, ManagerShellPhase::ConfigReady) =>
+        {
+            candidate.phase = ManagerShellPhase::Restoring;
+            candidate.plugin_gc = TaskState::Succeeded;
+            Some(candidate)
+        }
+        ManagerShellAction::RunPluginGcFailed
+            if matches!(prev.phase, ManagerShellPhase::ConfigReady) =>
+        {
+            candidate.phase = ManagerShellPhase::Restoring;
+            candidate.plugin_gc = TaskState::Failed;
+            Some(candidate)
+        }
+        ManagerShellAction::RunBootRestoreSucceeded
+            if matches!(prev.phase, ManagerShellPhase::Restoring) =>
+        {
+            candidate.phase = ManagerShellPhase::Listening;
+            candidate.boot_restore = TaskState::Succeeded;
+            Some(candidate)
+        }
+        ManagerShellAction::RunBootRestoreFailed
+            if matches!(prev.phase, ManagerShellPhase::Restoring) =>
+        {
+            candidate.phase = ManagerShellPhase::Listening;
+            candidate.boot_restore = TaskState::Failed;
+            Some(candidate)
+        }
+        ManagerShellAction::StartListening
+            if matches!(prev.phase, ManagerShellPhase::ConfigReady) =>
+        {
+            candidate.phase = ManagerShellPhase::Listening;
+            candidate.boot_restore = TaskState::Succeeded;
+            Some(candidate)
+        }
+        ManagerShellAction::BeginShutdown if matches!(prev.phase, ManagerShellPhase::Listening) => {
+            candidate.phase = ManagerShellPhase::ShutdownRequested;
+            Some(candidate)
+        }
+        ManagerShellAction::FinishShutdown
+            if matches!(prev.phase, ManagerShellPhase::ShutdownRequested) =>
+        {
+            candidate.phase = ManagerShellPhase::Stopped;
+            Some(candidate)
+        }
+        _ => None,
     }
 }

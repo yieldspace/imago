@@ -1,12 +1,9 @@
 use imagod_ipc::RunnerAppType;
-use nirvash_core::{
-    BoundedDomain, Fairness, Ltl, Signature, StatePredicate, StepPredicate, TransitionSystem,
-};
-use nirvash_macros::{
-    Signature as FormalSignature, fairness, illegal, invariant, property, subsystem_spec,
-};
+use nirvash_core::{Fairness, Ltl, ModelCase, StatePredicate, StepPredicate, TransitionSystem};
+use nirvash_macros::{Signature as FormalSignature, fairness, invariant, property, subsystem_spec};
 
-use crate::bounds::{EpochTicks, HttpQueueDepth, SPEC_RUNNER_APP_TYPES};
+#[cfg(test)]
+use crate::bounds::SPEC_RUNNER_APP_TYPES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunnerModeClass {
@@ -27,7 +24,6 @@ pub fn classify_runner_mode(app_type: RunnerAppType) -> RunnerModeClass {
 pub enum RuntimePhase {
     Idle,
     ComponentValidated,
-    Ready,
     Serving,
     Failed,
 }
@@ -50,74 +46,22 @@ pub enum WasmTuningClass {
 pub enum SocketPolicyClass {
     NotApplicable,
     InboundOnly,
-    OutboundOnly,
-    Bidirectional,
-    Invalid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
-#[signature(custom)]
+pub enum HttpQueueClass {
+    Empty,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunnerRuntimeState {
     pub mode: Option<RunnerAppType>,
     pub phase: RuntimePhase,
-    pub http_queue_depth: HttpQueueDepth,
-    pub epoch_ticks: EpochTicks,
+    pub http_queue: HttpQueueClass,
     pub component: ComponentLoadClass,
     pub tuning: WasmTuningClass,
     pub socket_policy: SocketPolicyClass,
-}
-
-impl RunnerRuntimeStateSignatureSpec for RunnerRuntimeState {
-    fn representatives() -> BoundedDomain<Self> {
-        BoundedDomain::new(vec![
-            RunnerRuntimeSpec::new().initial_state(),
-            Self {
-                mode: Some(RunnerAppType::Http),
-                phase: RuntimePhase::Serving,
-                http_queue_depth: HttpQueueDepth::new(1).expect("within bounds"),
-                epoch_ticks: EpochTicks::new(1).expect("within bounds"),
-                component: ComponentLoadClass::Loadable,
-                tuning: WasmTuningClass::Default,
-                socket_policy: SocketPolicyClass::NotApplicable,
-            },
-            Self {
-                mode: Some(RunnerAppType::Socket),
-                phase: RuntimePhase::Ready,
-                http_queue_depth: HttpQueueDepth::new(0).expect("within bounds"),
-                epoch_ticks: EpochTicks::new(0).expect("within bounds"),
-                component: ComponentLoadClass::Loadable,
-                tuning: WasmTuningClass::CustomValid,
-                socket_policy: SocketPolicyClass::InboundOnly,
-            },
-            Self {
-                mode: Some(RunnerAppType::Rpc),
-                phase: RuntimePhase::Failed,
-                http_queue_depth: HttpQueueDepth::new(0).expect("within bounds"),
-                epoch_ticks: EpochTicks::new(2).expect("within bounds"),
-                component: ComponentLoadClass::Invalid,
-                tuning: WasmTuningClass::Invalid,
-                socket_policy: SocketPolicyClass::NotApplicable,
-            },
-        ])
-    }
-
-    fn signature_invariant(&self) -> bool {
-        let serving_requires_component = !matches!(self.phase, RuntimePhase::Serving)
-            || matches!(self.component, ComponentLoadClass::Loadable);
-        let http_queue_requires_http_mode = self.http_queue_depth.is_zero()
-            || (matches!(self.mode, Some(RunnerAppType::Http))
-                && matches!(self.phase, RuntimePhase::Serving));
-        let socket_policy_matches_mode =
-            matches!(self.socket_policy, SocketPolicyClass::NotApplicable)
-                || matches!(self.mode, Some(RunnerAppType::Socket));
-        let invalid_tuning_cannot_serve = !matches!(self.tuning, WasmTuningClass::Invalid)
-            || !matches!(self.phase, RuntimePhase::Serving);
-
-        serving_requires_component
-            && http_queue_requires_http_mode
-            && socket_policy_matches_mode
-            && invalid_tuning_cannot_serve
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,33 +75,7 @@ pub enum RunnerRuntimeAction {
     StartServing,
     AcceptHttpRequest,
     DrainHttpRequest,
-    InvokeRpc,
-    RunCli,
-    AcceptSocketTraffic,
-    Tick,
     FailRuntime,
-}
-
-impl Signature for RunnerRuntimeAction {
-    fn bounded_domain() -> BoundedDomain<Self> {
-        let mut values = vec![
-            Self::ApplyDefaultTuning,
-            Self::ApplyCustomTuning,
-            Self::ApplyInvalidTuning,
-            Self::ValidateComponentLoadable,
-            Self::ValidateComponentInvalid,
-            Self::StartServing,
-            Self::AcceptHttpRequest,
-            Self::DrainHttpRequest,
-            Self::InvokeRpc,
-            Self::RunCli,
-            Self::AcceptSocketTraffic,
-            Self::Tick,
-            Self::FailRuntime,
-        ];
-        values.extend(SPEC_RUNNER_APP_TYPES.into_iter().map(Self::SelectMode));
-        BoundedDomain::new(values)
-    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -172,13 +90,124 @@ impl RunnerRuntimeSpec {
         RunnerRuntimeState {
             mode: None,
             phase: RuntimePhase::Idle,
-            http_queue_depth: HttpQueueDepth::new(0).expect("within bounds"),
-            epoch_ticks: EpochTicks::new(0).expect("within bounds"),
+            http_queue: HttpQueueClass::Empty,
             component: ComponentLoadClass::Unknown,
             tuning: WasmTuningClass::Default,
             socket_policy: SocketPolicyClass::NotApplicable,
         }
     }
+
+    fn action_vocabulary(&self) -> Vec<RunnerRuntimeAction> {
+        vec![
+            RunnerRuntimeAction::SelectMode(RunnerAppType::Cli),
+            RunnerRuntimeAction::SelectMode(RunnerAppType::Rpc),
+            RunnerRuntimeAction::SelectMode(RunnerAppType::Http),
+            RunnerRuntimeAction::SelectMode(RunnerAppType::Socket),
+            RunnerRuntimeAction::ApplyDefaultTuning,
+            RunnerRuntimeAction::ApplyCustomTuning,
+            RunnerRuntimeAction::ApplyInvalidTuning,
+            RunnerRuntimeAction::ValidateComponentLoadable,
+            RunnerRuntimeAction::ValidateComponentInvalid,
+            RunnerRuntimeAction::StartServing,
+            RunnerRuntimeAction::AcceptHttpRequest,
+            RunnerRuntimeAction::DrainHttpRequest,
+            RunnerRuntimeAction::FailRuntime,
+        ]
+    }
+
+    fn transition_state(
+        &self,
+        prev: &RunnerRuntimeState,
+        action: &RunnerRuntimeAction,
+    ) -> Option<RunnerRuntimeState> {
+        let mut candidate = *prev;
+        let allowed = match action {
+            RunnerRuntimeAction::SelectMode(app_type)
+                if prev.mode.is_none() && matches!(prev.phase, RuntimePhase::Idle) =>
+            {
+                candidate.mode = Some(*app_type);
+                candidate.socket_policy = match app_type {
+                    RunnerAppType::Cli | RunnerAppType::Rpc | RunnerAppType::Http => {
+                        SocketPolicyClass::NotApplicable
+                    }
+                    RunnerAppType::Socket => SocketPolicyClass::InboundOnly,
+                };
+                true
+            }
+            RunnerRuntimeAction::ApplyDefaultTuning
+                if prev.mode.is_some() && matches!(prev.phase, RuntimePhase::Idle) =>
+            {
+                candidate.tuning = WasmTuningClass::Default;
+                true
+            }
+            RunnerRuntimeAction::ApplyCustomTuning
+                if prev.mode.is_some() && matches!(prev.phase, RuntimePhase::Idle) =>
+            {
+                candidate.tuning = WasmTuningClass::CustomValid;
+                true
+            }
+            RunnerRuntimeAction::ApplyInvalidTuning
+                if prev.mode.is_some() && matches!(prev.phase, RuntimePhase::Idle) =>
+            {
+                candidate.tuning = WasmTuningClass::Invalid;
+                true
+            }
+            RunnerRuntimeAction::ValidateComponentLoadable
+                if prev.mode.is_some()
+                    && matches!(prev.phase, RuntimePhase::Idle)
+                    && !matches!(prev.tuning, WasmTuningClass::Invalid) =>
+            {
+                candidate.component = ComponentLoadClass::Loadable;
+                candidate.phase = RuntimePhase::ComponentValidated;
+                true
+            }
+            RunnerRuntimeAction::ValidateComponentInvalid
+                if prev.mode.is_some() && matches!(prev.phase, RuntimePhase::Idle) =>
+            {
+                candidate.component = ComponentLoadClass::Invalid;
+                candidate.phase = RuntimePhase::Failed;
+                true
+            }
+            RunnerRuntimeAction::StartServing
+                if matches!(prev.phase, RuntimePhase::ComponentValidated)
+                    && matches!(prev.component, ComponentLoadClass::Loadable)
+                    && !matches!(prev.tuning, WasmTuningClass::Invalid) =>
+            {
+                candidate.phase = RuntimePhase::Serving;
+                candidate.http_queue = HttpQueueClass::Empty;
+                true
+            }
+            RunnerRuntimeAction::AcceptHttpRequest
+                if matches!(prev.mode, Some(RunnerAppType::Http))
+                    && matches!(prev.phase, RuntimePhase::Serving)
+                    && matches!(prev.http_queue, HttpQueueClass::Empty) =>
+            {
+                candidate.http_queue = HttpQueueClass::Full;
+                true
+            }
+            RunnerRuntimeAction::DrainHttpRequest
+                if matches!(prev.mode, Some(RunnerAppType::Http))
+                    && matches!(prev.phase, RuntimePhase::Serving)
+                    && matches!(prev.http_queue, HttpQueueClass::Full) =>
+            {
+                candidate.http_queue = HttpQueueClass::Empty;
+                true
+            }
+            RunnerRuntimeAction::FailRuntime
+                if prev.mode.is_some() && !matches!(prev.phase, RuntimePhase::Failed) =>
+            {
+                candidate.phase = RuntimePhase::Failed;
+                candidate.http_queue = HttpQueueClass::Empty;
+                true
+            }
+            _ => false,
+        };
+        allowed.then_some(candidate)
+    }
+}
+
+fn runner_runtime_model_cases() -> Vec<ModelCase<RunnerRuntimeState, RunnerRuntimeAction>> {
+    vec![ModelCase::default().with_check_deadlocks(false)]
 }
 
 #[invariant(RunnerRuntimeSpec)]
@@ -192,7 +221,7 @@ fn serving_requires_loadable_component() -> StatePredicate<RunnerRuntimeState> {
 #[invariant(RunnerRuntimeSpec)]
 fn http_queue_requires_http_mode() -> StatePredicate<RunnerRuntimeState> {
     StatePredicate::new("http_queue_requires_http_mode", |state| {
-        state.http_queue_depth.is_zero()
+        matches!(state.http_queue, HttpQueueClass::Empty)
             || (matches!(state.mode, Some(RunnerAppType::Http))
                 && matches!(state.phase, RuntimePhase::Serving))
     })
@@ -206,27 +235,11 @@ fn socket_policy_requires_socket_mode() -> StatePredicate<RunnerRuntimeState> {
     })
 }
 
-#[illegal(RunnerRuntimeSpec)]
-fn accept_http_in_non_http_mode() -> StepPredicate<RunnerRuntimeState, RunnerRuntimeAction> {
-    StepPredicate::new("accept_http_in_non_http_mode", |prev, action, _| {
-        matches!(action, RunnerRuntimeAction::AcceptHttpRequest)
-            && !matches!(prev.mode, Some(RunnerAppType::Http))
-    })
-}
-
-#[illegal(RunnerRuntimeSpec)]
-fn serve_invalid_component() -> StepPredicate<RunnerRuntimeState, RunnerRuntimeAction> {
-    StepPredicate::new("serve_invalid_component", |prev, action, _| {
-        matches!(action, RunnerRuntimeAction::StartServing)
-            && !matches!(prev.component, ComponentLoadClass::Loadable)
-    })
-}
-
-#[illegal(RunnerRuntimeSpec)]
-fn serve_with_invalid_tuning() -> StepPredicate<RunnerRuntimeState, RunnerRuntimeAction> {
-    StepPredicate::new("serve_with_invalid_tuning", |prev, action, _| {
-        matches!(action, RunnerRuntimeAction::StartServing)
-            && matches!(prev.tuning, WasmTuningClass::Invalid)
+#[invariant(RunnerRuntimeSpec)]
+fn invalid_tuning_cannot_serve() -> StatePredicate<RunnerRuntimeState> {
+    StatePredicate::new("invalid_tuning_cannot_serve", |state| {
+        !matches!(state.tuning, WasmTuningClass::Invalid)
+            || !matches!(state.phase, RuntimePhase::Serving)
     })
 }
 
@@ -247,10 +260,10 @@ fn component_validated_leads_to_serving_or_failed() -> Ltl<RunnerRuntimeState, R
 fn http_queue_full_leads_to_not_full() -> Ltl<RunnerRuntimeState, RunnerRuntimeAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("http_queue_full", |state| {
-            state.http_queue_depth.is_max()
+            matches!(state.http_queue, HttpQueueClass::Full)
         })),
         Ltl::pred(StatePredicate::new("http_queue_not_full", |state| {
-            !state.http_queue_depth.is_max()
+            matches!(state.http_queue, HttpQueueClass::Empty)
         })),
     )
 }
@@ -287,7 +300,8 @@ fn http_drain_fairness() -> Fairness<RunnerRuntimeState, RunnerRuntimeAction> {
             matches!(action, RunnerRuntimeAction::DrainHttpRequest)
                 && matches!(prev.mode, Some(RunnerAppType::Http))
                 && matches!(prev.phase, RuntimePhase::Serving)
-                && next.http_queue_depth.get() < prev.http_queue_depth.get()
+                && matches!(prev.http_queue, HttpQueueClass::Full)
+                && matches!(next.http_queue, HttpQueueClass::Empty)
         },
     ))
 }
@@ -300,7 +314,7 @@ fn failure_fairness() -> Fairness<RunnerRuntimeState, RunnerRuntimeAction> {
     }))
 }
 
-#[subsystem_spec]
+#[subsystem_spec(model_cases(runner_runtime_model_cases))]
 impl TransitionSystem for RunnerRuntimeSpec {
     type State = RunnerRuntimeState;
     type Action = RunnerRuntimeAction;
@@ -309,90 +323,20 @@ impl TransitionSystem for RunnerRuntimeSpec {
         "runner_runtime"
     }
 
-    fn init(&self, state: &Self::State) -> bool {
-        *state == self.initial_state()
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![self.initial_state()]
     }
 
-    fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
-        let mut candidate = *prev;
-        match action {
-            RunnerRuntimeAction::SelectMode(app_type) if prev.mode.is_none() => {
-                candidate.mode = Some(*app_type);
-                candidate.socket_policy = match app_type {
-                    RunnerAppType::Cli | RunnerAppType::Rpc | RunnerAppType::Http => {
-                        SocketPolicyClass::NotApplicable
-                    }
-                    RunnerAppType::Socket => SocketPolicyClass::InboundOnly,
-                };
-            }
-            RunnerRuntimeAction::ApplyDefaultTuning
-                if !matches!(prev.phase, RuntimePhase::Serving) =>
-            {
-                candidate.tuning = WasmTuningClass::Default;
-            }
-            RunnerRuntimeAction::ApplyCustomTuning
-                if !matches!(prev.phase, RuntimePhase::Serving) =>
-            {
-                candidate.tuning = WasmTuningClass::CustomValid;
-            }
-            RunnerRuntimeAction::ApplyInvalidTuning
-                if !matches!(prev.phase, RuntimePhase::Serving) =>
-            {
-                candidate.tuning = WasmTuningClass::Invalid;
-            }
-            RunnerRuntimeAction::ValidateComponentLoadable
-                if prev.mode.is_some() && !matches!(prev.tuning, WasmTuningClass::Invalid) =>
-            {
-                candidate.component = ComponentLoadClass::Loadable;
-                candidate.phase = RuntimePhase::ComponentValidated;
-            }
-            RunnerRuntimeAction::ValidateComponentInvalid if prev.mode.is_some() => {
-                candidate.component = ComponentLoadClass::Invalid;
-                candidate.phase = RuntimePhase::Failed;
-            }
-            RunnerRuntimeAction::StartServing
-                if matches!(prev.component, ComponentLoadClass::Loadable)
-                    && !matches!(prev.tuning, WasmTuningClass::Invalid) =>
-            {
-                candidate.phase = RuntimePhase::Serving;
-            }
-            RunnerRuntimeAction::AcceptHttpRequest
-                if matches!(prev.mode, Some(RunnerAppType::Http))
-                    && matches!(prev.phase, RuntimePhase::Serving)
-                    && !prev.http_queue_depth.is_max() =>
-            {
-                candidate.http_queue_depth = prev.http_queue_depth.saturating_inc();
-            }
-            RunnerRuntimeAction::DrainHttpRequest
-                if matches!(prev.mode, Some(RunnerAppType::Http))
-                    && matches!(prev.phase, RuntimePhase::Serving)
-                    && !prev.http_queue_depth.is_zero() =>
-            {
-                candidate.http_queue_depth = prev.http_queue_depth.saturating_dec();
-            }
-            RunnerRuntimeAction::InvokeRpc
-                if matches!(prev.mode, Some(RunnerAppType::Rpc))
-                    && matches!(prev.phase, RuntimePhase::Serving) => {}
-            RunnerRuntimeAction::RunCli
-                if matches!(prev.mode, Some(RunnerAppType::Cli))
-                    && matches!(prev.phase, RuntimePhase::Serving) => {}
-            RunnerRuntimeAction::AcceptSocketTraffic
-                if matches!(prev.mode, Some(RunnerAppType::Socket))
-                    && matches!(prev.phase, RuntimePhase::Serving) => {}
-            RunnerRuntimeAction::Tick if matches!(prev.phase, RuntimePhase::Serving) => {
-                candidate.epoch_ticks = prev.epoch_ticks.saturating_inc();
-            }
-            RunnerRuntimeAction::FailRuntime if prev.mode.is_some() => {
-                candidate.phase = RuntimePhase::Failed;
-            }
-            _ => return false,
-        }
+    fn actions(&self) -> Vec<Self::Action> {
+        self.action_vocabulary()
+    }
 
-        candidate == *next && candidate.invariant()
+    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+        self.transition_state(state, action)
     }
 }
 
-#[nirvash_macros::formal_tests(spec = RunnerRuntimeSpec, init = initial_state)]
+#[nirvash_macros::formal_tests(spec = RunnerRuntimeSpec)]
 const _: () = ();
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 error: harness = ... is no longer supported; use binding = ... and implement ProtocolRuntimeBinding<Spec>
-   --> tests/fixtures/code_tests_legacy_harness.rs:118:68
+   --> tests/fixtures/code_tests_legacy_harness.rs:119:46
     |
-118 | #[code_tests(spec = Spec, binding = Binding, init = initial_state, harness = tests::Harness)]
-    |                                                                    ^^^^^^^
+119 | #[code_tests(spec = Spec, binding = Binding, harness = tests::Harness)]
+    |                                              ^^^^^^^

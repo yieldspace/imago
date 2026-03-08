@@ -1,10 +1,10 @@
 use nirvash_core::{
-    ActionConstraint, ModelCheckConfig, StateConstraint, StatePredicate, SymmetryReducer,
-    TemporalSpec, TransitionSystem,
+    ActionConstraint, ModelCase, StateConstraint, StatePredicate, SymmetryReducer, TemporalSpec,
+    TransitionSystem,
 };
 use nirvash_macros::{
-    Signature as FormalSignature, action_constraint, formal_tests, invariant,
-    property, state_constraint, subsystem_spec, symmetry,
+    Signature as FormalSignature, action_constraint, formal_tests, invariant, property,
+    state_constraint, subsystem_spec, symmetry,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
@@ -22,21 +22,25 @@ enum Action {
 #[derive(Default)]
 struct Spec;
 
-#[subsystem_spec(checker_config(spec_checker_config))]
+#[subsystem_spec(model_cases(spec_model_cases))]
 impl TransitionSystem for Spec {
     type State = State;
     type Action = Action;
 
-    fn init(&self, state: &Self::State) -> bool {
-        matches!(state, State::Idle)
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![State::Idle]
     }
 
-    fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
-        matches!(
-            (prev, action, next),
-            (State::Idle, Action::Start, State::Busy)
-                | (State::Busy, Action::Stop, State::Idle)
-        )
+    fn actions(&self) -> Vec<Self::Action> {
+        vec![Action::Start, Action::Stop]
+    }
+
+    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+        match (state, action) {
+            (State::Idle, Action::Start) => Some(State::Busy),
+            (State::Busy, Action::Stop) => Some(State::Idle),
+            _ => None,
+        }
     }
 }
 
@@ -48,8 +52,12 @@ fn idle_is_valid() -> StatePredicate<State> {
 #[property(Spec)]
 fn busy_leads_to_idle() -> nirvash_core::Ltl<State, Action> {
     nirvash_core::Ltl::leads_to(
-        nirvash_core::Ltl::pred(StatePredicate::new("busy", |state| matches!(state, State::Busy))),
-        nirvash_core::Ltl::pred(StatePredicate::new("idle", |state| matches!(state, State::Idle))),
+        nirvash_core::Ltl::pred(StatePredicate::new("busy", |state| {
+            matches!(state, State::Busy)
+        })),
+        nirvash_core::Ltl::pred(StatePredicate::new("idle", |state| {
+            matches!(state, State::Idle)
+        })),
     )
 }
 
@@ -68,25 +76,16 @@ fn identity_symmetry() -> SymmetryReducer<State> {
     SymmetryReducer::new("identity", |state| *state)
 }
 
-fn spec_checker_config() -> ModelCheckConfig {
-    ModelCheckConfig {
-        check_deadlocks: false,
-        ..ModelCheckConfig::default()
-    }
+fn spec_model_cases() -> Vec<ModelCase<State, Action>> {
+    vec![ModelCase::default().with_check_deadlocks(false)]
 }
 
-fn model_cases() -> Vec<Spec> {
+fn spec_cases() -> Vec<Spec> {
     vec![Spec]
 }
 
-#[formal_tests(spec = Spec, init = initial_state, cases = model_cases)]
+#[formal_tests(spec = Spec, cases = spec_cases)]
 const _: () = ();
-
-impl Spec {
-    fn initial_state(&self) -> State {
-        State::Idle
-    }
-}
 
 fn main() {
     let spec = Spec;

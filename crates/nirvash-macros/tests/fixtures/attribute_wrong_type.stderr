@@ -1,7 +1,7 @@
 error[E0308]: mismatched types
-  --> tests/fixtures/attribute_wrong_type.rs:35:4
+  --> tests/fixtures/attribute_wrong_type.rs:39:4
    |
-35 | fn wrong_state_type() -> StatePredicate<OtherState> {
+39 | fn wrong_state_type() -> StatePredicate<OtherState> {
    |    ^^^^^^^^^^^^^^^^ expected fn pointer, found fn item
    |
    = note: expected fn pointer `fn() -> StatePredicate<State>`

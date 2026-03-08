@@ -17,12 +17,12 @@ impl nirvash_core::TransitionSystem for Spec {
     type State = State;
     type Action = Action;
 
-    fn init(&self, _: &Self::State) -> bool {
-        true
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![State::Idle]
     }
 
-    fn next(&self, _: &Self::State, _: &Self::Action, _: &Self::State) -> bool {
-        false
+    fn successors(&self, _: &Self::State) -> Vec<(Self::Action, Self::State)> {
+        Vec::new()
     }
 }
 

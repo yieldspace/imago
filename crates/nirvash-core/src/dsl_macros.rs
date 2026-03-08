@@ -91,20 +91,6 @@ macro_rules! invariant {
     };
 }
 
-/// Declare and register an illegal transition predicate.
-#[macro_export]
-macro_rules! illegal {
-    ($spec:path, $name:ident ($prev:pat_param, $action:pat_param, $next:pat_param) => $expr:expr $(,)?) => {
-        #[::nirvash_macros::illegal($spec)]
-        fn $name() -> $crate::StepPredicate<
-            <$spec as $crate::TransitionSystem>::State,
-            <$spec as $crate::TransitionSystem>::Action,
-        > {
-            $crate::step!($name($prev, $action, $next) => $expr)
-        }
-    };
-}
-
 /// Declare and register a state constraint.
 #[macro_export]
 macro_rules! state_constraint {

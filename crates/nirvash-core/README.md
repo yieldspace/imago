@@ -1,12 +1,12 @@
 # nirvash-core
 
 `nirvash` は、Rust から時相論理ベースの仕様を書き、そのまま形式検証できるライブラリです。  
-`nirvash-core` はその中核で、bounded domain、reachable graph 探索、LTL/TLA+ practical subset、fairness、counterexample trace、structural exhaustive test の土台を提供します。
+`nirvash-core` はその中核で、遷移主体の reachable graph 探索、LTL/TLA+ practical subset、fairness、counterexample trace の土台を提供します。
 
 ## What It Provides
 
-- `Signature`: 有限な representative domain と値 invariant
-- `TransitionSystem` / `TemporalSpec`: 状態遷移と時相仕様の記述
+- `Signature`: bounded helper 型に有限 domain と値 invariant を与える trait
+- `TransitionSystem` / `TemporalSpec`: `initial_states + actions + transition` を正本にした状態遷移と時相仕様の記述
 - `Ltl`: `[]`, `<>`, `X`, `U`, `ENABLED`, `~>` を含む Rust DSL
 - `ModelChecker`: reachable graph ベースの model checking
 - `ActionApplier` / `StateObserver`: 実コード conformance の低レベル capability trait
@@ -18,15 +18,15 @@
 
 ```rust
 use nirvash_core::{ModelChecker, TransitionSystem};
-use nirvash_macros::{Signature as FormalSignature, formal_tests, subsystem_spec};
+use nirvash_macros::{formal_tests, subsystem_spec};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
     Idle,
     Busy,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
     Start,
     Finish,
@@ -40,16 +40,15 @@ impl TransitionSystem for Spec {
     type State = State;
     type Action = Action;
 
-    fn init(&self, state: &Self::State) -> bool {
-        matches!(state, State::Idle)
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![State::Idle]
     }
 
-    fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
-        matches!(
-            (prev, action, next),
-            (State::Idle, Action::Start, State::Busy)
-                | (State::Busy, Action::Finish, State::Idle)
-        )
+    fn successors(&self, state: &Self::State) -> Vec<(Self::Action, Self::State)> {
+        match state {
+            State::Idle => vec![(Action::Start, State::Busy)],
+            State::Busy => vec![(Action::Finish, State::Idle)],
+        }
     }
 }
 
@@ -63,14 +62,8 @@ nirvash_core::property!(Spec, busy_leads_back_to_idle => leads_to(
     (pred!(idle(state) => matches!(state, State::Idle)))
 ));
 
-#[formal_tests(spec = Spec, init = initial_state)]
+#[formal_tests(spec = Spec)]
 const _: () = ();
-
-impl Spec {
-    fn initial_state(&self) -> State {
-        State::Idle
-    }
-}
 
 let spec = Spec::default();
 let result = ModelChecker::new(&spec).check_all().expect("checker runs");
@@ -83,9 +76,12 @@ assert!(result.is_ok());
 
 `Signature` derive の推奨順は次です。
 
-- まず field domain の直積に任せる
+- まず helper enum/newtype や bounded collection に使う
 - 次に `#[signature(bounds(...))]` と `#[signature(filter(self => ...))]`、必要なら `#[signature_invariant(self => ...)]` で bounded domain を絞る
 - それでも足りない型だけ `#[signature(custom)]` で companion trait を手書きする
+
+重要なのは、`Signature` は **spec state space の正本ではない** ことです。  
+TLA+ に近い source of truth は `TransitionSystem::initial_states()` と `TransitionSystem::successors()` で、checker も docs の State Graph もそこから reachable graph を構築します。`Signature` は helper 型の有限境界を与えるための補助に限定します。
 
 field 単位では次を使えます。
 
@@ -105,7 +101,7 @@ field 単位では次を使えます。
     - `observe_state(Context) -> ObservedState`
 - spec 側契約
   - `ProtocolConformanceSpec`
-    - `expected_step(...)`
+    - `expected_output(...)`
     - `project_state(...)`
     - `project_output(...)`
 - spec と runtime の結合
@@ -117,7 +113,7 @@ field 単位では次を使えます。
 
 ```rust
 use nirvash_core::conformance::{
-    ActionApplier, ExpectedStep, ProtocolConformanceSpec, ProtocolRuntimeBinding, StateObserver,
+    ActionApplier, ProtocolConformanceSpec, ProtocolRuntimeBinding, StateObserver,
 };
 use nirvash_core::TransitionSystem;
 use nirvash_macros::{Signature as FormalSignature, code_tests, subsystem_spec};
@@ -178,16 +174,20 @@ impl TransitionSystem for Spec {
     type State = SpecState;
     type Action = RuntimeAction;
 
-    fn init(&self, state: &Self::State) -> bool {
-        matches!(state, SpecState::Idle)
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![SpecState::Idle]
     }
 
-    fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
-        matches!(
-            (prev, action, next),
-            (SpecState::Idle, RuntimeAction::Start, SpecState::Busy)
-                | (SpecState::Busy, RuntimeAction::Stop, SpecState::Idle)
-        )
+    fn actions(&self) -> Vec<Self::Action> {
+        vec![RuntimeAction::Start, RuntimeAction::Stop]
+    }
+
+    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+        match (state, action) {
+            (SpecState::Idle, RuntimeAction::Start) => Some(SpecState::Busy),
+            (SpecState::Busy, RuntimeAction::Stop) => Some(SpecState::Idle),
+            _ => None,
+        }
     }
 }
 
@@ -196,22 +196,14 @@ impl ProtocolConformanceSpec for Spec {
     type ObservedState = SpecState;
     type ObservedOutput = RuntimeOutput;
 
-    fn expected_step(
+    fn expected_output(
         &self,
         state: &Self::State,
         action: &Self::Action,
-    ) -> Option<ExpectedStep<Self::State, Self::ExpectedOutput>> {
-        match (state, action) {
-            (SpecState::Idle, RuntimeAction::Start) => Some(ExpectedStep {
-                next_state: SpecState::Busy,
-                output: RuntimeOutput::Ack,
-            }),
-            (SpecState::Busy, RuntimeAction::Stop) => Some(ExpectedStep {
-                next_state: SpecState::Idle,
-                output: RuntimeOutput::Ack,
-            }),
-            _ => None,
-        }
+        next: Option<&Self::State>,
+    ) -> Self::ExpectedOutput {
+        let _ = (state, action, next);
+        RuntimeOutput::Ack
     }
 
     fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
@@ -238,14 +230,8 @@ impl ProtocolRuntimeBinding<Spec> for Binding {
     }
 }
 
-#[code_tests(spec = Spec, binding = Binding, init = initial_state)]
+#[code_tests(spec = Spec, binding = Binding)]
 const _: () = ();
-
-impl Spec {
-    fn initial_state(&self) -> SpecState {
-        SpecState::Idle
-    }
-}
 ```
 
 ## `cargo doc` Integration
@@ -258,7 +244,7 @@ fn main() {
 }
 ```
 
-これにより `#[formal_tests(...)]` が付いた spec では reachable graph から生成した Mermaid の `State Graph` section が、すべての spec では registered invariant / property / fairness / constraint / subsystem 一覧を含む Mermaid の `Meta Model` section が rustdoc 上に注入されます。`State Graph` は docs 専用の boundary-path reduction を通すため、直線的な通常経路は 1 本の edge に畳まれ、同じ始点/終点に向かう平行 edge も 1 本にまとめられます。分岐/合流/終端/edge case state が優先的に残ります。Mermaid runtime は local asset として `target/doc/static.files/` に配置されるため、`cargo doc --open` でも CDN なしでそのまま表示できます。`build.rs` は再帰ビルドを避けるために `NIRVASH_DOCGEN_SKIP` を尊重します。
+これにより `#[formal_tests(...)]` が付いた spec では reachable graph から生成した Mermaid の `State Graph` section が、すべての spec では registered invariant / property / fairness / constraint / subsystem 一覧を含む Mermaid の `Meta Model` section が rustdoc 上に注入されます。`State Graph` は docs 専用の boundary-path reduction を通すため、直線的な通常経路は 1 本の edge に畳まれ、同じ始点/終点に向かう平行 edge も 1 本にまとめられます。分岐/合流/終端/edge case state が優先的に残ります。Mermaid runtime は doc fragment に inline で埋め込まれるため、`cargo doc --open` でも `file://` 経由の local asset 読み込みに依存せず表示できます。`build.rs` は再帰ビルドを避けるために `NIRVASH_DOCGEN_SKIP` を尊重します。
 
 ## State Graph Rendering
 

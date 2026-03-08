@@ -4,19 +4,13 @@ use std::{
 };
 
 use crate::{
-    ActionConstraint, Fairness, Ltl, StateConstraint, StatePredicate, StepPredicate,
-    SymmetryReducer, TransitionSystem,
+    ActionConstraint, Fairness, Ltl, StateConstraint, StatePredicate, SymmetryReducer,
+    TransitionSystem,
 };
 
 pub use inventory;
 
 pub struct RegisteredInvariant {
-    pub spec_type_id: fn() -> TypeId,
-    pub name: &'static str,
-    pub build: fn() -> Box<dyn Any>,
-}
-
-pub struct RegisteredIllegal {
     pub spec_type_id: fn() -> TypeId,
     pub name: &'static str,
     pub build: fn() -> Box<dyn Any>,
@@ -56,7 +50,6 @@ type ErasedBuilder = fn() -> Box<dyn Any>;
 type NamedBuilder = (&'static str, ErasedBuilder);
 
 inventory::collect!(RegisteredInvariant);
-inventory::collect!(RegisteredIllegal);
 inventory::collect!(RegisteredProperty);
 inventory::collect!(RegisteredFairness);
 inventory::collect!(RegisteredStateConstraint);
@@ -116,7 +109,6 @@ macro_rules! impl_registry_entry {
 }
 
 impl_registry_entry!(RegisteredInvariant);
-impl_registry_entry!(RegisteredIllegal);
 impl_registry_entry!(RegisteredProperty);
 impl_registry_entry!(RegisteredFairness);
 impl_registry_entry!(RegisteredStateConstraint);
@@ -138,31 +130,6 @@ where
     .into_iter()
     .map(|(name, build)| {
         downcast_registered::<StatePredicate<T::State>>(build(), spec_name, "invariant", name)
-    })
-    .collect()
-}
-
-pub fn collect_illegal<T>() -> Vec<StepPredicate<T::State, T::Action>>
-where
-    T: TransitionSystem + 'static,
-    T::State: 'static,
-    T::Action: 'static,
-{
-    let spec_name = type_name::<T>();
-    sorted_builders::<T, _>(
-        inventory::iter::<RegisteredIllegal>
-            .into_iter()
-            .map(|entry| (entry as &dyn RegistryEntry, entry.build)),
-        "illegal predicate",
-    )
-    .into_iter()
-    .map(|(name, build)| {
-        downcast_registered::<StepPredicate<T::State, T::Action>>(
-            build(),
-            spec_name,
-            "illegal predicate",
-            name,
-        )
     })
     .collect()
 }
@@ -313,12 +280,16 @@ mod tests {
         type State = RegistryState;
         type Action = RegistryAction;
 
-        fn init(&self, state: &Self::State) -> bool {
-            matches!(state, RegistryState::Idle)
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![RegistryState::Idle]
         }
 
-        fn next(&self, _: &Self::State, _: &Self::Action, _: &Self::State) -> bool {
-            false
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![RegistryAction::Tick]
+        }
+
+        fn transition(&self, _: &Self::State, _: &Self::Action) -> Option<Self::State> {
+            None
         }
     }
 
@@ -329,12 +300,16 @@ mod tests {
         type State = RegistryState;
         type Action = RegistryAction;
 
-        fn init(&self, state: &Self::State) -> bool {
-            matches!(state, RegistryState::Idle)
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![RegistryState::Idle]
         }
 
-        fn next(&self, _: &Self::State, _: &Self::Action, _: &Self::State) -> bool {
-            false
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![RegistryAction::Tick]
+        }
+
+        fn transition(&self, _: &Self::State, _: &Self::Action) -> Option<Self::State> {
+            None
         }
     }
 

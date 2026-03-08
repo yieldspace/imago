@@ -1,12 +1,6 @@
 use imagod_ipc::{RunnerAppType, RunnerBootstrap};
-use nirvash_core::{
-    BoundedDomain, Fairness, Ltl, Signature, StatePredicate, StepPredicate, TransitionSystem,
-};
-use nirvash_macros::{
-    Signature as FormalSignature, fairness, illegal, invariant, property, subsystem_spec,
-};
-
-use crate::bounds::SPEC_RUNNER_APP_TYPES;
+use nirvash_core::{Fairness, Ltl, StatePredicate, StepPredicate, TransitionSystem};
+use nirvash_macros::{Signature as FormalSignature, fairness, invariant, property, subsystem_spec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
 pub enum BootstrapSizeClass {
@@ -53,8 +47,7 @@ pub fn classify_bootstrap(bootstrap: &RunnerBootstrap) -> RunnerBootstrapContrac
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
-#[signature(custom)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunnerBootstrapState {
     pub size: BootstrapSizeClass,
     pub decoded: bool,
@@ -63,52 +56,6 @@ pub struct RunnerBootstrapState {
     pub auth: AuthProofState,
     pub registered: bool,
     pub ready: bool,
-}
-
-impl RunnerBootstrapStateSignatureSpec for RunnerBootstrapState {
-    fn representatives() -> BoundedDomain<Self> {
-        BoundedDomain::new(vec![
-            RunnerBootstrapSpec::new().initial_state(),
-            Self {
-                size: BootstrapSizeClass::WithinBounds,
-                decoded: true,
-                app_type: Some(RunnerAppType::Http),
-                endpoint: EndpointState::Prepared,
-                auth: AuthProofState::Pending,
-                registered: false,
-                ready: false,
-            },
-            Self {
-                size: BootstrapSizeClass::WithinBounds,
-                decoded: true,
-                app_type: Some(RunnerAppType::Rpc),
-                endpoint: EndpointState::Prepared,
-                auth: AuthProofState::Verified,
-                registered: true,
-                ready: true,
-            },
-            Self {
-                size: BootstrapSizeClass::Oversized,
-                decoded: false,
-                app_type: None,
-                endpoint: EndpointState::Missing,
-                auth: AuthProofState::Rejected,
-                registered: false,
-                ready: false,
-            },
-        ])
-    }
-
-    fn signature_invariant(&self) -> bool {
-        let ready_requires_registration =
-            !self.ready || (self.registered && matches!(self.auth, AuthProofState::Verified));
-        let registration_requires_endpoint =
-            !self.registered || (self.decoded && matches!(self.endpoint, EndpointState::Prepared));
-        let rejected_auth_is_not_ready =
-            !matches!(self.auth, AuthProofState::Rejected) || !self.ready;
-
-        ready_requires_registration && registration_requires_endpoint && rejected_auth_is_not_ready
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,21 +67,6 @@ pub enum RunnerBootstrapAction {
     RegisterRunner,
     RejectAuthProof,
     MarkReady,
-}
-
-impl Signature for RunnerBootstrapAction {
-    fn bounded_domain() -> BoundedDomain<Self> {
-        let mut values = vec![
-            Self::ReadWithinBounds,
-            Self::ReadOversized,
-            Self::PrepareEndpoint,
-            Self::RegisterRunner,
-            Self::RejectAuthProof,
-            Self::MarkReady,
-        ];
-        values.extend(SPEC_RUNNER_APP_TYPES.into_iter().map(Self::DecodeBootstrap));
-        BoundedDomain::new(values)
-    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -156,6 +88,87 @@ impl RunnerBootstrapSpec {
             ready: false,
         }
     }
+
+    fn action_vocabulary(&self) -> Vec<RunnerBootstrapAction> {
+        vec![
+            RunnerBootstrapAction::ReadWithinBounds,
+            RunnerBootstrapAction::ReadOversized,
+            RunnerBootstrapAction::DecodeBootstrap(RunnerAppType::Cli),
+            RunnerBootstrapAction::DecodeBootstrap(RunnerAppType::Rpc),
+            RunnerBootstrapAction::DecodeBootstrap(RunnerAppType::Http),
+            RunnerBootstrapAction::DecodeBootstrap(RunnerAppType::Socket),
+            RunnerBootstrapAction::PrepareEndpoint,
+            RunnerBootstrapAction::RegisterRunner,
+            RunnerBootstrapAction::RejectAuthProof,
+            RunnerBootstrapAction::MarkReady,
+        ]
+    }
+
+    fn transition_state(
+        &self,
+        prev: &RunnerBootstrapState,
+        action: &RunnerBootstrapAction,
+    ) -> Option<RunnerBootstrapState> {
+        let mut candidate = *prev;
+        let allowed = match action {
+            RunnerBootstrapAction::ReadWithinBounds if !prev.decoded => {
+                candidate.size = BootstrapSizeClass::WithinBounds;
+                true
+            }
+            RunnerBootstrapAction::ReadOversized if !prev.decoded => {
+                candidate.size = BootstrapSizeClass::Oversized;
+                candidate.auth = AuthProofState::Rejected;
+                true
+            }
+            RunnerBootstrapAction::DecodeBootstrap(app_type)
+                if matches!(prev.size, BootstrapSizeClass::WithinBounds) && !prev.decoded =>
+            {
+                candidate.decoded = true;
+                candidate.app_type = Some(*app_type);
+                true
+            }
+            RunnerBootstrapAction::PrepareEndpoint if prev.decoded => {
+                candidate.endpoint = EndpointState::Prepared;
+                true
+            }
+            RunnerBootstrapAction::RegisterRunner
+                if prev.decoded
+                    && matches!(prev.endpoint, EndpointState::Prepared)
+                    && matches!(prev.auth, AuthProofState::Pending) =>
+            {
+                candidate.registered = true;
+                candidate.auth = AuthProofState::Verified;
+                true
+            }
+            RunnerBootstrapAction::RejectAuthProof
+                if prev.decoded
+                    && matches!(prev.endpoint, EndpointState::Prepared)
+                    && !prev.registered =>
+            {
+                candidate.auth = AuthProofState::Rejected;
+                true
+            }
+            RunnerBootstrapAction::MarkReady
+                if prev.registered && matches!(prev.auth, AuthProofState::Verified) =>
+            {
+                candidate.ready = true;
+                true
+            }
+            _ => false,
+        };
+        (allowed && runner_bootstrap_state_valid(&candidate)).then_some(candidate)
+    }
+}
+
+fn runner_bootstrap_state_valid(state: &RunnerBootstrapState) -> bool {
+    let ready_requires_registration =
+        !state.ready || (state.registered && matches!(state.auth, AuthProofState::Verified));
+    let registration_requires_endpoint =
+        !state.registered || (state.decoded && matches!(state.endpoint, EndpointState::Prepared));
+    let rejected_auth_is_not_ready =
+        !matches!(state.auth, AuthProofState::Rejected) || !state.ready;
+
+    ready_requires_registration && registration_requires_endpoint && rejected_auth_is_not_ready
 }
 
 #[invariant(RunnerBootstrapSpec)]
@@ -176,29 +189,6 @@ fn registration_requires_prepared_endpoint() -> StatePredicate<RunnerBootstrapSt
 fn rejected_auth_cannot_be_ready() -> StatePredicate<RunnerBootstrapState> {
     StatePredicate::new("rejected_auth_cannot_be_ready", |state| {
         !matches!(state.auth, AuthProofState::Rejected) || !state.ready
-    })
-}
-
-#[illegal(RunnerBootstrapSpec)]
-fn decode_oversized_payload() -> StepPredicate<RunnerBootstrapState, RunnerBootstrapAction> {
-    StepPredicate::new("decode_oversized_payload", |prev, action, _| {
-        matches!(action, RunnerBootstrapAction::DecodeBootstrap(_))
-            && matches!(prev.size, BootstrapSizeClass::Oversized)
-    })
-}
-
-#[illegal(RunnerBootstrapSpec)]
-fn register_without_endpoint() -> StepPredicate<RunnerBootstrapState, RunnerBootstrapAction> {
-    StepPredicate::new("register_without_endpoint", |prev, action, _| {
-        matches!(action, RunnerBootstrapAction::RegisterRunner)
-            && !matches!(prev.endpoint, EndpointState::Prepared)
-    })
-}
-
-#[illegal(RunnerBootstrapSpec)]
-fn ready_without_registration() -> StepPredicate<RunnerBootstrapState, RunnerBootstrapAction> {
-    StepPredicate::new("ready_without_registration", |prev, action, _| {
-        matches!(action, RunnerBootstrapAction::MarkReady) && !prev.registered
     })
 }
 
@@ -277,57 +267,20 @@ impl TransitionSystem for RunnerBootstrapSpec {
         "runner_bootstrap"
     }
 
-    fn init(&self, state: &Self::State) -> bool {
-        *state == self.initial_state()
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![self.initial_state()]
     }
 
-    fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
-        let mut candidate = *prev;
-        match action {
-            RunnerBootstrapAction::ReadWithinBounds if !prev.decoded => {
-                candidate.size = BootstrapSizeClass::WithinBounds;
-            }
-            RunnerBootstrapAction::ReadOversized if !prev.decoded => {
-                candidate.size = BootstrapSizeClass::Oversized;
-                candidate.auth = AuthProofState::Rejected;
-            }
-            RunnerBootstrapAction::DecodeBootstrap(app_type)
-                if matches!(prev.size, BootstrapSizeClass::WithinBounds) && !prev.decoded =>
-            {
-                candidate.decoded = true;
-                candidate.app_type = Some(*app_type);
-            }
-            RunnerBootstrapAction::PrepareEndpoint if prev.decoded => {
-                candidate.endpoint = EndpointState::Prepared;
-            }
-            RunnerBootstrapAction::RegisterRunner
-                if prev.decoded
-                    && matches!(prev.endpoint, EndpointState::Prepared)
-                    && matches!(prev.auth, AuthProofState::Pending) =>
-            {
-                candidate.registered = true;
-                candidate.auth = AuthProofState::Verified;
-            }
-            RunnerBootstrapAction::RejectAuthProof
-                if prev.decoded
-                    && matches!(prev.endpoint, EndpointState::Prepared)
-                    && !prev.registered =>
-            {
-                candidate.auth = AuthProofState::Rejected;
-            }
-            RunnerBootstrapAction::MarkReady
-                if prev.registered && matches!(prev.auth, AuthProofState::Verified) =>
-            {
-                candidate.ready = true;
-            }
-            _ => return false,
-        }
+    fn actions(&self) -> Vec<Self::Action> {
+        self.action_vocabulary()
+    }
 
-        candidate == *next && candidate.invariant()
+    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+        self.transition_state(state, action)
     }
 }
 
-#[nirvash_macros::formal_tests(spec = RunnerBootstrapSpec, init = initial_state)]
+#[nirvash_macros::formal_tests(spec = RunnerBootstrapSpec)]
 const _: () = ();
 
 #[cfg(test)]

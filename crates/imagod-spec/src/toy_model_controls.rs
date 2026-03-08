@@ -1,41 +1,23 @@
-use nirvash_core::{OpaqueModelValue, Signature as _, TransitionSystem};
-use nirvash_macros::{Signature as FormalSignature, formal_tests, subsystem_spec};
+use nirvash_core::OpaqueModelValue;
+use nirvash_core::TransitionSystem;
+use nirvash_macros::{formal_tests, subsystem_spec};
 
 struct WorkerTag;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToyPhase {
     Idle,
     Busy,
     Blocked,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
-#[signature(custom)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ToyState {
     worker: OpaqueModelValue<WorkerTag, 2>,
     phase: ToyPhase,
 }
 
-impl ToyStateSignatureSpec for ToyState {
-    fn representatives() -> nirvash_core::BoundedDomain<Self> {
-        let workers = OpaqueModelValue::<WorkerTag, 2>::bounded_domain().into_vec();
-        let mut states = Vec::with_capacity(workers.len() * 2);
-        for worker in workers {
-            states.push(Self {
-                worker,
-                phase: ToyPhase::Idle,
-            });
-            states.push(Self {
-                worker,
-                phase: ToyPhase::Busy,
-            });
-        }
-        nirvash_core::BoundedDomain::new(states)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToyAction {
     Start,
     Finish,
@@ -61,6 +43,26 @@ impl ToyModelControlSpec {
             worker: self.initial_worker,
             phase: ToyPhase::Idle,
         }
+    }
+
+    fn action_vocabulary(&self) -> Vec<ToyAction> {
+        vec![ToyAction::Start, ToyAction::Finish, ToyAction::Block]
+    }
+
+    fn transition_state(&self, prev: &ToyState, action: &ToyAction) -> Option<ToyState> {
+        let mut candidate = *prev;
+        let allowed = match action {
+            ToyAction::Start if matches!(prev.phase, ToyPhase::Idle) => {
+                candidate.phase = ToyPhase::Busy;
+                true
+            }
+            ToyAction::Finish if matches!(prev.phase, ToyPhase::Busy) => {
+                candidate.phase = ToyPhase::Idle;
+                true
+            }
+            _ => false,
+        };
+        allowed.then_some(candidate)
     }
 }
 
@@ -111,31 +113,20 @@ impl TransitionSystem for ToyModelControlSpec {
         "toy_model_controls"
     }
 
-    fn init(&self, state: &Self::State) -> bool {
-        *state == self.initial_state()
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![self.initial_state()]
     }
 
-    fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
-        let mut candidate = *prev;
-        match action {
-            ToyAction::Start if matches!(prev.phase, ToyPhase::Idle) => {
-                candidate.phase = ToyPhase::Busy;
-            }
-            ToyAction::Finish if matches!(prev.phase, ToyPhase::Busy) => {
-                candidate.phase = ToyPhase::Idle;
-            }
-            _ => return false,
-        }
+    fn actions(&self) -> Vec<Self::Action> {
+        self.action_vocabulary()
+    }
 
-        candidate == *next && candidate.invariant()
+    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+        self.transition_state(state, action)
     }
 }
 
-#[formal_tests(
-    spec = ToyModelControlSpec,
-    init = initial_state,
-    cases = model_cases
-)]
+#[formal_tests(spec = ToyModelControlSpec, cases = model_cases)]
 const _: () = ();
 
 #[cfg(test)]
@@ -151,5 +142,14 @@ mod tests {
         assert_eq!(workers.len(), 2);
         assert!(workers.contains(&0));
         assert!(workers.contains(&1));
+    }
+
+    #[test]
+    fn blocked_phase_remains_explicit_edge_case() {
+        let blocked = ToyState {
+            worker: OpaqueModelValue::new(0).expect("within bounds"),
+            phase: ToyPhase::Blocked,
+        };
+        assert!(matches!(blocked.phase, ToyPhase::Blocked));
     }
 }

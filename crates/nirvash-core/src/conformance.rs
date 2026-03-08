@@ -1,5 +1,7 @@
-pub use crate::system::{ActionApplier, ExpectedStep, StateObserver, TransitionSystem};
-pub use crate::{ModelChecker, ReachableGraphSnapshot, Signature};
+pub use crate::system::{
+    ActionApplier, ModelCase, ModelCaseSource, StateObserver, TransitionSystem,
+};
+pub use crate::{ModelChecker, ReachableGraphSnapshot};
 
 /// Spec-side contract for replaying runtime behavior against a transition system.
 pub trait ProtocolConformanceSpec: TransitionSystem {
@@ -7,11 +9,12 @@ pub trait ProtocolConformanceSpec: TransitionSystem {
     type ObservedState: Clone + std::fmt::Debug;
     type ObservedOutput: Clone + std::fmt::Debug;
 
-    fn expected_step(
+    fn expected_output(
         &self,
         prev: &Self::State,
         action: &Self::Action,
-    ) -> ExpectedStep<Self::State, Self::ExpectedOutput>;
+        next: Option<&Self::State>,
+    ) -> Self::ExpectedOutput;
 
     fn project_state(&self, observed: &Self::ObservedState) -> Self::State;
 

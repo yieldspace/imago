@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
 use crate::{
-    ActionConstraint, Fairness, ReachableGraphEdge, ReachableGraphSnapshot, Signature,
-    StateConstraint, TemporalSpec, Trace, TraceStep,
+    ActionConstraint, Fairness, ModelCase, ModelCaseSource, ReachableGraphEdge,
+    ReachableGraphSnapshot, StateConstraint, TemporalSpec, Trace, TraceStep,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +61,6 @@ pub enum ModelCheckError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CounterexampleKind {
     Invariant,
-    IllegalTransition,
     Deadlock,
     StateConstraint,
     ActionConstraint,
@@ -145,26 +144,43 @@ impl<S, A> ReachableGraph<S, A> {
     }
 }
 
-pub struct ModelChecker<'a, T: TemporalSpec> {
+pub struct ModelChecker<'a, T: TemporalSpec + ModelCaseSource> {
     spec: &'a T,
+    model_case: ModelCase<T::State, T::Action>,
     config: ModelCheckConfig,
 }
 
 impl<'a, T> ModelChecker<'a, T>
 where
-    T: TemporalSpec,
+    T: TemporalSpec + ModelCaseSource,
     T::State: PartialEq,
     T::Action: PartialEq,
 {
     pub fn new(spec: &'a T) -> Self {
+        let model_case = spec.model_cases().into_iter().next().unwrap_or_default();
         Self {
             spec,
-            config: spec.checker_config(),
+            config: model_case.effective_checker_config(),
+            model_case,
+        }
+    }
+
+    pub fn for_case(spec: &'a T, model_case: ModelCase<T::State, T::Action>) -> Self {
+        let config = model_case.effective_checker_config();
+        Self {
+            spec,
+            model_case,
+            config,
         }
     }
 
     pub fn with_config(spec: &'a T, config: ModelCheckConfig) -> Self {
-        Self { spec, config }
+        let check_deadlocks = config.check_deadlocks;
+        let mut model_case = spec.model_cases().into_iter().next().unwrap_or_default();
+        model_case = model_case
+            .with_checker_config(config)
+            .with_check_deadlocks(check_deadlocks);
+        Self::for_case(spec, model_case)
     }
 
     pub fn reachable_graph_snapshot(
@@ -180,15 +196,6 @@ where
         match self.config.exploration {
             ExplorationMode::ReachableGraph => self.check_invariants_graph(),
             ExplorationMode::BoundedLasso => self.check_invariants_lasso(),
-        }
-    }
-
-    pub fn check_illegal_transitions(
-        &self,
-    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        match self.config.exploration {
-            ExplorationMode::ReachableGraph => self.check_illegal_graph(),
-            ExplorationMode::BoundedLasso => self.check_illegal_lasso(),
         }
     }
 
@@ -227,12 +234,6 @@ where
         }
         result.extend(invariants);
 
-        let illegal = self.check_illegal_transitions()?;
-        if self.config.stop_on_first_violation && !illegal.is_ok() {
-            return Ok(illegal);
-        }
-        result.extend(illegal);
-
         let deadlocks = self.check_deadlocks()?;
         if self.config.stop_on_first_violation && !deadlocks.is_ok() {
             return Ok(deadlocks);
@@ -254,14 +255,6 @@ where
         let graph = self.build_reachable_graph()?;
         self.ensure_untruncated(&graph)?;
         for (index, state) in graph.states.iter().enumerate() {
-            if !state.invariant() {
-                return Ok(ModelCheckResult::with_violation(Counterexample {
-                    kind: CounterexampleKind::Invariant,
-                    name: "state_invariant".to_owned(),
-                    trace: self.trace_to_state(&graph, index),
-                }));
-            }
-
             for predicate in self.spec.invariants() {
                 if !predicate.eval(state) {
                     return Ok(ModelCheckResult::with_violation(Counterexample {
@@ -269,32 +262,6 @@ where
                         name: predicate.name().to_owned(),
                         trace: self.trace_to_state(&graph, index),
                     }));
-                }
-            }
-        }
-
-        Ok(ModelCheckResult::ok())
-    }
-
-    fn check_illegal_graph(
-        &self,
-    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let graph = self.build_reachable_graph()?;
-        self.ensure_untruncated(&graph)?;
-        for (source, edges) in graph.edges.iter().enumerate() {
-            for edge in edges {
-                let TraceStep::Action(action) = &edge.step else {
-                    continue;
-                };
-
-                for predicate in self.spec.illegal_transitions() {
-                    if predicate.eval(&graph.states[source], action, &graph.states[edge.target]) {
-                        return Ok(ModelCheckResult::with_violation(Counterexample {
-                            kind: CounterexampleKind::IllegalTransition,
-                            name: predicate.name().to_owned(),
-                            trace: self.trace_to_transition(&graph, source, edge),
-                        }));
-                    }
                 }
             }
         }
@@ -321,7 +288,7 @@ where
     fn check_properties_graph(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        if self.spec.symmetry().is_some()
+        if self.model_case.symmetry().is_some()
             && (!self.spec.properties().is_empty() || !self.spec.fairness().is_empty())
         {
             return Err(ModelCheckError::UnsupportedConfiguration(
@@ -366,16 +333,6 @@ where
         Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
     }
 
-    fn check_illegal_lasso(
-        &self,
-    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let mut best = None;
-        for init in self.initial_states_filtered()? {
-            self.search_illegal_lasso(vec![init], Vec::new(), &mut best);
-        }
-        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
-    }
-
     fn check_deadlocks_lasso(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
@@ -389,7 +346,7 @@ where
     fn check_properties_lasso(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        if self.spec.symmetry().is_some()
+        if self.model_case.symmetry().is_some()
             && (!self.spec.properties().is_empty() || !self.spec.fairness().is_empty())
         {
             return Err(ModelCheckError::UnsupportedConfiguration(
@@ -613,17 +570,17 @@ where
     }
 
     fn canonicalize_state(&self, state: &T::State) -> T::State {
-        self.spec
+        self.model_case
             .symmetry()
             .map(|symmetry| symmetry.canonicalize(state))
             .unwrap_or_else(|| state.clone())
     }
 
     fn state_constraints_allow(&self, state: &T::State) -> bool {
-        self.spec
+        self.model_case
             .state_constraints()
-            .into_iter()
-            .all(|constraint: StateConstraint<T::State>| constraint.eval(state))
+            .iter()
+            .all(|constraint: &StateConstraint<T::State>| constraint.eval(state))
     }
 
     fn action_constraints_allow(
@@ -632,8 +589,10 @@ where
         action: &T::Action,
         next: &T::State,
     ) -> bool {
-        self.spec.action_constraints().into_iter().all(
-            |constraint: ActionConstraint<T::State, T::Action>| constraint.eval(prev, action, next),
+        self.model_case.action_constraints().iter().all(
+            |constraint: &ActionConstraint<T::State, T::Action>| {
+                constraint.eval(prev, action, next)
+            },
         )
     }
 
@@ -711,18 +670,6 @@ where
         let depth = steps.len();
         let current = states.last().expect("states always non-empty");
 
-        if !current.invariant() {
-            self.consider_violation(
-                best,
-                Counterexample {
-                    kind: CounterexampleKind::Invariant,
-                    name: "state_invariant".to_owned(),
-                    trace: self.terminal_trace(states.clone(), steps.clone()),
-                },
-            );
-            return;
-        }
-
         for predicate in self.spec.invariants() {
             if !predicate.eval(current) {
                 self.consider_violation(
@@ -747,48 +694,6 @@ where
             let mut next_steps = steps.clone();
             next_steps.push(step);
             self.search_invariants_lasso(next_states, next_steps, best);
-        }
-    }
-
-    fn search_illegal_lasso(
-        &self,
-        states: Vec<T::State>,
-        steps: Vec<TraceStep<T::Action>>,
-        best: &mut Option<Counterexample<T::State, T::Action>>,
-    ) {
-        let depth = steps.len();
-        let current = states.last().expect("states always non-empty");
-
-        if self.reached_bounded_depth(depth) {
-            return;
-        }
-
-        for (step, next) in self.constrained_successors(current) {
-            if let TraceStep::Action(action) = &step {
-                for predicate in self.spec.illegal_transitions() {
-                    if predicate.eval(current, action, &next) {
-                        let mut violation_states = states.clone();
-                        violation_states.push(next);
-                        let mut violation_steps = steps.clone();
-                        violation_steps.push(step);
-                        self.consider_violation(
-                            best,
-                            Counterexample {
-                                kind: CounterexampleKind::IllegalTransition,
-                                name: predicate.name().to_owned(),
-                                trace: self.terminal_trace(violation_states, violation_steps),
-                            },
-                        );
-                        return;
-                    }
-                }
-            }
-
-            let mut next_states = states.clone();
-            next_states.push(next);
-            let mut next_steps = steps.clone();
-            next_steps.push(step);
-            self.search_illegal_lasso(next_states, next_steps, best);
         }
     }
 
@@ -918,18 +823,6 @@ where
         target: usize,
     ) -> Trace<T::State, T::Action> {
         let (states, steps) = self.reconstruct_path(graph, target);
-        self.terminal_trace(states, steps)
-    }
-
-    fn trace_to_transition(
-        &self,
-        graph: &ReachableGraph<T::State, T::Action>,
-        source: usize,
-        edge: &GraphEdge<T::Action>,
-    ) -> Trace<T::State, T::Action> {
-        let (mut states, mut steps) = self.reconstruct_path(graph, source);
-        states.push(graph.states[edge.target].clone());
-        steps.push(edge.step.clone());
         self.terminal_trace(states, steps)
     }
 

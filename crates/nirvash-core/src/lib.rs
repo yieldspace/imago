@@ -32,7 +32,8 @@ pub use ltl::Ltl;
 pub use predicate::{ActionConstraint, StateConstraint, StatePredicate, StepPredicate};
 pub use symmetry::SymmetryReducer;
 pub use system::{
-    ActionApplier, ExpectedStep, StateObserver, SystemComposition, TemporalSpec, TransitionSystem,
+    ActionApplier, ModelCase, ModelCaseSource, StateObserver, SystemComposition, TemporalSpec,
+    TransitionSystem,
 };
 pub use trace::{Trace, TraceStep};
 
@@ -150,28 +151,26 @@ mod tests {
         type State = TestState;
         type Action = TestAction;
 
-        fn init(&self, state: &Self::State) -> bool {
-            matches!(state, TestState::Idle)
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![TestState::Idle]
         }
 
-        fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
-            matches!(
-                (prev, action, next),
-                (TestState::Idle, TestAction::Start, TestState::Busy)
-                    | (TestState::Busy, TestAction::Stop, TestState::Idle)
-            )
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![TestAction::Start, TestAction::Stop]
+        }
+
+        fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+            match (state, action) {
+                (TestState::Idle, TestAction::Start) => Some(TestState::Busy),
+                (TestState::Busy, TestAction::Stop) => Some(TestState::Idle),
+                _ => None,
+            }
         }
     }
 
     impl TemporalSpec for TestSpec {
         fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
             vec![StatePredicate::new("known_state", |_| true)]
-        }
-
-        fn illegal_transitions(&self) -> Vec<StepPredicate<Self::State, Self::Action>> {
-            vec![StepPredicate::new("double_start", |prev, action, _| {
-                matches!((prev, action), (TestState::Busy, TestAction::Start))
-            })]
         }
 
         fn properties(&self) -> Vec<Ltl<Self::State, Self::Action>> {
@@ -211,27 +210,17 @@ mod tests {
         }
     }
 
+    impl ModelCaseSource for TestSpec {}
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum DeadlockState {
         Idle,
         Busy,
     }
 
-    impl Signature for DeadlockState {
-        fn bounded_domain() -> BoundedDomain<Self> {
-            BoundedDomain::new(vec![Self::Idle, Self::Busy])
-        }
-    }
-
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum DeadlockAction {
         Start,
-    }
-
-    impl Signature for DeadlockAction {
-        fn bounded_domain() -> BoundedDomain<Self> {
-            BoundedDomain::new(vec![Self::Start])
-        }
     }
 
     #[derive(Debug, Clone, Copy, Default)]
@@ -241,19 +230,19 @@ mod tests {
         type State = DeadlockState;
         type Action = DeadlockAction;
 
-        fn init(&self, state: &Self::State) -> bool {
-            matches!(state, DeadlockState::Idle)
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![DeadlockState::Idle]
         }
 
-        fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
-            matches!(
-                (prev, action, next),
-                (
-                    DeadlockState::Idle,
-                    DeadlockAction::Start,
-                    DeadlockState::Busy
-                )
-            )
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![DeadlockAction::Start]
+        }
+
+        fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+            match (state, action) {
+                (DeadlockState::Idle, DeadlockAction::Start) => Some(DeadlockState::Busy),
+                _ => None,
+            }
         }
     }
 
@@ -261,11 +250,9 @@ mod tests {
         fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
             Vec::new()
         }
-
-        fn illegal_transitions(&self) -> Vec<StepPredicate<Self::State, Self::Action>> {
-            Vec::new()
-        }
     }
+
+    impl ModelCaseSource for DeadlockSpec {}
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum StutterState {
@@ -273,21 +260,9 @@ mod tests {
         Warm,
     }
 
-    impl Signature for StutterState {
-        fn bounded_domain() -> BoundedDomain<Self> {
-            BoundedDomain::new(vec![Self::Cold, Self::Warm])
-        }
-    }
-
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum StutterAction {
         Tick,
-    }
-
-    impl Signature for StutterAction {
-        fn bounded_domain() -> BoundedDomain<Self> {
-            BoundedDomain::new(vec![Self::Tick])
-        }
     }
 
     #[derive(Debug, Clone, Copy, Default)]
@@ -297,12 +272,16 @@ mod tests {
         type State = StutterState;
         type Action = StutterAction;
 
-        fn init(&self, state: &Self::State) -> bool {
-            matches!(state, StutterState::Cold)
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![StutterState::Cold]
         }
 
-        fn next(&self, _: &Self::State, _: &Self::Action, _: &Self::State) -> bool {
-            false
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![StutterAction::Tick]
+        }
+
+        fn transition(&self, _state: &Self::State, _action: &Self::Action) -> Option<Self::State> {
+            None
         }
 
         fn stutter_state(&self, state: &Self::State) -> Self::State {
@@ -318,10 +297,6 @@ mod tests {
             Vec::new()
         }
 
-        fn illegal_transitions(&self) -> Vec<StepPredicate<Self::State, Self::Action>> {
-            Vec::new()
-        }
-
         fn properties(&self) -> Vec<Ltl<Self::State, Self::Action>> {
             vec![Ltl::eventually(Ltl::pred(StatePredicate::new(
                 "warm",
@@ -330,6 +305,8 @@ mod tests {
         }
     }
 
+    impl ModelCaseSource for StutterSpec {}
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ControlState {
         Idle,
@@ -337,23 +314,11 @@ mod tests {
         Blocked,
     }
 
-    impl Signature for ControlState {
-        fn bounded_domain() -> BoundedDomain<Self> {
-            BoundedDomain::new(vec![Self::Idle, Self::Busy, Self::Blocked])
-        }
-    }
-
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ControlAction {
         Start,
         Stop,
         Block,
-    }
-
-    impl Signature for ControlAction {
-        fn bounded_domain() -> BoundedDomain<Self> {
-            BoundedDomain::new(vec![Self::Start, Self::Stop, Self::Block])
-        }
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -365,56 +330,32 @@ mod tests {
         type State = ControlState;
         type Action = ControlAction;
 
-        fn init(&self, state: &Self::State) -> bool {
-            matches!(state, ControlState::Idle)
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![ControlState::Idle]
         }
 
-        fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
-            matches!(
-                (prev, action, next),
-                (ControlState::Idle, ControlAction::Start, ControlState::Busy)
-                    | (ControlState::Busy, ControlAction::Stop, ControlState::Idle)
-                    | (
-                        ControlState::Busy,
-                        ControlAction::Block,
-                        ControlState::Blocked
-                    )
-                    | (
-                        ControlState::Blocked,
-                        ControlAction::Stop,
-                        ControlState::Idle
-                    )
-            )
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![
+                ControlAction::Start,
+                ControlAction::Stop,
+                ControlAction::Block,
+            ]
+        }
+
+        fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+            match (state, action) {
+                (ControlState::Idle, ControlAction::Start) => Some(ControlState::Busy),
+                (ControlState::Busy, ControlAction::Stop) => Some(ControlState::Idle),
+                (ControlState::Busy, ControlAction::Block) => Some(ControlState::Blocked),
+                (ControlState::Blocked, ControlAction::Stop) => Some(ControlState::Idle),
+                _ => None,
+            }
         }
     }
 
     impl TemporalSpec for ConstraintSpec {
         fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
             Vec::new()
-        }
-
-        fn illegal_transitions(&self) -> Vec<StepPredicate<Self::State, Self::Action>> {
-            Vec::new()
-        }
-
-        fn state_constraints(&self) -> Vec<StateConstraint<Self::State>> {
-            if self.constrained {
-                vec![StateConstraint::new("exclude_blocked", |state| {
-                    !matches!(state, ControlState::Blocked)
-                })]
-            } else {
-                Vec::new()
-            }
-        }
-
-        fn action_constraints(&self) -> Vec<ActionConstraint<Self::State, Self::Action>> {
-            if self.constrained {
-                vec![ActionConstraint::new("disallow_block", |_, action, _| {
-                    !matches!(action, ControlAction::Block)
-                })]
-            } else {
-                Vec::new()
-            }
         }
 
         fn properties(&self) -> Vec<Ltl<Self::State, Self::Action>> {
@@ -441,27 +382,35 @@ mod tests {
         }
     }
 
+    impl ModelCaseSource for ConstraintSpec {
+        fn model_cases(&self) -> Vec<ModelCase<Self::State, Self::Action>> {
+            if self.constrained {
+                vec![
+                    ModelCase::default()
+                        .with_state_constraint(StateConstraint::new("exclude_blocked", |state| {
+                            !matches!(state, ControlState::Blocked)
+                        }))
+                        .with_action_constraint(ActionConstraint::new(
+                            "disallow_block",
+                            |_, action, _| !matches!(action, ControlAction::Block),
+                        ))
+                        .with_check_deadlocks(false),
+                ]
+            } else {
+                vec![ModelCase::default().with_check_deadlocks(false)]
+            }
+        }
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum SymmetryState {
         Left,
         Right,
     }
 
-    impl Signature for SymmetryState {
-        fn bounded_domain() -> BoundedDomain<Self> {
-            BoundedDomain::new(vec![Self::Left, Self::Right])
-        }
-    }
-
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum SymmetryAction {
         Swap,
-    }
-
-    impl Signature for SymmetryAction {
-        fn bounded_domain() -> BoundedDomain<Self> {
-            BoundedDomain::new(vec![Self::Swap])
-        }
     }
 
     #[derive(Debug, Clone, Copy, Default)]
@@ -471,32 +420,24 @@ mod tests {
         type State = SymmetryState;
         type Action = SymmetryAction;
 
-        fn init(&self, _: &Self::State) -> bool {
-            true
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![SymmetryState::Left, SymmetryState::Right]
         }
 
-        fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
-            matches!(
-                (prev, action, next),
-                (
-                    SymmetryState::Left,
-                    SymmetryAction::Swap,
-                    SymmetryState::Right
-                ) | (
-                    SymmetryState::Right,
-                    SymmetryAction::Swap,
-                    SymmetryState::Left
-                )
-            )
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![SymmetryAction::Swap]
+        }
+
+        fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+            match (state, action) {
+                (SymmetryState::Left, SymmetryAction::Swap) => Some(SymmetryState::Right),
+                (SymmetryState::Right, SymmetryAction::Swap) => Some(SymmetryState::Left),
+            }
         }
     }
 
     impl TemporalSpec for SymmetrySpec {
         fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
-            Vec::new()
-        }
-
-        fn illegal_transitions(&self) -> Vec<StepPredicate<Self::State, Self::Action>> {
             Vec::new()
         }
 
@@ -506,21 +447,16 @@ mod tests {
                 |state| matches!(state, SymmetryState::Left),
             )))]
         }
-
-        fn symmetry(&self) -> Option<SymmetryReducer<Self::State>> {
-            Some(SymmetryReducer::new("collapse_lr", |_| SymmetryState::Left))
-        }
     }
 
-    #[test]
-    fn bounded_domain_expands_cartesian_product() {
-        let domain = TestState::bounded_domain().product(&TestAction::bounded_domain());
-        assert_eq!(domain.len(), 4);
-        assert!(
-            domain
-                .iter()
-                .any(|(state, action)| *state == TestState::Busy && *action == TestAction::Stop)
-        );
+    impl ModelCaseSource for SymmetrySpec {
+        fn model_cases(&self) -> Vec<ModelCase<Self::State, Self::Action>> {
+            vec![
+                ModelCase::default()
+                    .with_symmetry(SymmetryReducer::new("collapse_lr", |_| SymmetryState::Left))
+                    .with_check_deadlocks(false),
+            ]
+        }
     }
 
     #[test]
@@ -556,28 +492,30 @@ mod tests {
     }
 
     #[test]
-    fn system_composition_collects_typed_spec_fragments() {
+    fn system_composition_collects_typed_spec_fragments_and_model_cases() {
+        let model_case = ModelCase::<TestState, TestAction>::default()
+            .with_checker_config(ModelCheckConfig::bounded_lasso(5));
         let composition = SystemComposition::new("test-system")
             .with_subsystem("manager")
             .with_subsystem("runtime")
             .with_invariant(StatePredicate::new("idle", is_idle))
-            .with_illegal_transition(StepPredicate::new("start", starts_work))
             .with_property(Ltl::eventually(Ltl::pred(StatePredicate::new(
                 "idle", is_idle,
             ))))
             .with_fairness(Fairness::weak(StepPredicate::new("start", starts_work)))
-            .with_checker_config(ModelCheckConfig::bounded_lasso(5));
+            .with_model_case(model_case.clone());
 
         assert_eq!(composition.name(), "test-system");
         assert_eq!(composition.subsystems(), ["manager", "runtime"]);
         assert_eq!(composition.invariants().len(), 1);
-        assert_eq!(composition.illegal_transitions().len(), 1);
         assert_eq!(composition.properties().len(), 1);
         assert_eq!(composition.fairness().len(), 1);
-        assert_eq!(composition.checker_config().bounded_depth, Some(5));
+        assert_eq!(composition.model_cases().len(), 1);
         assert_eq!(
-            composition.checker_config().exploration,
-            ExplorationMode::BoundedLasso
+            composition.model_cases()[0]
+                .effective_checker_config()
+                .bounded_depth,
+            Some(5)
         );
     }
 
@@ -598,7 +536,6 @@ mod tests {
         let spec = TestSpec;
         let checker = ModelChecker::with_config(&spec, ModelCheckConfig::bounded_lasso(3));
         assert!(checker.check_invariants().unwrap().is_ok());
-        assert!(checker.check_illegal_transitions().unwrap().is_ok());
         assert!(checker.check_deadlocks().unwrap().is_ok());
         assert!(checker.check_properties().unwrap().is_ok());
     }

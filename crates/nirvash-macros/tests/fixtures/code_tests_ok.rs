@@ -3,12 +3,11 @@ use std::sync::Mutex;
 use nirvash_core::{
     TransitionSystem,
     conformance::{
-        ActionApplier, ExpectedStep, ProtocolConformanceSpec, ProtocolRuntimeBinding,
-        StateObserver,
+        ActionApplier, ProtocolConformanceSpec, ProtocolRuntimeBinding, StateObserver,
     },
 };
-use nirvash_macros::code_tests;
 use nirvash_macros::Signature as FormalSignature;
+use nirvash_macros::code_tests;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Spec;
@@ -41,15 +40,27 @@ impl TransitionSystem for Spec {
     type State = State;
     type Action = Action;
 
-    fn init(&self, state: &Self::State) -> bool {
-        matches!(state, State::Idle)
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![State::Idle]
     }
 
-    fn next(&self, prev: &Self::State, action: &Self::Action, next: &Self::State) -> bool {
-        match self.expected_step(prev, action) {
-            ExpectedStep::Allowed { next: expected, .. } => expected == *next,
-            ExpectedStep::Rejected { .. } => false,
+    fn actions(&self) -> Vec<Self::Action> {
+        vec![Action::Start, Action::Stop]
+    }
+
+    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+        match (state, action) {
+            (State::Idle, Action::Start) => Some(State::Busy),
+            (State::Busy, Action::Stop) => Some(State::Idle),
+            _ => None,
         }
+    }
+
+    fn successors(&self, state: &Self::State) -> Vec<(Self::Action, Self::State)> {
+        self.actions()
+            .into_iter()
+            .filter_map(|action| self.transition(state, &action).map(|next| (action, next)))
+            .collect()
     }
 }
 
@@ -58,23 +69,16 @@ impl ProtocolConformanceSpec for Spec {
     type ObservedState = State;
     type ObservedOutput = Output;
 
-    fn expected_step(
+    fn expected_output(
         &self,
         prev: &Self::State,
         action: &Self::Action,
-    ) -> ExpectedStep<Self::State, Self::ExpectedOutput> {
-        match (prev, action) {
-            (State::Idle, Action::Start) => ExpectedStep::Allowed {
-                next: State::Busy,
-                output: Output::Ack,
-            },
-            (State::Busy, Action::Stop) => ExpectedStep::Allowed {
-                next: State::Idle,
-                output: Output::Ack,
-            },
-            _ => ExpectedStep::Rejected {
-                output: Output::Rejected,
-            },
+        next: Option<&Self::State>,
+    ) -> Self::ExpectedOutput {
+        match (prev, action, next) {
+            (State::Idle, Action::Start, Some(State::Busy))
+            | (State::Busy, Action::Stop, Some(State::Idle)) => Output::Ack,
+            _ => Output::Rejected,
         }
     }
 
@@ -87,11 +91,7 @@ impl ProtocolConformanceSpec for Spec {
     }
 }
 
-fn initial_state() -> State {
-    State::Idle
-}
-
-#[code_tests(spec = Spec, binding = Binding, init = initial_state)]
+#[code_tests(spec = Spec, binding = Binding)]
 const _: () = ();
 
 struct Driver {
