@@ -598,10 +598,25 @@ mod tests {
     use bytes::Bytes;
     use imago_protocol::{ErrorCode, from_cbor};
     use imagod_control::{ServiceLogEvent, ServiceLogStream, ServiceLogSubscription};
+    use imagod_spec::{
+        LogsProjectionAction, LogsProjectionObservedState, LogsProjectionSpec, SystemEffect,
+        SystemState,
+    };
+    use nirvash_core::{
+        ProtocolConformanceSpec, TransitionSystem,
+        conformance::{ActionApplier, ProtocolRuntimeBinding, StateObserver},
+    };
+    use nirvash_macros::code_tests;
     use tokio::sync::{Notify, broadcast};
 
     use super::*;
     use crate::protocol_handler::session_loop::ProtocolSession;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RecordedDatagramKind {
+        Chunk,
+        End,
+    }
 
     struct FakeProtocolSession {
         max_datagram_size: usize,
@@ -701,6 +716,139 @@ mod tests {
             receiver: None,
         }
     }
+
+    fn decode_datagram_kinds(datagrams: &[Vec<u8>]) -> VecDeque<RecordedDatagramKind> {
+        datagrams
+            .iter()
+            .map(|bytes| {
+                if let Ok(chunk) = from_cbor::<ProtocolEnvelope<LogChunk>>(bytes)
+                    && chunk.message_type == MessageType::LogsChunk
+                {
+                    return RecordedDatagramKind::Chunk;
+                }
+
+                let end = from_cbor::<ProtocolEnvelope<LogEnd>>(bytes)
+                    .expect("logs projection datagram should decode as logs.end");
+                assert_eq!(end.message_type, MessageType::LogsEnd);
+                RecordedDatagramKind::End
+            })
+            .collect()
+    }
+
+    #[derive(Debug)]
+    struct LogsProjectionRuntime {
+        state: tokio::sync::Mutex<SystemState>,
+        trace: tokio::sync::Mutex<Vec<LogsProjectionAction>>,
+        pending: tokio::sync::Mutex<VecDeque<RecordedDatagramKind>>,
+    }
+
+    impl LogsProjectionRuntime {
+        fn new() -> Self {
+            Self {
+                state: tokio::sync::Mutex::new(LogsProjectionSpec::new().initial_state()),
+                trace: tokio::sync::Mutex::new(Vec::new()),
+                pending: tokio::sync::Mutex::new(VecDeque::new()),
+            }
+        }
+    }
+
+    #[derive(Debug, Default, Clone, Copy)]
+    struct LogsProjectionBinding;
+
+    impl ProtocolRuntimeBinding<LogsProjectionSpec> for LogsProjectionBinding {
+        type Runtime = LogsProjectionRuntime;
+        type Context = ();
+
+        async fn fresh_runtime(_spec: &LogsProjectionSpec) -> Self::Runtime {
+            LogsProjectionRuntime::new()
+        }
+
+        fn context(_spec: &LogsProjectionSpec) -> Self::Context {}
+    }
+
+    impl ActionApplier for LogsProjectionRuntime {
+        type Action = LogsProjectionAction;
+        type Output = Vec<SystemEffect>;
+        type Context = ();
+
+        async fn execute_action(
+            &self,
+            _context: &Self::Context,
+            action: &Self::Action,
+        ) -> Self::Output {
+            let spec = LogsProjectionSpec::new();
+            let mut state = self.state.lock().await;
+            let prev = state.clone();
+            let Some(next) = spec.transition(&prev, action) else {
+                return Vec::new();
+            };
+
+            match action {
+                LogsProjectionAction::LogsRequest => {
+                    let session = Arc::new(FakeProtocolSession::new(
+                        2048,
+                        vec![Ok(()), Ok(()), Ok(())],
+                    ));
+                    run_logs_forwarder(
+                        session.clone(),
+                        Uuid::from_u128(17),
+                        Uuid::from_u128(18),
+                        vec![sample_subscription("svc-a", b"hello-log")],
+                        false,
+                    )
+                    .await;
+                    *self.pending.lock().await = decode_datagram_kinds(&session.sent_datagrams());
+                }
+                LogsProjectionAction::LogsChunk => {
+                    let mut pending = self.pending.lock().await;
+                    let mut saw_chunk = false;
+                    while let Some(kind) = pending.front().copied() {
+                        match kind {
+                            RecordedDatagramKind::Chunk => {
+                                saw_chunk = true;
+                                pending.pop_front();
+                            }
+                            RecordedDatagramKind::End => break,
+                        }
+                    }
+                    assert!(saw_chunk, "logs forwarder should emit at least one logs.chunk");
+                }
+                LogsProjectionAction::LogsEnd => {
+                    let mut pending = self.pending.lock().await;
+                    while matches!(pending.front(), Some(RecordedDatagramKind::Chunk)) {
+                        pending.pop_front();
+                    }
+                    assert_eq!(
+                        pending.pop_front(),
+                        Some(RecordedDatagramKind::End),
+                        "logs forwarder should terminate with logs.end",
+                    );
+                    assert!(
+                        pending.is_empty(),
+                        "logs projection should consume all forwarded datagrams",
+                    );
+                }
+            }
+
+            *state = next;
+            self.trace.lock().await.push(*action);
+            spec.expected_output(&prev, action, Some(&*state))
+        }
+    }
+
+    impl StateObserver for LogsProjectionRuntime {
+        type ObservedState = LogsProjectionObservedState;
+        type Context = ();
+
+        async fn observe_state(&self, _context: &Self::Context) -> Self::ObservedState {
+            LogsProjectionObservedState {
+                trace: self.trace.lock().await.clone(),
+            }
+        }
+    }
+
+    #[code_tests(spec = LogsProjectionSpec, binding = LogsProjectionBinding)]
+    const _: () = ();
 
     #[tokio::test]
     async fn given_retryable_datagram_error__when_send_datagram_with_retry__then_second_attempt_succeeds()

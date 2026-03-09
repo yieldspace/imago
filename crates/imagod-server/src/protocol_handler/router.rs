@@ -6,6 +6,7 @@ use std::{
     },
 };
 
+use async_trait::async_trait;
 use imago_protocol::messages::{
     BindingsCertUploadRequest, BindingsCertUploadResponse, RpcInvokeRequest, RpcInvokeResponse,
 };
@@ -19,18 +20,72 @@ use imago_protocol::{
 };
 use imagod_common::ImagodError;
 use imagod_config::upsert_tls_known_client_key;
-use imagod_control::{ActionApplier, OperationManager};
 use semver::{Version, VersionReq};
 use serde::Serialize;
 use web_transport_quinn::SendStream;
 
 use super::{
-    Envelope, ProtocolHandler,
+    Envelope, ProtocolHandler, ProtocolOperations,
     envelope_io::{bad_request, event_envelope, payload_take, response_envelope, write_envelope},
     logs_forwarder::LogsForwarder,
     session_loop::ProtocolSession,
     upsert_dynamic_client_public_key,
 };
+
+#[async_trait]
+pub(crate) trait EnvelopeSink {
+    async fn write(&mut self, handler: &ProtocolHandler, envelope: &Envelope)
+    -> Result<(), ImagodError>;
+}
+
+pub(crate) struct SendStreamEnvelopeSink<'a> {
+    send: &'a mut SendStream,
+}
+
+impl<'a> SendStreamEnvelopeSink<'a> {
+    pub(crate) fn new(send: &'a mut SendStream) -> Self {
+        Self { send }
+    }
+}
+
+#[async_trait]
+impl EnvelopeSink for SendStreamEnvelopeSink<'_> {
+    async fn write(
+        &mut self,
+        handler: &ProtocolHandler,
+        envelope: &Envelope,
+    ) -> Result<(), ImagodError> {
+        write_envelope(self.send, envelope, handler.frame_codec.as_ref()).await
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+pub(crate) struct RecordingEnvelopeSink {
+    envelopes: Vec<Envelope>,
+}
+
+#[cfg(test)]
+impl RecordingEnvelopeSink {
+    #[allow(dead_code)]
+    pub(crate) fn into_envelopes(self) -> Vec<Envelope> {
+        self.envelopes
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl EnvelopeSink for RecordingEnvelopeSink {
+    async fn write(
+        &mut self,
+        _handler: &ProtocolHandler,
+        envelope: &Envelope,
+    ) -> Result<(), ImagodError> {
+        self.envelopes.push(envelope.clone());
+        Ok(())
+    }
+}
 
 impl ProtocolHandler {
     /// Dispatches non-command-start requests to the corresponding handler.
@@ -185,12 +240,13 @@ impl ProtocolHandler {
             .validate()
             .map_err(|e| bad_request("state.request", e.to_string()))?;
 
-        let response = <OperationManager as ActionApplier>::execute_action(
-            &self.operations,
-            &command_context(payload.request_id),
-            &CommandProtocolAction::SnapshotRunning,
-        )
-        .await;
+        let response = self
+            .operations
+            .execute(
+                &command_context(payload.request_id),
+                &CommandProtocolAction::SnapshotRunning,
+            )
+            .await;
         let response = state_response_from_output(payload.request_id, response)?;
         response_envelope(
             MessageType::StateResponse,
@@ -233,12 +289,13 @@ impl ProtocolHandler {
             .validate()
             .map_err(|e| bad_request("command.cancel", e.to_string()))?;
 
-        let response = <OperationManager as ActionApplier>::execute_action(
-            &self.operations,
-            &command_context(payload.request_id),
-            &CommandProtocolAction::RequestCancel,
-        )
-        .await;
+        let response = self
+            .operations
+            .execute(
+                &command_context(payload.request_id),
+                &CommandProtocolAction::RequestCancel,
+            )
+            .await;
         let response = cancel_response_from_output(response)?;
         response_envelope(
             MessageType::CommandCancel,
@@ -314,8 +371,22 @@ impl ProtocolHandler {
     pub(crate) async fn handle_logs_request<S>(
         &self,
         session: Arc<S>,
-        mut request: Envelope,
+        request: Envelope,
         send: &mut SendStream,
+    ) -> Result<(), ImagodError>
+    where
+        S: ProtocolSession + 'static,
+    {
+        let mut sink = SendStreamEnvelopeSink::new(send);
+        self.handle_logs_request_with_sink(session, request, &mut sink)
+            .await
+    }
+
+    pub(crate) async fn handle_logs_request_with_sink<S>(
+        &self,
+        session: Arc<S>,
+        mut request: Envelope,
+        sink: &mut (impl EnvelopeSink + ?Sized),
     ) -> Result<(), ImagodError>
     where
         S: ProtocolSession + 'static,
@@ -366,7 +437,7 @@ impl ProtocolHandler {
                 follow,
             },
         )?;
-        write_envelope(send, &ack, self.frame_codec.as_ref()).await?;
+        sink.write(self, &ack).await?;
 
         let logs_forwarder = self.logs_forwarder.clone();
         tokio::spawn(async move {
@@ -387,8 +458,17 @@ impl ProtocolHandler {
     /// Handles `command.start` and emits accepted/progress/terminal events.
     pub(crate) async fn handle_command_start(
         &self,
-        mut request: Envelope,
+        request: Envelope,
         send: &mut SendStream,
+    ) -> Result<(), ImagodError> {
+        let mut sink = SendStreamEnvelopeSink::new(send);
+        self.handle_command_start_with_sink(request, &mut sink).await
+    }
+
+    pub(crate) async fn handle_command_start_with_sink(
+        &self,
+        mut request: Envelope,
+        sink: &mut (impl EnvelopeSink + ?Sized),
     ) -> Result<(), ImagodError> {
         let request_id = request.request_id;
         let correlation_id = request.correlation_id;
@@ -411,12 +491,12 @@ impl ProtocolHandler {
         };
 
         expect_ack(
-            <OperationManager as ActionApplier>::execute_action(
-                &self.operations,
-                &operation_context,
-                &CommandProtocolAction::Start(command_kind_from_wire(payload.command_type)),
-            )
-            .await,
+            self.operations
+                .execute(
+                    &operation_context,
+                    &CommandProtocolAction::Start(command_kind_from_wire(payload.command_type)),
+                )
+                .await,
             CommandProtocolStageId::CommandStart,
         )?;
 
@@ -426,7 +506,7 @@ impl ProtocolHandler {
             correlation_id,
             &CommandStartResponse { accepted: true },
         )?;
-        write_envelope(send, &accepted, self.frame_codec.as_ref()).await?;
+        sink.write(self, &accepted).await?;
 
         let accepted_event = event_envelope(
             self.clock.as_ref(),
@@ -437,15 +517,12 @@ impl ProtocolHandler {
             None,
             None,
         )?;
-        write_envelope(send, &accepted_event, self.frame_codec.as_ref()).await?;
+        sink.write(self, &accepted_event).await?;
 
         expect_ack(
-            <OperationManager as ActionApplier>::execute_action(
-                &self.operations,
-                &operation_context,
-                &CommandProtocolAction::SetRunning,
-            )
-            .await,
+            self.operations
+                .execute(&operation_context, &CommandProtocolAction::SetRunning)
+                .await,
             CommandProtocolStageId::OperationState,
         )?;
         let running_event = event_envelope(
@@ -457,14 +534,12 @@ impl ProtocolHandler {
             Some("starting".to_string()),
             None,
         )?;
-        write_envelope(send, &running_event, self.frame_codec.as_ref()).await?;
+        sink.write(self, &running_event).await?;
 
-        let spawn_transition = <OperationManager as ActionApplier>::execute_action(
-            &self.operations,
-            &operation_context,
-            &CommandProtocolAction::MarkSpawned,
-        )
-        .await;
+        let spawn_transition = self
+            .operations
+            .execute(&operation_context, &CommandProtocolAction::MarkSpawned)
+            .await;
         if is_spawn_canceled(&spawn_transition)? {
             let canceled = event_envelope(
                 self.clock.as_ref(),
@@ -475,9 +550,9 @@ impl ProtocolHandler {
                 Some("canceled".to_string()),
                 None,
             )?;
-            let canceled_write = write_envelope(send, &canceled, self.frame_codec.as_ref()).await;
+            let canceled_write = sink.write(self, &canceled).await;
             let finalize_result = finalize_operation_after_terminal_event(
-                &self.operations,
+                self.operations.as_ref(),
                 &operation_context,
                 CommandProtocolAction::FinishCanceled,
                 canceled_write,
@@ -496,29 +571,13 @@ impl ProtocolHandler {
         let command_result = match (&payload.command_type, &payload.payload) {
             (CommandType::Deploy, CommandPayload::Deploy(deploy_payload)) => self
                 .orchestrator
-                .deploy(deploy_payload)
-                .await
-                .map(|summary| {
-                    (
-                        format!("release:{}:{}", summary.service_name, summary.release_hash),
-                        "spawned".to_string(),
-                    )
-                }),
+                .command_deploy(deploy_payload)
+                .await,
             (CommandType::Run, CommandPayload::Run(run_payload)) => {
-                self.orchestrator.run(run_payload).await.map(|summary| {
-                    (
-                        format!("running:{}:{}", summary.service_name, summary.release_hash),
-                        "spawned".to_string(),
-                    )
-                })
+                self.orchestrator.command_run(run_payload).await
             }
             (CommandType::Stop, CommandPayload::Stop(stop_payload)) => {
-                self.orchestrator.stop(stop_payload).await.map(|summary| {
-                    (
-                        format!("stopped:{}", summary.service_name),
-                        "completed".to_string(),
-                    )
-                })
+                self.orchestrator.command_stop(stop_payload).await
             }
             _ => Err(ImagodError::new(
                 imago_protocol::ErrorCode::BadRequest,
@@ -539,7 +598,7 @@ impl ProtocolHandler {
                     Some(progress_stage),
                     None,
                 )?;
-                write_envelope(send, &progress, self.frame_codec.as_ref()).await?;
+                sink.write(self, &progress).await?;
 
                 let succeeded = event_envelope(
                     self.clock.as_ref(),
@@ -550,10 +609,9 @@ impl ProtocolHandler {
                     Some(success_stage_for_event),
                     None,
                 )?;
-                let succeeded_write =
-                    write_envelope(send, &succeeded, self.frame_codec.as_ref()).await;
+                let succeeded_write = sink.write(self, &succeeded).await;
                 let finalize_result = finalize_operation_after_terminal_event(
-                    &self.operations,
+                    self.operations.as_ref(),
                     &operation_context,
                     CommandProtocolAction::FinishSucceeded,
                     succeeded_write,
@@ -577,9 +635,9 @@ impl ProtocolHandler {
                     Some("failed".to_string()),
                     Some(err.to_structured()),
                 )?;
-                let failed_write = write_envelope(send, &failed, self.frame_codec.as_ref()).await;
+                let failed_write = sink.write(self, &failed).await;
                 let finalize_result = finalize_operation_after_terminal_event(
-                    &self.operations,
+                    self.operations.as_ref(),
                     &operation_context,
                     CommandProtocolAction::FinishFailed(command_error_kind_from_wire(err.code)),
                     failed_write,
@@ -882,23 +940,20 @@ fn resolve_logs_request_service_names(
 
 /// Finalizes operation bookkeeping after writing terminal event.
 pub(crate) async fn finalize_operation_after_terminal_event(
-    operations: &OperationManager,
+    operations: &(impl ProtocolOperations + ?Sized),
     context: &CommandProtocolContext,
     terminal_action: CommandProtocolAction,
     terminal_write_result: Result<(), ImagodError>,
 ) -> Result<(), ImagodError> {
     expect_ack(
-        <OperationManager as ActionApplier>::execute_action(operations, context, &terminal_action)
+        operations.execute(context, &terminal_action)
             .await,
         CommandProtocolStageId::OperationState,
     )?;
     expect_ack(
-        <OperationManager as ActionApplier>::execute_action(
-            operations,
-            context,
-            &CommandProtocolAction::Remove,
-        )
-        .await,
+        operations
+            .execute(context, &CommandProtocolAction::Remove)
+            .await,
         CommandProtocolStageId::OperationRemove,
     )?;
     terminal_write_result
@@ -1183,6 +1238,438 @@ mod tests {
                 }
             ),
             "operation should be removed even on write error"
+        );
+    }
+}
+
+#[cfg(test)]
+mod conformance_tests {
+    use std::{
+        collections::BTreeMap,
+        path::PathBuf,
+        sync::{Arc, Mutex},
+    };
+
+    use async_trait::async_trait;
+    use imago_protocol::{
+        ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushChunkHeader,
+        ArtifactPushRequest, ArtifactStatus, ByteRange, CommandKind, CommandProtocolAction,
+        CommandProtocolContext, CommandProtocolOutput, DeployPrepareRequest, DeployPrepareResponse,
+        ErrorCode, HelloNegotiateRequest, MessageType, RpcInvokeTargetService,
+        ServiceListRequest, ServiceState, ServiceStatusEntry,
+        messages::{BindingsCertUploadRequest, RpcInvokeRequest},
+    };
+    use imagod_config::{RuntimeConfig, TlsConfig, load_or_create_default};
+    use imagod_control::{ActionApplier, OperationManager, ServiceLogSubscription};
+    use imagod_spec::{
+        RouterProjectionAction, RouterProjectionObservedState, RouterProjectionSpec, SystemEffect,
+        SystemState,
+        system_message_binding,
+    };
+    use nirvash_core::{
+        TransitionSystem,
+        conformance::{ActionApplier as ProtocolActionApplier, ProtocolRuntimeBinding, StateObserver},
+    };
+    use nirvash_macros::code_tests;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::{
+        Envelope, ProtocolHandler, ProtocolOperations,
+        super::{ProtocolArtifacts, ProtocolOrchestrator},
+    };
+
+    #[derive(Debug, Default, Clone, Copy)]
+    struct RouterProjectionBinding;
+
+    #[derive(Clone)]
+    struct RouterRuntime {
+        handler: ProtocolHandler,
+        spec: RouterProjectionSpec,
+        state: Arc<Mutex<SystemState>>,
+        trace: Arc<Mutex<Vec<RouterProjectionAction>>>,
+        _config_root: Arc<PathBuf>,
+    }
+
+    struct FakeArtifacts;
+
+    #[async_trait]
+    impl ProtocolArtifacts for FakeArtifacts {
+        async fn prepare(
+            &self,
+            _payload: DeployPrepareRequest,
+        ) -> Result<DeployPrepareResponse, imagod_common::ImagodError> {
+            Ok(DeployPrepareResponse {
+                deploy_id: "deploy-1".to_string(),
+                artifact_status: ArtifactStatus::Partial,
+                missing_ranges: vec![ByteRange {
+                    offset: 0,
+                    length: 4,
+                }],
+                upload_token: "token-1".to_string(),
+                session_expires_at: "1735689600".to_string(),
+            })
+        }
+
+        async fn push(
+            &self,
+            _payload: ArtifactPushRequest,
+        ) -> Result<ArtifactPushAck, imagod_common::ImagodError> {
+            Ok(ArtifactPushAck {
+                received_ranges: vec![ByteRange {
+                    offset: 0,
+                    length: 4,
+                }],
+                next_missing_range: None,
+                accepted_bytes: 4,
+            })
+        }
+
+        async fn commit(
+            &self,
+            _payload: ArtifactCommitRequest,
+        ) -> Result<ArtifactCommitResponse, imagod_common::ImagodError> {
+            Ok(ArtifactCommitResponse {
+                artifact_id: "artifact-1".to_string(),
+                verified: true,
+            })
+        }
+
+        async fn purge_deploy_session(
+            &self,
+            _deploy_id: &str,
+        ) -> Result<(), imagod_common::ImagodError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeOperations {
+        manager: Arc<OperationManager>,
+    }
+
+    #[async_trait]
+    impl ProtocolOperations for FakeOperations {
+        async fn execute(
+            &self,
+            context: &CommandProtocolContext,
+            action: &CommandProtocolAction,
+        ) -> CommandProtocolOutput {
+            self.manager.execute_action(context, action).await
+        }
+    }
+
+    struct FakeOrchestrator;
+
+    #[async_trait]
+    impl ProtocolOrchestrator for FakeOrchestrator {
+        async fn command_deploy(
+            &self,
+            _payload: &imago_protocol::DeployCommandPayload,
+        ) -> Result<(String, String), imagod_common::ImagodError> {
+            Ok(("release:svc-a:release-a".to_string(), "spawned".to_string()))
+        }
+
+        async fn command_run(
+            &self,
+            _payload: &imago_protocol::RunCommandPayload,
+        ) -> Result<(String, String), imagod_common::ImagodError> {
+            Ok(("running:svc-a:release-a".to_string(), "spawned".to_string()))
+        }
+
+        async fn command_stop(
+            &self,
+            _payload: &imago_protocol::StopCommandPayload,
+        ) -> Result<(String, String), imagod_common::ImagodError> {
+            Ok(("stopped:svc-a".to_string(), "completed".to_string()))
+        }
+
+        async fn list_service_states(
+            &self,
+            _names_filter: Option<&[String]>,
+        ) -> Result<Vec<ServiceStatusEntry>, imagod_common::ImagodError> {
+            Ok(vec![ServiceStatusEntry {
+                name: "svc-a".to_string(),
+                release_hash: "release-a".to_string(),
+                started_at: "1735689600".to_string(),
+                state: ServiceState::Running,
+            }])
+        }
+
+        async fn loggable_service_names(&self) -> Vec<String> {
+            vec!["svc-a".to_string()]
+        }
+
+        async fn open_logs(
+            &self,
+            _service_name: &str,
+            _tail_lines: u32,
+            _follow: bool,
+            _with_timestamp: bool,
+        ) -> Result<ServiceLogSubscription, imagod_common::ImagodError> {
+            Err(imagod_common::ImagodError::new(
+                ErrorCode::Internal,
+                "logs.request",
+                "router projection does not open logs",
+            ))
+        }
+
+        async fn invoke(
+            &self,
+            _target_service_name: &str,
+            _interface_id: &str,
+            _function: &str,
+            _args_cbor: Vec<u8>,
+        ) -> Result<Vec<u8>, imagod_common::ImagodError> {
+            Ok(vec![0x2a])
+        }
+
+        async fn reap_finished_services(&self) {}
+
+        async fn has_live_services(&self) -> bool {
+            true
+        }
+
+        async fn stop_all_services(
+            &self,
+            _force: bool,
+        ) -> Vec<(String, imagod_common::ImagodError)> {
+            Vec::new()
+        }
+    }
+
+    impl RouterRuntime {
+        fn request_for(&self, action: RouterProjectionAction) -> Envelope {
+            let request_id = Uuid::from_u128(7);
+            let correlation_id = Uuid::from_u128(2);
+            match action {
+                RouterProjectionAction::HelloNegotiate => Envelope::new(
+                    MessageType::HelloNegotiate,
+                    request_id,
+                    correlation_id,
+                    json!(HelloNegotiateRequest {
+                        client_version: "0.1.0".to_string(),
+                        required_features: Vec::new(),
+                    }),
+                ),
+                RouterProjectionAction::DeployPrepare => Envelope::new(
+                    MessageType::DeployPrepare,
+                    request_id,
+                    correlation_id,
+                    json!(DeployPrepareRequest {
+                        name: "svc-a".to_string(),
+                        app_type: "rpc".to_string(),
+                        target: BTreeMap::new(),
+                        artifact_digest: "sha256:artifact".to_string(),
+                        artifact_size: 4,
+                        manifest_digest: "sha256:manifest".to_string(),
+                        idempotency_key: "deploy-1".to_string(),
+                        policy: BTreeMap::new(),
+                    }),
+                ),
+                RouterProjectionAction::ArtifactPush => Envelope::new(
+                    MessageType::ArtifactPush,
+                    request_id,
+                    correlation_id,
+                    json!(ArtifactPushRequest {
+                        header: ArtifactPushChunkHeader {
+                            deploy_id: "deploy-1".to_string(),
+                            offset: 0,
+                            length: 4,
+                            chunk_sha256: "abcd".to_string(),
+                            upload_token: "token-1".to_string(),
+                        },
+                        chunk: vec![1, 2, 3, 4],
+                    }),
+                ),
+                RouterProjectionAction::ArtifactCommit => Envelope::new(
+                    MessageType::ArtifactCommit,
+                    request_id,
+                    correlation_id,
+                    json!(ArtifactCommitRequest {
+                        deploy_id: "deploy-1".to_string(),
+                        artifact_digest: "sha256:artifact".to_string(),
+                        artifact_size: 4,
+                        manifest_digest: "sha256:manifest".to_string(),
+                    }),
+                ),
+                RouterProjectionAction::StateRequest => Envelope::new(
+                    MessageType::StateRequest,
+                    request_id,
+                    correlation_id,
+                    json!(imago_protocol::StateRequest {
+                        request_id: Uuid::from_u128(7),
+                    }),
+                ),
+                RouterProjectionAction::ServicesList => Envelope::new(
+                    MessageType::ServicesList,
+                    request_id,
+                    correlation_id,
+                    json!(ServiceListRequest { names: None }),
+                ),
+                RouterProjectionAction::CommandCancel => Envelope::new(
+                    MessageType::CommandCancel,
+                    request_id,
+                    correlation_id,
+                    json!(imago_protocol::CommandCancelRequest { request_id }),
+                ),
+                RouterProjectionAction::RpcInvoke => Envelope::new(
+                    MessageType::RpcInvoke,
+                    request_id,
+                    correlation_id,
+                    json!(RpcInvokeRequest {
+                        interface_id: "yieldspace:service/invoke".to_string(),
+                        function: "call".to_string(),
+                        args_cbor: vec![0x01],
+                        target_service: RpcInvokeTargetService {
+                            name: "svc-a".to_string(),
+                        },
+                    }),
+                ),
+                RouterProjectionAction::BindingsCertUpload => Envelope::new(
+                    MessageType::BindingsCertUpload,
+                    request_id,
+                    correlation_id,
+                    json!(BindingsCertUploadRequest {
+                        authority: "edge.example".to_string(),
+                        public_key_hex: "1111111111111111111111111111111111111111111111111111111111111111"
+                            .to_string(),
+                    }),
+                ),
+            }
+        }
+
+        fn output_for_response(&self, action: RouterProjectionAction, response: &Envelope) -> Vec<SystemEffect> {
+            match system_message_binding(response.message_type) {
+                imagod_spec::SystemMessageBinding::Request(kind)
+                | imagod_spec::SystemMessageBinding::Response(kind) => {
+                    let stream = match action {
+                        RouterProjectionAction::BindingsCertUpload => imagod_spec::atoms::StreamAtom::Stream0,
+                        _ => imagod_spec::atoms::StreamAtom::Stream0,
+                    };
+                    vec![SystemEffect::Response(stream, kind)]
+                }
+                imagod_spec::SystemMessageBinding::CommandEvent
+                | imagod_spec::SystemMessageBinding::LogChunk
+                | imagod_spec::SystemMessageBinding::LogsEnd => Vec::new(),
+            }
+        }
+    }
+
+    impl ProtocolRuntimeBinding<RouterProjectionSpec> for RouterProjectionBinding {
+        type Runtime = RouterRuntime;
+        type Context = ();
+
+        async fn fresh_runtime(spec: &RouterProjectionSpec) -> Self::Runtime {
+            let config_root = std::env::temp_dir().join(format!("imagod-router-projection-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&config_root).expect("config root should exist");
+            let config_path = config_root.join("imagod.toml");
+            let loaded = load_or_create_default(&config_path).expect("default config should load");
+            let mut config = loaded.config;
+            config.server_version = "imagod/test".to_string();
+            config.runtime = RuntimeConfig::default();
+            config.listen_addr = "127.0.0.1:4443".to_string();
+            if config.tls.server_key.as_os_str().is_empty() {
+                config.tls = TlsConfig {
+                    server_key: PathBuf::new(),
+                    admin_public_keys: Vec::new(),
+                    client_public_keys: Vec::new(),
+                    known_public_keys: BTreeMap::new(),
+                };
+            }
+
+            let manager = Arc::new(OperationManager::new());
+            manager
+                .execute_action(
+                    &CommandProtocolContext {
+                        request_id: Uuid::from_u128(7),
+                    },
+                    &CommandProtocolAction::Start(CommandKind::Deploy),
+                )
+                .await;
+            let handler = ProtocolHandler::new_with_clients(
+                Arc::new(config),
+                config_path,
+                Arc::new(FakeArtifacts),
+                Arc::new(FakeOperations {
+                    manager: manager.clone(),
+                }),
+                Arc::new(FakeOrchestrator),
+                Arc::new(crate::protocol_handler::codec::LengthPrefixedFrameCodec),
+                Arc::new(crate::protocol_handler::clock::SystemServerClock),
+                Arc::new(crate::protocol_handler::logs_forwarder::DefaultLogsForwarder),
+            );
+            RouterRuntime {
+                handler,
+                spec: *spec,
+                state: Arc::new(Mutex::new(spec.initial_state())),
+                trace: Arc::new(Mutex::new(Vec::new())),
+                _config_root: Arc::new(config_root),
+            }
+        }
+
+        fn context(_spec: &RouterProjectionSpec) -> Self::Context {}
+    }
+
+    impl ProtocolActionApplier for RouterRuntime {
+        type Action = RouterProjectionAction;
+        type Output = Vec<SystemEffect>;
+        type Context = ();
+
+        async fn execute_action(&self, _context: &Self::Context, action: &Self::Action) -> Self::Output {
+            let prev = self.state.lock().expect("state lock").clone();
+            let Some(next) = self.spec.transition(&prev, action) else {
+                return Vec::new();
+            };
+            let request = self.request_for(*action);
+            let response = self
+                .handler
+                .handle_single(request)
+                .await
+                .expect("router action should succeed");
+            *self.state.lock().expect("state lock") = next;
+            self.trace.lock().expect("trace lock").push(*action);
+            self.output_for_response(*action, &response)
+        }
+    }
+
+    impl StateObserver for RouterRuntime {
+        type ObservedState = RouterProjectionObservedState;
+        type Context = ();
+
+        async fn observe_state(&self, _context: &Self::Context) -> Self::ObservedState {
+            RouterProjectionObservedState {
+                trace: self.trace.lock().expect("trace lock").clone(),
+            }
+        }
+    }
+
+    #[code_tests(spec = RouterProjectionSpec, binding = RouterProjectionBinding)]
+    const _: () = ();
+
+    #[test]
+    fn router_runtime_maps_services_list_to_system_response() {
+        let spec = RouterProjectionSpec::new();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime should build")
+            .block_on(async { RouterProjectionBinding::fresh_runtime(&spec).await });
+        let output = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime should build")
+            .block_on(async {
+                runtime
+                    .execute_action(&(), &RouterProjectionAction::ServicesList)
+                    .await
+            });
+        assert_eq!(
+            output,
+            vec![SystemEffect::Response(
+                imagod_spec::atoms::StreamAtom::Stream0,
+                imagod_spec::atoms::RequestKindAtom::ServicesList,
+            )]
         );
     }
 }

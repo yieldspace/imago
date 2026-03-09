@@ -439,11 +439,9 @@ where
             let next_depth = graph.depths[index] + 1;
             let mut edges = Vec::new();
 
-            for (action, next_raw) in self.spec.successors(&current) {
-                if !self.action_constraints_allow(&current, &action, &next_raw) {
-                    continue;
-                }
-
+            for (action, next_raw) in self.spec.successors_constrained(&current, &|action, next| {
+                self.action_constraints_allow(&current, action, next)
+            }) {
                 let next = self.canonicalize_state(&next_raw);
                 if !self.state_constraints_allow(&next) {
                     continue;
@@ -606,10 +604,9 @@ where
 
     fn constrained_successors(&self, state: &T::State) -> Vec<(TraceStep<T::Action>, T::State)> {
         let mut values = Vec::new();
-        for (action, next_raw) in self.spec.successors(state) {
-            if !self.action_constraints_allow(state, &action, &next_raw) {
-                continue;
-            }
+        for (action, next_raw) in self.spec.successors_constrained(state, &|action, next| {
+            self.action_constraints_allow(state, action, next)
+        }) {
             let next = self.canonicalize_state(&next_raw);
             if !self.state_constraints_allow(&next) {
                 continue;

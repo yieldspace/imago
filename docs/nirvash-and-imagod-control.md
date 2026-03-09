@@ -42,7 +42,8 @@ flowchart LR
 - `crates/imagod-spec`
   - `imagod` 全体の spec 記述
   - `command_protocol` では intended contract の projection つき conformance spec を実装
-  - `system` は subsystem transition を同期させる代表合成モデルで、top-level では cross-link invariant と scenario model case を主に持つ
+  - `system` は boot / session / wire / deploy / supervision / service RPC / plugin / shutdown を footprint-based concurrency で束ねる unified composition で、top-level では cross-link invariant と scenario model case を主に持つ
+  - `legacy_system` は single-service 前提の旧 baseline として残す
 - `crates/imagod-control/tests`
   - `command_protocol` の `OperationManager` runtime binding と `code_tests` 実行
 
@@ -67,12 +68,13 @@ flowchart TD
 
 ### 重要な設計点
 
-- spec の正本は `TransitionSystem::initial_states()`、`TransitionSystem::actions()`、`TransitionSystem::transition()` です。`successors()` はそこから導出されます。
+- 通常 spec の正本は `TransitionSystem::initial_states()`、`TransitionSystem::actions()`、`TransitionSystem::transition()` です。`system` のような並行 spec は `ConcurrentTransitionSystem::{initial_states, atomic_actions, atomic_transition, footprint_reads, footprint_writes}` を atomic 正本にし、`TransitionSystem::Action = ConcurrentAction<_>` と `successors()` で synthesized parallel step を返します。
 - `Signature` は helper enum/newtype や projection 型の bounded domain 付与にだけ使います。
 - `imagod-spec` では構造を持つ subsystem を relation-first で書くのを既定にし、atom を `RelAtom`、state field を `RelSet` / `Relation2` で持ちます。phase progression や terminal status のような線形 gate だけ scalar を残し、doc graph 側は relation schema と Alloy 風 notation を追加表示します。
+- concurrent edge の doc label は `parallel(a, b, c)` 形式で表示され、resource footprint に衝突しない atomic action だけが自動合成されます。
 - `formal_tests` は spec 単体を検査します。
 - `code_tests` は `nirvash_core::conformance::ProtocolConformanceSpec` と `ProtocolRuntimeBinding` を使って grouped な runtime conformance を生成し、`ActionApplier` / `StateObserver` 経由で spec の `transition` と `expected_output` を比較します。
-- `code_witness_tests` は `ProtocolInputWitnessBinding` で positive / negative witness を受け取り、reachable graph から semantic case を自動検出して witness 単位の strict test を custom harness で列挙します。現在の `command_protocol` binding は `OperationManager` に限定され、router 側の request validation / event sequencing はこの比較対象に含みません。
+- `code_witness_tests` は `ProtocolInputWitnessBinding` で positive / negative witness を受け取り、reachable graph から semantic case を自動検出して witness 単位の strict test を custom harness で列挙します。現行の command witness は `command_projection` が `system` から command surface を投影し、実行先は `OperationManager` に限定されます。ほかの boundary は grouped `code_tests` で `router_projection` / `session_auth_projection` / `logs_projection -> imagod-server`、`runtime_projection -> imagod-control`、`manager_runtime_projection -> imagod` に接続します。
 - shared contract は `imago-protocol`、conformance API は `nirvash-core` にあり、spec 本体は `imagod-spec`、runtime binding と `code_tests` 実行は runtime crate の integration test に置きます。
 
 ## imagod-control のシステム
@@ -144,17 +146,17 @@ flowchart LR
 
 server はこの trait 契約をそのまま使って command action を適用します。  
 `imagod-control` の integration test に置かれた `code_tests` も同じ trait 契約だけを前提に runtime を replay するため、spec/runtime 間で「別の adapter API」を挟みません。
-ただし、現在の binding は `OperationManager` に限定されていて、`imagod-server` router の wire validation や event ordering は別境界です。
+`command_projection` は witness-based に `OperationManager` へ接続し、外部 boundary は `system` から切り出した projection spec で grouped runtime conformance を取ります。現在は `router_projection` / `session_auth_projection` / `logs_projection` が `imagod-server`、`runtime_projection` が `imagod-control`、`manager_runtime_projection` が `imagod` に接続済みです。
 
 ## spec と runtime の接続
 
-`command_protocol` は、いま次の形で接続されています。
+command runtime は、いま次の形で接続されています。
 
 ```mermaid
 flowchart LR
-    A["imago-protocol::command_contract<br/>CommandProtocolAction<br/>CommandProtocolContext<br/>CommandProtocolOutput"] --> B["imagod-spec::command_protocol"]
+    A["imago-protocol::command_contract<br/>CommandProtocolAction<br/>CommandProtocolContext<br/>CommandProtocolOutput"] --> B["imagod-spec::command_projection"]
     A --> C["imagod-control::OperationManager"]
-    B --> D["transition(...) + expected_output(...)"]
+    B --> D["system transition(...) + projected expected_output(...)"]
     F["imagod-control/tests<br/>CommandProtocolBinding"] --> G["fresh_runtime / context"]
     G --> C
     C --> E["execute_action(...)"]
@@ -171,22 +173,22 @@ flowchart LR
 
 この接続で保証していることは次です。
 
-- spec の reachable graph 上で許可された action は、実コードでも受理される
-- spec で拒否される action は、実コードでも拒否される
-- 実コードの observed state を spec 側へ射影した結果が `transition` の next state と一致する
-- 実コードの output を spec 側へ射影した結果が `expected_output` と一致する
+- `system` の command projection 上で許可された action は、実コードでも受理される
+- `system` の command projection で拒否される action は、実コードでも拒否される
+- 実コードの observed state を `system` 側へ射影した結果が `transition` の next state と一致する
+- 実コードの output を投影した結果が projected `expected_output` と一致する
 
-`system` spec は別に、subsystem の `transition()` を同期適用する代表合成モデルとして維持しています。  
-full implementation をそのまま複製するのではなく、boot / command / deploy / runtime / plugin / shutdown の代表経路を cross-link invariant 付きで検証する役割です。
+`system` spec は、boot / session / wire / deploy / supervision / service RPC / plugin / shutdown を manager/session/trust/shutdown と束ねる unified top-level の正本です。  
+full implementation の private state をそのまま複製するのではなく、daemon-visible contract と cross-link invariant を `system` に集約し、boundary ごとの runtime conformance は `*_projection` spec へ射影して接続します。`legacy_system` は boot / command / plugin を含む旧 synchronized baseline として残しています。
 
 ## Source References
 
-- `nirvash-core`: `crates/nirvash-core/src/lib.rs`, `crates/nirvash-core/src/system.rs`, `crates/nirvash-core/src/checker.rs`
+- `nirvash-core`: `crates/nirvash-core/src/lib.rs`, `crates/nirvash-core/src/system.rs`, `crates/nirvash-core/src/checker.rs`, `crates/nirvash-core/src/concurrent.rs`
 - `nirvash-macros`: `crates/nirvash-macros/src/lib.rs`
 - `nirvash-docgen`: `crates/nirvash-docgen/src/lib.rs`
 - shared contract: `crates/imago-protocol/src/command_contract.rs`
 - conformance API: `crates/nirvash-core/src/conformance.rs`
 - `imagod-control`: `crates/imagod-control/src/lib.rs`, `crates/imagod-control/src/operation_state.rs`, `crates/imagod-control/src/artifact_store.rs`, `crates/imagod-control/src/orchestrator.rs`, `crates/imagod-control/src/service_supervisor.rs`
-- spec 側接続: `crates/imagod-spec/src/command_protocol.rs`
-- runtime 側 binding: `crates/imagod-control/tests/command_protocol_conformance.rs`
+- spec 側接続: `crates/imagod-spec/src/command_projection.rs`, `crates/imagod-spec/src/router_projection.rs`, `crates/imagod-spec/src/session_auth_projection.rs`, `crates/imagod-spec/src/logs_projection.rs`, `crates/imagod-spec/src/runtime_projection.rs`, `crates/imagod-spec/src/manager_runtime_projection.rs`, `crates/imagod-spec/src/command_protocol.rs`, `crates/imagod-spec/src/deploy.rs`, `crates/imagod-spec/src/supervision.rs`, `crates/imagod-spec/src/rpc.rs`, `crates/imagod-spec/src/session_auth.rs`, `crates/imagod-spec/src/wire_protocol.rs`, `crates/imagod-spec/src/system.rs`
+- runtime 側 binding: `crates/imagod-control/tests/command_protocol_conformance.rs`, `crates/imagod-server/src/protocol_handler/router.rs`, `crates/imagod-server/src/protocol_handler/session_loop.rs`, `crates/imagod-server/src/protocol_handler/logs_forwarder.rs`, `crates/imagod-control/src/service_supervisor.rs`, `crates/imagod/src/manager_runtime.rs`
 - wire boundary: `crates/imagod-server/src/protocol_handler/router.rs`

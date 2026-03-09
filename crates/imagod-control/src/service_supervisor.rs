@@ -1711,8 +1711,23 @@ fn inject_kill_and_wait_failure_for_pid(pid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact_store::ArtifactStore;
+    use imagod_spec::{
+        atoms::ServiceAtom,
+        RuntimeProjectionAction, RuntimeProjectionObservedState, RuntimeProjectionSpec,
+        SystemEffect, SystemState,
+    };
+    use nirvash_core::{
+        ProtocolConformanceSpec, TransitionSystem,
+        conformance::{ActionApplier as ProtocolActionApplier, ProtocolRuntimeBinding, StateObserver},
+    };
+    use nirvash_macros::code_tests;
+    use sha2::{Digest, Sha256};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use tar::{Builder, Header};
     use tokio::{net::UnixListener, process::Command};
+
+    const STAGE_RUNTIME_PROJECTION: &str = "runtime_projection";
 
     fn new_test_root(prefix: &str) -> PathBuf {
         let _ts = SystemTime::now()
@@ -1790,6 +1805,477 @@ mod tests {
             capabilities: CapabilityPolicy::default(),
         }
     }
+
+    fn append_tar_file(builder: &mut Builder<Vec<u8>>, name: &str, bytes: &[u8]) {
+        let mut header = Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, name, bytes)
+            .expect("tar entry should be appended");
+    }
+
+    fn artifact_archive(service_name: &str) -> (Vec<u8>, String, String) {
+        let manifest = serde_json::json!({
+            "name": service_name,
+            "main": "component.wasm",
+            "type": "rpc",
+            "assets": [],
+            "bindings": [],
+            "dependencies": [],
+            "capabilities": {},
+            "hash": {
+                "algorithm": "sha256",
+                "targets": ["wasm", "manifest", "assets"],
+            }
+        });
+        let manifest_bytes =
+            serde_json::to_vec(&manifest).expect("manifest should serialize to JSON");
+        let component_bytes = wat::parse_str("(component)").expect("component should compile");
+        let mut builder = Builder::new(Vec::new());
+        append_tar_file(&mut builder, "manifest.json", &manifest_bytes);
+        append_tar_file(&mut builder, "component.wasm", &component_bytes);
+        builder.finish().expect("artifact tar should finish");
+        let artifact_bytes = builder.into_inner().expect("artifact bytes should be returned");
+        let artifact_digest = hex::encode(Sha256::digest(&artifact_bytes));
+        let manifest_digest = hex::encode(Sha256::digest(&manifest_bytes));
+        (artifact_bytes, artifact_digest, manifest_digest)
+    }
+
+    #[derive(Debug, Default, Clone, Copy)]
+    struct RuntimeProjectionBinding;
+
+    struct RuntimeProjectionRuntime {
+        root: PathBuf,
+        artifact_store: ArtifactStore,
+        supervisor: ServiceSupervisor,
+        state: tokio::sync::Mutex<SystemState>,
+        trace: tokio::sync::Mutex<Vec<RuntimeProjectionAction>>,
+    }
+
+    impl RuntimeProjectionRuntime {
+        async fn new() -> Self {
+            let root = new_test_root("runtime-projection");
+            let artifact_root = root.join("artifacts");
+            std::fs::create_dir_all(&artifact_root).expect("artifact root should exist");
+            let artifact_store = ArtifactStore::new(&artifact_root, 60, 60, 8, 64 * 1024, 4, 512 * 1024)
+                .await
+                .expect("artifact store should initialize");
+            let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
+                .expect("supervisor should initialize");
+            Self {
+                root,
+                artifact_store,
+                supervisor,
+                state: tokio::sync::Mutex::new(RuntimeProjectionSpec::new().initial_state()),
+                trace: tokio::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn service_name(service: ServiceAtom) -> &'static str {
+            match service {
+                ServiceAtom::Service0 => "svc-source",
+                ServiceAtom::Service1 => "svc-target",
+            }
+        }
+
+        fn runner_id(service: ServiceAtom) -> &'static str {
+            match service {
+                ServiceAtom::Service0 => "runner-source",
+                ServiceAtom::Service1 => "runner-target",
+            }
+        }
+
+        fn release_hash(service: ServiceAtom) -> &'static str {
+            match service {
+                ServiceAtom::Service0 => "release-source-current",
+                ServiceAtom::Service1 => "release-target-current",
+            }
+        }
+
+        async fn ensure_release_markers(
+            &self,
+            service: ServiceAtom,
+        ) -> Result<(), ImagodError> {
+            let service_root = self.root.join("services").join(Self::service_name(service));
+            tokio::fs::create_dir_all(service_root.join(Self::release_hash(service)))
+                .await
+                .map_err(|e| ImagodError::new(ErrorCode::Internal, STAGE_START, e.to_string()))?;
+            tokio::fs::create_dir_all(service_root.join("release-previous"))
+                .await
+                .map_err(|e| ImagodError::new(ErrorCode::Internal, STAGE_START, e.to_string()))?;
+            tokio::fs::write(
+                service_root.join("active_release"),
+                Self::release_hash(service).as_bytes(),
+            )
+            .await
+            .map_err(|e| ImagodError::new(ErrorCode::Internal, STAGE_START, e.to_string()))?;
+            tokio::fs::write(service_root.join("restart_policy"), b"always")
+                .await
+                .map_err(|e| ImagodError::new(ErrorCode::Internal, STAGE_START, e.to_string()))?;
+            Ok(())
+        }
+
+        async fn upload_artifact(&self, service: ServiceAtom) -> Result<(), ImagodError> {
+            let service_name = Self::service_name(service);
+            let (artifact_bytes, artifact_digest, manifest_digest) = artifact_archive(service_name);
+            let prepare = self
+                .artifact_store
+                .prepare(imago_protocol::DeployPrepareRequest {
+                    name: service_name.to_string(),
+                    app_type: "rpc".to_string(),
+                    target: BTreeMap::new(),
+                    artifact_digest: artifact_digest.clone(),
+                    artifact_size: artifact_bytes.len() as u64,
+                    manifest_digest: manifest_digest.clone(),
+                    idempotency_key: format!("deploy-{service_name}"),
+                    policy: BTreeMap::new(),
+                })
+                .await?;
+            let chunk_sha256 = hex::encode(Sha256::digest(&artifact_bytes));
+            self.artifact_store
+                .push(imago_protocol::ArtifactPushRequest {
+                    header: imago_protocol::ArtifactPushChunkHeader {
+                        deploy_id: prepare.deploy_id.clone(),
+                        offset: 0,
+                        length: artifact_bytes.len() as u64,
+                        chunk_sha256,
+                        upload_token: prepare.upload_token.clone(),
+                    },
+                    chunk: artifact_bytes.clone(),
+                })
+                .await?;
+            self.artifact_store
+                .commit(imago_protocol::ArtifactCommitRequest {
+                    deploy_id: prepare.deploy_id.clone(),
+                    artifact_digest,
+                    artifact_size: artifact_bytes.len() as u64,
+                    manifest_digest,
+                })
+                .await?;
+            let committed = self
+                .artifact_store
+                .committed_artifact(&prepare.deploy_id)
+                .await?;
+            assert_eq!(committed.deploy_id, prepare.deploy_id);
+            self.ensure_release_markers(service).await?;
+            Ok(())
+        }
+
+        async fn seed_running_service(
+            &self,
+            service: ServiceAtom,
+        ) -> Result<(), ImagodError> {
+            let child = Command::new("sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| ImagodError::new(ErrorCode::Internal, STAGE_START, e.to_string()))?;
+            let mut running = new_running_service(
+                child,
+                Self::runner_id(service),
+                self.root
+                    .join("runtime")
+                    .join("ipc")
+                    .join(format!("{}.sock", Self::runner_id(service))),
+            );
+            running.release_hash = Self::release_hash(service).to_string();
+            let mut guard = self.supervisor.inner.write().await;
+            guard.insert(Self::service_name(service).to_string(), running);
+            Ok(())
+        }
+
+        async fn deploy_service(&self, service: ServiceAtom) -> Result<(), ImagodError> {
+            self.upload_artifact(service).await?;
+            self.seed_running_service(service).await
+        }
+
+        async fn rollback_service0(&self) -> Result<(), ImagodError> {
+            let service_root = self.root.join("services").join(Self::service_name(ServiceAtom::Service0));
+            tokio::fs::write(service_root.join("active_release"), b"release-previous")
+                .await
+                .map_err(|e| {
+                    ImagodError::new(ErrorCode::Internal, STAGE_RUNTIME_PROJECTION, e.to_string())
+                })?;
+            Ok(())
+        }
+
+        async fn local_rpc_resolved(&self) -> Result<(), ImagodError> {
+            let wit = "pkg:iface/invoke".to_string();
+            let source_runner_id = Self::runner_id(ServiceAtom::Service0);
+            {
+                let mut guard = self.supervisor.inner.write().await;
+                let source = guard
+                    .get_mut(Self::service_name(ServiceAtom::Service0))
+                    .expect("source service should be running");
+                source.bindings = vec![ServiceBinding {
+                    name: Self::service_name(ServiceAtom::Service1).to_string(),
+                    wit: wit.clone(),
+                }];
+            }
+            let source_secret = {
+                let guard = self.supervisor.inner.read().await;
+                guard
+                    .get(Self::service_name(ServiceAtom::Service0))
+                    .expect("source service should be present")
+                    .manager_auth_secret
+                    .clone()
+            };
+            let response = handle_control_request(
+                &self.supervisor.inner,
+                &self.supervisor.pending_ready,
+                ControlRequest::ResolveInvocationTarget {
+                    runner_id: source_runner_id.to_string(),
+                    manager_auth_proof: compute_manager_auth_proof(&source_secret, source_runner_id)
+                        .expect("proof should be generated"),
+                    target_service: Self::service_name(ServiceAtom::Service1).to_string(),
+                    wit,
+                },
+            )
+            .await;
+            match response {
+                ControlResponse::ResolvedInvocationTarget { .. } => Ok(()),
+                ControlResponse::Error(err) => Err(ImagodError::new(
+                    err.code,
+                    err.stage,
+                    err.message,
+                )),
+                other => Err(ImagodError::new(
+                    ErrorCode::Internal,
+                    STAGE_CONTROL,
+                    format!("unexpected local rpc response: {other:?}"),
+                )),
+            }
+        }
+
+        async fn local_rpc_denied(&self) -> Result<(), ImagodError> {
+            let source_runner_id = Self::runner_id(ServiceAtom::Service0);
+            let Some(source_secret) = ({
+                let guard = self.supervisor.inner.read().await;
+                guard
+                    .get(Self::service_name(ServiceAtom::Service0))
+                    .map(|service| service.manager_auth_secret.clone())
+            }) else {
+                return Ok(());
+            };
+            match handle_control_request(
+                &self.supervisor.inner,
+                &self.supervisor.pending_ready,
+                ControlRequest::ResolveInvocationTarget {
+                    runner_id: source_runner_id.to_string(),
+                    manager_auth_proof: compute_manager_auth_proof(&source_secret, source_runner_id)
+                        .expect("proof should be generated"),
+                    target_service: Self::service_name(ServiceAtom::Service1).to_string(),
+                    wit: "pkg:iface/invoke".to_string(),
+                },
+            )
+            .await
+            {
+                ControlResponse::Error(_) => Ok(()),
+                other => Err(ImagodError::new(
+                    ErrorCode::Internal,
+                    STAGE_CONTROL,
+                    format!("expected rejected local rpc, got {other:?}"),
+                )),
+            }
+        }
+
+        async fn remote_rpc_lifecycle(&self) -> Result<(), ImagodError> {
+            let (runner_endpoint, invocation_secret) = {
+                let guard = self.supervisor.inner.read().await;
+                let target = guard
+                    .get(Self::service_name(ServiceAtom::Service0))
+                    .expect("target service should be present");
+                (
+                    target.runner_endpoint.clone(),
+                    target.invocation_secret.clone(),
+                )
+            };
+            if let Some(parent) = runner_endpoint.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| ImagodError::new(ErrorCode::Internal, STAGE_INVOKE, e.to_string()))?;
+            }
+            let _ = std::fs::remove_file(&runner_endpoint);
+            let listener = UnixListener::bind(&runner_endpoint)
+                .map_err(|e| ImagodError::new(ErrorCode::Internal, STAGE_INVOKE, e.to_string()))?;
+            let server_task = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept should succeed");
+                let request = DbusP2pTransport::read_message::<RunnerInboundRequest>(&mut stream)
+                    .await
+                    .expect("invoke request should decode");
+                match request {
+                    RunnerInboundRequest::Invoke {
+                        interface_id,
+                        function,
+                        payload_cbor,
+                        token,
+                    } => {
+                        assert_eq!(interface_id, "yieldspace:service/invoke");
+                        assert_eq!(function, "call");
+                        let claims = imagod_ipc::verify_invocation_token(&invocation_secret, &token)
+                            .expect("token should verify");
+                        assert_eq!(claims.target_service, "svc-source");
+                        DbusP2pTransport::write_message(
+                            &mut stream,
+                            &RunnerInboundResponse::InvokeResult { payload_cbor },
+                        )
+                        .await
+                        .expect("invoke response should write");
+                    }
+                    other => panic!("unexpected request: {other:?}"),
+                }
+            });
+            let payload = vec![0x01, 0x02, 0x03];
+            let result = self
+                .supervisor
+                .invoke(
+                    Self::service_name(ServiceAtom::Service0),
+                    "yieldspace:service/invoke",
+                    "call",
+                    payload.clone(),
+                )
+                .await?;
+            assert_eq!(result, payload);
+            server_task
+                .await
+                .map_err(|e| ImagodError::new(ErrorCode::Internal, STAGE_INVOKE, e.to_string()))?;
+            let _ = std::fs::remove_file(&runner_endpoint);
+            Ok(())
+        }
+
+        async fn stop_service0(&self) -> Result<(), ImagodError> {
+            self.supervisor
+                .stop(Self::service_name(ServiceAtom::Service0), true)
+                .await
+        }
+
+        async fn reap_exited_service0(&self) -> Result<(), ImagodError> {
+            stop_running_service_best_effort(
+                &self.supervisor.inner,
+                Self::service_name(ServiceAtom::Service0),
+            )
+            .await;
+            let child = Command::new("sh")
+                .arg("-c")
+                .arg("exit 0")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| ImagodError::new(ErrorCode::Internal, STAGE_STOP, e.to_string()))?;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let service = new_running_service(
+                child,
+                Self::runner_id(ServiceAtom::Service0),
+                self.root
+                    .join("runtime")
+                    .join("ipc")
+                    .join("runner-source-exited.sock"),
+            );
+            {
+                let mut guard = self.supervisor.inner.write().await;
+                guard.insert(Self::service_name(ServiceAtom::Service0).to_string(), service);
+            }
+            self.supervisor.reap_finished().await;
+            Ok(())
+        }
+
+        async fn shutdown_drain(&self) -> Result<(), ImagodError> {
+            let errors = self.supervisor.stop_all(true).await;
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                let (service, err) = errors.into_iter().next().expect("errors should exist");
+                Err(ImagodError::new(
+                    err.code,
+                    err.stage,
+                    format!("shutdown drain failed for {service}: {}", err.message),
+                ))
+            }
+        }
+    }
+
+    impl Drop for RuntimeProjectionRuntime {
+        fn drop(&mut self) {
+            if let Ok(inner) = self.supervisor.inner.try_read() {
+                let pids = inner
+                    .values()
+                    .filter_map(|service| service.child.id())
+                    .collect::<Vec<_>>();
+                drop(inner);
+                for pid in pids {
+                    let _ = std::process::Command::new("kill")
+                        .arg("-9")
+                        .arg(pid.to_string())
+                        .status();
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    impl ProtocolRuntimeBinding<RuntimeProjectionSpec> for RuntimeProjectionBinding {
+        type Runtime = RuntimeProjectionRuntime;
+        type Context = ();
+
+        async fn fresh_runtime(_spec: &RuntimeProjectionSpec) -> Self::Runtime {
+            RuntimeProjectionRuntime::new().await
+        }
+
+        fn context(_spec: &RuntimeProjectionSpec) -> Self::Context {}
+    }
+
+    impl ProtocolActionApplier for RuntimeProjectionRuntime {
+        type Action = RuntimeProjectionAction;
+        type Output = Vec<SystemEffect>;
+        type Context = ();
+
+        async fn execute_action(
+            &self,
+            _context: &Self::Context,
+            action: &Self::Action,
+        ) -> Self::Output {
+            let spec = RuntimeProjectionSpec::new();
+            let prev = self.state.lock().await.clone();
+            let Some(next) = spec.transition(&prev, action) else {
+                return Vec::new();
+            };
+
+            let result = match action {
+                RuntimeProjectionAction::DeployService0 => self.deploy_service(ServiceAtom::Service0).await,
+                RuntimeProjectionAction::DeployService1 => self.deploy_service(ServiceAtom::Service1).await,
+                RuntimeProjectionAction::RollbackService0 => self.rollback_service0().await,
+                RuntimeProjectionAction::LocalRpcResolved => self.local_rpc_resolved().await,
+                RuntimeProjectionAction::LocalRpcDenied => self.local_rpc_denied().await,
+                RuntimeProjectionAction::RemoteRpcLifecycle => self.remote_rpc_lifecycle().await,
+                RuntimeProjectionAction::StopService0 => self.stop_service0().await,
+                RuntimeProjectionAction::ReapExitedService0 => self.reap_exited_service0().await,
+                RuntimeProjectionAction::ShutdownDrain => self.shutdown_drain().await,
+            };
+            result.expect("runtime projection action should succeed");
+
+            *self.state.lock().await = next.clone();
+            self.trace.lock().await.push(*action);
+            spec.expected_output(&prev, action, Some(&next))
+        }
+    }
+
+    impl StateObserver for RuntimeProjectionRuntime {
+        type ObservedState = RuntimeProjectionObservedState;
+        type Context = ();
+
+        async fn observe_state(&self, _context: &Self::Context) -> Self::ObservedState {
+            RuntimeProjectionObservedState {
+                trace: self.trace.lock().await.clone(),
+            }
+        }
+    }
+
+    #[code_tests(spec = RuntimeProjectionSpec, binding = RuntimeProjectionBinding)]
+    const _: () = ();
 
     #[test]
     fn bounded_log_buffer_keeps_latest_bytes_only() {

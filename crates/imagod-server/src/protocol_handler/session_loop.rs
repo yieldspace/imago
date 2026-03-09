@@ -27,6 +27,264 @@ struct SessionAuthContext {
     public_key_hex: String,
 }
 
+#[cfg(test)]
+mod conformance_tests {
+    use std::{any::Any, time::Duration};
+
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use imagod_spec::{
+        SessionAuthProjectionAction, SessionAuthProjectionObservedState, SessionAuthProjectionSpec,
+        SystemEffect, SystemState,
+    };
+    use nirvash_core::{
+        ProtocolConformanceSpec,
+        TransitionSystem,
+        conformance::{ActionApplier, ProtocolRuntimeBinding, StateObserver},
+    };
+    use nirvash_macros::code_tests;
+    use rustls::pki_types::CertificateDer;
+
+    use super::*;
+    use crate::protocol_handler::{
+        Envelope,
+        lock_dynamic_public_keys_for_tests, replace_dynamic_public_keys_for_tests,
+        upsert_dynamic_client_public_key,
+    };
+
+    fn hex_32(byte: u8) -> String {
+        let mut out = String::with_capacity(64);
+        for _ in 0..32 {
+            out.push_str(&format!("{byte:02x}"));
+        }
+        out
+    }
+
+    fn ed25519_spki_from_raw(raw: [u8; 32]) -> Vec<u8> {
+        let mut spki = ED25519_SPKI_PREFIX.to_vec();
+        spki.extend_from_slice(&raw);
+        spki
+    }
+
+    enum FakePeerIdentity {
+        Ed25519([u8; 32]),
+    }
+
+    struct FakeProtocolSession {
+        identity: FakePeerIdentity,
+    }
+
+    #[async_trait]
+    impl ProtocolSession for FakeProtocolSession {
+        async fn accept_bi(
+            &self,
+        ) -> Option<(
+            web_transport_quinn::SendStream,
+            web_transport_quinn::RecvStream,
+        )> {
+            None
+        }
+
+        fn max_datagram_size(&self) -> usize {
+            1200
+        }
+
+        fn send_datagram(&self, _payload: Bytes) -> Result<(), ImagodError> {
+            Ok(())
+        }
+
+        fn peer_identity(&self) -> Option<Box<dyn Any>> {
+            match self.identity {
+                FakePeerIdentity::Ed25519(raw) => Some(Box::new(vec![CertificateDer::from(
+                    ed25519_spki_from_raw(raw),
+                )])),
+            }
+        }
+
+        async fn closed(&self) {}
+    }
+
+    #[derive(Debug)]
+    struct SessionAuthRuntime {
+        state: tokio::sync::Mutex<SystemState>,
+        trace: tokio::sync::Mutex<Vec<SessionAuthProjectionAction>>,
+    }
+
+    impl SessionAuthRuntime {
+        fn new() -> Self {
+            Self {
+                state: tokio::sync::Mutex::new(SessionAuthProjectionSpec::new().initial_state()),
+                trace: tokio::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[derive(Debug, Default, Clone, Copy)]
+    struct SessionAuthBinding;
+
+    impl ProtocolRuntimeBinding<SessionAuthProjectionSpec> for SessionAuthBinding {
+        type Runtime = SessionAuthRuntime;
+        type Context = ();
+
+        async fn fresh_runtime(_spec: &SessionAuthProjectionSpec) -> Self::Runtime {
+            let _guard = lock_dynamic_public_keys_for_tests();
+            replace_dynamic_public_keys_for_tests(&[], &[]);
+            drop(_guard);
+            SessionAuthRuntime::new()
+        }
+
+        fn context(_spec: &SessionAuthProjectionSpec) -> Self::Context {}
+    }
+
+    impl ActionApplier for SessionAuthRuntime {
+        type Action = SessionAuthProjectionAction;
+        type Output = Vec<SystemEffect>;
+        type Context = ();
+
+        async fn execute_action(
+            &self,
+            _context: &Self::Context,
+            action: &Self::Action,
+        ) -> Self::Output {
+            let _guard = lock_dynamic_public_keys_for_tests();
+            let spec = SessionAuthProjectionSpec::new();
+            let mut state = self.state.lock().await;
+            let prev = state.clone();
+            let Some(next) = spec.transition(&prev, action) else {
+                return Vec::new();
+            };
+
+            match action {
+                SessionAuthProjectionAction::AcceptSession => {}
+                SessionAuthProjectionAction::AuthenticateAdmin => {
+                    replace_dynamic_public_keys_for_tests(&[[0x11u8; 32]], &[]);
+                    let session = FakeProtocolSession {
+                        identity: FakePeerIdentity::Ed25519([0x11u8; 32]),
+                    };
+                    let context =
+                        resolve_session_auth_context(&session).expect("admin auth should resolve");
+                    assert_eq!(context.role, DynamicClientRole::Admin);
+                }
+                SessionAuthProjectionAction::AuthenticateClient => {
+                    replace_dynamic_public_keys_for_tests(&[], &[[0x22u8; 32]]);
+                    let session = FakeProtocolSession {
+                        identity: FakePeerIdentity::Ed25519([0x22u8; 32]),
+                    };
+                    let context =
+                        resolve_session_auth_context(&session).expect("client auth should resolve");
+                    assert_eq!(context.role, DynamicClientRole::Client);
+                }
+                SessionAuthProjectionAction::AuthenticateUnknown => {
+                    replace_dynamic_public_keys_for_tests(&[], &[]);
+                    let session = FakeProtocolSession {
+                        identity: FakePeerIdentity::Ed25519([0x33u8; 32]),
+                    };
+                    let context = resolve_session_auth_context(&session)
+                        .expect("unknown auth context should resolve");
+                    assert_eq!(context.role, DynamicClientRole::Unknown);
+                }
+                SessionAuthProjectionAction::AuthorizeAdminServicesList => {
+                    let request = Envelope::new(
+                        MessageType::ServicesList,
+                        Uuid::new_v4(),
+                        Uuid::new_v4(),
+                        serde_json::json!({}),
+                    );
+                    ensure_message_type_allowed(
+                        &request,
+                        &SessionAuthContext {
+                            role: DynamicClientRole::Admin,
+                            public_key_hex: hex_32(0x11),
+                        },
+                    )
+                    .expect("admin should authorize services.list");
+                }
+                SessionAuthProjectionAction::AuthorizeClientHello => {
+                    let request = Envelope::new(
+                        MessageType::HelloNegotiate,
+                        Uuid::new_v4(),
+                        Uuid::new_v4(),
+                        serde_json::json!({}),
+                    );
+                    ensure_message_type_allowed(
+                        &request,
+                        &SessionAuthContext {
+                            role: DynamicClientRole::Client,
+                            public_key_hex: hex_32(0x22),
+                        },
+                    )
+                    .expect("client should authorize hello.negotiate");
+                }
+                SessionAuthProjectionAction::AuthorizeClientRpc => {
+                    let request = Envelope::new(
+                        MessageType::RpcInvoke,
+                        Uuid::new_v4(),
+                        Uuid::new_v4(),
+                        serde_json::json!({}),
+                    );
+                    ensure_message_type_allowed(
+                        &request,
+                        &SessionAuthContext {
+                            role: DynamicClientRole::Client,
+                            public_key_hex: hex_32(0x22),
+                        },
+                    )
+                    .expect("client should authorize rpc.invoke");
+                }
+                SessionAuthProjectionAction::RejectUnauthorizedServicesList => {
+                    let request = Envelope::new(
+                        MessageType::ServicesList,
+                        Uuid::new_v4(),
+                        Uuid::new_v4(),
+                        serde_json::json!({}),
+                    );
+                    let err = ensure_message_type_allowed(
+                        &request,
+                        &SessionAuthContext {
+                            role: DynamicClientRole::Unknown,
+                            public_key_hex: hex_32(0x33),
+                        },
+                    )
+                    .expect_err("unknown role should be rejected");
+                    assert_eq!(err.code, ErrorCode::Unauthorized);
+                }
+                SessionAuthProjectionAction::ReadTimeout => {
+                    let err = read_stream_with_timeout(
+                        std::future::pending::<Result<Vec<u8>, std::io::Error>>(),
+                        Duration::from_millis(1),
+                    )
+                    .await
+                    .expect_err("timeout should fail");
+                    assert_eq!(err.code, ErrorCode::OperationTimeout);
+                }
+                SessionAuthProjectionAction::CloseStream => {}
+                SessionAuthProjectionAction::UploadClientAuthority => {
+                    upsert_dynamic_client_public_key(&hex_32(0x22))
+                        .expect("authority upload should succeed");
+                }
+            }
+
+            *state = next;
+            self.trace.lock().await.push(*action);
+            spec.expected_output(&prev, action, Some(&*state))
+        }
+    }
+
+    impl StateObserver for SessionAuthRuntime {
+        type ObservedState = SessionAuthProjectionObservedState;
+        type Context = ();
+
+        async fn observe_state(&self, _context: &Self::Context) -> Self::ObservedState {
+            SessionAuthProjectionObservedState {
+                trace: self.trace.lock().await.clone(),
+            }
+        }
+    }
+
+    #[code_tests(spec = SessionAuthProjectionSpec, binding = SessionAuthBinding)]
+    const _: () = ();
+}
+
 #[async_trait]
 pub(crate) trait ProtocolSession: Send + Sync {
     async fn accept_bi(&self) -> Option<(SendStream, RecvStream)>;

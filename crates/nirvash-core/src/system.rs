@@ -28,6 +28,17 @@ pub trait TransitionSystem {
             .collect()
     }
 
+    fn successors_constrained(
+        &self,
+        state: &Self::State,
+        action_allowed: &dyn Fn(&Self::Action, &Self::State) -> bool,
+    ) -> Vec<(Self::Action, Self::State)> {
+        self.successors(state)
+            .into_iter()
+            .filter(|(action, next)| action_allowed(action, next))
+            .collect()
+    }
+
     fn contains_initial(&self, state: &Self::State) -> bool {
         self.initial_states()
             .iter()

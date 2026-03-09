@@ -1872,6 +1872,10 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
             type GeneratedState = <#spec_ty as ::nirvash_core::TransitionSystem>::State;
             type GeneratedAction = <#spec_ty as ::nirvash_core::TransitionSystem>::Action;
             type GeneratedModelCase = ::nirvash_core::ModelCase<GeneratedState, GeneratedAction>;
+            const GENERATED_FORMAL_CHECK_ENV: &str = "NIRVASH_FORMAL_CHECK";
+            const GENERATED_FORMAL_SPEC_INDEX_ENV: &str = "NIRVASH_FORMAL_SPEC_INDEX";
+            const GENERATED_FORMAL_MODEL_CASE_INDEX_ENV: &str =
+                "NIRVASH_FORMAL_MODEL_CASE_INDEX";
 
             fn generated_cases() -> ::std::vec::Vec<#spec_ty> {
                 #cases_expr
@@ -1888,6 +1892,76 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                 ::nirvash_core::ModelChecker::for_case(spec, model_case)
                     .full_reachable_graph_snapshot()
                     .expect("reachable graph snapshot should build")
+            }
+
+            fn selected_formal_case(
+                expected_check: &str,
+            ) -> ::core::option::Option<(#spec_ty, GeneratedModelCase)> {
+                if ::std::env::var(GENERATED_FORMAL_CHECK_ENV).ok().as_deref()
+                    != ::core::option::Option::Some(expected_check)
+                {
+                    return ::core::option::Option::None;
+                }
+                let spec_index = ::std::env::var(GENERATED_FORMAL_SPEC_INDEX_ENV)
+                    .expect("formal spec index env should exist")
+                    .parse::<usize>()
+                    .expect("formal spec index env should be usize");
+                let model_case_index = ::std::env::var(GENERATED_FORMAL_MODEL_CASE_INDEX_ENV)
+                    .expect("formal model case env should exist")
+                    .parse::<usize>()
+                    .expect("formal model case env should be usize");
+                let spec = generated_cases()
+                    .into_iter()
+                    .nth(spec_index)
+                    .expect("formal spec index should resolve");
+                let model_case = generated_model_cases(&spec)
+                    .into_iter()
+                    .nth(model_case_index)
+                    .expect("formal model case index should resolve");
+                ::core::option::Option::Some((spec, model_case))
+            }
+
+            fn generated_test_filter(test_name: &str) -> ::std::string::String {
+                let module_path = module_path!();
+                let relative_module = module_path
+                    .split_once("::")
+                    .map(|(_, rest)| rest)
+                    .unwrap_or(module_path);
+                format!("{relative_module}::{test_name}")
+            }
+
+            fn run_formal_cases_in_subprocesses(expected_check: &str, driver_test_name: &str) {
+                let current_exe =
+                    ::std::env::current_exe().expect("current test binary should resolve");
+                let driver_filter = generated_test_filter(driver_test_name);
+                for (spec_index, spec) in generated_cases().into_iter().enumerate() {
+                    for (model_case_index, model_case) in
+                        generated_model_cases(&spec).into_iter().enumerate()
+                    {
+                        let output = ::std::process::Command::new(&current_exe)
+                            .arg("--exact")
+                            .arg(&driver_filter)
+                            .arg("--nocapture")
+                            .env(GENERATED_FORMAL_CHECK_ENV, expected_check)
+                            .env(GENERATED_FORMAL_SPEC_INDEX_ENV, spec_index.to_string())
+                            .env(
+                                GENERATED_FORMAL_MODEL_CASE_INDEX_ENV,
+                                model_case_index.to_string(),
+                            )
+                            .output()
+                            .expect("formal case subprocess should launch");
+                        assert!(
+                            output.status.success(),
+                            "formal case subprocess failed for {}[spec {}, model_case {}:{}]\nstdout:\n{}\nstderr:\n{}",
+                            expected_check,
+                            spec_index,
+                            model_case_index,
+                            model_case.label(),
+                            ::std::string::String::from_utf8_lossy(&output.stdout),
+                            ::std::string::String::from_utf8_lossy(&output.stderr),
+                        );
+                    }
+                }
             }
 
             #[test]
@@ -1916,60 +1990,87 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
 
             #[test]
             fn generated_model_checker_accepts_spec() {
-                for spec in generated_cases() {
-                    for model_case in generated_model_cases(&spec) {
-                        let checker = ::nirvash_core::ModelChecker::for_case(&spec, model_case);
-                        let result = checker.check_all().expect("model checker should run");
-                        assert!(result.is_ok(), "{:?}", result.violations());
-                    }
-                }
+                run_formal_cases_in_subprocesses(
+                    "model_checker_accepts_spec",
+                    "generated_model_checker_accepts_spec_case",
+                );
+            }
+
+            #[test]
+            fn generated_model_checker_accepts_spec_case() {
+                let ::core::option::Option::Some((spec, model_case)) =
+                    selected_formal_case("model_checker_accepts_spec")
+                else {
+                    return;
+                };
+                let checker = ::nirvash_core::ModelChecker::for_case(&spec, model_case);
+                let result = checker.check_all().expect("model checker should run");
+                assert!(result.is_ok(), "{:?}", result.violations());
             }
 
             #[test]
             fn generated_reachable_states_satisfy_registered_state_predicates() {
-                for spec in generated_cases() {
-                    let invariants = <#spec_ty as ::nirvash_core::TemporalSpec>::invariants(&spec);
-                    for model_case in generated_model_cases(&spec) {
-                        let snapshot = generated_snapshot(&spec, model_case.clone());
-                        for state in snapshot.states {
-                            assert!(
-                                invariants.iter().all(|predicate| predicate.eval(&state)),
-                                "registered invariant failed for state {:?}",
-                                state
-                            );
-                            assert!(
-                                model_case.state_constraints().iter().all(|constraint| constraint.eval(&state)),
-                                "state constraint failed for state {:?}",
-                                state
-                            );
-                        }
-                    }
+                run_formal_cases_in_subprocesses(
+                    "reachable_states_satisfy_registered_state_predicates",
+                    "generated_reachable_states_satisfy_registered_state_predicates_case",
+                );
+            }
+
+            #[test]
+            fn generated_reachable_states_satisfy_registered_state_predicates_case() {
+                let ::core::option::Option::Some((spec, model_case)) =
+                    selected_formal_case("reachable_states_satisfy_registered_state_predicates")
+                else {
+                    return;
+                };
+                let invariants = <#spec_ty as ::nirvash_core::TemporalSpec>::invariants(&spec);
+                let snapshot = generated_snapshot(&spec, model_case.clone());
+                for state in snapshot.states {
+                    assert!(
+                        invariants.iter().all(|predicate| predicate.eval(&state)),
+                        "registered invariant failed for state {:?}",
+                        state
+                    );
+                    assert!(
+                        model_case.state_constraints().iter().all(|constraint| constraint.eval(&state)),
+                        "state constraint failed for state {:?}",
+                        state
+                    );
                 }
             }
 
             #[test]
             fn generated_reachable_transitions_respect_constraints() {
-                for spec in generated_cases() {
-                    for model_case in generated_model_cases(&spec) {
-                        let snapshot = generated_snapshot(&spec, model_case.clone());
-                        for (source, edges) in snapshot.edges.iter().enumerate() {
-                            let prev = &snapshot.states[source];
-                            for edge in edges {
-                                let next = &snapshot.states[edge.target];
-                                assert!(
-                                    model_case.state_constraints().iter().all(|constraint| constraint.eval(next)),
-                                    "reachable transition produced state violating state constraints: {:?}",
-                                    next
-                                );
-                                assert!(
-                                    model_case.action_constraints().iter().all(|constraint| constraint.eval(prev, &edge.action, next)),
-                                    "reachable transition violated action constraints: {:?} -- {:?} --> {:?}",
-                                    prev,
-                                    edge.action,
-                                    next
-                                );
-                            }
-                        }
+                run_formal_cases_in_subprocesses(
+                    "reachable_transitions_respect_constraints",
+                    "generated_reachable_transitions_respect_constraints_case",
+                );
+            }
+
+            #[test]
+            fn generated_reachable_transitions_respect_constraints_case() {
+                let ::core::option::Option::Some((spec, model_case)) =
+                    selected_formal_case("reachable_transitions_respect_constraints")
+                else {
+                    return;
+                };
+                let snapshot = generated_snapshot(&spec, model_case.clone());
+                for (source, edges) in snapshot.edges.iter().enumerate() {
+                    let prev = &snapshot.states[source];
+                    for edge in edges {
+                        let next = &snapshot.states[edge.target];
+                        assert!(
+                            model_case.state_constraints().iter().all(|constraint| constraint.eval(next)),
+                            "reachable transition produced state violating state constraints: {:?}",
+                            next
+                        );
+                        assert!(
+                            model_case.action_constraints().iter().all(|constraint| constraint.eval(prev, &edge.action, next)),
+                            "reachable transition violated action constraints: {:?} -- {:?} --> {:?}",
+                            prev,
+                            edge.action,
+                            next
+                        );
                     }
                 }
             }

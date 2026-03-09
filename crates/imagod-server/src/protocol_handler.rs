@@ -12,10 +12,18 @@ use std::{
     },
 };
 
-use imago_protocol::ErrorCode;
+use async_trait::async_trait;
+use imago_protocol::{
+    ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushRequest,
+    CommandProtocolAction, CommandProtocolContext, CommandProtocolOutput, DeployCommandPayload,
+    DeployPrepareRequest, DeployPrepareResponse, ErrorCode, RunCommandPayload, ServiceStatusEntry,
+    StopCommandPayload,
+};
 use imagod_common::ImagodError;
 use imagod_config::{ImagodConfig, parse_ed25519_raw_public_key_hex, resolve_config_path};
-use imagod_control::{ArtifactStore, OperationManager, Orchestrator};
+use imagod_control::{
+    ActionApplier, ArtifactStore, OperationManager, Orchestrator, ServiceLogSubscription,
+};
 use serde_json::Value;
 use web_transport_quinn::Session;
 
@@ -36,6 +44,191 @@ const STAGE_DYNAMIC_KEYS: &str = "protocol.keys";
 
 /// JSON-backed envelope type used by stream decode/encode flow.
 pub(crate) type Envelope = imago_protocol::ProtocolEnvelope<Value>;
+
+#[async_trait]
+pub(crate) trait ProtocolArtifacts: Send + Sync {
+    async fn prepare(
+        &self,
+        payload: DeployPrepareRequest,
+    ) -> Result<DeployPrepareResponse, ImagodError>;
+
+    async fn push(&self, payload: ArtifactPushRequest) -> Result<ArtifactPushAck, ImagodError>;
+
+    async fn commit(
+        &self,
+        payload: ArtifactCommitRequest,
+    ) -> Result<ArtifactCommitResponse, ImagodError>;
+
+    async fn purge_deploy_session(&self, deploy_id: &str) -> Result<(), ImagodError>;
+}
+
+#[async_trait]
+impl ProtocolArtifacts for ArtifactStore {
+    async fn prepare(
+        &self,
+        payload: DeployPrepareRequest,
+    ) -> Result<DeployPrepareResponse, ImagodError> {
+        ArtifactStore::prepare(self, payload).await
+    }
+
+    async fn push(&self, payload: ArtifactPushRequest) -> Result<ArtifactPushAck, ImagodError> {
+        ArtifactStore::push(self, payload).await
+    }
+
+    async fn commit(
+        &self,
+        payload: ArtifactCommitRequest,
+    ) -> Result<ArtifactCommitResponse, ImagodError> {
+        ArtifactStore::commit(self, payload).await
+    }
+
+    async fn purge_deploy_session(&self, deploy_id: &str) -> Result<(), ImagodError> {
+        ArtifactStore::purge_deploy_session(self, deploy_id).await
+    }
+}
+
+#[async_trait]
+pub(crate) trait ProtocolOperations: Send + Sync {
+    async fn execute(
+        &self,
+        context: &CommandProtocolContext,
+        action: &CommandProtocolAction,
+    ) -> CommandProtocolOutput;
+}
+
+#[async_trait]
+impl ProtocolOperations for OperationManager {
+    async fn execute(
+        &self,
+        context: &CommandProtocolContext,
+        action: &CommandProtocolAction,
+    ) -> CommandProtocolOutput {
+        <OperationManager as ActionApplier>::execute_action(self, context, action).await
+    }
+}
+
+#[async_trait]
+pub(crate) trait ProtocolOrchestrator: Send + Sync {
+    async fn command_deploy(
+        &self,
+        payload: &DeployCommandPayload,
+    ) -> Result<(String, String), ImagodError>;
+
+    async fn command_run(
+        &self,
+        payload: &RunCommandPayload,
+    ) -> Result<(String, String), ImagodError>;
+
+    async fn command_stop(
+        &self,
+        payload: &StopCommandPayload,
+    ) -> Result<(String, String), ImagodError>;
+
+    async fn list_service_states(
+        &self,
+        names_filter: Option<&[String]>,
+    ) -> Result<Vec<ServiceStatusEntry>, ImagodError>;
+
+    async fn loggable_service_names(&self) -> Vec<String>;
+
+    async fn open_logs(
+        &self,
+        service_name: &str,
+        tail_lines: u32,
+        follow: bool,
+        with_timestamp: bool,
+    ) -> Result<ServiceLogSubscription, ImagodError>;
+
+    async fn invoke(
+        &self,
+        target_service_name: &str,
+        interface_id: &str,
+        function: &str,
+        args_cbor: Vec<u8>,
+    ) -> Result<Vec<u8>, ImagodError>;
+
+    async fn reap_finished_services(&self);
+
+    async fn has_live_services(&self) -> bool;
+
+    async fn stop_all_services(&self, force: bool) -> Vec<(String, ImagodError)>;
+}
+
+#[async_trait]
+impl ProtocolOrchestrator for Orchestrator {
+    async fn command_deploy(
+        &self,
+        payload: &DeployCommandPayload,
+    ) -> Result<(String, String), ImagodError> {
+        let summary = Orchestrator::deploy(self, payload).await?;
+        Ok((
+            format!("release:{}:{}", summary.service_name, summary.release_hash),
+            "spawned".to_string(),
+        ))
+    }
+
+    async fn command_run(
+        &self,
+        payload: &RunCommandPayload,
+    ) -> Result<(String, String), ImagodError> {
+        let summary = Orchestrator::run(self, payload).await?;
+        Ok((
+            format!("running:{}:{}", summary.service_name, summary.release_hash),
+            "spawned".to_string(),
+        ))
+    }
+
+    async fn command_stop(
+        &self,
+        payload: &StopCommandPayload,
+    ) -> Result<(String, String), ImagodError> {
+        let summary = Orchestrator::stop(self, payload).await?;
+        Ok((format!("stopped:{}", summary.service_name), "completed".to_string()))
+    }
+
+    async fn list_service_states(
+        &self,
+        names_filter: Option<&[String]>,
+    ) -> Result<Vec<ServiceStatusEntry>, ImagodError> {
+        Orchestrator::list_service_states(self, names_filter).await
+    }
+
+    async fn loggable_service_names(&self) -> Vec<String> {
+        Orchestrator::loggable_service_names(self).await
+    }
+
+    async fn open_logs(
+        &self,
+        service_name: &str,
+        tail_lines: u32,
+        follow: bool,
+        with_timestamp: bool,
+    ) -> Result<ServiceLogSubscription, ImagodError> {
+        Orchestrator::open_logs(self, service_name, tail_lines, follow, with_timestamp).await
+    }
+
+    async fn invoke(
+        &self,
+        target_service_name: &str,
+        interface_id: &str,
+        function: &str,
+        args_cbor: Vec<u8>,
+    ) -> Result<Vec<u8>, ImagodError> {
+        Orchestrator::invoke(self, target_service_name, interface_id, function, args_cbor).await
+    }
+
+    async fn reap_finished_services(&self) {
+        Orchestrator::reap_finished_services(self).await
+    }
+
+    async fn has_live_services(&self) -> bool {
+        Orchestrator::has_live_services(self).await
+    }
+
+    async fn stop_all_services(&self, force: bool) -> Vec<(String, ImagodError)> {
+        Orchestrator::stop_all_services(self, force).await
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DynamicClientRole {
@@ -202,9 +395,9 @@ pub(crate) fn replace_dynamic_public_keys_for_tests(
 pub struct ProtocolHandler {
     config: Arc<ImagodConfig>,
     config_path: PathBuf,
-    artifacts: ArtifactStore,
-    operations: OperationManager,
-    orchestrator: Orchestrator,
+    artifacts: Arc<dyn ProtocolArtifacts>,
+    operations: Arc<dyn ProtocolOperations>,
+    orchestrator: Arc<dyn ProtocolOrchestrator>,
     shutdown_requested: Arc<AtomicBool>,
     frame_codec: Arc<codec::LengthPrefixedFrameCodec>,
     clock: Arc<clock::SystemServerClock>,
@@ -220,12 +413,12 @@ impl ProtocolHandler {
         operations: OperationManager,
         orchestrator: Orchestrator,
     ) -> Self {
-        Self::new_with_runtime_components(
+        Self::new_with_clients(
             config,
             config_path,
-            artifacts,
-            operations,
-            orchestrator,
+            Arc::new(artifacts),
+            Arc::new(operations),
+            Arc::new(orchestrator),
             Arc::new(codec::LengthPrefixedFrameCodec),
             Arc::new(clock::SystemServerClock),
             Arc::new(logs_forwarder::DefaultLogsForwarder),
@@ -249,12 +442,12 @@ impl ProtocolHandler {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn new_with_runtime_components(
+    fn new_with_clients(
         config: Arc<ImagodConfig>,
         config_path: PathBuf,
-        artifacts: ArtifactStore,
-        operations: OperationManager,
-        orchestrator: Orchestrator,
+        artifacts: Arc<dyn ProtocolArtifacts>,
+        operations: Arc<dyn ProtocolOperations>,
+        orchestrator: Arc<dyn ProtocolOrchestrator>,
         frame_codec: Arc<codec::LengthPrefixedFrameCodec>,
         clock: Arc<clock::SystemServerClock>,
         logs_forwarder: Arc<logs_forwarder::DefaultLogsForwarder>,

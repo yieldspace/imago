@@ -1,4 +1,5 @@
 mod checker;
+pub mod concurrent;
 pub mod conformance;
 mod doc_graph;
 mod domain;
@@ -16,6 +17,7 @@ pub use checker::{
     Counterexample, CounterexampleKind, ExplorationMode, ModelCheckConfig, ModelCheckError,
     ModelCheckResult, ModelChecker,
 };
+pub use concurrent::{ConcurrentAction, ConcurrentTransitionSystem};
 pub use conformance::{
     DynamicTestCase, NegativeWitness, PositiveWitness, ProtocolConformanceSpec,
     ProtocolInputWitnessBinding, ProtocolRuntimeBinding, RegisteredCodeWitnessTestProvider,
@@ -415,6 +417,81 @@ mod tests {
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FilteredGraphState {
+        Idle,
+        Busy,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FilteredGraphAction {
+        Start,
+        Block,
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct FilteredGraphSpec;
+
+    impl TransitionSystem for FilteredGraphSpec {
+        type State = FilteredGraphState;
+        type Action = FilteredGraphAction;
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![FilteredGraphState::Idle]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![FilteredGraphAction::Start, FilteredGraphAction::Block]
+        }
+
+        fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+            match (state, action) {
+                (FilteredGraphState::Idle, FilteredGraphAction::Start) => {
+                    Some(FilteredGraphState::Busy)
+                }
+                (FilteredGraphState::Idle, FilteredGraphAction::Block) => {
+                    Some(FilteredGraphState::Idle)
+                }
+                _ => None,
+            }
+        }
+
+        fn successors(&self, _: &Self::State) -> Vec<(Self::Action, Self::State)> {
+            panic!("reachable graph should use successors_constrained for constrained exploration")
+        }
+
+        fn successors_constrained(
+            &self,
+            _state: &Self::State,
+            action_allowed: &dyn Fn(&Self::Action, &Self::State) -> bool,
+        ) -> Vec<(Self::Action, Self::State)> {
+            [
+                (FilteredGraphAction::Start, FilteredGraphState::Busy),
+                (FilteredGraphAction::Block, FilteredGraphState::Idle),
+            ]
+            .into_iter()
+            .filter(|(action, next)| action_allowed(action, next))
+            .collect()
+        }
+    }
+
+    impl TemporalSpec for FilteredGraphSpec {
+        fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
+            Vec::new()
+        }
+    }
+
+    impl ModelCaseSource for FilteredGraphSpec {
+        fn model_cases(&self) -> Vec<ModelCase<Self::State, Self::Action>> {
+            vec![
+                ModelCase::default().with_action_constraint(ActionConstraint::new(
+                    "disallow_block",
+                    |_, action, _| !matches!(action, FilteredGraphAction::Block),
+                )),
+            ]
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum SymmetryState {
         Left,
         Right,
@@ -723,6 +800,24 @@ mod tests {
             vec![ReachableGraphEdge {
                 action: SymmetryAction::Swap,
                 target: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn reachable_graph_uses_successors_constrained_for_filtered_exploration() {
+        let snapshot = ModelChecker::new(&FilteredGraphSpec)
+            .reachable_graph_snapshot()
+            .expect("snapshot should build via constrained successors");
+        assert_eq!(
+            snapshot.states,
+            vec![FilteredGraphState::Idle, FilteredGraphState::Busy]
+        );
+        assert_eq!(
+            snapshot.edges[0],
+            vec![ReachableGraphEdge {
+                action: FilteredGraphAction::Start,
+                target: 1,
             }]
         );
     }

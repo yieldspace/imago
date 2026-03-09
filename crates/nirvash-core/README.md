@@ -8,6 +8,7 @@
 - `Signature`: bounded helper 型に有限 domain と値 invariant を与える trait
 - `RelAtom` / `RelSet<T>` / `Relation2<A, B>`: Alloy 風の unary / binary relation を bounded finite domain 上で扱う relational kernel
 - `TransitionSystem` / `TemporalSpec`: `initial_states + actions + transition` を正本にした状態遷移と時相仕様の記述
+- `ConcurrentAction` / `ConcurrentTransitionSystem`: footprint 宣言から独立 atomic action の並行 step を自動合成する helper
 - `Ltl`: `[]`, `<>`, `X`, `U`, `ENABLED`, `~>` を含む Rust DSL
 - `ModelChecker`: reachable graph ベースの model checking
 - `ActionApplier` / `StateObserver`: 実コード conformance の低レベル capability trait
@@ -82,7 +83,7 @@ assert!(result.is_ok());
 - それでも足りない型だけ `#[signature(custom)]` で companion trait を手書きする
 
 重要なのは、`Signature` は **spec state space の正本ではない** ことです。  
-TLA+ に近い source of truth は `TransitionSystem::initial_states()`、`TransitionSystem::actions()`、`TransitionSystem::transition()` で、checker も docs の State Graph もそこから reachable graph を構築します。`Signature` は helper 型の有限境界を与えるための補助に限定します。
+通常 spec の source of truth は `TransitionSystem::initial_states()`、`TransitionSystem::actions()`、`TransitionSystem::transition()` で、checker も docs の State Graph もそこから reachable graph を構築します。並行 spec では `ConcurrentTransitionSystem::{initial_states, atomic_actions, atomic_transition, footprint_reads, footprint_writes}` を atomic 正本にし、top-level `TransitionSystem` 側で `ConcurrentAction` を合成します。`Signature` は helper 型の有限境界を与えるための補助に限定します。
 
 field 単位では次を使えます。
 
@@ -100,6 +101,16 @@ field 単位では次を使えます。
 - 演算は `union` / `intersection` / `difference` / `subset_of` / `domain` / `range` / `transpose` / `join` / `cardinality` / `some` / `no` / `one` / `lone` を持ちます
 - `transitive_closure()` は `Relation2<T, T>` だけを許し、異種 relation には `transitive_closure_checked()` で fail-closed にします
 - state に relation field を持たせる場合は `#[derive(RelationalState)]` を付けると doc graph / rustdoc fragment が relation schema と Alloy 風 notation を表示します
+
+## Declarative Concurrency
+
+relation-first spec で service ごとの独立 transition をまとめたい場合は、`ConcurrentTransitionSystem` を使います。
+
+- atomic action は `atomic_actions()` と `atomic_transition()` にだけ書きます
+- read/write footprint は `footprint_reads()` / `footprint_writes()` で宣言します
+- checker は non-empty 独立 subset を `ConcurrentAction<A>` として自動合成します
+- doc graph の edge label は composite step を `parallel(a, b, c)` 形式で表示します
+- tractability は `ModelCase` の action constraint で `ConcurrentAction::atoms()` / `arity()` を絞って与えます
 
 ## Runtime Conformance
 
