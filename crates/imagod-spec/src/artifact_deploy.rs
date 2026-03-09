@@ -1,5 +1,7 @@
 use nirvash_core::{Fairness, Ltl, StatePredicate, StepPredicate, TransitionSystem};
-use nirvash_macros::{Signature as FormalSignature, fairness, invariant, property, subsystem_spec};
+use nirvash_macros::{
+    ActionVocabulary, Signature as FormalSignature, fairness, invariant, property, subsystem_spec,
+};
 
 use crate::bounds::ArtifactChunks;
 
@@ -29,15 +31,23 @@ pub struct ArtifactDeployState {
     pub chunks: ArtifactChunks,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, ActionVocabulary)]
 pub enum ArtifactDeployAction {
+    /// Receive chunk
     ReceiveChunk,
+    /// Complete upload
     CompleteUpload,
+    /// Commit upload
     CommitUpload,
+    /// Deploy matched
     StartDeployMatched,
+    /// Deploy mismatched
     StartDeployMismatched,
+    /// Promote release
     PromoteRelease,
+    /// Trigger rollback
     TriggerRollback,
+    /// Finish rollback
     FinishRollback,
 }
 
@@ -195,7 +205,7 @@ impl TransitionSystem for ArtifactDeploySpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        action_vocabulary()
+        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition(&self, prev: &Self::State, action: &Self::Action) -> Option<Self::State> {
@@ -205,19 +215,6 @@ impl TransitionSystem for ArtifactDeploySpec {
 
 #[nirvash_macros::formal_tests(spec = ArtifactDeploySpec)]
 const _: () = ();
-
-fn action_vocabulary() -> Vec<ArtifactDeployAction> {
-    vec![
-        ArtifactDeployAction::ReceiveChunk,
-        ArtifactDeployAction::CompleteUpload,
-        ArtifactDeployAction::CommitUpload,
-        ArtifactDeployAction::StartDeployMatched,
-        ArtifactDeployAction::StartDeployMismatched,
-        ArtifactDeployAction::PromoteRelease,
-        ArtifactDeployAction::TriggerRollback,
-        ArtifactDeployAction::FinishRollback,
-    ]
-}
 
 fn transition_state(
     prev: &ArtifactDeployState,

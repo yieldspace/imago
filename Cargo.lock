@@ -2583,6 +2583,8 @@ dependencies = [
  "hmac",
  "imago-protocol",
  "imagod-common",
+ "nirvash-core",
+ "nirvash-macros",
  "serde",
  "serde_json",
  "sha2",

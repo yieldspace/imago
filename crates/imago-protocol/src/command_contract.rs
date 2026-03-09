@@ -5,8 +5,11 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, nirvash_macros::Signature)]
 /// High-level command category accepted by the manager runtime.
 pub enum CommandKind {
+    /// Starts an artifact deployment command.
     Deploy,
+    /// Starts a runtime invocation command.
     Run,
+    /// Starts a stop or termination command.
     Stop,
 }
 
@@ -30,19 +33,33 @@ impl CommandLifecycleState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, nirvash_macros::Signature)]
 /// Stable command-domain error classes used by runtime and conformance tests.
 pub enum CommandErrorKind {
+    /// Rejects unauthenticated command requests.
     Unauthorized,
+    /// Rejects malformed command payloads.
     BadRequest,
+    /// Rejects invalid manifests during deploy.
     BadManifest,
+    /// Rejects commands while the manager is busy.
     Busy,
+    /// Rejects requests that reference an unknown command.
     NotFound,
+    /// Rejects requests after an unexpected internal failure.
     Internal,
+    /// Rejects duplicate idempotency keys with mismatched intent.
     IdempotencyConflict,
+    /// Rejects invalid chunk range requests.
     RangeInvalid,
+    /// Rejects artifact chunks whose digest does not match.
     ChunkHashMismatch,
+    /// Rejects incomplete uploaded artifacts.
     ArtifactIncomplete,
+    /// Rejects commands whose preconditions are not met.
     PreconditionFailed,
+    /// Rejects commands that exceeded their runtime timeout.
     OperationTimeout,
+    /// Rejects commands when rollback could not complete.
     RollbackFailed,
+    /// Rejects commands when storage quota is exhausted.
     StorageQuota,
 }
 
@@ -76,18 +93,37 @@ impl CommandProtocolStageId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, nirvash_macros::Signature)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, nirvash_macros::Signature, nirvash_macros::ActionVocabulary,
+)]
 /// Shared command action vocabulary applied by `OperationManager`.
 pub enum CommandProtocolAction {
-    Start(CommandKind),
+    /// Start command
+    Start(#[sig(domain = command_protocol_command_kind_vocabulary)] CommandKind),
+    /// Mark running
     SetRunning,
+    /// Request cancel
     RequestCancel,
+    /// Observe running
     SnapshotRunning,
+    /// Mark spawned
     MarkSpawned,
+    /// Finish succeeded
     FinishSucceeded,
-    FinishFailed(CommandErrorKind),
+    /// Finish failed
+    FinishFailed(#[sig(domain = command_protocol_error_kind_vocabulary)] CommandErrorKind),
+    /// Finish canceled
     FinishCanceled,
+    /// Remove command
     Remove,
+}
+
+fn command_protocol_command_kind_vocabulary() -> Vec<CommandKind> {
+    vec![CommandKind::Deploy, CommandKind::Run, CommandKind::Stop]
+}
+
+fn command_protocol_error_kind_vocabulary() -> Vec<CommandErrorKind> {
+    vec![CommandErrorKind::Internal, CommandErrorKind::Busy]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

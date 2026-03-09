@@ -1,6 +1,6 @@
 use nirvash_core::OpaqueModelValue;
 use nirvash_core::TransitionSystem;
-use nirvash_macros::{formal_tests, subsystem_spec};
+use nirvash_macros::{ActionVocabulary, Signature, formal_tests, subsystem_spec};
 
 struct WorkerTag;
 
@@ -17,10 +17,13 @@ struct ToyState {
     phase: ToyPhase,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, ActionVocabulary)]
 enum ToyAction {
+    /// Start work
     Start,
+    /// Finish work
     Finish,
+    /// Block worker
     Block,
 }
 
@@ -43,10 +46,6 @@ impl ToyModelControlSpec {
             worker: self.initial_worker,
             phase: ToyPhase::Idle,
         }
-    }
-
-    fn action_vocabulary(&self) -> Vec<ToyAction> {
-        vec![ToyAction::Start, ToyAction::Finish, ToyAction::Block]
     }
 
     fn transition_state(&self, prev: &ToyState, action: &ToyAction) -> Option<ToyState> {
@@ -118,7 +117,7 @@ impl TransitionSystem for ToyModelControlSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        self.action_vocabulary()
+        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {

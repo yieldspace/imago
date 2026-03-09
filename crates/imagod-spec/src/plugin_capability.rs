@@ -3,8 +3,8 @@ use nirvash_core::{
     Fairness, Ltl, ModelCase, RelSet, Relation2, StatePredicate, StepPredicate, TransitionSystem,
 };
 use nirvash_macros::{
-    RelAtom, RelationalState, Signature as FormalSignature, fairness, invariant, property,
-    subsystem_spec,
+    ActionVocabulary, RelAtom, RelationalState, Signature as FormalSignature, fairness, invariant,
+    property, subsystem_spec,
 };
 
 #[cfg(test)]
@@ -109,18 +109,29 @@ impl PluginCapabilityState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, FormalSignature, ActionVocabulary)]
 pub enum PluginCapabilityAction {
+    /// Register plugin
     RegisterPlugin(PluginKind),
+    /// Mark graph acyclic
     ClassifyGraphAcyclic,
+    /// Mark graph cyclic
     ClassifyGraphCyclic,
+    /// Mark dependency missing
     ClassifyGraphMissingDependency,
+    /// Resolve self provider
     ResolveProviderSelf,
+    /// Resolve dependency provider
     ResolveProviderDependency,
+    /// Mark provider missing
     ResolveProviderMissing,
+    /// Allow capability
     AllowCapability,
+    /// Grant privileged capability
     GrantPrivilegedCapability,
+    /// Allow HTTP host
     AllowHttpHost,
+    /// Deny HTTP outbound
     DenyHttpOutbound,
 }
 
@@ -147,23 +158,6 @@ impl PluginCapabilitySpec {
             privileged_plugins: RelSet::empty(),
             http_outbound: Relation2::empty(),
         }
-    }
-
-    fn action_vocabulary(&self) -> Vec<PluginCapabilityAction> {
-        vec![
-            PluginCapabilityAction::RegisterPlugin(PluginKind::Native),
-            PluginCapabilityAction::RegisterPlugin(PluginKind::Wasm),
-            PluginCapabilityAction::ClassifyGraphAcyclic,
-            PluginCapabilityAction::ClassifyGraphCyclic,
-            PluginCapabilityAction::ClassifyGraphMissingDependency,
-            PluginCapabilityAction::ResolveProviderSelf,
-            PluginCapabilityAction::ResolveProviderDependency,
-            PluginCapabilityAction::ResolveProviderMissing,
-            PluginCapabilityAction::AllowCapability,
-            PluginCapabilityAction::GrantPrivilegedCapability,
-            PluginCapabilityAction::AllowHttpHost,
-            PluginCapabilityAction::DenyHttpOutbound,
-        ]
     }
 
     fn transition_state(
@@ -417,7 +411,7 @@ impl TransitionSystem for PluginCapabilitySpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        self.action_vocabulary()
+        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {

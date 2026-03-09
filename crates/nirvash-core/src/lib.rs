@@ -25,7 +25,8 @@ pub use doc_graph::{
     DocGraphCase, DocGraphEdge, DocGraphPolicy, DocGraphProvider, DocGraphReductionMode,
     DocGraphSnapshot, DocGraphSpec, DocGraphState, ReachableGraphEdge, ReachableGraphSnapshot,
     ReducedDocGraph, ReducedDocGraphEdge, ReducedDocGraphNode, RegisteredDocGraphProvider,
-    collect_doc_graph_specs, reduce_doc_graph, summarize_doc_graph_state, summarize_doc_graph_text,
+    collect_doc_graph_specs, format_doc_graph_action, reduce_doc_graph, summarize_doc_graph_state,
+    summarize_doc_graph_text,
 };
 pub use domain::{
     BoundedDomain, IntoBoundedDomain, OpaqueModelValue, Signature, bounded_vec_domain,
@@ -35,6 +36,7 @@ pub use fairness::Fairness;
 pub use inventory;
 pub use ltl::Ltl;
 pub use predicate::{ActionConstraint, StateConstraint, StatePredicate, StepPredicate};
+pub use registry::RegisteredActionDocLabel;
 pub use relation::{
     RegisteredRelationalState, RelAtom, RelSet, Relation2, RelationError, RelationField,
     RelationFieldKind, RelationFieldSchema, RelationFieldSummary, RelationalState,
@@ -42,8 +44,8 @@ pub use relation::{
 };
 pub use symmetry::SymmetryReducer;
 pub use system::{
-    ActionApplier, ModelCase, ModelCaseSource, StateObserver, SystemComposition, TemporalSpec,
-    TransitionSystem,
+    ActionApplier, ActionVocabulary, ModelCase, ModelCaseSource, StateObserver, SystemComposition,
+    TemporalSpec, TransitionSystem,
 };
 pub use trace::{Trace, TraceStep};
 

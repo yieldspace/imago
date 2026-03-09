@@ -1,5 +1,5 @@
 use nirvash_core::{Fairness, Ltl, ModelCase, StatePredicate, StepPredicate, TransitionSystem};
-use nirvash_macros::{Signature, fairness, invariant, property, subsystem_spec};
+use nirvash_macros::{ActionVocabulary, Signature, fairness, invariant, property, subsystem_spec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
 pub enum ShutdownPhase {
@@ -21,14 +21,21 @@ pub struct ShutdownFlowState {
     pub forced_stop_attempted: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, ActionVocabulary)]
 pub enum ShutdownFlowAction {
+    /// Signal shutdown
     ReceiveSignal,
+    /// Stop accepting
     StopAccepting,
+    /// Drain sessions
     DrainSessions,
+    /// Stop services
     StopServicesGraceful,
+    /// Force stop services
     StopServicesForced,
+    /// Stop maintenance
     StopMaintenance,
+    /// Finalize shutdown
     Finalize,
 }
 
@@ -49,18 +56,6 @@ impl ShutdownFlowSpec {
             maintenance_stopped: false,
             forced_stop_attempted: false,
         }
-    }
-
-    fn action_vocabulary(&self) -> Vec<ShutdownFlowAction> {
-        vec![
-            ShutdownFlowAction::ReceiveSignal,
-            ShutdownFlowAction::StopAccepting,
-            ShutdownFlowAction::DrainSessions,
-            ShutdownFlowAction::StopServicesGraceful,
-            ShutdownFlowAction::StopServicesForced,
-            ShutdownFlowAction::StopMaintenance,
-            ShutdownFlowAction::Finalize,
-        ]
     }
 
     fn transition_state(
@@ -272,7 +267,7 @@ impl TransitionSystem for ShutdownFlowSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        self.action_vocabulary()
+        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {

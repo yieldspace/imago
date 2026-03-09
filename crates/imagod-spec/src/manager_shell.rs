@@ -1,5 +1,5 @@
 use nirvash_core::{ModelCase, TransitionSystem};
-use nirvash_macros::{Signature, subsystem_spec};
+use nirvash_macros::{ActionVocabulary, Signature, subsystem_spec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
 pub enum TaskState {
@@ -27,16 +27,25 @@ pub struct ManagerShellState {
     pub boot_restore: TaskState,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, ActionVocabulary)]
 pub enum ManagerShellAction {
+    /// Load config
     LoadExistingConfig,
+    /// Create config
     CreateDefaultConfig,
+    /// Record GC success
     RunPluginGcSucceeded,
+    /// Record GC failure
     RunPluginGcFailed,
+    /// Record restore success
     RunBootRestoreSucceeded,
+    /// Record restore failure
     RunBootRestoreFailed,
+    /// Start listening
     StartListening,
+    /// Begin shutdown
     BeginShutdown,
+    /// Finish shutdown
     FinishShutdown,
 }
 
@@ -165,7 +174,7 @@ impl TransitionSystem for ManagerShellSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        action_vocabulary()
+        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition(&self, prev: &Self::State, action: &Self::Action) -> Option<Self::State> {
@@ -175,20 +184,6 @@ impl TransitionSystem for ManagerShellSpec {
 
 #[nirvash_macros::formal_tests(spec = ManagerShellSpec)]
 const _: () = ();
-
-fn action_vocabulary() -> Vec<ManagerShellAction> {
-    vec![
-        ManagerShellAction::LoadExistingConfig,
-        ManagerShellAction::CreateDefaultConfig,
-        ManagerShellAction::RunPluginGcSucceeded,
-        ManagerShellAction::RunPluginGcFailed,
-        ManagerShellAction::RunBootRestoreSucceeded,
-        ManagerShellAction::RunBootRestoreFailed,
-        ManagerShellAction::StartListening,
-        ManagerShellAction::BeginShutdown,
-        ManagerShellAction::FinishShutdown,
-    ]
-}
 
 fn transition_state(
     prev: &ManagerShellState,

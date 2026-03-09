@@ -4,8 +4,8 @@ use nirvash_core::{
     TransitionSystem,
 };
 use nirvash_macros::{
-    RelAtom, RelationalState, Signature as FormalSignature, fairness, invariant, property,
-    subsystem_spec,
+    ActionVocabulary, RelAtom, RelationalState, Signature as FormalSignature, fairness, invariant,
+    property, subsystem_spec,
 };
 
 #[cfg(test)]
@@ -94,17 +94,27 @@ impl RunnerRuntimeState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, ActionVocabulary)]
 pub enum RunnerRuntimeAction {
+    /// Select mode
     SelectMode(RunnerAppType),
+    /// Apply default tuning
     ApplyDefaultTuning,
+    /// Apply tuning
     ApplyCustomTuning,
+    /// Apply invalid tuning
     ApplyInvalidTuning,
+    /// Validate component
     ValidateComponentLoadable,
+    /// Reject component
     ValidateComponentInvalid,
+    /// Start serving
     StartServing,
+    /// Enqueue HTTP request
     AcceptHttpRequest,
+    /// Drain HTTP request
     DrainHttpRequest,
+    /// Fail runtime
     FailRuntime,
 }
 
@@ -125,24 +135,6 @@ impl RunnerRuntimeSpec {
             component: ComponentLoadClass::Unknown,
             tuning: WasmTuningClass::Default,
         }
-    }
-
-    fn action_vocabulary(&self) -> Vec<RunnerRuntimeAction> {
-        vec![
-            RunnerRuntimeAction::SelectMode(RunnerAppType::Cli),
-            RunnerRuntimeAction::SelectMode(RunnerAppType::Rpc),
-            RunnerRuntimeAction::SelectMode(RunnerAppType::Http),
-            RunnerRuntimeAction::SelectMode(RunnerAppType::Socket),
-            RunnerRuntimeAction::ApplyDefaultTuning,
-            RunnerRuntimeAction::ApplyCustomTuning,
-            RunnerRuntimeAction::ApplyInvalidTuning,
-            RunnerRuntimeAction::ValidateComponentLoadable,
-            RunnerRuntimeAction::ValidateComponentInvalid,
-            RunnerRuntimeAction::StartServing,
-            RunnerRuntimeAction::AcceptHttpRequest,
-            RunnerRuntimeAction::DrainHttpRequest,
-            RunnerRuntimeAction::FailRuntime,
-        ]
     }
 
     fn transition_state(
@@ -359,7 +351,7 @@ impl TransitionSystem for RunnerRuntimeSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        self.action_vocabulary()
+        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {

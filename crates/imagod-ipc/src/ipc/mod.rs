@@ -84,15 +84,19 @@ impl Validate for ServiceBinding {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, nirvash_macros::Signature)]
 /// Runtime application type carried from manifest into runner bootstrap.
 pub enum RunnerAppType {
+    /// Runs a one-shot CLI-style component.
     #[serde(rename = "cli")]
     Cli,
+    /// Runs the RPC service entrypoint.
     #[serde(rename = "rpc")]
     Rpc,
+    /// Runs the HTTP service entrypoint.
     #[serde(rename = "http")]
     Http,
+    /// Runs the socket service entrypoint.
     #[serde(rename = "socket")]
     Socket,
 }
@@ -526,11 +530,13 @@ fn ip_in_cidr(ip: IpAddr, network: IpAddr, prefix_len: u8) -> bool {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, nirvash_macros::Signature)]
 #[serde(rename_all = "lowercase")]
 /// Plugin delivery kind used by manifest/bootstrap dependency definitions.
 pub enum PluginKind {
+    /// Loads a native host plugin.
     Native,
+    /// Loads a Wasm component plugin.
     Wasm,
 }
 

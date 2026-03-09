@@ -3,6 +3,10 @@ use crate::{
     StatePredicate, SymmetryReducer,
 };
 
+pub trait ActionVocabulary: Sized {
+    fn action_vocabulary() -> Vec<Self>;
+}
+
 pub trait TransitionSystem {
     type State: Clone + std::fmt::Debug + Eq + 'static;
     type Action: Clone + std::fmt::Debug + Eq + 'static;

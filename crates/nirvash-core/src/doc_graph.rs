@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     RelationFieldSchema, RelationFieldSummary, StatePredicate, collect_relational_state_schema,
-    collect_relational_state_summary,
+    collect_relational_state_summary, registry::lookup_action_doc_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +173,13 @@ where
         relation_fields,
         relation_schema,
     }
+}
+
+pub fn format_doc_graph_action<T>(value: &T) -> String
+where
+    T: Debug + 'static,
+{
+    lookup_action_doc_label(value as &dyn std::any::Any).unwrap_or_else(|| format!("{value:?}"))
 }
 
 pub fn summarize_doc_graph_text(input: &str) -> String {
@@ -469,8 +476,8 @@ mod tests {
     use std::any::{Any, TypeId};
 
     use crate::{
-        BoundedDomain, RegisteredRelationalState, RelAtom, RelSet, Relation2, RelationField,
-        RelationalState, Signature,
+        BoundedDomain, RegisteredActionDocLabel, RegisteredRelationalState, RelAtom, RelSet,
+        Relation2, RelationField, RelationalState, Signature,
     };
 
     #[test]
@@ -570,6 +577,60 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    enum NestedDocAction {
+        Inner,
+    }
+
+    fn nested_doc_action_type_id() -> TypeId {
+        TypeId::of::<NestedDocAction>()
+    }
+
+    fn nested_doc_action_format(value: &dyn Any) -> Option<String> {
+        let value = value
+            .downcast_ref::<NestedDocAction>()
+            .expect("registered action doc downcast");
+        match value {
+            NestedDocAction::Inner => Some("inner action doc".to_owned()),
+        }
+    }
+
+    inventory::submit! {
+        RegisteredActionDocLabel {
+            value_type_id: nested_doc_action_type_id,
+            format: nested_doc_action_format,
+        }
+    }
+
+    #[derive(Debug)]
+    enum WrapperDocAction {
+        Direct,
+        Delegated(NestedDocAction),
+        Missing,
+    }
+
+    fn wrapper_doc_action_type_id() -> TypeId {
+        TypeId::of::<WrapperDocAction>()
+    }
+
+    fn wrapper_doc_action_format(value: &dyn Any) -> Option<String> {
+        let value = value
+            .downcast_ref::<WrapperDocAction>()
+            .expect("registered action doc downcast");
+        match value {
+            WrapperDocAction::Direct => Some("direct action doc".to_owned()),
+            WrapperDocAction::Delegated(inner) => Some(format_doc_graph_action(inner)),
+            WrapperDocAction::Missing => None,
+        }
+    }
+
+    inventory::submit! {
+        RegisteredActionDocLabel {
+            value_type_id: wrapper_doc_action_type_id,
+            format: wrapper_doc_action_format,
+        }
+    }
+
     #[test]
     fn summarize_doc_graph_state_captures_relation_schema_and_notation() {
         let state = RelationalDemoState {
@@ -584,6 +645,22 @@ mod tests {
         assert_eq!(summarized.relation_schema.len(), 2);
         assert_eq!(summarized.relation_schema[0].name, "requires");
         assert_eq!(summarized.relation_schema[1].name, "allowed");
+    }
+
+    #[test]
+    fn format_doc_graph_action_prefers_registered_doc_and_delegates_single_field_wrappers() {
+        assert_eq!(
+            format_doc_graph_action(&WrapperDocAction::Direct),
+            "direct action doc"
+        );
+        assert_eq!(
+            format_doc_graph_action(&WrapperDocAction::Delegated(NestedDocAction::Inner)),
+            "inner action doc"
+        );
+        assert_eq!(
+            format_doc_graph_action(&WrapperDocAction::Missing),
+            "Missing"
+        );
     }
 
     #[test]

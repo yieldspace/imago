@@ -1,6 +1,8 @@
 use imagod_ipc::{RunnerAppType, RunnerBootstrap};
 use nirvash_core::{Fairness, Ltl, StatePredicate, StepPredicate, TransitionSystem};
-use nirvash_macros::{Signature as FormalSignature, fairness, invariant, property, subsystem_spec};
+use nirvash_macros::{
+    ActionVocabulary, Signature as FormalSignature, fairness, invariant, property, subsystem_spec,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
 pub enum BootstrapSizeClass {
@@ -58,14 +60,21 @@ pub struct RunnerBootstrapState {
     pub ready: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, ActionVocabulary)]
 pub enum RunnerBootstrapAction {
+    /// Read bootstrap
     ReadWithinBounds,
+    /// Read oversized bootstrap
     ReadOversized,
+    /// Decode bootstrap
     DecodeBootstrap(RunnerAppType),
+    /// Prepare endpoint
     PrepareEndpoint,
+    /// Register runner
     RegisterRunner,
+    /// Reject auth proof
     RejectAuthProof,
+    /// Mark runner ready
     MarkReady,
 }
 
@@ -87,21 +96,6 @@ impl RunnerBootstrapSpec {
             registered: false,
             ready: false,
         }
-    }
-
-    fn action_vocabulary(&self) -> Vec<RunnerBootstrapAction> {
-        vec![
-            RunnerBootstrapAction::ReadWithinBounds,
-            RunnerBootstrapAction::ReadOversized,
-            RunnerBootstrapAction::DecodeBootstrap(RunnerAppType::Cli),
-            RunnerBootstrapAction::DecodeBootstrap(RunnerAppType::Rpc),
-            RunnerBootstrapAction::DecodeBootstrap(RunnerAppType::Http),
-            RunnerBootstrapAction::DecodeBootstrap(RunnerAppType::Socket),
-            RunnerBootstrapAction::PrepareEndpoint,
-            RunnerBootstrapAction::RegisterRunner,
-            RunnerBootstrapAction::RejectAuthProof,
-            RunnerBootstrapAction::MarkReady,
-        ]
     }
 
     fn transition_state(
@@ -272,7 +266,7 @@ impl TransitionSystem for RunnerBootstrapSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        self.action_vocabulary()
+        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {

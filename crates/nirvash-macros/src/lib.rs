@@ -7,7 +7,7 @@ use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
     Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprRange, Field, Fields, Ident,
-    ImplItem, ItemConst, ItemFn, ItemImpl, LitStr, Path, RangeLimits, Token, Type,
+    ImplItem, ItemConst, ItemFn, ItemImpl, Lit, LitStr, Path, RangeLimits, Token, Type,
     parse_macro_input,
 };
 
@@ -15,6 +15,15 @@ use syn::{
 pub fn derive_signature(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand_signature_derive(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[proc_macro_derive(ActionVocabulary)]
+pub fn derive_action_vocabulary(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match expand_action_vocabulary_derive(input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
@@ -663,6 +672,8 @@ fn expand_signature_derive(input: DeriveInput) -> syn::Result<proc_macro2::Token
     let trait_where_clause = &generics.where_clause;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let supported_data = ensure_supported_signature_data(&ident, &input.data)?;
+    let action_doc_registration =
+        signature_action_doc_registration(&ident, &input.data, &generics)?;
 
     if args.custom
         && (args.range.is_some()
@@ -718,7 +729,164 @@ fn expand_signature_derive(input: DeriveInput) -> syn::Result<proc_macro2::Token
                 <Self as #trait_ident #ty_generics>::signature_invariant(self)
             }
         }
+
+        #action_doc_registration
     })
+}
+
+fn expand_action_vocabulary_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let ident = input.ident;
+    let generics = input.generics;
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+    match &input.data {
+        Data::Enum(_) => Ok(quote! {
+            impl #impl_generics ::nirvash_core::ActionVocabulary for #ident #ty_generics #where_clause {
+                fn action_vocabulary() -> ::std::vec::Vec<Self> {
+                    <Self as ::nirvash_core::Signature>::bounded_domain().into_vec()
+                }
+            }
+        }),
+        Data::Struct(data) => Err(syn::Error::new(
+            data.struct_token.span(),
+            "ActionVocabulary derive requires an enum",
+        )),
+        Data::Union(data) => Err(syn::Error::new(
+            data.union_token.span(),
+            "ActionVocabulary derive does not support unions",
+        )),
+    }
+}
+
+fn signature_action_doc_registration(
+    ident: &Ident,
+    data: &Data,
+    generics: &syn::Generics,
+) -> syn::Result<proc_macro2::TokenStream> {
+    if !generics.params.is_empty() {
+        return Ok(quote! {});
+    }
+
+    let Data::Enum(data) = data else {
+        return Ok(quote! {});
+    };
+
+    let match_arms = data
+        .variants
+        .iter()
+        .map(|variant| signature_action_doc_match_arm(ident, variant))
+        .collect::<syn::Result<Vec<_>>>()?;
+    let ident_snake = to_upper_snake(&ident.to_string()).to_lowercase();
+    let type_id_fn_ident = format_ident!("__nirvash_action_doc_type_id_{}", ident_snake);
+    let format_fn_ident = format_ident!("__nirvash_action_doc_format_{}", ident_snake);
+
+    Ok(quote! {
+        #[doc(hidden)]
+        fn #type_id_fn_ident() -> ::std::any::TypeId {
+            ::std::any::TypeId::of::<#ident>()
+        }
+
+        #[doc(hidden)]
+        fn #format_fn_ident(
+            value: &dyn ::std::any::Any,
+        ) -> ::std::option::Option<::std::string::String> {
+            let value = value
+                .downcast_ref::<#ident>()
+                .expect("registered action doc downcast");
+            match value {
+                #(#match_arms)*
+            }
+        }
+
+        ::nirvash_core::inventory::submit! {
+            ::nirvash_core::RegisteredActionDocLabel {
+                value_type_id: #type_id_fn_ident,
+                format: #format_fn_ident,
+            }
+        }
+    })
+}
+
+fn signature_action_doc_match_arm(
+    enum_ident: &Ident,
+    variant: &syn::Variant,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let variant_ident = &variant.ident;
+    if let Some(summary) = first_doc_line(&variant.attrs) {
+        let pattern = variant_ignore_pattern(enum_ident, variant_ident, &variant.fields);
+        return Ok(quote! {
+            #pattern => ::std::option::Option::Some(#summary.to_owned()),
+        });
+    }
+
+    if let Some(delegate_arm) =
+        single_field_delegate_arm(enum_ident, variant_ident, &variant.fields)
+    {
+        return Ok(delegate_arm);
+    }
+
+    let pattern = variant_ignore_pattern(enum_ident, variant_ident, &variant.fields);
+    Ok(quote! {
+        #pattern => ::std::option::Option::None,
+    })
+}
+
+fn first_doc_line(attrs: &[Attribute]) -> Option<LitStr> {
+    attrs.iter().find_map(|attr| {
+        if !attr.path().is_ident("doc") {
+            return None;
+        }
+        let syn::Meta::NameValue(meta) = &attr.meta else {
+            return None;
+        };
+        let Expr::Lit(expr_lit) = &meta.value else {
+            return None;
+        };
+        let Lit::Str(lit) = &expr_lit.lit else {
+            return None;
+        };
+        let trimmed = lit.value().trim().to_owned();
+        (!trimmed.is_empty()).then(|| LitStr::new(&trimmed, lit.span()))
+    })
+}
+
+fn variant_ignore_pattern(
+    enum_ident: &Ident,
+    variant_ident: &Ident,
+    fields: &Fields,
+) -> proc_macro2::TokenStream {
+    match fields {
+        Fields::Unit => quote! { #enum_ident::#variant_ident },
+        Fields::Unnamed(_) => quote! { #enum_ident::#variant_ident(..) },
+        Fields::Named(_) => quote! { #enum_ident::#variant_ident { .. } },
+    }
+}
+
+fn single_field_delegate_arm(
+    enum_ident: &Ident,
+    variant_ident: &Ident,
+    fields: &Fields,
+) -> Option<proc_macro2::TokenStream> {
+    match fields {
+        Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+            let binding = format_ident!("__nirvash_inner");
+            Some(quote! {
+                #enum_ident::#variant_ident(#binding) => ::std::option::Option::Some(
+                    ::nirvash_core::format_doc_graph_action(#binding)
+                ),
+            })
+        }
+        Fields::Named(fields) if fields.named.len() == 1 => {
+            let binding = format_ident!("__nirvash_inner");
+            let field_ident = fields.named.first()?.ident.as_ref()?;
+            Some(quote! {
+                #enum_ident::#variant_ident { #field_ident: #binding } => ::std::option::Option::Some(
+                    ::nirvash_core::format_doc_graph_action(#binding)
+                ),
+            })
+        }
+        _ => None,
+    }
 }
 
 fn expand_rel_atom_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
@@ -1638,7 +1806,7 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                                         outgoing
                                             .iter()
                                             .map(|edge| ::nirvash_core::DocGraphEdge {
-                                                label: format!("{:?}", edge.action),
+                                                label: ::nirvash_core::format_doc_graph_action(&edge.action),
                                                 target: edge.target,
                                             })
                                             .collect::<::std::vec::Vec<_>>()

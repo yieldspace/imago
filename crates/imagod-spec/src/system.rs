@@ -4,7 +4,7 @@ use nirvash_core::{
     ActionConstraint, ModelCase, ModelCaseSource, ModelCheckConfig, StatePredicate, TemporalSpec,
     TransitionSystem,
 };
-use nirvash_macros::{invariant, system_spec};
+use nirvash_macros::{ActionVocabulary, Signature as FormalSignature, invariant, system_spec};
 
 use crate::{
     artifact_deploy::{
@@ -37,17 +37,20 @@ pub struct ImagodSystemState {
     pub shutdown: ShutdownFlowState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, FormalSignature, ActionVocabulary)]
+/// Top-level system actions delegated to subsystem specifications.
 pub enum ImagodSystemAction {
-    Manager(ManagerShellAction),
-    Session(SessionTransportAction),
-    Command(CommandProtocolAction),
-    Deploy(ArtifactDeployAction),
-    Supervision(ServiceSupervisionAction),
-    Bootstrap(RunnerBootstrapAction),
-    Runtime(RunnerRuntimeAction),
-    Plugin(PluginCapabilityAction),
-    Shutdown(ShutdownFlowAction),
+    Manager(#[sig(domain = imagod_system_manager_action_vocabulary)] ManagerShellAction),
+    Session(#[sig(domain = imagod_system_session_action_vocabulary)] SessionTransportAction),
+    Command(#[sig(domain = imagod_system_command_action_vocabulary)] CommandProtocolAction),
+    Deploy(#[sig(domain = imagod_system_deploy_action_vocabulary)] ArtifactDeployAction),
+    Supervision(
+        #[sig(domain = imagod_system_supervision_action_vocabulary)] ServiceSupervisionAction,
+    ),
+    Bootstrap(#[sig(domain = imagod_system_bootstrap_action_vocabulary)] RunnerBootstrapAction),
+    Runtime(#[sig(domain = imagod_system_runtime_action_vocabulary)] RunnerRuntimeAction),
+    Plugin(#[sig(domain = imagod_system_plugin_action_vocabulary)] PluginCapabilityAction),
+    Shutdown(#[sig(domain = imagod_system_shutdown_action_vocabulary)] ShutdownFlowAction),
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -70,73 +73,6 @@ impl ImagodSystemSpec {
             plugin: PluginCapabilitySpec::new().initial_state(),
             shutdown: ShutdownFlowSpec::new().initial_state(),
         }
-    }
-
-    fn action_vocabulary(&self) -> Vec<ImagodSystemAction> {
-        vec![
-            ImagodSystemAction::Manager(ManagerShellAction::LoadExistingConfig),
-            ImagodSystemAction::Manager(ManagerShellAction::CreateDefaultConfig),
-            ImagodSystemAction::Manager(ManagerShellAction::RunPluginGcSucceeded),
-            ImagodSystemAction::Manager(ManagerShellAction::RunPluginGcFailed),
-            ImagodSystemAction::Manager(ManagerShellAction::RunBootRestoreSucceeded),
-            ImagodSystemAction::Manager(ManagerShellAction::RunBootRestoreFailed),
-            ImagodSystemAction::Manager(ManagerShellAction::StartListening),
-            ImagodSystemAction::Command(CommandProtocolAction::Start(CommandKind::Run)),
-            ImagodSystemAction::Command(CommandProtocolAction::SetRunning),
-            ImagodSystemAction::Command(CommandProtocolAction::RequestCancel),
-            ImagodSystemAction::Command(CommandProtocolAction::MarkSpawned),
-            ImagodSystemAction::Command(CommandProtocolAction::FinishCanceled),
-            ImagodSystemAction::Command(CommandProtocolAction::FinishFailed(
-                CommandErrorKind::Internal,
-            )),
-            ImagodSystemAction::Command(CommandProtocolAction::Remove),
-            ImagodSystemAction::Session(SessionTransportAction::AcceptSession),
-            ImagodSystemAction::Session(SessionTransportAction::RejectTooMany),
-            ImagodSystemAction::Session(SessionTransportAction::JoinSession),
-            ImagodSystemAction::Deploy(ArtifactDeployAction::ReceiveChunk),
-            ImagodSystemAction::Deploy(ArtifactDeployAction::CompleteUpload),
-            ImagodSystemAction::Deploy(ArtifactDeployAction::CommitUpload),
-            ImagodSystemAction::Deploy(ArtifactDeployAction::StartDeployMatched),
-            ImagodSystemAction::Deploy(ArtifactDeployAction::StartDeployMismatched),
-            ImagodSystemAction::Deploy(ArtifactDeployAction::PromoteRelease),
-            ImagodSystemAction::Deploy(ArtifactDeployAction::TriggerRollback),
-            ImagodSystemAction::Deploy(ArtifactDeployAction::FinishRollback),
-            ImagodSystemAction::Supervision(ServiceSupervisionAction::StartService),
-            ImagodSystemAction::Bootstrap(RunnerBootstrapAction::ReadWithinBounds),
-            ImagodSystemAction::Bootstrap(RunnerBootstrapAction::ReadOversized),
-            ImagodSystemAction::Bootstrap(RunnerBootstrapAction::DecodeBootstrap(
-                RunnerAppType::Rpc,
-            )),
-            ImagodSystemAction::Bootstrap(RunnerBootstrapAction::PrepareEndpoint),
-            ImagodSystemAction::Bootstrap(RunnerBootstrapAction::RegisterRunner),
-            ImagodSystemAction::Bootstrap(RunnerBootstrapAction::RejectAuthProof),
-            ImagodSystemAction::Bootstrap(RunnerBootstrapAction::MarkReady),
-            ImagodSystemAction::Runtime(RunnerRuntimeAction::SelectMode(RunnerAppType::Rpc)),
-            ImagodSystemAction::Runtime(RunnerRuntimeAction::ApplyDefaultTuning),
-            ImagodSystemAction::Runtime(RunnerRuntimeAction::ApplyInvalidTuning),
-            ImagodSystemAction::Runtime(RunnerRuntimeAction::ValidateComponentLoadable),
-            ImagodSystemAction::Runtime(RunnerRuntimeAction::ValidateComponentInvalid),
-            ImagodSystemAction::Runtime(RunnerRuntimeAction::StartServing),
-            ImagodSystemAction::Runtime(RunnerRuntimeAction::FailRuntime),
-            ImagodSystemAction::Plugin(PluginCapabilityAction::RegisterPlugin(PluginKind::Wasm)),
-            ImagodSystemAction::Plugin(PluginCapabilityAction::ClassifyGraphAcyclic),
-            ImagodSystemAction::Plugin(PluginCapabilityAction::ClassifyGraphMissingDependency),
-            ImagodSystemAction::Plugin(PluginCapabilityAction::ResolveProviderSelf),
-            ImagodSystemAction::Plugin(PluginCapabilityAction::ResolveProviderDependency),
-            ImagodSystemAction::Plugin(PluginCapabilityAction::ResolveProviderMissing),
-            ImagodSystemAction::Plugin(PluginCapabilityAction::AllowCapability),
-            ImagodSystemAction::Plugin(PluginCapabilityAction::GrantPrivilegedCapability),
-            ImagodSystemAction::Plugin(PluginCapabilityAction::AllowHttpHost),
-            ImagodSystemAction::Plugin(PluginCapabilityAction::DenyHttpOutbound),
-            ImagodSystemAction::Manager(ManagerShellAction::BeginShutdown),
-            ImagodSystemAction::Shutdown(ShutdownFlowAction::StopAccepting),
-            ImagodSystemAction::Shutdown(ShutdownFlowAction::DrainSessions),
-            ImagodSystemAction::Shutdown(ShutdownFlowAction::StopServicesGraceful),
-            ImagodSystemAction::Shutdown(ShutdownFlowAction::StopServicesForced),
-            ImagodSystemAction::Shutdown(ShutdownFlowAction::StopMaintenance),
-            ImagodSystemAction::Shutdown(ShutdownFlowAction::Finalize),
-            ImagodSystemAction::Manager(ManagerShellAction::FinishShutdown),
-        ]
     }
 
     fn transition_state(
@@ -218,6 +154,107 @@ impl ImagodSystemSpec {
 
         system_state_valid(&candidate).then_some(candidate)
     }
+}
+
+fn imagod_system_manager_action_vocabulary() -> Vec<ManagerShellAction> {
+    vec![
+        ManagerShellAction::LoadExistingConfig,
+        ManagerShellAction::CreateDefaultConfig,
+        ManagerShellAction::RunPluginGcSucceeded,
+        ManagerShellAction::RunPluginGcFailed,
+        ManagerShellAction::RunBootRestoreSucceeded,
+        ManagerShellAction::RunBootRestoreFailed,
+        ManagerShellAction::StartListening,
+        ManagerShellAction::BeginShutdown,
+        ManagerShellAction::FinishShutdown,
+    ]
+}
+
+fn imagod_system_session_action_vocabulary() -> Vec<SessionTransportAction> {
+    vec![
+        SessionTransportAction::AcceptSession,
+        SessionTransportAction::RejectTooMany,
+        SessionTransportAction::JoinSession,
+    ]
+}
+
+fn imagod_system_command_action_vocabulary() -> Vec<CommandProtocolAction> {
+    vec![
+        CommandProtocolAction::Start(CommandKind::Run),
+        CommandProtocolAction::SetRunning,
+        CommandProtocolAction::RequestCancel,
+        CommandProtocolAction::MarkSpawned,
+        CommandProtocolAction::FinishFailed(CommandErrorKind::Internal),
+        CommandProtocolAction::FinishCanceled,
+        CommandProtocolAction::Remove,
+    ]
+}
+
+fn imagod_system_deploy_action_vocabulary() -> Vec<ArtifactDeployAction> {
+    vec![
+        ArtifactDeployAction::ReceiveChunk,
+        ArtifactDeployAction::CompleteUpload,
+        ArtifactDeployAction::CommitUpload,
+        ArtifactDeployAction::StartDeployMatched,
+        ArtifactDeployAction::StartDeployMismatched,
+        ArtifactDeployAction::PromoteRelease,
+        ArtifactDeployAction::TriggerRollback,
+        ArtifactDeployAction::FinishRollback,
+    ]
+}
+
+fn imagod_system_supervision_action_vocabulary() -> Vec<ServiceSupervisionAction> {
+    vec![ServiceSupervisionAction::StartService]
+}
+
+fn imagod_system_bootstrap_action_vocabulary() -> Vec<RunnerBootstrapAction> {
+    vec![
+        RunnerBootstrapAction::ReadWithinBounds,
+        RunnerBootstrapAction::ReadOversized,
+        RunnerBootstrapAction::DecodeBootstrap(RunnerAppType::Rpc),
+        RunnerBootstrapAction::PrepareEndpoint,
+        RunnerBootstrapAction::RegisterRunner,
+        RunnerBootstrapAction::RejectAuthProof,
+        RunnerBootstrapAction::MarkReady,
+    ]
+}
+
+fn imagod_system_runtime_action_vocabulary() -> Vec<RunnerRuntimeAction> {
+    vec![
+        RunnerRuntimeAction::SelectMode(RunnerAppType::Rpc),
+        RunnerRuntimeAction::ApplyDefaultTuning,
+        RunnerRuntimeAction::ApplyInvalidTuning,
+        RunnerRuntimeAction::ValidateComponentLoadable,
+        RunnerRuntimeAction::ValidateComponentInvalid,
+        RunnerRuntimeAction::StartServing,
+        RunnerRuntimeAction::FailRuntime,
+    ]
+}
+
+fn imagod_system_plugin_action_vocabulary() -> Vec<PluginCapabilityAction> {
+    vec![
+        PluginCapabilityAction::RegisterPlugin(PluginKind::Wasm),
+        PluginCapabilityAction::ClassifyGraphAcyclic,
+        PluginCapabilityAction::ClassifyGraphMissingDependency,
+        PluginCapabilityAction::ResolveProviderSelf,
+        PluginCapabilityAction::ResolveProviderDependency,
+        PluginCapabilityAction::ResolveProviderMissing,
+        PluginCapabilityAction::AllowCapability,
+        PluginCapabilityAction::GrantPrivilegedCapability,
+        PluginCapabilityAction::AllowHttpHost,
+        PluginCapabilityAction::DenyHttpOutbound,
+    ]
+}
+
+fn imagod_system_shutdown_action_vocabulary() -> Vec<ShutdownFlowAction> {
+    vec![
+        ShutdownFlowAction::StopAccepting,
+        ShutdownFlowAction::DrainSessions,
+        ShutdownFlowAction::StopServicesGraceful,
+        ShutdownFlowAction::StopServicesForced,
+        ShutdownFlowAction::StopMaintenance,
+        ShutdownFlowAction::Finalize,
+    ]
 }
 
 fn system_model_cases() -> Vec<ModelCase<ImagodSystemState, ImagodSystemAction>> {
@@ -624,7 +661,7 @@ impl TransitionSystem for ImagodSystemSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        self.action_vocabulary()
+        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
@@ -670,6 +707,89 @@ mod tests {
         runner_runtime::{ComponentLoadClass, WasmTuningClass},
         session_transport::SessionOutcome,
     };
+
+    #[test]
+    fn derived_action_vocabulary_preserves_representative_subset() {
+        assert_eq!(
+            <ImagodSystemAction as nirvash_core::ActionVocabulary>::action_vocabulary(),
+            vec![
+                ImagodSystemAction::Manager(ManagerShellAction::LoadExistingConfig),
+                ImagodSystemAction::Manager(ManagerShellAction::CreateDefaultConfig),
+                ImagodSystemAction::Manager(ManagerShellAction::RunPluginGcSucceeded),
+                ImagodSystemAction::Manager(ManagerShellAction::RunPluginGcFailed),
+                ImagodSystemAction::Manager(ManagerShellAction::RunBootRestoreSucceeded),
+                ImagodSystemAction::Manager(ManagerShellAction::RunBootRestoreFailed),
+                ImagodSystemAction::Manager(ManagerShellAction::StartListening),
+                ImagodSystemAction::Manager(ManagerShellAction::BeginShutdown),
+                ImagodSystemAction::Manager(ManagerShellAction::FinishShutdown),
+                ImagodSystemAction::Session(SessionTransportAction::AcceptSession),
+                ImagodSystemAction::Session(SessionTransportAction::RejectTooMany),
+                ImagodSystemAction::Session(SessionTransportAction::JoinSession),
+                ImagodSystemAction::Command(CommandProtocolAction::Start(CommandKind::Run)),
+                ImagodSystemAction::Command(CommandProtocolAction::SetRunning),
+                ImagodSystemAction::Command(CommandProtocolAction::RequestCancel),
+                ImagodSystemAction::Command(CommandProtocolAction::MarkSpawned),
+                ImagodSystemAction::Command(CommandProtocolAction::FinishFailed(
+                    CommandErrorKind::Internal,
+                )),
+                ImagodSystemAction::Command(CommandProtocolAction::FinishCanceled),
+                ImagodSystemAction::Command(CommandProtocolAction::Remove),
+                ImagodSystemAction::Deploy(ArtifactDeployAction::ReceiveChunk),
+                ImagodSystemAction::Deploy(ArtifactDeployAction::CompleteUpload),
+                ImagodSystemAction::Deploy(ArtifactDeployAction::CommitUpload),
+                ImagodSystemAction::Deploy(ArtifactDeployAction::StartDeployMatched),
+                ImagodSystemAction::Deploy(ArtifactDeployAction::StartDeployMismatched),
+                ImagodSystemAction::Deploy(ArtifactDeployAction::PromoteRelease),
+                ImagodSystemAction::Deploy(ArtifactDeployAction::TriggerRollback),
+                ImagodSystemAction::Deploy(ArtifactDeployAction::FinishRollback),
+                ImagodSystemAction::Supervision(ServiceSupervisionAction::StartService),
+                ImagodSystemAction::Bootstrap(RunnerBootstrapAction::ReadWithinBounds),
+                ImagodSystemAction::Bootstrap(RunnerBootstrapAction::ReadOversized),
+                ImagodSystemAction::Bootstrap(RunnerBootstrapAction::DecodeBootstrap(
+                    RunnerAppType::Rpc,
+                )),
+                ImagodSystemAction::Bootstrap(RunnerBootstrapAction::PrepareEndpoint),
+                ImagodSystemAction::Bootstrap(RunnerBootstrapAction::RegisterRunner),
+                ImagodSystemAction::Bootstrap(RunnerBootstrapAction::RejectAuthProof),
+                ImagodSystemAction::Bootstrap(RunnerBootstrapAction::MarkReady),
+                ImagodSystemAction::Runtime(RunnerRuntimeAction::SelectMode(RunnerAppType::Rpc)),
+                ImagodSystemAction::Runtime(RunnerRuntimeAction::ApplyDefaultTuning),
+                ImagodSystemAction::Runtime(RunnerRuntimeAction::ApplyInvalidTuning),
+                ImagodSystemAction::Runtime(RunnerRuntimeAction::ValidateComponentLoadable),
+                ImagodSystemAction::Runtime(RunnerRuntimeAction::ValidateComponentInvalid),
+                ImagodSystemAction::Runtime(RunnerRuntimeAction::StartServing),
+                ImagodSystemAction::Runtime(RunnerRuntimeAction::FailRuntime),
+                ImagodSystemAction::Plugin(PluginCapabilityAction::RegisterPlugin(
+                    PluginKind::Wasm,
+                )),
+                ImagodSystemAction::Plugin(PluginCapabilityAction::ClassifyGraphAcyclic),
+                ImagodSystemAction::Plugin(PluginCapabilityAction::ClassifyGraphMissingDependency,),
+                ImagodSystemAction::Plugin(PluginCapabilityAction::ResolveProviderSelf),
+                ImagodSystemAction::Plugin(PluginCapabilityAction::ResolveProviderDependency),
+                ImagodSystemAction::Plugin(PluginCapabilityAction::ResolveProviderMissing),
+                ImagodSystemAction::Plugin(PluginCapabilityAction::AllowCapability),
+                ImagodSystemAction::Plugin(PluginCapabilityAction::GrantPrivilegedCapability),
+                ImagodSystemAction::Plugin(PluginCapabilityAction::AllowHttpHost),
+                ImagodSystemAction::Plugin(PluginCapabilityAction::DenyHttpOutbound),
+                ImagodSystemAction::Shutdown(ShutdownFlowAction::StopAccepting),
+                ImagodSystemAction::Shutdown(ShutdownFlowAction::DrainSessions),
+                ImagodSystemAction::Shutdown(ShutdownFlowAction::StopServicesGraceful),
+                ImagodSystemAction::Shutdown(ShutdownFlowAction::StopServicesForced),
+                ImagodSystemAction::Shutdown(ShutdownFlowAction::StopMaintenance),
+                ImagodSystemAction::Shutdown(ShutdownFlowAction::Finalize),
+            ]
+        );
+    }
+
+    #[test]
+    fn wrapper_action_labels_delegate_to_nested_action_docs() {
+        assert_eq!(
+            nirvash_core::format_doc_graph_action(&ImagodSystemAction::Manager(
+                ManagerShellAction::LoadExistingConfig,
+            )),
+            "Load config"
+        );
+    }
 
     fn model_case(
         spec: &ImagodSystemSpec,

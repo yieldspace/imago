@@ -2183,6 +2183,55 @@ impl TransitionSystem for DuplicateSpec {
     }
 
     #[test]
+    fn render_state_graph_preserves_doc_driven_edge_labels() {
+        let spec = SpecDoc {
+            kind: Some(SpecKind::Subsystem),
+            full_path: vec!["demo".to_owned(), "DemoSpec".to_owned()],
+            tail_ident: "DemoSpec".to_owned(),
+            state_ty: "DemoState".to_owned(),
+            action_ty: "DemoAction".to_owned(),
+            model_cases: None,
+            subsystems: Vec::new(),
+            registrations: BTreeMap::new(),
+            doc_graphs: Vec::new(),
+        };
+        let graph = nirvash_core::reduce_doc_graph(&nirvash_core::DocGraphSnapshot {
+            states: vec![
+                nirvash_core::DocGraphState {
+                    summary: "Init".to_owned(),
+                    full: "Init".to_owned(),
+                    relation_fields: Vec::new(),
+                    relation_schema: Vec::new(),
+                },
+                nirvash_core::DocGraphState {
+                    summary: "Next".to_owned(),
+                    full: "Next".to_owned(),
+                    relation_fields: Vec::new(),
+                    relation_schema: Vec::new(),
+                },
+            ],
+            edges: vec![
+                vec![nirvash_core::DocGraphEdge {
+                    label: "Load config".to_owned(),
+                    target: 1,
+                }],
+                Vec::new(),
+            ],
+            initial_indices: vec![0],
+            deadlocks: vec![],
+            truncated: false,
+            stutter_omitted: false,
+            focus_indices: Vec::new(),
+            reduction: nirvash_core::DocGraphReductionMode::BoundaryPaths,
+            max_edge_actions_in_label: 2,
+        });
+        let visible_edges = visible_reduced_edges(&graph);
+        let diagram = render_state_graph_mermaid(&spec, &graph, &visible_edges);
+
+        assert!(diagram.contains("S0 --> S1: \"Load config\""));
+    }
+
+    #[test]
     fn render_state_graph_quotes_collapsed_edge_labels_with_arrows() {
         let spec = SpecDoc {
             kind: Some(SpecKind::Subsystem),

@@ -3,7 +3,8 @@ use nirvash_core::{
     TransitionSystem,
 };
 use nirvash_macros::{
-    RelAtom, RelationalState, Signature, fairness, invariant, property, subsystem_spec,
+    ActionVocabulary, RelAtom, RelationalState, Signature, fairness, invariant, property,
+    subsystem_spec,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, RelAtom)]
@@ -45,11 +46,15 @@ impl SessionTransportState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, ActionVocabulary)]
 pub enum SessionTransportAction {
+    /// Accept session
     AcceptSession,
+    /// Reject session
     RejectTooMany,
+    /// Join session
     JoinSession,
+    /// Begin shutdown
     BeginShutdown,
 }
 
@@ -180,7 +185,7 @@ impl TransitionSystem for SessionTransportSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        action_vocabulary()
+        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition(&self, prev: &Self::State, action: &Self::Action) -> Option<Self::State> {
@@ -204,15 +209,6 @@ fn resolve_capacity_pressure() -> StepPredicate<SessionTransportState, SessionTr
 
 #[nirvash_macros::formal_tests(spec = SessionTransportSpec)]
 const _: () = ();
-
-fn action_vocabulary() -> Vec<SessionTransportAction> {
-    vec![
-        SessionTransportAction::AcceptSession,
-        SessionTransportAction::RejectTooMany,
-        SessionTransportAction::JoinSession,
-        SessionTransportAction::BeginShutdown,
-    ]
-}
 
 fn next_free_session(state: &SessionTransportState) -> Option<SessionAtom> {
     SessionAtom::bounded_domain()

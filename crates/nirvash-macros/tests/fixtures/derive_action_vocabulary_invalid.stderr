@@ -1,0 +1,5 @@
+error: ActionVocabulary derive requires an enum
+ --> tests/fixtures/derive_action_vocabulary_invalid.rs:2:1
+  |
+2 | struct NotAnEnum;
+  | ^^^^^^

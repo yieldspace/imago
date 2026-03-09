@@ -2,7 +2,8 @@ use nirvash_core::{
     Fairness, Ltl, RelSet, Signature as _, StatePredicate, StepPredicate, TransitionSystem,
 };
 use nirvash_macros::{
-    RelAtom, RelationalState, Signature, fairness, invariant, property, subsystem_spec,
+    ActionVocabulary, RelAtom, RelationalState, Signature, fairness, invariant, property,
+    subsystem_spec,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, RelAtom)]
@@ -48,15 +49,23 @@ impl ServiceSupervisionState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, ActionVocabulary)]
 pub enum ServiceSupervisionAction {
+    /// Start service
     StartService,
+    /// Register service
     RegisterRunner,
+    /// Mark ready
     MarkRunnerReady,
+    /// Stop service
     RequestStop,
+    /// Force stop
     ForceStop,
+    /// Reap service
     ReapService,
+    /// Retain logs
     RetainLogs,
+    /// Clear logs
     ClearRetainedLogs,
 }
 
@@ -238,7 +247,7 @@ impl TransitionSystem for ServiceSupervisionSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        action_vocabulary()
+        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition(&self, prev: &Self::State, action: &Self::Action) -> Option<Self::State> {
@@ -248,19 +257,6 @@ impl TransitionSystem for ServiceSupervisionSpec {
 
 #[nirvash_macros::formal_tests(spec = ServiceSupervisionSpec)]
 const _: () = ();
-
-fn action_vocabulary() -> Vec<ServiceSupervisionAction> {
-    vec![
-        ServiceSupervisionAction::StartService,
-        ServiceSupervisionAction::RegisterRunner,
-        ServiceSupervisionAction::MarkRunnerReady,
-        ServiceSupervisionAction::RequestStop,
-        ServiceSupervisionAction::ForceStop,
-        ServiceSupervisionAction::ReapService,
-        ServiceSupervisionAction::RetainLogs,
-        ServiceSupervisionAction::ClearRetainedLogs,
-    ]
-}
 
 fn next_free_service(state: &ServiceSupervisionState) -> Option<ServiceAtom> {
     ServiceAtom::bounded_domain()

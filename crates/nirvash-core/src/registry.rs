@@ -46,6 +46,11 @@ pub struct RegisteredSymmetry {
     pub build: fn() -> Box<dyn Any>,
 }
 
+pub struct RegisteredActionDocLabel {
+    pub value_type_id: fn() -> TypeId,
+    pub format: fn(&dyn Any) -> Option<String>,
+}
+
 type ErasedBuilder = fn() -> Box<dyn Any>;
 type NamedBuilder = (&'static str, ErasedBuilder);
 
@@ -55,6 +60,16 @@ inventory::collect!(RegisteredFairness);
 inventory::collect!(RegisteredStateConstraint);
 inventory::collect!(RegisteredActionConstraint);
 inventory::collect!(RegisteredSymmetry);
+inventory::collect!(RegisteredActionDocLabel);
+
+pub fn lookup_action_doc_label(value: &dyn Any) -> Option<String> {
+    let value_type_id = value.type_id();
+    inventory::iter::<RegisteredActionDocLabel>
+        .into_iter()
+        .filter(|entry| (entry.value_type_id)() == value_type_id)
+        .find_map(|entry| (entry.format)(value))
+        .filter(|label| !label.trim().is_empty())
+}
 
 fn sorted_builders<'a, T, I>(entries: I, kind: &'static str) -> Vec<NamedBuilder>
 where

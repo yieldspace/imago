@@ -117,23 +117,6 @@ impl CommandProtocolSpec {
         }
     }
 
-    fn action_vocabulary(&self) -> Vec<CommandProtocolAction> {
-        vec![
-            CommandProtocolAction::Start(imago_protocol::CommandKind::Deploy),
-            CommandProtocolAction::Start(imago_protocol::CommandKind::Run),
-            CommandProtocolAction::Start(imago_protocol::CommandKind::Stop),
-            CommandProtocolAction::SetRunning,
-            CommandProtocolAction::RequestCancel,
-            CommandProtocolAction::SnapshotRunning,
-            CommandProtocolAction::MarkSpawned,
-            CommandProtocolAction::FinishSucceeded,
-            CommandProtocolAction::FinishFailed(CommandErrorKind::Internal),
-            CommandProtocolAction::FinishFailed(CommandErrorKind::Busy),
-            CommandProtocolAction::FinishCanceled,
-            CommandProtocolAction::Remove,
-        ]
-    }
-
     fn transition_state(
         &self,
         prev: &CommandProtocolState,
@@ -400,7 +383,7 @@ impl TransitionSystem for CommandProtocolSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        self.action_vocabulary()
+        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
@@ -490,6 +473,27 @@ mod tests {
     }
 
     #[test]
+    fn derived_action_vocabulary_preserves_representative_subset() {
+        assert_eq!(
+            <CommandProtocolAction as nirvash_core::ActionVocabulary>::action_vocabulary(),
+            vec![
+                CommandProtocolAction::Start(imago_protocol::CommandKind::Deploy),
+                CommandProtocolAction::Start(imago_protocol::CommandKind::Run),
+                CommandProtocolAction::Start(imago_protocol::CommandKind::Stop),
+                CommandProtocolAction::SetRunning,
+                CommandProtocolAction::RequestCancel,
+                CommandProtocolAction::SnapshotRunning,
+                CommandProtocolAction::MarkSpawned,
+                CommandProtocolAction::FinishSucceeded,
+                CommandProtocolAction::FinishFailed(CommandErrorKind::Internal),
+                CommandProtocolAction::FinishFailed(CommandErrorKind::Busy),
+                CommandProtocolAction::FinishCanceled,
+                CommandProtocolAction::Remove,
+            ]
+        );
+    }
+
+    #[test]
     fn doc_graph_policy_keeps_cancel_and_terminal_edge_cases() {
         let spec = CommandProtocolSpec::new();
         let model_case = spec.model_cases().into_iter().next().expect("model case");
@@ -523,7 +527,7 @@ mod tests {
                     outgoing
                         .iter()
                         .map(|edge| nirvash_core::DocGraphEdge {
-                            label: format!("{:?}", edge.action),
+                            label: nirvash_core::format_doc_graph_action(&edge.action),
                             target: edge.target,
                         })
                         .collect()

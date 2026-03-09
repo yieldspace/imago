@@ -12,6 +12,7 @@ fn signature_derive_behaves_for_supported_inputs() {
     }
     let t = trybuild::TestCases::new();
     t.pass("tests/fixtures/derive_signature_ok.rs");
+    t.pass("tests/fixtures/derive_action_vocabulary_ok.rs");
     t.pass("tests/fixtures/derive_rel_atom_ok.rs");
     t.pass("tests/fixtures/derive_relational_state_ok.rs");
     t.pass("tests/fixtures/subsystem_spec_ok.rs");
@@ -35,6 +36,7 @@ fn signature_derive_behaves_for_supported_inputs() {
     t.compile_fail("tests/fixtures/derive_signature_custom_with_bounds.rs");
     t.compile_fail("tests/fixtures/derive_signature_invalid_len.rs");
     t.compile_fail("tests/fixtures/derive_signature_invalid_filter.rs");
+    t.compile_fail("tests/fixtures/derive_action_vocabulary_invalid.rs");
     t.compile_fail("tests/fixtures/derive_relational_state_invalid.rs");
     unsafe {
         std::env::remove_var("NIRVASH_DOC_FRAGMENT_SPEC");
