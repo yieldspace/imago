@@ -3,7 +3,8 @@ use nirvash_core::{
     TransitionSystem,
 };
 use nirvash_macros::{
-    ActionVocabulary, RelationalState, fairness, invariant, property, subsystem_spec,
+    ActionVocabulary, RelationalState, action_constraint, fairness, invariant, property,
+    subsystem_spec,
 };
 
 use crate::atoms::ServiceAtom;
@@ -83,13 +84,7 @@ impl DeploySpec {
 }
 
 fn deploy_model_cases() -> Vec<ModelCase<DeployState, DeployAction>> {
-    vec![
-        ModelCase::default()
-            .with_check_deadlocks(false)
-            .with_action_constraint(ActionConstraint::new("service0_only", |_, action, _| {
-                deploy_action_service(*action) == ServiceAtom::Service0
-            })),
-    ]
+    vec![ModelCase::default().with_check_deadlocks(false)]
 }
 
 fn deploy_action_service(action: DeployAction) -> ServiceAtom {
@@ -101,6 +96,13 @@ fn deploy_action_service(action: DeployAction) -> ServiceAtom {
         | DeployAction::TriggerRollback(service)
         | DeployAction::FinishRollback(service) => service,
     }
+}
+
+#[action_constraint(DeploySpec, cases("default"))]
+fn service0_only() -> ActionConstraint<DeployState, DeployAction> {
+    ActionConstraint::new("service0_only", |_, action, _| {
+        deploy_action_service(*action) == ServiceAtom::Service0
+    })
 }
 
 #[invariant(DeploySpec)]

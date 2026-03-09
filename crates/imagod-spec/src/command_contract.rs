@@ -1,9 +1,8 @@
 //! Shared command-domain contracts used by runtime, spec, and wire adapters.
 
-use nirvash_core::{ActionVocabulary, BoundedDomain, Signature};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, nirvash_macros::Signature)]
 /// High-level command category accepted by the manager runtime.
 pub enum CommandKind {
     /// Starts an artifact deployment command.
@@ -14,7 +13,7 @@ pub enum CommandKind {
     Stop,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, nirvash_macros::Signature)]
 /// Internal command lifecycle state tracked by the manager runtime.
 pub enum CommandLifecycleState {
     Accepted,
@@ -31,7 +30,7 @@ impl CommandLifecycleState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, nirvash_macros::Signature)]
 /// Stable command-domain error classes used by runtime and conformance tests.
 pub enum CommandErrorKind {
     /// Rejects unauthenticated command requests.
@@ -64,14 +63,14 @@ pub enum CommandErrorKind {
     StorageQuota,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, nirvash_macros::Signature)]
 /// Lifecycle phase around the spawn race tracked by `OperationManager`.
 pub enum OperationPhase {
     Starting,
     Spawned,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, nirvash_macros::Signature)]
 /// Stable stage identifiers used for rejected command-protocol actions.
 pub enum CommandProtocolStageId {
     CommandStart,
@@ -94,7 +93,9 @@ impl CommandProtocolStageId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, nirvash_macros::Signature, nirvash_macros::ActionVocabulary,
+)]
 /// Shared command action vocabulary applied by `OperationManager`.
 pub enum CommandProtocolAction {
     /// Start command
@@ -110,7 +111,7 @@ pub enum CommandProtocolAction {
     /// Finish succeeded
     FinishSucceeded,
     /// Finish failed
-    FinishFailed(CommandErrorKind),
+    FinishFailed(#[sig(domain = finish_failed_error_domain)] CommandErrorKind),
     /// Finish canceled
     FinishCanceled,
     /// Remove command
@@ -167,84 +168,88 @@ impl CommandProtocolObservedState {
     }
 }
 
-impl Signature for CommandKind {
-    fn bounded_domain() -> BoundedDomain<Self> {
-        BoundedDomain::new(vec![Self::Deploy, Self::Run, Self::Stop])
-    }
+fn finish_failed_error_domain() -> Vec<CommandErrorKind> {
+    vec![CommandErrorKind::Internal, CommandErrorKind::Busy]
 }
 
-impl Signature for CommandLifecycleState {
-    fn bounded_domain() -> BoundedDomain<Self> {
-        BoundedDomain::new(vec![
-            Self::Accepted,
-            Self::Running,
-            Self::Succeeded,
-            Self::Failed,
-            Self::Canceled,
-        ])
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nirvash_core::{ActionVocabulary, Signature};
 
-impl Signature for CommandErrorKind {
-    fn bounded_domain() -> BoundedDomain<Self> {
-        BoundedDomain::new(vec![
-            Self::Unauthorized,
-            Self::BadRequest,
-            Self::BadManifest,
-            Self::Busy,
-            Self::NotFound,
-            Self::Internal,
-            Self::IdempotencyConflict,
-            Self::RangeInvalid,
-            Self::ChunkHashMismatch,
-            Self::ArtifactIncomplete,
-            Self::PreconditionFailed,
-            Self::OperationTimeout,
-            Self::RollbackFailed,
-            Self::StorageQuota,
-        ])
+    #[test]
+    fn command_signature_domains_match_expected_order() {
+        assert_eq!(
+            CommandKind::bounded_domain().into_vec(),
+            vec![CommandKind::Deploy, CommandKind::Run, CommandKind::Stop]
+        );
+        assert_eq!(
+            CommandLifecycleState::bounded_domain().into_vec(),
+            vec![
+                CommandLifecycleState::Accepted,
+                CommandLifecycleState::Running,
+                CommandLifecycleState::Succeeded,
+                CommandLifecycleState::Failed,
+                CommandLifecycleState::Canceled,
+            ]
+        );
+        assert_eq!(
+            CommandErrorKind::bounded_domain().into_vec(),
+            vec![
+                CommandErrorKind::Unauthorized,
+                CommandErrorKind::BadRequest,
+                CommandErrorKind::BadManifest,
+                CommandErrorKind::Busy,
+                CommandErrorKind::NotFound,
+                CommandErrorKind::Internal,
+                CommandErrorKind::IdempotencyConflict,
+                CommandErrorKind::RangeInvalid,
+                CommandErrorKind::ChunkHashMismatch,
+                CommandErrorKind::ArtifactIncomplete,
+                CommandErrorKind::PreconditionFailed,
+                CommandErrorKind::OperationTimeout,
+                CommandErrorKind::RollbackFailed,
+                CommandErrorKind::StorageQuota,
+            ]
+        );
+        assert_eq!(
+            OperationPhase::bounded_domain().into_vec(),
+            vec![OperationPhase::Starting, OperationPhase::Spawned]
+        );
+        assert_eq!(
+            CommandProtocolStageId::bounded_domain().into_vec(),
+            vec![
+                CommandProtocolStageId::CommandStart,
+                CommandProtocolStageId::OperationState,
+                CommandProtocolStageId::StateRequest,
+                CommandProtocolStageId::CommandCancel,
+                CommandProtocolStageId::OperationRemove,
+            ]
+        );
     }
-}
 
-impl Signature for OperationPhase {
-    fn bounded_domain() -> BoundedDomain<Self> {
-        BoundedDomain::new(vec![Self::Starting, Self::Spawned])
-    }
-}
-
-impl Signature for CommandProtocolStageId {
-    fn bounded_domain() -> BoundedDomain<Self> {
-        BoundedDomain::new(vec![
-            Self::CommandStart,
-            Self::OperationState,
-            Self::StateRequest,
-            Self::CommandCancel,
-            Self::OperationRemove,
-        ])
-    }
-}
-
-impl ActionVocabulary for CommandProtocolAction {
-    fn action_vocabulary() -> Vec<Self> {
-        vec![
-            Self::Start(CommandKind::Deploy),
-            Self::Start(CommandKind::Run),
-            Self::Start(CommandKind::Stop),
-            Self::SetRunning,
-            Self::RequestCancel,
-            Self::SnapshotRunning,
-            Self::MarkSpawned,
-            Self::FinishSucceeded,
-            Self::FinishFailed(CommandErrorKind::Internal),
-            Self::FinishFailed(CommandErrorKind::Busy),
-            Self::FinishCanceled,
-            Self::Remove,
-        ]
-    }
-}
-
-impl Signature for CommandProtocolAction {
-    fn bounded_domain() -> BoundedDomain<Self> {
-        BoundedDomain::new(Self::action_vocabulary())
+    #[test]
+    fn command_action_vocabulary_matches_expected_subset() {
+        assert_eq!(
+            CommandProtocolAction::action_vocabulary(),
+            vec![
+                CommandProtocolAction::Start(CommandKind::Deploy),
+                CommandProtocolAction::Start(CommandKind::Run),
+                CommandProtocolAction::Start(CommandKind::Stop),
+                CommandProtocolAction::SetRunning,
+                CommandProtocolAction::RequestCancel,
+                CommandProtocolAction::SnapshotRunning,
+                CommandProtocolAction::MarkSpawned,
+                CommandProtocolAction::FinishSucceeded,
+                CommandProtocolAction::FinishFailed(CommandErrorKind::Internal),
+                CommandProtocolAction::FinishFailed(CommandErrorKind::Busy),
+                CommandProtocolAction::FinishCanceled,
+                CommandProtocolAction::Remove,
+            ]
+        );
+        assert_eq!(
+            CommandProtocolAction::bounded_domain().into_vec(),
+            CommandProtocolAction::action_vocabulary()
+        );
     }
 }

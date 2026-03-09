@@ -16,10 +16,13 @@ fn signature_derive_behaves_for_supported_inputs() {
     t.pass("tests/fixtures/derive_rel_atom_ok.rs");
     t.pass("tests/fixtures/derive_relational_state_ok.rs");
     t.pass("tests/fixtures/subsystem_spec_ok.rs");
+    t.pass("tests/fixtures/case_scoped_constraints_ok.rs");
     t.pass("tests/fixtures/code_tests_ok.rs");
     t.pass("tests/fixtures/code_witness_tests_ok.rs");
     t.compile_fail("tests/fixtures/attribute_missing_target.rs");
     t.compile_fail("tests/fixtures/attribute_wrong_type.rs");
+    t.compile_fail("tests/fixtures/case_scoped_constraints_invalid_option.rs");
+    t.compile_fail("tests/fixtures/case_scoped_constraints_duplicate_labels.rs");
     t.compile_fail("tests/fixtures/old_macro_names.rs");
     t.compile_fail("tests/fixtures/subsystem_spec_invalid_symmetry.rs");
     t.compile_fail("tests/fixtures/code_witness_tests_missing_main.rs");

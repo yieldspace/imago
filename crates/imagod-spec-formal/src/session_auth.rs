@@ -3,7 +3,8 @@ use nirvash_core::{
     Signature as _, StatePredicate, StepPredicate, TransitionSystem,
 };
 use nirvash_macros::{
-    ActionVocabulary, RelationalState, fairness, invariant, property, subsystem_spec,
+    ActionVocabulary, RelationalState, action_constraint, fairness, invariant, property,
+    subsystem_spec,
 };
 
 use crate::atoms::{
@@ -111,26 +112,7 @@ fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthActi
                 check_deadlocks: false,
                 stop_on_first_violation: false,
             })
-            .with_check_deadlocks(false)
-            .with_action_constraint(ActionConstraint::new(
-                "client_rpc_surface_actions",
-                |_, action, _| {
-                    matches!(
-                        action,
-                        SessionAuthAction::AcceptSession(SessionAtom::Session0)
-                            | SessionAuthAction::AuthenticateClient(SessionAtom::Session0)
-                            | SessionAuthAction::AuthorizeClient(
-                                StreamAtom::Stream0,
-                                RequestKindAtom::HelloNegotiate,
-                            )
-                            | SessionAuthAction::UploadClientAuthority(RemoteAuthorityAtom::Edge0)
-                            | SessionAuthAction::AuthorizeClient(
-                                StreamAtom::Stream0,
-                                RequestKindAtom::RpcInvoke,
-                            )
-                    )
-                },
-            )),
+            .with_check_deadlocks(false),
         ModelCase::new("timeout_and_reject_surface")
             .with_checker_config(ModelCheckConfig {
                 exploration: nirvash_core::ExplorationMode::ReachableGraph,
@@ -148,25 +130,51 @@ fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthActi
                 check_deadlocks: false,
                 stop_on_first_violation: false,
             })
-            .with_check_deadlocks(false)
-            .with_action_constraint(ActionConstraint::new("session0_only", |_, action, _| {
-                session_for_action(*action).is_none_or(|session| session == SessionAtom::Session0)
-            }))
-            .with_action_constraint(ActionConstraint::new(
-                "timeout_reject_surface",
-                |_, action, _| match action {
-                    SessionAuthAction::AuthorizeAdmin(stream, kind)
-                    | SessionAuthAction::RejectUnauthorized(stream, kind) => {
-                        *stream == StreamAtom::Stream0 && *kind == RequestKindAtom::ServicesList
-                    }
-                    SessionAuthAction::ReadTimeout(stream)
-                    | SessionAuthAction::CloseStream(stream) => *stream == StreamAtom::Stream0,
-                    SessionAuthAction::AcceptSession(SessionAtom::Session0)
-                    | SessionAuthAction::AuthenticateAdmin(SessionAtom::Session0) => true,
-                    _ => false,
-                },
-            )),
+            .with_check_deadlocks(false),
     ]
+}
+
+#[action_constraint(SessionAuthSpec, cases("client_rpc_surface"))]
+fn client_rpc_surface_actions() -> ActionConstraint<SessionAuthState, SessionAuthAction> {
+    ActionConstraint::new("client_rpc_surface_actions", |_, action, _| {
+        matches!(
+            action,
+            SessionAuthAction::AcceptSession(SessionAtom::Session0)
+                | SessionAuthAction::AuthenticateClient(SessionAtom::Session0)
+                | SessionAuthAction::AuthorizeClient(
+                    StreamAtom::Stream0,
+                    RequestKindAtom::HelloNegotiate,
+                )
+                | SessionAuthAction::UploadClientAuthority(RemoteAuthorityAtom::Edge0)
+                | SessionAuthAction::AuthorizeClient(
+                    StreamAtom::Stream0,
+                    RequestKindAtom::RpcInvoke,
+                )
+        )
+    })
+}
+
+#[action_constraint(SessionAuthSpec, cases("timeout_and_reject_surface"))]
+fn session0_only() -> ActionConstraint<SessionAuthState, SessionAuthAction> {
+    ActionConstraint::new("session0_only", |_, action, _| {
+        session_for_action(*action).is_none_or(|session| session == SessionAtom::Session0)
+    })
+}
+
+#[action_constraint(SessionAuthSpec, cases("timeout_and_reject_surface"))]
+fn timeout_reject_surface() -> ActionConstraint<SessionAuthState, SessionAuthAction> {
+    ActionConstraint::new("timeout_reject_surface", |_, action, _| match action {
+        SessionAuthAction::AuthorizeAdmin(stream, kind)
+        | SessionAuthAction::RejectUnauthorized(stream, kind) => {
+            *stream == StreamAtom::Stream0 && *kind == RequestKindAtom::ServicesList
+        }
+        SessionAuthAction::ReadTimeout(stream) | SessionAuthAction::CloseStream(stream) => {
+            *stream == StreamAtom::Stream0
+        }
+        SessionAuthAction::AcceptSession(SessionAtom::Session0)
+        | SessionAuthAction::AuthenticateAdmin(SessionAtom::Session0) => true,
+        _ => false,
+    })
 }
 
 fn session_for_action(action: SessionAuthAction) -> Option<SessionAtom> {

@@ -2,7 +2,9 @@ use nirvash_core::{
     ActionConstraint, ModelCase, ModelCaseSource, ModelCheckConfig, StatePredicate, TemporalSpec,
     TransitionSystem,
 };
-use nirvash_macros::{ActionVocabulary, Signature as FormalSignature, invariant, system_spec};
+use nirvash_macros::{
+    ActionVocabulary, Signature as FormalSignature, action_constraint, invariant, system_spec,
+};
 
 use crate::{
     CommandErrorKind, CommandKind, CommandLifecycleState, CommandProtocolAction, PluginKind,
@@ -274,42 +276,36 @@ fn startup_command_model_case() -> ModelCase<ImagodSystemState, ImagodSystemActi
     ModelCase::new("startup_command")
         .with_checker_config(system_checker_config())
         .with_doc_checker_config(system_doc_checker_config())
-        .with_action_constraint(startup_command_action_constraint())
 }
 
 fn deploy_runtime_serving_model_case() -> ModelCase<ImagodSystemState, ImagodSystemAction> {
     ModelCase::new("deploy_runtime_serving")
         .with_checker_config(system_checker_config())
         .with_doc_checker_config(system_doc_checker_config())
-        .with_action_constraint(deploy_runtime_serving_action_constraint())
 }
 
 fn deploy_rollback_model_case() -> ModelCase<ImagodSystemState, ImagodSystemAction> {
     ModelCase::new("deploy_rollback")
         .with_checker_config(system_checker_config())
         .with_doc_checker_config(system_doc_checker_config())
-        .with_action_constraint(deploy_rollback_action_constraint())
 }
 
 fn bootstrap_runtime_failure_model_case() -> ModelCase<ImagodSystemState, ImagodSystemAction> {
     ModelCase::new("bootstrap_runtime_failure")
         .with_checker_config(system_checker_config())
         .with_doc_checker_config(system_doc_checker_config())
-        .with_action_constraint(bootstrap_runtime_failure_action_constraint())
 }
 
 fn plugin_dependency_model_case() -> ModelCase<ImagodSystemState, ImagodSystemAction> {
     ModelCase::new("plugin_dependency")
         .with_checker_config(system_checker_config())
         .with_doc_checker_config(system_doc_checker_config())
-        .with_action_constraint(plugin_dependency_action_constraint())
 }
 
 fn shutdown_model_case() -> ModelCase<ImagodSystemState, ImagodSystemAction> {
     ModelCase::new("shutdown")
         .with_checker_config(system_checker_config())
         .with_doc_checker_config(system_doc_checker_config())
-        .with_action_constraint(shutdown_action_constraint())
 }
 
 fn system_checker_config() -> ModelCheckConfig {
@@ -327,6 +323,7 @@ fn system_doc_checker_config() -> ModelCheckConfig {
     }
 }
 
+#[action_constraint(ImagodSystemSpec, cases("startup_command"))]
 fn startup_command_action_constraint() -> ActionConstraint<ImagodSystemState, ImagodSystemAction> {
     ActionConstraint::new("startup_command_actions", |prev, action, _| {
         startup_command_session_progress_allowed(prev, action)
@@ -334,6 +331,7 @@ fn startup_command_action_constraint() -> ActionConstraint<ImagodSystemState, Im
     })
 }
 
+#[action_constraint(ImagodSystemSpec, cases("deploy_runtime_serving"))]
 fn deploy_runtime_serving_action_constraint()
 -> ActionConstraint<ImagodSystemState, ImagodSystemAction> {
     ActionConstraint::new("deploy_runtime_serving_actions", |prev, action, _| {
@@ -342,6 +340,7 @@ fn deploy_runtime_serving_action_constraint()
     })
 }
 
+#[action_constraint(ImagodSystemSpec, cases("deploy_rollback"))]
 fn deploy_rollback_action_constraint() -> ActionConstraint<ImagodSystemState, ImagodSystemAction> {
     ActionConstraint::new("deploy_rollback_actions", |prev, action, _| {
         deterministic_session_cycle_allowed(prev, action)
@@ -349,6 +348,7 @@ fn deploy_rollback_action_constraint() -> ActionConstraint<ImagodSystemState, Im
     })
 }
 
+#[action_constraint(ImagodSystemSpec, cases("bootstrap_runtime_failure"))]
 fn bootstrap_runtime_failure_action_constraint()
 -> ActionConstraint<ImagodSystemState, ImagodSystemAction> {
     ActionConstraint::new("bootstrap_runtime_failure_actions", |prev, action, _| {
@@ -357,6 +357,7 @@ fn bootstrap_runtime_failure_action_constraint()
     })
 }
 
+#[action_constraint(ImagodSystemSpec, cases("plugin_dependency"))]
 fn plugin_dependency_action_constraint() -> ActionConstraint<ImagodSystemState, ImagodSystemAction>
 {
     ActionConstraint::new("plugin_dependency_actions", |prev, action, _| {
@@ -365,6 +366,7 @@ fn plugin_dependency_action_constraint() -> ActionConstraint<ImagodSystemState, 
     })
 }
 
+#[action_constraint(ImagodSystemSpec, cases("shutdown"))]
 fn shutdown_action_constraint() -> ActionConstraint<ImagodSystemState, ImagodSystemAction> {
     ActionConstraint::new("shutdown_actions", |prev, action, _| {
         shutdown_session_progress_allowed(prev, action)

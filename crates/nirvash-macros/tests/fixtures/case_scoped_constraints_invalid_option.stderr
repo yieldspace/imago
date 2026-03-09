@@ -1,0 +1,5 @@
+error: unsupported registration option; expected cases(...)
+  --> tests/fixtures/case_scoped_constraints_invalid_option.rs:34:26
+   |
+34 | #[state_constraint(Spec, nope("case_a"))]
+   |                          ^^^^

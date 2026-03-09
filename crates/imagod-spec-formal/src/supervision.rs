@@ -3,7 +3,8 @@ use nirvash_core::{
     StepPredicate, TransitionSystem,
 };
 use nirvash_macros::{
-    ActionVocabulary, RelationalState, fairness, invariant, property, subsystem_spec,
+    ActionVocabulary, RelationalState, action_constraint, fairness, invariant, property,
+    subsystem_spec,
 };
 
 use crate::atoms::{RunnerAtom, ServiceAppAtom, ServiceAtom, service_runner};
@@ -81,13 +82,7 @@ impl SupervisionSpec {
 }
 
 fn supervision_model_cases() -> Vec<ModelCase<SupervisionState, SupervisionAction>> {
-    vec![
-        ModelCase::default()
-            .with_check_deadlocks(false)
-            .with_action_constraint(ActionConstraint::new("service0_only", |_, action, _| {
-                supervision_action_service(*action) == ServiceAtom::Service0
-            })),
-    ]
+    vec![ModelCase::default().with_check_deadlocks(false)]
 }
 
 fn supervision_action_service(action: SupervisionAction) -> ServiceAtom {
@@ -98,6 +93,13 @@ fn supervision_action_service(action: SupervisionAction) -> ServiceAtom {
         | SupervisionAction::RequestStop(service)
         | SupervisionAction::ReapService(service) => service,
     }
+}
+
+#[action_constraint(SupervisionSpec, cases("default"))]
+fn service0_only() -> ActionConstraint<SupervisionState, SupervisionAction> {
+    ActionConstraint::new("service0_only", |_, action, _| {
+        supervision_action_service(*action) == ServiceAtom::Service0
+    })
 }
 
 #[invariant(SupervisionSpec)]

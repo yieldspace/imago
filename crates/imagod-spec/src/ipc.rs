@@ -7,7 +7,6 @@ use std::{
 };
 
 use crate::wire::{ErrorCode, Validate, ValidationError};
-use nirvash_core::{BoundedDomain, Signature};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -61,7 +60,7 @@ impl Validate for ServiceBinding {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, nirvash_macros::Signature)]
 /// Runtime application type carried from manifest into runner bootstrap.
 pub enum RunnerAppType {
     /// Runs a one-shot CLI-style component.
@@ -507,7 +506,7 @@ fn ip_in_cidr(ip: IpAddr, network: IpAddr, prefix_len: u8) -> bool {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, nirvash_macros::Signature)]
 #[serde(rename_all = "lowercase")]
 /// Plugin delivery kind used by manifest/bootstrap dependency definitions.
 pub enum PluginKind {
@@ -515,18 +514,6 @@ pub enum PluginKind {
     Native,
     /// Loads a Wasm component plugin.
     Wasm,
-}
-
-impl Signature for RunnerAppType {
-    fn bounded_domain() -> BoundedDomain<Self> {
-        BoundedDomain::new(vec![Self::Cli, Self::Rpc, Self::Http, Self::Socket])
-    }
-}
-
-impl Signature for PluginKind {
-    fn bounded_domain() -> BoundedDomain<Self> {
-        BoundedDomain::new(vec![Self::Native, Self::Wasm])
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1105,5 +1092,32 @@ impl Validate for InvocationTokenClaims {
             (&self.nonce, "nonce"),
         ])?;
         validate_positive_u64(self.exp, "exp")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nirvash_core::Signature;
+
+    #[test]
+    fn runner_app_type_domain_matches_expected_order() {
+        assert_eq!(
+            RunnerAppType::bounded_domain().into_vec(),
+            vec![
+                RunnerAppType::Cli,
+                RunnerAppType::Rpc,
+                RunnerAppType::Http,
+                RunnerAppType::Socket,
+            ]
+        );
+    }
+
+    #[test]
+    fn plugin_kind_domain_matches_expected_order() {
+        assert_eq!(
+            PluginKind::bounded_domain().into_vec(),
+            vec![PluginKind::Native, PluginKind::Wasm]
+        );
     }
 }

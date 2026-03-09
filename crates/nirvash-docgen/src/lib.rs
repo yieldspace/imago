@@ -12,7 +12,7 @@ use quote::ToTokens;
 use serde::Deserialize;
 use syn::{
     Attribute, ImplItem, Item, ItemFn, ItemImpl, ItemMacro, ItemMod, LitStr, Path as SynPath,
-    PathArguments, Type,
+    PathArguments, Token, Type,
 };
 
 type DynError = Box<dyn Error>;
@@ -29,7 +29,7 @@ const MERMAID_RUNTIME_SOURCE: &str = include_str!("../assets/mermaid/mermaid.min
 
 /// Generate rustdoc fragments for `nirvash` specs in the current crate.
 pub fn generate() -> Result<(), Box<dyn Error>> {
-    if env::var_os("NIRVASH_DOCGEN_SKIP").is_some() {
+    if env::var_os("NIRVASH_DOCGEN_SKIP").is_some() || env::var_os("RUSTDOC").is_none() {
         return Ok(());
     }
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
@@ -382,16 +382,18 @@ impl SourceCollector {
             let Some(kind) = registration_kind(attr) else {
                 continue;
             };
-            let target: SynPath = attr.parse_args().map_err(|error| {
-                err(format!(
-                    "failed to parse #[{}(...)] on `{}`: {error}",
-                    kind.attr_name(),
-                    item_fn.sig.ident
-                ))
-            })?;
+            let target = attr
+                .parse_args::<ParsedRegistrationArgs>()
+                .map_err(|error| {
+                    err(format!(
+                        "failed to parse #[{}(...)] on `{}`: {error}",
+                        kind.attr_name(),
+                        item_fn.sig.ident
+                    ))
+                })?;
             self.registrations.push(PendingRegistration {
                 kind,
-                target_spec: normalize_path(&target, module_path)?,
+                target_spec: normalize_path(&target.target_spec, module_path)?,
                 function_name: item_fn.sig.ident.to_string(),
             });
         }
@@ -662,13 +664,23 @@ fn collect_runtime_graphs(
         ))
     })?;
 
+    let runner_target_dir = out_dir.join("nirvash-doc-runner-target");
+    if runner_target_dir.exists() {
+        fs::remove_dir_all(&runner_target_dir).map_err(|error| {
+            err(format!(
+                "failed to clear runtime graph runner target dir {}: {error}",
+                runner_target_dir.display()
+            ))
+        })?;
+    }
+
     let output = Command::new(cargo_binary())
         .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
         .arg(&runner_manifest)
         .arg("--target-dir")
-        .arg(out_dir.join("nirvash-doc-runner-target"))
+        .arg(&runner_target_dir)
         .env("NIRVASH_DOCGEN_SKIP", "1")
         .output()
         .map_err(|error| {
@@ -809,6 +821,24 @@ fn registration_kind_for_path(path: &SynPath) -> Option<RegistrationKind> {
 struct ParsedMacroRegistration {
     target_spec: SynPath,
     function_name: String,
+}
+
+struct ParsedRegistrationArgs {
+    target_spec: SynPath,
+}
+
+impl syn::parse::Parse for ParsedRegistrationArgs {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        let target_spec: SynPath = input.parse()?;
+        while !input.is_empty() {
+            input.parse::<Token![,]>()?;
+            let _: syn::Ident = input.parse()?;
+            let content;
+            syn::parenthesized!(content in input);
+            let _: proc_macro2::TokenStream = content.parse()?;
+        }
+        Ok(Self { target_spec })
+    }
 }
 
 impl syn::parse::Parse for ParsedMacroRegistration {

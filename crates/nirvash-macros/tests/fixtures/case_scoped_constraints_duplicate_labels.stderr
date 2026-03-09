@@ -1,0 +1,5 @@
+error: duplicate case label `case_a`
+  --> tests/fixtures/case_scoped_constraints_duplicate_labels.rs:34:43
+   |
+34 | #[action_constraint(Spec, cases("case_a", "case_a"))]
+   |                                           ^^^^^^^^

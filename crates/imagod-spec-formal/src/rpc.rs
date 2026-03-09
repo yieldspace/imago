@@ -3,7 +3,8 @@ use nirvash_core::{
     StepPredicate, TransitionSystem,
 };
 use nirvash_macros::{
-    ActionVocabulary, RelationalState, fairness, invariant, property, subsystem_spec,
+    ActionVocabulary, RelationalState, action_constraint, fairness, invariant, property,
+    subsystem_spec,
 };
 
 use crate::atoms::{
@@ -126,38 +127,38 @@ fn rpc_model_cases() -> Vec<ModelCase<RpcState, RpcAction>> {
 }
 
 fn local_rpc_model_case() -> ModelCase<RpcState, RpcAction> {
-    ModelCase::new("local_service0_only")
-        .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "local_service0_only",
-            |_, action, _| {
-                matches!(
-                    action,
-                    RpcAction::GrantBinding(ServiceAtom::Service0)
-                        | RpcAction::ResolveLocal(ServiceAtom::Service0)
-                        | RpcAction::RejectLocal(ServiceAtom::Service0)
-                )
-            },
-        ))
+    ModelCase::new("local_service0_only").with_check_deadlocks(false)
 }
 
 fn remote_rpc_model_case() -> ModelCase<RpcState, RpcAction> {
-    ModelCase::new("remote_service0_only")
-        .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "remote_service0_only",
-            |_, action, _| {
-                matches!(
-                    action,
-                    RpcAction::GrantBinding(ServiceAtom::Service0)
-                        | RpcAction::ConnectRemote(ServiceAtom::Service0)
-                        | RpcAction::InvokeRemote(ServiceAtom::Service0)
-                        | RpcAction::RejectRemoteInvoke(ServiceAtom::Service0)
-                        | RpcAction::CompleteRemoteCall(ServiceAtom::Service0)
-                        | RpcAction::DisconnectRemote(ServiceAtom::Service0)
-                )
-            },
-        ))
+    ModelCase::new("remote_service0_only").with_check_deadlocks(false)
+}
+
+#[action_constraint(RpcSpec, cases("local_service0_only"))]
+fn local_service0_only() -> ActionConstraint<RpcState, RpcAction> {
+    ActionConstraint::new("local_service0_only", |_, action, _| {
+        matches!(
+            action,
+            RpcAction::GrantBinding(ServiceAtom::Service0)
+                | RpcAction::ResolveLocal(ServiceAtom::Service0)
+                | RpcAction::RejectLocal(ServiceAtom::Service0)
+        )
+    })
+}
+
+#[action_constraint(RpcSpec, cases("remote_service0_only"))]
+fn remote_service0_only() -> ActionConstraint<RpcState, RpcAction> {
+    ActionConstraint::new("remote_service0_only", |_, action, _| {
+        matches!(
+            action,
+            RpcAction::GrantBinding(ServiceAtom::Service0)
+                | RpcAction::ConnectRemote(ServiceAtom::Service0)
+                | RpcAction::InvokeRemote(ServiceAtom::Service0)
+                | RpcAction::RejectRemoteInvoke(ServiceAtom::Service0)
+                | RpcAction::CompleteRemoteCall(ServiceAtom::Service0)
+                | RpcAction::DisconnectRemote(ServiceAtom::Service0)
+        )
+    })
 }
 
 #[invariant(RpcSpec)]

@@ -5,7 +5,7 @@ use nirvash_core::{
     StateConstraint, StatePredicate, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };
-use nirvash_macros::{invariant, system_spec};
+use nirvash_macros::{action_constraint, invariant, state_constraint, system_spec};
 
 use crate::{
     CommandKind, CommandLifecycleState, CommandProtocolAction, OperationPhase, PluginKind,
@@ -828,12 +828,6 @@ fn boot_gc_and_restore_case() -> ModelCase<SystemState, ConcurrentAction<SystemA
         .with_checker_config(system_checker_config())
         .with_doc_checker_config(system_doc_checker_config())
         .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "boot_gc_and_restore_actions",
-            |_, action, _| {
-                action.arity() == 1 && action.atoms().iter().all(boot_to_listening_atom_allowed)
-            },
-        ))
 }
 
 fn session_auth_and_authorize_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>>
@@ -842,16 +836,6 @@ fn session_auth_and_authorize_case() -> ModelCase<SystemState, ConcurrentAction<
         .with_checker_config(system_checker_config())
         .with_doc_checker_config(system_doc_checker_config())
         .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "session_auth_and_authorize_actions",
-            |_, action, _| {
-                action.arity() == 1
-                    && action
-                        .atoms()
-                        .iter()
-                        .all(session_auth_and_authorize_atom_allowed)
-            },
-        ))
 }
 
 fn hello_negotiation_and_limits_case()
@@ -860,16 +844,6 @@ fn hello_negotiation_and_limits_case()
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "hello_negotiation_and_limits_actions",
-            |_, action, _| {
-                action.arity() == 1
-                    && action
-                        .atoms()
-                        .iter()
-                        .all(hello_negotiation_and_limits_atom_allowed)
-            },
-        ))
 }
 
 fn deploy_upload_and_commit_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
@@ -877,16 +851,6 @@ fn deploy_upload_and_commit_case() -> ModelCase<SystemState, ConcurrentAction<Sy
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "deploy_upload_and_commit_actions",
-            |_, action, _| {
-                action.arity() == 1
-                    && action
-                        .atoms()
-                        .iter()
-                        .all(deploy_upload_and_commit_atom_allowed)
-            },
-        ))
 }
 
 fn command_start_event_flow_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
@@ -894,16 +858,6 @@ fn command_start_event_flow_case() -> ModelCase<SystemState, ConcurrentAction<Sy
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "command_start_event_flow_actions",
-            |_, action, _| {
-                action.arity() == 1
-                    && action
-                        .atoms()
-                        .iter()
-                        .all(command_start_event_flow_atom_allowed)
-            },
-        ))
 }
 
 fn state_request_and_cancel_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
@@ -911,16 +865,6 @@ fn state_request_and_cancel_case() -> ModelCase<SystemState, ConcurrentAction<Sy
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "state_request_and_cancel_actions",
-            |_, action, _| {
-                action.arity() == 1
-                    && action
-                        .atoms()
-                        .iter()
-                        .all(state_request_and_cancel_atom_allowed)
-            },
-        ))
 }
 
 fn services_list_merge_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
@@ -928,12 +872,6 @@ fn services_list_merge_case() -> ModelCase<SystemState, ConcurrentAction<SystemA
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "services_list_merge_actions",
-            |_, action, _| {
-                action.arity() <= 2 && action.atoms().iter().all(services_list_merge_atom_allowed)
-            },
-        ))
 }
 
 fn logs_request_snapshot_and_follow_case()
@@ -942,16 +880,6 @@ fn logs_request_snapshot_and_follow_case()
         .with_checker_config(system_checker_config())
         .with_doc_checker_config(system_doc_checker_config())
         .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "logs_request_snapshot_and_follow_actions",
-            |_, action, _| {
-                action.arity() <= 2
-                    && action
-                        .atoms()
-                        .iter()
-                        .all(logs_request_snapshot_and_follow_atom_allowed)
-            },
-        ))
 }
 
 #[allow(dead_code)]
@@ -961,16 +889,6 @@ fn bindings_cert_upload_updates_authorization_case()
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "bindings_cert_upload_updates_authorization_actions",
-            |_, action, _| {
-                action.arity() == 1
-                    && action
-                        .atoms()
-                        .iter()
-                        .all(bindings_cert_upload_updates_authorization_atom_allowed)
-            },
-        ))
 }
 
 #[allow(dead_code)]
@@ -980,16 +898,6 @@ fn parallel_deploy_and_start_case() -> ModelCase<SystemState, ConcurrentAction<S
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "parallel_deploy_and_start_actions",
-            |_, action, _| {
-                action.arity() <= 2
-                    && action
-                        .atoms()
-                        .iter()
-                        .all(parallel_deploy_and_start_atom_allowed)
-            },
-        ))
 }
 
 #[allow(dead_code)]
@@ -998,16 +906,6 @@ fn service_scoped_rollback_case() -> ModelCase<SystemState, ConcurrentAction<Sys
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "service_scoped_rollback_actions",
-            |_, action, _| {
-                action.arity() == 1
-                    && action
-                        .atoms()
-                        .iter()
-                        .all(service_scoped_rollback_atom_allowed)
-            },
-        ))
 }
 
 #[allow(dead_code)]
@@ -1016,12 +914,6 @@ fn local_rpc_happy_path_case() -> ModelCase<SystemState, ConcurrentAction<System
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "local_rpc_happy_path_actions",
-            |_, action, _| {
-                action.arity() == 1 && action.atoms().iter().all(local_rpc_happy_atom_allowed)
-            },
-        ))
 }
 
 #[allow(dead_code)]
@@ -1030,12 +922,6 @@ fn local_rpc_denied_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtom
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "local_rpc_denied_actions",
-            |_, action, _| {
-                action.arity() == 1 && action.atoms().iter().all(local_rpc_denied_atom_allowed)
-            },
-        ))
 }
 
 #[allow(dead_code)]
@@ -1045,16 +931,6 @@ fn remote_rpc_connection_lifecycle_case()
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "remote_rpc_connection_lifecycle_actions",
-            |_, action, _| {
-                action.arity() == 1
-                    && action
-                        .atoms()
-                        .iter()
-                        .all(remote_rpc_connection_atom_allowed)
-            },
-        ))
 }
 
 #[allow(dead_code)]
@@ -1063,26 +939,6 @@ fn shutdown_blocks_new_rpc_case() -> ModelCase<SystemState, ConcurrentAction<Sys
         .with_checker_config(shutdown_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
-        .with_state_constraint(StateConstraint::new(
-            "shutdown_service1_quiescent",
-            |state: &SystemState| {
-                state.deploy.service_is_quiescent(ServiceAtom::Service1)
-                    && state
-                        .supervision
-                        .service_is_quiescent(ServiceAtom::Service1)
-                    && state.rpc.service_is_quiescent(ServiceAtom::Service1)
-            },
-        ))
-        .with_action_constraint(ActionConstraint::new(
-            "shutdown_blocks_new_rpc_actions",
-            |_: &SystemState, action: &ConcurrentAction<SystemAtomicAction>, _: &SystemState| {
-                action.arity() == 1
-                    && action
-                        .atoms()
-                        .iter()
-                        .all(shutdown_blocks_new_rpc_atom_allowed)
-            },
-        ))
 }
 
 fn graceful_shutdown_and_force_fallback_case()
@@ -1091,16 +947,6 @@ fn graceful_shutdown_and_force_fallback_case()
         .with_checker_config(shutdown_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "graceful_shutdown_and_force_fallback_actions",
-            |_, action, _| {
-                action.arity() == 1
-                    && action
-                        .atoms()
-                        .iter()
-                        .all(graceful_shutdown_and_force_fallback_atom_allowed)
-            },
-        ))
 }
 
 fn maintenance_reap_and_idle_tick_case()
@@ -1109,16 +955,214 @@ fn maintenance_reap_and_idle_tick_case()
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
-        .with_action_constraint(ActionConstraint::new(
-            "maintenance_reap_and_idle_tick_actions",
-            |_, action, _| {
-                action.arity() == 1
-                    && action
-                        .atoms()
-                        .iter()
-                        .all(maintenance_reap_and_idle_tick_atom_allowed)
-            },
-        ))
+}
+
+#[action_constraint(SystemSpec, cases("boot_gc_and_restore"))]
+fn boot_gc_and_restore_actions()
+-> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
+    ActionConstraint::new("boot_gc_and_restore_actions", |_, action, _| {
+        action.arity() == 1 && action.atoms().iter().all(boot_to_listening_atom_allowed)
+    })
+}
+
+#[action_constraint(SystemSpec, cases("session_auth_and_authorize"))]
+fn session_auth_and_authorize_actions()
+-> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
+    ActionConstraint::new("session_auth_and_authorize_actions", |_, action, _| {
+        action.arity() == 1
+            && action
+                .atoms()
+                .iter()
+                .all(session_auth_and_authorize_atom_allowed)
+    })
+}
+
+#[action_constraint(SystemSpec, cases("hello_negotiation_and_limits"))]
+fn hello_negotiation_and_limits_actions()
+-> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
+    ActionConstraint::new("hello_negotiation_and_limits_actions", |_, action, _| {
+        action.arity() == 1
+            && action
+                .atoms()
+                .iter()
+                .all(hello_negotiation_and_limits_atom_allowed)
+    })
+}
+
+#[action_constraint(SystemSpec, cases("deploy_upload_and_commit"))]
+fn deploy_upload_and_commit_actions()
+-> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
+    ActionConstraint::new("deploy_upload_and_commit_actions", |_, action, _| {
+        action.arity() == 1
+            && action
+                .atoms()
+                .iter()
+                .all(deploy_upload_and_commit_atom_allowed)
+    })
+}
+
+#[action_constraint(SystemSpec, cases("command_start_event_flow"))]
+fn command_start_event_flow_actions()
+-> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
+    ActionConstraint::new("command_start_event_flow_actions", |_, action, _| {
+        action.arity() == 1
+            && action
+                .atoms()
+                .iter()
+                .all(command_start_event_flow_atom_allowed)
+    })
+}
+
+#[action_constraint(SystemSpec, cases("state_request_and_cancel"))]
+fn state_request_and_cancel_actions()
+-> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
+    ActionConstraint::new("state_request_and_cancel_actions", |_, action, _| {
+        action.arity() == 1
+            && action
+                .atoms()
+                .iter()
+                .all(state_request_and_cancel_atom_allowed)
+    })
+}
+
+#[action_constraint(SystemSpec, cases("services_list_merge"))]
+fn services_list_merge_actions()
+-> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
+    ActionConstraint::new("services_list_merge_actions", |_, action, _| {
+        action.arity() <= 2 && action.atoms().iter().all(services_list_merge_atom_allowed)
+    })
+}
+
+#[action_constraint(SystemSpec, cases("logs_request_snapshot_and_follow"))]
+fn logs_request_snapshot_and_follow_actions()
+-> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
+    ActionConstraint::new(
+        "logs_request_snapshot_and_follow_actions",
+        |_, action, _| {
+            action.arity() <= 2
+                && action
+                    .atoms()
+                    .iter()
+                    .all(logs_request_snapshot_and_follow_atom_allowed)
+        },
+    )
+}
+
+#[action_constraint(SystemSpec, cases("bindings_cert_upload_updates_authorization"))]
+fn bindings_cert_upload_updates_authorization_actions()
+-> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
+    ActionConstraint::new(
+        "bindings_cert_upload_updates_authorization_actions",
+        |_, action, _| {
+            action.arity() == 1
+                && action
+                    .atoms()
+                    .iter()
+                    .all(bindings_cert_upload_updates_authorization_atom_allowed)
+        },
+    )
+}
+
+#[action_constraint(SystemSpec, cases("parallel_deploy_and_start"))]
+fn parallel_deploy_and_start_actions()
+-> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
+    ActionConstraint::new("parallel_deploy_and_start_actions", |_, action, _| {
+        action.arity() <= 2
+            && action
+                .atoms()
+                .iter()
+                .all(parallel_deploy_and_start_atom_allowed)
+    })
+}
+
+#[action_constraint(SystemSpec, cases("service_scoped_rollback"))]
+fn service_scoped_rollback_actions()
+-> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
+    ActionConstraint::new("service_scoped_rollback_actions", |_, action, _| {
+        action.arity() == 1
+            && action
+                .atoms()
+                .iter()
+                .all(service_scoped_rollback_atom_allowed)
+    })
+}
+
+#[action_constraint(SystemSpec, cases("local_rpc_happy_path"))]
+fn local_rpc_happy_path_actions()
+-> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
+    ActionConstraint::new("local_rpc_happy_path_actions", |_, action, _| {
+        action.arity() == 1 && action.atoms().iter().all(local_rpc_happy_atom_allowed)
+    })
+}
+
+#[action_constraint(SystemSpec, cases("local_rpc_denied_or_target_missing"))]
+fn local_rpc_denied_actions() -> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>>
+{
+    ActionConstraint::new("local_rpc_denied_actions", |_, action, _| {
+        action.arity() == 1 && action.atoms().iter().all(local_rpc_denied_atom_allowed)
+    })
+}
+
+#[action_constraint(SystemSpec, cases("remote_rpc_connection_lifecycle"))]
+fn remote_rpc_connection_lifecycle_actions()
+-> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
+    ActionConstraint::new("remote_rpc_connection_lifecycle_actions", |_, action, _| {
+        action.arity() == 1
+            && action
+                .atoms()
+                .iter()
+                .all(remote_rpc_connection_atom_allowed)
+    })
+}
+
+#[state_constraint(SystemSpec, cases("shutdown_blocks_new_rpc_and_drains_services"))]
+fn shutdown_service1_quiescent() -> StateConstraint<SystemState> {
+    StateConstraint::new("shutdown_service1_quiescent", |state: &SystemState| {
+        state.deploy.service_is_quiescent(ServiceAtom::Service1)
+            && state
+                .supervision
+                .service_is_quiescent(ServiceAtom::Service1)
+            && state.rpc.service_is_quiescent(ServiceAtom::Service1)
+    })
+}
+
+#[action_constraint(SystemSpec, cases("shutdown_blocks_new_rpc_and_drains_services"))]
+fn shutdown_blocks_new_rpc_actions()
+-> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
+    ActionConstraint::new("shutdown_blocks_new_rpc_actions", |_, action, _| {
+        action.arity() == 1
+            && action
+                .atoms()
+                .iter()
+                .all(shutdown_blocks_new_rpc_atom_allowed)
+    })
+}
+
+#[action_constraint(SystemSpec, cases("graceful_shutdown_and_force_fallback"))]
+fn graceful_shutdown_and_force_fallback_actions()
+-> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
+    ActionConstraint::new(
+        "graceful_shutdown_and_force_fallback_actions",
+        |_, action, _| {
+            action.arity() == 1
+                && action
+                    .atoms()
+                    .iter()
+                    .all(graceful_shutdown_and_force_fallback_atom_allowed)
+        },
+    )
+}
+
+#[action_constraint(SystemSpec, cases("maintenance_reap_and_idle_tick"))]
+fn maintenance_reap_and_idle_tick_actions()
+-> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
+    ActionConstraint::new("maintenance_reap_and_idle_tick_actions", |_, action, _| {
+        action.arity() == 1
+            && action
+                .atoms()
+                .iter()
+                .all(maintenance_reap_and_idle_tick_atom_allowed)
+    })
 }
 
 #[invariant(SystemSpec)]

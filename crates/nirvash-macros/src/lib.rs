@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2, TokenTree};
@@ -521,15 +521,52 @@ fn parse_single_path(input: &syn::parse::ParseBuffer<'_>) -> syn::Result<Path> {
     Ok(path)
 }
 
-struct TargetSpecArg {
+struct RegistrationArgs {
     spec: Path,
+    case_labels: Option<Vec<LitStr>>,
 }
 
-impl syn::parse::Parse for TargetSpecArg {
+impl syn::parse::Parse for RegistrationArgs {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
-        Ok(Self {
-            spec: input.parse()?,
-        })
+        let spec = input.parse()?;
+        let mut case_labels = None;
+
+        while !input.is_empty() {
+            input.parse::<Token![,]>()?;
+            let option = input.parse::<Ident>()?;
+            if option != "cases" {
+                return Err(syn::Error::new(
+                    option.span(),
+                    "unsupported registration option; expected cases(...)",
+                ));
+            }
+            if case_labels.is_some() {
+                return Err(syn::Error::new(
+                    option.span(),
+                    "duplicate cases(...) registration option",
+                ));
+            }
+
+            let content;
+            syn::parenthesized!(content in input);
+            let labels = content
+                .parse_terminated(|input| input.parse::<LitStr>(), Token![,])?
+                .into_iter()
+                .collect::<Vec<_>>();
+            let mut seen = BTreeSet::new();
+            for label in &labels {
+                let value = label.value();
+                if !seen.insert(value.clone()) {
+                    return Err(syn::Error::new(
+                        label.span(),
+                        format!("duplicate case label `{value}`"),
+                    ));
+                }
+            }
+            case_labels = Some(labels);
+        }
+
+        Ok(Self { spec, case_labels })
     }
 }
 
@@ -603,7 +640,7 @@ fn expand_registration_attr(
         .to_compile_error()
         .into();
     }
-    let args = parse_macro_input!(attr as TargetSpecArg);
+    let args = parse_macro_input!(attr as RegistrationArgs);
     let item = parse_macro_input!(item as ItemFn);
     match expand_registration(args, item, kind) {
         Ok(tokens) => tokens.into(),
@@ -612,7 +649,7 @@ fn expand_registration_attr(
 }
 
 fn expand_registration(
-    args: TargetSpecArg,
+    args: RegistrationArgs,
     item: ItemFn,
     kind: RegistrationKind,
 ) -> syn::Result<proc_macro2::TokenStream> {
@@ -630,12 +667,52 @@ fn expand_registration(
     }
 
     let fn_ident = item.sig.ident.clone();
-    let spec = args.spec;
+    let RegistrationArgs { spec, case_labels } = args;
+    if case_labels.is_some()
+        && !matches!(
+            kind,
+            RegistrationKind::StateConstraint | RegistrationKind::ActionConstraint
+        )
+    {
+        return Err(syn::Error::new(
+            fn_ident.span(),
+            "cases(...) is only supported on #[state_constraint(...)] and #[action_constraint(...)]",
+        ));
+    }
     let expected = kind.expected_type(&spec);
     let registry_ident = kind.registry_ident();
     let label = kind.label();
     let build_ident = format_ident!("__nirvash_{}_build_{}", label, fn_ident);
     let spec_id_ident = format_ident!("__nirvash_{}_spec_type_id_{}", label, fn_ident);
+    let case_labels_item_ident = format_ident!("__nirvash_{}_case_labels_{}", label, fn_ident);
+    let case_labels_tokens = if matches!(
+        kind,
+        RegistrationKind::StateConstraint | RegistrationKind::ActionConstraint
+    ) {
+        if let Some(case_labels) = &case_labels {
+            quote! {
+                #[doc(hidden)]
+                #[allow(non_upper_case_globals)]
+                static #case_labels_item_ident: &[&str] = &[#(#case_labels),*];
+            }
+        } else {
+            quote! {}
+        }
+    } else {
+        quote! {}
+    };
+    let case_labels_field = if matches!(
+        kind,
+        RegistrationKind::StateConstraint | RegistrationKind::ActionConstraint
+    ) {
+        if case_labels.is_some() {
+            quote! { case_labels: ::std::option::Option::Some(#case_labels_item_ident), }
+        } else {
+            quote! { case_labels: ::std::option::Option::None, }
+        }
+    } else {
+        quote! {}
+    };
 
     Ok(quote! {
         #item
@@ -653,10 +730,13 @@ fn expand_registration(
         #[doc(hidden)]
         const _: fn() -> #expected = #fn_ident;
 
+        #case_labels_tokens
+
         ::nirvash_core::inventory::submit! {
             ::nirvash_core::registry::#registry_ident {
                 spec_type_id: #spec_id_ident,
                 name: stringify!(#fn_ident),
+                #case_labels_field
                 build: #build_ident,
             }
         }
@@ -1702,24 +1782,7 @@ fn expand_temporal_spec(
                 if model_cases.is_empty() {
                     model_cases.push(::nirvash_core::ModelCase::default());
                 }
-                let state_constraints = ::nirvash_core::registry::collect_state_constraints::<Self>();
-                let action_constraints = ::nirvash_core::registry::collect_action_constraints::<Self>();
-                let symmetry = ::nirvash_core::registry::collect_symmetry::<Self>();
-                for model_case in &mut model_cases {
-                    let mut next_model_case = ::core::mem::take(model_case);
-                    for constraint in &state_constraints {
-                        next_model_case = next_model_case.with_state_constraint(*constraint);
-                    }
-                    for constraint in &action_constraints {
-                        next_model_case = next_model_case.with_action_constraint(*constraint);
-                    }
-                    if next_model_case.symmetry().is_none() {
-                        if let ::core::option::Option::Some(symmetry) = symmetry {
-                            next_model_case = next_model_case.with_symmetry(symmetry);
-                        }
-                    }
-                    *model_case = next_model_case;
-                }
+                ::nirvash_core::registry::apply_registered_model_case_metadata::<Self>(&mut model_cases);
                 model_cases
             }
         }

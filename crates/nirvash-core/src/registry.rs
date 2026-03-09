@@ -31,12 +31,14 @@ pub struct RegisteredFairness {
 pub struct RegisteredStateConstraint {
     pub spec_type_id: fn() -> TypeId,
     pub name: &'static str,
+    pub case_labels: Option<&'static [&'static str]>,
     pub build: fn() -> Box<dyn Any>,
 }
 
 pub struct RegisteredActionConstraint {
     pub spec_type_id: fn() -> TypeId,
     pub name: &'static str,
+    pub case_labels: Option<&'static [&'static str]>,
     pub build: fn() -> Box<dyn Any>,
 }
 
@@ -53,6 +55,58 @@ pub struct RegisteredActionDocLabel {
 
 type ErasedBuilder = fn() -> Box<dyn Any>;
 type NamedBuilder = (&'static str, ErasedBuilder);
+
+#[derive(Debug, Clone, Copy)]
+pub struct ScopedStateConstraint<S> {
+    name: &'static str,
+    case_labels: Option<&'static [&'static str]>,
+    constraint: StateConstraint<S>,
+}
+
+impl<S> ScopedStateConstraint<S> {
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub const fn case_labels(&self) -> Option<&'static [&'static str]> {
+        self.case_labels
+    }
+
+    pub const fn constraint(&self) -> StateConstraint<S> {
+        self.constraint
+    }
+
+    pub fn applies_to(&self, case_label: &str) -> bool {
+        self.case_labels
+            .is_none_or(|labels| labels.contains(&case_label))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ScopedActionConstraint<S, A> {
+    name: &'static str,
+    case_labels: Option<&'static [&'static str]>,
+    constraint: ActionConstraint<S, A>,
+}
+
+impl<S, A> ScopedActionConstraint<S, A> {
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub const fn case_labels(&self) -> Option<&'static [&'static str]> {
+        self.case_labels
+    }
+
+    pub const fn constraint(&self) -> ActionConstraint<S, A> {
+        self.constraint
+    }
+
+    pub fn applies_to(&self, case_label: &str) -> bool {
+        self.case_labels
+            .is_none_or(|labels| labels.contains(&case_label))
+    }
+}
 
 inventory::collect!(RegisteredInvariant);
 inventory::collect!(RegisteredProperty);
@@ -194,23 +248,48 @@ where
     T: TransitionSystem + 'static,
     T::State: 'static,
 {
+    collect_scoped_state_constraints::<T>()
+        .into_iter()
+        .map(|entry| entry.constraint())
+        .collect()
+}
+
+pub fn collect_scoped_state_constraints<T>() -> Vec<ScopedStateConstraint<T::State>>
+where
+    T: TransitionSystem + 'static,
+    T::State: 'static,
+{
     let spec_name = type_name::<T>();
-    sorted_builders::<T, _>(
-        inventory::iter::<RegisteredStateConstraint>
-            .into_iter()
-            .map(|entry| (entry as &dyn RegistryEntry, entry.build)),
-        "state constraint",
-    )
-    .into_iter()
-    .map(|(name, build)| {
-        downcast_registered::<StateConstraint<T::State>>(
-            build(),
-            spec_name,
-            "state constraint",
-            name,
-        )
-    })
-    .collect()
+    let spec_type_id = TypeId::of::<T>();
+    let mut matched = inventory::iter::<RegisteredStateConstraint>
+        .into_iter()
+        .filter(|entry| (entry.spec_type_id)() == spec_type_id)
+        .collect::<Vec<_>>();
+    matched.sort_by_key(|entry| entry.name);
+
+    let mut seen = BTreeSet::new();
+    for entry in &matched {
+        if !seen.insert(entry.name) {
+            panic!(
+                "duplicate state constraint registration `{}` for spec `{spec_name}`",
+                entry.name
+            );
+        }
+    }
+
+    matched
+        .into_iter()
+        .map(|entry| ScopedStateConstraint {
+            name: entry.name,
+            case_labels: entry.case_labels,
+            constraint: downcast_registered::<StateConstraint<T::State>>(
+                (entry.build)(),
+                spec_name,
+                "state constraint",
+                entry.name,
+            ),
+        })
+        .collect()
 }
 
 pub fn collect_action_constraints<T>() -> Vec<ActionConstraint<T::State, T::Action>>
@@ -219,23 +298,122 @@ where
     T::State: 'static,
     T::Action: 'static,
 {
+    collect_scoped_action_constraints::<T>()
+        .into_iter()
+        .map(|entry| entry.constraint())
+        .collect()
+}
+
+pub fn collect_scoped_action_constraints<T>() -> Vec<ScopedActionConstraint<T::State, T::Action>>
+where
+    T: TransitionSystem + 'static,
+    T::State: 'static,
+    T::Action: 'static,
+{
     let spec_name = type_name::<T>();
-    sorted_builders::<T, _>(
-        inventory::iter::<RegisteredActionConstraint>
-            .into_iter()
-            .map(|entry| (entry as &dyn RegistryEntry, entry.build)),
-        "action constraint",
-    )
-    .into_iter()
-    .map(|(name, build)| {
-        downcast_registered::<ActionConstraint<T::State, T::Action>>(
-            build(),
+    let spec_type_id = TypeId::of::<T>();
+    let mut matched = inventory::iter::<RegisteredActionConstraint>
+        .into_iter()
+        .filter(|entry| (entry.spec_type_id)() == spec_type_id)
+        .collect::<Vec<_>>();
+    matched.sort_by_key(|entry| entry.name);
+
+    let mut seen = BTreeSet::new();
+    for entry in &matched {
+        if !seen.insert(entry.name) {
+            panic!(
+                "duplicate action constraint registration `{}` for spec `{spec_name}`",
+                entry.name
+            );
+        }
+    }
+
+    matched
+        .into_iter()
+        .map(|entry| ScopedActionConstraint {
+            name: entry.name,
+            case_labels: entry.case_labels,
+            constraint: downcast_registered::<ActionConstraint<T::State, T::Action>>(
+                (entry.build)(),
+                spec_name,
+                "action constraint",
+                entry.name,
+            ),
+        })
+        .collect()
+}
+
+fn validate_case_labels(
+    spec_name: &'static str,
+    kind: &'static str,
+    name: &'static str,
+    case_labels: Option<&'static [&'static str]>,
+    available_labels: &BTreeSet<&'static str>,
+) {
+    if let Some(labels) = case_labels {
+        for label in labels {
+            assert!(
+                available_labels.contains(label),
+                "registered {kind} `{name}` references unknown model case `{label}` for spec `{spec_name}`"
+            );
+        }
+    }
+}
+
+pub fn apply_registered_model_case_metadata<T>(
+    model_cases: &mut Vec<crate::ModelCase<T::State, T::Action>>,
+) where
+    T: TransitionSystem + 'static,
+    T::State: 'static,
+    T::Action: 'static,
+{
+    let state_constraints = collect_scoped_state_constraints::<T>();
+    let action_constraints = collect_scoped_action_constraints::<T>();
+    let symmetry = collect_symmetry::<T>();
+    let spec_name = type_name::<T>();
+    let available_labels = model_cases
+        .iter()
+        .map(|model_case| model_case.label())
+        .collect::<BTreeSet<_>>();
+
+    for entry in &state_constraints {
+        validate_case_labels(
+            spec_name,
+            "state constraint",
+            entry.name(),
+            entry.case_labels(),
+            &available_labels,
+        );
+    }
+    for entry in &action_constraints {
+        validate_case_labels(
             spec_name,
             "action constraint",
-            name,
-        )
-    })
-    .collect()
+            entry.name(),
+            entry.case_labels(),
+            &available_labels,
+        );
+    }
+
+    for model_case in model_cases {
+        let mut next_model_case = ::core::mem::take(model_case);
+        for constraint in &state_constraints {
+            if constraint.applies_to(next_model_case.label()) {
+                next_model_case = next_model_case.with_state_constraint(constraint.constraint());
+            }
+        }
+        for constraint in &action_constraints {
+            if constraint.applies_to(next_model_case.label()) {
+                next_model_case = next_model_case.with_action_constraint(constraint.constraint());
+            }
+        }
+        if next_model_case.symmetry().is_none()
+            && let Some(symmetry) = symmetry
+        {
+            next_model_case = next_model_case.with_symmetry(symmetry);
+        }
+        *model_case = next_model_case;
+    }
 }
 
 pub fn collect_symmetry<T>() -> Option<SymmetryReducer<T::State>>
@@ -368,6 +546,86 @@ mod tests {
         Box::new(duplicate_b())
     }
 
+    #[derive(Debug, Clone, Copy, Default)]
+    struct ScopedCaseSpec;
+
+    impl TransitionSystem for ScopedCaseSpec {
+        type State = RegistryState;
+        type Action = RegistryAction;
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![RegistryState::Idle]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![RegistryAction::Tick]
+        }
+
+        fn transition(&self, _: &Self::State, _: &Self::Action) -> Option<Self::State> {
+            None
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct UnknownCaseSpec;
+
+    impl TransitionSystem for UnknownCaseSpec {
+        type State = RegistryState;
+        type Action = RegistryAction;
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![RegistryState::Idle]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![RegistryAction::Tick]
+        }
+
+        fn transition(&self, _: &Self::State, _: &Self::Action) -> Option<Self::State> {
+            None
+        }
+    }
+
+    fn scoped_case_spec_type_id() -> TypeId {
+        TypeId::of::<ScopedCaseSpec>()
+    }
+
+    fn unknown_case_spec_type_id() -> TypeId {
+        TypeId::of::<UnknownCaseSpec>()
+    }
+
+    fn global_state_constraint() -> StateConstraint<RegistryState> {
+        StateConstraint::new("global_state_constraint", |_| true)
+    }
+
+    fn only_case_a_state_constraint() -> StateConstraint<RegistryState> {
+        StateConstraint::new("only_case_a_state_constraint", |_| true)
+    }
+
+    fn only_case_b_action_constraint() -> ActionConstraint<RegistryState, RegistryAction> {
+        ActionConstraint::new("only_case_b_action_constraint", |_, _, _| true)
+    }
+
+    fn unknown_case_state_constraint() -> StateConstraint<RegistryState> {
+        StateConstraint::new("unknown_case_state_constraint", |_| true)
+    }
+
+    fn build_global_state_constraint() -> Box<dyn Any> {
+        Box::new(global_state_constraint())
+    }
+
+    fn build_only_case_a_state_constraint() -> Box<dyn Any> {
+        Box::new(only_case_a_state_constraint())
+    }
+
+    fn build_only_case_b_action_constraint() -> Box<dyn Any> {
+        Box::new(only_case_b_action_constraint())
+    }
+
+    fn build_unknown_case_state_constraint() -> Box<dyn Any> {
+        Box::new(unknown_case_state_constraint())
+    }
+
     crate::inventory::submit! {
         RegisteredInvariant {
             spec_type_id: ordered_spec_type_id,
@@ -400,6 +658,42 @@ mod tests {
         }
     }
 
+    crate::inventory::submit! {
+        RegisteredStateConstraint {
+            spec_type_id: scoped_case_spec_type_id,
+            name: "global_state_constraint",
+            case_labels: None,
+            build: build_global_state_constraint,
+        }
+    }
+
+    crate::inventory::submit! {
+        RegisteredStateConstraint {
+            spec_type_id: scoped_case_spec_type_id,
+            name: "only_case_a_state_constraint",
+            case_labels: Some(&["case_a"]),
+            build: build_only_case_a_state_constraint,
+        }
+    }
+
+    crate::inventory::submit! {
+        RegisteredActionConstraint {
+            spec_type_id: scoped_case_spec_type_id,
+            name: "only_case_b_action_constraint",
+            case_labels: Some(&["case_b"]),
+            build: build_only_case_b_action_constraint,
+        }
+    }
+
+    crate::inventory::submit! {
+        RegisteredStateConstraint {
+            spec_type_id: unknown_case_spec_type_id,
+            name: "unknown_case_state_constraint",
+            case_labels: Some(&["missing_case"]),
+            build: build_unknown_case_state_constraint,
+        }
+    }
+
     fn panic_message(payload: Box<dyn Any + Send>) -> String {
         match payload.downcast::<String>() {
             Ok(message) => *message,
@@ -429,5 +723,58 @@ mod tests {
         let message = panic_message(panic);
         assert!(message.contains("duplicate invariant registration `duplicate_name`"));
         assert!(message.contains(type_name::<DuplicateSpec>()));
+    }
+
+    #[test]
+    fn apply_registered_model_case_metadata_scopes_constraints_by_case_label() {
+        let mut model_cases = vec![
+            crate::ModelCase::<RegistryState, RegistryAction>::new("case_a"),
+            crate::ModelCase::<RegistryState, RegistryAction>::new("case_b"),
+        ];
+
+        apply_registered_model_case_metadata::<ScopedCaseSpec>(&mut model_cases);
+
+        assert_eq!(
+            model_cases[0]
+                .state_constraints()
+                .iter()
+                .map(|constraint| constraint.name())
+                .collect::<Vec<_>>(),
+            vec!["global_state_constraint", "only_case_a_state_constraint"]
+        );
+        assert!(model_cases[0].action_constraints().is_empty());
+
+        assert_eq!(
+            model_cases[1]
+                .state_constraints()
+                .iter()
+                .map(|constraint| constraint.name())
+                .collect::<Vec<_>>(),
+            vec!["global_state_constraint"]
+        );
+        assert_eq!(
+            model_cases[1]
+                .action_constraints()
+                .iter()
+                .map(|constraint| constraint.name())
+                .collect::<Vec<_>>(),
+            vec!["only_case_b_action_constraint"]
+        );
+    }
+
+    #[test]
+    fn apply_registered_model_case_metadata_rejects_unknown_case_labels() {
+        let panic = panic::catch_unwind(AssertUnwindSafe(|| {
+            let mut model_cases = vec![crate::ModelCase::<RegistryState, RegistryAction>::new(
+                "case_a",
+            )];
+            apply_registered_model_case_metadata::<UnknownCaseSpec>(&mut model_cases);
+        }))
+        .expect_err("unknown case labels must panic");
+
+        let message = panic_message(panic);
+        assert!(message.contains("unknown model case `missing_case`"));
+        assert!(message.contains("unknown_case_state_constraint"));
+        assert!(message.contains(type_name::<UnknownCaseSpec>()));
     }
 }

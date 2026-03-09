@@ -3,7 +3,8 @@ use nirvash_core::{
     Signature as _, StatePredicate, StepPredicate, TransitionSystem,
 };
 use nirvash_macros::{
-    ActionVocabulary, RelationalState, fairness, invariant, property, subsystem_spec,
+    ActionVocabulary, RelationalState, action_constraint, fairness, invariant, property,
+    subsystem_spec,
 };
 
 use crate::atoms::{CommandEventAtom, LogChunkAtom, RequestKindAtom, StreamAtom};
@@ -112,10 +113,7 @@ fn wire_protocol_model_cases() -> Vec<ModelCase<WireProtocolState, WireProtocolA
                 check_deadlocks: false,
                 stop_on_first_violation: false,
             })
-            .with_check_deadlocks(false)
-            .with_action_constraint(ActionConstraint::new("stream0_only", |_, action, _| {
-                stream_for_action(*action) == StreamAtom::Stream0
-            })),
+            .with_check_deadlocks(false),
     ]
 }
 
@@ -136,6 +134,13 @@ fn stream_for_action(action: WireProtocolAction) -> StreamAtom {
         | WireProtocolAction::RpcInvoke(stream)
         | WireProtocolAction::BindingsCertUpload(stream) => stream,
     }
+}
+
+#[action_constraint(WireProtocolSpec, cases("default"))]
+fn stream0_only() -> ActionConstraint<WireProtocolState, WireProtocolAction> {
+    ActionConstraint::new("stream0_only", |_, action, _| {
+        stream_for_action(*action) == StreamAtom::Stream0
+    })
 }
 
 fn request_kind_for_action(action: WireProtocolAction) -> Option<RequestKindAtom> {
