@@ -15,7 +15,11 @@ pub use checker::{
     Counterexample, CounterexampleKind, ExplorationMode, ModelCheckConfig, ModelCheckError,
     ModelCheckResult, ModelChecker,
 };
-pub use conformance::{ProtocolConformanceSpec, ProtocolRuntimeBinding};
+pub use conformance::{
+    DynamicTestCase, NegativeWitness, PositiveWitness, ProtocolConformanceSpec,
+    ProtocolInputWitnessBinding, ProtocolRuntimeBinding, RegisteredCodeWitnessTestProvider,
+    run_registered_code_witness_tests,
+};
 pub use doc_graph::{
     DocGraphCase, DocGraphEdge, DocGraphPolicy, DocGraphProvider, DocGraphReductionMode,
     DocGraphSnapshot, DocGraphSpec, DocGraphState, ReachableGraphEdge, ReachableGraphSnapshot,

@@ -1,0 +1,190 @@
+use std::sync::Mutex;
+
+use nirvash_core::{
+    TransitionSystem,
+    conformance::{
+        ActionApplier, NegativeWitness, PositiveWitness, ProtocolConformanceSpec,
+        ProtocolInputWitnessBinding, ProtocolRuntimeBinding, StateObserver,
+    },
+};
+use nirvash_macros::Signature as FormalSignature;
+use nirvash_macros::code_witness_tests;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Spec;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Binding;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+enum State {
+    Idle,
+    Busy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, FormalSignature)]
+enum Action {
+    Start,
+    Stop,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Output {
+    Ack,
+    Rejected,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Context;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Session {
+    context: Context,
+}
+
+impl TransitionSystem for Spec {
+    type State = State;
+    type Action = Action;
+
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![State::Idle]
+    }
+
+    fn actions(&self) -> Vec<Self::Action> {
+        vec![Action::Start, Action::Stop]
+    }
+
+    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+        match (state, action) {
+            (State::Idle, Action::Start) => Some(State::Busy),
+            (State::Busy, Action::Stop) => Some(State::Idle),
+            _ => None,
+        }
+    }
+}
+
+impl ProtocolConformanceSpec for Spec {
+    type ExpectedOutput = Output;
+    type ObservedState = State;
+    type ObservedOutput = Output;
+
+    fn expected_output(
+        &self,
+        prev: &Self::State,
+        action: &Self::Action,
+        next: Option<&Self::State>,
+    ) -> Self::ExpectedOutput {
+        match (prev, action, next) {
+            (State::Idle, Action::Start, Some(State::Busy))
+            | (State::Busy, Action::Stop, Some(State::Idle)) => Output::Ack,
+            _ => Output::Rejected,
+        }
+    }
+
+    fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
+        *observed
+    }
+
+    fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {
+        observed.clone()
+    }
+}
+
+#[code_witness_tests(spec = Spec, binding = Binding)]
+const _: () = ();
+
+struct Driver {
+    state: Mutex<State>,
+}
+
+impl ProtocolRuntimeBinding<Spec> for Binding {
+    type Runtime = Driver;
+    type Context = Context;
+
+    async fn fresh_runtime(_spec: &Spec) -> Self::Runtime {
+        Driver {
+            state: Mutex::new(State::Idle),
+        }
+    }
+
+    fn context(_spec: &Spec) -> Self::Context {
+        Context
+    }
+}
+
+impl ProtocolInputWitnessBinding<Spec> for Binding {
+    type Input = Action;
+    type Session = Session;
+
+    async fn fresh_session(_spec: &Spec) -> Self::Session {
+        Session { context: Context }
+    }
+
+    fn positive_witnesses(
+        _spec: &Spec,
+        session: &Self::Session,
+        _prev: &State,
+        action: &Action,
+        _next: &State,
+    ) -> Vec<PositiveWitness<Self::Context, Self::Input>> {
+        vec![PositiveWitness::new("principal", session.context, action.clone()).with_canonical(true)]
+    }
+
+    fn negative_witnesses(
+        _spec: &Spec,
+        session: &Self::Session,
+        _prev: &State,
+        action: &Action,
+    ) -> Vec<NegativeWitness<Self::Context, Self::Input>> {
+        vec![NegativeWitness::new(
+            "principal",
+            session.context,
+            action.clone(),
+        )]
+    }
+
+    async fn execute_input(
+        runtime: &Self::Runtime,
+        _session: &mut Self::Session,
+        context: &Self::Context,
+        input: &Self::Input,
+    ) -> Output {
+        runtime.execute_action(context, input).await
+    }
+
+    fn probe_context(session: &Self::Session) -> Self::Context {
+        session.context
+    }
+}
+
+impl ActionApplier for Driver {
+    type Action = Action;
+    type Output = Output;
+    type Context = Context;
+
+    async fn execute_action(&self, _context: &Context, action: &Action) -> Output {
+        let mut state = self.state.lock().expect("lock state");
+        match (*state, action) {
+            (State::Idle, Action::Start) => {
+                *state = State::Busy;
+                Output::Ack
+            }
+            (State::Busy, Action::Stop) => {
+                *state = State::Idle;
+                Output::Ack
+            }
+            _ => Output::Rejected,
+        }
+    }
+}
+
+impl StateObserver for Driver {
+    type ObservedState = State;
+    type Context = Context;
+
+    async fn observe_state(&self, _context: &Context) -> State {
+        *self.state.lock().expect("lock state")
+    }
+}
+
+fn main() {}

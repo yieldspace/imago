@@ -479,6 +479,12 @@ mod tests {
             &CommandProtocolAction::SetRunning,
         )
         .await;
+        <OperationManager as ActionApplier>::execute_action(
+            &operations,
+            &CommandProtocolContext { request_id },
+            &CommandProtocolAction::MarkSpawned,
+        )
+        .await;
 
         let write_error = ImagodError::new(ErrorCode::Internal, "session.write", "stream closed");
         let result = finalize_operation_after_terminal_event(

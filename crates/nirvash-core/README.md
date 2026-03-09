@@ -108,8 +108,16 @@ field 単位では次を使えます。
   - `ProtocolRuntimeBinding`
     - `fresh_runtime(&spec)`
     - `context(&spec)`
+  - `ProtocolInputWitnessBinding`
+    - `fresh_session(&spec)`
+    - `positive_witnesses(...)`
+    - `negative_witnesses(...)`
+    - `execute_input(...)`
+    - `probe_context(...)`
 
 `nirvash_macros::code_tests` はこの契約だけを使って reachable graph を replay し、runtime の observed state/output を spec 側の expected state/output に射影して比較します。runtime 側に spec 専用 field を追加する必要はありません。実運用では spec crate に `ProtocolConformanceSpec` を置き、runtime crate の integration test に `ProtocolRuntimeBinding` と `#[code_tests(...)]` を置く構成が依存方向を最も保ちやすいです。
+
+`nirvash_macros::code_witness_tests` は `ProtocolInputWitnessBinding` を追加で使い、reachable graph から semantic case を自動検出して witness 単位の strict test を custom harness (`code_witness_test_main!()`) で個別実行します。`model_cases` は formal 側の探索分割に残しつつ、runtime binding 側は concrete input witness だけを実装すれば十分です。
 
 ```rust
 use nirvash_core::conformance::{
@@ -233,6 +241,8 @@ impl ProtocolRuntimeBinding<Spec> for Binding {
 #[code_tests(spec = Spec, binding = Binding)]
 const _: () = ();
 ```
+
+grouped な回帰だけで十分なら `#[code_tests(...)]` を使い、どの semantic case / witness が壊れたかを `cargo test -- --list` と個別再実行で追いたい場合は `#[code_witness_tests(...)]` と `code_witness_test_main!()` を使います。
 
 ## `cargo doc` Integration
 

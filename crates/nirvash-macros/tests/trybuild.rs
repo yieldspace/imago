@@ -14,10 +14,12 @@ fn signature_derive_behaves_for_supported_inputs() {
     t.pass("tests/fixtures/derive_signature_ok.rs");
     t.pass("tests/fixtures/subsystem_spec_ok.rs");
     t.pass("tests/fixtures/code_tests_ok.rs");
+    t.pass("tests/fixtures/code_witness_tests_ok.rs");
     t.compile_fail("tests/fixtures/attribute_missing_target.rs");
     t.compile_fail("tests/fixtures/attribute_wrong_type.rs");
     t.compile_fail("tests/fixtures/old_macro_names.rs");
     t.compile_fail("tests/fixtures/subsystem_spec_invalid_symmetry.rs");
+    t.compile_fail("tests/fixtures/code_witness_tests_missing_main.rs");
     t.compile_fail("tests/fixtures/code_tests_legacy_action.rs");
     t.compile_fail("tests/fixtures/code_tests_legacy_driver.rs");
     t.compile_fail("tests/fixtures/code_tests_legacy_fresh.rs");

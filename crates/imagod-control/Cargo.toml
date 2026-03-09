@@ -37,6 +37,11 @@ imagod-spec = { workspace = true }
 nirvash-macros = { workspace = true }
 wat = { workspace = true }
 
+[[test]]
+name = "command_protocol_conformance"
+path = "tests/command_protocol_conformance.rs"
+harness = false
+
 [[bench]]
 name = "log_buffer"
 harness = false

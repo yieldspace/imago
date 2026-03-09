@@ -84,6 +84,13 @@ impl OperationManager {
             CommandErrorKind::NotFound,
             CommandProtocolStageId::OperationState,
         ))?;
+        if entry.state != CommandLifecycleState::Accepted || entry.phase != OperationPhase::Starting
+        {
+            return Err(OperationReject::new(
+                CommandErrorKind::NotFound,
+                CommandProtocolStageId::OperationState,
+            ));
+        }
         entry.state = state;
         entry.stage = stage.to_owned();
         entry.updated_at_unix_secs = now_unix_secs();
@@ -146,6 +153,13 @@ impl OperationManager {
             CommandErrorKind::NotFound,
             CommandProtocolStageId::OperationState,
         ))?;
+        if entry.state != CommandLifecycleState::Running || entry.phase != OperationPhase::Starting
+        {
+            return Err(OperationReject::new(
+                CommandErrorKind::NotFound,
+                CommandProtocolStageId::OperationState,
+            ));
+        }
 
         if entry.cancel_requested {
             entry.stage = "cancel-pending".to_owned();
@@ -161,15 +175,29 @@ impl OperationManager {
         Ok((true, false))
     }
 
-    async fn finish_entry(&self, request_id: &Uuid, state: CommandLifecycleState, stage: &str) {
+    async fn finish_entry(
+        &self,
+        request_id: &Uuid,
+        state: CommandLifecycleState,
+        stage: &str,
+    ) -> Result<(), OperationReject> {
         let mut inner = self.inner.write().await;
-        if let Some(entry) = inner.get_mut(request_id) {
-            entry.state = state;
-            entry.stage = stage.to_owned();
-            entry.updated_at_unix_secs = now_unix_secs();
-            entry.phase = OperationPhase::Spawned;
-            entry.cancel_requested = false;
+        let entry = inner.get_mut(request_id).ok_or(OperationReject::new(
+            CommandErrorKind::NotFound,
+            CommandProtocolStageId::OperationState,
+        ))?;
+        if is_terminal(entry.state) || entry.phase != OperationPhase::Spawned {
+            return Err(OperationReject::new(
+                CommandErrorKind::NotFound,
+                CommandProtocolStageId::OperationState,
+            ));
         }
+        entry.state = state;
+        entry.stage = stage.to_owned();
+        entry.updated_at_unix_secs = now_unix_secs();
+        entry.phase = OperationPhase::Spawned;
+        entry.cancel_requested = false;
+        Ok(())
     }
 
     async fn remove_entry(&self, request_id: &Uuid) -> Result<(), OperationReject> {
@@ -235,29 +263,29 @@ impl ActionApplier for OperationManager {
                 .await
                 .map(|(spawned, canceled)| CommandProtocolOutput::SpawnResult { spawned, canceled })
                 .unwrap_or_else(OperationReject::into_output),
-            CommandProtocolAction::FinishSucceeded => {
-                self.finish_entry(
+            CommandProtocolAction::FinishSucceeded => self
+                .finish_entry(
                     &context.request_id,
                     CommandLifecycleState::Succeeded,
                     "succeeded",
                 )
-                .await;
-                CommandProtocolOutput::Ack
-            }
-            CommandProtocolAction::FinishFailed(_) => {
-                self.finish_entry(&context.request_id, CommandLifecycleState::Failed, "failed")
-                    .await;
-                CommandProtocolOutput::Ack
-            }
-            CommandProtocolAction::FinishCanceled => {
-                self.finish_entry(
+                .await
+                .map(|_| CommandProtocolOutput::Ack)
+                .unwrap_or_else(OperationReject::into_output),
+            CommandProtocolAction::FinishFailed(_) => self
+                .finish_entry(&context.request_id, CommandLifecycleState::Failed, "failed")
+                .await
+                .map(|_| CommandProtocolOutput::Ack)
+                .unwrap_or_else(OperationReject::into_output),
+            CommandProtocolAction::FinishCanceled => self
+                .finish_entry(
                     &context.request_id,
                     CommandLifecycleState::Canceled,
                     "canceled",
                 )
-                .await;
-                CommandProtocolOutput::Ack
-            }
+                .await
+                .map(|_| CommandProtocolOutput::Ack)
+                .unwrap_or_else(OperationReject::into_output),
             CommandProtocolAction::Remove => self
                 .remove_entry(&context.request_id)
                 .await
@@ -408,6 +436,12 @@ mod tests {
             .execute_action(&context, &CommandProtocolAction::Start(CommandKind::Deploy))
             .await;
         manager
+            .execute_action(&context, &CommandProtocolAction::SetRunning)
+            .await;
+        manager
+            .execute_action(&context, &CommandProtocolAction::MarkSpawned)
+            .await;
+        manager
             .execute_action(&context, &CommandProtocolAction::FinishSucceeded)
             .await;
         assert_eq!(
@@ -467,6 +501,12 @@ mod tests {
         );
         assert_eq!(
             manager
+                .execute_action(&context, &CommandProtocolAction::SetRunning)
+                .await,
+            CommandProtocolOutput::Ack
+        );
+        assert_eq!(
+            manager
                 .execute_action(&context, &CommandProtocolAction::MarkSpawned)
                 .await,
             CommandProtocolOutput::SpawnResult {
@@ -485,6 +525,25 @@ mod tests {
                 .execute_action(&context, &CommandProtocolAction::Remove)
                 .await,
             CommandProtocolOutput::Ack
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_is_rejected_before_spawned() {
+        let manager = OperationManager::new();
+        let context = context(88);
+        manager
+            .execute_action(&context, &CommandProtocolAction::Start(CommandKind::Deploy))
+            .await;
+
+        assert_eq!(
+            manager
+                .execute_action(&context, &CommandProtocolAction::FinishSucceeded)
+                .await,
+            CommandProtocolOutput::Rejected {
+                code: CommandErrorKind::NotFound,
+                stage: CommandProtocolStageId::OperationState,
+            }
         );
     }
 

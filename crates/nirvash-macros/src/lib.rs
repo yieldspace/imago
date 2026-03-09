@@ -61,6 +61,31 @@ pub fn code_tests(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
+pub fn code_witness_tests(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as CodeTestArgs);
+    let _item = parse_macro_input!(item as ItemConst);
+    match expand_code_witness_tests(args) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[proc_macro]
+pub fn code_witness_test_main(input: TokenStream) -> TokenStream {
+    let _ = parse_macro_input!(input as syn::parse::Nothing);
+    quote! {
+        #[doc(hidden)]
+        pub fn __nirvash_code_witness_main_marker() {}
+
+        fn main() {
+            let _ = __nirvash_code_witness_main_marker as fn();
+            ::nirvash_core::conformance::run_registered_code_witness_tests();
+        }
+    }
+    .into()
+}
+
+#[proc_macro_attribute]
 pub fn invariant(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand_registration_attr(attr, item, RegistrationKind::Invariant)
 }
@@ -1970,6 +1995,730 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                         }
                     }
                 }
+            }
+        }
+    })
+}
+
+fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream> {
+    let spec_ty = args.spec;
+    let binding_ty = args.binding;
+    let spec_tail = path_tail_ident(&spec_ty)?.clone();
+    let cases_method = args.cases;
+    let module_ident = format_ident!(
+        "__nirvash_code_witness_tests_{}",
+        spec_tail.to_string().to_lowercase()
+    );
+    let provider_build_ident = format_ident!(
+        "__nirvash_build_code_witness_tests_{}",
+        spec_tail.to_string().to_lowercase()
+    );
+    let cases_expr = if let Some(cases_method) = cases_method {
+        quote! { #cases_method() }
+    } else {
+        quote! { vec![<#spec_ty as ::core::default::Default>::default()] }
+    };
+
+    Ok(quote! {
+        const _: fn() = crate::__nirvash_code_witness_main_marker;
+
+        #[cfg(test)]
+        mod #module_ident {
+            use super::*;
+
+            type GeneratedState = <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::State;
+            type GeneratedAction = <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action;
+            type GeneratedModelCase = ::nirvash_core::conformance::ModelCase<GeneratedState, GeneratedAction>;
+            type GeneratedRuntime =
+                <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::Runtime;
+            type GeneratedContext =
+                <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::Context;
+            type GeneratedInput =
+                <#binding_ty as ::nirvash_core::conformance::ProtocolInputWitnessBinding<#spec_ty>>::Input;
+            type GeneratedSession =
+                <#binding_ty as ::nirvash_core::conformance::ProtocolInputWitnessBinding<#spec_ty>>::Session;
+            type GeneratedExpectedOutput =
+                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ExpectedOutput;
+            type GeneratedObservedState =
+                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ObservedState;
+            type GeneratedObservedOutput =
+                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ObservedOutput;
+            type GeneratedPositiveWitness =
+                ::nirvash_core::conformance::PositiveWitness<GeneratedContext, GeneratedInput>;
+            type GeneratedNegativeWitness =
+                ::nirvash_core::conformance::NegativeWitness<GeneratedContext, GeneratedInput>;
+
+            #[derive(Clone)]
+            struct GeneratedSemanticCase {
+                spec_case_label: ::std::string::String,
+                prefix_id: usize,
+                provenance: ::std::vec::Vec<::std::string::String>,
+                state: GeneratedState,
+                action: GeneratedAction,
+                expected_next: ::core::option::Option<GeneratedState>,
+                path: ::std::vec::Vec<GeneratedAction>,
+            }
+
+            #[derive(Clone)]
+            struct GeneratedWitnessDescriptor {
+                index: usize,
+                name: ::std::string::String,
+            }
+
+            fn generated_cases() -> ::std::vec::Vec<#spec_ty> {
+                #cases_expr
+            }
+
+            fn generated_model_cases(spec: &#spec_ty) -> ::std::vec::Vec<GeneratedModelCase> {
+                <#spec_ty as ::nirvash_core::conformance::ModelCaseSource>::model_cases(spec)
+            }
+
+            fn generated_paths(
+                spec: &#spec_ty,
+                model_case: GeneratedModelCase,
+            ) -> (
+                ::nirvash_core::conformance::ReachableGraphSnapshot<GeneratedState, GeneratedAction>,
+                ::std::vec::Vec<::std::vec::Vec<GeneratedAction>>,
+            ) {
+                let snapshot = ::nirvash_core::conformance::ModelChecker::for_case(spec, model_case)
+                    .full_reachable_graph_snapshot()
+                    .expect("reachable graph snapshot should build");
+                let mut paths = vec![::core::option::Option::None; snapshot.states.len()];
+                let mut queue = ::std::collections::VecDeque::new();
+                for &index in &snapshot.initial_indices {
+                    paths[index] = ::core::option::Option::Some(::std::vec::Vec::new());
+                    queue.push_back(index);
+                }
+                while let ::core::option::Option::Some(source) = queue.pop_front() {
+                    let prefix = paths[source]
+                        .clone()
+                        .expect("reachable source should already have a path");
+                    for edge in &snapshot.edges[source] {
+                        if paths[edge.target].is_none() {
+                            let mut next_path = prefix.clone();
+                            next_path.push(edge.action.clone());
+                            paths[edge.target] = ::core::option::Option::Some(next_path);
+                            queue.push_back(edge.target);
+                        }
+                    }
+                }
+                (
+                    snapshot,
+                    paths.into_iter()
+                        .map(|path| path.expect("reachable state should have canonical path"))
+                        .collect(),
+                )
+            }
+
+            fn generated_spec_case_label(index: usize, total: usize) -> ::std::string::String {
+                if total > 1 {
+                    format!("case-{index}")
+                } else {
+                    "default".to_owned()
+                }
+            }
+
+            fn generated_sanitize_test_component(raw: &str) -> ::std::string::String {
+                let mut sanitized = raw
+                    .chars()
+                    .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+                    .collect::<::std::string::String>();
+                while sanitized.contains("__") {
+                    sanitized = sanitized.replace("__", "_");
+                }
+                sanitized = sanitized.trim_matches('_').to_owned();
+                if sanitized.is_empty() {
+                    "default".to_owned()
+                } else {
+                    sanitized
+                }
+            }
+
+            fn generated_prefix_component(path: &[GeneratedAction]) -> ::std::string::String {
+                if path.is_empty() {
+                    return "from_init".to_owned();
+                }
+                let actions = path
+                    .iter()
+                    .map(|action| generated_sanitize_test_component(&format!("{action:?}")))
+                    .collect::<::std::vec::Vec<_>>()
+                    .join("__");
+                format!("after_{actions}")
+            }
+
+            fn generated_action_component(action: &GeneratedAction) -> ::std::string::String {
+                format!(
+                    "when_{}",
+                    generated_sanitize_test_component(&format!("{action:?}"))
+                )
+            }
+
+            fn generated_prefix_id_component(prefix_id: usize) -> ::std::string::String {
+                format!("via_{prefix_id:02}")
+            }
+
+            fn generated_test_name(
+                semantic_case: &GeneratedSemanticCase,
+                witness: &GeneratedWitnessDescriptor,
+            ) -> ::std::string::String {
+                let kind = if semantic_case.expected_next.is_some() {
+                    "positive"
+                } else {
+                    "negative"
+                };
+                format!(
+                    "code_witness/{}/{}/{}/{}/{}/{}-{}",
+                    kind,
+                    generated_sanitize_test_component(&semantic_case.spec_case_label),
+                    generated_prefix_component(&semantic_case.path),
+                    generated_action_component(&semantic_case.action),
+                    generated_prefix_id_component(semantic_case.prefix_id),
+                    generated_sanitize_test_component(&witness.name),
+                    witness.index,
+                )
+            }
+
+            fn generated_setup_failure_name(semantic_case: &GeneratedSemanticCase) -> ::std::string::String {
+                let kind = if semantic_case.expected_next.is_some() {
+                    "positive"
+                } else {
+                    "negative"
+                };
+                format!(
+                    "code_witness/{}/{}/{}/{}/{}/setup",
+                    kind,
+                    generated_sanitize_test_component(&semantic_case.spec_case_label),
+                    generated_prefix_component(&semantic_case.path),
+                    generated_action_component(&semantic_case.action),
+                    generated_prefix_id_component(semantic_case.prefix_id),
+                )
+            }
+
+            fn generated_failure_prelude(
+                semantic_case: &GeneratedSemanticCase,
+                witness_name: &str,
+            ) -> ::std::string::String {
+                format!(
+                    "spec case: {}\nsemantic action: {:?}\nwitness: {}\nprovenance: {:?}\ncanonical prefix path: {:?}\n",
+                    semantic_case.spec_case_label,
+                    semantic_case.action,
+                    witness_name,
+                    semantic_case.provenance,
+                    semantic_case.path,
+                )
+            }
+
+            fn generated_merge_provenance(
+                provenance: &mut ::std::vec::Vec<::std::string::String>,
+                label: ::std::string::String,
+            ) {
+                if !provenance.iter().any(|existing| existing == &label) {
+                    provenance.push(label);
+                }
+            }
+
+            fn generated_semantic_cases(
+                spec_case_label: &str,
+                spec: &#spec_ty,
+            ) -> ::std::vec::Vec<GeneratedSemanticCase> {
+                let mut cases: ::std::vec::Vec<GeneratedSemanticCase> = ::std::vec::Vec::new();
+                let mut next_prefix_id = 0usize;
+                for model_case in generated_model_cases(spec) {
+                    let provenance_label = format!("{spec_case_label}/{}", model_case.label());
+                    let (snapshot, paths) = generated_paths(spec, model_case);
+                    for (index, state) in snapshot.states.iter().enumerate() {
+                        for action in <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::actions(spec) {
+                            let expected_next =
+                                <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::transition(
+                                    spec,
+                                    state,
+                                    &action,
+                                );
+                            if let ::core::option::Option::Some(existing) = cases.iter_mut().find(|existing| {
+                                existing.state == *state
+                                    && existing.action == action
+                                    && existing.expected_next == expected_next
+                                    && existing.path == paths[index]
+                            }) {
+                                generated_merge_provenance(
+                                    &mut existing.provenance,
+                                    provenance_label.clone(),
+                                );
+                                continue;
+                            }
+                            cases.push(GeneratedSemanticCase {
+                                spec_case_label: spec_case_label.to_owned(),
+                                prefix_id: next_prefix_id,
+                                provenance: vec![provenance_label.clone()],
+                                state: state.clone(),
+                                action: action.clone(),
+                                expected_next,
+                                path: paths[index].clone(),
+                            });
+                            next_prefix_id += 1;
+                        }
+                    }
+                }
+                cases
+            }
+
+            fn generated_runtime() -> ::tokio::runtime::Runtime {
+                ::tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("code witness tokio runtime should build")
+            }
+
+            async fn generated_observe_projected_state(
+                spec: &#spec_ty,
+                runtime: &GeneratedRuntime,
+                session: &GeneratedSession,
+            ) -> GeneratedState {
+                let context =
+                    <#binding_ty as ::nirvash_core::conformance::ProtocolInputWitnessBinding<#spec_ty>>::probe_context(session);
+                let observed = <GeneratedRuntime as ::nirvash_core::conformance::StateObserver>::observe_state(
+                    runtime,
+                    &context,
+                )
+                .await;
+                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_state(
+                    spec,
+                    &observed,
+                )
+            }
+
+            fn generated_select_canonical_witness(
+                semantic_case: &GeneratedSemanticCase,
+                prev: &GeneratedState,
+                action: &GeneratedAction,
+                next: &GeneratedState,
+                witnesses: &[GeneratedPositiveWitness],
+            ) -> ::std::result::Result<GeneratedPositiveWitness, ::std::string::String> {
+                let canonical = witnesses
+                    .iter()
+                    .filter(|witness| witness.canonical())
+                    .cloned()
+                    .collect::<::std::vec::Vec<_>>();
+                if canonical.len() == 1 {
+                    return Ok(canonical[0].clone());
+                }
+                Err(format!(
+                    "{}expected canonical witness count = 1 for {:?} -- {:?} --> {:?}, found {} from {:?}",
+                    generated_failure_prelude(semantic_case, "<canonical-prefix>"),
+                    prev,
+                    action,
+                    next,
+                    canonical.len(),
+                    witnesses
+                        .iter()
+                        .map(|witness| format!("{}(canonical={})", witness.name(), witness.canonical()))
+                        .collect::<::std::vec::Vec<_>>(),
+                ))
+            }
+
+            async fn generated_replay_canonical_prefix(
+                spec: &#spec_ty,
+                semantic_case: &GeneratedSemanticCase,
+                runtime: &GeneratedRuntime,
+                session: &mut GeneratedSession,
+            ) -> ::std::result::Result<(), ::std::string::String> {
+                let initial_projected = generated_observe_projected_state(spec, runtime, session).await;
+                let initial_states =
+                    <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::initial_states(spec);
+                if !initial_states
+                    .iter()
+                    .any(|state| *state == initial_projected)
+                {
+                    return Err(format!(
+                        "{}runtime initial state {:?} must be one of {:?}",
+                        generated_failure_prelude(semantic_case, "<initial-state>"),
+                        initial_projected,
+                        initial_states,
+                    ));
+                }
+                let mut projected = initial_projected;
+                for action in &semantic_case.path {
+                    let expected_next =
+                        <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::transition(
+                            spec,
+                            &projected,
+                            action,
+                        )
+                        .ok_or_else(|| {
+                            format!(
+                                "{}canonical prefix action {:?} is not allowed from {:?}",
+                                generated_failure_prelude(semantic_case, "<canonical-prefix>"),
+                                action,
+                                projected,
+                            )
+                        })?;
+                    let witnesses =
+                        <#binding_ty as ::nirvash_core::conformance::ProtocolInputWitnessBinding<#spec_ty>>::positive_witnesses(
+                            spec,
+                            session,
+                            &projected,
+                            action,
+                            &expected_next,
+                        );
+                    if witnesses.is_empty() {
+                        return Err(format!(
+                            "{}canonical prefix for {:?} -- {:?} --> {:?} has no positive witnesses",
+                            generated_failure_prelude(semantic_case, "<canonical-prefix>"),
+                            projected,
+                            action,
+                            expected_next,
+                        ));
+                    }
+                    let witness = generated_select_canonical_witness(
+                        semantic_case,
+                        &projected,
+                        action,
+                        &expected_next,
+                        &witnesses,
+                    )?;
+                    let output =
+                        <#binding_ty as ::nirvash_core::conformance::ProtocolInputWitnessBinding<#spec_ty>>::execute_input(
+                            runtime,
+                            session,
+                            witness.context(),
+                            witness.input(),
+                        )
+                        .await;
+                    let projected_output =
+                        <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_output(
+                            spec,
+                            &output,
+                        );
+                    let expected_output =
+                        <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::expected_output(
+                            spec,
+                            &projected,
+                            action,
+                            ::core::option::Option::Some(&expected_next),
+                        );
+                    if projected_output != expected_output {
+                        return Err(format!(
+                            "{}expected output: {:?}\nobserved output: {:?}\nexpected state: {:?}\nobserved state: {:?}",
+                            generated_failure_prelude(semantic_case, witness.name()),
+                            expected_output,
+                            projected_output,
+                            expected_next,
+                            projected,
+                        ));
+                    }
+                    let observed_after = generated_observe_projected_state(spec, runtime, session).await;
+                    if observed_after != expected_next {
+                        return Err(format!(
+                            "{}expected output: {:?}\nobserved output: {:?}\nexpected state: {:?}\nobserved state: {:?}",
+                            generated_failure_prelude(semantic_case, witness.name()),
+                            expected_output,
+                            projected_output,
+                            expected_next,
+                            observed_after,
+                        ));
+                    }
+                    projected = expected_next;
+                }
+                Ok(())
+            }
+
+            fn generated_case_witnesses(
+                spec: &#spec_ty,
+                semantic_case: &GeneratedSemanticCase,
+            ) -> ::std::result::Result<::std::vec::Vec<GeneratedWitnessDescriptor>, ::std::string::String> {
+                generated_runtime().block_on(async {
+                    let runtime =
+                        <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::fresh_runtime(spec).await;
+                    let mut session =
+                        <#binding_ty as ::nirvash_core::conformance::ProtocolInputWitnessBinding<#spec_ty>>::fresh_session(spec).await;
+                    generated_replay_canonical_prefix(spec, semantic_case, &runtime, &mut session).await?;
+                    let observed_before = generated_observe_projected_state(spec, &runtime, &session).await;
+                    if observed_before != semantic_case.state {
+                        return Err(format!(
+                            "{}expected output: <not-executed>\nobserved output: <not-executed>\nexpected state: {:?}\nobserved state: {:?}",
+                            generated_failure_prelude(semantic_case, "<probe-before-target>"),
+                            semantic_case.state,
+                            observed_before,
+                        ));
+                    }
+                    if let ::core::option::Option::Some(next) = semantic_case.expected_next.as_ref() {
+                        let witnesses =
+                            <#binding_ty as ::nirvash_core::conformance::ProtocolInputWitnessBinding<#spec_ty>>::positive_witnesses(
+                                spec,
+                                &session,
+                                &semantic_case.state,
+                                &semantic_case.action,
+                                next,
+                            );
+                        if witnesses.is_empty() {
+                            return Err(format!(
+                                "{}positive witnesses are empty",
+                                generated_failure_prelude(semantic_case, "<metadata>"),
+                            ));
+                        }
+                        let canonical_count =
+                            witnesses.iter().filter(|witness| witness.canonical()).count();
+                        if canonical_count != 1 {
+                            return Err(format!(
+                                "{}expected canonical witness count = 1, found {} from {:?}",
+                                generated_failure_prelude(semantic_case, "<metadata>"),
+                                canonical_count,
+                                witnesses
+                                    .iter()
+                                    .map(|witness| format!("{}(canonical={})", witness.name(), witness.canonical()))
+                                    .collect::<::std::vec::Vec<_>>(),
+                            ));
+                        }
+                        Ok(witnesses
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, witness)| GeneratedWitnessDescriptor {
+                                index,
+                                name: witness.name().to_owned(),
+                            })
+                            .collect())
+                    } else {
+                        let witnesses =
+                            <#binding_ty as ::nirvash_core::conformance::ProtocolInputWitnessBinding<#spec_ty>>::negative_witnesses(
+                                spec,
+                                &session,
+                                &semantic_case.state,
+                                &semantic_case.action,
+                            );
+                        if witnesses.is_empty() {
+                            return Err(format!(
+                                "{}negative witnesses are empty",
+                                generated_failure_prelude(semantic_case, "<metadata>"),
+                            ));
+                        }
+                        Ok(witnesses
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, witness)| GeneratedWitnessDescriptor {
+                                index,
+                                name: witness.name().to_owned(),
+                            })
+                            .collect())
+                    }
+                })
+            }
+
+            fn generated_run_case(
+                spec: ::std::rc::Rc<#spec_ty>,
+                semantic_case: GeneratedSemanticCase,
+                witness_index: usize,
+            ) -> ::std::result::Result<(), ::std::string::String> {
+                generated_runtime().block_on(async move {
+                    let runtime =
+                        <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::fresh_runtime(spec.as_ref()).await;
+                    let mut session =
+                        <#binding_ty as ::nirvash_core::conformance::ProtocolInputWitnessBinding<#spec_ty>>::fresh_session(spec.as_ref()).await;
+                    generated_replay_canonical_prefix(spec.as_ref(), &semantic_case, &runtime, &mut session).await?;
+                    let observed_before =
+                        generated_observe_projected_state(spec.as_ref(), &runtime, &session).await;
+                    if observed_before != semantic_case.state {
+                        return Err(format!(
+                            "{}expected output: <not-executed>\nobserved output: <not-executed>\nexpected state: {:?}\nobserved state: {:?}",
+                            generated_failure_prelude(&semantic_case, "<probe-before-target>"),
+                            semantic_case.state,
+                            observed_before,
+                        ));
+                    }
+                    match semantic_case.expected_next.as_ref() {
+                        ::core::option::Option::Some(next) => {
+                            let witnesses =
+                                <#binding_ty as ::nirvash_core::conformance::ProtocolInputWitnessBinding<#spec_ty>>::positive_witnesses(
+                                    spec.as_ref(),
+                                    &session,
+                                    &semantic_case.state,
+                                    &semantic_case.action,
+                                    next,
+                                );
+                            if witnesses.is_empty() {
+                                return Err(format!(
+                                    "{}positive witnesses are empty",
+                                    generated_failure_prelude(&semantic_case, "<run-positive>"),
+                                ));
+                            }
+                            let witness = witnesses.get(witness_index).ok_or_else(|| {
+                                format!(
+                                    "{}witness index {} is out of bounds for {:?}",
+                                    generated_failure_prelude(&semantic_case, "<run-positive>"),
+                                    witness_index,
+                                    witnesses
+                                        .iter()
+                                        .map(|witness| witness.name().to_owned())
+                                        .collect::<::std::vec::Vec<_>>(),
+                                )
+                            })?;
+                            let output =
+                                <#binding_ty as ::nirvash_core::conformance::ProtocolInputWitnessBinding<#spec_ty>>::execute_input(
+                                    &runtime,
+                                    &mut session,
+                                    witness.context(),
+                                    witness.input(),
+                                )
+                                .await;
+                            let projected_output =
+                                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_output(
+                                    spec.as_ref(),
+                                    &output,
+                                );
+                            let expected_output =
+                                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::expected_output(
+                                    spec.as_ref(),
+                                    &semantic_case.state,
+                                    &semantic_case.action,
+                                    ::core::option::Option::Some(next),
+                                );
+                            let observed_after =
+                                generated_observe_projected_state(spec.as_ref(), &runtime, &session).await;
+                            if projected_output != expected_output {
+                                return Err(format!(
+                                    "{}expected output: {:?}\nobserved output: {:?}\nexpected state: {:?}\nobserved state: {:?}",
+                                    generated_failure_prelude(&semantic_case, witness.name()),
+                                    expected_output,
+                                    projected_output,
+                                    next,
+                                    observed_after,
+                                ));
+                            }
+                            if observed_after != *next {
+                                return Err(format!(
+                                    "{}expected output: {:?}\nobserved output: {:?}\nexpected state: {:?}\nobserved state: {:?}",
+                                    generated_failure_prelude(&semantic_case, witness.name()),
+                                    expected_output,
+                                    projected_output,
+                                    next,
+                                    observed_after,
+                                ));
+                            }
+                            Ok(())
+                        }
+                        ::core::option::Option::None => {
+                            let witnesses =
+                                <#binding_ty as ::nirvash_core::conformance::ProtocolInputWitnessBinding<#spec_ty>>::negative_witnesses(
+                                    spec.as_ref(),
+                                    &session,
+                                    &semantic_case.state,
+                                    &semantic_case.action,
+                                );
+                            if witnesses.is_empty() {
+                                return Err(format!(
+                                    "{}negative witnesses are empty",
+                                    generated_failure_prelude(&semantic_case, "<run-negative>"),
+                                ));
+                            }
+                            let witness = witnesses.get(witness_index).ok_or_else(|| {
+                                format!(
+                                    "{}witness index {} is out of bounds for {:?}",
+                                    generated_failure_prelude(&semantic_case, "<run-negative>"),
+                                    witness_index,
+                                    witnesses
+                                        .iter()
+                                        .map(|witness| witness.name().to_owned())
+                                        .collect::<::std::vec::Vec<_>>(),
+                                )
+                            })?;
+                            let output =
+                                <#binding_ty as ::nirvash_core::conformance::ProtocolInputWitnessBinding<#spec_ty>>::execute_input(
+                                    &runtime,
+                                    &mut session,
+                                    witness.context(),
+                                    witness.input(),
+                                )
+                                .await;
+                            let projected_output =
+                                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_output(
+                                    spec.as_ref(),
+                                    &output,
+                                );
+                            let expected_output =
+                                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::expected_output(
+                                    spec.as_ref(),
+                                    &semantic_case.state,
+                                    &semantic_case.action,
+                                    ::core::option::Option::None,
+                                );
+                            let observed_after =
+                                generated_observe_projected_state(spec.as_ref(), &runtime, &session).await;
+                            if projected_output != expected_output {
+                                return Err(format!(
+                                    "{}expected output: {:?}\nobserved output: {:?}\nexpected state: {:?}\nobserved state: {:?}",
+                                    generated_failure_prelude(&semantic_case, witness.name()),
+                                    expected_output,
+                                    projected_output,
+                                    semantic_case.state,
+                                    observed_after,
+                                ));
+                            }
+                            if observed_after != semantic_case.state {
+                                return Err(format!(
+                                    "{}expected output: {:?}\nobserved output: {:?}\nexpected state: {:?}\nobserved state: {:?}",
+                                    generated_failure_prelude(&semantic_case, witness.name()),
+                                    expected_output,
+                                    projected_output,
+                                    semantic_case.state,
+                                    observed_after,
+                                ));
+                            }
+                            Ok(())
+                        }
+                    }
+                })
+            }
+
+            pub(super) fn generated_dynamic_tests() -> ::std::vec::Vec<::nirvash_core::conformance::DynamicTestCase> {
+                let specs = generated_cases();
+                let total = specs.len();
+                let mut tests: ::std::vec::Vec<::nirvash_core::conformance::DynamicTestCase> =
+                    ::std::vec::Vec::new();
+                for (index, spec) in specs.into_iter().enumerate() {
+                    let spec_case_label = generated_spec_case_label(index, total);
+                    let spec = ::std::rc::Rc::new(spec);
+                    for semantic_case in generated_semantic_cases(&spec_case_label, spec.as_ref()) {
+                        match generated_case_witnesses(spec.as_ref(), &semantic_case) {
+                            Ok(witnesses) => {
+                                for witness in witnesses {
+                                    let spec = spec.clone();
+                                    let semantic_case = semantic_case.clone();
+                                    let name = generated_test_name(&semantic_case, &witness);
+                                    tests.push(::nirvash_core::conformance::DynamicTestCase::new(
+                                        name,
+                                        move || {
+                                            generated_run_case(
+                                                spec.clone(),
+                                                semantic_case.clone(),
+                                                witness.index,
+                                            )
+                                        },
+                                    ));
+                                }
+                            }
+                            Err(message) => {
+                                let name = generated_setup_failure_name(&semantic_case);
+                                tests.push(::nirvash_core::conformance::DynamicTestCase::new(
+                                    name,
+                                    move || Err(message.clone()),
+                                ));
+                            }
+                        }
+                    }
+                }
+                tests
+            }
+        }
+
+        #[cfg(test)]
+        #[doc(hidden)]
+        fn #provider_build_ident() -> ::std::vec::Vec<::nirvash_core::conformance::DynamicTestCase> {
+            #module_ident::generated_dynamic_tests()
+        }
+
+        #[cfg(test)]
+        ::nirvash_core::inventory::submit! {
+            ::nirvash_core::conformance::RegisteredCodeWitnessTestProvider {
+                build: #provider_build_ident,
             }
         }
     })

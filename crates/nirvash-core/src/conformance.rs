@@ -1,3 +1,5 @@
+use std::{fmt::Debug, panic::AssertUnwindSafe, process};
+
 pub use crate::system::{
     ActionApplier, ModelCase, ModelCaseSource, StateObserver, TransitionSystem,
 };
@@ -5,9 +7,9 @@ pub use crate::{ModelChecker, ReachableGraphSnapshot};
 
 /// Spec-side contract for replaying runtime behavior against a transition system.
 pub trait ProtocolConformanceSpec: TransitionSystem {
-    type ExpectedOutput: Clone + std::fmt::Debug + PartialEq + Eq;
-    type ObservedState: Clone + std::fmt::Debug;
-    type ObservedOutput: Clone + std::fmt::Debug;
+    type ExpectedOutput: Clone + Debug + PartialEq + Eq;
+    type ObservedState: Clone + Debug;
+    type ObservedOutput: Clone + Debug;
 
     fn expected_output(
         &self,
@@ -34,4 +36,284 @@ where
     async fn fresh_runtime(spec: &Spec) -> Self::Runtime;
 
     fn context(spec: &Spec) -> Self::Context;
+}
+
+/// Concrete input that should follow a valid abstract transition.
+#[derive(Debug, Clone)]
+pub struct PositiveWitness<Context, Input> {
+    name: String,
+    context: Context,
+    input: Input,
+    canonical: bool,
+}
+
+impl<Context, Input> PositiveWitness<Context, Input> {
+    /// Creates a named positive witness with concrete context and input.
+    pub fn new(name: impl Into<String>, context: Context, input: Input) -> Self {
+        Self {
+            name: name.into(),
+            context,
+            input,
+            canonical: false,
+        }
+    }
+
+    /// Marks whether this witness is the canonical replay choice for prefix execution.
+    pub fn with_canonical(mut self, canonical: bool) -> Self {
+        self.canonical = canonical;
+        self
+    }
+
+    /// Returns the stable witness label used in test names and failures.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the concrete runtime context for the witness.
+    pub fn context(&self) -> &Context {
+        &self.context
+    }
+
+    /// Returns the concrete runtime input for the witness.
+    pub fn input(&self) -> &Input {
+        &self.input
+    }
+
+    /// Returns whether this witness is used for canonical prefix replay.
+    pub fn canonical(&self) -> bool {
+        self.canonical
+    }
+}
+
+/// Concrete input that should not follow an abstract transition.
+#[derive(Debug, Clone)]
+pub struct NegativeWitness<Context, Input> {
+    name: String,
+    context: Context,
+    input: Input,
+}
+
+impl<Context, Input> NegativeWitness<Context, Input> {
+    /// Creates a named negative witness with concrete context and input.
+    pub fn new(name: impl Into<String>, context: Context, input: Input) -> Self {
+        Self {
+            name: name.into(),
+            context,
+            input,
+        }
+    }
+
+    /// Returns the stable witness label used in test names and failures.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the concrete runtime context for the witness.
+    pub fn context(&self) -> &Context {
+        &self.context
+    }
+
+    /// Returns the concrete runtime input for the witness.
+    pub fn input(&self) -> &Input {
+        &self.input
+    }
+}
+
+/// Binding that can materialize concrete runtime inputs for abstract conformance actions.
+#[allow(async_fn_in_trait)]
+pub trait ProtocolInputWitnessBinding<Spec>: ProtocolRuntimeBinding<Spec>
+where
+    Spec: ProtocolConformanceSpec,
+{
+    type Input: Clone + Debug;
+    type Session;
+
+    /// Creates a fresh session that can carry probe identity or other witness-local state.
+    async fn fresh_session(spec: &Spec) -> Self::Session;
+
+    /// Returns the concrete inputs that should realize a valid abstract transition.
+    fn positive_witnesses(
+        spec: &Spec,
+        session: &Self::Session,
+        prev: &Spec::State,
+        action: &Spec::Action,
+        next: &Spec::State,
+    ) -> Vec<PositiveWitness<Self::Context, Self::Input>>;
+
+    /// Returns the concrete inputs that should keep the abstract transition rejected.
+    fn negative_witnesses(
+        spec: &Spec,
+        session: &Self::Session,
+        prev: &Spec::State,
+        action: &Spec::Action,
+    ) -> Vec<NegativeWitness<Self::Context, Self::Input>>;
+
+    /// Executes a concrete witness input against the runtime.
+    async fn execute_input(
+        runtime: &Self::Runtime,
+        session: &mut Self::Session,
+        context: &Self::Context,
+        input: &Self::Input,
+    ) -> Spec::ObservedOutput;
+
+    /// Returns the probe context used to observe the authoritative runtime state.
+    fn probe_context(session: &Self::Session) -> Self::Context;
+}
+
+/// Dynamically built test case used by the witness harness.
+pub struct DynamicTestCase {
+    name: String,
+    run: Box<dyn Fn() -> Result<(), String>>,
+}
+
+impl DynamicTestCase {
+    /// Creates a dynamically named test case.
+    pub fn new<F>(name: impl Into<String>, run: F) -> Self
+    where
+        F: Fn() -> Result<(), String> + 'static,
+    {
+        Self {
+            name: name.into(),
+            run: Box::new(run),
+        }
+    }
+
+    /// Returns the externally visible test name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn execute(&self) -> Result<(), String> {
+        (self.run)()
+    }
+}
+
+/// Inventory entry that contributes witness tests to the custom harness.
+pub struct RegisteredCodeWitnessTestProvider {
+    pub build: fn() -> Vec<DynamicTestCase>,
+}
+
+crate::inventory::collect!(RegisteredCodeWitnessTestProvider);
+
+#[derive(Debug, Default)]
+struct WitnessHarnessArgs {
+    filter: Option<String>,
+    exact: bool,
+    list: bool,
+}
+
+impl WitnessHarnessArgs {
+    fn matches(&self, name: &str) -> bool {
+        let Some(filter) = &self.filter else {
+            return true;
+        };
+        if self.exact {
+            name == filter
+        } else {
+            name.contains(filter)
+        }
+    }
+}
+
+fn parse_witness_harness_args() -> WitnessHarnessArgs {
+    let mut parsed = WitnessHarnessArgs::default();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--list" => parsed.list = true,
+            "--exact" => parsed.exact = true,
+            "--nocapture" | "--quiet" | "-q" | "--show-output" | "--ignored"
+            | "--include-ignored" => {}
+            "--test-threads" | "--skip" | "--format" | "--color" => {
+                let _ = args.next();
+            }
+            _ if arg.starts_with("--test-threads=")
+                || arg.starts_with("--skip=")
+                || arg.starts_with("--format=")
+                || arg.starts_with("--color=") => {}
+            _ if arg.starts_with('-') => {}
+            _ if parsed.filter.is_none() => parsed.filter = Some(arg),
+            _ => {}
+        }
+    }
+    parsed
+}
+
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "dynamic witness test panicked with a non-string payload".to_owned()
+    }
+}
+
+fn collect_dynamic_witness_tests() -> Vec<DynamicTestCase> {
+    let mut tests = crate::inventory::iter::<RegisteredCodeWitnessTestProvider>
+        .into_iter()
+        .flat_map(|provider| (provider.build)())
+        .collect::<Vec<_>>();
+    tests.sort_by(|left, right| left.name.cmp(&right.name));
+    tests
+}
+
+/// Runs all registered witness test providers with a small libtest-compatible CLI surface.
+pub fn run_registered_code_witness_tests() {
+    let args = parse_witness_harness_args();
+    let tests = collect_dynamic_witness_tests();
+    let selected = tests
+        .into_iter()
+        .filter(|test| args.matches(test.name()))
+        .collect::<Vec<_>>();
+
+    if args.list {
+        for test in &selected {
+            println!("{}: test", test.name());
+        }
+        println!();
+        println!("{} tests, 0 benchmarks", selected.len());
+        return;
+    }
+
+    println!("running {} tests", selected.len());
+    let mut failures = Vec::new();
+    for test in &selected {
+        print!("test {} ... ", test.name());
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| test.execute()));
+        match outcome {
+            Ok(Ok(())) => println!("ok"),
+            Ok(Err(message)) => {
+                println!("FAILED");
+                failures.push((test.name().to_owned(), message));
+            }
+            Err(payload) => {
+                println!("FAILED");
+                failures.push((test.name().to_owned(), panic_payload_to_string(payload)));
+            }
+        }
+    }
+
+    if failures.is_empty() {
+        println!();
+        println!(
+            "test result: ok. {} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
+            selected.len()
+        );
+        return;
+    }
+
+    println!();
+    println!("failures:");
+    for (name, message) in &failures {
+        println!("---- {name} ----");
+        println!("{message}");
+        println!();
+    }
+    println!(
+        "test result: FAILED. {} passed; {} failed; 0 ignored; 0 measured; 0 filtered out",
+        selected.len().saturating_sub(failures.len()),
+        failures.len()
+    );
+    process::exit(101);
 }

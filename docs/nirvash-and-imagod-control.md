@@ -68,7 +68,8 @@ flowchart TD
 - spec の正本は `TransitionSystem::initial_states()`、`TransitionSystem::actions()`、`TransitionSystem::transition()` です。`successors()` はそこから導出されます。
 - `Signature` は helper enum/newtype や projection 型の bounded domain 付与にだけ使います。
 - `formal_tests` は spec 単体を検査します。
-- `code_tests` は `nirvash_core::conformance::ProtocolConformanceSpec` と `ProtocolRuntimeBinding` を使って runtime を生成し、`ActionApplier` / `StateObserver` 経由で spec の `transition` と `expected_output` を比較します。現在の `command_protocol` binding は `OperationManager` に限定され、router 側の request validation / event sequencing はこの比較対象に含みません。
+- `code_tests` は `nirvash_core::conformance::ProtocolConformanceSpec` と `ProtocolRuntimeBinding` を使って grouped な runtime conformance を生成し、`ActionApplier` / `StateObserver` 経由で spec の `transition` と `expected_output` を比較します。
+- `code_witness_tests` は `ProtocolInputWitnessBinding` で positive / negative witness を受け取り、reachable graph から semantic case を自動検出して witness 単位の strict test を custom harness で列挙します。現在の `command_protocol` binding は `OperationManager` に限定され、router 側の request validation / event sequencing はこの比較対象に含みません。
 - shared contract は `imago-protocol`、conformance API は `nirvash-core` にあり、spec 本体は `imagod-spec`、runtime binding と `code_tests` 実行は runtime crate の integration test に置きます。
 
 ## imagod-control のシステム

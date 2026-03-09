@@ -8,6 +8,11 @@ publish.workspace = true
 [lib]
 proc-macro = true
 
+[[test]]
+name = "code_witness_history_names"
+path = "tests/code_witness_history_names.rs"
+harness = false
+
 [dependencies]
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
