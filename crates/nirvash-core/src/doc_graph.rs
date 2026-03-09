@@ -2,7 +2,10 @@ use std::{collections::BTreeMap, collections::BTreeSet, fmt::Debug};
 
 use serde::{Deserialize, Serialize};
 
-use crate::StatePredicate;
+use crate::{
+    RelationFieldSchema, RelationFieldSummary, StatePredicate, collect_relational_state_schema,
+    collect_relational_state_summary,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReachableGraphEdge<A> {
@@ -24,6 +27,8 @@ pub struct ReachableGraphSnapshot<S, A> {
 pub struct DocGraphState {
     pub summary: String,
     pub full: String,
+    pub relation_fields: Vec<RelationFieldSummary>,
+    pub relation_schema: Vec<RelationFieldSchema>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,12 +148,30 @@ inventory::collect!(RegisteredDocGraphProvider);
 
 pub fn summarize_doc_graph_state<T>(state: &T) -> DocGraphState
 where
-    T: Debug,
+    T: Debug + 'static,
 {
     let full = format!("{state:#?}");
+    let relation_fields = collect_relational_state_summary(state);
+    let relation_schema = collect_relational_state_schema::<T>();
+    let base_summary = summarize_doc_graph_text(&full);
+    let summary = if relation_fields.is_empty() {
+        base_summary
+    } else {
+        summarize_doc_graph_text(&format!(
+            "{}\n{}",
+            relation_fields
+                .iter()
+                .map(|field| field.notation.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            base_summary
+        ))
+    };
     DocGraphState {
-        summary: summarize_doc_graph_text(&full),
+        summary,
         full,
+        relation_fields,
+        relation_schema,
     }
 }
 
@@ -443,6 +466,12 @@ fn summarize_single_edge_action_label(label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::any::{Any, TypeId};
+
+    use crate::{
+        BoundedDomain, RegisteredRelationalState, RelAtom, RelSet, Relation2, RelationField,
+        RelationalState, Signature,
+    };
 
     #[test]
     fn summarize_doc_graph_state_preserves_full_and_shortens_summary() {
@@ -467,6 +496,96 @@ mod tests {
         assert!(summarized.summary.len() <= 243);
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum DemoAtom {
+        Root,
+        Dependency,
+    }
+
+    impl Signature for DemoAtom {
+        fn bounded_domain() -> BoundedDomain<Self> {
+            BoundedDomain::new(vec![Self::Root, Self::Dependency])
+        }
+    }
+
+    impl RelAtom for DemoAtom {
+        fn rel_index(&self) -> usize {
+            match self {
+                Self::Root => 0,
+                Self::Dependency => 1,
+            }
+        }
+
+        fn rel_from_index(index: usize) -> Option<Self> {
+            match index {
+                0 => Some(Self::Root),
+                1 => Some(Self::Dependency),
+                _ => None,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct RelationalDemoState {
+        requires: Relation2<DemoAtom, DemoAtom>,
+        allowed: RelSet<DemoAtom>,
+    }
+
+    impl RelationalState for RelationalDemoState {
+        fn relation_schema() -> Vec<crate::RelationFieldSchema> {
+            vec![
+                <Relation2<DemoAtom, DemoAtom> as RelationField>::relation_schema("requires"),
+                <RelSet<DemoAtom> as RelationField>::relation_schema("allowed"),
+            ]
+        }
+
+        fn relation_summary(&self) -> Vec<crate::RelationFieldSummary> {
+            vec![
+                self.requires.relation_summary("requires"),
+                self.allowed.relation_summary("allowed"),
+            ]
+        }
+    }
+
+    fn relational_demo_type_id() -> TypeId {
+        TypeId::of::<RelationalDemoState>()
+    }
+
+    fn relational_demo_schema() -> Vec<crate::RelationFieldSchema> {
+        <RelationalDemoState as RelationalState>::relation_schema()
+    }
+
+    fn relational_demo_summary(value: &dyn Any) -> Vec<crate::RelationFieldSummary> {
+        value
+            .downcast_ref::<RelationalDemoState>()
+            .expect("registered relational state downcast")
+            .relation_summary()
+    }
+
+    inventory::submit! {
+        RegisteredRelationalState {
+            state_type_id: relational_demo_type_id,
+            relation_schema: relational_demo_schema,
+            relation_summary: relational_demo_summary,
+        }
+    }
+
+    #[test]
+    fn summarize_doc_graph_state_captures_relation_schema_and_notation() {
+        let state = RelationalDemoState {
+            requires: Relation2::from_pairs([(DemoAtom::Root, DemoAtom::Dependency)]),
+            allowed: RelSet::from_items([DemoAtom::Root]),
+        };
+
+        let summarized = summarize_doc_graph_state(&state);
+
+        assert!(summarized.summary.contains("requires = Root->Dependency"));
+        assert_eq!(summarized.relation_fields.len(), 2);
+        assert_eq!(summarized.relation_schema.len(), 2);
+        assert_eq!(summarized.relation_schema[0].name, "requires");
+        assert_eq!(summarized.relation_schema[1].name, "allowed");
+    }
+
     #[test]
     fn summarize_doc_graph_text_truncates_large_payloads() {
         let text = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10";
@@ -482,6 +601,8 @@ mod tests {
         DocGraphState {
             summary: name.to_owned(),
             full: name.to_owned(),
+            relation_fields: Vec::new(),
+            relation_schema: Vec::new(),
         }
     }
 

@@ -340,11 +340,16 @@ fn deterministic_session_cycle_allowed(
     prev: &ImagodSystemState,
     action: &ImagodSystemAction,
 ) -> bool {
-    match (prev.transport.active_sessions.get(), action) {
-        (0, ImagodSystemAction::Session(SessionTransportAction::AcceptSession)) => true,
-        (1, ImagodSystemAction::Session(SessionTransportAction::JoinSession)) => true,
-        _ => false,
-    }
+    matches!(
+        (prev.transport.active_sessions.get(), action),
+        (
+            0,
+            ImagodSystemAction::Session(SessionTransportAction::AcceptSession)
+        ) | (
+            1,
+            ImagodSystemAction::Session(SessionTransportAction::JoinSession)
+        )
+    )
 }
 
 fn startup_command_non_session_action_allowed(action: &ImagodSystemAction) -> bool {
@@ -373,34 +378,34 @@ fn startup_command_session_progress_allowed(
     prev: &ImagodSystemState,
     action: &ImagodSystemAction,
 ) -> bool {
-    match (
-        prev.transport.active_sessions.get(),
-        prev.transport.last_outcome,
-        action,
-    ) {
-        (0, _, ImagodSystemAction::Session(SessionTransportAction::AcceptSession)) => true,
+    matches!(
         (
+            prev.transport.active_sessions.get(),
+            prev.transport.last_outcome,
+            action,
+        ),
+        (
+            0,
+            _,
+            ImagodSystemAction::Session(SessionTransportAction::AcceptSession)
+        ) | (
             1,
             SessionOutcome::Accepted,
             ImagodSystemAction::Session(SessionTransportAction::AcceptSession),
-        ) => true,
-        (
+        ) | (
             1,
             SessionOutcome::Joined,
             ImagodSystemAction::Session(SessionTransportAction::JoinSession),
-        ) => true,
-        (
+        ) | (
             2,
             SessionOutcome::Accepted,
             ImagodSystemAction::Session(SessionTransportAction::RejectTooMany),
-        ) => true,
-        (
+        ) | (
             2,
             SessionOutcome::RejectedTooMany,
             ImagodSystemAction::Session(SessionTransportAction::JoinSession),
-        ) => true,
-        _ => false,
-    }
+        )
+    )
 }
 
 fn deploy_runtime_serving_non_session_action_allowed(action: &ImagodSystemAction) -> bool {
@@ -495,11 +500,16 @@ fn shutdown_session_progress_allowed(
         return false;
     }
 
-    match (prev.transport.active_sessions.get(), action) {
-        (0, ImagodSystemAction::Session(SessionTransportAction::RejectTooMany)) => true,
-        (1 | 2, ImagodSystemAction::Session(SessionTransportAction::JoinSession)) => true,
-        _ => false,
-    }
+    matches!(
+        (prev.transport.active_sessions.get(), action),
+        (
+            0,
+            ImagodSystemAction::Session(SessionTransportAction::RejectTooMany)
+        ) | (
+            1 | 2,
+            ImagodSystemAction::Session(SessionTransportAction::JoinSession)
+        )
+    )
 }
 
 fn state_respects_spec<T>(spec: &T, state: &T::State) -> bool

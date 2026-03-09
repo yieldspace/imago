@@ -7,6 +7,7 @@ mod fairness;
 mod ltl;
 mod predicate;
 pub mod registry;
+mod relation;
 mod symmetry;
 mod system;
 mod trace;
@@ -34,6 +35,11 @@ pub use fairness::Fairness;
 pub use inventory;
 pub use ltl::Ltl;
 pub use predicate::{ActionConstraint, StateConstraint, StatePredicate, StepPredicate};
+pub use relation::{
+    RegisteredRelationalState, RelAtom, RelSet, Relation2, RelationError, RelationField,
+    RelationFieldKind, RelationFieldSchema, RelationFieldSummary, RelationalState,
+    collect_relational_state_schema, collect_relational_state_summary,
+};
 pub use symmetry::SymmetryReducer;
 pub use system::{
     ActionApplier, ModelCase, ModelCaseSource, StateObserver, SystemComposition, TemporalSpec,

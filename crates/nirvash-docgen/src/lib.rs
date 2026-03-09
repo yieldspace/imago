@@ -1057,6 +1057,11 @@ fn render_fragment(spec: &SpecDoc) -> String {
     if !spec.doc_graphs.is_empty() {
         output.push_str(&render_state_graph_section(spec));
         output.push_str("\n\n");
+        let relation_schema = render_relation_schema_section(spec);
+        if !relation_schema.is_empty() {
+            output.push_str(&relation_schema);
+            output.push_str("\n\n");
+        }
     }
 
     let mermaid = render_meta_model_mermaid(spec);
@@ -1120,6 +1125,14 @@ fn render_state_graph_section(spec: &SpecDoc) -> String {
         )));
         output.push_str("\n\n<details><summary>Full State Legend</summary>\n\n");
         for state in &reduced_graph.states {
+            if !state.state.relation_fields.is_empty() {
+                output.push_str("Relations:\n\n```text\n");
+                for relation in &state.state.relation_fields {
+                    output.push_str(&relation.notation);
+                    output.push('\n');
+                }
+                output.push_str("```\n\n");
+            }
             output.push_str(&format!(
                 "#### S{}\n\n```text\n{}\n```\n\n",
                 state.original_index, state.state.full
@@ -1165,7 +1178,10 @@ fn render_state_graph_mermaid(
 
     for state in &graph.states {
         let label = render_state_node_label(graph, state);
-        output.push_str(&format!("state \"{}\" as S{}\n", label, state.original_index));
+        output.push_str(&format!(
+            "state \"{}\" as S{}\n",
+            label, state.original_index
+        ));
     }
 
     for state in &graph.states {
@@ -1230,7 +1246,11 @@ fn state_display_lines(
         return delta;
     }
 
-    compact_state_lines(&state.state.full, &state.state.summary)
+    compact_state_lines(
+        &state.state.full,
+        &state.state.summary,
+        &state.state.relation_fields,
+    )
 }
 
 fn preferred_predecessor(graph: &nirvash_core::ReducedDocGraph, target: usize) -> Option<usize> {
@@ -1328,8 +1348,22 @@ fn is_structural_debug_line(line: &str) -> bool {
             && !trimmed.contains(':'))
 }
 
-fn compact_state_lines(full: &str, summary: &str) -> Vec<String> {
+fn compact_state_lines(
+    full: &str,
+    summary: &str,
+    relation_fields: &[nirvash_core::RelationFieldSummary],
+) -> Vec<String> {
     const MAX_NODE_DETAIL_LINES: usize = 2;
+
+    let relation_lines = relation_fields
+        .iter()
+        .map(|field| simplify_state_line(&field.notation))
+        .filter(|line| !line.is_empty())
+        .take(MAX_NODE_DETAIL_LINES)
+        .collect::<Vec<_>>();
+    if !relation_lines.is_empty() {
+        return relation_lines;
+    }
 
     let from_full = normalized_debug_lines(full)
         .into_iter()
@@ -1370,6 +1404,129 @@ fn compact_state_lines(full: &str, summary: &str) -> Vec<String> {
         .into_iter()
         .take(MAX_NODE_DETAIL_LINES)
         .collect()
+}
+
+fn render_relation_schema_section(spec: &SpecDoc) -> String {
+    let schemas = collect_relation_schemas(spec);
+    if schemas.is_empty() {
+        return String::new();
+    }
+
+    let set_relations = schemas
+        .iter()
+        .filter(|schema| schema.kind == nirvash_core::RelationFieldKind::Set)
+        .collect::<Vec<_>>();
+    let binary_relations = schemas
+        .iter()
+        .filter(|schema| schema.kind == nirvash_core::RelationFieldKind::Binary)
+        .collect::<Vec<_>>();
+
+    let mut output = String::from("## Relation Schema\n\n");
+    if !binary_relations.is_empty() {
+        output.push_str(&render_mermaid_block(&render_relation_schema_mermaid(
+            &binary_relations,
+        )));
+        output.push_str("\n\n");
+    }
+    if !set_relations.is_empty() {
+        output.push_str("Set relations:\n\n");
+        for schema in set_relations {
+            output.push_str(&format!(
+                "- `{}`: set of `{}`\n",
+                schema.name, schema.from_type
+            ));
+        }
+        output.push('\n');
+    }
+    if !binary_relations.is_empty() {
+        output.push_str("Binary relations:\n\n");
+        for schema in binary_relations {
+            output.push_str(&format!(
+                "- `{}`: `{}` -> `{}`\n",
+                schema.name,
+                schema.from_type,
+                schema.to_type.as_deref().unwrap_or("?")
+            ));
+        }
+    }
+    output
+}
+
+fn collect_relation_schemas(spec: &SpecDoc) -> Vec<nirvash_core::RelationFieldSchema> {
+    let mut seen = BTreeSet::new();
+    let mut schemas = Vec::new();
+    for case in &spec.doc_graphs {
+        for state in &case.graph.states {
+            for schema in &state.relation_schema {
+                let key = (
+                    schema.name.clone(),
+                    schema.kind,
+                    schema.from_type.clone(),
+                    schema.to_type.clone(),
+                );
+                if seen.insert(key) {
+                    schemas.push(schema.clone());
+                }
+            }
+        }
+    }
+    schemas.sort_by(|left, right| left.name.cmp(&right.name));
+    schemas
+}
+
+fn render_relation_schema_mermaid(schemas: &[&nirvash_core::RelationFieldSchema]) -> String {
+    let mut type_ids = BTreeMap::new();
+    let mut output = String::from("erDiagram\n");
+    for schema in schemas {
+        type_ids
+            .entry(schema.from_type.clone())
+            .or_insert_with(|| mermaid_entity_id(&schema.from_type));
+        if let Some(to_type) = &schema.to_type {
+            type_ids
+                .entry(to_type.clone())
+                .or_insert_with(|| mermaid_entity_id(to_type));
+        }
+    }
+    for (type_name, entity_id) in &type_ids {
+        output.push_str(&format!(
+            "    {entity_id} {{\n        string atom \"{}\"\n    }}\n",
+            escape_mermaid_label(type_name)
+        ));
+    }
+    for schema in schemas {
+        let from = type_ids
+            .get(&schema.from_type)
+            .expect("from type id exists");
+        let to = type_ids
+            .get(
+                schema
+                    .to_type
+                    .as_ref()
+                    .expect("binary relation target type exists"),
+            )
+            .expect("to type id exists");
+        output.push_str(&format!(
+            "    {from} }}o--o{{ {to} : \"{}\"\n",
+            escape_mermaid_edge_label(&schema.name)
+        ));
+    }
+    output
+}
+
+fn mermaid_entity_id(type_name: &str) -> String {
+    let mut id = String::new();
+    for character in type_name.chars() {
+        if character.is_ascii_alphanumeric() {
+            id.push(character.to_ascii_uppercase());
+        } else {
+            id.push('_');
+        }
+    }
+    if id.is_empty() {
+        "RELATION_ENTITY".to_owned()
+    } else {
+        id
+    }
 }
 
 fn simplify_state_line(line: &str) -> String {
@@ -1822,10 +1979,14 @@ impl TransitionSystem for DuplicateSpec {
                         nirvash_core::DocGraphState {
                             summary: "Idle".to_owned(),
                             full: "Idle".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
                         },
                         nirvash_core::DocGraphState {
                             summary: "Busy".to_owned(),
                             full: "Busy".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
                         },
                     ],
                     edges: vec![
@@ -1874,6 +2035,92 @@ impl TransitionSystem for DuplicateSpec {
     }
 
     #[test]
+    fn render_fragment_includes_relation_schema_and_relation_notation() {
+        let fragment = render_fragment(&SpecDoc {
+            kind: Some(SpecKind::Subsystem),
+            full_path: vec!["demo".to_owned(), "RelationalSpec".to_owned()],
+            tail_ident: "RelationalSpec".to_owned(),
+            state_ty: "RelationalState".to_owned(),
+            action_ty: "RelationalAction".to_owned(),
+            model_cases: None,
+            subsystems: Vec::new(),
+            registrations: BTreeMap::new(),
+            doc_graphs: vec![nirvash_core::DocGraphCase {
+                label: "default".to_owned(),
+                graph: nirvash_core::DocGraphSnapshot {
+                    states: vec![
+                        nirvash_core::DocGraphState {
+                            summary: "unused".to_owned(),
+                            full: "unused".to_owned(),
+                            relation_fields: vec![
+                                nirvash_core::RelationFieldSummary {
+                                    name: "requires".to_owned(),
+                                    notation: "requires = Root->Dependency".to_owned(),
+                                },
+                                nirvash_core::RelationFieldSummary {
+                                    name: "allowed".to_owned(),
+                                    notation: "allowed = Root".to_owned(),
+                                },
+                            ],
+                            relation_schema: vec![
+                                nirvash_core::RelationFieldSchema {
+                                    name: "requires".to_owned(),
+                                    kind: nirvash_core::RelationFieldKind::Binary,
+                                    from_type: "PluginAtom".to_owned(),
+                                    to_type: Some("PluginAtom".to_owned()),
+                                },
+                                nirvash_core::RelationFieldSchema {
+                                    name: "allowed".to_owned(),
+                                    kind: nirvash_core::RelationFieldKind::Set,
+                                    from_type: "PluginAtom".to_owned(),
+                                    to_type: None,
+                                },
+                            ],
+                        },
+                        nirvash_core::DocGraphState {
+                            summary: "unused-next".to_owned(),
+                            full: "unused-next".to_owned(),
+                            relation_fields: vec![nirvash_core::RelationFieldSummary {
+                                name: "requires".to_owned(),
+                                notation: "requires = Root->Dependency".to_owned(),
+                            }],
+                            relation_schema: vec![nirvash_core::RelationFieldSchema {
+                                name: "requires".to_owned(),
+                                kind: nirvash_core::RelationFieldKind::Binary,
+                                from_type: "PluginAtom".to_owned(),
+                                to_type: Some("PluginAtom".to_owned()),
+                            }],
+                        },
+                    ],
+                    edges: vec![
+                        vec![nirvash_core::DocGraphEdge {
+                            label: "Advance".to_owned(),
+                            target: 1,
+                        }],
+                        Vec::new(),
+                    ],
+                    initial_indices: vec![0],
+                    deadlocks: vec![],
+                    truncated: false,
+                    stutter_omitted: false,
+                    focus_indices: Vec::new(),
+                    reduction: nirvash_core::DocGraphReductionMode::BoundaryPaths,
+                    max_edge_actions_in_label: 2,
+                },
+            }],
+        });
+
+        assert!(fragment.contains("## Relation Schema"));
+        assert!(fragment.contains("erDiagram"));
+        assert!(fragment.contains("`requires`: `PluginAtom` -> `PluginAtom`"));
+        assert!(fragment.contains("`allowed`: set of `PluginAtom`"));
+        assert!(
+            fragment.contains("requires = Root-&gt;Dependency")
+                || fragment.contains("requires = Root->Dependency")
+        );
+    }
+
+    #[test]
     fn render_state_graph_quotes_edge_labels_with_parentheses() {
         let spec = SpecDoc {
             kind: Some(SpecKind::Subsystem),
@@ -1891,10 +2138,14 @@ impl TransitionSystem for DuplicateSpec {
                 nirvash_core::DocGraphState {
                     summary: "Init".to_owned(),
                     full: "Init".to_owned(),
+                    relation_fields: Vec::new(),
+                    relation_schema: Vec::new(),
                 },
                 nirvash_core::DocGraphState {
                     summary: "Next".to_owned(),
                     full: "Next".to_owned(),
+                    relation_fields: Vec::new(),
+                    relation_schema: Vec::new(),
                 },
             ],
             edges: vec![
@@ -1938,6 +2189,8 @@ impl TransitionSystem for DuplicateSpec {
                     state: nirvash_core::DocGraphState {
                         summary: "Init".to_owned(),
                         full: "Init".to_owned(),
+                        relation_fields: Vec::new(),
+                        relation_schema: Vec::new(),
                     },
                     is_initial: true,
                     is_deadlock: false,
@@ -1947,6 +2200,8 @@ impl TransitionSystem for DuplicateSpec {
                     state: nirvash_core::DocGraphState {
                         summary: "Stopped".to_owned(),
                         full: "Stopped".to_owned(),
+                        relation_fields: Vec::new(),
+                        relation_schema: Vec::new(),
                     },
                     is_initial: false,
                     is_deadlock: true,
@@ -1987,10 +2242,14 @@ impl TransitionSystem for DuplicateSpec {
                 nirvash_core::DocGraphState {
                     summary: "State { phase: Booting, unchanged: false }".to_owned(),
                     full: "State {\n    phase: Booting,\n    unchanged: false,\n}\n".to_owned(),
+                    relation_fields: Vec::new(),
+                    relation_schema: Vec::new(),
                 },
                 nirvash_core::DocGraphState {
                     summary: "State { phase: Listening, unchanged: false }".to_owned(),
                     full: "State {\n    phase: Listening,\n    unchanged: false,\n}\n".to_owned(),
+                    relation_fields: Vec::new(),
+                    relation_schema: Vec::new(),
                 },
             ],
             edges: vec![
@@ -2036,10 +2295,14 @@ impl TransitionSystem for DuplicateSpec {
                 nirvash_core::DocGraphState {
                     summary: "Init".to_owned(),
                     full: "Init".to_owned(),
+                    relation_fields: Vec::new(),
+                    relation_schema: Vec::new(),
                 },
                 nirvash_core::DocGraphState {
                     summary: "Running".to_owned(),
                     full: "Running".to_owned(),
+                    relation_fields: Vec::new(),
+                    relation_schema: Vec::new(),
                 },
             ],
             edges: vec![
@@ -2083,6 +2346,8 @@ impl TransitionSystem for DuplicateSpec {
                     state: nirvash_core::DocGraphState {
                         summary: "S0".to_owned(),
                         full: "S0".to_owned(),
+                        relation_fields: Vec::new(),
+                        relation_schema: Vec::new(),
                     },
                     is_initial: true,
                     is_deadlock: false,
@@ -2092,6 +2357,8 @@ impl TransitionSystem for DuplicateSpec {
                     state: nirvash_core::DocGraphState {
                         summary: "S1".to_owned(),
                         full: "S1".to_owned(),
+                        relation_fields: Vec::new(),
+                        relation_schema: Vec::new(),
                     },
                     is_initial: false,
                     is_deadlock: false,
@@ -2146,14 +2413,20 @@ impl TransitionSystem for DuplicateSpec {
                         nirvash_core::DocGraphState {
                             summary: "Init".to_owned(),
                             full: "Init".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
                         },
                         nirvash_core::DocGraphState {
                             summary: "Middle".to_owned(),
                             full: "Middle".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
                         },
                         nirvash_core::DocGraphState {
                             summary: "Done".to_owned(),
                             full: "Done".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
                         },
                     ],
                     edges: vec![

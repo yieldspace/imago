@@ -6,6 +6,7 @@
 ## What It Provides
 
 - `Signature`: bounded helper 型に有限 domain と値 invariant を与える trait
+- `RelAtom` / `RelSet<T>` / `Relation2<A, B>`: Alloy 風の unary / binary relation を bounded finite domain 上で扱う relational kernel
 - `TransitionSystem` / `TemporalSpec`: `initial_states + actions + transition` を正本にした状態遷移と時相仕様の記述
 - `Ltl`: `[]`, `<>`, `X`, `U`, `ENABLED`, `~>` を含む Rust DSL
 - `ModelChecker`: reachable graph ベースの model checking
@@ -81,7 +82,7 @@ assert!(result.is_ok());
 - それでも足りない型だけ `#[signature(custom)]` で companion trait を手書きする
 
 重要なのは、`Signature` は **spec state space の正本ではない** ことです。  
-TLA+ に近い source of truth は `TransitionSystem::initial_states()` と `TransitionSystem::successors()` で、checker も docs の State Graph もそこから reachable graph を構築します。`Signature` は helper 型の有限境界を与えるための補助に限定します。
+TLA+ に近い source of truth は `TransitionSystem::initial_states()`、`TransitionSystem::actions()`、`TransitionSystem::transition()` で、checker も docs の State Graph もそこから reachable graph を構築します。`Signature` は helper 型の有限境界を与えるための補助に限定します。
 
 field 単位では次を使えます。
 
@@ -89,6 +90,16 @@ field 単位では次を使えます。
 - `#[sig(len = "A..=B")]`: `Vec<T>` field の bounded length
 - `#[sig(domain = path)]`: `Vec<T>` / `[T; N]` / `BoundedDomain<T>` を返す関数で field domain を上書き
 - manual fallback を短く書きたい場合は `nirvash_core::signature_spec!(StateSignatureSpec for State, representatives = ..., filter(self) => ..., invariant(self) => ...)` も使えます
+
+## Relational Modeling
+
+`nirvash-core` は relation-first な構造モデル記述も持ちます。v1 の対象は unary / binary relation です。
+
+- atom は `#[derive(Signature, RelAtom)]` で有限 domain と stable index を与えます
+- set relation は `RelSet<T>`、binary relation は `Relation2<A, B>` を使います
+- 演算は `union` / `intersection` / `difference` / `subset_of` / `domain` / `range` / `transpose` / `join` / `cardinality` / `some` / `no` / `one` / `lone` を持ちます
+- `transitive_closure()` は `Relation2<T, T>` だけを許し、異種 relation には `transitive_closure_checked()` で fail-closed にします
+- state に relation field を持たせる場合は `#[derive(RelationalState)]` を付けると doc graph / rustdoc fragment が relation schema と Alloy 風 notation を表示します
 
 ## Runtime Conformance
 

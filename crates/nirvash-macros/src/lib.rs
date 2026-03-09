@@ -20,6 +20,24 @@ pub fn derive_signature(input: TokenStream) -> TokenStream {
     }
 }
 
+#[proc_macro_derive(RelAtom)]
+pub fn derive_rel_atom(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match expand_rel_atom_derive(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[proc_macro_derive(RelationalState)]
+pub fn derive_relational_state(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match expand_relational_state_derive(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
 #[proc_macro_attribute]
 pub fn subsystem_spec(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as SpecArgs);
@@ -701,6 +719,169 @@ fn expand_signature_derive(input: DeriveInput) -> syn::Result<proc_macro2::Token
             }
         }
     })
+}
+
+fn expand_rel_atom_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let ident = input.ident;
+    let generics = input.generics;
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let supported_data = ensure_supported_signature_data(&ident, &input.data)?;
+
+    Ok(quote! {
+        #supported_data
+
+        #[doc(hidden)]
+        const _: fn() -> ::nirvash_core::BoundedDomain<#ident #ty_generics> =
+            <#ident #ty_generics as ::nirvash_core::Signature>::bounded_domain;
+
+        impl #impl_generics ::nirvash_core::RelAtom for #ident #ty_generics #where_clause {
+            fn rel_index(&self) -> usize {
+                <Self as ::nirvash_core::Signature>::bounded_domain()
+                    .into_vec()
+                    .into_iter()
+                    .position(|candidate| candidate == self.clone())
+                    .expect("RelAtom value must belong to Signature::bounded_domain()")
+            }
+
+            fn rel_from_index(index: usize) -> ::std::option::Option<Self> {
+                <Self as ::nirvash_core::Signature>::bounded_domain()
+                    .into_vec()
+                    .into_iter()
+                    .nth(index)
+            }
+
+            fn rel_label(&self) -> ::std::string::String {
+                ::std::format!("{self:?}")
+            }
+        }
+    })
+}
+
+fn expand_relational_state_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let ident = input.ident;
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            input.generics.span(),
+            "RelationalState derive does not support generic types",
+        ));
+    }
+
+    let fields = match &input.data {
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(fields) => fields.named.iter().collect::<Vec<_>>(),
+            _ => {
+                return Err(syn::Error::new(
+                    data.fields.span(),
+                    "RelationalState derive requires a named struct",
+                ));
+            }
+        },
+        Data::Enum(data) => {
+            return Err(syn::Error::new(
+                data.enum_token.span(),
+                "RelationalState derive does not support enums",
+            ));
+        }
+        Data::Union(data) => {
+            return Err(syn::Error::new(
+                data.union_token.span(),
+                "RelationalState derive does not support unions",
+            ));
+        }
+    };
+
+    let relation_fields = fields
+        .into_iter()
+        .filter_map(|field| {
+            relation_field_kind(&field.ty).map(|_| {
+                let field_ident = field.ident.as_ref().expect("named field").clone();
+                let field_name = field_ident.to_string();
+                let field_ty = field.ty.clone();
+                (field_ident, field_name, field_ty)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if relation_fields.is_empty() {
+        return Err(syn::Error::new(
+            ident.span(),
+            "RelationalState derive requires at least one RelSet<T> or Relation2<A, B> field",
+        ));
+    }
+
+    let schema_entries = relation_fields
+        .iter()
+        .map(|(_, field_name, field_ty)| {
+            quote! {
+                <#field_ty as ::nirvash_core::RelationField>::relation_schema(#field_name)
+            }
+        })
+        .collect::<Vec<_>>();
+    let summary_entries = relation_fields
+        .iter()
+        .map(|(field_ident, field_name, field_ty)| {
+            quote! {
+                <#field_ty as ::nirvash_core::RelationField>::relation_summary(&self.#field_ident, #field_name)
+            }
+        })
+        .collect::<Vec<_>>();
+    let ident_snake = to_upper_snake(&ident.to_string()).to_lowercase();
+    let schema_fn_ident = format_ident!("__nirvash_relational_schema_{}", ident_snake);
+    let summary_fn_ident = format_ident!("__nirvash_relational_summary_{}", ident_snake);
+    let type_id_fn_ident = format_ident!("__nirvash_relational_state_type_id_{}", ident_snake);
+
+    Ok(quote! {
+        impl ::nirvash_core::RelationalState for #ident {
+            fn relation_schema() -> ::std::vec::Vec<::nirvash_core::RelationFieldSchema> {
+                ::std::vec![#(#schema_entries),*]
+            }
+
+            fn relation_summary(&self) -> ::std::vec::Vec<::nirvash_core::RelationFieldSummary> {
+                ::std::vec![#(#summary_entries),*]
+            }
+        }
+
+        #[doc(hidden)]
+        fn #schema_fn_ident() -> ::std::vec::Vec<::nirvash_core::RelationFieldSchema> {
+            <#ident as ::nirvash_core::RelationalState>::relation_schema()
+        }
+
+        #[doc(hidden)]
+        fn #summary_fn_ident(
+            value: &dyn ::std::any::Any,
+        ) -> ::std::vec::Vec<::nirvash_core::RelationFieldSummary> {
+            <#ident as ::nirvash_core::RelationalState>::relation_summary(
+                value
+                    .downcast_ref::<#ident>()
+                    .expect("registered RelationalState downcast")
+            )
+        }
+
+        #[doc(hidden)]
+        fn #type_id_fn_ident() -> ::std::any::TypeId {
+            ::std::any::TypeId::of::<#ident>()
+        }
+
+        ::nirvash_core::inventory::submit! {
+            ::nirvash_core::RegisteredRelationalState {
+                state_type_id: #type_id_fn_ident,
+                relation_schema: #schema_fn_ident,
+                relation_summary: #summary_fn_ident,
+            }
+        }
+    })
+}
+
+fn relation_field_kind(ty: &Type) -> Option<&'static str> {
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+    let segment = type_path.path.segments.last()?;
+    match segment.ident.to_string().as_str() {
+        "RelSet" => Some("set"),
+        "Relation2" => Some("binary"),
+        _ => None,
+    }
 }
 
 fn companion_trait_ident(ident: &Ident) -> Ident {

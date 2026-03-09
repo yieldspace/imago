@@ -1,0 +1,5 @@
+error: RelationalState derive does not support enums
+ --> tests/fixtures/derive_relational_state_invalid.rs:4:1
+  |
+4 | enum InvalidState {
+  | ^^^^

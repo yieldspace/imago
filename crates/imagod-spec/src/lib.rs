@@ -4,6 +4,7 @@ pub mod command_protocol;
 pub mod manager_shell;
 pub mod model;
 pub mod plugin_capability;
+pub mod plugin_capability_relational;
 pub mod runner_bootstrap;
 pub mod runner_runtime;
 pub mod service_supervision;
