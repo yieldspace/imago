@@ -1184,6 +1184,19 @@ fn render_state_graph_mermaid(
         ));
     }
 
+    let deadlocks = graph
+        .states
+        .iter()
+        .filter(|state| state.is_deadlock)
+        .map(|state| format!("S{}", state.original_index))
+        .collect::<Vec<_>>();
+    if !deadlocks.is_empty() {
+        output.push_str(
+            "classDef deadlock fill:#fee2e2,stroke:#b91c1c,stroke-width:3px,color:#7f1d1d;\n",
+        );
+        output.push_str(&format!("class {} deadlock\n", deadlocks.join(",")));
+    }
+
     for state in &graph.states {
         if state.is_initial {
             output.push_str(&format!("[*] --> S{}\n", state.original_index));
@@ -1225,7 +1238,7 @@ fn render_state_node_label(
 ) -> String {
     let mut parts = Vec::new();
     if state.is_deadlock {
-        parts.push("deadlock".to_string());
+        parts.push("DEADLOCK".to_string());
     }
     parts.extend(state_display_lines(graph, state));
 
@@ -2222,6 +2235,44 @@ impl TransitionSystem for DuplicateSpec {
         assert!(
             diagram.contains("S0 --> S1: \"StartListening -> ... -> FinishShutdown (3 steps)\"")
         );
+    }
+
+    #[test]
+    fn render_state_graph_highlights_deadlocks_in_red() {
+        let spec = SpecDoc {
+            kind: Some(SpecKind::Subsystem),
+            full_path: vec!["demo".to_owned(), "DemoSpec".to_owned()],
+            tail_ident: "DemoSpec".to_owned(),
+            state_ty: "DemoState".to_owned(),
+            action_ty: "DemoAction".to_owned(),
+            model_cases: None,
+            subsystems: Vec::new(),
+            registrations: BTreeMap::new(),
+            doc_graphs: Vec::new(),
+        };
+        let graph = nirvash_core::ReducedDocGraph {
+            states: vec![nirvash_core::ReducedDocGraphNode {
+                original_index: 3,
+                state: nirvash_core::DocGraphState {
+                    summary: "Stopped".to_owned(),
+                    full: "Stopped".to_owned(),
+                    relation_fields: Vec::new(),
+                    relation_schema: Vec::new(),
+                },
+                is_initial: false,
+                is_deadlock: true,
+            }],
+            edges: Vec::new(),
+            truncated: false,
+            stutter_omitted: false,
+        };
+        let visible_edges = visible_reduced_edges(&graph);
+        let diagram = render_state_graph_mermaid(&spec, &graph, &visible_edges);
+
+        assert!(diagram.contains("state \"DEADLOCK<br/>Stopped\" as S3"));
+        assert!(diagram.contains("classDef deadlock fill:#fee2e2,stroke:#b91c1c"));
+        assert!(diagram.contains("class S3 deadlock\n"));
+        assert!(!diagram.contains("class S3 deadlock;"));
     }
 
     #[test]

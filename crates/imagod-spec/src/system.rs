@@ -12,14 +12,11 @@ use crate::{
     },
     command_protocol::CommandProtocolSpec,
     manager_shell::{ManagerShellAction, ManagerShellPhase, ManagerShellSpec, ManagerShellState},
-    plugin_capability::{
-        DependencyGraphClass, PluginCapabilityAction, PluginCapabilitySpec, PluginCapabilityState,
-        ProviderResolutionClass,
-    },
+    plugin_capability::{PluginCapabilityAction, PluginCapabilitySpec, PluginCapabilityState},
     runner_bootstrap::{RunnerBootstrapAction, RunnerBootstrapSpec, RunnerBootstrapState},
     runner_runtime::{RunnerRuntimeAction, RunnerRuntimeSpec, RunnerRuntimeState, RuntimePhase},
     service_supervision::{
-        ServicePhase, ServiceSupervisionAction, ServiceSupervisionSpec, ServiceSupervisionState,
+        ServiceSupervisionAction, ServiceSupervisionSpec, ServiceSupervisionState,
     },
     session_transport::{
         SessionOutcome, SessionTransportAction, SessionTransportSpec, SessionTransportState,
@@ -341,7 +338,7 @@ fn deterministic_session_cycle_allowed(
     action: &ImagodSystemAction,
 ) -> bool {
     matches!(
-        (prev.transport.active_sessions.get(), action),
+        (prev.transport.active_session_count(), action),
         (
             0,
             ImagodSystemAction::Session(SessionTransportAction::AcceptSession)
@@ -380,7 +377,7 @@ fn startup_command_session_progress_allowed(
 ) -> bool {
     matches!(
         (
-            prev.transport.active_sessions.get(),
+            prev.transport.active_session_count(),
             prev.transport.last_outcome,
             action,
         ),
@@ -501,7 +498,7 @@ fn shutdown_session_progress_allowed(
     }
 
     matches!(
-        (prev.transport.active_sessions.get(), action),
+        (prev.transport.active_session_count(), action),
         (
             0,
             ImagodSystemAction::Session(SessionTransportAction::RejectTooMany)
@@ -546,7 +543,7 @@ fn runtime_serving_requires_ready_and_promoted_release() -> StatePredicate<Imago
         |state| {
             !matches!(state.runtime.phase, RuntimePhase::Serving)
                 || (state.bootstrap.ready
-                    && matches!(state.supervision.phase, ServicePhase::Running)
+                    && state.supervision.has_ready_service()
                     && matches!(state.deploy.release, ReleaseStage::Promoted))
         },
     )
@@ -570,7 +567,7 @@ fn shutdown_requires_transport_gate_and_manager_shutdown() -> StatePredicate<Ima
 #[invariant(ImagodSystemSpec)]
 fn ready_runner_requires_running_supervision() -> StatePredicate<ImagodSystemState> {
     StatePredicate::new("ready_runner_requires_running_supervision", |state| {
-        !state.bootstrap.ready || matches!(state.supervision.phase, ServicePhase::Running)
+        !state.bootstrap.ready || state.supervision.has_ready_service()
     })
 }
 
@@ -596,10 +593,7 @@ fn stopped_manager_requires_completed_shutdown() -> StatePredicate<ImagodSystemS
 fn dependency_provider_requires_acyclic_plugin_graph() -> StatePredicate<ImagodSystemState> {
     StatePredicate::new(
         "dependency_provider_requires_acyclic_plugin_graph",
-        |state| {
-            !matches!(state.plugin.provider, ProviderResolutionClass::Dependency)
-                || matches!(state.plugin.graph, DependencyGraphClass::Acyclic)
-        },
+        |state| !state.plugin.provider_is_dependency() || state.plugin.graph_is_acyclic(),
     )
 }
 
@@ -641,7 +635,7 @@ impl TransitionSystem for ImagodSystemSpec {
 fn cross_links_hold(state: &ImagodSystemState) -> bool {
     (!matches!(state.runtime.phase, RuntimePhase::Serving)
         || (state.bootstrap.ready
-            && matches!(state.supervision.phase, ServicePhase::Running)
+            && state.supervision.has_ready_service()
             && matches!(state.deploy.release, ReleaseStage::Promoted)))
         && (matches!(state.shutdown.phase, ShutdownPhase::Idle)
             || (state.transport.shutdown_requested
@@ -649,15 +643,14 @@ fn cross_links_hold(state: &ImagodSystemState) -> bool {
                     state.manager.phase,
                     ManagerShellPhase::ShutdownRequested | ManagerShellPhase::Stopped
                 )))
-        && (!state.bootstrap.ready || matches!(state.supervision.phase, ServicePhase::Running))
+        && (!state.bootstrap.ready || state.supervision.has_ready_service())
         && (!matches!(
             state.command.lifecycle_state,
             Some(CommandLifecycleState::Accepted | CommandLifecycleState::Running)
         ) || matches!(state.manager.phase, ManagerShellPhase::Listening))
         && (!matches!(state.manager.phase, ManagerShellPhase::Stopped)
             || matches!(state.shutdown.phase, ShutdownPhase::Completed))
-        && (!matches!(state.plugin.provider, ProviderResolutionClass::Dependency)
-            || matches!(state.plugin.graph, DependencyGraphClass::Acyclic))
+        && (!state.plugin.provider_is_dependency() || state.plugin.graph_is_acyclic())
 }
 
 #[nirvash_macros::formal_tests(
@@ -672,11 +665,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        bounds::SessionSlots,
         manager_shell::TaskState,
-        plugin_capability::CapabilityDecision,
         runner_bootstrap::{AuthProofState, BootstrapSizeClass, EndpointState},
-        runner_runtime::{ComponentLoadClass, HttpQueueClass, SocketPolicyClass, WasmTuningClass},
+        runner_runtime::{ComponentLoadClass, WasmTuningClass},
         session_transport::SessionOutcome,
     };
 
@@ -719,9 +710,40 @@ mod tests {
         .expect("boot restore should complete")
     }
 
+    fn running_supervision_state() -> ServiceSupervisionState {
+        let spec = ServiceSupervisionSpec::new();
+        let starting = spec
+            .transition(
+                &spec.initial_state(),
+                &ServiceSupervisionAction::StartService,
+            )
+            .expect("start service");
+        let waiting = spec
+            .transition(&starting, &ServiceSupervisionAction::RegisterRunner)
+            .expect("register runner");
+        spec.transition(&waiting, &ServiceSupervisionAction::MarkRunnerReady)
+            .expect("mark runner ready")
+    }
+
+    fn component_validated_runtime_state(mode: RunnerAppType) -> RunnerRuntimeState {
+        let spec = RunnerRuntimeSpec::new();
+        let selected = spec
+            .transition(
+                &spec.initial_state(),
+                &RunnerRuntimeAction::SelectMode(mode),
+            )
+            .expect("select runtime mode");
+        spec.transition(&selected, &RunnerRuntimeAction::ValidateComponentLoadable)
+            .expect("validate component")
+    }
+
     #[test]
     fn runtime_cannot_start_serving_before_runner_ready() {
         let spec = ImagodSystemSpec::new();
+        let runtime = component_validated_runtime_state(RunnerAppType::Rpc);
+        let runtime_serving = RunnerRuntimeSpec::new()
+            .transition(&runtime, &RunnerRuntimeAction::StartServing)
+            .expect("runtime alone can serve after validation");
         let prev = ImagodSystemState {
             manager: ManagerShellState {
                 phase: ManagerShellPhase::Listening,
@@ -730,11 +752,7 @@ mod tests {
                 plugin_gc: TaskState::Succeeded,
                 boot_restore: TaskState::Succeeded,
             },
-            transport: SessionTransportState {
-                active_sessions: SessionSlots::new(0).expect("within bounds"),
-                shutdown_requested: false,
-                last_outcome: SessionOutcome::None,
-            },
+            transport: SessionTransportSpec::new().initial_state(),
             command: CommandProtocolSpec::new().initial_state(),
             deploy: ArtifactDeployState {
                 upload: crate::artifact_deploy::UploadStage::Committed,
@@ -743,11 +761,7 @@ mod tests {
                 auto_rollback: true,
                 chunks: crate::bounds::ArtifactChunks::new(2).expect("within bounds"),
             },
-            supervision: ServiceSupervisionState {
-                active_services: crate::bounds::ServiceSlots::new(1).expect("within bounds"),
-                phase: ServicePhase::Running,
-                retained_logs: false,
-            },
+            supervision: running_supervision_state(),
             bootstrap: RunnerBootstrapState {
                 size: BootstrapSizeClass::WithinBounds,
                 decoded: true,
@@ -757,22 +771,12 @@ mod tests {
                 registered: true,
                 ready: false,
             },
-            runtime: RunnerRuntimeState {
-                mode: Some(RunnerAppType::Rpc),
-                phase: RuntimePhase::ComponentValidated,
-                http_queue: HttpQueueClass::Empty,
-                component: ComponentLoadClass::Loadable,
-                tuning: WasmTuningClass::Default,
-                socket_policy: SocketPolicyClass::NotApplicable,
-            },
+            runtime,
             plugin: PluginCapabilitySpec::new().initial_state(),
             shutdown: ShutdownFlowSpec::new().initial_state(),
         };
         let next = ImagodSystemState {
-            runtime: RunnerRuntimeState {
-                phase: RuntimePhase::Serving,
-                ..prev.runtime
-            },
+            runtime: runtime_serving,
             ..prev.clone()
         };
         assert!(!spec.contains_transition(
@@ -954,7 +958,7 @@ mod tests {
         assert!(snapshot.states.iter().any(|state| {
             matches!(state.runtime.phase, RuntimePhase::Serving)
                 && state.bootstrap.ready
-                && matches!(state.supervision.phase, ServicePhase::Running)
+                && state.supervision.has_ready_service()
                 && matches!(state.deploy.release, ReleaseStage::Promoted)
         }));
     }
@@ -1016,15 +1020,13 @@ mod tests {
         let snapshot = reachable_snapshot_for_case(&spec, "plugin_dependency");
 
         assert!(
-            snapshot.states.iter().any(|state| {
-                matches!(state.plugin.provider, ProviderResolutionClass::Dependency)
-            })
+            snapshot
+                .states
+                .iter()
+                .any(|state| { state.plugin.provider_is_dependency() })
         );
         assert!(snapshot.states.iter().any(|state| {
-            matches!(
-                state.plugin.capability,
-                CapabilityDecision::Allowed | CapabilityDecision::Privileged
-            ) && matches!(state.plugin.provider, ProviderResolutionClass::Dependency)
+            state.plugin.capability_decided() && state.plugin.provider_is_dependency()
         }));
     }
 

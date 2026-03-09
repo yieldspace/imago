@@ -1,61 +1,112 @@
 use imagod_ipc::PluginKind;
-use nirvash_core::{Fairness, Ltl, ModelCase, StatePredicate, StepPredicate, TransitionSystem};
-use nirvash_macros::{Signature as FormalSignature, fairness, invariant, property, subsystem_spec};
+use nirvash_core::{
+    Fairness, Ltl, ModelCase, RelSet, Relation2, StatePredicate, StepPredicate, TransitionSystem,
+};
+use nirvash_macros::{
+    RelAtom, RelationalState, Signature as FormalSignature, fairness, invariant, property,
+    subsystem_spec,
+};
 
 #[cfg(test)]
 use crate::bounds::SPEC_PLUGIN_KINDS;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PluginRoleClass {
-    NativeHost,
-    WasmComponent,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, RelAtom)]
+enum PluginAtom {
+    Root,
 }
 
-pub fn classify_plugin_kind(kind: &PluginKind) -> PluginRoleClass {
-    match kind {
-        PluginKind::Native => PluginRoleClass::NativeHost,
-        PluginKind::Wasm => PluginRoleClass::WasmComponent,
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, RelAtom)]
+enum PluginKindAtom {
+    Native,
+    Wasm,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
-pub enum DependencyGraphClass {
-    Empty,
-    Acyclic,
-    Cyclic,
-    MissingDependency,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, RelAtom)]
+enum ProviderAtom {
+    SelfProvider,
+    DependencyProvider,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
-pub enum ProviderResolutionClass {
-    Unresolved,
-    SelfComponent,
-    Dependency,
-    Missing,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, RelAtom)]
+enum InterfaceAtom {
+    CapabilityApi,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
-pub enum CapabilityDecision {
-    Denied,
-    Allowed,
-    Privileged,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, RelAtom)]
+enum WasiCapabilityAtom {
+    HttpOutgoing,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
-pub enum HttpOutboundClass {
-    None,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, RelAtom)]
+enum HttpTargetAtom {
     Host,
-    HostPort,
-    Cidr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, RelationalState)]
 pub struct PluginCapabilityState {
-    pub plugin_kind: Option<PluginKind>,
-    pub graph: DependencyGraphClass,
-    pub provider: ProviderResolutionClass,
-    pub capability: CapabilityDecision,
-    pub http_outbound: HttpOutboundClass,
+    registered_plugins: RelSet<PluginAtom>,
+    plugin_kinds: Relation2<PluginAtom, PluginKindAtom>,
+    requires: Relation2<PluginAtom, ProviderAtom>,
+    provides: Relation2<ProviderAtom, InterfaceAtom>,
+    imports: Relation2<PluginAtom, InterfaceAtom>,
+    resolved_provider: Relation2<PluginAtom, ProviderAtom>,
+    missing_dependencies: Relation2<PluginAtom, ProviderAtom>,
+    cycle_edges: Relation2<ProviderAtom, ProviderAtom>,
+    allowed_dep_calls: Relation2<PluginAtom, ProviderAtom>,
+    allowed_wasi_calls: Relation2<PluginAtom, WasiCapabilityAtom>,
+    privileged_plugins: RelSet<PluginAtom>,
+    http_outbound: Relation2<PluginAtom, HttpTargetAtom>,
+}
+
+impl PluginCapabilityState {
+    pub fn plugin_registered(&self) -> bool {
+        self.registered_plugins.some()
+    }
+
+    pub fn graph_classified(&self) -> bool {
+        self.requires.some() || self.cycle_edges.some() || self.missing_dependencies.some()
+    }
+
+    pub fn graph_is_acyclic(&self) -> bool {
+        self.plugin_registered()
+            && self.requires.some()
+            && self.cycle_edges.no()
+            && self.missing_dependencies.no()
+    }
+
+    pub fn provider_decided(&self) -> bool {
+        self.resolved_provider.some() || self.provider_is_missing()
+    }
+
+    pub fn provider_is_self(&self) -> bool {
+        self.resolved_provider
+            .contains(&PluginAtom::Root, &ProviderAtom::SelfProvider)
+    }
+
+    pub fn provider_is_dependency(&self) -> bool {
+        self.resolved_provider
+            .contains(&PluginAtom::Root, &ProviderAtom::DependencyProvider)
+    }
+
+    pub fn provider_is_missing(&self) -> bool {
+        self.imports
+            .contains(&PluginAtom::Root, &InterfaceAtom::CapabilityApi)
+            && self.resolved_provider.no()
+    }
+
+    pub fn capability_decided(&self) -> bool {
+        self.allowed_dep_calls.some()
+            || self.allowed_wasi_calls.some()
+            || self.privileged_plugins.some()
+    }
+
+    pub fn capability_is_privileged(&self) -> bool {
+        self.privileged_plugins.contains(&PluginAtom::Root)
+    }
+
+    pub fn http_outbound_enabled(&self) -> bool {
+        self.http_outbound.some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,11 +134,18 @@ impl PluginCapabilitySpec {
 
     pub fn initial_state(&self) -> PluginCapabilityState {
         PluginCapabilityState {
-            plugin_kind: None,
-            graph: DependencyGraphClass::Empty,
-            provider: ProviderResolutionClass::Unresolved,
-            capability: CapabilityDecision::Denied,
-            http_outbound: HttpOutboundClass::None,
+            registered_plugins: RelSet::empty(),
+            plugin_kinds: Relation2::empty(),
+            requires: Relation2::empty(),
+            provides: Relation2::empty(),
+            imports: Relation2::empty(),
+            resolved_provider: Relation2::empty(),
+            missing_dependencies: Relation2::empty(),
+            cycle_edges: Relation2::empty(),
+            allowed_dep_calls: Relation2::empty(),
+            allowed_wasi_calls: Relation2::empty(),
+            privileged_plugins: RelSet::empty(),
+            http_outbound: Relation2::empty(),
         }
     }
 
@@ -115,86 +173,112 @@ impl PluginCapabilitySpec {
     ) -> Option<PluginCapabilityState> {
         let mut candidate = prev.clone();
         let allowed = match action {
-            PluginCapabilityAction::RegisterPlugin(kind) if prev.plugin_kind.is_none() => {
-                candidate.plugin_kind = Some(kind.clone());
+            PluginCapabilityAction::RegisterPlugin(kind) if prev.registered_plugins.no() => {
+                candidate.registered_plugins.insert(PluginAtom::Root);
+                candidate
+                    .plugin_kinds
+                    .insert(PluginAtom::Root, plugin_kind_atom(kind.clone()));
                 true
             }
             PluginCapabilityAction::ClassifyGraphAcyclic
-                if prev.plugin_kind.is_some()
-                    && matches!(prev.graph, DependencyGraphClass::Empty) =>
+                if prev.plugin_registered() && !prev.graph_classified() =>
             {
-                candidate.graph = DependencyGraphClass::Acyclic;
+                candidate
+                    .requires
+                    .insert(PluginAtom::Root, ProviderAtom::DependencyProvider);
                 true
             }
             PluginCapabilityAction::ClassifyGraphCyclic
-                if prev.plugin_kind.is_some()
-                    && matches!(prev.graph, DependencyGraphClass::Empty) =>
+                if prev.plugin_registered() && !prev.graph_classified() =>
             {
-                candidate.graph = DependencyGraphClass::Cyclic;
+                candidate
+                    .cycle_edges
+                    .insert(ProviderAtom::SelfProvider, ProviderAtom::DependencyProvider);
+                candidate
+                    .cycle_edges
+                    .insert(ProviderAtom::DependencyProvider, ProviderAtom::SelfProvider);
                 true
             }
             PluginCapabilityAction::ClassifyGraphMissingDependency
-                if prev.plugin_kind.is_some()
-                    && matches!(prev.graph, DependencyGraphClass::Empty) =>
+                if prev.plugin_registered() && !prev.graph_classified() =>
             {
-                candidate.graph = DependencyGraphClass::MissingDependency;
+                candidate
+                    .missing_dependencies
+                    .insert(PluginAtom::Root, ProviderAtom::DependencyProvider);
                 true
             }
             PluginCapabilityAction::ResolveProviderSelf
-                if matches!(prev.graph, DependencyGraphClass::Acyclic)
-                    && matches!(prev.provider, ProviderResolutionClass::Unresolved) =>
+                if prev.graph_is_acyclic() && prev.resolved_provider.no() =>
             {
-                candidate.provider = ProviderResolutionClass::SelfComponent;
+                candidate
+                    .imports
+                    .insert(PluginAtom::Root, InterfaceAtom::CapabilityApi);
+                candidate
+                    .provides
+                    .insert(ProviderAtom::SelfProvider, InterfaceAtom::CapabilityApi);
+                candidate
+                    .resolved_provider
+                    .insert(PluginAtom::Root, ProviderAtom::SelfProvider);
                 true
             }
             PluginCapabilityAction::ResolveProviderDependency
-                if matches!(prev.graph, DependencyGraphClass::Acyclic)
-                    && matches!(prev.provider, ProviderResolutionClass::Unresolved) =>
+                if prev.graph_is_acyclic() && prev.resolved_provider.no() =>
             {
-                candidate.provider = ProviderResolutionClass::Dependency;
+                candidate
+                    .imports
+                    .insert(PluginAtom::Root, InterfaceAtom::CapabilityApi);
+                candidate.provides.insert(
+                    ProviderAtom::DependencyProvider,
+                    InterfaceAtom::CapabilityApi,
+                );
+                candidate
+                    .resolved_provider
+                    .insert(PluginAtom::Root, ProviderAtom::DependencyProvider);
                 true
             }
             PluginCapabilityAction::ResolveProviderMissing
-                if !matches!(
-                    prev.graph,
-                    DependencyGraphClass::Empty | DependencyGraphClass::Acyclic
-                ) && matches!(prev.provider, ProviderResolutionClass::Unresolved) =>
+                if !prev.graph_is_acyclic() && prev.resolved_provider.no() && prev.imports.no() =>
             {
-                candidate.provider = ProviderResolutionClass::Missing;
+                candidate
+                    .imports
+                    .insert(PluginAtom::Root, InterfaceAtom::CapabilityApi);
                 true
             }
             PluginCapabilityAction::AllowCapability
-                if matches!(
-                    prev.provider,
-                    ProviderResolutionClass::SelfComponent | ProviderResolutionClass::Dependency
-                ) && !matches!(prev.capability, CapabilityDecision::Allowed) =>
+                if prev.resolved_provider.some() && !prev.capability_decided() =>
             {
-                candidate.capability = CapabilityDecision::Allowed;
+                candidate
+                    .allowed_dep_calls
+                    .insert(PluginAtom::Root, ProviderAtom::DependencyProvider);
+                candidate
+                    .allowed_wasi_calls
+                    .insert(PluginAtom::Root, WasiCapabilityAtom::HttpOutgoing);
                 true
             }
             PluginCapabilityAction::GrantPrivilegedCapability
-                if matches!(
-                    prev.provider,
-                    ProviderResolutionClass::SelfComponent | ProviderResolutionClass::Dependency
-                ) && !matches!(prev.capability, CapabilityDecision::Privileged) =>
+                if prev.resolved_provider.some() && prev.privileged_plugins.no() =>
             {
-                candidate.capability = CapabilityDecision::Privileged;
+                candidate.privileged_plugins.insert(PluginAtom::Root);
+                candidate
+                    .allowed_dep_calls
+                    .insert(PluginAtom::Root, ProviderAtom::DependencyProvider);
+                candidate
+                    .allowed_wasi_calls
+                    .insert(PluginAtom::Root, WasiCapabilityAtom::HttpOutgoing);
                 true
             }
             PluginCapabilityAction::AllowHttpHost
-                if matches!(
-                    prev.provider,
-                    ProviderResolutionClass::SelfComponent | ProviderResolutionClass::Dependency
-                ) && !matches!(prev.capability, CapabilityDecision::Denied)
-                    && matches!(prev.http_outbound, HttpOutboundClass::None) =>
+                if prev.resolved_provider.some()
+                    && prev.capability_decided()
+                    && prev.http_outbound.no() =>
             {
-                candidate.http_outbound = HttpOutboundClass::Host;
+                candidate
+                    .http_outbound
+                    .insert(PluginAtom::Root, HttpTargetAtom::Host);
                 true
             }
-            PluginCapabilityAction::DenyHttpOutbound
-                if !matches!(prev.http_outbound, HttpOutboundClass::None) =>
-            {
-                candidate.http_outbound = HttpOutboundClass::None;
+            PluginCapabilityAction::DenyHttpOutbound if prev.http_outbound.some() => {
+                candidate.http_outbound = Relation2::empty();
                 true
             }
             _ => false,
@@ -208,32 +292,31 @@ fn plugin_capability_model_cases() -> Vec<ModelCase<PluginCapabilityState, Plugi
     vec![ModelCase::default().with_check_deadlocks(false)]
 }
 
+fn plugin_kind_atom(kind: PluginKind) -> PluginKindAtom {
+    match kind {
+        PluginKind::Native => PluginKindAtom::Native,
+        PluginKind::Wasm => PluginKindAtom::Wasm,
+    }
+}
+
 #[invariant(PluginCapabilitySpec)]
 fn resolved_provider_requires_acyclic_graph() -> StatePredicate<PluginCapabilityState> {
     StatePredicate::new("resolved_provider_requires_acyclic_graph", |state| {
-        !matches!(
-            state.provider,
-            ProviderResolutionClass::SelfComponent | ProviderResolutionClass::Dependency
-        ) || matches!(state.graph, DependencyGraphClass::Acyclic)
+        state.resolved_provider.no() || state.graph_is_acyclic()
     })
 }
 
 #[invariant(PluginCapabilitySpec)]
 fn http_outbound_requires_provider_resolution() -> StatePredicate<PluginCapabilityState> {
     StatePredicate::new("http_outbound_requires_provider_resolution", |state| {
-        matches!(state.http_outbound, HttpOutboundClass::None)
-            || matches!(
-                state.provider,
-                ProviderResolutionClass::SelfComponent | ProviderResolutionClass::Dependency
-            )
+        !state.http_outbound_enabled() || state.resolved_provider.some()
     })
 }
 
 #[invariant(PluginCapabilitySpec)]
 fn privileged_mode_requires_resolved_provider() -> StatePredicate<PluginCapabilityState> {
     StatePredicate::new("privileged_mode_requires_resolved_provider", |state| {
-        !matches!(state.capability, CapabilityDecision::Privileged)
-            || !matches!(state.provider, ProviderResolutionClass::Missing)
+        !state.capability_is_privileged() || state.resolved_provider.some()
     })
 }
 
@@ -242,10 +325,10 @@ fn plugin_registered_leads_to_graph_classified()
 -> Ltl<PluginCapabilityState, PluginCapabilityAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("plugin_registered", |state| {
-            state.plugin_kind.is_some()
+            state.plugin_registered()
         })),
         Ltl::pred(StatePredicate::new("graph_classified", |state| {
-            !matches!(state.graph, DependencyGraphClass::Empty)
+            state.graph_classified()
         })),
     )
 }
@@ -255,13 +338,10 @@ fn graph_acyclic_leads_to_provider_resolved() -> Ltl<PluginCapabilityState, Plug
 {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("graph_acyclic", |state| {
-            matches!(state.graph, DependencyGraphClass::Acyclic)
+            state.graph_is_acyclic()
         })),
         Ltl::pred(StatePredicate::new("provider_resolved", |state| {
-            matches!(
-                state.provider,
-                ProviderResolutionClass::SelfComponent | ProviderResolutionClass::Dependency
-            )
+            state.resolved_provider.some()
         })),
     )
 }
@@ -271,14 +351,10 @@ fn provider_resolved_leads_to_capability_decided()
 -> Ltl<PluginCapabilityState, PluginCapabilityAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("provider_resolved", |state| {
-            matches!(
-                state.provider,
-                ProviderResolutionClass::SelfComponent | ProviderResolutionClass::Dependency
-            )
+            state.resolved_provider.some()
         })),
         Ltl::pred(StatePredicate::new("capability_decided", |state| {
-            !matches!(state.capability, CapabilityDecision::Denied)
-                || matches!(state.http_outbound, HttpOutboundClass::None)
+            state.capability_decided()
         })),
     )
 }
@@ -288,14 +364,14 @@ fn graph_classification_fairness() -> Fairness<PluginCapabilityState, PluginCapa
     Fairness::weak(StepPredicate::new(
         "classify_graph",
         |prev, action, next| {
-            prev.plugin_kind.is_some()
+            prev.plugin_registered()
                 && matches!(
                     action,
                     PluginCapabilityAction::ClassifyGraphAcyclic
                         | PluginCapabilityAction::ClassifyGraphCyclic
                         | PluginCapabilityAction::ClassifyGraphMissingDependency
                 )
-                && !matches!(next.graph, DependencyGraphClass::Empty)
+                && next.graph_classified()
         },
     ))
 }
@@ -308,7 +384,7 @@ fn provider_resolution_fairness() -> Fairness<PluginCapabilityState, PluginCapab
             PluginCapabilityAction::ResolveProviderSelf
                 | PluginCapabilityAction::ResolveProviderDependency
                 | PluginCapabilityAction::ResolveProviderMissing
-        ) && !matches!(next.provider, ProviderResolutionClass::Unresolved)
+        ) && next.provider_decided()
     }))
 }
 
@@ -321,7 +397,8 @@ fn capability_decision_fairness() -> Fairness<PluginCapabilityState, PluginCapab
                 action,
                 PluginCapabilityAction::AllowCapability
                     | PluginCapabilityAction::GrantPrivilegedCapability
-            ) && next.capability != prev.capability
+            ) && next.capability_decided()
+                && !prev.capability_decided()
         },
     ))
 }
@@ -356,10 +433,174 @@ mod tests {
     use super::*;
     use nirvash_core::ModelChecker;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum LegacyDependencyGraphClass {
+        Empty,
+        Acyclic,
+        Cyclic,
+        MissingDependency,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum LegacyProviderResolutionClass {
+        Unresolved,
+        SelfComponent,
+        Dependency,
+        Missing,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum LegacyCapabilityDecision {
+        Denied,
+        Allowed,
+        Privileged,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum LegacyHttpOutboundClass {
+        None,
+        Host,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct LegacyPluginCapabilityState {
+        plugin_kind: Option<PluginKind>,
+        graph: LegacyDependencyGraphClass,
+        provider: LegacyProviderResolutionClass,
+        capability: LegacyCapabilityDecision,
+        http_outbound: LegacyHttpOutboundClass,
+    }
+
+    fn legacy_initial_state() -> LegacyPluginCapabilityState {
+        LegacyPluginCapabilityState {
+            plugin_kind: None,
+            graph: LegacyDependencyGraphClass::Empty,
+            provider: LegacyProviderResolutionClass::Unresolved,
+            capability: LegacyCapabilityDecision::Denied,
+            http_outbound: LegacyHttpOutboundClass::None,
+        }
+    }
+
+    fn legacy_transition(
+        prev: &LegacyPluginCapabilityState,
+        action: &PluginCapabilityAction,
+    ) -> Option<LegacyPluginCapabilityState> {
+        let mut candidate = prev.clone();
+        let allowed = match action {
+            PluginCapabilityAction::RegisterPlugin(kind) if prev.plugin_kind.is_none() => {
+                candidate.plugin_kind = Some(kind.clone());
+                true
+            }
+            PluginCapabilityAction::ClassifyGraphAcyclic
+                if prev.plugin_kind.is_some()
+                    && matches!(prev.graph, LegacyDependencyGraphClass::Empty) =>
+            {
+                candidate.graph = LegacyDependencyGraphClass::Acyclic;
+                true
+            }
+            PluginCapabilityAction::ClassifyGraphCyclic
+                if prev.plugin_kind.is_some()
+                    && matches!(prev.graph, LegacyDependencyGraphClass::Empty) =>
+            {
+                candidate.graph = LegacyDependencyGraphClass::Cyclic;
+                true
+            }
+            PluginCapabilityAction::ClassifyGraphMissingDependency
+                if prev.plugin_kind.is_some()
+                    && matches!(prev.graph, LegacyDependencyGraphClass::Empty) =>
+            {
+                candidate.graph = LegacyDependencyGraphClass::MissingDependency;
+                true
+            }
+            PluginCapabilityAction::ResolveProviderSelf
+                if matches!(prev.graph, LegacyDependencyGraphClass::Acyclic)
+                    && matches!(prev.provider, LegacyProviderResolutionClass::Unresolved) =>
+            {
+                candidate.provider = LegacyProviderResolutionClass::SelfComponent;
+                true
+            }
+            PluginCapabilityAction::ResolveProviderDependency
+                if matches!(prev.graph, LegacyDependencyGraphClass::Acyclic)
+                    && matches!(prev.provider, LegacyProviderResolutionClass::Unresolved) =>
+            {
+                candidate.provider = LegacyProviderResolutionClass::Dependency;
+                true
+            }
+            PluginCapabilityAction::ResolveProviderMissing
+                if !matches!(
+                    prev.graph,
+                    LegacyDependencyGraphClass::Empty | LegacyDependencyGraphClass::Acyclic
+                ) && matches!(prev.provider, LegacyProviderResolutionClass::Unresolved) =>
+            {
+                candidate.provider = LegacyProviderResolutionClass::Missing;
+                true
+            }
+            PluginCapabilityAction::AllowCapability
+                if matches!(
+                    prev.provider,
+                    LegacyProviderResolutionClass::SelfComponent
+                        | LegacyProviderResolutionClass::Dependency
+                ) && !matches!(prev.capability, LegacyCapabilityDecision::Allowed) =>
+            {
+                candidate.capability = LegacyCapabilityDecision::Allowed;
+                true
+            }
+            PluginCapabilityAction::GrantPrivilegedCapability
+                if matches!(
+                    prev.provider,
+                    LegacyProviderResolutionClass::SelfComponent
+                        | LegacyProviderResolutionClass::Dependency
+                ) && !matches!(prev.capability, LegacyCapabilityDecision::Privileged) =>
+            {
+                candidate.capability = LegacyCapabilityDecision::Privileged;
+                true
+            }
+            PluginCapabilityAction::AllowHttpHost
+                if matches!(
+                    prev.provider,
+                    LegacyProviderResolutionClass::SelfComponent
+                        | LegacyProviderResolutionClass::Dependency
+                ) && !matches!(prev.capability, LegacyCapabilityDecision::Denied)
+                    && matches!(prev.http_outbound, LegacyHttpOutboundClass::None) =>
+            {
+                candidate.http_outbound = LegacyHttpOutboundClass::Host;
+                true
+            }
+            PluginCapabilityAction::DenyHttpOutbound
+                if !matches!(prev.http_outbound, LegacyHttpOutboundClass::None) =>
+            {
+                candidate.http_outbound = LegacyHttpOutboundClass::None;
+                true
+            }
+            _ => false,
+        };
+        allowed.then_some(candidate)
+    }
+
+    fn legacy_reachable_states() -> Vec<LegacyPluginCapabilityState> {
+        let mut states = vec![legacy_initial_state()];
+        let mut cursor = 0;
+        let actions = PluginCapabilitySpec::new().actions();
+
+        while cursor < states.len() {
+            let current = states[cursor].clone();
+            for action in &actions {
+                if let Some(next) = legacy_transition(&current, action)
+                    && !states.contains(&next)
+                {
+                    states.push(next);
+                }
+            }
+            cursor += 1;
+        }
+
+        states
+    }
+
     #[test]
-    fn plugin_kind_classifier_covers_public_kinds() {
+    fn plugin_kind_atom_covers_public_kinds() {
         for kind in SPEC_PLUGIN_KINDS.iter() {
-            let _ = classify_plugin_kind(kind);
+            let _ = plugin_kind_atom(kind.clone());
         }
     }
 
@@ -370,9 +611,76 @@ mod tests {
             .reachable_graph_snapshot()
             .expect("reachable graph snapshot");
 
-        assert!(snapshot.states.iter().any(|state| {
-            matches!(state.provider, ProviderResolutionClass::Dependency)
-                && matches!(state.graph, DependencyGraphClass::Acyclic)
-        }));
+        assert!(
+            snapshot
+                .states
+                .iter()
+                .any(|state| { state.provider_is_dependency() && state.graph_is_acyclic() })
+        );
+    }
+
+    #[test]
+    fn relation_model_preserves_legacy_reachability_intents() {
+        let legacy_states = legacy_reachable_states();
+        let relational_states = ModelChecker::new(&PluginCapabilitySpec::new())
+            .reachable_graph_snapshot()
+            .expect("reachable graph snapshot")
+            .states;
+
+        assert!(
+            legacy_states.iter().any(|state| matches!(
+                state.provider,
+                LegacyProviderResolutionClass::SelfComponent
+            ))
+        );
+        assert!(
+            relational_states
+                .iter()
+                .any(PluginCapabilityState::provider_is_self)
+        );
+
+        assert!(
+            legacy_states
+                .iter()
+                .any(|state| matches!(state.provider, LegacyProviderResolutionClass::Dependency))
+        );
+        assert!(
+            relational_states
+                .iter()
+                .any(PluginCapabilityState::provider_is_dependency)
+        );
+
+        assert!(
+            legacy_states
+                .iter()
+                .any(|state| matches!(state.provider, LegacyProviderResolutionClass::Missing))
+        );
+        assert!(
+            relational_states
+                .iter()
+                .any(PluginCapabilityState::provider_is_missing)
+        );
+
+        assert!(
+            legacy_states
+                .iter()
+                .any(|state| matches!(state.capability, LegacyCapabilityDecision::Privileged))
+        );
+        assert!(
+            relational_states
+                .iter()
+                .any(PluginCapabilityState::capability_is_privileged)
+        );
+
+        assert!(
+            legacy_states
+                .iter()
+                .any(|state| matches!(state.http_outbound, LegacyHttpOutboundClass::Host))
+        );
+        assert!(
+            relational_states
+                .iter()
+                .any(PluginCapabilityState::http_outbound_enabled)
+        );
     }
 }

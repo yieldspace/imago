@@ -69,7 +69,7 @@ flowchart TD
 
 - spec の正本は `TransitionSystem::initial_states()`、`TransitionSystem::actions()`、`TransitionSystem::transition()` です。`successors()` はそこから導出されます。
 - `Signature` は helper enum/newtype や projection 型の bounded domain 付与にだけ使います。
-- relation-first に書きたい場合は atom を `RelAtom`、state field を `RelSet` / `Relation2` で持ち、doc graph 側は relation schema と Alloy 風 notation を追加表示します。
+- `imagod-spec` では構造を持つ subsystem を relation-first で書くのを既定にし、atom を `RelAtom`、state field を `RelSet` / `Relation2` で持ちます。phase progression や terminal status のような線形 gate だけ scalar を残し、doc graph 側は relation schema と Alloy 風 notation を追加表示します。
 - `formal_tests` は spec 単体を検査します。
 - `code_tests` は `nirvash_core::conformance::ProtocolConformanceSpec` と `ProtocolRuntimeBinding` を使って grouped な runtime conformance を生成し、`ActionApplier` / `StateObserver` 経由で spec の `transition` と `expected_output` を比較します。
 - `code_witness_tests` は `ProtocolInputWitnessBinding` で positive / negative witness を受け取り、reachable graph から semantic case を自動検出して witness 単位の strict test を custom harness で列挙します。現在の `command_protocol` binding は `OperationManager` に限定され、router 側の request validation / event sequencing はこの比較対象に含みません。

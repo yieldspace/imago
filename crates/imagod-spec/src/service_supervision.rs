@@ -1,7 +1,15 @@
-use nirvash_core::{Fairness, Ltl, StatePredicate, StepPredicate, TransitionSystem};
-use nirvash_macros::{Signature, fairness, invariant, property, subsystem_spec};
+use nirvash_core::{
+    Fairness, Ltl, RelSet, Signature as _, StatePredicate, StepPredicate, TransitionSystem,
+};
+use nirvash_macros::{
+    RelAtom, RelationalState, Signature, fairness, invariant, property, subsystem_spec,
+};
 
-use crate::bounds::ServiceSlots;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, RelAtom)]
+enum ServiceAtom {
+    Service0,
+    Service1,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
 pub enum ServicePhase {
@@ -14,11 +22,30 @@ pub enum ServicePhase {
     Reaped,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, RelationalState)]
 pub struct ServiceSupervisionState {
-    pub active_services: ServiceSlots,
+    active_services: RelSet<ServiceAtom>,
+    ready_services: RelSet<ServiceAtom>,
+    retained_logs: RelSet<ServiceAtom>,
     pub phase: ServicePhase,
-    pub retained_logs: bool,
+}
+
+impl ServiceSupervisionState {
+    pub fn active_service_count(&self) -> usize {
+        self.active_services.cardinality()
+    }
+
+    pub fn has_active_service(&self) -> bool {
+        self.active_services.some()
+    }
+
+    pub fn has_ready_service(&self) -> bool {
+        self.ready_services.some()
+    }
+
+    pub fn has_retained_logs(&self) -> bool {
+        self.retained_logs.some()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
@@ -43,26 +70,38 @@ impl ServiceSupervisionSpec {
 
     pub fn initial_state(&self) -> ServiceSupervisionState {
         ServiceSupervisionState {
-            active_services: ServiceSlots::new(0).expect("within bounds"),
+            active_services: RelSet::empty(),
+            ready_services: RelSet::empty(),
+            retained_logs: RelSet::empty(),
             phase: ServicePhase::Idle,
-            retained_logs: false,
         }
     }
 }
 
 fn service_supervision_state_valid(state: &ServiceSupervisionState) -> bool {
     let active_matches_phase = match state.phase {
-        ServicePhase::Idle | ServicePhase::Reaped => state.active_services.is_zero(),
+        ServicePhase::Idle | ServicePhase::Reaped => state.active_services.no(),
         ServicePhase::Starting
         | ServicePhase::WaitingReady
         | ServicePhase::Running
         | ServicePhase::Stopping
-        | ServicePhase::ForcedStop => !state.active_services.is_zero(),
+        | ServicePhase::ForcedStop => state.active_services.some(),
     };
-    let logs_after_reap =
-        !state.retained_logs || matches!(state.phase, ServicePhase::Reaped | ServicePhase::Idle);
 
-    active_matches_phase && logs_after_reap
+    let ready_matches_phase = match state.phase {
+        ServicePhase::Idle | ServicePhase::Starting | ServicePhase::WaitingReady => {
+            state.ready_services.no()
+        }
+        ServicePhase::Running | ServicePhase::Stopping | ServicePhase::ForcedStop => {
+            state.ready_services.some() && state.ready_services.subset_of(&state.active_services)
+        }
+        ServicePhase::Reaped => state.ready_services.lone(),
+    };
+
+    let logs_after_reap = !state.has_retained_logs() || matches!(state.phase, ServicePhase::Reaped);
+    let retained_subset_of_ready = state.retained_logs.subset_of(&state.ready_services);
+
+    active_matches_phase && ready_matches_phase && logs_after_reap && retained_subset_of_ready
 }
 
 #[invariant(ServiceSupervisionSpec)]
@@ -75,21 +114,21 @@ fn running_requires_active_service() -> StatePredicate<ServiceSupervisionState> 
                 | ServicePhase::Running
                 | ServicePhase::Stopping
                 | ServicePhase::ForcedStop
-        ) || !state.active_services.is_zero()
+        ) || state.has_active_service()
     })
 }
 
 #[invariant(ServiceSupervisionSpec)]
 fn reaped_clears_active_service_count() -> StatePredicate<ServiceSupervisionState> {
     StatePredicate::new("reaped_clears_active_service_count", |state| {
-        !matches!(state.phase, ServicePhase::Reaped) || state.active_services.is_zero()
+        !matches!(state.phase, ServicePhase::Reaped) || !state.has_active_service()
     })
 }
 
 #[invariant(ServiceSupervisionSpec)]
 fn logs_are_only_retained_after_reap() -> StatePredicate<ServiceSupervisionState> {
     StatePredicate::new("logs_are_only_retained_after_reap", |state| {
-        !state.retained_logs || matches!(state.phase, ServicePhase::Reaped | ServicePhase::Idle)
+        !state.has_retained_logs() || matches!(state.phase, ServicePhase::Reaped)
     })
 }
 
@@ -127,10 +166,10 @@ fn running_leads_to_stopping_or_reaped() -> Ltl<ServiceSupervisionState, Service
 fn retained_logs_eventually_clear() -> Ltl<ServiceSupervisionState, ServiceSupervisionAction> {
     Ltl::leads_to(
         Ltl::pred(StatePredicate::new("retained_logs", |state| {
-            state.retained_logs
+            state.has_retained_logs()
         })),
         Ltl::pred(StatePredicate::new("retained_logs_cleared", |state| {
-            !state.retained_logs
+            !state.has_retained_logs()
         })),
     )
 }
@@ -178,7 +217,7 @@ fn log_cleanup_progress() -> Fairness<ServiceSupervisionState, ServiceSupervisio
         "log_cleanup_progress",
         |prev, action, next| {
             matches!(prev.phase, ServicePhase::Reaped)
-                && prev.retained_logs
+                && prev.has_retained_logs()
                 && matches!(action, ServiceSupervisionAction::ClearRetainedLogs)
                 && matches!(next.phase, ServicePhase::Idle)
         },
@@ -223,19 +262,32 @@ fn action_vocabulary() -> Vec<ServiceSupervisionAction> {
     ]
 }
 
+fn next_free_service(state: &ServiceSupervisionState) -> Option<ServiceAtom> {
+    ServiceAtom::bounded_domain()
+        .into_vec()
+        .into_iter()
+        .find(|service| !state.active_services.contains(service))
+}
+
+fn first_active_service(state: &ServiceSupervisionState) -> Option<ServiceAtom> {
+    state.active_services.items().into_iter().next()
+}
+
 fn transition_state(
     prev: &ServiceSupervisionState,
     action: &ServiceSupervisionAction,
 ) -> Option<ServiceSupervisionState> {
-    let mut candidate = *prev;
+    let mut candidate = prev.clone();
     let allowed = match action {
         ServiceSupervisionAction::StartService
             if matches!(prev.phase, ServicePhase::Idle | ServicePhase::Reaped)
-                && !prev.active_services.is_max() =>
+                && !prev.has_active_service() =>
         {
-            candidate.active_services = prev.active_services.saturating_inc();
+            let service = next_free_service(prev)?;
+            candidate.active_services.insert(service);
+            candidate.ready_services = RelSet::empty();
+            candidate.retained_logs = RelSet::empty();
             candidate.phase = ServicePhase::Starting;
-            candidate.retained_logs = false;
             true
         }
         ServiceSupervisionAction::RegisterRunner
@@ -247,6 +299,8 @@ fn transition_state(
         ServiceSupervisionAction::MarkRunnerReady
             if matches!(prev.phase, ServicePhase::WaitingReady) =>
         {
+            let service = first_active_service(prev)?;
+            candidate.ready_services.insert(service);
             candidate.phase = ServicePhase::Running;
             true
         }
@@ -267,18 +321,24 @@ fn transition_state(
             ) =>
         {
             candidate.phase = ServicePhase::Reaped;
-            candidate.active_services = ServiceSlots::new(0).expect("within bounds");
+            candidate.active_services = RelSet::empty();
+            candidate.retained_logs = RelSet::empty();
             true
         }
-        ServiceSupervisionAction::RetainLogs if matches!(prev.phase, ServicePhase::Reaped) => {
-            candidate.retained_logs = true;
+        ServiceSupervisionAction::RetainLogs
+            if matches!(prev.phase, ServicePhase::Reaped)
+                && prev.ready_services.some()
+                && prev.retained_logs.no() =>
+        {
+            candidate.retained_logs = prev.ready_services.clone();
             true
         }
         ServiceSupervisionAction::ClearRetainedLogs
-            if matches!(prev.phase, ServicePhase::Reaped) && prev.retained_logs =>
+            if matches!(prev.phase, ServicePhase::Reaped) && prev.has_retained_logs() =>
         {
             candidate.phase = ServicePhase::Idle;
-            candidate.retained_logs = false;
+            candidate.ready_services = RelSet::empty();
+            candidate.retained_logs = RelSet::empty();
             true
         }
         _ => false,
@@ -287,4 +347,40 @@ fn transition_state(
     allowed
         .then_some(candidate)
         .filter(service_supervision_state_valid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reap_preserves_service_for_explicit_log_retention() {
+        let spec = ServiceSupervisionSpec::new();
+        let starting = spec
+            .transition(
+                &spec.initial_state(),
+                &ServiceSupervisionAction::StartService,
+            )
+            .expect("start");
+        let waiting = spec
+            .transition(&starting, &ServiceSupervisionAction::RegisterRunner)
+            .expect("register");
+        let running = spec
+            .transition(&waiting, &ServiceSupervisionAction::MarkRunnerReady)
+            .expect("ready");
+        let stopping = spec
+            .transition(&running, &ServiceSupervisionAction::RequestStop)
+            .expect("stop");
+        let reaped = spec
+            .transition(&stopping, &ServiceSupervisionAction::ReapService)
+            .expect("reap");
+        let retained = spec
+            .transition(&reaped, &ServiceSupervisionAction::RetainLogs)
+            .expect("retain logs");
+
+        assert_eq!(running.ready_services.items(), vec![ServiceAtom::Service0]);
+        assert!(reaped.active_services.no());
+        assert_eq!(reaped.ready_services.items(), vec![ServiceAtom::Service0]);
+        assert_eq!(retained.retained_logs.items(), vec![ServiceAtom::Service0]);
+    }
 }

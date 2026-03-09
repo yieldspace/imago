@@ -92,6 +92,10 @@ where
         set_bit(&mut self.bits, item.rel_index());
     }
 
+    pub fn remove(&mut self, item: &T) {
+        clear_bit(&mut self.bits, item.rel_index());
+    }
+
     pub fn contains(&self, item: &T) -> bool {
         get_bit(&self.bits, item.rel_index())
     }
@@ -226,6 +230,11 @@ where
     pub fn insert(&mut self, left: A, right: B) {
         let bit_index = self.bit_index(left.rel_index(), right.rel_index());
         set_bit(&mut self.bits, bit_index);
+    }
+
+    pub fn remove(&mut self, left: &A, right: &B) {
+        let bit_index = self.bit_index(left.rel_index(), right.rel_index());
+        clear_bit(&mut self.bits, bit_index);
     }
 
     pub fn contains(&self, left: &A, right: &B) -> bool {
@@ -567,6 +576,14 @@ fn set_bit(bits: &mut [u64], index: usize) {
     let offset = index % 64;
     if let Some(slot) = bits.get_mut(word) {
         *slot |= 1_u64 << offset;
+    }
+}
+
+fn clear_bit(bits: &mut [u64], index: usize) {
+    let word = index / 64;
+    let offset = index % 64;
+    if let Some(slot) = bits.get_mut(word) {
+        *slot &= !(1_u64 << offset);
     }
 }
 

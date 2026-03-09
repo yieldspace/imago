@@ -1,6 +1,12 @@
 use imagod_ipc::RunnerAppType;
-use nirvash_core::{Fairness, Ltl, ModelCase, StatePredicate, StepPredicate, TransitionSystem};
-use nirvash_macros::{Signature as FormalSignature, fairness, invariant, property, subsystem_spec};
+use nirvash_core::{
+    Fairness, Ltl, ModelCase, RelAtom as _, RelSet, Signature as _, StatePredicate, StepPredicate,
+    TransitionSystem,
+};
+use nirvash_macros::{
+    RelAtom, RelationalState, Signature as FormalSignature, fairness, invariant, property,
+    subsystem_spec,
+};
 
 #[cfg(test)]
 use crate::bounds::SPEC_RUNNER_APP_TYPES;
@@ -18,6 +24,18 @@ pub fn classify_runner_mode(app_type: RunnerAppType) -> RunnerModeClass {
         RunnerAppType::Rpc => RunnerModeClass::Service,
         RunnerAppType::Http | RunnerAppType::Socket => RunnerModeClass::Network,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, RelAtom)]
+enum RuntimeEndpointAtom {
+    HttpInbound,
+    SocketInbound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, RelAtom)]
+enum HttpRequestAtom {
+    Request0,
+    Request1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
@@ -42,26 +60,38 @@ pub enum WasmTuningClass {
     Invalid,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
-pub enum SocketPolicyClass {
-    NotApplicable,
-    InboundOnly,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
-pub enum HttpQueueClass {
-    Empty,
-    Full,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, RelationalState)]
 pub struct RunnerRuntimeState {
+    listening_endpoints: RelSet<RuntimeEndpointAtom>,
+    queued_http_requests: RelSet<HttpRequestAtom>,
     pub mode: Option<RunnerAppType>,
     pub phase: RuntimePhase,
-    pub http_queue: HttpQueueClass,
     pub component: ComponentLoadClass,
     pub tuning: WasmTuningClass,
-    pub socket_policy: SocketPolicyClass,
+}
+
+impl RunnerRuntimeState {
+    pub fn has_http_listener(&self) -> bool {
+        self.listening_endpoints
+            .contains(&RuntimeEndpointAtom::HttpInbound)
+    }
+
+    pub fn has_socket_listener(&self) -> bool {
+        self.listening_endpoints
+            .contains(&RuntimeEndpointAtom::SocketInbound)
+    }
+
+    pub fn queued_http_request_count(&self) -> usize {
+        self.queued_http_requests.cardinality()
+    }
+
+    pub fn has_queued_http_requests(&self) -> bool {
+        self.queued_http_requests.some()
+    }
+
+    fn http_queue_full(&self) -> bool {
+        self.queued_http_request_count() == HttpRequestAtom::rel_domain_len()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,12 +118,12 @@ impl RunnerRuntimeSpec {
 
     pub fn initial_state(&self) -> RunnerRuntimeState {
         RunnerRuntimeState {
+            listening_endpoints: RelSet::empty(),
+            queued_http_requests: RelSet::empty(),
             mode: None,
             phase: RuntimePhase::Idle,
-            http_queue: HttpQueueClass::Empty,
             component: ComponentLoadClass::Unknown,
             tuning: WasmTuningClass::Default,
-            socket_policy: SocketPolicyClass::NotApplicable,
         }
     }
 
@@ -120,18 +150,12 @@ impl RunnerRuntimeSpec {
         prev: &RunnerRuntimeState,
         action: &RunnerRuntimeAction,
     ) -> Option<RunnerRuntimeState> {
-        let mut candidate = *prev;
+        let mut candidate = prev.clone();
         let allowed = match action {
             RunnerRuntimeAction::SelectMode(app_type)
                 if prev.mode.is_none() && matches!(prev.phase, RuntimePhase::Idle) =>
             {
                 candidate.mode = Some(*app_type);
-                candidate.socket_policy = match app_type {
-                    RunnerAppType::Cli | RunnerAppType::Rpc | RunnerAppType::Http => {
-                        SocketPolicyClass::NotApplicable
-                    }
-                    RunnerAppType::Socket => SocketPolicyClass::InboundOnly,
-                };
                 true
             }
             RunnerRuntimeAction::ApplyDefaultTuning
@@ -174,30 +198,35 @@ impl RunnerRuntimeSpec {
                     && !matches!(prev.tuning, WasmTuningClass::Invalid) =>
             {
                 candidate.phase = RuntimePhase::Serving;
-                candidate.http_queue = HttpQueueClass::Empty;
+                candidate.listening_endpoints = serving_endpoints(prev.mode);
+                candidate.queued_http_requests = RelSet::empty();
                 true
             }
             RunnerRuntimeAction::AcceptHttpRequest
                 if matches!(prev.mode, Some(RunnerAppType::Http))
                     && matches!(prev.phase, RuntimePhase::Serving)
-                    && matches!(prev.http_queue, HttpQueueClass::Empty) =>
+                    && prev.has_http_listener()
+                    && !prev.http_queue_full() =>
             {
-                candidate.http_queue = HttpQueueClass::Full;
+                let request = next_free_http_request(prev)?;
+                candidate.queued_http_requests.insert(request);
                 true
             }
             RunnerRuntimeAction::DrainHttpRequest
                 if matches!(prev.mode, Some(RunnerAppType::Http))
                     && matches!(prev.phase, RuntimePhase::Serving)
-                    && matches!(prev.http_queue, HttpQueueClass::Full) =>
+                    && prev.has_queued_http_requests() =>
             {
-                candidate.http_queue = HttpQueueClass::Empty;
+                let request = first_queued_http_request(prev)?;
+                candidate.queued_http_requests.remove(&request);
                 true
             }
             RunnerRuntimeAction::FailRuntime
                 if prev.mode.is_some() && !matches!(prev.phase, RuntimePhase::Failed) =>
             {
                 candidate.phase = RuntimePhase::Failed;
-                candidate.http_queue = HttpQueueClass::Empty;
+                candidate.listening_endpoints = RelSet::empty();
+                candidate.queued_http_requests = RelSet::empty();
                 true
             }
             _ => false,
@@ -221,17 +250,19 @@ fn serving_requires_loadable_component() -> StatePredicate<RunnerRuntimeState> {
 #[invariant(RunnerRuntimeSpec)]
 fn http_queue_requires_http_mode() -> StatePredicate<RunnerRuntimeState> {
     StatePredicate::new("http_queue_requires_http_mode", |state| {
-        matches!(state.http_queue, HttpQueueClass::Empty)
+        !state.has_queued_http_requests()
             || (matches!(state.mode, Some(RunnerAppType::Http))
-                && matches!(state.phase, RuntimePhase::Serving))
+                && matches!(state.phase, RuntimePhase::Serving)
+                && state.has_http_listener())
     })
 }
 
 #[invariant(RunnerRuntimeSpec)]
-fn socket_policy_requires_socket_mode() -> StatePredicate<RunnerRuntimeState> {
-    StatePredicate::new("socket_policy_requires_socket_mode", |state| {
-        matches!(state.socket_policy, SocketPolicyClass::NotApplicable)
-            || matches!(state.mode, Some(RunnerAppType::Socket))
+fn socket_listener_requires_socket_mode() -> StatePredicate<RunnerRuntimeState> {
+    StatePredicate::new("socket_listener_requires_socket_mode", |state| {
+        !state.has_socket_listener()
+            || (matches!(state.mode, Some(RunnerAppType::Socket))
+                && matches!(state.phase, RuntimePhase::Serving))
     })
 }
 
@@ -257,13 +288,13 @@ fn component_validated_leads_to_serving_or_failed() -> Ltl<RunnerRuntimeState, R
 }
 
 #[property(RunnerRuntimeSpec)]
-fn http_queue_full_leads_to_not_full() -> Ltl<RunnerRuntimeState, RunnerRuntimeAction> {
+fn http_queue_nonempty_leads_to_empty() -> Ltl<RunnerRuntimeState, RunnerRuntimeAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("http_queue_full", |state| {
-            matches!(state.http_queue, HttpQueueClass::Full)
+        Ltl::pred(StatePredicate::new("http_queue_nonempty", |state| {
+            state.has_queued_http_requests()
         })),
-        Ltl::pred(StatePredicate::new("http_queue_not_full", |state| {
-            matches!(state.http_queue, HttpQueueClass::Empty)
+        Ltl::pred(StatePredicate::new("http_queue_empty", |state| {
+            !state.has_queued_http_requests()
         })),
     )
 }
@@ -300,8 +331,8 @@ fn http_drain_fairness() -> Fairness<RunnerRuntimeState, RunnerRuntimeAction> {
             matches!(action, RunnerRuntimeAction::DrainHttpRequest)
                 && matches!(prev.mode, Some(RunnerAppType::Http))
                 && matches!(prev.phase, RuntimePhase::Serving)
-                && matches!(prev.http_queue, HttpQueueClass::Full)
-                && matches!(next.http_queue, HttpQueueClass::Empty)
+                && prev.has_queued_http_requests()
+                && next.queued_http_request_count() < prev.queued_http_request_count()
         },
     ))
 }
@@ -339,6 +370,25 @@ impl TransitionSystem for RunnerRuntimeSpec {
 #[nirvash_macros::formal_tests(spec = RunnerRuntimeSpec)]
 const _: () = ();
 
+fn serving_endpoints(mode: Option<RunnerAppType>) -> RelSet<RuntimeEndpointAtom> {
+    match mode {
+        Some(RunnerAppType::Http) => RelSet::from_items([RuntimeEndpointAtom::HttpInbound]),
+        Some(RunnerAppType::Socket) => RelSet::from_items([RuntimeEndpointAtom::SocketInbound]),
+        _ => RelSet::empty(),
+    }
+}
+
+fn next_free_http_request(state: &RunnerRuntimeState) -> Option<HttpRequestAtom> {
+    HttpRequestAtom::bounded_domain()
+        .into_vec()
+        .into_iter()
+        .find(|request| !state.queued_http_requests.contains(request))
+}
+
+fn first_queued_http_request(state: &RunnerRuntimeState) -> Option<HttpRequestAtom> {
+    state.queued_http_requests.items().into_iter().next()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +398,35 @@ mod tests {
         for app_type in SPEC_RUNNER_APP_TYPES {
             let _ = classify_runner_mode(app_type);
         }
+    }
+
+    #[test]
+    fn http_serving_tracks_listener_and_queue_relations() {
+        let spec = RunnerRuntimeSpec::new();
+        let selected = spec
+            .transition(
+                &spec.initial_state(),
+                &RunnerRuntimeAction::SelectMode(RunnerAppType::Http),
+            )
+            .expect("select mode");
+        let validated = spec
+            .transition(&selected, &RunnerRuntimeAction::ValidateComponentLoadable)
+            .expect("validate");
+        let serving = spec
+            .transition(&validated, &RunnerRuntimeAction::StartServing)
+            .expect("start serving");
+        let queued = spec
+            .transition(&serving, &RunnerRuntimeAction::AcceptHttpRequest)
+            .expect("queue request");
+        let drained = spec
+            .transition(&queued, &RunnerRuntimeAction::DrainHttpRequest)
+            .expect("drain request");
+
+        assert!(serving.has_http_listener());
+        assert_eq!(
+            queued.queued_http_requests.items(),
+            vec![HttpRequestAtom::Request0]
+        );
+        assert!(!drained.has_queued_http_requests());
     }
 }
