@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
-use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_runtime_internal::{
     HttpComponentSupervisor, RuntimeHttpRequest, RuntimeHttpResponse, RuntimeHttpWorkItem,
 };
+use imagod_spec::ErrorCode;
 use tokio::sync::{mpsc, oneshot};
 use wasmtime::Store;
 use wasmtime_wasi_http::{WasiHttpView, bindings::Proxy, bindings::http::types::Scheme};

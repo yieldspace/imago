@@ -21,7 +21,7 @@ pub enum ArtifactStatus {
 ///
 /// # Examples
 /// ```rust
-/// use imago_protocol::{messages::ByteRange, Validate};
+/// use imagod_spec::{ByteRange, Validate};
 ///
 /// let range = ByteRange { offset: 0, length: 4 };
 /// range.validate().expect("positive length is required");
@@ -43,7 +43,7 @@ impl Validate for ByteRange {
 /// # Examples
 /// ```rust
 /// use std::collections::BTreeMap;
-/// use imago_protocol::{messages::DeployPrepareRequest, Validate};
+/// use imagod_spec::{DeployPrepareRequest, Validate};
 ///
 /// let request = DeployPrepareRequest {
 ///     name: "svc-a".to_string(),
@@ -87,7 +87,7 @@ impl Validate for DeployPrepareRequest {
 ///
 /// # Examples
 /// ```rust
-/// use imago_protocol::{messages::{ArtifactStatus, ByteRange, DeployPrepareResponse}, Validate};
+/// use imagod_spec::{ArtifactStatus, ByteRange, DeployPrepareResponse, Validate};
 ///
 /// let response = DeployPrepareResponse {
 ///     deploy_id: "deploy-1".to_string(),
@@ -151,7 +151,7 @@ impl Validate for ArtifactPushChunkHeader {
 ///
 /// # Examples
 /// ```rust
-/// use imago_protocol::{messages::{ArtifactPushChunkHeader, ArtifactPushRequest}, Validate};
+/// use imagod_spec::{ArtifactPushChunkHeader, ArtifactPushRequest, Validate};
 ///
 /// let request = ArtifactPushRequest {
 ///     header: ArtifactPushChunkHeader {

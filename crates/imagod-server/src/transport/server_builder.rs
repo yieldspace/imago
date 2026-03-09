@@ -1,6 +1,6 @@
-use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_config::ImagodConfig;
+use imagod_spec::ErrorCode;
 use web_transport_quinn::Server;
 
 use super::{
@@ -68,7 +68,7 @@ mod tests {
             Ok(_) => panic!("invalid listen_addr must fail"),
             Err(err) => err,
         };
-        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.code, imagod_spec::ErrorCode::BadRequest);
         assert_eq!(err.stage, super::STAGE_TRANSPORT);
         assert!(err.message.contains("listen_addr parse failed"));
     }
@@ -102,7 +102,7 @@ mod tests {
                 Ok(_) => panic!("quic endpoint bind should fail"),
                 Err(err) => err,
             };
-            assert_eq!(err.code, imago_protocol::ErrorCode::Internal);
+            assert_eq!(err.code, imagod_spec::ErrorCode::Internal);
             assert_eq!(err.stage, super::STAGE_TRANSPORT);
             assert!(err.message.contains("endpoint bind failed"));
         });

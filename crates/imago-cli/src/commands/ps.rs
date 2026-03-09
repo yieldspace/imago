@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::Context;
 use chrono::{DateTime, Local, Utc};
-use imago_protocol::{
+use imagod_spec::{
     MessageType, ServiceListRequest, ServiceListResponse, ServiceState as ProtocolServiceState,
     ServiceStatusEntry,
 };

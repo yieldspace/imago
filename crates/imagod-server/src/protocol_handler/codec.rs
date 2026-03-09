@@ -39,7 +39,7 @@ fn decode_frame_ranges(value: &[u8]) -> Result<Vec<(usize, usize)>, ImagodError>
     while offset < value.len() {
         if value.len() - offset < 4 {
             return Err(ImagodError::new(
-                imago_protocol::ErrorCode::BadRequest,
+                imagod_spec::ErrorCode::BadRequest,
                 "protocol",
                 "truncated frame header",
             ));
@@ -47,7 +47,7 @@ fn decode_frame_ranges(value: &[u8]) -> Result<Vec<(usize, usize)>, ImagodError>
 
         let len = u32::from_be_bytes(value[offset..offset + 4].try_into().map_err(|_| {
             ImagodError::new(
-                imago_protocol::ErrorCode::BadRequest,
+                imagod_spec::ErrorCode::BadRequest,
                 "protocol",
                 "invalid frame header",
             )
@@ -56,7 +56,7 @@ fn decode_frame_ranges(value: &[u8]) -> Result<Vec<(usize, usize)>, ImagodError>
 
         if value.len() - offset < len {
             return Err(ImagodError::new(
-                imago_protocol::ErrorCode::BadRequest,
+                imagod_spec::ErrorCode::BadRequest,
                 "protocol",
                 "truncated frame payload",
             ));
@@ -129,7 +129,7 @@ mod tests {
             .decode_frame_slices(&[0x00, 0x00, 0x00])
             .expect_err("truncated header must fail");
 
-        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.code, imagod_spec::ErrorCode::BadRequest);
         assert_eq!(err.stage, "protocol");
         assert_eq!(err.message, "truncated frame header");
     }
@@ -144,7 +144,7 @@ mod tests {
             .decode_frame_slices(&frame)
             .expect_err("truncated payload must fail");
 
-        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.code, imagod_spec::ErrorCode::BadRequest);
         assert_eq!(err.stage, "protocol");
         assert_eq!(err.message, "truncated frame payload");
     }

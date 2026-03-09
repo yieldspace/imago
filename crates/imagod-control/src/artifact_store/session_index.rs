@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use imago_protocol::{ArtifactStatus, DeployPrepareResponse};
+use imagod_spec::{ArtifactStatus, DeployPrepareResponse};
 
 use super::{CleanupPlan, StoreState, UploadSession, commit};
 

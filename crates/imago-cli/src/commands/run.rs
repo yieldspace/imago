@@ -1,7 +1,7 @@
 use std::{path::Path, time::Instant};
 
 use anyhow::Context;
-use imago_protocol::{CommandPayload, CommandType, RunCommandPayload};
+use imagod_spec::{CommandPayload, CommandType, RunCommandPayload};
 use uuid::Uuid;
 
 use crate::{

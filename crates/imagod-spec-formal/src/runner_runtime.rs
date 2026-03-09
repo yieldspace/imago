@@ -1,4 +1,3 @@
-use imagod_ipc::RunnerAppType;
 use nirvash_core::{
     Fairness, Ltl, ModelCase, RelAtom as _, RelSet, Signature as _, StatePredicate, StepPredicate,
     TransitionSystem,
@@ -8,6 +7,7 @@ use nirvash_macros::{
     property, subsystem_spec,
 };
 
+use crate::RunnerAppType;
 #[cfg(test)]
 use crate::bounds::SPEC_RUNNER_APP_TYPES;
 

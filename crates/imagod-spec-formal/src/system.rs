@@ -1,5 +1,4 @@
-use imago_protocol::{CommandLifecycleState, CommandProtocolAction, MessageType};
-use imagod_ipc::PluginKind;
+use imagod_spec::MessageType;
 use nirvash_core::concurrent::{ConcurrentAction, ConcurrentTransitionSystem};
 use nirvash_core::{
     ActionConstraint, ModelCase, ModelCaseSource, ModelCheckConfig, Signature as _,
@@ -9,6 +8,7 @@ use nirvash_core::{
 use nirvash_macros::{invariant, system_spec};
 
 use crate::{
+    CommandKind, CommandLifecycleState, CommandProtocolAction, OperationPhase, PluginKind,
     atoms::{
         CommandEventAtom, LogChunkAtom, RemoteAuthorityAtom, RequestKindAtom, RpcCallAtom,
         RpcConnectionAtom, RunnerAtom, ServiceAtom, SessionAtom, StreamAtom, binding_target_for,
@@ -695,7 +695,7 @@ fn system_atomic_candidates(state: &SystemState) -> Vec<SystemAtomicAction> {
 
     if !state.command.tracked {
         actions.push(SystemAtomicAction::Command(CommandProtocolAction::Start(
-            imago_protocol::CommandKind::Deploy,
+            CommandKind::Deploy,
         )));
     }
     if matches!(
@@ -720,10 +720,8 @@ fn system_atomic_candidates(state: &SystemState) -> Vec<SystemAtomicAction> {
     if matches!(
         state.command.lifecycle_state,
         Some(CommandLifecycleState::Running)
-    ) && matches!(
-        state.command.phase,
-        Some(imago_protocol::OperationPhase::Spawned)
-    ) {
+    ) && matches!(state.command.phase, Some(OperationPhase::Spawned))
+    {
         actions.push(SystemAtomicAction::Command(
             CommandProtocolAction::FinishSucceeded,
         ));
@@ -2131,9 +2129,7 @@ fn command_start_event_flow_atom_allowed(action: &SystemAtomicAction) -> bool {
                     RequestKindAtom::CommandStart,
                 ))
                 | SystemAtomicAction::Wire(WireProtocolAction::CommandStart(StreamAtom::Stream0,))
-                | SystemAtomicAction::Command(CommandProtocolAction::Start(
-                    imago_protocol::CommandKind::Deploy,
-                ))
+                | SystemAtomicAction::Command(CommandProtocolAction::Start(CommandKind::Deploy,))
                 | SystemAtomicAction::Command(CommandProtocolAction::SetRunning)
                 | SystemAtomicAction::Command(CommandProtocolAction::MarkSpawned)
                 | SystemAtomicAction::Command(CommandProtocolAction::FinishSucceeded)
@@ -2169,9 +2165,7 @@ fn state_request_and_cancel_atom_allowed(action: &SystemAtomicAction) -> bool {
                 ))
                 | SystemAtomicAction::Wire(WireProtocolAction::StateRequest(StreamAtom::Stream0,))
                 | SystemAtomicAction::Wire(WireProtocolAction::CommandCancel(StreamAtom::Stream1,))
-                | SystemAtomicAction::Command(CommandProtocolAction::Start(
-                    imago_protocol::CommandKind::Deploy,
-                ))
+                | SystemAtomicAction::Command(CommandProtocolAction::Start(CommandKind::Deploy,))
                 | SystemAtomicAction::Command(CommandProtocolAction::SetRunning)
                 | SystemAtomicAction::Command(CommandProtocolAction::SnapshotRunning)
                 | SystemAtomicAction::Command(CommandProtocolAction::RequestCancel)
@@ -2975,9 +2969,7 @@ mod tests {
         let state = step(
             &spec,
             &state,
-            SystemAtomicAction::Command(CommandProtocolAction::Start(
-                imago_protocol::CommandKind::Deploy,
-            )),
+            SystemAtomicAction::Command(CommandProtocolAction::Start(CommandKind::Deploy)),
         );
         let state = step(
             &spec,
@@ -3110,9 +3102,7 @@ mod tests {
         let state = step(
             &spec,
             &listening_state(&spec),
-            SystemAtomicAction::Command(CommandProtocolAction::Start(
-                imago_protocol::CommandKind::Deploy,
-            )),
+            SystemAtomicAction::Command(CommandProtocolAction::Start(CommandKind::Deploy)),
         );
         let state = step(
             &spec,

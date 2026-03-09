@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use imago_protocol::ErrorCode;
+use imagod_spec::ErrorCode;
 
 use crate::ImagodError;
 

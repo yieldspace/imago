@@ -7,7 +7,7 @@
 
 ```mermaid
 flowchart LR
-    A["imago-protocol<br/>shared contract"] --> B["imagod-spec<br/>TemporalSpec / projection"]
+    A["imagod-spec<br/>shared contract"] --> B["imagod-spec-formal<br/>TemporalSpec / projection"]
     B --> C["nirvash-macros<br/>derive / registry / generated tests"]
     C --> D["nirvash-core<br/>DSL / checker"]
     C --> E["nirvash-docgen<br/>rustdoc graph generation"]
@@ -35,12 +35,14 @@ flowchart LR
   - `#[subsystem_spec]` / `#[system_spec]`
   - `#[formal_tests]` / `#[code_tests]`
   - `#[invariant(...)]` などの registry 登録
+- `crates/imagod-spec`
+  - `command_contract` / `wire` / `ipc` の shared contract
 - `crates/imago-protocol`
-  - `command_contract` の shared contract
+  - CBOR codec helper
 - `crates/nirvash-docgen`
   - `cargo doc` 時に spec を走らせ、reachable graph と registration 情報から Mermaid 図を生成
-- `crates/imagod-spec`
-  - `imagod` 全体の spec 記述
+- `crates/imagod-spec-formal`
+  - `imagod` 全体の formal spec 記述
   - `command_protocol` では intended contract の projection つき conformance spec を実装
   - `system` は boot / session / wire / deploy / supervision / service RPC / plugin / shutdown を footprint-based concurrency で束ねる unified composition で、top-level では cross-link invariant と scenario model case を主に持つ
   - `legacy_system` は single-service 前提の旧 baseline として残す
@@ -51,7 +53,7 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    A["Spec authoring<br/>imagod-spec"] --> B["subsystem_spec / system_spec"]
+    A["Spec authoring<br/>imagod-spec-formal"] --> B["subsystem_spec / system_spec"]
     A --> C["invariant / property / fairness / model cases"]
     A --> D["formal_tests / code_tests"]
     B --> E["TemporalSpec impl"]
@@ -70,12 +72,12 @@ flowchart TD
 
 - 通常 spec の正本は `TransitionSystem::initial_states()`、`TransitionSystem::actions()`、`TransitionSystem::transition()` です。`system` のような並行 spec は `ConcurrentTransitionSystem::{initial_states, atomic_actions, atomic_transition, footprint_reads, footprint_writes}` を atomic 正本にし、`TransitionSystem::Action = ConcurrentAction<_>` と `successors()` で synthesized parallel step を返します。
 - `Signature` は helper enum/newtype や projection 型の bounded domain 付与にだけ使います。
-- `imagod-spec` では構造を持つ subsystem を relation-first で書くのを既定にし、atom を `RelAtom`、state field を `RelSet` / `Relation2` で持ちます。phase progression や terminal status のような線形 gate だけ scalar を残し、doc graph 側は relation schema と Alloy 風 notation を追加表示します。
+- `imagod-spec-formal` では構造を持つ subsystem を relation-first で書くのを既定にし、atom を `RelAtom`、state field を `RelSet` / `Relation2` で持ちます。phase progression や terminal status のような線形 gate だけ scalar を残し、doc graph 側は relation schema と Alloy 風 notation を追加表示します。
 - concurrent edge の doc label は `parallel(a, b, c)` 形式で表示され、resource footprint に衝突しない atomic action だけが自動合成されます。
 - `formal_tests` は spec 単体を検査します。
 - `code_tests` は `nirvash_core::conformance::ProtocolConformanceSpec` と `ProtocolRuntimeBinding` を使って grouped な runtime conformance を生成し、`ActionApplier` / `StateObserver` 経由で spec の `transition` と `expected_output` を比較します。
 - `code_witness_tests` は `ProtocolInputWitnessBinding` で positive / negative witness を受け取り、reachable graph から semantic case を自動検出して witness 単位の strict test を custom harness で列挙します。現行の command witness は `command_projection` が `system` から command surface を投影し、実行先は `OperationManager` に限定されます。ほかの boundary は grouped `code_tests` で `router_projection` / `session_auth_projection` / `logs_projection -> imagod-server`、`runtime_projection -> imagod-control`、`manager_runtime_projection -> imagod` に接続します。
-- shared contract は `imago-protocol`、conformance API は `nirvash-core` にあり、spec 本体は `imagod-spec`、runtime binding と `code_tests` 実行は runtime crate の integration test に置きます。
+- shared contract は `imagod-spec`、conformance API は `nirvash-core` にあり、formal spec 本体は `imagod-spec-formal`、runtime binding と `code_tests` 実行は runtime crate の integration test に置きます。
 
 ## imagod-control のシステム
 
@@ -154,7 +156,7 @@ command runtime は、いま次の形で接続されています。
 
 ```mermaid
 flowchart LR
-    A["imago-protocol::command_contract<br/>CommandProtocolAction<br/>CommandProtocolContext<br/>CommandProtocolOutput"] --> B["imagod-spec::command_projection"]
+    A["imagod-spec::command_contract<br/>CommandProtocolAction<br/>CommandProtocolContext<br/>CommandProtocolOutput"] --> B["imagod-spec-formal::command_projection"]
     A --> C["imagod-control::OperationManager"]
     B --> D["system transition(...) + projected expected_output(...)"]
     F["imagod-control/tests<br/>CommandProtocolBinding"] --> G["fresh_runtime / context"]
@@ -186,9 +188,9 @@ full implementation の private state をそのまま複製するのではなく
 - `nirvash-core`: `crates/nirvash-core/src/lib.rs`, `crates/nirvash-core/src/system.rs`, `crates/nirvash-core/src/checker.rs`, `crates/nirvash-core/src/concurrent.rs`
 - `nirvash-macros`: `crates/nirvash-macros/src/lib.rs`
 - `nirvash-docgen`: `crates/nirvash-docgen/src/lib.rs`
-- shared contract: `crates/imago-protocol/src/command_contract.rs`
+- shared contract: `crates/imagod-spec/src/command_contract.rs`, `crates/imagod-spec/src/wire.rs`, `crates/imagod-spec/src/ipc.rs`
 - conformance API: `crates/nirvash-core/src/conformance.rs`
 - `imagod-control`: `crates/imagod-control/src/lib.rs`, `crates/imagod-control/src/operation_state.rs`, `crates/imagod-control/src/artifact_store.rs`, `crates/imagod-control/src/orchestrator.rs`, `crates/imagod-control/src/service_supervisor.rs`
-- spec 側接続: `crates/imagod-spec/src/command_projection.rs`, `crates/imagod-spec/src/router_projection.rs`, `crates/imagod-spec/src/session_auth_projection.rs`, `crates/imagod-spec/src/logs_projection.rs`, `crates/imagod-spec/src/runtime_projection.rs`, `crates/imagod-spec/src/manager_runtime_projection.rs`, `crates/imagod-spec/src/command_protocol.rs`, `crates/imagod-spec/src/deploy.rs`, `crates/imagod-spec/src/supervision.rs`, `crates/imagod-spec/src/rpc.rs`, `crates/imagod-spec/src/session_auth.rs`, `crates/imagod-spec/src/wire_protocol.rs`, `crates/imagod-spec/src/system.rs`
+- spec 側接続: `crates/imagod-spec-formal/src/command_projection.rs`, `crates/imagod-spec-formal/src/router_projection.rs`, `crates/imagod-spec-formal/src/session_auth_projection.rs`, `crates/imagod-spec-formal/src/logs_projection.rs`, `crates/imagod-spec-formal/src/runtime_projection.rs`, `crates/imagod-spec-formal/src/manager_runtime_projection.rs`, `crates/imagod-spec-formal/src/command_protocol.rs`, `crates/imagod-spec-formal/src/deploy.rs`, `crates/imagod-spec-formal/src/supervision.rs`, `crates/imagod-spec-formal/src/rpc.rs`, `crates/imagod-spec-formal/src/session_auth.rs`, `crates/imagod-spec-formal/src/wire_protocol.rs`, `crates/imagod-spec-formal/src/system.rs`
 - runtime 側 binding: `crates/imagod-control/tests/command_protocol_conformance.rs`, `crates/imagod-server/src/protocol_handler/router.rs`, `crates/imagod-server/src/protocol_handler/session_loop.rs`, `crates/imagod-server/src/protocol_handler/logs_forwarder.rs`, `crates/imagod-control/src/service_supervisor.rs`, `crates/imagod/src/manager_runtime.rs`
 - wire boundary: `crates/imagod-server/src/protocol_handler/router.rs`

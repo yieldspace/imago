@@ -5,7 +5,7 @@ use std::{
 };
 
 use imagod_common::ImagodError;
-use imagod_ipc::{CapabilityPolicy, RunnerAppType, RunnerSocketConfig, ServiceBinding};
+use imagod_spec::{CapabilityPolicy, RunnerAppType, RunnerSocketConfig, ServiceBinding};
 use sha2::{Digest, Sha256};
 
 use super::{

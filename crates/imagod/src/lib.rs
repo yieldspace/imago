@@ -8,7 +8,7 @@ use imago_plugin_imago_experimental_gpio::ImagoExperimentalGpioPlugin;
 use imago_plugin_imago_experimental_i2c::ImagoExperimentalI2cPlugin;
 use imago_plugin_imago_node::ImagoNodePlugin;
 use imago_plugin_imago_usb::ImagoUsbPlugin;
-use imago_protocol::PROTOCOL_VERSION;
+use imagod_spec::PROTOCOL_VERSION;
 
 mod manager_runtime;
 mod runner_runtime;

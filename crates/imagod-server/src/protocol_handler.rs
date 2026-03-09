@@ -13,16 +13,16 @@ use std::{
 };
 
 use async_trait::async_trait;
-use imago_protocol::{
-    ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushRequest,
-    CommandProtocolAction, CommandProtocolContext, CommandProtocolOutput, DeployCommandPayload,
-    DeployPrepareRequest, DeployPrepareResponse, ErrorCode, RunCommandPayload, ServiceStatusEntry,
-    StopCommandPayload,
-};
 use imagod_common::ImagodError;
 use imagod_config::{ImagodConfig, parse_ed25519_raw_public_key_hex, resolve_config_path};
 use imagod_control::{
     ActionApplier, ArtifactStore, OperationManager, Orchestrator, ServiceLogSubscription,
+};
+use imagod_spec::{
+    ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushRequest,
+    CommandProtocolAction, CommandProtocolContext, CommandProtocolOutput, DeployCommandPayload,
+    DeployPrepareRequest, DeployPrepareResponse, ErrorCode, ProtocolEnvelope, RunCommandPayload,
+    ServiceStatusEntry, StopCommandPayload,
 };
 use serde_json::Value;
 use web_transport_quinn::Session;
@@ -43,7 +43,7 @@ pub(crate) const LOG_DATAGRAM_TARGET_BYTES: usize = 1024;
 const STAGE_DYNAMIC_KEYS: &str = "protocol.keys";
 
 /// JSON-backed envelope type used by stream decode/encode flow.
-pub(crate) type Envelope = imago_protocol::ProtocolEnvelope<Value>;
+pub(crate) type Envelope = ProtocolEnvelope<Value>;
 
 #[async_trait]
 pub(crate) trait ProtocolArtifacts: Send + Sync {
@@ -183,7 +183,10 @@ impl ProtocolOrchestrator for Orchestrator {
         payload: &StopCommandPayload,
     ) -> Result<(String, String), ImagodError> {
         let summary = Orchestrator::stop(self, payload).await?;
-        Ok((format!("stopped:{}", summary.service_name), "completed".to_string()))
+        Ok((
+            format!("stopped:{}", summary.service_name),
+            "completed".to_string(),
+        ))
     }
 
     async fn list_service_states(
@@ -512,14 +515,15 @@ mod tests {
         },
         session_loop::{read_stream_with_timeout, stream_read_timeout_error},
     };
-    use imago_protocol::{
+    use imago_protocol::to_cbor;
+    use imagod_common::ImagodError;
+    use imagod_control::{ActionApplier, OperationManager, ServiceLogStream};
+    use imagod_spec::{
         ArtifactPushChunkHeader, ArtifactPushRequest, CommandErrorKind, CommandKind,
         CommandProtocolAction, CommandProtocolContext, CommandProtocolOutput,
         CommandProtocolStageId, ErrorCode, LogChunk, LogErrorCode, LogStreamKind, MessageType,
-        ProtocolEnvelope, to_cbor,
+        ProtocolEnvelope,
     };
-    use imagod_common::ImagodError;
-    use imagod_control::{ActionApplier, OperationManager, ServiceLogStream};
     use serde_json::Value;
     use std::{sync::atomic::AtomicBool, time::Duration};
     use uuid::Uuid;
@@ -578,7 +582,7 @@ mod tests {
         let payload_request_id = Uuid::new_v4();
         let err = ensure_command_start_request_id_match(envelope_request_id, payload_request_id)
             .expect_err("mismatched request ids should be rejected");
-        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.code, imagod_spec::ErrorCode::BadRequest);
     }
 
     #[test]
@@ -593,7 +597,7 @@ mod tests {
         let shutdown_requested = AtomicBool::new(true);
         let err = ensure_command_start_allowed(&shutdown_requested)
             .expect_err("shutdown mode should reject command.start");
-        assert_eq!(err.code, imago_protocol::ErrorCode::Busy);
+        assert_eq!(err.code, imagod_spec::ErrorCode::Busy);
         assert_eq!(err.stage, "command.start");
         assert_eq!(err.message, "server is shutting down");
     }
@@ -635,7 +639,7 @@ mod tests {
             chunk: Vec::new(),
         };
         let err = validate_push_payload(&payload).expect_err("empty chunk should be rejected");
-        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.code, imagod_spec::ErrorCode::BadRequest);
     }
 
     #[tokio::test]
@@ -646,13 +650,13 @@ mod tests {
         )
         .await
         .expect_err("pending read should timeout");
-        assert_eq!(err.code, imago_protocol::ErrorCode::OperationTimeout);
+        assert_eq!(err.code, imagod_spec::ErrorCode::OperationTimeout);
     }
 
     #[test]
     fn stream_timeout_error_has_session_read_stage() {
         let err = stream_read_timeout_error();
-        assert_eq!(err.code, imago_protocol::ErrorCode::OperationTimeout);
+        assert_eq!(err.code, imagod_spec::ErrorCode::OperationTimeout);
         assert_eq!(err.stage, "session.read");
     }
 

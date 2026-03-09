@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use imago_protocol::{
-    LogChunk, LogEnd, LogError, LogErrorCode, LogStreamKind, MessageType, ProtocolEnvelope, to_cbor,
-};
+use imago_protocol::to_cbor;
 use imagod_common::ImagodError;
 use imagod_control::{
     ServiceLogEvent, ServiceLogSnapshot, ServiceLogStream, ServiceLogSubscription,
+};
+use imagod_spec::{
+    LogChunk, LogEnd, LogError, LogErrorCode, LogStreamKind, MessageType, ProtocolEnvelope,
 };
 use tokio::{sync::mpsc, time::Duration};
 use uuid::Uuid;
@@ -197,7 +198,7 @@ where
         }
         if self.chunk_size == 0 {
             return Err(ImagodError::new(
-                imago_protocol::ErrorCode::Internal,
+                imagod_spec::ErrorCode::Internal,
                 "logs.datagram",
                 "computed logs chunk size must be greater than zero",
             ));
@@ -470,14 +471,14 @@ where
 {
     let bytes = to_cbor(envelope).map_err(|e| {
         ImagodError::new(
-            imago_protocol::ErrorCode::Internal,
+            imagod_spec::ErrorCode::Internal,
             "logs.datagram",
             format!("failed to encode datagram payload: {e}"),
         )
     })?;
     if bytes.len() > max_datagram_size {
         return Err(ImagodError::new(
-            imago_protocol::ErrorCode::Internal,
+            imagod_spec::ErrorCode::Internal,
             "logs.datagram",
             format!(
                 "datagram payload too large: size={} max={}",
@@ -538,7 +539,7 @@ pub(crate) fn fixed_log_chunk_size(
     let envelope = ProtocolEnvelope::new(MessageType::LogsChunk, request_id, correlation_id, probe);
     let overhead = to_cbor(&envelope).map_err(|e| {
         ImagodError::new(
-            imago_protocol::ErrorCode::Internal,
+            imagod_spec::ErrorCode::Internal,
             "logs.datagram",
             format!("failed to encode datagram probe: {e}"),
         )
@@ -547,7 +548,7 @@ pub(crate) fn fixed_log_chunk_size(
     let chunk_size = computed_limit.min(LOG_DATAGRAM_TARGET_BYTES);
     if chunk_size == 0 {
         return Err(ImagodError::new(
-            imago_protocol::ErrorCode::Internal,
+            imagod_spec::ErrorCode::Internal,
             "logs.datagram",
             format!(
                 "datagram size is too small for logs payload: max={} overhead={}",
@@ -569,8 +570,8 @@ pub(crate) fn service_log_stream_to_protocol(stream: ServiceLogStream) -> LogStr
 
 pub(crate) fn log_error_from_imagod_error(err: &ImagodError) -> LogError {
     let code = match err.code {
-        imago_protocol::ErrorCode::NotFound => LogErrorCode::ProcessNotFound,
-        imago_protocol::ErrorCode::Unauthorized => LogErrorCode::PermissionDenied,
+        imagod_spec::ErrorCode::NotFound => LogErrorCode::ProcessNotFound,
+        imagod_spec::ErrorCode::Unauthorized => LogErrorCode::PermissionDenied,
         _ => LogErrorCode::Internal,
     };
 
@@ -596,9 +597,10 @@ mod tests {
 
     use async_trait::async_trait;
     use bytes::Bytes;
-    use imago_protocol::{ErrorCode, from_cbor};
+    use imago_protocol::from_cbor;
     use imagod_control::{ServiceLogEvent, ServiceLogStream, ServiceLogSubscription};
-    use imagod_spec::{
+    use imagod_spec::ErrorCode;
+    use imagod_spec_formal::{
         LogsProjectionAction, LogsProjectionObservedState, LogsProjectionSpec, SystemEffect,
         SystemState,
     };
@@ -785,10 +787,8 @@ mod tests {
 
             match action {
                 LogsProjectionAction::LogsRequest => {
-                    let session = Arc::new(FakeProtocolSession::new(
-                        2048,
-                        vec![Ok(()), Ok(()), Ok(())],
-                    ));
+                    let session =
+                        Arc::new(FakeProtocolSession::new(2048, vec![Ok(()), Ok(()), Ok(())]));
                     run_logs_forwarder(
                         session.clone(),
                         Uuid::from_u128(17),
@@ -811,7 +811,10 @@ mod tests {
                             RecordedDatagramKind::End => break,
                         }
                     }
-                    assert!(saw_chunk, "logs forwarder should emit at least one logs.chunk");
+                    assert!(
+                        saw_chunk,
+                        "logs forwarder should emit at least one logs.chunk"
+                    );
                 }
                 LogsProjectionAction::LogsEnd => {
                     let mut pending = self.pending.lock().await;

@@ -3,18 +3,18 @@
 use std::any::Any;
 use std::path::Path;
 
-use imago_protocol::{ErrorCode, Validate};
 use imagod_common::ImagodError;
+use imagod_spec::ipc::{
+    ControlRequest, ControlResponse, RunnerInboundRequest, RunnerInboundResponse,
+};
+use imagod_spec::wire::{ErrorCode, Validate};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
 };
 
-use crate::ipc::{
-    BoxFutureResult, ControlPlaneTransport, ControlRequest, ControlResponse, InvocationTransport,
-    RunnerInboundRequest, RunnerInboundResponse, map_ipc_error,
-};
+use crate::ipc::{BoxFutureResult, ControlPlaneTransport, InvocationTransport, map_ipc_error};
 
 const STAGE: &str = "ipc.dbus_p2p";
 const MAX_FRAME_BYTES: usize = 1024 * 1024 * 8;
@@ -228,7 +228,7 @@ mod tests {
     use tokio::net::UnixStream;
 
     use super::*;
-    use crate::ipc::{
+    use imagod_spec::ipc::{
         ControlRequest, ControlResponse, RunnerInboundRequest, RunnerInboundResponse,
     };
 

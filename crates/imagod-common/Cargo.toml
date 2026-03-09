@@ -5,5 +5,5 @@ edition.workspace = true
 license.workspace = true
 publish = false
 [dependencies]
-imago-protocol = { workspace = true }
+imagod-spec = { workspace = true }
 thiserror = { workspace = true }

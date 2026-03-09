@@ -1,5 +1,3 @@
-#[cfg(test)]
-use imago_protocol::Validate;
 use imagod_runtime_wasmtime::{
     NativePluginContext, WasiState,
     native_plugins::{
@@ -8,6 +6,8 @@ use imagod_runtime_wasmtime::{
     },
     rpc_bridge::{self, RpcConnection},
 };
+#[cfg(test)]
+use imagod_spec::Validate;
 use url::Url;
 use wasmtime::component::Resource;
 
@@ -157,9 +157,9 @@ impl imago_node_plugin_bindings::imago::node::rpc::Host for WasiState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imagod_ipc::{
-        ControlRequest, ControlResponse, RunnerAppType, RunnerInboundRequest,
-        RunnerInboundResponse, random_secret_hex, verify_manager_auth_proof,
+    use imagod_ipc::{random_secret_hex, verify_manager_auth_proof};
+    use imagod_spec::{
+        ControlRequest, ControlResponse, RunnerAppType, RunnerInboundRequest, RunnerInboundResponse,
     };
     use std::{
         io::{Read, Write},

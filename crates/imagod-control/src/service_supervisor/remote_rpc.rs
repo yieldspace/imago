@@ -7,13 +7,14 @@ use std::{
     time::Duration,
 };
 
-use imago_protocol::{
-    ErrorCode, HelloNegotiateRequest, HelloNegotiateResponse, MessageType, PROTOCOL_VERSION,
-    ProtocolEnvelope, RpcInvokeRequest, RpcInvokeResponse, RpcInvokeTargetService,
-    SUPPORTED_PROTOCOL_VERSION_RANGE, Validate, from_cbor, to_cbor,
-};
+use imago_protocol::{from_cbor, to_cbor};
 use imagod_common::ImagodError;
 use imagod_config::{ImagodConfig, upsert_tls_known_public_key};
+use imagod_spec::{
+    ErrorCode, HelloNegotiateRequest, HelloNegotiateResponse, MessageType, PROTOCOL_VERSION,
+    ProtocolEnvelope, RpcInvokeRequest, RpcInvokeResponse, RpcInvokeTargetService,
+    SUPPORTED_PROTOCOL_VERSION_RANGE, Validate,
+};
 use rustls::{
     DigitallySignedStruct, SignatureScheme,
     client::{
@@ -773,7 +774,7 @@ mod tests {
         time::Duration,
     };
 
-    use imago_protocol::{HelloNegotiateResponse, StructuredError, Validate, ValidationError};
+    use imagod_spec::{HelloNegotiateResponse, StructuredError, Validate, ValidationError};
     use rustls::client::danger::ServerCertVerifier;
     use serde::{Deserialize, Serialize};
 

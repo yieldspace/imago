@@ -134,6 +134,7 @@ imagod-runtime-internal = { path = "crates/imagod-runtime-internal", version = "
 imagod-runtime-wasmtime = { path = "crates/imagod-runtime-wasmtime", version = "0.2.0" }
 imagod-server = { path = "crates/imagod-server", version = "0.2.0" }
 imagod-spec = { path = "crates/imagod-spec", version = "0.2.0" }
+imagod-spec-formal = { path = "crates/imagod-spec-formal", version = "0.2.0" }
 
 [workspace.metadata.prup]
 base_ref = "origin/main"

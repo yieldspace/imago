@@ -1,7 +1,6 @@
 use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
-    concurrent::ConcurrentAction,
-    conformance::ProtocolConformanceSpec,
+    concurrent::ConcurrentAction, conformance::ProtocolConformanceSpec,
 };
 use nirvash_macros::{ActionVocabulary, Signature};
 
@@ -171,7 +170,9 @@ impl TransitionSystem for RuntimeProjectionSpec {
             RuntimeProjectionAction::RollbackService0 => self.apply_many(
                 state,
                 [
-                    SystemAtomicAction::Deploy(DeployAction::TriggerRollback(ServiceAtom::Service0)),
+                    SystemAtomicAction::Deploy(DeployAction::TriggerRollback(
+                        ServiceAtom::Service0,
+                    )),
                     SystemAtomicAction::Deploy(DeployAction::FinishRollback(ServiceAtom::Service0)),
                 ],
             ),
@@ -198,9 +199,7 @@ impl TransitionSystem for RuntimeProjectionSpec {
                         SystemAtomicAction::Rpc(RpcAction::CompleteRemoteCall(
                             ServiceAtom::Service0,
                         )),
-                        SystemAtomicAction::Rpc(RpcAction::DisconnectRemote(
-                            ServiceAtom::Service0,
-                        )),
+                        SystemAtomicAction::Rpc(RpcAction::DisconnectRemote(ServiceAtom::Service0)),
                     ],
                 ),
             ),
@@ -246,10 +245,13 @@ impl ProtocolConformanceSpec for RuntimeProjectionSpec {
     }
 
     fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
-        observed.trace.iter().fold(self.initial_state(), |state, action| {
-            self.transition(&state, action)
-                .expect("runtime projection trace should stay valid")
-        })
+        observed
+            .trace
+            .iter()
+            .fold(self.initial_state(), |state, action| {
+                self.transition(&state, action)
+                    .expect("runtime projection trace should stay valid")
+            })
     }
 
     fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {
@@ -265,7 +267,10 @@ mod tests {
     fn deploy_service_action_reaches_running_state() {
         let spec = RuntimeProjectionSpec::new();
         let state = spec
-            .transition(&spec.initial_state(), &RuntimeProjectionAction::DeployService0)
+            .transition(
+                &spec.initial_state(),
+                &RuntimeProjectionAction::DeployService0,
+            )
             .expect("deploy action should succeed");
 
         assert!(state.supervision.service_is_running(ServiceAtom::Service0));
@@ -275,7 +280,10 @@ mod tests {
     fn shutdown_drain_finishes_with_shutdown_effect() {
         let spec = RuntimeProjectionSpec::new();
         let state = spec
-            .transition(&spec.initial_state(), &RuntimeProjectionAction::DeployService0)
+            .transition(
+                &spec.initial_state(),
+                &RuntimeProjectionAction::DeployService0,
+            )
             .expect("deploy action should succeed");
         let next = spec
             .transition(&state, &RuntimeProjectionAction::ShutdownDrain)

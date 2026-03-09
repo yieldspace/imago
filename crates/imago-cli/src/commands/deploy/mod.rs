@@ -9,12 +9,13 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
-use imago_protocol::{
+use imago_protocol::{from_cbor, to_cbor};
+use imagod_spec::{
     ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushChunkHeader, ArtifactPushRequest,
     ArtifactStatus, ByteRange, CommandEvent, CommandEventType, CommandPayload, CommandStartRequest,
     CommandStartResponse, CommandType, DeployCommandPayload, DeployPrepareRequest,
     DeployPrepareResponse, ErrorCode, HelloNegotiateRequest, HelloNegotiateResponse, MessageType,
-    PROTOCOL_VERSION, ProtocolEnvelope, StructuredError, from_cbor, to_cbor,
+    PROTOCOL_VERSION, ProtocolEnvelope, StructuredError,
 };
 use rustls::{
     DigitallySignedStruct, SignatureScheme,
@@ -1755,7 +1756,7 @@ async fn push_single_artifact_chunk(
         .drain(..)
         .next()
         .ok_or_else(|| anyhow!("empty response stream"))?;
-    let _ack: imago_protocol::ArtifactPushAck = response_payload(response)?;
+    let _ack: imagod_spec::ArtifactPushAck = response_payload(response)?;
     Ok(())
 }
 

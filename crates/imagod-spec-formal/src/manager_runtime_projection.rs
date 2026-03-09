@@ -66,55 +66,40 @@ impl ManagerRuntimeProjectionSpec {
 
     fn apply_begin_shutdown(self, state: &SystemState) -> Option<SystemState> {
         let mut candidate = state.clone();
-        candidate.manager = ManagerRuntimeSpec::new().transition(
-            &state.manager,
-            &ManagerRuntimeAction::BeginShutdown,
-        )?;
-        candidate.shutdown = ShutdownFlowSpec::new().transition(
-            &state.shutdown,
-            &ShutdownFlowAction::ReceiveSignal,
-        )?;
-        candidate.session = SessionTransportSpec::new().transition(
-            &state.session,
-            &SessionTransportAction::BeginShutdown,
-        )?;
-        candidate.shutdown = ShutdownFlowSpec::new().transition(
-            &candidate.shutdown,
-            &ShutdownFlowAction::StopAccepting,
-        )?;
+        candidate.manager = ManagerRuntimeSpec::new()
+            .transition(&state.manager, &ManagerRuntimeAction::BeginShutdown)?;
+        candidate.shutdown = ShutdownFlowSpec::new()
+            .transition(&state.shutdown, &ShutdownFlowAction::ReceiveSignal)?;
+        candidate.session = SessionTransportSpec::new()
+            .transition(&state.session, &SessionTransportAction::BeginShutdown)?;
+        candidate.shutdown = ShutdownFlowSpec::new()
+            .transition(&candidate.shutdown, &ShutdownFlowAction::StopAccepting)?;
         Some(candidate)
     }
 
     fn apply_stop_services(self, state: &SystemState, force: bool) -> Option<SystemState> {
         let mut candidate = state.clone();
         if matches!(candidate.shutdown.phase, ShutdownPhase::DrainingSessions) {
-            candidate.shutdown = ShutdownFlowSpec::new().transition(
-                &candidate.shutdown,
-                &ShutdownFlowAction::DrainSessions,
-            )?;
+            candidate.shutdown = ShutdownFlowSpec::new()
+                .transition(&candidate.shutdown, &ShutdownFlowAction::DrainSessions)?;
         }
         let action = if force {
             ShutdownFlowAction::StopServicesForced
         } else {
             ShutdownFlowAction::StopServicesGraceful
         };
-        candidate.shutdown =
-            ShutdownFlowSpec::new().transition(&candidate.shutdown, &action)?;
+        candidate.shutdown = ShutdownFlowSpec::new().transition(&candidate.shutdown, &action)?;
         Some(candidate)
     }
 
     fn apply_finish_shutdown(self, state: &SystemState) -> Option<SystemState> {
         let mut candidate = state.clone();
         if !matches!(candidate.shutdown.phase, ShutdownPhase::Completed) {
-            candidate.shutdown = ShutdownFlowSpec::new().transition(
-                &candidate.shutdown,
-                &ShutdownFlowAction::Finalize,
-            )?;
+            candidate.shutdown = ShutdownFlowSpec::new()
+                .transition(&candidate.shutdown, &ShutdownFlowAction::Finalize)?;
         }
-        candidate.manager = ManagerRuntimeSpec::new().transition(
-            &candidate.manager,
-            &ManagerRuntimeAction::FinishShutdown,
-        )?;
+        candidate.manager = ManagerRuntimeSpec::new()
+            .transition(&candidate.manager, &ManagerRuntimeAction::FinishShutdown)?;
         Some(candidate)
     }
 }
@@ -209,10 +194,13 @@ impl ProtocolConformanceSpec for ManagerRuntimeProjectionSpec {
     }
 
     fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
-        observed.trace.iter().fold(self.initial_state(), |state, action| {
-            self.transition(&state, action)
-                .expect("manager runtime projection trace should stay valid")
-        })
+        observed
+            .trace
+            .iter()
+            .fold(self.initial_state(), |state, action| {
+                self.transition(&state, action)
+                    .expect("manager runtime projection trace should stay valid")
+            })
     }
 
     fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {
@@ -235,13 +223,22 @@ mod tests {
             )
             .expect("config load should be allowed");
         let state = spec
-            .transition(&state, &ManagerRuntimeProjectionAction::RunPluginGcSucceeded)
+            .transition(
+                &state,
+                &ManagerRuntimeProjectionAction::RunPluginGcSucceeded,
+            )
             .expect("plugin gc should be allowed");
         let state = spec
-            .transition(&state, &ManagerRuntimeProjectionAction::RunBootRestoreSucceeded)
+            .transition(
+                &state,
+                &ManagerRuntimeProjectionAction::RunBootRestoreSucceeded,
+            )
             .expect("boot restore should be allowed");
 
-        assert!(matches!(state.manager.phase, ManagerRuntimePhase::Listening));
+        assert!(matches!(
+            state.manager.phase,
+            ManagerRuntimePhase::Listening
+        ));
         assert!(matches!(state.manager.plugin_gc, TaskState::Succeeded));
         assert!(matches!(state.manager.boot_restore, TaskState::Succeeded));
     }
@@ -256,16 +253,25 @@ mod tests {
             )
             .expect("config load should be allowed");
         let state = spec
-            .transition(&state, &ManagerRuntimeProjectionAction::RunPluginGcSucceeded)
+            .transition(
+                &state,
+                &ManagerRuntimeProjectionAction::RunPluginGcSucceeded,
+            )
             .expect("plugin gc should be allowed");
         let state = spec
-            .transition(&state, &ManagerRuntimeProjectionAction::RunBootRestoreSucceeded)
+            .transition(
+                &state,
+                &ManagerRuntimeProjectionAction::RunBootRestoreSucceeded,
+            )
             .expect("boot restore should be allowed");
         let state = spec
             .transition(&state, &ManagerRuntimeProjectionAction::BeginShutdown)
             .expect("shutdown should begin");
         let state = spec
-            .transition(&state, &ManagerRuntimeProjectionAction::StopServicesGraceful)
+            .transition(
+                &state,
+                &ManagerRuntimeProjectionAction::StopServicesGraceful,
+            )
             .expect("graceful stop should advance");
         let state = spec
             .transition(&state, &ManagerRuntimeProjectionAction::StopMaintenance)
@@ -276,7 +282,11 @@ mod tests {
 
         assert!(matches!(next.manager.phase, ManagerRuntimePhase::Stopped));
         assert_eq!(
-            spec.expected_output(&state, &ManagerRuntimeProjectionAction::FinishShutdown, Some(&next)),
+            spec.expected_output(
+                &state,
+                &ManagerRuntimeProjectionAction::FinishShutdown,
+                Some(&next)
+            ),
             vec![SystemEffect::ShutdownComplete]
         );
     }

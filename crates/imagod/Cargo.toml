@@ -25,7 +25,7 @@ imago-plugin-imago-experimental-gpio = { workspace = true }
 imago-plugin-imago-experimental-i2c = { workspace = true }
 imago-plugin-imago-node = { workspace = true }
 imago-plugin-imago-usb = { workspace = true }
-imago-protocol = { workspace = true }
+imagod-spec = { workspace = true }
 imagod-common = { workspace = true }
 imagod-config = { workspace = true }
 imagod-control = { workspace = true }
@@ -36,6 +36,6 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "
 web-transport-quinn = { workspace = true }
 
 [dev-dependencies]
-imagod-spec = { workspace = true }
+imagod-spec-formal = { workspace = true }
 nirvash-core = { workspace = true }
 nirvash-macros = { workspace = true }

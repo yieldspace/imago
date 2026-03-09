@@ -1,6 +1,6 @@
 use imagod_common::ImagodError;
-use imagod_ipc::CapabilityPolicy;
 use imagod_runtime_internal::CapabilityChecker;
+use imagod_spec::CapabilityPolicy;
 use wasmtime::{Engine, component::types};
 
 use crate::map_runtime_unauthorized_error;
@@ -263,7 +263,7 @@ mod tests {
                 "get-environment",
             )
             .expect_err("empty policy should deny wasi function");
-        assert_eq!(err.code, imago_protocol::ErrorCode::Unauthorized);
+        assert_eq!(err.code, imagod_spec::ErrorCode::Unauthorized);
         assert!(
             err.message.contains("capability denied caller 'app'"),
             "unexpected message: {}",

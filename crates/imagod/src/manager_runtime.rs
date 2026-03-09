@@ -499,8 +499,7 @@ fn log_service_shutdown_errors(stop_errors: Vec<(String, ImagodError)>, force: b
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use imagod_spec::{
+    use imagod_spec_formal::{
         ManagerRuntimeProjectionAction, ManagerRuntimeProjectionObservedState,
         ManagerRuntimeProjectionSpec, SystemEffect,
     };
@@ -509,12 +508,13 @@ mod tests {
         conformance::{ActionApplier, ProtocolRuntimeBinding, StateObserver},
     };
     use nirvash_macros::code_tests;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex as AsyncMutex;
 
     #[derive(Debug)]
     struct ManagerRuntimeProjectionRuntime {
         probe: ManagerRuntimeProbe,
-        state: AsyncMutex<imagod_spec::SystemState>,
+        state: AsyncMutex<imagod_spec_formal::SystemState>,
         trace: AsyncMutex<Vec<ManagerRuntimeProjectionAction>>,
     }
 
@@ -567,7 +567,8 @@ mod tests {
                     self.probe.record_listening();
                 }
                 ManagerRuntimeProjectionAction::RunBootRestoreFailed => {
-                    self.probe.record_boot_restore(ManagerRuntimeTaskState::Failed);
+                    self.probe
+                        .record_boot_restore(ManagerRuntimeTaskState::Failed);
                     self.probe.record_listening();
                 }
                 ManagerRuntimeProjectionAction::BeginShutdown => {
@@ -582,12 +583,8 @@ mod tests {
                     .await;
                 }
                 ManagerRuntimeProjectionAction::StopServicesForced => {
-                    stop_managed_services(
-                        |_| async { Vec::new() },
-                        || async { true },
-                        &self.probe,
-                    )
-                    .await;
+                    stop_managed_services(|_| async { Vec::new() }, || async { true }, &self.probe)
+                        .await;
                 }
                 ManagerRuntimeProjectionAction::StopMaintenance => {
                     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

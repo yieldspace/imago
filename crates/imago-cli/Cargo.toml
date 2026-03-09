@@ -23,6 +23,7 @@ hex = { workspace = true }
 indicatif = { workspace = true }
 imago-project-config = { workspace = true }
 imago-protocol = { workspace = true }
+imagod-spec = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }

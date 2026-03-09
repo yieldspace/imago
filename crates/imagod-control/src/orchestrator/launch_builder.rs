@@ -4,7 +4,7 @@ use std::{
 };
 
 use imagod_common::ImagodError;
-use imagod_ipc::{ResourceMap, RunnerWasiMount, WasiHttpOutboundRule};
+use imagod_spec::{ResourceMap, RunnerWasiMount, WasiHttpOutboundRule};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use super::{

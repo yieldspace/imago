@@ -60,7 +60,7 @@ pub enum CommandState {
 /// # Examples
 /// ```rust
 /// use uuid::Uuid;
-/// use imago_protocol::{messages::{CommandPayload, CommandStartRequest, CommandType, RunCommandPayload}, Validate};
+/// use imagod_spec::{CommandPayload, CommandStartRequest, CommandType, RunCommandPayload, Validate};
 ///
 /// let request = CommandStartRequest {
 ///     request_id: Uuid::new_v4(),
@@ -182,7 +182,7 @@ fn default_true() -> bool {
 /// # Examples
 /// ```rust
 /// use uuid::Uuid;
-/// use imago_protocol::{messages::{CommandEvent, CommandEventType, CommandType}, Validate};
+/// use imagod_spec::{CommandEvent, CommandEventType, CommandType, Validate};
 ///
 /// let event = CommandEvent {
 ///     event_type: CommandEventType::Progress,
@@ -246,7 +246,7 @@ impl Validate for StateRequest {
 /// # Examples
 /// ```rust
 /// use uuid::Uuid;
-/// use imago_protocol::{messages::{CommandState, StateResponse}, Validate};
+/// use imagod_spec::{CommandState, StateResponse, Validate};
 ///
 /// let response = StateResponse {
 ///     request_id: Uuid::new_v4(),

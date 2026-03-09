@@ -5,9 +5,5 @@ edition.workspace = true
 license.workspace = true
 publish = false
 [dependencies]
-serde = { workspace = true, features = ["derive"] }
-serde_bytes = { workspace = true }
-uuid = { workspace = true, features = ["serde", "v4"] }
 ciborium = { workspace = true }
-nirvash-core = { workspace = true }
-nirvash-macros = { workspace = true }
+serde = { workspace = true, features = ["derive"] }

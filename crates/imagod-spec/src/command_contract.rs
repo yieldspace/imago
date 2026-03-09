@@ -1,8 +1,9 @@
 //! Shared command-domain contracts used by runtime, spec, and wire adapters.
 
+use nirvash_core::{ActionVocabulary, BoundedDomain, Signature};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, nirvash_macros::Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 /// High-level command category accepted by the manager runtime.
 pub enum CommandKind {
     /// Starts an artifact deployment command.
@@ -13,7 +14,7 @@ pub enum CommandKind {
     Stop,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, nirvash_macros::Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 /// Internal command lifecycle state tracked by the manager runtime.
 pub enum CommandLifecycleState {
     Accepted,
@@ -30,7 +31,7 @@ impl CommandLifecycleState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, nirvash_macros::Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 /// Stable command-domain error classes used by runtime and conformance tests.
 pub enum CommandErrorKind {
     /// Rejects unauthenticated command requests.
@@ -63,14 +64,14 @@ pub enum CommandErrorKind {
     StorageQuota,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, nirvash_macros::Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 /// Lifecycle phase around the spawn race tracked by `OperationManager`.
 pub enum OperationPhase {
     Starting,
     Spawned,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, nirvash_macros::Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 /// Stable stage identifiers used for rejected command-protocol actions.
 pub enum CommandProtocolStageId {
     CommandStart,
@@ -93,13 +94,11 @@ impl CommandProtocolStageId {
     }
 }
 
-#[derive(
-    Debug, Clone, PartialEq, Eq, nirvash_macros::Signature, nirvash_macros::ActionVocabulary,
-)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 /// Shared command action vocabulary applied by `OperationManager`.
 pub enum CommandProtocolAction {
     /// Start command
-    Start(#[sig(domain = command_protocol_command_kind_vocabulary)] CommandKind),
+    Start(CommandKind),
     /// Mark running
     SetRunning,
     /// Request cancel
@@ -111,19 +110,11 @@ pub enum CommandProtocolAction {
     /// Finish succeeded
     FinishSucceeded,
     /// Finish failed
-    FinishFailed(#[sig(domain = command_protocol_error_kind_vocabulary)] CommandErrorKind),
+    FinishFailed(CommandErrorKind),
     /// Finish canceled
     FinishCanceled,
     /// Remove command
     Remove,
-}
-
-fn command_protocol_command_kind_vocabulary() -> Vec<CommandKind> {
-    vec![CommandKind::Deploy, CommandKind::Run, CommandKind::Stop]
-}
-
-fn command_protocol_error_kind_vocabulary() -> Vec<CommandErrorKind> {
-    vec![CommandErrorKind::Internal, CommandErrorKind::Busy]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -173,5 +164,87 @@ impl CommandProtocolObservedState {
             cancel_requested: false,
             phase: None,
         }
+    }
+}
+
+impl Signature for CommandKind {
+    fn bounded_domain() -> BoundedDomain<Self> {
+        BoundedDomain::new(vec![Self::Deploy, Self::Run, Self::Stop])
+    }
+}
+
+impl Signature for CommandLifecycleState {
+    fn bounded_domain() -> BoundedDomain<Self> {
+        BoundedDomain::new(vec![
+            Self::Accepted,
+            Self::Running,
+            Self::Succeeded,
+            Self::Failed,
+            Self::Canceled,
+        ])
+    }
+}
+
+impl Signature for CommandErrorKind {
+    fn bounded_domain() -> BoundedDomain<Self> {
+        BoundedDomain::new(vec![
+            Self::Unauthorized,
+            Self::BadRequest,
+            Self::BadManifest,
+            Self::Busy,
+            Self::NotFound,
+            Self::Internal,
+            Self::IdempotencyConflict,
+            Self::RangeInvalid,
+            Self::ChunkHashMismatch,
+            Self::ArtifactIncomplete,
+            Self::PreconditionFailed,
+            Self::OperationTimeout,
+            Self::RollbackFailed,
+            Self::StorageQuota,
+        ])
+    }
+}
+
+impl Signature for OperationPhase {
+    fn bounded_domain() -> BoundedDomain<Self> {
+        BoundedDomain::new(vec![Self::Starting, Self::Spawned])
+    }
+}
+
+impl Signature for CommandProtocolStageId {
+    fn bounded_domain() -> BoundedDomain<Self> {
+        BoundedDomain::new(vec![
+            Self::CommandStart,
+            Self::OperationState,
+            Self::StateRequest,
+            Self::CommandCancel,
+            Self::OperationRemove,
+        ])
+    }
+}
+
+impl ActionVocabulary for CommandProtocolAction {
+    fn action_vocabulary() -> Vec<Self> {
+        vec![
+            Self::Start(CommandKind::Deploy),
+            Self::Start(CommandKind::Run),
+            Self::Start(CommandKind::Stop),
+            Self::SetRunning,
+            Self::RequestCancel,
+            Self::SnapshotRunning,
+            Self::MarkSpawned,
+            Self::FinishSucceeded,
+            Self::FinishFailed(CommandErrorKind::Internal),
+            Self::FinishFailed(CommandErrorKind::Busy),
+            Self::FinishCanceled,
+            Self::Remove,
+        ]
+    }
+}
+
+impl Signature for CommandProtocolAction {
+    fn bounded_domain() -> BoundedDomain<Self> {
+        BoundedDomain::new(Self::action_vocabulary())
     }
 }

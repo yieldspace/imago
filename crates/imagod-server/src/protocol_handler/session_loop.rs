@@ -2,8 +2,8 @@ use std::{any::Any, fmt::Write, future::Future, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use imago_protocol::{ErrorCode, MessageType};
 use imagod_common::ImagodError;
+use imagod_spec::{ErrorCode, MessageType};
 use rustls::pki_types::CertificateDer;
 use uuid::Uuid;
 use web_transport_quinn::{RecvStream, SendStream, Session};
@@ -33,13 +33,12 @@ mod conformance_tests {
 
     use async_trait::async_trait;
     use bytes::Bytes;
-    use imagod_spec::{
+    use imagod_spec_formal::{
         SessionAuthProjectionAction, SessionAuthProjectionObservedState, SessionAuthProjectionSpec,
         SystemEffect, SystemState,
     };
     use nirvash_core::{
-        ProtocolConformanceSpec,
-        TransitionSystem,
+        ProtocolConformanceSpec, TransitionSystem,
         conformance::{ActionApplier, ProtocolRuntimeBinding, StateObserver},
     };
     use nirvash_macros::code_tests;
@@ -47,8 +46,7 @@ mod conformance_tests {
 
     use super::*;
     use crate::protocol_handler::{
-        Envelope,
-        lock_dynamic_public_keys_for_tests, replace_dynamic_public_keys_for_tests,
+        Envelope, lock_dynamic_public_keys_for_tests, replace_dynamic_public_keys_for_tests,
         upsert_dynamic_client_public_key,
     };
 
@@ -695,7 +693,7 @@ where
     match tokio::time::timeout(timeout_duration, read_future).await {
         Ok(result) => result.map_err(|e| {
             ImagodError::new(
-                imago_protocol::ErrorCode::BadRequest,
+                ErrorCode::BadRequest,
                 "session.read",
                 format!("failed to read stream: {e}"),
             )
@@ -706,7 +704,7 @@ where
 
 pub(crate) fn stream_read_timeout_error() -> ImagodError {
     ImagodError::new(
-        imago_protocol::ErrorCode::OperationTimeout,
+        ErrorCode::OperationTimeout,
         "session.read",
         format!(
             "stream read timed out after {} seconds",

@@ -7,10 +7,9 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming as HyperIncomingBody;
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
-use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
-use imagod_ipc::RunnerBootstrap;
 pub use imagod_runtime_internal::{ComponentRuntime, RuntimeHttpRequest, RuntimeHttpResponse};
+use imagod_spec::{ErrorCode, RunnerBootstrap};
 use tokio::{
     net::TcpListener,
     sync::{Semaphore, watch},
@@ -394,8 +393,9 @@ fn should_retry_accept(err: &std::io::Error) -> bool {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use imagod_ipc::{RunnerAppType, random_secret_hex};
+    use imagod_ipc::random_secret_hex;
     use imagod_runtime_internal::RuntimeRunRequest;
+    use imagod_spec::{CapabilityPolicy, RunnerAppType};
     use std::{
         collections::BTreeMap,
         path::{Path, PathBuf},
@@ -433,7 +433,7 @@ mod tests {
             resources: BTreeMap::new(),
             bindings: Vec::new(),
             plugin_dependencies: Vec::new(),
-            capabilities: imagod_ipc::CapabilityPolicy::default(),
+            capabilities: CapabilityPolicy::default(),
             manager_control_endpoint: root.join("manager-control.sock"),
             runner_endpoint: root.join("runner.sock"),
             manager_auth_secret: random_secret_hex(),

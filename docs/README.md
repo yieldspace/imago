@@ -38,8 +38,9 @@ The source of truth is the codebase (module docs, type definitions, validation l
   - [`crates/imago-cli/src/lockfile/mod.rs`](../crates/imago-cli/src/lockfile/mod.rs)
   - [`crates/imago-cli/src/lockfile/resolve.rs`](../crates/imago-cli/src/lockfile/resolve.rs)
 - Protocol contracts and validation:
-  - [`crates/imago-protocol/src/lib.rs`](../crates/imago-protocol/src/lib.rs)
-  - [`crates/imago-protocol/src/messages`](../crates/imago-protocol/src/messages)
+  - [`crates/imagod-spec/src/command_contract.rs`](../crates/imagod-spec/src/command_contract.rs)
+  - [`crates/imagod-spec/src/wire.rs`](../crates/imagod-spec/src/wire.rs)
+  - [`crates/imagod-spec/src/ipc.rs`](../crates/imagod-spec/src/ipc.rs)
 - Daemon configuration and runtime orchestration:
   - [`crates/imagod-config/src/lib.rs`](../crates/imagod-config/src/lib.rs)
   - [`crates/imagod-config/src/load/validation.rs`](../crates/imagod-config/src/load/validation.rs)

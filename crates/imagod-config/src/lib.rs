@@ -11,7 +11,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use imago_protocol::ErrorCode;
+use imagod_spec::ErrorCode;
 use rcgen::{KeyPair, PKCS_ED25519};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

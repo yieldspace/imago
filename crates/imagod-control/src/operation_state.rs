@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::UNIX_EPOCH};
 
-use imago_protocol::{
+use imagod_spec::{
     CommandErrorKind, CommandLifecycleState, CommandProtocolAction, CommandProtocolContext,
     CommandProtocolObservedState, CommandProtocolOutput, CommandProtocolStageId, OperationPhase,
 };
@@ -327,7 +327,7 @@ fn is_terminal(state: CommandLifecycleState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imago_protocol::CommandKind;
+    use imagod_spec::CommandKind;
 
     fn req(id: u128) -> Uuid {
         Uuid::from_u128(id)

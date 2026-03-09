@@ -1,8 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
-use imagod_ipc::ResourceMap;
+use imagod_spec::{ErrorCode, ResourceMap};
 use wasmtime::component::Linker;
 
 use super::WasiState;

@@ -13,13 +13,13 @@ use std::{
     sync::{Arc, Mutex as StdMutex},
 };
 
-use imago_protocol::{
+use imagod_common::ImagodError;
+use imagod_spec::{
+    CapabilityPolicy, PluginDependency, ResourceMap, RunnerAppType, RunnerSocketConfig,
+};
+use imagod_spec::{
     DeployCommandPayload, ErrorCode, RunCommandPayload, ServiceState, ServiceStatusEntry,
     StopCommandPayload,
-};
-use imagod_common::ImagodError;
-use imagod_ipc::{
-    CapabilityPolicy, PluginDependency, ResourceMap, RunnerAppType, RunnerSocketConfig,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1372,12 +1372,12 @@ mod tests {
         validate_deploy_preconditions, validate_service_name,
     };
     use crate::artifact_store::CommittedArtifact;
-    use imago_protocol::{DeployCommandPayload, ErrorCode, ServiceState, ServiceStatusEntry};
     use imagod_common::ImagodError;
-    use imagod_ipc::{
+    use imagod_spec::{
         CapabilityPolicy, PluginComponent, PluginDependency, PluginKind, RunnerSocketConfig,
         RunnerSocketDirection, RunnerSocketProtocol, RunnerWasiMount, WasiHttpOutboundRule,
     };
+    use imagod_spec::{DeployCommandPayload, ErrorCode, ServiceState, ServiceStatusEntry};
     use sha2::{Digest, Sha256};
     use std::{
         collections::{BTreeMap, BTreeSet, VecDeque},
@@ -1512,7 +1512,7 @@ mod tests {
         };
         let mismatch = validate_deploy_preconditions(&mismatch_payload, Some("release-actual"))
             .expect_err("mismatch should be rejected");
-        assert_eq!(mismatch.code, imago_protocol::ErrorCode::PreconditionFailed);
+        assert_eq!(mismatch.code, imagod_spec::ErrorCode::PreconditionFailed);
 
         let bad_policy_payload = DeployCommandPayload {
             deploy_id: "deploy-1".to_string(),
@@ -1522,7 +1522,7 @@ mod tests {
         };
         let bad_policy = validate_deploy_preconditions(&bad_policy_payload, None)
             .expect_err("unsupported restart policy should be rejected");
-        assert_eq!(bad_policy.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(bad_policy.code, imagod_spec::ErrorCode::BadRequest);
     }
 
     #[test]

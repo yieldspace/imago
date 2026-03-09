@@ -165,10 +165,13 @@ impl ProtocolConformanceSpec for SessionAuthProjectionSpec {
     }
 
     fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
-        observed.trace.iter().fold(self.initial_state(), |state, action| {
-            self.transition(&state, action)
-                .expect("session auth projection trace should stay valid")
-        })
+        observed
+            .trace
+            .iter()
+            .fold(self.initial_state(), |state, action| {
+                self.transition(&state, action)
+                    .expect("session auth projection trace should stay valid")
+            })
     }
 
     fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {

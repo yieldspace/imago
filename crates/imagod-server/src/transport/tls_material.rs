@@ -1,8 +1,8 @@
 use std::{io::BufReader, path::Path, sync::Arc};
 
-use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_config::ImagodConfig;
+use imagod_spec::ErrorCode;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer, UnixTime};
 
 use super::STAGE_TRANSPORT;

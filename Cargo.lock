@@ -2362,6 +2362,7 @@ dependencies = [
  "hex",
  "imago-project-config",
  "imago-protocol",
+ "imagod-spec",
  "include_dir",
  "indicatif",
  "quinn",
@@ -2426,6 +2427,7 @@ dependencies = [
  "imago-protocol",
  "imagod-ipc",
  "imagod-runtime-wasmtime",
+ "imagod-spec",
  "serde",
  "url",
  "wasmtime",
@@ -2483,11 +2485,7 @@ name = "imago-protocol"
 version = "0.2.0"
 dependencies = [
  "ciborium",
- "nirvash-core",
- "nirvash-macros",
  "serde",
- "serde_bytes",
- "uuid",
 ]
 
 [[package]]
@@ -2513,13 +2511,13 @@ dependencies = [
  "imago-plugin-imago-experimental-i2c",
  "imago-plugin-imago-node",
  "imago-plugin-imago-usb",
- "imago-protocol",
  "imagod-common",
  "imagod-config",
  "imagod-control",
  "imagod-runtime",
  "imagod-server",
  "imagod-spec",
+ "imagod-spec-formal",
  "nirvash-core",
  "nirvash-macros",
  "rustls 0.23.37",
@@ -2531,7 +2529,7 @@ dependencies = [
 name = "imagod-common"
 version = "0.2.0"
 dependencies = [
- "imago-protocol",
+ "imagod-spec",
  "thiserror 2.0.18",
 ]
 
@@ -2539,8 +2537,8 @@ dependencies = [
 name = "imagod-config"
 version = "0.2.0"
 dependencies = [
- "imago-protocol",
  "imagod-common",
+ "imagod-spec",
  "rcgen",
  "schemars 1.2.1",
  "serde",
@@ -2559,6 +2557,7 @@ dependencies = [
  "imagod-config",
  "imagod-ipc",
  "imagod-spec",
+ "imagod-spec-formal",
  "nirvash-core",
  "nirvash-macros",
  "quinn",
@@ -2587,8 +2586,7 @@ dependencies = [
  "hmac",
  "imago-protocol",
  "imagod-common",
- "nirvash-core",
- "nirvash-macros",
+ "imagod-spec",
  "serde",
  "serde_json",
  "sha2",
@@ -2605,7 +2603,6 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "imago-protocol",
  "imagod-common",
  "imagod-ipc",
  "imagod-runtime-bootstrap",
@@ -2613,6 +2610,7 @@ dependencies = [
  "imagod-runtime-ingress",
  "imagod-runtime-internal",
  "imagod-runtime-wasmtime",
+ "imagod-spec",
  "tokio",
 ]
 
@@ -2623,6 +2621,7 @@ dependencies = [
  "imago-protocol",
  "imagod-common",
  "imagod-ipc",
+ "imagod-spec",
  "tokio",
 ]
 
@@ -2635,6 +2634,7 @@ dependencies = [
  "imagod-common",
  "imagod-ipc",
  "imagod-runtime-internal",
+ "imagod-spec",
  "tokio",
 ]
 
@@ -2647,10 +2647,10 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "imago-protocol",
  "imagod-common",
  "imagod-ipc",
  "imagod-runtime-internal",
+ "imagod-spec",
  "tokio",
 ]
 
@@ -2662,6 +2662,7 @@ dependencies = [
  "bytes",
  "imagod-common",
  "imagod-ipc",
+ "imagod-spec",
  "tokio",
 ]
 
@@ -2677,6 +2678,7 @@ dependencies = [
  "imagod-common",
  "imagod-ipc",
  "imagod-runtime-internal",
+ "imagod-spec",
  "libc",
  "serde",
  "serde_json",
@@ -2702,6 +2704,7 @@ dependencies = [
  "imagod-config",
  "imagod-control",
  "imagod-spec",
+ "imagod-spec-formal",
  "nirvash-core",
  "nirvash-macros",
  "quinn",
@@ -2720,15 +2723,22 @@ dependencies = [
 name = "imagod-spec"
 version = "0.2.0"
 dependencies = [
- "imago-protocol",
- "imagod-config",
- "imagod-control",
- "imagod-ipc",
+ "ciborium",
+ "nirvash-core",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "imagod-spec-formal"
+version = "0.2.0"
+dependencies = [
+ "imagod-spec",
  "nirvash-core",
  "nirvash-docgen",
  "nirvash-macros",
- "tokio",
- "uuid",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
-use imago_protocol::{
-    CommandErrorKind, CommandLifecycleState, CommandProtocolAction, CommandProtocolObservedState,
-    CommandProtocolOutput, CommandProtocolStageId, OperationPhase,
+use imagod_spec::{
+    CommandProtocolObservedState as RuntimeCommandProtocolObservedState,
+    CommandProtocolOutput as RuntimeCommandProtocolOutput,
 };
 use nirvash_core::{
     DocGraphPolicy, ModelCase, StatePredicate, TransitionSystem,
@@ -8,8 +8,16 @@ use nirvash_core::{
 };
 use nirvash_macros::{invariant, subsystem_spec};
 
+use crate::{
+    CommandErrorKind, CommandLifecycleState, CommandProtocolAction, CommandProtocolStageId,
+    OperationPhase,
+};
+
 #[cfg(test)]
-use crate::bounds::{SPEC_COMMAND_STATES, SPEC_ERROR_CODES};
+use crate::{
+    CommandKind,
+    bounds::{SPEC_COMMAND_STATES, SPEC_ERROR_CODES},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandStateClass {
@@ -393,8 +401,8 @@ impl TransitionSystem for CommandProtocolSpec {
 
 impl ProtocolConformanceSpec for CommandProtocolSpec {
     type ExpectedOutput = CommandProtocolExpectedOutput;
-    type ObservedState = CommandProtocolObservedState;
-    type ObservedOutput = CommandProtocolOutput;
+    type ObservedState = RuntimeCommandProtocolObservedState;
+    type ObservedOutput = RuntimeCommandProtocolOutput;
 
     fn expected_output(
         &self,
@@ -416,8 +424,8 @@ impl ProtocolConformanceSpec for CommandProtocolSpec {
 
     fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {
         match observed {
-            CommandProtocolOutput::Ack => CommandProtocolExpectedOutput::Ack,
-            CommandProtocolOutput::StateSnapshot {
+            RuntimeCommandProtocolOutput::Ack => CommandProtocolExpectedOutput::Ack,
+            RuntimeCommandProtocolOutput::StateSnapshot {
                 state,
                 stage,
                 updated_at_unix_secs,
@@ -426,20 +434,20 @@ impl ProtocolConformanceSpec for CommandProtocolSpec {
                 stage_non_empty: !stage.is_empty(),
                 updated_at_non_zero: *updated_at_unix_secs > 0,
             },
-            CommandProtocolOutput::CancelResponse {
+            RuntimeCommandProtocolOutput::CancelResponse {
                 cancellable,
                 final_state,
             } => CommandProtocolExpectedOutput::CancelResponse {
                 cancellable: *cancellable,
                 final_state: *final_state,
             },
-            CommandProtocolOutput::SpawnResult { spawned, canceled } => {
+            RuntimeCommandProtocolOutput::SpawnResult { spawned, canceled } => {
                 CommandProtocolExpectedOutput::SpawnResult {
                     spawned: *spawned,
                     canceled: *canceled,
                 }
             }
-            CommandProtocolOutput::Rejected { code, stage } => {
+            RuntimeCommandProtocolOutput::Rejected { code, stage } => {
                 CommandProtocolExpectedOutput::Rejected {
                     code: *code,
                     stage: *stage,
@@ -477,9 +485,9 @@ mod tests {
         assert_eq!(
             <CommandProtocolAction as nirvash_core::ActionVocabulary>::action_vocabulary(),
             vec![
-                CommandProtocolAction::Start(imago_protocol::CommandKind::Deploy),
-                CommandProtocolAction::Start(imago_protocol::CommandKind::Run),
-                CommandProtocolAction::Start(imago_protocol::CommandKind::Stop),
+                CommandProtocolAction::Start(CommandKind::Deploy),
+                CommandProtocolAction::Start(CommandKind::Run),
+                CommandProtocolAction::Start(CommandKind::Stop),
                 CommandProtocolAction::SetRunning,
                 CommandProtocolAction::RequestCancel,
                 CommandProtocolAction::SnapshotRunning,

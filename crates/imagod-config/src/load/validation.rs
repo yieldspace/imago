@@ -6,8 +6,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
-use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
+use imagod_spec::ErrorCode;
 
 use crate::{
     ImagodConfig, MAX_CHUNK_SIZE_BYTES, MAX_HTTP_QUEUE_MEMORY_BUDGET_BYTES,

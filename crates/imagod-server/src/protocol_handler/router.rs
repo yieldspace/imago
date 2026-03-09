@@ -7,10 +7,12 @@ use std::{
 };
 
 use async_trait::async_trait;
-use imago_protocol::messages::{
+use imagod_common::ImagodError;
+use imagod_config::upsert_tls_known_client_key;
+use imagod_spec::messages::{
     BindingsCertUploadRequest, BindingsCertUploadResponse, RpcInvokeRequest, RpcInvokeResponse,
 };
-use imago_protocol::{
+use imagod_spec::{
     ArtifactPushRequest, CommandCancelRequest, CommandCancelResponse, CommandErrorKind,
     CommandEventType, CommandKind, CommandLifecycleState, CommandPayload, CommandProtocolAction,
     CommandProtocolContext, CommandProtocolOutput, CommandProtocolStageId, CommandStartRequest,
@@ -18,8 +20,6 @@ use imago_protocol::{
     PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSION_RANGE, ServiceListRequest, ServiceListResponse,
     StateRequest, StateResponse, Validate,
 };
-use imagod_common::ImagodError;
-use imagod_config::upsert_tls_known_client_key;
 use semver::{Version, VersionReq};
 use serde::Serialize;
 use web_transport_quinn::SendStream;
@@ -34,8 +34,11 @@ use super::{
 
 #[async_trait]
 pub(crate) trait EnvelopeSink {
-    async fn write(&mut self, handler: &ProtocolHandler, envelope: &Envelope)
-    -> Result<(), ImagodError>;
+    async fn write(
+        &mut self,
+        handler: &ProtocolHandler,
+        envelope: &Envelope,
+    ) -> Result<(), ImagodError>;
 }
 
 pub(crate) struct SendStreamEnvelopeSink<'a> {
@@ -101,7 +104,7 @@ impl ProtocolHandler {
             MessageType::RpcInvoke => self.handle_rpc_invoke(request).await,
             MessageType::BindingsCertUpload => self.handle_bindings_cert_upload(request),
             _ => Err(ImagodError::new(
-                imago_protocol::ErrorCode::BadRequest,
+                ErrorCode::BadRequest,
                 "dispatch",
                 "unsupported message type",
             )),
@@ -111,7 +114,7 @@ impl ProtocolHandler {
     fn handle_hello(&self, mut request: Envelope) -> Result<Envelope, ImagodError> {
         let request_id = request.request_id;
         let correlation_id = request.correlation_id;
-        let payload: imago_protocol::HelloNegotiateRequest = payload_take(&mut request)?;
+        let payload: imagod_spec::HelloNegotiateRequest = payload_take(&mut request)?;
         payload
             .validate()
             .map_err(|e| bad_request("hello.negotiate", e.to_string()))?;
@@ -145,7 +148,7 @@ impl ProtocolHandler {
             MessageType::HelloNegotiate,
             request_id,
             correlation_id,
-            &imago_protocol::HelloNegotiateResponse {
+            &imagod_spec::HelloNegotiateResponse {
                 accepted,
                 server_version: self.config.server_version.clone(),
                 server_protocol_version: PROTOCOL_VERSION.to_string(),
@@ -218,7 +221,7 @@ impl ProtocolHandler {
     async fn handle_commit(&self, mut request: Envelope) -> Result<Envelope, ImagodError> {
         let request_id = request.request_id;
         let correlation_id = request.correlation_id;
-        let payload: imago_protocol::ArtifactCommitRequest = payload_take(&mut request)?;
+        let payload: imagod_spec::ArtifactCommitRequest = payload_take(&mut request)?;
         payload
             .validate()
             .map_err(|e| bad_request("artifact.commit", e.to_string()))?;
@@ -393,11 +396,11 @@ impl ProtocolHandler {
     {
         let request_id = request.request_id;
         let correlation_id = request.correlation_id;
-        let payload: imago_protocol::LogRequest = payload_take(&mut request)?;
+        let payload: imagod_spec::LogRequest = payload_take(&mut request)?;
         payload
             .validate()
             .map_err(|e| bad_request("logs.request", e.to_string()))?;
-        let imago_protocol::LogRequest {
+        let imagod_spec::LogRequest {
             name,
             tail_lines,
             follow,
@@ -462,7 +465,8 @@ impl ProtocolHandler {
         send: &mut SendStream,
     ) -> Result<(), ImagodError> {
         let mut sink = SendStreamEnvelopeSink::new(send);
-        self.handle_command_start_with_sink(request, &mut sink).await
+        self.handle_command_start_with_sink(request, &mut sink)
+            .await
     }
 
     pub(crate) async fn handle_command_start_with_sink(
@@ -569,10 +573,9 @@ impl ProtocolHandler {
         }
 
         let command_result = match (&payload.command_type, &payload.payload) {
-            (CommandType::Deploy, CommandPayload::Deploy(deploy_payload)) => self
-                .orchestrator
-                .command_deploy(deploy_payload)
-                .await,
+            (CommandType::Deploy, CommandPayload::Deploy(deploy_payload)) => {
+                self.orchestrator.command_deploy(deploy_payload).await
+            }
             (CommandType::Run, CommandPayload::Run(run_payload)) => {
                 self.orchestrator.command_run(run_payload).await
             }
@@ -580,7 +583,7 @@ impl ProtocolHandler {
                 self.orchestrator.command_stop(stop_payload).await
             }
             _ => Err(ImagodError::new(
-                imago_protocol::ErrorCode::BadRequest,
+                ErrorCode::BadRequest,
                 "command.start",
                 "payload does not match command_type",
             )),
@@ -898,7 +901,7 @@ pub(crate) fn ensure_command_start_allowed(
     }
 
     Err(ImagodError::new(
-        imago_protocol::ErrorCode::Busy,
+        ErrorCode::Busy,
         "command.start",
         "server is shutting down",
     ))
@@ -917,8 +920,9 @@ fn should_purge_deploy_session_after_terminal(
     match terminal_state {
         CommandState::Succeeded => true,
         CommandState::Canceled => false,
-        CommandState::Failed => terminal_error
-            .is_some_and(|err| err.code != imago_protocol::ErrorCode::Busy && !err.retryable),
+        CommandState::Failed => {
+            terminal_error.is_some_and(|err| err.code != ErrorCode::Busy && !err.retryable)
+        }
         _ => false,
     }
 }
@@ -931,7 +935,7 @@ fn resolve_logs_request_service_names(
         Some(name) => Ok(vec![name]),
         None if !loggable_names.is_empty() => Ok(loggable_names),
         None => Err(ImagodError::new(
-            imago_protocol::ErrorCode::NotFound,
+            ErrorCode::NotFound,
             "logs.request",
             "no loggable services are available",
         )),
@@ -946,8 +950,7 @@ pub(crate) async fn finalize_operation_after_terminal_event(
     terminal_write_result: Result<(), ImagodError>,
 ) -> Result<(), ImagodError> {
     expect_ack(
-        operations.execute(context, &terminal_action)
-            .await,
+        operations.execute(context, &terminal_action).await,
         CommandProtocolStageId::OperationState,
     )?;
     expect_ack(
@@ -966,12 +969,12 @@ mod tests {
 
     use std::sync::atomic::AtomicBool;
 
-    use imago_protocol::{
+    use imagod_control::{ActionApplier, OperationManager};
+    use imagod_spec::{
         ArtifactPushChunkHeader, ArtifactPushRequest, CommandErrorKind, CommandKind,
         CommandLifecycleState, CommandProtocolAction, CommandProtocolContext,
         CommandProtocolOutput, CommandProtocolStageId, CommandState, CommandType,
     };
-    use imagod_control::{ActionApplier, OperationManager};
     use uuid::Uuid;
 
     use super::{
@@ -982,7 +985,7 @@ mod tests {
         should_purge_deploy_session_after_terminal, state_response_from_output,
         validate_push_payload,
     };
-    use imago_protocol::ErrorCode;
+    use imagod_spec::ErrorCode;
 
     #[test]
     fn given_name_is_none__when_loggable_names_exist__then_resolve_logs_uses_all_names() {
@@ -1251,32 +1254,34 @@ mod conformance_tests {
     };
 
     use async_trait::async_trait;
-    use imago_protocol::{
-        ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushChunkHeader,
-        ArtifactPushRequest, ArtifactStatus, ByteRange, CommandKind, CommandProtocolAction,
-        CommandProtocolContext, CommandProtocolOutput, DeployPrepareRequest, DeployPrepareResponse,
-        ErrorCode, HelloNegotiateRequest, MessageType, RpcInvokeTargetService,
-        ServiceListRequest, ServiceState, ServiceStatusEntry,
-        messages::{BindingsCertUploadRequest, RpcInvokeRequest},
-    };
     use imagod_config::{RuntimeConfig, TlsConfig, load_or_create_default};
     use imagod_control::{ActionApplier, OperationManager, ServiceLogSubscription};
     use imagod_spec::{
+        ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushChunkHeader,
+        ArtifactPushRequest, ArtifactStatus, BindingsCertUploadRequest, ByteRange, CommandKind,
+        CommandCancelRequest, CommandProtocolAction, CommandProtocolContext,
+        CommandProtocolOutput, DeployCommandPayload, DeployPrepareRequest,
+        DeployPrepareResponse, ErrorCode, HelloNegotiateRequest, MessageType, RpcInvokeRequest,
+        RpcInvokeTargetService, RunCommandPayload, ServiceListRequest, ServiceState,
+        ServiceStatusEntry, StateRequest, StopCommandPayload,
+    };
+    use imagod_spec_formal::{
         RouterProjectionAction, RouterProjectionObservedState, RouterProjectionSpec, SystemEffect,
-        SystemState,
-        system_message_binding,
+        SystemMessageBinding, SystemState, atoms, system_message_binding,
     };
     use nirvash_core::{
         TransitionSystem,
-        conformance::{ActionApplier as ProtocolActionApplier, ProtocolRuntimeBinding, StateObserver},
+        conformance::{
+            ActionApplier as ProtocolActionApplier, ProtocolRuntimeBinding, StateObserver,
+        },
     };
     use nirvash_macros::code_tests;
     use serde_json::json;
     use uuid::Uuid;
 
     use super::{
-        Envelope, ProtocolHandler, ProtocolOperations,
         super::{ProtocolArtifacts, ProtocolOrchestrator},
+        Envelope, ProtocolHandler, ProtocolOperations,
     };
 
     #[derive(Debug, Default, Clone, Copy)]
@@ -1365,21 +1370,21 @@ mod conformance_tests {
     impl ProtocolOrchestrator for FakeOrchestrator {
         async fn command_deploy(
             &self,
-            _payload: &imago_protocol::DeployCommandPayload,
+            _payload: &DeployCommandPayload,
         ) -> Result<(String, String), imagod_common::ImagodError> {
             Ok(("release:svc-a:release-a".to_string(), "spawned".to_string()))
         }
 
         async fn command_run(
             &self,
-            _payload: &imago_protocol::RunCommandPayload,
+            _payload: &RunCommandPayload,
         ) -> Result<(String, String), imagod_common::ImagodError> {
             Ok(("running:svc-a:release-a".to_string(), "spawned".to_string()))
         }
 
         async fn command_stop(
             &self,
-            _payload: &imago_protocol::StopCommandPayload,
+            _payload: &StopCommandPayload,
         ) -> Result<(String, String), imagod_common::ImagodError> {
             Ok(("stopped:svc-a".to_string(), "completed".to_string()))
         }
@@ -1497,7 +1502,7 @@ mod conformance_tests {
                     MessageType::StateRequest,
                     request_id,
                     correlation_id,
-                    json!(imago_protocol::StateRequest {
+                    json!(StateRequest {
                         request_id: Uuid::from_u128(7),
                     }),
                 ),
@@ -1511,7 +1516,7 @@ mod conformance_tests {
                     MessageType::CommandCancel,
                     request_id,
                     correlation_id,
-                    json!(imago_protocol::CommandCancelRequest { request_id }),
+                    json!(CommandCancelRequest { request_id }),
                 ),
                 RouterProjectionAction::RpcInvoke => Envelope::new(
                     MessageType::RpcInvoke,
@@ -1532,26 +1537,30 @@ mod conformance_tests {
                     correlation_id,
                     json!(BindingsCertUploadRequest {
                         authority: "edge.example".to_string(),
-                        public_key_hex: "1111111111111111111111111111111111111111111111111111111111111111"
-                            .to_string(),
+                        public_key_hex:
+                            "1111111111111111111111111111111111111111111111111111111111111111"
+                                .to_string(),
                     }),
                 ),
             }
         }
 
-        fn output_for_response(&self, action: RouterProjectionAction, response: &Envelope) -> Vec<SystemEffect> {
+        fn output_for_response(
+            &self,
+            action: RouterProjectionAction,
+            response: &Envelope,
+        ) -> Vec<SystemEffect> {
             match system_message_binding(response.message_type) {
-                imagod_spec::SystemMessageBinding::Request(kind)
-                | imagod_spec::SystemMessageBinding::Response(kind) => {
+                SystemMessageBinding::Request(kind) | SystemMessageBinding::Response(kind) => {
                     let stream = match action {
-                        RouterProjectionAction::BindingsCertUpload => imagod_spec::atoms::StreamAtom::Stream0,
-                        _ => imagod_spec::atoms::StreamAtom::Stream0,
+                        RouterProjectionAction::BindingsCertUpload => atoms::StreamAtom::Stream0,
+                        _ => atoms::StreamAtom::Stream0,
                     };
                     vec![SystemEffect::Response(stream, kind)]
                 }
-                imagod_spec::SystemMessageBinding::CommandEvent
-                | imagod_spec::SystemMessageBinding::LogChunk
-                | imagod_spec::SystemMessageBinding::LogsEnd => Vec::new(),
+                SystemMessageBinding::CommandEvent
+                | SystemMessageBinding::LogChunk
+                | SystemMessageBinding::LogsEnd => Vec::new(),
             }
         }
     }
@@ -1561,7 +1570,8 @@ mod conformance_tests {
         type Context = ();
 
         async fn fresh_runtime(spec: &RouterProjectionSpec) -> Self::Runtime {
-            let config_root = std::env::temp_dir().join(format!("imagod-router-projection-{}", Uuid::new_v4()));
+            let config_root =
+                std::env::temp_dir().join(format!("imagod-router-projection-{}", Uuid::new_v4()));
             std::fs::create_dir_all(&config_root).expect("config root should exist");
             let config_path = config_root.join("imagod.toml");
             let loaded = load_or_create_default(&config_path).expect("default config should load");
@@ -1616,7 +1626,11 @@ mod conformance_tests {
         type Output = Vec<SystemEffect>;
         type Context = ();
 
-        async fn execute_action(&self, _context: &Self::Context, action: &Self::Action) -> Self::Output {
+        async fn execute_action(
+            &self,
+            _context: &Self::Context,
+            action: &Self::Action,
+        ) -> Self::Output {
             let prev = self.state.lock().expect("state lock").clone();
             let Some(next) = self.spec.transition(&prev, action) else {
                 return Vec::new();
@@ -1667,8 +1681,8 @@ mod conformance_tests {
         assert_eq!(
             output,
             vec![SystemEffect::Response(
-                imagod_spec::atoms::StreamAtom::Stream0,
-                imagod_spec::atoms::RequestKindAtom::ServicesList,
+                atoms::StreamAtom::Stream0,
+                atoms::RequestKindAtom::ServicesList,
             )]
         );
     }

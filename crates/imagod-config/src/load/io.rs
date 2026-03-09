@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
+use imagod_spec::ErrorCode;
 
 pub(crate) fn read_to_string(path: &Path) -> Result<String, ImagodError> {
     std::fs::read_to_string(path).map_err(|e| {

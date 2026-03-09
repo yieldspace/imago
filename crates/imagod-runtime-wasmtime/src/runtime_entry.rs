@@ -7,15 +7,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use imago_protocol::ErrorCode;
 use imagod_common::{
     DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY, DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES,
     DEFAULT_WASM_MEMORY_RESERVATION_BYTES, DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES,
     DEFAULT_WASM_PARALLEL_COMPILATION, ImagodError,
-};
-use imagod_ipc::{
-    CapabilityPolicy, PluginDependency, RunnerAppType, RunnerSocketConfig, RunnerSocketDirection,
-    RunnerWasiMount, ServiceBinding, WasiHttpOutboundRule,
 };
 #[cfg(test)]
 use imagod_runtime_internal::RuntimeInvokeContext;
@@ -23,6 +18,10 @@ use imagod_runtime_internal::{
     ComponentRuntime, HttpComponentSupervisor, PluginResolver, RuntimeHttpRequest,
     RuntimeHttpResponse, RuntimeHttpWorkItem, RuntimeInvokeRequest, RuntimeInvoker,
     RuntimeRunRequest,
+};
+use imagod_spec::{
+    CapabilityPolicy, ErrorCode, PluginDependency, RunnerAppType, RunnerSocketConfig,
+    RunnerSocketDirection, RunnerWasiMount, ServiceBinding, WasiHttpOutboundRule,
 };
 use tokio::{
     sync::{mpsc, oneshot, watch},
@@ -924,7 +923,7 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imagod_ipc::{RunnerSocketConfig, RunnerSocketProtocol, RunnerWasiMount};
+    use imagod_spec::{RunnerSocketConfig, RunnerSocketProtocol, RunnerWasiMount};
     use std::{
         collections::BTreeMap,
         fs,

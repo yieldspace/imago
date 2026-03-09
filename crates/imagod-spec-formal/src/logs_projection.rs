@@ -146,7 +146,9 @@ impl TransitionSystem for LogsProjectionSpec {
 
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
         if matches!(action, LogsProjectionAction::LogsChunk)
-            && state.wire.saw_log_chunk(StreamAtom::Stream1, LogChunkAtom::Chunk0)
+            && state
+                .wire
+                .saw_log_chunk(StreamAtom::Stream1, LogChunkAtom::Chunk0)
         {
             return None;
         }
@@ -192,10 +194,13 @@ impl ProtocolConformanceSpec for LogsProjectionSpec {
     }
 
     fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
-        observed.trace.iter().fold(self.initial_state(), |state, action| {
-            self.transition(&state, action)
-                .expect("logs projection trace should stay valid")
-        })
+        observed
+            .trace
+            .iter()
+            .fold(self.initial_state(), |state, action| {
+                self.transition(&state, action)
+                    .expect("logs projection trace should stay valid")
+            })
     }
 
     fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {

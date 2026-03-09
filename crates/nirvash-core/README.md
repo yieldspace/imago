@@ -76,6 +76,8 @@ assert!(result.is_ok());
 
 `nirvash-core` は runtime / checker / DSL を提供し、`nirvash-macros` は `#[invariant(...)]`、`#[subsystem_spec]`、`#[formal_tests(...)]` などの宣言を自動化します。bang macro 形式の `nirvash_core::invariant!` や `nirvash_core::property!` は内部でこれらの proc macro を使うため、利用 crate には `nirvash-core` と `nirvash-macros` の両方が必要です。`imagod-spec` はその上で `imagod` 全体の仕様を記述する利用例です。
 
+`Signature` 系は通常どおり `#[derive(Signature)]`、`#[derive(ActionVocabulary)]`、`#[derive(RelAtom)]`、`#[derive(RelationalState)]` を使います。formal 用の doc/registry 向け cfg は derive macro 側が吸収するので、利用側で個別の cfg を書く必要はありません。
+
 `Signature` derive の推奨順は次です。
 
 - まず helper enum/newtype や bounded collection に使う

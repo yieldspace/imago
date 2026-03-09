@@ -1,6 +1,6 @@
-use imago_protocol::{CommandErrorKind, CommandKind, CommandLifecycleState};
-use imagod_ipc::{PluginKind, RunnerAppType};
 use nirvash_macros::Signature as FormalSignature;
+
+use crate::{CommandErrorKind, CommandKind, CommandLifecycleState, PluginKind, RunnerAppType};
 
 pub const MAX_SERVICES: u8 = 2;
 pub const MAX_SESSIONS: u8 = 2;

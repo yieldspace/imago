@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use imago_protocol::{ErrorCode, StructuredError};
+use imagod_spec::{ErrorCode, IpcErrorPayload, StructuredError};
 use thiserror::Error;
 
 mod builders;
@@ -81,5 +81,20 @@ impl ImagodError {
             ErrorCode::RollbackFailed => "RollbackFailed",
             ErrorCode::StorageQuota => "StorageQuota",
         }
+    }
+
+    /// Converts this value into the IPC wire error shape.
+    pub fn to_ipc_error_payload(&self) -> IpcErrorPayload {
+        IpcErrorPayload {
+            code: self.code,
+            stage: self.stage.clone(),
+            message: self.message.clone(),
+        }
+    }
+}
+
+impl From<IpcErrorPayload> for ImagodError {
+    fn from(value: IpcErrorPayload) -> Self {
+        Self::new(value.code, value.stage, value.message)
     }
 }

@@ -9,7 +9,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use imagod_common::ImagodError;
-use imagod_ipc::{
+use imagod_spec::{
     CapabilityPolicy, PluginDependency, ResourceMap, RunnerAppType, RunnerSocketConfig,
     RunnerWasiMount, ServiceBinding, WasiHttpOutboundRule,
 };

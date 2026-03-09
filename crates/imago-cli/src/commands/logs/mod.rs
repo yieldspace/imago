@@ -8,9 +8,9 @@ use std::{
 
 use anyhow::{Context, anyhow};
 use chrono::{DateTime, Local, Utc};
-use imago_protocol::{
+use imago_protocol::from_cbor;
+use imagod_spec::{
     LogChunk, LogEnd, LogRequest, LogStreamKind, MessageType, ProtocolEnvelope, StructuredError,
-    from_cbor,
 };
 use serde::Deserialize;
 use tokio::time;

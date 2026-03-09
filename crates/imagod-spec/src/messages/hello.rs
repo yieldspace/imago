@@ -12,7 +12,7 @@ use super::StringMap;
 ///
 /// # Examples
 /// ```rust
-/// use imago_protocol::{messages::HelloNegotiateRequest, Validate};
+/// use imagod_spec::{HelloNegotiateRequest, Validate};
 ///
 /// let request = HelloNegotiateRequest {
 ///     client_version: "0.1.0".to_string(),
@@ -38,7 +38,7 @@ impl Validate for HelloNegotiateRequest {
 /// # Examples
 /// ```rust
 /// use std::collections::BTreeMap;
-/// use imago_protocol::{messages::HelloNegotiateResponse, Validate};
+/// use imagod_spec::{HelloNegotiateResponse, Validate};
 ///
 /// let response = HelloNegotiateResponse {
 ///     accepted: true,

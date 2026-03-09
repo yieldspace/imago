@@ -664,6 +664,24 @@ fn expand_registration(
 }
 
 fn expand_signature_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    expand_signature_tokens(input)
+}
+
+fn formal_runtime_guard_attrs() -> proc_macro2::TokenStream {
+    quote! {
+        #[cfg(any(debug_assertions, test, doc))]
+    }
+}
+
+fn guard_item(tokens: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    let attrs = formal_runtime_guard_attrs();
+    quote! {
+        #attrs
+        #tokens
+    }
+}
+
+fn expand_signature_tokens(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let args = SignatureArgs::from_attrs(&input.attrs)?;
     let ident = input.ident;
     let generics = input.generics;
@@ -735,6 +753,10 @@ fn expand_signature_derive(input: DeriveInput) -> syn::Result<proc_macro2::Token
 }
 
 fn expand_action_vocabulary_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    expand_action_vocabulary_tokens(input)
+}
+
+fn expand_action_vocabulary_tokens(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let ident = input.ident;
     let generics = input.generics;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -779,13 +801,13 @@ fn signature_action_doc_registration(
     let ident_snake = to_upper_snake(&ident.to_string()).to_lowercase();
     let type_id_fn_ident = format_ident!("__nirvash_action_doc_type_id_{}", ident_snake);
     let format_fn_ident = format_ident!("__nirvash_action_doc_format_{}", ident_snake);
-
-    Ok(quote! {
+    let type_id_item = guard_item(quote! {
         #[doc(hidden)]
         fn #type_id_fn_ident() -> ::std::any::TypeId {
             ::std::any::TypeId::of::<#ident>()
         }
-
+    });
+    let format_item = guard_item(quote! {
         #[doc(hidden)]
         fn #format_fn_ident(
             value: &dyn ::std::any::Any,
@@ -797,13 +819,20 @@ fn signature_action_doc_registration(
                 #(#match_arms)*
             }
         }
-
+    });
+    let inventory_item = guard_item(quote! {
         ::nirvash_core::inventory::submit! {
             ::nirvash_core::RegisteredActionDocLabel {
                 value_type_id: #type_id_fn_ident,
                 format: #format_fn_ident,
             }
         }
+    });
+
+    Ok(quote! {
+        #type_id_item
+        #format_item
+        #inventory_item
     })
 }
 
@@ -890,6 +919,10 @@ fn single_field_delegate_arm(
 }
 
 fn expand_rel_atom_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    expand_rel_atom_tokens(input)
+}
+
+fn expand_rel_atom_tokens(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let ident = input.ident;
     let generics = input.generics;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -926,6 +959,10 @@ fn expand_rel_atom_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenS
 }
 
 fn expand_relational_state_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    expand_relational_state_tokens(input)
+}
+
+fn expand_relational_state_tokens(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let ident = input.ident;
     if !input.generics.params.is_empty() {
         return Err(syn::Error::new(
@@ -997,6 +1034,39 @@ fn expand_relational_state_derive(input: DeriveInput) -> syn::Result<proc_macro2
     let schema_fn_ident = format_ident!("__nirvash_relational_schema_{}", ident_snake);
     let summary_fn_ident = format_ident!("__nirvash_relational_summary_{}", ident_snake);
     let type_id_fn_ident = format_ident!("__nirvash_relational_state_type_id_{}", ident_snake);
+    let schema_item = guard_item(quote! {
+        #[doc(hidden)]
+        fn #schema_fn_ident() -> ::std::vec::Vec<::nirvash_core::RelationFieldSchema> {
+            <#ident as ::nirvash_core::RelationalState>::relation_schema()
+        }
+    });
+    let summary_item = guard_item(quote! {
+        #[doc(hidden)]
+        fn #summary_fn_ident(
+            value: &dyn ::std::any::Any,
+        ) -> ::std::vec::Vec<::nirvash_core::RelationFieldSummary> {
+            <#ident as ::nirvash_core::RelationalState>::relation_summary(
+                value
+                    .downcast_ref::<#ident>()
+                    .expect("registered RelationalState downcast")
+            )
+        }
+    });
+    let type_id_item = guard_item(quote! {
+        #[doc(hidden)]
+        fn #type_id_fn_ident() -> ::std::any::TypeId {
+            ::std::any::TypeId::of::<#ident>()
+        }
+    });
+    let inventory_item = guard_item(quote! {
+        ::nirvash_core::inventory::submit! {
+            ::nirvash_core::RegisteredRelationalState {
+                state_type_id: #type_id_fn_ident,
+                relation_schema: #schema_fn_ident,
+                relation_summary: #summary_fn_ident,
+            }
+        }
+    });
 
     Ok(quote! {
         impl ::nirvash_core::RelationalState for #ident {
@@ -1009,34 +1079,10 @@ fn expand_relational_state_derive(input: DeriveInput) -> syn::Result<proc_macro2
             }
         }
 
-        #[doc(hidden)]
-        fn #schema_fn_ident() -> ::std::vec::Vec<::nirvash_core::RelationFieldSchema> {
-            <#ident as ::nirvash_core::RelationalState>::relation_schema()
-        }
-
-        #[doc(hidden)]
-        fn #summary_fn_ident(
-            value: &dyn ::std::any::Any,
-        ) -> ::std::vec::Vec<::nirvash_core::RelationFieldSummary> {
-            <#ident as ::nirvash_core::RelationalState>::relation_summary(
-                value
-                    .downcast_ref::<#ident>()
-                    .expect("registered RelationalState downcast")
-            )
-        }
-
-        #[doc(hidden)]
-        fn #type_id_fn_ident() -> ::std::any::TypeId {
-            ::std::any::TypeId::of::<#ident>()
-        }
-
-        ::nirvash_core::inventory::submit! {
-            ::nirvash_core::RegisteredRelationalState {
-                state_type_id: #type_id_fn_ident,
-                relation_schema: #schema_fn_ident,
-                relation_summary: #summary_fn_ident,
-            }
-        }
+        #schema_item
+        #summary_item
+        #type_id_item
+        #inventory_item
     })
 }
 
@@ -1698,7 +1744,7 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
     let cases_method = args.cases;
     let composition_method = args.composition;
     let module_ident = format_ident!(
-        "__nirvash_formal_tests_{}",
+        "__nirvash_generated_tests_{}",
         spec_tail.to_string().to_lowercase()
     );
     let doc_provider_ident = format_ident!("__NirvashDocGraphProvider{}", spec_tail);

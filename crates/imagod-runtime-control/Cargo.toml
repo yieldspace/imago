@@ -9,5 +9,6 @@ async-trait = { workspace = true }
 imago-protocol = { workspace = true }
 imagod-common = { workspace = true }
 imagod-ipc = { workspace = true }
+imagod-spec = { workspace = true }
 imagod-runtime-internal = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }

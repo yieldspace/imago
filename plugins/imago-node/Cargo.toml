@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 imago-protocol = { workspace = true }
 imagod-ipc = { workspace = true }
+imagod-spec = { workspace = true }
 imagod-runtime-wasmtime = { workspace = true }
 serde = { workspace = true }
 url = { workspace = true }

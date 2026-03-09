@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
+use imagod_spec::ErrorCode;
 
 use crate::{ImagodConfig, ImagodTomlDocument};
 
@@ -52,7 +52,7 @@ client_public_keys = []
 
         let err = parse(Path::new("/tmp/imagod.toml"), "listen_addr = [")
             .expect_err("invalid toml should fail");
-        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.code, imagod_spec::ErrorCode::BadRequest);
         assert_eq!(err.stage, "config.load");
         assert!(err.message.contains("config parse failed"));
         assert_eq!(
@@ -89,7 +89,7 @@ client_public_keys = []
         .expect("fixture toml should parse");
         let err = decode(Path::new("/tmp/imagod.toml"), invalid_raw)
             .expect_err("invalid type should fail decode");
-        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.code, imagod_spec::ErrorCode::BadRequest);
         assert_eq!(err.stage, "config.load");
         assert!(err.message.contains("config decode failed"));
         assert_eq!(

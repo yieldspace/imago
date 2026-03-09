@@ -71,7 +71,7 @@ impl ProtocolSession for BenchProtocolSession {
             .is_ok()
         {
             return Err(ImagodError::new(
-                imago_protocol::ErrorCode::Internal,
+                imagod_spec::ErrorCode::Internal,
                 "logs.datagram",
                 "bench injected send failure",
             ));

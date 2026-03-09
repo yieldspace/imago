@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
-use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_config::RuntimeConfig;
+use imagod_spec::ErrorCode;
 
 use super::{DATAGRAM_BUFFER_BYTES, STAGE_TRANSPORT};
 
@@ -89,7 +89,7 @@ mod tests {
 
         let err = build_quic_server_config(tls, &config.runtime)
             .expect_err("too large idle timeout must fail");
-        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.code, imagod_spec::ErrorCode::BadRequest);
         assert_eq!(err.stage, super::STAGE_TRANSPORT);
         assert!(
             err.message

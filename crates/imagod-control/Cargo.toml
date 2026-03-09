@@ -13,6 +13,7 @@ base64 = { workspace = true }
 criterion = { workspace = true, optional = true }
 hex = { workspace = true }
 imago-protocol = { workspace = true }
+imagod-spec = { workspace = true }
 imagod-common = { workspace = true }
 imagod-config = { workspace = true }
 imagod-ipc = { workspace = true }
@@ -33,7 +34,7 @@ web-transport-quinn = { workspace = true }
 wasmparser = { workspace = true }
 
 [dev-dependencies]
-imagod-spec = { workspace = true }
+imagod-spec-formal = { workspace = true }
 nirvash-macros = { workspace = true }
 wat = { workspace = true }
 

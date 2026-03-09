@@ -1,8 +1,10 @@
-use imagod_ipc::{RunnerAppType, RunnerBootstrap};
+use imagod_spec::RunnerBootstrap;
 use nirvash_core::{Fairness, Ltl, StatePredicate, StepPredicate, TransitionSystem};
 use nirvash_macros::{
     ActionVocabulary, Signature as FormalSignature, fairness, invariant, property, subsystem_spec,
 };
+
+use crate::RunnerAppType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
 pub enum BootstrapSizeClass {
@@ -32,14 +34,15 @@ pub struct RunnerBootstrapContractClass {
 }
 
 pub fn classify_bootstrap(bootstrap: &RunnerBootstrap) -> RunnerBootstrapContractClass {
+    let app_type = bootstrap.app_type;
     RunnerBootstrapContractClass {
-        app_type: bootstrap.app_type,
-        http_contract_valid: if matches!(bootstrap.app_type, RunnerAppType::Http) {
+        app_type,
+        http_contract_valid: if matches!(app_type, RunnerAppType::Http) {
             bootstrap.http_port.is_some()
         } else {
             bootstrap.http_port.is_none()
         },
-        socket_contract_valid: if matches!(bootstrap.app_type, RunnerAppType::Socket) {
+        socket_contract_valid: if matches!(app_type, RunnerAppType::Socket) {
             bootstrap.socket.is_some()
         } else {
             bootstrap.socket.is_none()
@@ -280,7 +283,7 @@ const _: () = ();
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imagod_ipc::{
+    use imagod_spec::{
         CapabilityPolicy, RunnerBootstrap, RunnerSocketConfig, RunnerSocketDirection,
         RunnerSocketProtocol,
     };

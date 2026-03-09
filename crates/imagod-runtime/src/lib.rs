@@ -45,8 +45,8 @@ pub use runner_process::run_runner_from_stdin_with_registry;
 
 #[cfg(not(feature = "runtime-wasmtime"))]
 mod native_plugin_stub {
-    use imago_protocol::ErrorCode;
     use imagod_common::ImagodError;
+    use imagod_spec::ErrorCode;
 
     #[derive(Clone, Default)]
     pub struct NativePluginRegistry;

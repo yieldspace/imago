@@ -1,6 +1,6 @@
-use imago_protocol::CommandProtocolContext;
 use imagod_control::OperationManager;
-use imagod_spec::{CommandProjectionSpec, SystemState};
+use imagod_spec::{CommandProtocolAction as RuntimeCommandProtocolAction, CommandProtocolContext};
+use imagod_spec_formal::{CommandProjectionSpec, CommandProtocolAction, SystemState};
 use nirvash_core::conformance::{
     ActionApplier, NegativeWitness, PositiveWitness, ProtocolInputWitnessBinding,
     ProtocolRuntimeBinding,
@@ -33,7 +33,7 @@ impl ProtocolRuntimeBinding<CommandProjectionSpec> for CommandProtocolBinding {
 }
 
 impl ProtocolInputWitnessBinding<CommandProjectionSpec> for CommandProtocolBinding {
-    type Input = imago_protocol::CommandProtocolAction;
+    type Input = RuntimeCommandProtocolAction;
     type Session = CommandProtocolWitnessSession;
 
     async fn fresh_session(_spec: &CommandProjectionSpec) -> Self::Session {
@@ -50,12 +50,16 @@ impl ProtocolInputWitnessBinding<CommandProjectionSpec> for CommandProtocolBindi
         _spec: &CommandProjectionSpec,
         session: &Self::Session,
         _prev: &SystemState,
-        action: &imago_protocol::CommandProtocolAction,
+        action: &CommandProtocolAction,
         _next: &SystemState,
     ) -> Vec<PositiveWitness<Self::Context, Self::Input>> {
         vec![
-            PositiveWitness::new("principal", session.principal_context, action.clone())
-                .with_canonical(true),
+            PositiveWitness::new(
+                "principal",
+                session.principal_context,
+                action.clone(),
+            )
+            .with_canonical(true),
         ]
     }
 
@@ -63,7 +67,7 @@ impl ProtocolInputWitnessBinding<CommandProjectionSpec> for CommandProtocolBindi
         _spec: &CommandProjectionSpec,
         session: &Self::Session,
         _prev: &SystemState,
-        action: &imago_protocol::CommandProtocolAction,
+        action: &CommandProtocolAction,
     ) -> Vec<NegativeWitness<Self::Context, Self::Input>> {
         vec![NegativeWitness::new(
             "principal",

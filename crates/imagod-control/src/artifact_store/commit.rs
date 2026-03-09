@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use imago_protocol::ByteRange;
 use imagod_common::ImagodError;
+use imagod_spec::ByteRange;
 use sha2::{Digest, Sha256};
 use tokio::{fs::OpenOptions, io::AsyncReadExt};
 

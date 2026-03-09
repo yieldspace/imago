@@ -4,7 +4,7 @@ use std::{
 };
 
 use imagod_common::ImagodError;
-use imagod_ipc::{PluginDependency, PluginKind};
+use imagod_spec::{PluginComponent, PluginDependency, PluginKind};
 use sha2::{Digest, Sha256};
 use tokio::{fs, io::AsyncReadExt};
 use wasmparser::{ComponentExternalKind, ComponentTypeRef, Parser, Payload};
@@ -200,7 +200,7 @@ pub(super) async fn prepare_plugin_dependencies_for_root(
                         })?;
                 }
 
-                dep.component = Some(imagod_ipc::PluginComponent {
+                dep.component = Some(PluginComponent {
                     path: cache_path,
                     sha256: component.sha256,
                     imports: Some(imports),

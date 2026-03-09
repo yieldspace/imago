@@ -8,8 +8,8 @@ use std::{
 };
 
 #[cfg(test)]
-use imago_protocol::ArtifactStatus;
-use imago_protocol::{
+use imagod_spec::ArtifactStatus;
+use imagod_spec::{
     ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushRequest, ByteRange,
     DeployPrepareRequest, DeployPrepareResponse, ErrorCode,
 };
@@ -787,7 +787,7 @@ fn map_internal(stage: &str, message: String) -> ImagodError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imago_protocol::ArtifactPushChunkHeader;
+    use imagod_spec::ArtifactPushChunkHeader;
     use std::time::Duration;
 
     const TEST_CHUNK_SIZE: usize = 1024 * 1024;

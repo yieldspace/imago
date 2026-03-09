@@ -3,9 +3,8 @@ use std::{
     process::Stdio,
 };
 
-use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
-use imagod_ipc::RunnerBootstrap;
+use imagod_spec::{ErrorCode, RunnerBootstrap};
 use sha2::{Digest, Sha256};
 use tokio::process::{Child, Command};
 

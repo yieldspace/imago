@@ -12,8 +12,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use imago_protocol::{ErrorCode, from_cbor, to_cbor};
+use imago_protocol::{from_cbor, to_cbor};
 use imagod_common::ImagodError;
+use imagod_spec::ErrorCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

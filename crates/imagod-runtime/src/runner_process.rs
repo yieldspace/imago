@@ -7,9 +7,7 @@ use std::sync::Arc;
 
 #[cfg(not(feature = "runtime-wasmtime"))]
 use async_trait::async_trait;
-use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
-use imagod_ipc::{RunnerAppType, RunnerBootstrap};
 use imagod_runtime_bootstrap::{
     STAGE_RUNNER, SocketCleanupGuard, prepare_socket_path, read_runner_bootstrap,
 };
@@ -17,6 +15,7 @@ use imagod_runtime_control::{
     DbusRunnerManagerClient, mark_ready, register, run_inbound_server, send_heartbeats,
 };
 use imagod_runtime_ingress::{STAGE_HTTP_INGRESS, spawn_http_ingress_server};
+use imagod_spec::{ErrorCode, RunnerAppType, RunnerBootstrap};
 use tokio::{
     net::UnixListener,
     sync::{oneshot, watch},
@@ -428,6 +427,11 @@ fn map_http_ingress_join_error(err: tokio::task::JoinError) -> ImagodError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(feature = "runtime-wasmtime"))]
+    use imagod_ipc::random_secret_hex;
+    #[cfg(not(feature = "runtime-wasmtime"))]
+    use imagod_spec::CapabilityPolicy;
+
     use super::*;
     use tokio::sync::oneshot;
 
@@ -451,11 +455,11 @@ mod tests {
             resources: std::collections::BTreeMap::new(),
             bindings: vec![],
             plugin_dependencies: vec![],
-            capabilities: imagod_ipc::CapabilityPolicy::default(),
+            capabilities: CapabilityPolicy::default(),
             manager_control_endpoint: std::path::PathBuf::from("/tmp/manager.sock"),
             runner_endpoint: std::path::PathBuf::from("/tmp/runner.sock"),
-            manager_auth_secret: imagod_ipc::random_secret_hex(),
-            invocation_secret: imagod_ipc::random_secret_hex(),
+            manager_auth_secret: random_secret_hex(),
+            invocation_secret: random_secret_hex(),
             epoch_tick_interval_ms: 50,
             wasm_memory_reservation_bytes: 64 * 1024 * 1024,
             wasm_memory_reservation_for_growth_bytes: 16 * 1024 * 1024,

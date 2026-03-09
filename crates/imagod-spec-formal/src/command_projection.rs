@@ -1,10 +1,14 @@
-use imago_protocol::{CommandProtocolAction, CommandProtocolObservedState, CommandProtocolOutput};
+use imagod_spec::{
+    CommandProtocolObservedState as RuntimeCommandProtocolObservedState,
+    CommandProtocolOutput as RuntimeCommandProtocolOutput,
+};
 use nirvash_core::{
     ActionVocabulary, ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
     concurrent::ConcurrentAction, conformance::ProtocolConformanceSpec,
 };
 
 use crate::{
+    CommandProtocolAction,
     command_protocol::{CommandProtocolExpectedOutput, CommandProtocolSpec, CommandProtocolState},
     system::{SystemAtomicAction, SystemSpec, SystemState},
 };
@@ -28,7 +32,7 @@ impl CommandProjectionSpec {
 
     fn command_observed_state(
         self,
-        observed: &CommandProtocolObservedState,
+        observed: &RuntimeCommandProtocolObservedState,
     ) -> CommandProtocolState {
         CommandProtocolState {
             tracked: observed.tracked,
@@ -77,8 +81,8 @@ impl ModelCaseSource for CommandProjectionSpec {
 
 impl ProtocolConformanceSpec for CommandProjectionSpec {
     type ExpectedOutput = CommandProtocolExpectedOutput;
-    type ObservedState = CommandProtocolObservedState;
-    type ObservedOutput = CommandProtocolOutput;
+    type ObservedState = RuntimeCommandProtocolObservedState;
+    type ObservedOutput = RuntimeCommandProtocolOutput;
 
     fn expected_output(
         &self,
@@ -110,8 +114,9 @@ impl ProtocolConformanceSpec for CommandProjectionSpec {
 
 #[cfg(test)]
 mod tests {
+    use imagod_spec::{CommandKind, OperationPhase};
+
     use super::*;
-    use imago_protocol::{CommandKind, OperationPhase};
 
     #[test]
     fn initial_state_starts_from_listening_system() {

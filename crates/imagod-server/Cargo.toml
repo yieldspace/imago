@@ -13,6 +13,7 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 criterion = { workspace = true, optional = true }
 imago-protocol = { workspace = true }
+imagod-spec = { workspace = true }
 imagod-common = { workspace = true }
 imagod-config = { workspace = true }
 imagod-control = { workspace = true }
@@ -28,7 +29,7 @@ uuid = { workspace = true, features = ["v4"] }
 web-transport-quinn = { workspace = true }
 
 [dev-dependencies]
-imagod-spec = { workspace = true }
+imagod-spec-formal = { workspace = true }
 nirvash-core = { workspace = true }
 nirvash-macros = { workspace = true }
 

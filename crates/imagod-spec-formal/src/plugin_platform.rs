@@ -1,4 +1,3 @@
-use imagod_ipc::PluginKind;
 use nirvash_core::{
     Fairness, Ltl, ModelCase, RelSet, Relation2, StatePredicate, StepPredicate, TransitionSystem,
 };
@@ -7,6 +6,7 @@ use nirvash_macros::{
     property, subsystem_spec,
 };
 
+use crate::PluginKind;
 #[cfg(test)]
 use crate::bounds::SPEC_PLUGIN_KINDS;
 

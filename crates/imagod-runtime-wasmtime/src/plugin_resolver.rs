@@ -4,10 +4,10 @@ use std::{
 };
 
 use imagod_common::ImagodError;
-use imagod_ipc::{CapabilityPolicy, PluginDependency, PluginKind, ServiceBinding};
 use imagod_runtime_internal::{
     CapabilityChecker, PluginComponentInterfaces, PluginImportProvider, PluginResolver,
 };
+use imagod_spec::{CapabilityPolicy, PluginDependency, PluginKind, ServiceBinding};
 use wasmtime::{
     Engine, Store,
     component::{Component, Func, Linker, Val, types},
@@ -971,7 +971,7 @@ mod tests {
         HasSelf, NativePlugin, NativePluginLinker, NativePluginResult,
         map_native_plugin_linker_error,
     };
-    use imago_protocol::ErrorCode;
+    use imagod_spec::ErrorCode;
     use serde_json::json;
     use std::sync::{
         Arc,
@@ -1068,7 +1068,7 @@ mod tests {
 
         fn validate_resources(
             &self,
-            resources: &imagod_ipc::ResourceMap,
+            resources: &imagod_spec::ResourceMap,
         ) -> NativePluginResult<()> {
             self.validate_calls.fetch_add(1, Ordering::Relaxed);
             self.saw_gpio_resource
@@ -1098,7 +1098,7 @@ mod tests {
 
     fn test_store_with_resources(
         engine: &Engine,
-        resources: imagod_ipc::ResourceMap,
+        resources: imagod_spec::ResourceMap,
     ) -> Store<WasiState> {
         let state = WasiState {
             table: wasmtime::component::ResourceTable::new(),
@@ -1109,7 +1109,7 @@ mod tests {
                 "svc-test".to_string(),
                 "release-test".to_string(),
                 "runner-test".to_string(),
-                imagod_ipc::RunnerAppType::Cli,
+                imagod_spec::RunnerAppType::Cli,
                 PathBuf::from("/tmp/manager.sock"),
                 "secret".to_string(),
                 resources,
@@ -1141,7 +1141,7 @@ mod tests {
             kind: PluginKind::Wasm,
             wit: format!("warg://{name}@0.1.0"),
             requires: Vec::new(),
-            component: Some(imagod_ipc::PluginComponent {
+            component: Some(imagod_spec::PluginComponent {
                 path: component_path,
                 sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                     .to_string(),

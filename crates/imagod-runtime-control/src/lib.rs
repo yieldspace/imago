@@ -3,14 +3,16 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{
-    ControlRequest, ControlResponse, IpcErrorPayload, RunnerBootstrap, RunnerInboundRequest,
-    RunnerInboundResponse, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
-    verify_invocation_token, verify_manager_auth_proof,
+    compute_manager_auth_proof, dbus_p2p::DbusP2pTransport, verify_invocation_token,
+    verify_manager_auth_proof,
 };
 use imagod_runtime_internal::{RuntimeInvokeContext, RuntimeInvokeRequest, RuntimeInvoker};
+use imagod_spec::{
+    ControlRequest, ControlResponse, ErrorCode, IpcErrorPayload, RunnerBootstrap,
+    RunnerInboundRequest, RunnerInboundResponse,
+};
 use tokio::{
     net::{UnixListener, UnixStream},
     sync::{Semaphore, watch},
@@ -115,7 +117,7 @@ where
     let response = manager_client.register(bootstrap, proof).await?;
     match response {
         ControlResponse::Ack => Ok(()),
-        ControlResponse::Error(err) => Err(err.to_error()),
+        ControlResponse::Error(err) => Err(err.into()),
         _ => Err(ImagodError::new(
             ErrorCode::Internal,
             STAGE_RUNNER,
@@ -135,7 +137,7 @@ where
     let response = manager_client.mark_ready(bootstrap, proof).await?;
     match response {
         ControlResponse::Ack => Ok(()),
-        ControlResponse::Error(err) => Err(err.to_error()),
+        ControlResponse::Error(err) => Err(err.into()),
         _ => Err(ImagodError::new(
             ErrorCode::Internal,
             STAGE_RUNNER,
@@ -370,7 +372,7 @@ pub async fn handle_inbound_connection(
         Ok(Err(err)) => {
             let _ = DbusP2pTransport::write_message(
                 stream,
-                &RunnerInboundResponse::Error(IpcErrorPayload::from_error(&err)),
+                &RunnerInboundResponse::Error(err.to_ipc_error_payload()),
             )
             .await;
             return;
@@ -378,11 +380,14 @@ pub async fn handle_inbound_connection(
         Err(_) => {
             let _ = DbusP2pTransport::write_message(
                 stream,
-                &RunnerInboundResponse::Error(IpcErrorPayload::from_error(&ImagodError::new(
-                    ErrorCode::OperationTimeout,
-                    STAGE_INBOUND,
-                    "runner inbound request timed out",
-                ))),
+                &RunnerInboundResponse::Error(
+                    ImagodError::new(
+                        ErrorCode::OperationTimeout,
+                        STAGE_INBOUND,
+                        "runner inbound request timed out",
+                    )
+                    .to_ipc_error_payload(),
+                ),
             )
             .await;
             return;
@@ -435,7 +440,7 @@ pub async fn handle_inbound_request(
                 &bootstrap.runner_id,
                 &manager_auth_proof,
             ) {
-                return RunnerInboundResponse::Error(IpcErrorPayload::from_error(&err));
+                return RunnerInboundResponse::Error(err.to_ipc_error_payload());
             }
             let _ = shutdown_tx.send(true);
             RunnerInboundResponse::Ack
@@ -449,7 +454,7 @@ pub async fn handle_inbound_request(
             let claims = match verify_invocation_token(&bootstrap.invocation_secret, &token) {
                 Ok(claims) => claims,
                 Err(err) => {
-                    return RunnerInboundResponse::Error(IpcErrorPayload::from_error(&err));
+                    return RunnerInboundResponse::Error(err.to_ipc_error_payload());
                 }
             };
 
@@ -480,7 +485,7 @@ pub async fn handle_inbound_request(
                 Ok(result_cbor) => RunnerInboundResponse::InvokeResult {
                     payload_cbor: result_cbor,
                 },
-                Err(err) => RunnerInboundResponse::Error(IpcErrorPayload::from_error(&err)),
+                Err(err) => RunnerInboundResponse::Error(err.to_ipc_error_payload()),
             }
         }
     }
@@ -496,10 +501,8 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use imagod_ipc::{
-        ControlRequest, InvocationTokenClaims, RunnerAppType, issue_invocation_token,
-        now_unix_secs, random_secret_hex,
-    };
+    use imagod_ipc::{issue_invocation_token, now_unix_secs, random_secret_hex};
+    use imagod_spec::{CapabilityPolicy, ControlRequest, InvocationTokenClaims, RunnerAppType};
     use tokio::sync::oneshot;
 
     struct EchoRuntimeInvoker;
@@ -558,7 +561,7 @@ mod tests {
             resources: BTreeMap::new(),
             bindings: Vec::new(),
             plugin_dependencies: Vec::new(),
-            capabilities: imagod_ipc::CapabilityPolicy::default(),
+            capabilities: CapabilityPolicy::default(),
             manager_control_endpoint: root.join("manager-control.sock"),
             runner_endpoint: root.join(runner_socket_name),
             manager_auth_secret: random_secret_hex(),

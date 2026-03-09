@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, path::Path};
 
 use anyhow::anyhow;
-use imago_protocol::{
+use imagod_spec::{
     CommandEvent, CommandEventType, CommandStartResponse, HelloNegotiateRequest,
     HelloNegotiateResponse, MessageType, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSION_RANGE,
 };

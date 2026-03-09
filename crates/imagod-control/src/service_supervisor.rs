@@ -20,20 +20,22 @@ use std::{
     time::Duration,
 };
 
-use imago_protocol::ErrorCode;
 use imagod_common::{
     DEFAULT_WASM_GUARD_BEFORE_LINEAR_MEMORY, DEFAULT_WASM_MEMORY_GUARD_SIZE_BYTES,
     DEFAULT_WASM_MEMORY_RESERVATION_BYTES, DEFAULT_WASM_MEMORY_RESERVATION_FOR_GROWTH_BYTES,
     DEFAULT_WASM_PARALLEL_COMPILATION, ImagodError,
 };
 use imagod_ipc::{
-    CapabilityPolicy, PluginDependency, ResourceMap, RunnerAppType, RunnerBootstrap,
-    RunnerInboundRequest, RunnerInboundResponse, RunnerSocketConfig, RunnerWasiMount,
-    ServiceBinding, WasiHttpOutboundRule, compute_manager_auth_proof, dbus_p2p::DbusP2pTransport,
-    issue_invocation_token, now_unix_secs, random_secret_hex,
+    compute_manager_auth_proof, dbus_p2p::DbusP2pTransport, issue_invocation_token, now_unix_secs,
+    random_secret_hex,
+};
+use imagod_spec::{
+    CapabilityPolicy, ErrorCode, InvocationTokenClaims, PluginDependency, ResourceMap,
+    RunnerAppType, RunnerBootstrap, RunnerInboundRequest, RunnerInboundResponse,
+    RunnerSocketConfig, RunnerWasiMount, ServiceBinding, WasiHttpOutboundRule,
 };
 #[cfg(test)]
-use imagod_ipc::{ControlRequest, ControlResponse};
+use imagod_spec::{ControlRequest, ControlResponse};
 use tokio::{
     io::{AsyncRead, AsyncWriteExt},
     net::UnixListener,
@@ -987,7 +989,7 @@ impl ServiceSupervisor {
             )
         };
 
-        let claims = imagod_ipc::InvocationTokenClaims {
+        let claims = InvocationTokenClaims {
             source_service: "remote".to_string(),
             target_service: target_service_name.to_string(),
             wit: interface_id.to_string(),
@@ -1009,7 +1011,7 @@ impl ServiceSupervisor {
 
         match response {
             RunnerInboundResponse::InvokeResult { payload_cbor } => Ok(payload_cbor),
-            RunnerInboundResponse::Error(err) => Err(err.to_error()),
+            RunnerInboundResponse::Error(err) => Err(err.into()),
             RunnerInboundResponse::Ack => Err(ImagodError::new(
                 ErrorCode::Internal,
                 STAGE_INVOKE,
@@ -1712,14 +1714,15 @@ fn inject_kill_and_wait_failure_for_pid(pid: u32) {
 mod tests {
     use super::*;
     use crate::artifact_store::ArtifactStore;
-    use imagod_spec::{
-        atoms::ServiceAtom,
+    use imagod_spec_formal::{
         RuntimeProjectionAction, RuntimeProjectionObservedState, RuntimeProjectionSpec,
-        SystemEffect, SystemState,
+        SystemEffect, SystemState, atoms::ServiceAtom,
     };
     use nirvash_core::{
         ProtocolConformanceSpec, TransitionSystem,
-        conformance::{ActionApplier as ProtocolActionApplier, ProtocolRuntimeBinding, StateObserver},
+        conformance::{
+            ActionApplier as ProtocolActionApplier, ProtocolRuntimeBinding, StateObserver,
+        },
     };
     use nirvash_macros::code_tests;
     use sha2::{Digest, Sha256};
@@ -1837,7 +1840,9 @@ mod tests {
         append_tar_file(&mut builder, "manifest.json", &manifest_bytes);
         append_tar_file(&mut builder, "component.wasm", &component_bytes);
         builder.finish().expect("artifact tar should finish");
-        let artifact_bytes = builder.into_inner().expect("artifact bytes should be returned");
+        let artifact_bytes = builder
+            .into_inner()
+            .expect("artifact bytes should be returned");
         let artifact_digest = hex::encode(Sha256::digest(&artifact_bytes));
         let manifest_digest = hex::encode(Sha256::digest(&manifest_bytes));
         (artifact_bytes, artifact_digest, manifest_digest)
@@ -1859,9 +1864,10 @@ mod tests {
             let root = new_test_root("runtime-projection");
             let artifact_root = root.join("artifacts");
             std::fs::create_dir_all(&artifact_root).expect("artifact root should exist");
-            let artifact_store = ArtifactStore::new(&artifact_root, 60, 60, 8, 64 * 1024, 4, 512 * 1024)
-                .await
-                .expect("artifact store should initialize");
+            let artifact_store =
+                ArtifactStore::new(&artifact_root, 60, 60, 8, 64 * 1024, 4, 512 * 1024)
+                    .await
+                    .expect("artifact store should initialize");
             let supervisor = ServiceSupervisor::new(&root, 1, 1, 1_000, 2, 4, 4096, 50)
                 .expect("supervisor should initialize");
             Self {
@@ -1894,10 +1900,7 @@ mod tests {
             }
         }
 
-        async fn ensure_release_markers(
-            &self,
-            service: ServiceAtom,
-        ) -> Result<(), ImagodError> {
+        async fn ensure_release_markers(&self, service: ServiceAtom) -> Result<(), ImagodError> {
             let service_root = self.root.join("services").join(Self::service_name(service));
             tokio::fs::create_dir_all(service_root.join(Self::release_hash(service)))
                 .await
@@ -1922,7 +1925,7 @@ mod tests {
             let (artifact_bytes, artifact_digest, manifest_digest) = artifact_archive(service_name);
             let prepare = self
                 .artifact_store
-                .prepare(imago_protocol::DeployPrepareRequest {
+                .prepare(imagod_spec::DeployPrepareRequest {
                     name: service_name.to_string(),
                     app_type: "rpc".to_string(),
                     target: BTreeMap::new(),
@@ -1935,8 +1938,8 @@ mod tests {
                 .await?;
             let chunk_sha256 = hex::encode(Sha256::digest(&artifact_bytes));
             self.artifact_store
-                .push(imago_protocol::ArtifactPushRequest {
-                    header: imago_protocol::ArtifactPushChunkHeader {
+                .push(imagod_spec::ArtifactPushRequest {
+                    header: imagod_spec::ArtifactPushChunkHeader {
                         deploy_id: prepare.deploy_id.clone(),
                         offset: 0,
                         length: artifact_bytes.len() as u64,
@@ -1947,7 +1950,7 @@ mod tests {
                 })
                 .await?;
             self.artifact_store
-                .commit(imago_protocol::ArtifactCommitRequest {
+                .commit(imagod_spec::ArtifactCommitRequest {
                     deploy_id: prepare.deploy_id.clone(),
                     artifact_digest,
                     artifact_size: artifact_bytes.len() as u64,
@@ -1963,10 +1966,7 @@ mod tests {
             Ok(())
         }
 
-        async fn seed_running_service(
-            &self,
-            service: ServiceAtom,
-        ) -> Result<(), ImagodError> {
+        async fn seed_running_service(&self, service: ServiceAtom) -> Result<(), ImagodError> {
             let child = Command::new("sleep")
                 .arg("30")
                 .stdin(Stdio::null())
@@ -1994,7 +1994,10 @@ mod tests {
         }
 
         async fn rollback_service0(&self) -> Result<(), ImagodError> {
-            let service_root = self.root.join("services").join(Self::service_name(ServiceAtom::Service0));
+            let service_root = self
+                .root
+                .join("services")
+                .join(Self::service_name(ServiceAtom::Service0));
             tokio::fs::write(service_root.join("active_release"), b"release-previous")
                 .await
                 .map_err(|e| {
@@ -2029,8 +2032,11 @@ mod tests {
                 &self.supervisor.pending_ready,
                 ControlRequest::ResolveInvocationTarget {
                     runner_id: source_runner_id.to_string(),
-                    manager_auth_proof: compute_manager_auth_proof(&source_secret, source_runner_id)
-                        .expect("proof should be generated"),
+                    manager_auth_proof: compute_manager_auth_proof(
+                        &source_secret,
+                        source_runner_id,
+                    )
+                    .expect("proof should be generated"),
                     target_service: Self::service_name(ServiceAtom::Service1).to_string(),
                     wit,
                 },
@@ -2038,11 +2044,9 @@ mod tests {
             .await;
             match response {
                 ControlResponse::ResolvedInvocationTarget { .. } => Ok(()),
-                ControlResponse::Error(err) => Err(ImagodError::new(
-                    err.code,
-                    err.stage,
-                    err.message,
-                )),
+                ControlResponse::Error(err) => {
+                    Err(ImagodError::new(err.code, err.stage, err.message))
+                }
                 other => Err(ImagodError::new(
                     ErrorCode::Internal,
                     STAGE_CONTROL,
@@ -2066,8 +2070,11 @@ mod tests {
                 &self.supervisor.pending_ready,
                 ControlRequest::ResolveInvocationTarget {
                     runner_id: source_runner_id.to_string(),
-                    manager_auth_proof: compute_manager_auth_proof(&source_secret, source_runner_id)
-                        .expect("proof should be generated"),
+                    manager_auth_proof: compute_manager_auth_proof(
+                        &source_secret,
+                        source_runner_id,
+                    )
+                    .expect("proof should be generated"),
                     target_service: Self::service_name(ServiceAtom::Service1).to_string(),
                     wit: "pkg:iface/invoke".to_string(),
                 },
@@ -2095,8 +2102,9 @@ mod tests {
                 )
             };
             if let Some(parent) = runner_endpoint.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| ImagodError::new(ErrorCode::Internal, STAGE_INVOKE, e.to_string()))?;
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    ImagodError::new(ErrorCode::Internal, STAGE_INVOKE, e.to_string())
+                })?;
             }
             let _ = std::fs::remove_file(&runner_endpoint);
             let listener = UnixListener::bind(&runner_endpoint)
@@ -2115,8 +2123,9 @@ mod tests {
                     } => {
                         assert_eq!(interface_id, "yieldspace:service/invoke");
                         assert_eq!(function, "call");
-                        let claims = imagod_ipc::verify_invocation_token(&invocation_secret, &token)
-                            .expect("token should verify");
+                        let claims =
+                            imagod_ipc::verify_invocation_token(&invocation_secret, &token)
+                                .expect("token should verify");
                         assert_eq!(claims.target_service, "svc-source");
                         DbusP2pTransport::write_message(
                             &mut stream,
@@ -2177,7 +2186,10 @@ mod tests {
             );
             {
                 let mut guard = self.supervisor.inner.write().await;
-                guard.insert(Self::service_name(ServiceAtom::Service0).to_string(), service);
+                guard.insert(
+                    Self::service_name(ServiceAtom::Service0).to_string(),
+                    service,
+                );
             }
             self.supervisor.reap_finished().await;
             Ok(())
@@ -2245,8 +2257,12 @@ mod tests {
             };
 
             let result = match action {
-                RuntimeProjectionAction::DeployService0 => self.deploy_service(ServiceAtom::Service0).await,
-                RuntimeProjectionAction::DeployService1 => self.deploy_service(ServiceAtom::Service1).await,
+                RuntimeProjectionAction::DeployService0 => {
+                    self.deploy_service(ServiceAtom::Service0).await
+                }
+                RuntimeProjectionAction::DeployService1 => {
+                    self.deploy_service(ServiceAtom::Service1).await
+                }
                 RuntimeProjectionAction::RollbackService0 => self.rollback_service0().await,
                 RuntimeProjectionAction::LocalRpcResolved => self.local_rpc_resolved().await,
                 RuntimeProjectionAction::LocalRpcDenied => self.local_rpc_denied().await,

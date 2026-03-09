@@ -6,10 +6,8 @@ use std::{
     },
 };
 
-use imagod_ipc::{
-    ControlRequest, ControlResponse, RunnerInboundRequest, RunnerInboundResponse,
-    compute_manager_auth_proof,
-};
+use imagod_ipc::compute_manager_auth_proof;
+use imagod_spec::{ControlRequest, ControlResponse, RunnerInboundRequest, RunnerInboundResponse};
 
 #[cfg(unix)]
 use std::{
@@ -20,7 +18,9 @@ use std::{
 };
 
 #[cfg(unix)]
-use imago_protocol::{Validate, from_cbor, to_cbor};
+use imago_protocol::{from_cbor, to_cbor};
+#[cfg(unix)]
+use imagod_spec::Validate;
 #[cfg(unix)]
 use serde::{Serialize, de::DeserializeOwned};
 use wasmtime::{
@@ -224,8 +224,8 @@ where
 #[cfg(not(unix))]
 fn call_ipc_sync<Req, Resp>(_endpoint: &std::path::Path, _request: &Req) -> Result<Resp, String>
 where
-    Req: serde::Serialize + imago_protocol::Validate,
-    Resp: serde::de::DeserializeOwned + imago_protocol::Validate,
+    Req: serde::Serialize + imagod_spec::Validate,
+    Resp: serde::de::DeserializeOwned + imagod_spec::Validate,
 {
     Err("rpc bridge is only supported on unix targets".to_string())
 }
@@ -334,7 +334,8 @@ fn disconnect_remote_via_manager(context: &NativePluginContext, connection_id: &
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imagod_ipc::{RunnerAppType, random_secret_hex, verify_manager_auth_proof};
+    use imagod_ipc::{random_secret_hex, verify_manager_auth_proof};
+    use imagod_spec::RunnerAppType;
     use std::{
         os::unix::net::UnixListener as StdUnixListener,
         path::PathBuf,

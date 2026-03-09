@@ -9,9 +9,8 @@ pub mod rpc_bridge;
 mod rpc_values;
 mod runtime_entry;
 
-use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
-use imagod_ipc::{ResourceMap, RunnerAppType, WasiHttpOutboundRule};
+use imagod_spec::{ErrorCode, ResourceMap, RunnerAppType, WasiHttpOutboundRule};
 use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{
@@ -172,7 +171,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use http_body_util::{BodyExt, Empty};
-    use imagod_ipc::RunnerAppType;
+    use imagod_spec::RunnerAppType;
     use std::time::Duration;
     use wasmtime_wasi_http::bindings::http::types::ErrorCode as WasiHttpErrorCode;
 

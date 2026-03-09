@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
-use imago_protocol::{BindingsCertUploadRequest, BindingsCertUploadResponse, MessageType};
+use imagod_spec::{BindingsCertUploadRequest, BindingsCertUploadResponse, MessageType};
 use rcgen::{KeyPair, PKCS_ED25519};
 use url::Url;
 use uuid::Uuid;

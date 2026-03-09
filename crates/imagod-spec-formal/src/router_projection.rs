@@ -1,4 +1,3 @@
-use imago_protocol::CommandProtocolAction;
 use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
@@ -6,6 +5,7 @@ use nirvash_core::{
 use nirvash_macros::{ActionVocabulary, Signature};
 
 use crate::{
+    CommandKind, CommandProtocolAction,
     atoms::{RequestKindAtom, SessionAtom, StreamAtom},
     session_auth::SessionAuthAction,
     system::{SystemAtomicAction, SystemEffect, SystemSpec, SystemState},
@@ -77,9 +77,7 @@ impl RouterProjectionSpec {
         );
         let state = self.apply_atomic(
             &state,
-            SystemAtomicAction::Command(CommandProtocolAction::Start(
-                imago_protocol::CommandKind::Deploy,
-            )),
+            SystemAtomicAction::Command(CommandProtocolAction::Start(CommandKind::Deploy)),
         );
         let state = self.apply_atomic(
             &state,
@@ -229,10 +227,13 @@ impl ProtocolConformanceSpec for RouterProjectionSpec {
     }
 
     fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
-        observed.trace.iter().fold(self.initial_state(), |state, action| {
-            self.transition(&state, action)
-                .expect("router projection trace should stay valid")
-        })
+        observed
+            .trace
+            .iter()
+            .fold(self.initial_state(), |state, action| {
+                self.transition(&state, action)
+                    .expect("router projection trace should stay valid")
+            })
     }
 
     fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {

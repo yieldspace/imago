@@ -1,8 +1,9 @@
-use imago_protocol::{
-    ArtifactPushRequest, CommandEvent, CommandEventType, CommandType, MessageType,
-    ProtocolEnvelope, StructuredError, from_cbor, to_cbor,
-};
+use imago_protocol::{from_cbor, to_cbor};
 use imagod_common::ImagodError;
+use imagod_spec::{
+    ArtifactPushRequest, CommandEvent, CommandEventType, CommandType, ErrorCode, MessageType,
+    ProtocolEnvelope, StructuredError,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use uuid::Uuid;
@@ -25,7 +26,7 @@ struct EnvelopeHeader {
 }
 
 pub(crate) fn bad_request(stage: &str, message: impl Into<String>) -> ImagodError {
-    ImagodError::new(imago_protocol::ErrorCode::BadRequest, stage, message)
+    ImagodError::new(ErrorCode::BadRequest, stage, message)
 }
 
 pub(crate) fn response_envelope<T: Serialize>(
@@ -193,7 +194,7 @@ pub(crate) async fn write_envelope(
     let framed = codec.encode_frame(&data);
     send.write_all(&framed).await.map_err(|e| {
         ImagodError::new(
-            imago_protocol::ErrorCode::Internal,
+            imagod_spec::ErrorCode::Internal,
             "session.write",
             format!("failed to send frame: {e}"),
         )
@@ -204,7 +205,7 @@ pub(crate) async fn write_envelope(
 pub(crate) fn finish_stream(send: &mut SendStream) -> Result<(), ImagodError> {
     send.finish().map_err(|e| {
         ImagodError::new(
-            imago_protocol::ErrorCode::Internal,
+            imagod_spec::ErrorCode::Internal,
             "session.write",
             format!("failed to finish stream: {e}"),
         )
@@ -240,7 +241,8 @@ pub(crate) fn event_envelope(
 mod tests {
     #![allow(non_snake_case)]
     #![allow(dead_code)]
-    use imago_protocol::{ArtifactPushChunkHeader, ArtifactPushRequest, ProtocolEnvelope};
+    use imago_protocol::to_cbor;
+    use imagod_spec::{ArtifactPushChunkHeader, ArtifactPushRequest, ProtocolEnvelope};
     use serde::Deserialize;
     use serde::Serialize;
 
@@ -299,7 +301,7 @@ mod tests {
     #[test]
     fn given_structured_error__when_error_envelope__then_null_payload_and_error_are_set() {
         let error = StructuredError {
-            code: imago_protocol::ErrorCode::BadRequest,
+            code: imagod_spec::ErrorCode::BadRequest,
             stage: "session.protocol".to_string(),
             message: "invalid".to_string(),
             retryable: false,
@@ -372,7 +374,7 @@ mod tests {
             error: None,
         };
         let err = payload_as::<RequestPayload>(&envelope).expect_err("decode must fail");
-        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.code, imagod_spec::ErrorCode::BadRequest);
         assert_eq!(err.stage, "protocol");
         assert!(err.message.contains("request payload decode failed"));
     }
@@ -419,7 +421,7 @@ mod tests {
             error: None,
         };
         let err = payload_take::<RequestPayload>(&mut envelope).expect_err("decode must fail");
-        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.code, imagod_spec::ErrorCode::BadRequest);
         assert_eq!(err.stage, "protocol");
         assert!(err.message.contains("request payload decode failed"));
         assert!(envelope.payload.is_null(), "payload should be consumed");
@@ -449,7 +451,7 @@ mod tests {
         };
         let err = ensure_non_nil_envelope_ids(&bad_request_id)
             .expect_err("nil request_id must be rejected");
-        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.code, imagod_spec::ErrorCode::BadRequest);
 
         let bad_correlation_id = Envelope {
             correlation_id: Uuid::nil(),
@@ -457,11 +459,11 @@ mod tests {
         };
         let err = ensure_non_nil_envelope_ids(&bad_correlation_id)
             .expect_err("nil correlation_id must be rejected");
-        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.code, imagod_spec::ErrorCode::BadRequest);
 
         let err = ensure_single_request_envelope(&[good.clone(), good])
             .expect_err("multi request stream must fail");
-        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.code, imagod_spec::ErrorCode::BadRequest);
         assert_eq!(err.stage, "session.protocol");
     }
 
@@ -487,7 +489,7 @@ mod tests {
         let second = sample_envelope(MessageType::RpcInvoke);
         let err = take_single_request_envelope(vec![first, second])
             .expect_err("multiple request envelopes must be rejected");
-        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.code, imagod_spec::ErrorCode::BadRequest);
         assert_eq!(err.stage, "session.protocol");
         assert_eq!(
             err.message,
@@ -543,7 +545,7 @@ mod tests {
 
         let err = parse_single_request_envelope(&bytes, &codec)
             .expect_err("multiple request envelopes must be rejected");
-        assert_eq!(err.code, imago_protocol::ErrorCode::BadRequest);
+        assert_eq!(err.code, imagod_spec::ErrorCode::BadRequest);
         assert_eq!(err.stage, "session.protocol");
         assert_eq!(
             err.message,

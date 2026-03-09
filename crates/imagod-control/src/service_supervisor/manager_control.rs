@@ -1,10 +1,12 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
-use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{
-    ControlRequest, ControlResponse, IpcErrorPayload, dbus_p2p::DbusP2pTransport,
-    issue_invocation_token, now_unix_secs, verify_manager_auth_proof,
+    dbus_p2p::DbusP2pTransport, issue_invocation_token, now_unix_secs, verify_manager_auth_proof,
+};
+use imagod_spec::{
+    ControlRequest, ControlResponse, ErrorCode, InvocationTokenClaims, IpcErrorPayload,
+    ServiceBinding,
 };
 use tokio::{
     net::UnixStream,
@@ -138,7 +140,7 @@ pub(super) async fn handle_control_request_impl(
                 &runner_id,
                 &manager_auth_proof,
             ) {
-                return ControlResponse::Error(IpcErrorPayload::from_error(&err));
+                return ControlResponse::Error(err.to_ipc_error_payload());
             }
 
             if actual_service_name != service_name || service.release_hash != release_hash {
@@ -178,7 +180,7 @@ pub(super) async fn handle_control_request_impl(
                     &runner_id,
                     &manager_auth_proof,
                 ) {
-                    return ControlResponse::Error(IpcErrorPayload::from_error(&err));
+                    return ControlResponse::Error(err.to_ipc_error_payload());
                 }
 
                 service.is_ready = true;
@@ -216,7 +218,7 @@ pub(super) async fn handle_control_request_impl(
                 &runner_id,
                 &manager_auth_proof,
             ) {
-                return ControlResponse::Error(IpcErrorPayload::from_error(&err));
+                return ControlResponse::Error(err.to_ipc_error_payload());
             }
 
             service.last_heartbeat_at = now_unix_secs().to_string();
@@ -251,7 +253,7 @@ pub(super) async fn handle_control_request_impl(
                 &runner_id,
                 &manager_auth_proof,
             ) {
-                return ControlResponse::Error(IpcErrorPayload::from_error(&err));
+                return ControlResponse::Error(err.to_ipc_error_payload());
             }
 
             if !is_binding_allowed(&source_service.bindings, &target_service, &wit) {
@@ -268,7 +270,7 @@ pub(super) async fn handle_control_request_impl(
                 return control_error(ErrorCode::NotFound, "target service is not running");
             }
 
-            let claims = imagod_ipc::InvocationTokenClaims {
+            let claims = InvocationTokenClaims {
                 source_service: source_service_name,
                 target_service: target_service.clone(),
                 wit: wit.clone(),
@@ -277,7 +279,7 @@ pub(super) async fn handle_control_request_impl(
             };
             let token = match issue_invocation_token(&target_runner.invocation_secret, claims) {
                 Ok(token) => token,
-                Err(err) => return ControlResponse::Error(IpcErrorPayload::from_error(&err)),
+                Err(err) => return ControlResponse::Error(err.to_ipc_error_payload()),
             };
 
             ControlResponse::ResolvedInvocationTarget {
@@ -312,7 +314,7 @@ pub(super) async fn handle_control_request_impl(
                 &runner_id,
                 &manager_auth_proof,
             ) {
-                return ControlResponse::Error(IpcErrorPayload::from_error(&err));
+                return ControlResponse::Error(err.to_ipc_error_payload());
             }
             drop(guard);
 
@@ -327,7 +329,7 @@ pub(super) async fn handle_control_request_impl(
             .await
             {
                 Ok(authority) => authority,
-                Err(err) => return ControlResponse::Error(IpcErrorPayload::from_error(&err)),
+                Err(err) => return ControlResponse::Error(err.to_ipc_error_payload()),
             };
 
             let mut remote_rpc = handler.remote_rpc.lock().await;
@@ -365,7 +367,7 @@ pub(super) async fn handle_control_request_impl(
                 &runner_id,
                 &manager_auth_proof,
             ) {
-                return ControlResponse::Error(IpcErrorPayload::from_error(&err));
+                return ControlResponse::Error(err.to_ipc_error_payload());
             }
             if !is_binding_allowed(&source_service.bindings, &target_service, &interface_id) {
                 return control_error(
@@ -400,7 +402,7 @@ pub(super) async fn handle_control_request_impl(
             .await
             {
                 Ok(result_cbor) => ControlResponse::RpcRemoteInvokeResult { result_cbor },
-                Err(err) => ControlResponse::Error(IpcErrorPayload::from_error(&err)),
+                Err(err) => ControlResponse::Error(err.to_ipc_error_payload()),
             }
         }
         ControlRequest::RpcDisconnectRemote {
@@ -430,7 +432,7 @@ pub(super) async fn handle_control_request_impl(
                 &runner_id,
                 &manager_auth_proof,
             ) {
-                return ControlResponse::Error(IpcErrorPayload::from_error(&err));
+                return ControlResponse::Error(err.to_ipc_error_payload());
             }
             drop(guard);
 
@@ -464,7 +466,7 @@ pub(super) async fn handle_control_connection_impl(
         Ok(Err(err)) => {
             let _ = DbusP2pTransport::write_message(
                 &mut stream,
-                &ControlResponse::Error(IpcErrorPayload::from_error(&err)),
+                &ControlResponse::Error(err.to_ipc_error_payload()),
             )
             .await;
             return;
@@ -525,7 +527,7 @@ pub(super) fn control_error(code: ErrorCode, message: impl Into<String>) -> Cont
 
 /// Returns whether a binding list allows the target service/interface pair.
 pub(super) fn is_binding_allowed(
-    bindings: &[imagod_ipc::ServiceBinding],
+    bindings: &[ServiceBinding],
     target_service: &str,
     wit: &str,
 ) -> bool {
@@ -550,7 +552,7 @@ mod tests {
         child: Child,
         runner_id: &str,
         manager_auth_secret: String,
-        bindings: Vec<imagod_ipc::ServiceBinding>,
+        bindings: Vec<ServiceBinding>,
     ) -> super::super::RunningService {
         let (log_sender, _) = broadcast::channel(16);
         super::super::RunningService {
@@ -653,7 +655,7 @@ mod tests {
             child,
             runner_id,
             manager_auth_secret.clone(),
-            vec![imagod_ipc::ServiceBinding {
+            vec![ServiceBinding {
                 name: "svc-allowed".to_string(),
                 wit: "pkg:iface/allowed".to_string(),
             }],
@@ -700,11 +702,11 @@ mod tests {
     #[test]
     fn given_binding_list__when_is_binding_allowed__then_exact_service_and_wit_match_is_required() {
         let bindings = vec![
-            imagod_ipc::ServiceBinding {
+            ServiceBinding {
                 name: "svc-a".to_string(),
                 wit: "pkg:iface/a".to_string(),
             },
-            imagod_ipc::ServiceBinding {
+            ServiceBinding {
                 name: "svc-b".to_string(),
                 wit: "pkg:iface/b".to_string(),
             },

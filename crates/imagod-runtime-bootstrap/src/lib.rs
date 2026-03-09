@@ -2,9 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
-use imagod_ipc::RunnerBootstrap;
+use imagod_spec::{ErrorCode, RunnerBootstrap};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// Stage label used by runner bootstrap decode/validation errors.
@@ -118,7 +117,7 @@ pub fn prepare_socket_path(path: &Path) -> Result<(), ImagodError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imago_protocol::ErrorCode;
+    use imagod_spec::ErrorCode;
     use std::{
         io::Cursor,
         os::unix::net::UnixListener as StdUnixListener,
