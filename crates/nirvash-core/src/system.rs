@@ -75,6 +75,7 @@ pub struct ModelCase<S, A> {
     symmetry: Option<SymmetryReducer<S>>,
     checker_config: ModelCheckConfig,
     check_deadlocks: bool,
+    doc_checker_config: Option<ModelCheckConfig>,
     doc_graph_policy: DocGraphPolicy<S>,
 }
 
@@ -87,6 +88,7 @@ impl<S, A> ModelCase<S, A> {
             symmetry: None,
             checker_config: ModelCheckConfig::default(),
             check_deadlocks: true,
+            doc_checker_config: None,
             doc_graph_policy: DocGraphPolicy::default(),
         }
     }
@@ -125,6 +127,11 @@ impl<S, A> ModelCase<S, A> {
         self
     }
 
+    pub fn with_doc_checker_config(mut self, config: ModelCheckConfig) -> Self {
+        self.doc_checker_config = Some(config);
+        self
+    }
+
     pub fn with_doc_graph_policy(mut self, doc_graph_policy: DocGraphPolicy<S>) -> Self {
         self.doc_graph_policy = doc_graph_policy;
         self
@@ -154,6 +161,10 @@ impl<S, A> ModelCase<S, A> {
         let mut config = self.checker_config;
         config.check_deadlocks = self.check_deadlocks;
         config
+    }
+
+    pub const fn doc_checker_config(&self) -> Option<ModelCheckConfig> {
+        self.doc_checker_config
     }
 
     pub fn doc_graph_policy(&self) -> &DocGraphPolicy<S> {

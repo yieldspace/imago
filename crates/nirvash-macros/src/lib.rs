@@ -1381,6 +1381,7 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                         );
                         assert_eq!(actual.symmetry().map(|symmetry| symmetry.name()), expected.symmetry().map(|symmetry| symmetry.name()));
                         assert_eq!(actual.effective_checker_config(), expected.effective_checker_config());
+                        assert_eq!(actual.doc_checker_config(), expected.doc_checker_config());
                         assert_eq!(actual.doc_graph_policy().reduction, expected.doc_graph_policy().reduction);
                         assert_eq!(actual.doc_graph_policy().max_edge_actions_in_label, expected.doc_graph_policy().max_edge_actions_in_label);
                         assert_eq!(
@@ -1424,25 +1425,15 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                                     .reachable_graph_snapshot()
                                     .expect("reachable graph snapshot should build for docs");
                                 let states = snapshot.states;
-                                let actions = <#spec_ty as ::nirvash_core::TransitionSystem>::actions(&spec);
-                                let edges = states
+                                let edges = snapshot
+                                    .edges
                                     .iter()
-                                    .map(|state| {
-                                        actions
+                                    .map(|outgoing| {
+                                        outgoing
                                             .iter()
-                                            .filter_map(|action| {
-                                                <#spec_ty as ::nirvash_core::TransitionSystem>::transition(
-                                                    &spec,
-                                                    state,
-                                                    action,
-                                                )
-                                                .and_then(|next| {
-                                                    states.iter().position(|candidate| *candidate == next)
-                                                })
-                                                .map(|target| ::nirvash_core::DocGraphEdge {
-                                                    label: format!("{:?}", action),
-                                                    target,
-                                                })
+                                            .map(|edge| ::nirvash_core::DocGraphEdge {
+                                                label: format!("{:?}", edge.action),
+                                                target: edge.target,
                                             })
                                             .collect::<::std::vec::Vec<_>>()
                                     })
@@ -1521,7 +1512,7 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                 model_case: GeneratedModelCase,
             ) -> ::nirvash_core::ReachableGraphSnapshot<GeneratedState, GeneratedAction> {
                 ::nirvash_core::ModelChecker::for_case(spec, model_case)
-                    .reachable_graph_snapshot()
+                    .full_reachable_graph_snapshot()
                     .expect("reachable graph snapshot should build")
             }
 
@@ -1664,7 +1655,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                 ::std::vec::Vec<::std::vec::Vec<GeneratedAction>>,
             ) {
                 let snapshot = ::nirvash_core::conformance::ModelChecker::for_case(spec, model_case)
-                    .reachable_graph_snapshot()
+                    .full_reachable_graph_snapshot()
                     .expect("reachable graph snapshot should build");
                 let mut paths = vec![::core::option::Option::None; snapshot.states.len()];
                 let mut queue = ::std::collections::VecDeque::new();
@@ -1998,19 +1989,14 @@ fn doc_fragment_attrs(self_ty: &Type) -> syn::Result<Vec<proc_macro2::TokenStrea
     let Ok(path) = ::std::env::var(&env_key) else {
         return Ok(Vec::new());
     };
-    let contents = ::std::fs::read_to_string(&path).map_err(|error| {
+    ::std::fs::metadata(&path).map_err(|error| {
         syn::Error::new(
             self_ty.span(),
             format!("failed to read nirvash doc fragment `{path}`: {error}"),
         )
     })?;
-    Ok(contents
-        .lines()
-        .map(|line| {
-            let lit = LitStr::new(line, Span::call_site());
-            quote! { #[doc = #lit] }
-        })
-        .collect())
+    let path = LitStr::new(&path, Span::call_site());
+    Ok(vec![quote! { #[doc = include_str!(#path)] }])
 }
 
 fn doc_fragment_env_key(self_ty: &Type) -> syn::Result<Option<String>> {

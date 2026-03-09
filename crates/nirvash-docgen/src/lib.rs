@@ -1165,11 +1165,7 @@ fn render_state_graph_mermaid(
 
     for state in &graph.states {
         let label = render_state_node_label(graph, state);
-        output.push_str(&format!(
-            "state \"{}\" as S{}\n",
-            escape_mermaid_label(&label),
-            state.original_index
-        ));
+        output.push_str(&format!("state \"{}\" as S{}\n", label, state.original_index));
     }
 
     for state in &graph.states {
@@ -1183,7 +1179,7 @@ fn render_state_graph_mermaid(
             "S{} --> S{}: {}\n",
             edge.source,
             edge.target,
-            escape_mermaid_label(&edge.label)
+            mermaid_edge_label(&edge.label)
         ));
     }
 
@@ -1211,7 +1207,7 @@ fn render_state_node_label(
     graph: &nirvash_core::ReducedDocGraph,
     state: &nirvash_core::ReducedDocGraphNode,
 ) -> String {
-    let mut parts = vec![format!("S{}", state.original_index)];
+    let mut parts = Vec::new();
     if state.is_deadlock {
         parts.push("deadlock".to_string());
     }
@@ -1289,7 +1285,7 @@ fn mermaid_state_label(input: &str) -> String {
         .filter(|line| !line.trim().is_empty())
         .map(escape_mermaid_label)
         .collect::<Vec<_>>()
-        .join("\\n")
+        .join("<br/>")
 }
 
 fn state_delta_lines(previous: &str, current: &str) -> Option<Vec<String>> {
@@ -1529,6 +1525,14 @@ fn mermaid_multiline(input: &str) -> String {
         .map(escape_mermaid_label)
         .collect::<Vec<_>>()
         .join("<br/>")
+}
+
+fn mermaid_edge_label(input: &str) -> String {
+    format!("\"{}\"", escape_mermaid_edge_label(input))
+}
+
+fn escape_mermaid_edge_label(input: &str) -> String {
+    input.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(test)]
@@ -1848,8 +1852,8 @@ impl TransitionSystem for DuplicateSpec {
         assert!(fragment.contains("<pre class=\"mermaid nirvash-mermaid\">"));
         assert!(fragment.contains("stateDiagram-v2"));
         assert!(fragment.contains("default"));
-        assert!(fragment.contains("state &quot;S0\\nIdle&quot; as S0"));
-        assert!(!fragment.contains("state &quot;S1\\nBusy&quot; as S1"));
+        assert!(fragment.contains("state &quot;Idle&quot; as S0"));
+        assert!(!fragment.contains("state &quot;Busy&quot; as S1"));
         assert!(fragment.contains("[*] --&gt; S0") || fragment.contains("[*] --> S0"));
         assert!(
             fragment.contains("Start -&amp;gt; Stop")
@@ -1911,7 +1915,58 @@ impl TransitionSystem for DuplicateSpec {
         let visible_edges = visible_reduced_edges(&graph);
         let diagram = render_state_graph_mermaid(&spec, &graph, &visible_edges);
 
-        assert!(diagram.contains("S0 --> S1: Manager(...)"));
+        assert!(diagram.contains("S0 --> S1: \"Manager(...)\""));
+    }
+
+    #[test]
+    fn render_state_graph_quotes_collapsed_edge_labels_with_arrows() {
+        let spec = SpecDoc {
+            kind: Some(SpecKind::Subsystem),
+            full_path: vec!["demo".to_owned(), "DemoSpec".to_owned()],
+            tail_ident: "DemoSpec".to_owned(),
+            state_ty: "DemoState".to_owned(),
+            action_ty: "DemoAction".to_owned(),
+            model_cases: None,
+            subsystems: Vec::new(),
+            registrations: BTreeMap::new(),
+            doc_graphs: Vec::new(),
+        };
+        let graph = nirvash_core::ReducedDocGraph {
+            states: vec![
+                nirvash_core::ReducedDocGraphNode {
+                    original_index: 0,
+                    state: nirvash_core::DocGraphState {
+                        summary: "Init".to_owned(),
+                        full: "Init".to_owned(),
+                    },
+                    is_initial: true,
+                    is_deadlock: false,
+                },
+                nirvash_core::ReducedDocGraphNode {
+                    original_index: 1,
+                    state: nirvash_core::DocGraphState {
+                        summary: "Stopped".to_owned(),
+                        full: "Stopped".to_owned(),
+                    },
+                    is_initial: false,
+                    is_deadlock: true,
+                },
+            ],
+            edges: vec![nirvash_core::ReducedDocGraphEdge {
+                source: 0,
+                target: 1,
+                label: "StartListening -> ... -> FinishShutdown (3 steps)".to_owned(),
+                collapsed_state_indices: vec![2, 3],
+            }],
+            truncated: false,
+            stutter_omitted: false,
+        };
+        let visible_edges = visible_reduced_edges(&graph);
+        let diagram = render_state_graph_mermaid(&spec, &graph, &visible_edges);
+
+        assert!(
+            diagram.contains("S0 --> S1: \"StartListening -> ... -> FinishShutdown (3 steps)\"")
+        );
     }
 
     #[test]
@@ -1956,8 +2011,10 @@ impl TransitionSystem for DuplicateSpec {
         let visible_edges = visible_reduced_edges(&graph);
         let diagram = render_state_graph_mermaid(&spec, &graph, &visible_edges);
 
-        assert!(diagram.contains("state \"S0\\nphase: Booting\" as S0"));
-        assert!(diagram.contains("state \"S1\\nphase: Listening\" as S1"));
+        assert!(diagram.contains("state \"phase: Booting\" as S0"));
+        assert!(diagram.contains("state \"phase: Listening\" as S1"));
+        assert!(!diagram.contains("\\n"));
+        assert!(!diagram.contains("state \"S0"));
         assert!(!diagram.contains("unchanged: false"));
     }
 
@@ -2003,7 +2060,7 @@ impl TransitionSystem for DuplicateSpec {
         let visible_edges = visible_reduced_edges(&graph);
         let diagram = render_state_graph_mermaid(&spec, &graph, &visible_edges);
 
-        assert!(diagram.contains("S0 --> S1: Start{...}"));
+        assert!(diagram.contains("S0 --> S1: \"Start{...}\""));
     }
 
     #[test]
@@ -2066,9 +2123,9 @@ impl TransitionSystem for DuplicateSpec {
         let visible_edges = visible_reduced_edges(&graph);
         let diagram = render_state_graph_mermaid(&spec, &graph, &visible_edges);
 
-        assert!(!diagram.contains("S0 --> S0: Retry"));
-        assert!(diagram.contains("S0 --> S1: Advance"));
-        assert!(diagram.contains("S1 --> S1: Loop"));
+        assert!(!diagram.contains("S0 --> S0: \"Retry\""));
+        assert!(diagram.contains("S0 --> S1: \"Advance\""));
+        assert!(diagram.contains("S1 --> S1: \"Loop\""));
     }
 
     #[test]

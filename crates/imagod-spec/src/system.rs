@@ -237,41 +237,58 @@ fn system_model_cases() -> Vec<ModelCase<ImagodSystemState, ImagodSystemAction>>
 fn startup_command_model_case() -> ModelCase<ImagodSystemState, ImagodSystemAction> {
     ModelCase::new("startup_command")
         .with_checker_config(system_checker_config())
+        .with_doc_checker_config(system_doc_checker_config())
         .with_action_constraint(startup_command_action_constraint())
 }
 
 fn deploy_runtime_serving_model_case() -> ModelCase<ImagodSystemState, ImagodSystemAction> {
     ModelCase::new("deploy_runtime_serving")
         .with_checker_config(system_checker_config())
+        .with_doc_checker_config(system_doc_checker_config())
         .with_action_constraint(deploy_runtime_serving_action_constraint())
 }
 
 fn deploy_rollback_model_case() -> ModelCase<ImagodSystemState, ImagodSystemAction> {
     ModelCase::new("deploy_rollback")
         .with_checker_config(system_checker_config())
+        .with_doc_checker_config(system_doc_checker_config())
         .with_action_constraint(deploy_rollback_action_constraint())
 }
 
 fn bootstrap_runtime_failure_model_case() -> ModelCase<ImagodSystemState, ImagodSystemAction> {
     ModelCase::new("bootstrap_runtime_failure")
         .with_checker_config(system_checker_config())
+        .with_doc_checker_config(system_doc_checker_config())
         .with_action_constraint(bootstrap_runtime_failure_action_constraint())
 }
 
 fn plugin_dependency_model_case() -> ModelCase<ImagodSystemState, ImagodSystemAction> {
     ModelCase::new("plugin_dependency")
         .with_checker_config(system_checker_config())
+        .with_doc_checker_config(system_doc_checker_config())
         .with_action_constraint(plugin_dependency_action_constraint())
 }
 
 fn shutdown_model_case() -> ModelCase<ImagodSystemState, ImagodSystemAction> {
     ModelCase::new("shutdown")
         .with_checker_config(system_checker_config())
+        .with_doc_checker_config(system_doc_checker_config())
         .with_action_constraint(shutdown_action_constraint())
 }
 
 fn system_checker_config() -> ModelCheckConfig {
     ModelCheckConfig::reachable_graph()
+}
+
+fn system_doc_checker_config() -> ModelCheckConfig {
+    ModelCheckConfig {
+        exploration: nirvash_core::ExplorationMode::ReachableGraph,
+        bounded_depth: None,
+        max_states: Some(128),
+        max_transitions: Some(384),
+        check_deadlocks: true,
+        stop_on_first_violation: false,
+    }
 }
 
 fn startup_command_action_constraint() -> ActionConstraint<ImagodSystemState, ImagodSystemAction> {
@@ -668,7 +685,7 @@ mod tests {
         label: &str,
     ) -> nirvash_core::ReachableGraphSnapshot<ImagodSystemState, ImagodSystemAction> {
         ModelChecker::for_case(spec, model_case(spec, label))
-            .reachable_graph_snapshot()
+            .full_reachable_graph_snapshot()
             .expect("reachable graph snapshot")
     }
 

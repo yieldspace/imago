@@ -617,6 +617,31 @@ mod tests {
     }
 
     #[test]
+    fn full_reachable_graph_snapshot_ignores_doc_only_limits() {
+        let model_case = ModelCase::default().with_doc_checker_config(ModelCheckConfig {
+            exploration: ExplorationMode::ReachableGraph,
+            bounded_depth: None,
+            max_states: Some(1),
+            max_transitions: Some(1),
+            check_deadlocks: true,
+            stop_on_first_violation: false,
+        });
+        let checker = ModelChecker::for_case(&TestSpec, model_case);
+
+        let doc_snapshot = checker
+            .reachable_graph_snapshot()
+            .expect("doc snapshot should build");
+        let full_snapshot = checker
+            .full_reachable_graph_snapshot()
+            .expect("full snapshot should build");
+
+        assert!(doc_snapshot.truncated);
+        assert_eq!(doc_snapshot.states.len(), 1);
+        assert!(!full_snapshot.truncated);
+        assert_eq!(full_snapshot.states, vec![TestState::Idle, TestState::Busy]);
+    }
+
+    #[test]
     fn constraints_prune_problematic_edges_from_the_graph() {
         let unconstrained = ConstraintSpec { constrained: false };
         let constrained = ConstraintSpec { constrained: true };

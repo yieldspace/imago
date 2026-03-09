@@ -190,6 +190,14 @@ where
         Ok(self.snapshot_from_graph(&graph))
     }
 
+    pub fn full_reachable_graph_snapshot(
+        &self,
+    ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
+        let graph = self.build_reachable_graph()?;
+        self.ensure_untruncated(&graph)?;
+        Ok(self.snapshot_from_graph(&graph))
+    }
+
     pub fn check_invariants(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
@@ -387,7 +395,7 @@ where
     fn build_reachable_graph_for_docs(
         &self,
     ) -> Result<ReachableGraph<T::State, T::Action>, ModelCheckError> {
-        let mut config = self.config;
+        let mut config = self.model_case.doc_checker_config().unwrap_or(self.config);
         config.exploration = ExplorationMode::ReachableGraph;
         config.stop_on_first_violation = false;
         self.build_reachable_graph_with_config(config)
