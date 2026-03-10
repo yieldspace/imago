@@ -53,6 +53,11 @@ pub struct RegisteredActionDocLabel {
     pub format: fn(&dyn Any) -> Option<String>,
 }
 
+pub struct RegisteredActionDocPresentation {
+    pub value_type_id: fn() -> TypeId,
+    pub format: fn(&dyn Any) -> Option<crate::DocGraphActionPresentation>,
+}
+
 type ErasedBuilder = fn() -> Box<dyn Any>;
 type NamedBuilder = (&'static str, ErasedBuilder);
 
@@ -115,6 +120,7 @@ inventory::collect!(RegisteredStateConstraint);
 inventory::collect!(RegisteredActionConstraint);
 inventory::collect!(RegisteredSymmetry);
 inventory::collect!(RegisteredActionDocLabel);
+inventory::collect!(RegisteredActionDocPresentation);
 
 pub fn lookup_action_doc_label(value: &dyn Any) -> Option<String> {
     let value_type_id = value.type_id();
@@ -123,6 +129,17 @@ pub fn lookup_action_doc_label(value: &dyn Any) -> Option<String> {
         .filter(|entry| (entry.value_type_id)() == value_type_id)
         .find_map(|entry| (entry.format)(value))
         .filter(|label| !label.trim().is_empty())
+}
+
+pub fn lookup_action_doc_presentation(
+    value: &dyn Any,
+) -> Option<crate::DocGraphActionPresentation> {
+    let value_type_id = value.type_id();
+    inventory::iter::<RegisteredActionDocPresentation>
+        .into_iter()
+        .filter(|entry| (entry.value_type_id)() == value_type_id)
+        .find_map(|entry| (entry.format)(value))
+        .filter(|presentation| !presentation.label.trim().is_empty())
 }
 
 fn sorted_builders<'a, T, I>(entries: I, kind: &'static str) -> Vec<NamedBuilder>
@@ -435,6 +452,51 @@ where
     matched.into_iter().next().map(|(name, build)| {
         downcast_registered::<SymmetryReducer<T::State>>(build(), spec_name, "symmetry", name)
     })
+}
+
+pub fn collect_symmetry_name<T>() -> Option<String>
+where
+    T: TransitionSystem + 'static,
+    T::State: 'static,
+{
+    let matched = sorted_builders::<T, _>(
+        inventory::iter::<RegisteredSymmetry>
+            .into_iter()
+            .map(|entry| (entry as &dyn RegistryEntry, entry.build)),
+        "symmetry",
+    );
+    matched.into_iter().next().map(|(name, _)| name.to_owned())
+}
+
+pub fn collect_spec_viz_registrations<T>() -> crate::SpecVizRegistrationSet
+where
+    T: TransitionSystem + 'static,
+    T::State: 'static,
+    T::Action: 'static,
+{
+    crate::SpecVizRegistrationSet {
+        invariants: collect_invariants::<T>()
+            .into_iter()
+            .map(|predicate| predicate.name().to_owned())
+            .collect(),
+        properties: collect_properties::<T>()
+            .into_iter()
+            .map(|property| property.describe().to_owned())
+            .collect(),
+        fairness: collect_fairness::<T>()
+            .into_iter()
+            .map(|fairness| fairness.name().to_owned())
+            .collect(),
+        state_constraints: collect_scoped_state_constraints::<T>()
+            .into_iter()
+            .map(|constraint| constraint.name().to_owned())
+            .collect(),
+        action_constraints: collect_scoped_action_constraints::<T>()
+            .into_iter()
+            .map(|constraint| constraint.name().to_owned())
+            .collect(),
+        symmetries: collect_symmetry_name::<T>().into_iter().collect(),
+    }
 }
 
 #[cfg(test)]

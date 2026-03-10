@@ -544,9 +544,17 @@ mod tests {
                 .map(|outgoing| {
                     outgoing
                         .iter()
-                        .map(|edge| nirvash_core::DocGraphEdge {
-                            label: nirvash_core::format_doc_graph_action(&edge.action),
-                            target: edge.target,
+                        .map(|edge| {
+                            let presentation =
+                                nirvash_core::describe_doc_graph_action(&edge.action);
+                            nirvash_core::DocGraphEdge {
+                                label: presentation.label,
+                                compact_label: presentation.compact_label,
+                                scenario_priority: presentation.scenario_priority,
+                                interaction_steps: presentation.interaction_steps,
+                                process_steps: presentation.process_steps,
+                                target: edge.target,
+                            }
                         })
                         .collect()
                 })

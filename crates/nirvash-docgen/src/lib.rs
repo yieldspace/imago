@@ -7,7 +7,6 @@ use std::{
     process::Command,
 };
 
-use nirvash_core::DocGraphSpec;
 use quote::ToTokens;
 use serde::Deserialize;
 use syn::{
@@ -25,6 +24,7 @@ const CATEGORY_ORDER: [RegistrationKind; 6] = [
     RegistrationKind::ActionConstraint,
     RegistrationKind::Symmetry,
 ];
+const MAX_REDUCED_STATE_GRAPH_NODES: usize = 50;
 const MERMAID_RUNTIME_SOURCE: &str = include_str!("../assets/mermaid/mermaid.min.js");
 
 /// Generate rustdoc fragments for `nirvash` specs in the current crate.
@@ -195,6 +195,60 @@ struct SpecDoc {
     subsystems: Vec<String>,
     registrations: BTreeMap<RegistrationKind, Vec<String>>,
     doc_graphs: Vec<nirvash_core::DocGraphCase>,
+}
+
+impl SpecDoc {
+    fn viz_bundle(&self) -> nirvash_core::SpecVizBundle {
+        let metadata = nirvash_core::SpecVizMetadata {
+            kind: self.kind.map(|kind| match kind {
+                SpecKind::Subsystem => nirvash_core::SpecVizKind::Subsystem,
+                SpecKind::System => nirvash_core::SpecVizKind::System,
+            }),
+            state_ty: self.state_ty.clone(),
+            action_ty: self.action_ty.clone(),
+            model_cases: self.model_cases.clone(),
+            subsystems: self.subsystems.clone(),
+            registrations: nirvash_core::SpecVizRegistrationSet {
+                invariants: self
+                    .registrations
+                    .get(&RegistrationKind::Invariant)
+                    .cloned()
+                    .unwrap_or_default(),
+                properties: self
+                    .registrations
+                    .get(&RegistrationKind::Property)
+                    .cloned()
+                    .unwrap_or_default(),
+                fairness: self
+                    .registrations
+                    .get(&RegistrationKind::Fairness)
+                    .cloned()
+                    .unwrap_or_default(),
+                state_constraints: self
+                    .registrations
+                    .get(&RegistrationKind::StateConstraint)
+                    .cloned()
+                    .unwrap_or_default(),
+                action_constraints: self
+                    .registrations
+                    .get(&RegistrationKind::ActionConstraint)
+                    .cloned()
+                    .unwrap_or_default(),
+                symmetries: self
+                    .registrations
+                    .get(&RegistrationKind::Symmetry)
+                    .cloned()
+                    .unwrap_or_default(),
+            },
+            policy: nirvash_core::VizPolicy::default(),
+        };
+
+        nirvash_core::SpecVizBundle::from_doc_graph_spec(
+            self.tail_ident.clone(),
+            metadata,
+            self.doc_graphs.clone(),
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -487,13 +541,16 @@ impl SourceCollector {
             .values()
             .map(|spec| spec.full_path.clone())
             .collect::<Vec<_>>();
-        for runtime_spec in collect_runtime_graphs(manifest_dir, out_dir, &runtime_spec_paths)? {
-            if let Some(path_key) = tail_to_path.get(&runtime_spec.spec_name)
-                && let Some(spec) = by_path.get_mut(path_key)
+        let mut runtime_bundles = collect_runtime_graphs(manifest_dir, out_dir, &runtime_spec_paths)?;
+        for spec in by_path.values() {
+            if runtime_bundles
+                .iter()
+                .all(|bundle| bundle.spec_name != spec.tail_ident)
             {
-                spec.doc_graphs = runtime_spec.cases;
+                runtime_bundles.push(spec.viz_bundle());
             }
         }
+        runtime_bundles.sort_by(|left, right| left.spec_name.cmp(&right.spec_name));
 
         let doc_dir = out_dir.join("nirvash-doc");
         fs::create_dir_all(&doc_dir).map_err(|error| {
@@ -502,15 +559,36 @@ impl SourceCollector {
                 doc_dir.display()
             ))
         })?;
+        let viz_dir = out_dir.join("viz");
+        fs::create_dir_all(&viz_dir).map_err(|error| {
+            err(format!(
+                "failed to create visualization bundle directory {}: {error}",
+                viz_dir.display()
+            ))
+        })?;
 
         let mut fragments = Vec::new();
-        for spec in by_path.values_mut() {
-            for names in spec.registrations.values_mut() {
-                names.sort();
-            }
-            let env_key = format!("NIRVASH_DOC_FRAGMENT_{}", to_upper_snake(&spec.tail_ident));
-            let path = doc_dir.join(format!("{}.md", spec.tail_ident));
-            fs::write(&path, render_fragment(spec)).map_err(|error| {
+        for bundle in runtime_bundles {
+            let spec_name = bundle.spec_name.clone();
+            let env_key = format!("NIRVASH_DOC_FRAGMENT_{}", to_upper_snake(&spec_name));
+            let path = doc_dir.join(format!("{spec_name}.md"));
+            let viz_path = viz_dir.join(format!("{spec_name}.json"));
+            fs::write(
+                &viz_path,
+                serde_json::to_vec_pretty(&bundle).map_err(|error| {
+                    err(format!(
+                        "failed to serialize visualization bundle {}: {error}",
+                        viz_path.display()
+                    ))
+                })?,
+            )
+            .map_err(|error| {
+                err(format!(
+                    "failed to write visualization bundle {}: {error}",
+                    viz_path.display()
+                ))
+            })?;
+            fs::write(&path, render_viz_fragment(&bundle)).map_err(|error| {
                 err(format!(
                     "failed to write documentation fragment {}: {error}",
                     path.display()
@@ -592,7 +670,7 @@ fn collect_runtime_graphs(
     manifest_dir: &Path,
     out_dir: &Path,
     spec_paths: &[Vec<String>],
-) -> Result<Vec<DocGraphSpec>, DynError> {
+) -> Result<Vec<nirvash_core::SpecVizBundle>, DynError> {
     let manifest_path = manifest_dir.join("Cargo.toml");
     if !manifest_path.exists() {
         return Ok(Vec::new());
@@ -762,7 +840,7 @@ fn render_runner_main(spec_paths: &[Vec<String>]) -> String {
         output.push('\n');
     }
     output.push_str(
-        "    let specs = nirvash_core::collect_doc_graph_specs();\n    println!(\"{}\", serde_json::to_string(&specs).expect(\"serialize doc graphs\"));\n}\n",
+        "    let specs = nirvash_core::collect_spec_viz_bundles();\n    println!(\"{}\", serde_json::to_string(&specs).expect(\"serialize doc graphs\"));\n}\n",
     );
     output
 }
@@ -784,9 +862,9 @@ fn render_link_call(spec_path: &[String]) -> String {
         path.push_str("::");
         path.push_str(module);
     }
-    path.push_str("::__nirvash_doc_graph_provider_link_");
-    path.push_str(&tail.to_lowercase());
-    path.push_str("();");
+    path.push_str("::");
+    path.push_str(tail);
+    path.push_str("::spec_kind();");
     path
 }
 
@@ -1082,58 +1160,462 @@ fn to_upper_snake(input: &str) -> String {
     output
 }
 
-fn render_fragment(spec: &SpecDoc) -> String {
+fn to_lower_snake(input: &str) -> String {
     let mut output = String::new();
-    if !spec.doc_graphs.is_empty() {
-        output.push_str(&render_state_graph_section(spec));
-        output.push_str("\n\n");
-        let relation_schema = render_relation_schema_section(spec);
-        if !relation_schema.is_empty() {
-            output.push_str(&relation_schema);
-            output.push_str("\n\n");
+    let mut previous_is_lower = false;
+    for character in input.chars() {
+        if character.is_ascii_uppercase() {
+            if previous_is_lower && !output.ends_with('_') {
+                output.push('_');
+            }
+            output.push(character.to_ascii_lowercase());
+            previous_is_lower = false;
+        } else if character.is_ascii_alphanumeric() {
+            output.push(character.to_ascii_lowercase());
+            previous_is_lower = true;
+        } else {
+            if !output.ends_with('_') && !output.is_empty() {
+                output.push('_');
+            }
+            previous_is_lower = false;
         }
     }
+    output
+}
 
-    let mermaid = render_meta_model_mermaid(spec);
-    let model_cases = spec.model_cases.as_deref().unwrap_or("default");
-    output.push_str("## Meta Model\n\n");
-    output.push_str(&render_mermaid_block(&mermaid));
-    output.push_str("\n\nLegend:\n\n");
-    output.push_str(&format!("- kind: `{}`\n", spec.kind.unwrap().label()));
-    output.push_str(&format!("- state: `{}`\n", spec.state_ty));
-    output.push_str(&format!("- action: `{}`\n", spec.action_ty));
-    output.push_str(&format!("- model_cases = `{model_cases}`\n"));
-    if spec.kind == Some(SpecKind::System) {
-        let subsystems = if spec.subsystems.is_empty() {
-            "none".to_string()
-        } else {
-            spec.subsystems
-                .iter()
-                .map(|name| format!("`{name}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        output.push_str(&format!("- subsystems: {subsystems}\n"));
-    }
-    output.push_str("\nRegistered functions:\n\n");
-    for kind in CATEGORY_ORDER {
-        let names = spec
-            .registrations
-            .get(&kind)
-            .filter(|values| !values.is_empty())
-            .map(|values| {
-                values
-                    .iter()
-                    .map(|value| format!("`{value}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_else(|| "none".to_string());
-        output.push_str(&format!("- {}: {}\n", kind.label(), names));
-    }
+fn render_fragment(spec: &SpecDoc) -> String {
+    render_viz_fragment(&spec.viz_bundle())
+}
+
+fn render_viz_fragment(bundle: &nirvash_core::SpecVizBundle) -> String {
+    let mut output = String::new();
+    output.push_str(&render_overview_section(bundle));
+    output.push_str("\n\n");
+    output.push_str(&render_reachability_section(bundle));
+    output.push_str("\n\n");
+    output.push_str(&render_scenario_traces_section(bundle));
+    output.push_str("\n\n");
+    output.push_str(&render_process_view_section(bundle));
+    output.push_str("\n\n");
+    output.push_str(&render_data_model_section(bundle));
     output.push('\n');
     output.push_str(&mermaid_render_script());
     output
+}
+
+fn render_overview_section(bundle: &nirvash_core::SpecVizBundle) -> String {
+    let mut output = String::from("## Overview\n\n");
+    let kind = match bundle.metadata.kind {
+        Some(nirvash_core::SpecVizKind::Subsystem) => "subsystem_spec",
+        Some(nirvash_core::SpecVizKind::System) => "system_spec",
+        None => "unknown",
+    };
+    let model_cases = bundle.metadata.model_cases.as_deref().unwrap_or("default");
+    let subsystems = if bundle.metadata.subsystems.is_empty() {
+        "none".to_owned()
+    } else {
+        bundle.metadata.subsystems.join(", ")
+    };
+
+    output.push_str("| field | value |\n| --- | --- |\n");
+    output.push_str(&format!("| spec | `{}` |\n", bundle.spec_name));
+    output.push_str(&format!("| kind | `{kind}` |\n"));
+    output.push_str(&format!("| state | `{}` |\n", bundle.metadata.state_ty));
+    output.push_str(&format!("| action | `{}` |\n", bundle.metadata.action_ty));
+    output.push_str(&format!("| model cases | `{model_cases}` |\n"));
+    output.push_str(&format!("| subsystems | {} |\n", subsystems));
+    output.push_str(&format!(
+        "| policy | inline={} states, scenarios={}, large-graph threshold={} |\n\n",
+        bundle.metadata.policy.max_inline_states,
+        bundle.metadata.policy.max_scenarios,
+        bundle.metadata.policy.large_graph_threshold
+    ));
+
+    output.push_str("### Cases\n\n");
+    output.push_str("| case | full states | reduced states | traces | rendering |\n");
+    output.push_str("| --- | --- | --- | --- | --- |\n");
+    for case in &bundle.cases {
+        output.push_str(&format!(
+            "| `{}` | {} | {} | {} | {} |\n",
+            case.label,
+            case.stats.full_state_count,
+            case.stats.reduced_state_count,
+            case.scenarios.len(),
+            if case.stats.large_graph_fallback {
+                "focus graph"
+            } else {
+                "reduced graph"
+            }
+        ));
+    }
+    output
+}
+
+fn render_reachability_section(bundle: &nirvash_core::SpecVizBundle) -> String {
+    let mut output = String::from("## Reachability\n\n");
+    for case in &bundle.cases {
+        output.push_str(&format!("### {}\n\n", case.label));
+        output.push_str(&format!(
+            "- states: full=`{}`, reduced=`{}`, focus=`{}`\n",
+            case.stats.full_state_count,
+            case.stats.reduced_state_count,
+            case.stats.focus_state_count
+        ));
+        output.push_str(&format!(
+            "- edges: full=`{}`, reduced=`{}`\n",
+            case.stats.full_edge_count,
+            case.stats.reduced_edge_count
+        ));
+        if case.stats.truncated {
+            output.push_str("- checker note: truncated by checker limits\n");
+        }
+        if case.stats.stutter_omitted {
+            output.push_str("- checker note: stutter omitted from rendered edges\n");
+        }
+        if case.stats.large_graph_fallback {
+            output.push_str(
+                "- renderer note: selected traces were promoted to an inline focus graph\n",
+            );
+        }
+        output.push('\n');
+
+        let graph = case.focus_graph.as_ref().unwrap_or(&case.reduced_graph);
+        let visible_edges = visible_reduced_edges(graph);
+        output.push_str(&render_mermaid_block(&render_viz_state_graph_mermaid(
+            bundle, case, graph, &visible_edges,
+        )));
+        output.push_str("\n\n<details><summary>State legend</summary>\n\n");
+        for state in &graph.states {
+            output.push_str(&format!(
+                "#### S{}\n\n```text\n{}\n```\n\n",
+                state.original_index, state.state.full
+            ));
+        }
+        output.push_str("</details>\n\n");
+    }
+    output
+}
+
+fn render_scenario_traces_section(bundle: &nirvash_core::SpecVizBundle) -> String {
+    let mut output = String::from("## Scenario Traces\n\n");
+    for case in &bundle.cases {
+        output.push_str(&format!("### {}\n\n", case.label));
+        if case.scenarios.is_empty() {
+            output.push_str("No selected traces.\n\n");
+            continue;
+        }
+        for scenario in &case.scenarios {
+            output.push_str(&format!("#### {}\n\n", scenario.label));
+            output.push_str(&format!(
+                "- kind: `{}`\n- path: `{}`\n\n",
+                viz_scenario_kind_label(scenario.kind),
+                scenario
+                    .state_path
+                    .iter()
+                    .map(|state| format!("S{state}"))
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            ));
+            if scenario.actors.len() >= 2 {
+                output.push_str(&render_mermaid_block(&render_viz_sequence_diagram_mermaid(
+                    bundle, case, scenario,
+                )));
+                output.push_str("\n\n");
+            } else {
+                output.push_str(&render_viz_step_table(scenario));
+                output.push_str("\n\n");
+            }
+        }
+    }
+    output
+}
+
+fn render_process_view_section(bundle: &nirvash_core::SpecVizBundle) -> String {
+    let mut output = String::from("## Process View\n\n");
+    for case in &bundle.cases {
+        output.push_str(&format!("### {}\n\n", case.label));
+        output.push_str(&render_code_block("text", &render_case_process_view(case)));
+        output.push_str("\n\n");
+    }
+    output
+}
+
+fn render_data_model_section(bundle: &nirvash_core::SpecVizBundle) -> String {
+    let mut output = String::from("## Data Model\n\n");
+    output.push_str("### Types\n\n");
+    output.push_str(&format!(
+        "- state: `{}`\n- action: `{}`\n\n",
+        bundle.metadata.state_ty, bundle.metadata.action_ty
+    ));
+
+    output.push_str("### Actions\n\n");
+    if bundle.action_vocabulary.is_empty() {
+        output.push_str("- none\n\n");
+    } else {
+        for action in &bundle.action_vocabulary {
+            output.push_str(&format!(
+                "- `{}`",
+                action
+                    .compact_label
+                    .as_deref()
+                    .unwrap_or(action.label.as_str())
+            ));
+            if action.compact_label.is_some() {
+                output.push_str(&format!(" (`{}`)", action.label));
+            }
+            if let Some(priority) = action.scenario_priority {
+                output.push_str(&format!(" priority={priority}"));
+            }
+            output.push('\n');
+        }
+        output.push('\n');
+    }
+
+    output.push_str("### Relations\n\n");
+    if bundle.relation_schema.is_empty() {
+        output.push_str("- none\n\n");
+    } else {
+        output.push_str(&render_code_block(
+            "text",
+            &bundle
+                .relation_schema
+                .iter()
+                .map(|schema| format!("{schema:?}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
+        output.push_str("\n\n");
+    }
+
+    output.push_str("### Constraints\n\n");
+    render_named_block(&mut output, "invariants", &bundle.metadata.registrations.invariants);
+    render_named_block(&mut output, "properties", &bundle.metadata.registrations.properties);
+    render_named_block(&mut output, "fairness", &bundle.metadata.registrations.fairness);
+    render_named_block(
+        &mut output,
+        "state_constraints",
+        &bundle.metadata.registrations.state_constraints,
+    );
+    render_named_block(
+        &mut output,
+        "action_constraints",
+        &bundle.metadata.registrations.action_constraints,
+    );
+    render_named_block(
+        &mut output,
+        "symmetries",
+        &bundle.metadata.registrations.symmetries,
+    );
+    output
+}
+
+fn render_named_block(output: &mut String, title: &str, values: &[String]) {
+    output.push_str(&format!("{title}:\n"));
+    if values.is_empty() {
+        output.push_str("  - none\n\n");
+        return;
+    }
+    for value in values {
+        output.push_str(&format!("  - {value}\n"));
+    }
+    output.push('\n');
+}
+
+fn render_viz_state_graph_mermaid(
+    bundle: &nirvash_core::SpecVizBundle,
+    case: &nirvash_core::SpecVizCase,
+    graph: &nirvash_core::ReducedDocGraph,
+    visible_edges: &[&nirvash_core::ReducedDocGraphEdge],
+) -> String {
+    let mut output = String::from("stateDiagram-v2\n");
+    output.push_str(&format!(
+        "%% reachable state graph for {}::{}\n",
+        bundle.spec_name, case.label
+    ));
+
+    for state in &graph.states {
+        let label = render_state_node_label(graph, state);
+        output.push_str(&format!(
+            "state \"{}\" as S{}\n",
+            label, state.original_index
+        ));
+    }
+
+    let deadlocks = graph
+        .states
+        .iter()
+        .filter(|state| state.is_deadlock)
+        .map(|state| format!("S{}", state.original_index))
+        .collect::<Vec<_>>();
+    if !deadlocks.is_empty() {
+        output.push_str(
+            "classDef deadlock fill:#fee2e2,stroke:#b91c1c,stroke-width:3px,color:#7f1d1d;\n",
+        );
+        output.push_str(&format!("class {} deadlock\n", deadlocks.join(",")));
+    }
+
+    for state in &graph.states {
+        if state.is_initial {
+            output.push_str(&format!("[*] --> S{}\n", state.original_index));
+        }
+    }
+
+    for edge in visible_edges {
+        output.push_str(&format!(
+            "S{} --> S{}: {}\n",
+            edge.source,
+            edge.target,
+            state_diagram_edge_label(&edge.label)
+        ));
+    }
+
+    output
+}
+
+fn render_viz_sequence_diagram_mermaid(
+    bundle: &nirvash_core::SpecVizBundle,
+    case: &nirvash_core::SpecVizCase,
+    scenario: &nirvash_core::VizScenario,
+) -> String {
+    let actors = if scenario.actors.is_empty() {
+        vec!["Spec".to_owned()]
+    } else {
+        scenario.actors.clone()
+    };
+    let mut output = String::from("sequenceDiagram\n");
+    output.push_str(&format!(
+        "%% selected trace for {}::{}::{}\n",
+        bundle.spec_name, case.label, scenario.label
+    ));
+    render_sequence_participants(&mut output, &actors);
+    if let Some(initial) = scenario.state_path.first() {
+        output.push_str(&format!(
+            "Note over {}: {}\n",
+            sequence_note_scope(&actors),
+            mermaid_sequence_text(&format!("initial S{initial}"))
+        ));
+    }
+
+    for step in &scenario.steps {
+        if step.interaction_steps.len() > 1 {
+            for (index, interaction) in step.interaction_steps.iter().enumerate() {
+                let keyword = if index == 0 { "par" } else { "and" };
+                output.push_str(&format!(
+                    "{}{} {}\n",
+                    sequence_indent(0),
+                    keyword,
+                    mermaid_sequence_text(&interaction_step_branch_label(interaction))
+                ));
+                render_sequence_messages(
+                    &mut output,
+                    &actors,
+                    std::slice::from_ref(interaction),
+                    1,
+                );
+            }
+            output.push_str("end\n");
+        } else if !step.interaction_steps.is_empty() {
+            render_sequence_messages(&mut output, &actors, &step.interaction_steps, 0);
+        } else {
+            output.push_str(&format!(
+                "Note over {}: {}\n",
+                sequence_note_scope(&actors),
+                mermaid_sequence_text(step.compact_label.as_deref().unwrap_or(&step.label))
+            ));
+        }
+
+        output.push_str(&format!(
+            "Note over {}: {}\n",
+            sequence_note_scope(&actors),
+            mermaid_sequence_text(&format!("S{} -> S{}", step.source, step.target))
+        ));
+    }
+
+    if let Some(last) = scenario.state_path.last() {
+        output.push_str(&format!(
+            "Note over {}: {}\n",
+            sequence_note_scope(&actors),
+            mermaid_sequence_text(&format!("reach S{last}"))
+        ));
+    }
+    output
+}
+
+fn render_viz_step_table(scenario: &nirvash_core::VizScenario) -> String {
+    let mut output = String::from("| # | transition | action |\n| --- | --- | --- |\n");
+    for (index, step) in scenario.steps.iter().enumerate() {
+        output.push_str(&format!(
+            "| {} | `S{} -> S{}` | `{}` |\n",
+            index + 1,
+            step.source,
+            step.target,
+            step.compact_label.as_deref().unwrap_or(&step.label)
+        ));
+    }
+    output
+}
+
+fn render_case_process_view(case: &nirvash_core::SpecVizCase) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("case {}:\n", case.label));
+    if !case.loop_groups.is_empty() {
+        output.push_str("loop blocks:\n");
+        for (index, group) in case.loop_groups.iter().enumerate() {
+            output.push_str(&format!(
+                "  loop#{} = {}\n",
+                index + 1,
+                group
+                    .iter()
+                    .map(|state| format!("S{state}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        output.push('\n');
+    }
+
+    let actors = if case.actors.len() >= 2 {
+        case.actors.clone()
+    } else {
+        vec!["Spec".to_owned()]
+    };
+    for actor in actors {
+        let actor_name = actor.as_str();
+        output.push_str(&format!("process {actor_name}:\n"));
+        for scenario in &case.scenarios {
+            let steps = scenario
+                .steps
+                .iter()
+                .flat_map(|step| {
+                    step.process_steps.iter().filter(move |process_step| {
+                        actor_name == "Spec"
+                            || process_step
+                                .actor
+                                .as_deref()
+                                .is_none_or(|name| name == actor_name)
+                    })
+                })
+                .collect::<Vec<_>>();
+            if steps.is_empty() {
+                continue;
+            }
+            output.push_str(&format!("  scenario {}:\n", scenario.label));
+            for step in steps {
+                output.push_str(&format!("    {}\n", render_process_step(step)));
+            }
+        }
+        output.push('\n');
+    }
+    output
+}
+
+fn viz_scenario_kind_label(kind: nirvash_core::VizScenarioKind) -> &'static str {
+    match kind {
+        nirvash_core::VizScenarioKind::DeadlockPath => "deadlock_shortest_path",
+        nirvash_core::VizScenarioKind::FocusPath => "focus_predicate_shortest_path",
+        nirvash_core::VizScenarioKind::CycleWitness => "cycle_witness",
+        nirvash_core::VizScenarioKind::HappyPath => "happy_path",
+    }
 }
 
 fn render_state_graph_section(spec: &SpecDoc) -> String {
@@ -1147,6 +1629,14 @@ fn render_state_graph_section(spec: &SpecDoc) -> String {
         }
         if reduced_graph.stutter_omitted {
             output.push_str("Note: stutter omitted from rendered edges.\n\n");
+        }
+        if reduced_graph.states.len() > MAX_REDUCED_STATE_GRAPH_NODES {
+            output.push_str(&format!(
+                "State Graph omitted: {} reduced states exceed limit {}.\n\n",
+                reduced_graph.states.len(),
+                MAX_REDUCED_STATE_GRAPH_NODES
+            ));
+            continue;
         }
         output.push_str(&render_mermaid_block(&render_state_graph_mermaid(
             spec,
@@ -1195,6 +1685,46 @@ fn render_state_graph_section(spec: &SpecDoc) -> String {
     output
 }
 
+fn render_sequence_diagram_section(spec: &SpecDoc) -> String {
+    let cases = spec
+        .doc_graphs
+        .iter()
+        .filter(|case| sequence_case_actor_names(case).len() >= 2)
+        .collect::<Vec<_>>();
+    if cases.is_empty() {
+        return String::new();
+    }
+
+    let mut output = String::from("## Sequence Diagram\n\n");
+    for case in cases {
+        output.push_str(&format!("### {}\n\n", case.label));
+        if case.graph.truncated {
+            output.push_str("Warning: truncated by checker limits.\n\n");
+        }
+        if case.graph.stutter_omitted {
+            output.push_str("Note: stutter omitted from rendered edges.\n\n");
+        }
+        output.push_str(&render_mermaid_block(&render_sequence_diagram_mermaid(
+            spec, case,
+        )));
+        output.push('\n');
+    }
+    output
+}
+
+fn render_algorithm_view_section(spec: &SpecDoc) -> String {
+    let mut output = String::from("## Algorithm View\n\n");
+    for case in &spec.doc_graphs {
+        output.push_str(&format!("### {}\n\n", case.label));
+        output.push_str(&render_code_block(
+            "text",
+            &render_algorithm_view(spec, case),
+        ));
+        output.push_str("\n\n");
+    }
+    output
+}
+
 fn render_state_graph_mermaid(
     spec: &SpecDoc,
     graph: &nirvash_core::ReducedDocGraph,
@@ -1238,11 +1768,398 @@ fn render_state_graph_mermaid(
             "S{} --> S{}: {}\n",
             edge.source,
             edge.target,
-            mermaid_edge_label(&edge.label)
+            state_diagram_edge_label(&edge.label)
         ));
     }
 
     output
+}
+
+fn render_sequence_diagram_mermaid(spec: &SpecDoc, case: &nirvash_core::DocGraphCase) -> String {
+    let graph = &case.graph;
+    let actors = sequence_case_actor_names(case);
+    let mut output = String::from("sequenceDiagram\n");
+    let mut expanded_states = HashSet::new();
+    output.push_str(&format!(
+        "%% all reachable paths for {}::{}\n",
+        spec.tail_ident, case.label
+    ));
+    render_sequence_participants(&mut output, &actors);
+    let mut initial_indices = graph.initial_indices.clone();
+    initial_indices.sort_unstable();
+    if initial_indices.is_empty() {
+        output.push_str(&format!(
+            "Note over {}: no initial states\n",
+            sequence_note_scope(&actors)
+        ));
+        return output;
+    }
+
+    if initial_indices.len() == 1 {
+        let initial = initial_indices[0];
+        render_initial_state_note(&mut output, graph, &actors, initial, 0);
+        render_sequence_from_state(
+            &mut output,
+            graph,
+            &actors,
+            initial,
+            &mut vec![initial],
+            &mut expanded_states,
+            0,
+        );
+        return output;
+    }
+
+    let indent = sequence_indent(0);
+    for (index, initial) in initial_indices.iter().enumerate() {
+        let keyword = if index == 0 { "alt" } else { "else" };
+        output.push_str(&format!("{indent}{keyword} initial S{initial}\n"));
+        render_initial_state_note(&mut output, graph, &actors, *initial, 1);
+        render_sequence_from_state(
+            &mut output,
+            graph,
+            &actors,
+            *initial,
+            &mut vec![*initial],
+            &mut expanded_states,
+            1,
+        );
+    }
+    output.push_str("end\n");
+    output
+}
+
+fn render_sequence_participants(output: &mut String, actors: &[String]) {
+    for actor in actors {
+        output.push_str(&format!(
+            "participant {} as {}\n",
+            mermaid_entity_id(actor),
+            mermaid_edge_label(actor)
+        ));
+    }
+}
+
+fn render_initial_state_note(
+    output: &mut String,
+    graph: &nirvash_core::DocGraphSnapshot,
+    actors: &[String],
+    state_index: usize,
+    indent: usize,
+) {
+    output.push_str(&format!(
+        "{}Note over {}: {}\n",
+        sequence_indent(indent),
+        sequence_note_scope(actors),
+        render_sequence_initial_note_label(graph, state_index)
+    ));
+}
+
+fn render_sequence_from_state(
+    output: &mut String,
+    graph: &nirvash_core::DocGraphSnapshot,
+    actors: &[String],
+    state_index: usize,
+    path_stack: &mut Vec<usize>,
+    expanded_states: &mut HashSet<usize>,
+    indent: usize,
+) {
+    if !expanded_states.insert(state_index) {
+        output.push_str(&format!(
+            "{}Note over {}: {}\n",
+            sequence_indent(indent),
+            sequence_note_scope(actors),
+            mermaid_sequence_text(&format!("continue at S{state_index}"))
+        ));
+        return;
+    }
+
+    let outgoing = sorted_doc_graph_edges(graph, state_index);
+    if outgoing.is_empty() {
+        render_sequence_terminal_note(output, graph, actors, state_index, indent);
+        return;
+    }
+
+    if outgoing.len() == 1 {
+        render_sequence_edge_branch(
+            output,
+            graph,
+            actors,
+            outgoing[0],
+            path_stack,
+            expanded_states,
+            indent,
+        );
+        return;
+    }
+
+    for (index, edge) in outgoing.into_iter().enumerate() {
+        let keyword = if index == 0 { "alt" } else { "else" };
+        output.push_str(&format!(
+            "{}{} {}\n",
+            sequence_indent(indent),
+            keyword,
+            mermaid_sequence_text(&format!(
+                "S{} -> S{} via {}",
+                state_index, edge.target, edge.label
+            ))
+        ));
+        render_sequence_edge_branch(
+            output,
+            graph,
+            actors,
+            edge,
+            path_stack,
+            expanded_states,
+            indent + 1,
+        );
+    }
+    output.push_str(&format!("{}end\n", sequence_indent(indent)));
+}
+
+fn render_sequence_edge_branch(
+    output: &mut String,
+    graph: &nirvash_core::DocGraphSnapshot,
+    actors: &[String],
+    edge: &nirvash_core::DocGraphEdge,
+    path_stack: &mut Vec<usize>,
+    expanded_states: &mut HashSet<usize>,
+    indent: usize,
+) {
+    let source = *path_stack
+        .last()
+        .expect("sequence traversal always keeps the current state on the stack");
+    if path_stack.contains(&edge.target) {
+        render_sequence_loop(output, graph, actors, source, edge, indent);
+        return;
+    }
+
+    render_sequence_edge_step(output, graph, actors, source, edge, indent);
+    path_stack.push(edge.target);
+    render_sequence_from_state(
+        output,
+        graph,
+        actors,
+        edge.target,
+        path_stack,
+        expanded_states,
+        indent,
+    );
+    path_stack.pop();
+}
+
+fn render_sequence_loop(
+    output: &mut String,
+    graph: &nirvash_core::DocGraphSnapshot,
+    actors: &[String],
+    source: usize,
+    edge: &nirvash_core::DocGraphEdge,
+    indent: usize,
+) {
+    output.push_str(&format!(
+        "{}loop {}\n",
+        sequence_indent(indent),
+        mermaid_sequence_text(&format!("back to S{}", edge.target))
+    ));
+    render_sequence_edge_step(output, graph, actors, source, edge, indent + 1);
+    output.push_str(&format!(
+        "{}Note over {}: {}\n",
+        sequence_indent(indent + 1),
+        sequence_note_scope(actors),
+        mermaid_sequence_text(&format!("back to S{}", edge.target))
+    ));
+    output.push_str(&format!("{}end\n", sequence_indent(indent)));
+}
+
+fn render_sequence_edge_step(
+    output: &mut String,
+    graph: &nirvash_core::DocGraphSnapshot,
+    actors: &[String],
+    source: usize,
+    edge: &nirvash_core::DocGraphEdge,
+    indent: usize,
+) {
+    if edge.interaction_steps.len() > 1 {
+        render_parallel_sequence_steps(output, actors, edge, indent);
+    } else {
+        render_sequence_messages(output, actors, &edge.interaction_steps, indent);
+    }
+
+    output.push_str(&format!(
+        "{}Note over {}: {}\n",
+        sequence_indent(indent),
+        sequence_note_scope(actors),
+        render_sequence_transition_note(graph, source, edge.target)
+    ));
+}
+
+fn render_parallel_sequence_steps(
+    output: &mut String,
+    actors: &[String],
+    edge: &nirvash_core::DocGraphEdge,
+    indent: usize,
+) {
+    for (index, step) in edge.interaction_steps.iter().enumerate() {
+        let keyword = if index == 0 { "par" } else { "and" };
+        output.push_str(&format!(
+            "{}{} {}\n",
+            sequence_indent(indent),
+            keyword,
+            mermaid_sequence_text(&interaction_step_branch_label(step))
+        ));
+        render_sequence_messages(output, actors, std::slice::from_ref(step), indent + 1);
+    }
+    output.push_str(&format!("{}end\n", sequence_indent(indent)));
+}
+
+fn render_sequence_messages(
+    output: &mut String,
+    actors: &[String],
+    steps: &[nirvash_core::DocGraphInteractionStep],
+    indent: usize,
+) {
+    for step in steps {
+        match (&step.from, &step.to) {
+            (Some(from), Some(to)) => output.push_str(&format!(
+                "{}{}->>{}: {}\n",
+                sequence_indent(indent),
+                mermaid_entity_id(from),
+                mermaid_entity_id(to),
+                mermaid_sequence_text(&step.label)
+            )),
+            (Some(actor), None) | (None, Some(actor)) => output.push_str(&format!(
+                "{}Note over {}: {}\n",
+                sequence_indent(indent),
+                mermaid_entity_id(actor),
+                mermaid_sequence_text(&step.label)
+            )),
+            (None, None) => output.push_str(&format!(
+                "{}Note over {}: {}\n",
+                sequence_indent(indent),
+                sequence_note_scope(actors),
+                mermaid_sequence_text(&step.label)
+            )),
+        }
+    }
+}
+
+fn render_sequence_terminal_note(
+    output: &mut String,
+    graph: &nirvash_core::DocGraphSnapshot,
+    actors: &[String],
+    state_index: usize,
+    indent: usize,
+) {
+    let label = if graph.deadlocks.contains(&state_index) {
+        format!("deadlock at S{state_index}")
+    } else {
+        format!("terminal at S{state_index}")
+    };
+    output.push_str(&format!(
+        "{}Note over {}: {}\n",
+        sequence_indent(indent),
+        sequence_note_scope(actors),
+        mermaid_sequence_text(&label)
+    ));
+}
+
+fn render_sequence_initial_note_label(
+    graph: &nirvash_core::DocGraphSnapshot,
+    state_index: usize,
+) -> String {
+    let mut lines = vec![format!("initial S{state_index}")];
+    if let Some(state) = graph.states.get(state_index) {
+        lines.extend(compact_state_lines(
+            &state.full,
+            &state.summary,
+            &state.relation_fields,
+        ));
+    }
+    mermaid_sequence_text(&lines.join("\n"))
+}
+
+fn render_sequence_transition_note(
+    graph: &nirvash_core::DocGraphSnapshot,
+    source: usize,
+    target: usize,
+) -> String {
+    let mut lines = vec![format!("S{source} -> S{target}")];
+    if let (Some(source_state), Some(target_state)) =
+        (graph.states.get(source), graph.states.get(target))
+    {
+        if graph.deadlocks.contains(&target) {
+            lines.push("DEADLOCK".to_owned());
+        }
+        if let Some(delta) = state_delta_lines(&source_state.full, &target_state.full) {
+            lines.extend(delta);
+        } else {
+            lines.extend(compact_state_lines(
+                &target_state.full,
+                &target_state.summary,
+                &target_state.relation_fields,
+            ));
+        }
+    }
+    mermaid_sequence_text(&lines.join("\n"))
+}
+
+fn sorted_doc_graph_edges(
+    graph: &nirvash_core::DocGraphSnapshot,
+    state_index: usize,
+) -> Vec<&nirvash_core::DocGraphEdge> {
+    let mut edges = graph.edges[state_index].iter().collect::<Vec<_>>();
+    edges.sort_by(|left, right| {
+        left.label
+            .cmp(&right.label)
+            .then(left.target.cmp(&right.target))
+    });
+    edges
+}
+
+fn sequence_case_actor_names(case: &nirvash_core::DocGraphCase) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut ordered = Vec::new();
+    for outgoing in &case.graph.edges {
+        for edge in outgoing {
+            for actor in edge
+                .interaction_steps
+                .iter()
+                .flat_map(|step| step.from.iter().chain(step.to.iter()))
+            {
+                if seen.insert(actor.clone()) {
+                    ordered.push(actor.clone());
+                }
+            }
+        }
+    }
+    ordered
+}
+
+fn sequence_note_scope(actors: &[String]) -> String {
+    match actors {
+        [] => "Spec".to_owned(),
+        [actor] => mermaid_entity_id(actor),
+        [first, .., last] => format!("{},{}", mermaid_entity_id(first), mermaid_entity_id(last)),
+    }
+}
+
+fn interaction_step_branch_label(step: &nirvash_core::DocGraphInteractionStep) -> String {
+    match (&step.from, &step.to) {
+        (Some(from), Some(to)) => {
+            format!(
+                "{} -> {}: {}",
+                to_lower_snake(from),
+                to_lower_snake(to),
+                step.label
+            )
+        }
+        (Some(from), None) => format!("{}: {}", to_lower_snake(from), step.label),
+        (None, Some(to)) => format!("{}: {}", to_lower_snake(to), step.label),
+        (None, None) => step.label.clone(),
+    }
+}
+
+fn sequence_indent(level: usize) -> String {
+    "    ".repeat(level)
 }
 
 fn visible_reduced_edges(
@@ -1294,6 +2211,320 @@ fn state_display_lines(
         &state.state.summary,
         &state.state.relation_fields,
     )
+}
+
+fn render_algorithm_view(spec: &SpecDoc, case: &nirvash_core::DocGraphCase) -> String {
+    let graph = &case.graph;
+    let mut output = String::new();
+    output.push_str(&format!("case {}:\n", case.label));
+    if spec.kind == Some(SpecKind::System) {
+        let subsystems = if spec.subsystems.is_empty() {
+            "none".to_owned()
+        } else {
+            spec.subsystems.join(", ")
+        };
+        output.push_str(&format!("subsystems: {subsystems}\n"));
+    }
+    if !graph.deadlocks.is_empty() {
+        output.push_str(&format!(
+            "deadlocks: {}\n",
+            graph
+                .deadlocks
+                .iter()
+                .map(|index| format!("S{index}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    output.push('\n');
+    let actors = process_case_actor_names(case);
+    if actors.len() >= 2 {
+        for actor in &actors {
+            render_process_block(&mut output, graph, Some(actor.as_str()), actor, 0);
+            output.push('\n');
+        }
+    } else {
+        render_process_block(&mut output, graph, None, "Spec", 0);
+        output.push('\n');
+    }
+    render_registration_list_block(&mut output, spec, "invariants", RegistrationKind::Invariant);
+    render_registration_list_block(&mut output, spec, "properties", RegistrationKind::Property);
+    render_registration_list_block(&mut output, spec, "fairness", RegistrationKind::Fairness);
+    render_registration_list_block(
+        &mut output,
+        spec,
+        "state_constraints",
+        RegistrationKind::StateConstraint,
+    );
+    render_registration_list_block(
+        &mut output,
+        spec,
+        "action_constraints",
+        RegistrationKind::ActionConstraint,
+    );
+    render_registration_list_block(&mut output, spec, "symmetry", RegistrationKind::Symmetry);
+    output
+}
+
+fn process_case_actor_names(case: &nirvash_core::DocGraphCase) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut ordered = Vec::new();
+    for outgoing in &case.graph.edges {
+        for edge in outgoing {
+            for actor in edge
+                .process_steps
+                .iter()
+                .filter_map(|step| step.actor.as_ref())
+            {
+                if seen.insert(actor.clone()) {
+                    ordered.push(actor.clone());
+                }
+            }
+        }
+    }
+    ordered
+}
+
+fn render_process_block(
+    output: &mut String,
+    graph: &nirvash_core::DocGraphSnapshot,
+    actor_filter: Option<&str>,
+    actor_label: &str,
+    indent: usize,
+) {
+    output.push_str(&format!(
+        "{}process {}:\n",
+        process_indent(indent),
+        actor_label
+    ));
+    let body_indent = indent + 1;
+    if graph_has_cycle(graph) {
+        output.push_str(&format!("{}while TRUE:\n", process_indent(body_indent)));
+        render_process_entry_points(output, graph, actor_filter, body_indent + 1);
+    } else {
+        render_process_entry_points(output, graph, actor_filter, body_indent);
+    }
+}
+
+fn render_process_entry_points(
+    output: &mut String,
+    graph: &nirvash_core::DocGraphSnapshot,
+    actor_filter: Option<&str>,
+    indent: usize,
+) {
+    let mut initial_indices = graph.initial_indices.clone();
+    initial_indices.sort_unstable();
+    if initial_indices.is_empty() {
+        output.push_str(&format!("{}do no initial states\n", process_indent(indent)));
+        return;
+    }
+
+    let mut expanded_states = HashSet::new();
+    if initial_indices.len() == 1 {
+        render_process_from_state(
+            output,
+            graph,
+            actor_filter,
+            initial_indices[0],
+            &mut vec![initial_indices[0]],
+            &mut expanded_states,
+            indent,
+        );
+        return;
+    }
+
+    for (index, initial) in initial_indices.iter().enumerate() {
+        let keyword = if index == 0 { "either:" } else { "or:" };
+        output.push_str(&format!("{}{}\n", process_indent(indent), keyword));
+        render_process_from_state(
+            output,
+            graph,
+            actor_filter,
+            *initial,
+            &mut vec![*initial],
+            &mut expanded_states,
+            indent + 1,
+        );
+    }
+}
+
+fn render_process_from_state(
+    output: &mut String,
+    graph: &nirvash_core::DocGraphSnapshot,
+    actor_filter: Option<&str>,
+    state_index: usize,
+    path_stack: &mut Vec<usize>,
+    expanded_states: &mut HashSet<usize>,
+    indent: usize,
+) {
+    if !expanded_states.insert(state_index) {
+        output.push_str(&format!(
+            "{}do continue at S{}\n",
+            process_indent(indent),
+            state_index
+        ));
+        return;
+    }
+
+    let outgoing = sorted_doc_graph_edges(graph, state_index);
+    if outgoing.is_empty() {
+        let label = if graph.deadlocks.contains(&state_index) {
+            format!("deadlock at S{state_index}")
+        } else {
+            format!("stop at S{state_index}")
+        };
+        output.push_str(&format!("{}do {}\n", process_indent(indent), label));
+        return;
+    }
+
+    if outgoing.len() == 1 {
+        render_process_edge_branch(
+            output,
+            graph,
+            actor_filter,
+            outgoing[0],
+            path_stack,
+            expanded_states,
+            indent,
+        );
+        return;
+    }
+
+    for (index, edge) in outgoing.into_iter().enumerate() {
+        let keyword = if index == 0 { "either:" } else { "or:" };
+        output.push_str(&format!("{}{}\n", process_indent(indent), keyword));
+        render_process_edge_branch(
+            output,
+            graph,
+            actor_filter,
+            edge,
+            path_stack,
+            expanded_states,
+            indent + 1,
+        );
+    }
+}
+
+fn render_process_edge_branch(
+    output: &mut String,
+    graph: &nirvash_core::DocGraphSnapshot,
+    actor_filter: Option<&str>,
+    edge: &nirvash_core::DocGraphEdge,
+    path_stack: &mut Vec<usize>,
+    expanded_states: &mut HashSet<usize>,
+    indent: usize,
+) {
+    render_process_edge_steps(output, actor_filter, edge, indent);
+    if path_stack.contains(&edge.target) {
+        output.push_str(&format!(
+            "{}do continue at S{}\n",
+            process_indent(indent),
+            edge.target
+        ));
+        return;
+    }
+
+    path_stack.push(edge.target);
+    render_process_from_state(
+        output,
+        graph,
+        actor_filter,
+        edge.target,
+        path_stack,
+        expanded_states,
+        indent,
+    );
+    path_stack.pop();
+}
+
+fn render_process_edge_steps(
+    output: &mut String,
+    actor_filter: Option<&str>,
+    edge: &nirvash_core::DocGraphEdge,
+    indent: usize,
+) {
+    let steps = edge
+        .process_steps
+        .iter()
+        .filter(|step| actor_filter.is_none_or(|actor| step.actor.as_deref() == Some(actor)))
+        .collect::<Vec<_>>();
+    if steps.is_empty() {
+        output.push_str(&format!("{}do {}\n", process_indent(indent), edge.label));
+        return;
+    }
+
+    for step in steps {
+        output.push_str(&format!(
+            "{}{}\n",
+            process_indent(indent),
+            render_process_step(step)
+        ));
+    }
+}
+
+fn render_process_step(step: &nirvash_core::DocGraphProcessStep) -> String {
+    let verb = match step.kind {
+        nirvash_core::DocGraphProcessKind::Do => "do",
+        nirvash_core::DocGraphProcessKind::Send => "send",
+        nirvash_core::DocGraphProcessKind::Receive => "receive",
+        nirvash_core::DocGraphProcessKind::Wait => "wait",
+        nirvash_core::DocGraphProcessKind::Emit => "emit",
+    };
+    format!("{verb} {}", step.label)
+}
+
+fn graph_has_cycle(graph: &nirvash_core::DocGraphSnapshot) -> bool {
+    fn visit(
+        graph: &nirvash_core::DocGraphSnapshot,
+        state_index: usize,
+        visiting: &mut HashSet<usize>,
+        visited: &mut HashSet<usize>,
+    ) -> bool {
+        if !visited.insert(state_index) {
+            return false;
+        }
+        visiting.insert(state_index);
+        for edge in &graph.edges[state_index] {
+            if visiting.contains(&edge.target) {
+                return true;
+            }
+            if visit(graph, edge.target, visiting, visited) {
+                return true;
+            }
+        }
+        visiting.remove(&state_index);
+        false
+    }
+
+    let mut visited = HashSet::new();
+    let mut visiting = HashSet::new();
+    (0..graph.states.len()).any(|state| visit(graph, state, &mut visiting, &mut visited))
+}
+
+fn render_registration_list_block(
+    output: &mut String,
+    spec: &SpecDoc,
+    title: &str,
+    kind: RegistrationKind,
+) {
+    let values = spec.registrations.get(&kind).cloned().unwrap_or_default();
+    output.push_str(&format!("{title}:\n"));
+    if values.is_empty() {
+        output.push_str("  - none\n\n");
+        return;
+    }
+    for value in values {
+        output.push_str(&format!("  - {value}\n"));
+    }
+    output.push('\n');
+}
+
+fn render_code_block(language: &str, body: &str) -> String {
+    format!("```{language}\n{body}\n```")
+}
+
+fn process_indent(level: usize) -> String {
+    "  ".repeat(level)
 }
 
 fn preferred_predecessor(graph: &nirvash_core::ReducedDocGraph, target: usize) -> Option<usize> {
@@ -1727,18 +2958,120 @@ fn mermaid_multiline(input: &str) -> String {
         .join("<br/>")
 }
 
+fn mermaid_sequence_text(input: &str) -> String {
+    input
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("<br/>")
+}
+
 fn mermaid_edge_label(input: &str) -> String {
     format!("\"{}\"", escape_mermaid_edge_label(input))
+}
+
+fn state_diagram_edge_label(input: &str) -> String {
+    sanitize_state_diagram_edge_label(input)
 }
 
 fn escape_mermaid_edge_label(input: &str) -> String {
     input.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+fn sanitize_state_diagram_edge_label(input: &str) -> String {
+    input
+        .replace("<br/>", " / ")
+        .replace("->", "→")
+        .replace(':', " -")
+        .replace('"', "'")
+        .replace('\n', " / ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn demo_edge(label: &str, target: usize) -> nirvash_core::DocGraphEdge {
+        nirvash_core::DocGraphEdge {
+            label: label.to_owned(),
+            compact_label: None,
+            scenario_priority: None,
+            interaction_steps: Vec::new(),
+            process_steps: vec![nirvash_core::DocGraphProcessStep::new(
+                nirvash_core::DocGraphProcessKind::Do,
+                label,
+            )],
+            target,
+        }
+    }
+
+    fn demo_participant_edge(
+        label: &str,
+        from: &str,
+        to: &str,
+        step_label: &str,
+        target: usize,
+    ) -> nirvash_core::DocGraphEdge {
+        nirvash_core::DocGraphEdge {
+            label: label.to_owned(),
+            compact_label: None,
+            scenario_priority: None,
+            interaction_steps: vec![nirvash_core::DocGraphInteractionStep::between(
+                from, to, step_label,
+            )],
+            process_steps: vec![
+                nirvash_core::DocGraphProcessStep::for_actor(
+                    from,
+                    nirvash_core::DocGraphProcessKind::Send,
+                    format!("{step_label} to {to}"),
+                ),
+                nirvash_core::DocGraphProcessStep::for_actor(
+                    to,
+                    nirvash_core::DocGraphProcessKind::Receive,
+                    format!("{step_label} from {from}"),
+                ),
+            ],
+            target,
+        }
+    }
+
+    fn demo_parallel_edge(
+        label: &str,
+        steps: &[(&str, &str, &str)],
+        target: usize,
+    ) -> nirvash_core::DocGraphEdge {
+        nirvash_core::DocGraphEdge {
+            label: label.to_owned(),
+            compact_label: None,
+            scenario_priority: None,
+            interaction_steps: steps
+                .iter()
+                .map(|(from, to, step_label)| {
+                    nirvash_core::DocGraphInteractionStep::between(*from, *to, *step_label)
+                })
+                .collect(),
+            process_steps: steps
+                .iter()
+                .flat_map(|(from, to, step_label)| {
+                    [
+                        nirvash_core::DocGraphProcessStep::for_actor(
+                            *from,
+                            nirvash_core::DocGraphProcessKind::Send,
+                            format!("{step_label} to {to}"),
+                        ),
+                        nirvash_core::DocGraphProcessStep::for_actor(
+                            *to,
+                            nirvash_core::DocGraphProcessKind::Receive,
+                            format!("{step_label} from {from}"),
+                        ),
+                    ]
+                })
+                .collect(),
+            target,
+        }
+    }
 
     #[test]
     fn generate_collects_supported_module_tree_and_renders_mermaid() {
@@ -1906,14 +3239,13 @@ fn system_model_cases() {}
             .find(|fragment| fragment.env_key == "NIRVASH_DOC_FRAGMENT_INLINE_SPEC")
             .expect("inline fragment");
         let inline_doc = fs::read_to_string(&inline_fragment.path).expect("inline doc");
-        assert!(inline_doc.contains("## Meta Model"));
-        assert!(inline_doc.contains("<pre class=\"mermaid nirvash-mermaid\">"));
-        assert!(inline_doc.contains("flowchart LR"));
+        assert!(inline_doc.contains("## Overview"));
+        assert!(inline_doc.contains("## Data Model"));
         assert!(inline_doc.contains("InlineSpec"));
         assert!(inline_doc.contains("inline_invariant"));
         assert!(inline_doc.contains("super_invariant"));
         assert!(inline_doc.contains("crate_property"));
-        assert!(inline_doc.contains("model_cases = `inline_model_cases`"));
+        assert!(inline_doc.contains("| model cases | `inline_model_cases` |"));
         assert!(inline_doc.contains("nirvash mermaid runtime failed to initialize"));
         assert!(inline_doc.contains("runtime.textContent = "));
         assert!(!inline_doc.contains("mermaid.min.js"));
@@ -1938,7 +3270,7 @@ fn system_model_cases() {}
             .expect("system fragment");
         let system_doc = fs::read_to_string(&system_fragment.path).expect("system doc");
         assert!(system_doc.contains("RootSystemSpec"));
-        assert!(system_doc.contains("SystemComposition"));
+        assert!(system_doc.contains("| subsystems | child, inline_parent |"));
         assert!(system_doc.contains("child"));
         assert!(system_doc.contains("inline_parent"));
         assert!(system_doc.contains("system_invariant"));
@@ -2032,16 +3364,7 @@ impl TransitionSystem for DuplicateSpec {
                             relation_schema: Vec::new(),
                         },
                     ],
-                    edges: vec![
-                        vec![nirvash_core::DocGraphEdge {
-                            label: "Start".to_owned(),
-                            target: 1,
-                        }],
-                        vec![nirvash_core::DocGraphEdge {
-                            label: "Stop".to_owned(),
-                            target: 0,
-                        }],
-                    ],
+                    edges: vec![vec![demo_edge("Start", 1)], vec![demo_edge("Stop", 0)]],
                     initial_indices: vec![0],
                     deadlocks: vec![],
                     truncated: false,
@@ -2052,7 +3375,8 @@ impl TransitionSystem for DuplicateSpec {
                 },
             }],
         });
-        assert!(fragment.contains("## State Graph"));
+        assert!(fragment.contains("## Reachability"));
+        assert!(fragment.contains("## Scenario Traces"));
         assert!(fragment.contains("<pre class=\"mermaid nirvash-mermaid\">"));
         assert!(fragment.contains("stateDiagram-v2"));
         assert!(fragment.contains("default"));
@@ -2060,21 +3384,22 @@ impl TransitionSystem for DuplicateSpec {
         assert!(!fragment.contains("state &quot;Busy&quot; as S1"));
         assert!(fragment.contains("[*] --&gt; S0") || fragment.contains("[*] --> S0"));
         assert!(
-            fragment.contains("Start -&amp;gt; Stop")
-                || fragment.contains("Start -&gt; Stop")
-                || fragment.contains("Start -> Stop")
+            fragment.contains("Start → Stop")
+                || fragment.contains("Start &#8594; Stop")
+                || fragment.contains("Start &rarr; Stop")
         );
-        assert!(fragment.contains("Note: stutter omitted"));
-        assert!(fragment.contains("<details><summary>Collapsed Path Details</summary>"));
-        assert!(fragment.contains("#### S0 -&gt; S0") || fragment.contains("#### S0 -> S0"));
-        assert!(fragment.contains("collapsed: S1"));
-        assert!(fragment.contains("## Meta Model"));
-        assert!(fragment.contains("flowchart LR"));
+        assert!(fragment.contains("stutter omitted"));
+        assert!(fragment.contains("<details><summary>State legend</summary>"));
+        assert!(!fragment.contains("## Sequence Diagram"));
+        assert!(fragment.contains("## Process View"));
+        assert!(fragment.contains("process Spec:"));
+        assert!(fragment.contains("scenario cycle witness"));
+        assert!(fragment.contains("do Start"));
+        assert!(fragment.contains("## Data Model"));
         assert!(fragment.contains("#### S0"));
         assert!(fragment.contains("```text\nIdle\n```"));
-        assert!(fragment.contains("```text\nBusy\n```"));
         assert!(fragment.contains("runtime.textContent = "));
-        assert!(fragment.contains("<details><summary>Full State Legend</summary>"));
+        assert!(fragment.contains("<details><summary>State legend</summary>"));
     }
 
     #[test]
@@ -2135,13 +3460,7 @@ impl TransitionSystem for DuplicateSpec {
                             }],
                         },
                     ],
-                    edges: vec![
-                        vec![nirvash_core::DocGraphEdge {
-                            label: "Advance".to_owned(),
-                            target: 1,
-                        }],
-                        Vec::new(),
-                    ],
+                    edges: vec![vec![demo_edge("Advance", 1)], Vec::new()],
                     initial_indices: vec![0],
                     deadlocks: vec![],
                     truncated: false,
@@ -2153,18 +3472,14 @@ impl TransitionSystem for DuplicateSpec {
             }],
         });
 
-        assert!(fragment.contains("## Relation Schema"));
-        assert!(fragment.contains("erDiagram"));
-        assert!(fragment.contains("`requires`: `PluginAtom` -> `PluginAtom`"));
-        assert!(fragment.contains("`allowed`: set of `PluginAtom`"));
-        assert!(
-            fragment.contains("requires = Root-&gt;Dependency")
-                || fragment.contains("requires = Root->Dependency")
-        );
+        assert!(fragment.contains("## Data Model"));
+        assert!(fragment.contains("### Relations"));
+        assert!(fragment.contains("requires"));
+        assert!(fragment.contains("allowed"));
     }
 
     #[test]
-    fn render_state_graph_quotes_edge_labels_with_parentheses() {
+    fn render_state_graph_renders_edge_labels_with_parentheses_without_quotes() {
         let spec = SpecDoc {
             kind: Some(SpecKind::Subsystem),
             full_path: vec!["demo".to_owned(), "DemoSpec".to_owned()],
@@ -2192,10 +3507,7 @@ impl TransitionSystem for DuplicateSpec {
                 },
             ],
             edges: vec![
-                vec![nirvash_core::DocGraphEdge {
-                    label: "Manager(LoadExistingConfig)".to_owned(),
-                    target: 1,
-                }],
+                vec![demo_edge("Manager(LoadExistingConfig)", 1)],
                 Vec::new(),
             ],
             initial_indices: vec![0],
@@ -2209,7 +3521,7 @@ impl TransitionSystem for DuplicateSpec {
         let visible_edges = visible_reduced_edges(&graph);
         let diagram = render_state_graph_mermaid(&spec, &graph, &visible_edges);
 
-        assert!(diagram.contains("S0 --> S1: \"Manager(...)\""));
+        assert!(diagram.contains("S0 --> S1: Manager(...)"));
     }
 
     #[test]
@@ -2240,13 +3552,7 @@ impl TransitionSystem for DuplicateSpec {
                     relation_schema: Vec::new(),
                 },
             ],
-            edges: vec![
-                vec![nirvash_core::DocGraphEdge {
-                    label: "Load config".to_owned(),
-                    target: 1,
-                }],
-                Vec::new(),
-            ],
+            edges: vec![vec![demo_edge("Load config", 1)], Vec::new()],
             initial_indices: vec![0],
             deadlocks: vec![],
             truncated: false,
@@ -2258,11 +3564,11 @@ impl TransitionSystem for DuplicateSpec {
         let visible_edges = visible_reduced_edges(&graph);
         let diagram = render_state_graph_mermaid(&spec, &graph, &visible_edges);
 
-        assert!(diagram.contains("S0 --> S1: \"Load config\""));
+        assert!(diagram.contains("S0 --> S1: Load config"));
     }
 
     #[test]
-    fn render_state_graph_quotes_collapsed_edge_labels_with_arrows() {
+    fn render_state_graph_sanitizes_collapsed_edge_labels_for_state_diagram() {
         let spec = SpecDoc {
             kind: Some(SpecKind::Subsystem),
             full_path: vec!["demo".to_owned(), "DemoSpec".to_owned()],
@@ -2311,8 +3617,57 @@ impl TransitionSystem for DuplicateSpec {
         let visible_edges = visible_reduced_edges(&graph);
         let diagram = render_state_graph_mermaid(&spec, &graph, &visible_edges);
 
+        assert!(diagram.contains("S0 --> S1: StartListening → ... → FinishShutdown (3 steps)"));
+    }
+
+    #[test]
+    fn render_state_graph_sanitizes_system_doc_labels_for_state_diagram() {
+        let spec = SpecDoc {
+            kind: Some(SpecKind::System),
+            full_path: vec!["demo".to_owned(), "SystemSpec".to_owned()],
+            tail_ident: "SystemSpec".to_owned(),
+            state_ty: "SystemState".to_owned(),
+            action_ty: "SystemAction".to_owned(),
+            model_cases: None,
+            subsystems: Vec::new(),
+            registrations: BTreeMap::new(),
+            doc_graphs: Vec::new(),
+        };
+        let graph = nirvash_core::reduce_doc_graph(&nirvash_core::DocGraphSnapshot {
+            states: vec![
+                nirvash_core::DocGraphState {
+                    summary: "Init".to_owned(),
+                    full: "Init".to_owned(),
+                    relation_fields: Vec::new(),
+                    relation_schema: Vec::new(),
+                },
+                nirvash_core::DocGraphState {
+                    summary: "Ready".to_owned(),
+                    full: "Ready".to_owned(),
+                    relation_fields: Vec::new(),
+                    relation_schema: Vec::new(),
+                },
+            ],
+            edges: vec![
+                vec![demo_edge(
+                    "manager: Load config -> manager: Record restore success",
+                    1,
+                )],
+                Vec::new(),
+            ],
+            initial_indices: vec![0],
+            deadlocks: vec![],
+            truncated: false,
+            stutter_omitted: false,
+            focus_indices: Vec::new(),
+            reduction: nirvash_core::DocGraphReductionMode::BoundaryPaths,
+            max_edge_actions_in_label: 2,
+        });
+        let visible_edges = visible_reduced_edges(&graph);
+        let diagram = render_state_graph_mermaid(&spec, &graph, &visible_edges);
+
         assert!(
-            diagram.contains("S0 --> S1: \"StartListening -> ... -> FinishShutdown (3 steps)\"")
+            diagram.contains("S0 --> S1: manager - Load config → manager - Record restore success")
         );
     }
 
@@ -2382,13 +3737,7 @@ impl TransitionSystem for DuplicateSpec {
                     relation_schema: Vec::new(),
                 },
             ],
-            edges: vec![
-                vec![nirvash_core::DocGraphEdge {
-                    label: "Advance".to_owned(),
-                    target: 1,
-                }],
-                Vec::new(),
-            ],
+            edges: vec![vec![demo_edge("Advance", 1)], Vec::new()],
             initial_indices: vec![0],
             deadlocks: vec![],
             truncated: false,
@@ -2436,10 +3785,10 @@ impl TransitionSystem for DuplicateSpec {
                 },
             ],
             edges: vec![
-                vec![nirvash_core::DocGraphEdge {
-                    label: "Start { request_id: 1, payload: VeryVerbosePayload }".to_owned(),
-                    target: 1,
-                }],
+                vec![demo_edge(
+                    "Start { request_id: 1, payload: VeryVerbosePayload }",
+                    1,
+                )],
                 Vec::new(),
             ],
             initial_indices: vec![0],
@@ -2453,7 +3802,7 @@ impl TransitionSystem for DuplicateSpec {
         let visible_edges = visible_reduced_edges(&graph);
         let diagram = render_state_graph_mermaid(&spec, &graph, &visible_edges);
 
-        assert!(diagram.contains("S0 --> S1: \"Start{...}\""));
+        assert!(diagram.contains("S0 --> S1: Start{...}"));
     }
 
     #[test]
@@ -2520,9 +3869,9 @@ impl TransitionSystem for DuplicateSpec {
         let visible_edges = visible_reduced_edges(&graph);
         let diagram = render_state_graph_mermaid(&spec, &graph, &visible_edges);
 
-        assert!(!diagram.contains("S0 --> S0: \"Retry\""));
-        assert!(diagram.contains("S0 --> S1: \"Advance\""));
-        assert!(diagram.contains("S1 --> S1: \"Loop\""));
+        assert!(!diagram.contains("S0 --> S0: Retry"));
+        assert!(diagram.contains("S0 --> S1: Advance"));
+        assert!(diagram.contains("S1 --> S1: Loop"));
     }
 
     #[test]
@@ -2560,14 +3909,8 @@ impl TransitionSystem for DuplicateSpec {
                         },
                     ],
                     edges: vec![
-                        vec![nirvash_core::DocGraphEdge {
-                            label: "Start".to_owned(),
-                            target: 1,
-                        }],
-                        vec![nirvash_core::DocGraphEdge {
-                            label: "Finish".to_owned(),
-                            target: 2,
-                        }],
+                        vec![demo_edge("Start", 1)],
+                        vec![demo_edge("Finish", 2)],
                         Vec::new(),
                     ],
                     initial_indices: vec![0],
@@ -2584,6 +3927,392 @@ impl TransitionSystem for DuplicateSpec {
         assert!(section.contains("Collapsed Path Details"));
         assert!(section.contains("#### S0 -> S2"));
         assert!(section.contains("##### S1"));
+    }
+
+    #[test]
+    fn render_state_graph_section_omits_large_graphs() {
+        let states = (0..51)
+            .map(|index| nirvash_core::DocGraphState {
+                summary: format!("S{index}"),
+                full: format!("S{index}"),
+                relation_fields: Vec::new(),
+                relation_schema: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let mut edges = vec![Vec::new(); 51];
+        for index in 0..50 {
+            edges[index].push(demo_edge(&format!("Step{index}"), index + 1));
+        }
+
+        let section = render_state_graph_section(&SpecDoc {
+            kind: Some(SpecKind::Subsystem),
+            full_path: vec!["demo".to_owned(), "LargeSpec".to_owned()],
+            tail_ident: "LargeSpec".to_owned(),
+            state_ty: "LargeState".to_owned(),
+            action_ty: "LargeAction".to_owned(),
+            model_cases: None,
+            subsystems: Vec::new(),
+            registrations: BTreeMap::new(),
+            doc_graphs: vec![nirvash_core::DocGraphCase {
+                label: "large".to_owned(),
+                graph: nirvash_core::DocGraphSnapshot {
+                    states,
+                    edges,
+                    initial_indices: vec![0],
+                    deadlocks: vec![50],
+                    truncated: false,
+                    stutter_omitted: false,
+                    focus_indices: Vec::new(),
+                    reduction: nirvash_core::DocGraphReductionMode::Full,
+                    max_edge_actions_in_label: 2,
+                },
+            }],
+        });
+
+        assert!(section.contains("State Graph omitted: 51 reduced states exceed limit 50."));
+        assert!(!section.contains("<details><summary>Full State Legend</summary>"));
+        assert!(!section.contains("Collapsed Path Details"));
+    }
+
+    #[test]
+    fn render_sequence_diagram_section_expands_full_graph_branches_and_loops() {
+        let section = render_sequence_diagram_section(&SpecDoc {
+            kind: Some(SpecKind::Subsystem),
+            full_path: vec!["demo".to_owned(), "DemoSpec".to_owned()],
+            tail_ident: "DemoSpec".to_owned(),
+            state_ty: "DemoState".to_owned(),
+            action_ty: "DemoAction".to_owned(),
+            model_cases: None,
+            subsystems: Vec::new(),
+            registrations: BTreeMap::new(),
+            doc_graphs: vec![nirvash_core::DocGraphCase {
+                label: "default".to_owned(),
+                graph: nirvash_core::DocGraphSnapshot {
+                    states: vec![
+                        nirvash_core::DocGraphState {
+                            summary: "Init".to_owned(),
+                            full: "Init".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
+                        },
+                        nirvash_core::DocGraphState {
+                            summary: "Middle".to_owned(),
+                            full: "Middle".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
+                        },
+                        nirvash_core::DocGraphState {
+                            summary: "Done".to_owned(),
+                            full: "Done".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
+                        },
+                        nirvash_core::DocGraphState {
+                            summary: "Retry".to_owned(),
+                            full: "Retry".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
+                        },
+                    ],
+                    edges: vec![
+                        vec![
+                            demo_participant_edge("Abort", "Client", "Manager", "Abort", 3),
+                            demo_participant_edge("Start", "Client", "Manager", "Start", 1),
+                        ],
+                        vec![demo_participant_edge(
+                            "Finish", "Manager", "Runner", "Finish", 2,
+                        )],
+                        Vec::new(),
+                        vec![demo_participant_edge(
+                            "Retry", "Manager", "Client", "Retry", 0,
+                        )],
+                    ],
+                    initial_indices: vec![0],
+                    deadlocks: vec![2, 3],
+                    truncated: false,
+                    stutter_omitted: false,
+                    focus_indices: Vec::new(),
+                    reduction: nirvash_core::DocGraphReductionMode::BoundaryPaths,
+                    max_edge_actions_in_label: 2,
+                },
+            }],
+        });
+
+        assert!(section.contains("sequenceDiagram"));
+        assert!(
+            section.contains("alt S0 -&gt; S3 via Abort")
+                || section.contains("alt S0 -> S3 via Abort")
+        );
+        assert!(
+            section.contains("else S0 -&gt; S1 via Start")
+                || section.contains("else S0 -> S1 via Start")
+        );
+        assert!(
+            section.contains("CLIENT-&gt;&gt;MANAGER: Abort")
+                || section.contains("CLIENT->>MANAGER: Abort")
+        );
+        assert!(
+            section.contains("CLIENT-&gt;&gt;MANAGER: Start")
+                || section.contains("CLIENT->>MANAGER: Start")
+        );
+        assert!(
+            section.contains("MANAGER-&gt;&gt;RUNNER: Finish")
+                || section.contains("MANAGER->>RUNNER: Finish")
+        );
+        assert!(section.contains("loop back to S0"));
+        assert!(section.contains("deadlock at S2"));
+        assert!(section.contains("S0 -&gt; S1") || section.contains("S0 -> S1"));
+    }
+
+    #[test]
+    fn render_sequence_diagram_section_uses_system_participants_and_parallel_steps() {
+        let section = render_sequence_diagram_section(&SpecDoc {
+            kind: Some(SpecKind::System),
+            full_path: vec!["demo".to_owned(), "SystemSpec".to_owned()],
+            tail_ident: "SystemSpec".to_owned(),
+            state_ty: "SystemState".to_owned(),
+            action_ty: "SystemAction".to_owned(),
+            model_cases: None,
+            subsystems: vec!["manager".to_owned(), "session_auth".to_owned()],
+            registrations: BTreeMap::new(),
+            doc_graphs: vec![nirvash_core::DocGraphCase {
+                label: "all_paths".to_owned(),
+                graph: nirvash_core::DocGraphSnapshot {
+                    states: vec![
+                        nirvash_core::DocGraphState {
+                            summary: "Idle".to_owned(),
+                            full: "Idle".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
+                        },
+                        nirvash_core::DocGraphState {
+                            summary: "Ready".to_owned(),
+                            full: "Ready".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
+                        },
+                    ],
+                    edges: vec![
+                        vec![demo_parallel_edge(
+                            "parallel(manager: Load config, session_auth: Accept session)",
+                            &[
+                                ("Manager", "Runner", "Load config"),
+                                ("Client", "Manager", "Accept session"),
+                            ],
+                            1,
+                        )],
+                        Vec::new(),
+                    ],
+                    initial_indices: vec![0],
+                    deadlocks: vec![1],
+                    truncated: false,
+                    stutter_omitted: false,
+                    focus_indices: Vec::new(),
+                    reduction: nirvash_core::DocGraphReductionMode::Full,
+                    max_edge_actions_in_label: 2,
+                },
+            }],
+        });
+
+        assert!(section.contains("participant MANAGER as &quot;Manager&quot;"));
+        assert!(section.contains("participant RUNNER as &quot;Runner&quot;"));
+        assert!(section.contains("participant CLIENT as &quot;Client&quot;"));
+        assert!(!section.contains("participant State as &quot;State&quot;"));
+        assert!(!section.contains("participant Spec as &quot;Spec&quot;"));
+        assert!(
+            section.contains("par manager -&gt; runner: Load config")
+                || section.contains("par manager -> runner: Load config")
+        );
+        assert!(
+            section.contains("and client -&gt; manager: Accept session")
+                || section.contains("and client -> manager: Accept session")
+        );
+        assert!(
+            section.contains("MANAGER-&gt;&gt;RUNNER: Load config")
+                || section.contains("MANAGER->>RUNNER: Load config")
+        );
+        assert!(
+            section.contains("CLIENT-&gt;&gt;MANAGER: Accept session")
+                || section.contains("CLIENT->>MANAGER: Accept session")
+        );
+    }
+
+    #[test]
+    fn render_sequence_diagram_section_marks_reconverged_states_without_reexpanding_suffixes() {
+        let section = render_sequence_diagram_section(&SpecDoc {
+            kind: Some(SpecKind::Subsystem),
+            full_path: vec!["demo".to_owned(), "DemoSpec".to_owned()],
+            tail_ident: "DemoSpec".to_owned(),
+            state_ty: "DemoState".to_owned(),
+            action_ty: "DemoAction".to_owned(),
+            model_cases: None,
+            subsystems: Vec::new(),
+            registrations: BTreeMap::new(),
+            doc_graphs: vec![nirvash_core::DocGraphCase {
+                label: "shared_suffix".to_owned(),
+                graph: nirvash_core::DocGraphSnapshot {
+                    states: vec![
+                        nirvash_core::DocGraphState {
+                            summary: "Init".to_owned(),
+                            full: "Init".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
+                        },
+                        nirvash_core::DocGraphState {
+                            summary: "Left".to_owned(),
+                            full: "Left".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
+                        },
+                        nirvash_core::DocGraphState {
+                            summary: "Right".to_owned(),
+                            full: "Right".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
+                        },
+                        nirvash_core::DocGraphState {
+                            summary: "Joined".to_owned(),
+                            full: "Joined".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
+                        },
+                        nirvash_core::DocGraphState {
+                            summary: "Done".to_owned(),
+                            full: "Done".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
+                        },
+                    ],
+                    edges: vec![
+                        vec![
+                            demo_participant_edge("GoLeft", "Manager", "Runner", "GoLeft", 1),
+                            demo_participant_edge("GoRight", "Manager", "Runner", "GoRight", 2),
+                        ],
+                        vec![demo_participant_edge(
+                            "Join", "Runner", "Manager", "Join", 3,
+                        )],
+                        vec![demo_participant_edge(
+                            "Join", "Runner", "Manager", "Join", 3,
+                        )],
+                        vec![demo_participant_edge(
+                            "Finish", "Manager", "Runner", "Finish", 4,
+                        )],
+                        Vec::new(),
+                    ],
+                    initial_indices: vec![0],
+                    deadlocks: vec![4],
+                    truncated: false,
+                    stutter_omitted: false,
+                    focus_indices: Vec::new(),
+                    reduction: nirvash_core::DocGraphReductionMode::Full,
+                    max_edge_actions_in_label: 2,
+                },
+            }],
+        });
+
+        assert!(section.contains("continue at S3"));
+        assert_eq!(
+            section.matches("MANAGER-&gt;&gt;RUNNER: Finish").count()
+                + section.matches("MANAGER->>RUNNER: Finish").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn render_algorithm_view_section_groups_edges_and_lists_subsystems() {
+        let section = render_algorithm_view_section(&SpecDoc {
+            kind: Some(SpecKind::System),
+            full_path: vec!["demo".to_owned(), "SystemSpec".to_owned()],
+            tail_ident: "SystemSpec".to_owned(),
+            state_ty: "SystemState".to_owned(),
+            action_ty: "SystemAction".to_owned(),
+            model_cases: None,
+            subsystems: vec!["router".to_owned(), "runtime".to_owned()],
+            registrations: BTreeMap::from([
+                (
+                    RegistrationKind::Invariant,
+                    vec!["system_invariant".to_owned()],
+                ),
+                (
+                    RegistrationKind::StateConstraint,
+                    vec!["system_state_constraint".to_owned()],
+                ),
+            ]),
+            doc_graphs: vec![nirvash_core::DocGraphCase {
+                label: "all_paths".to_owned(),
+                graph: nirvash_core::DocGraphSnapshot {
+                    states: vec![
+                        nirvash_core::DocGraphState {
+                            summary: "Idle".to_owned(),
+                            full: "Idle".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
+                        },
+                        nirvash_core::DocGraphState {
+                            summary: "Busy".to_owned(),
+                            full: "Busy".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
+                        },
+                        nirvash_core::DocGraphState {
+                            summary: "Done".to_owned(),
+                            full: "Done".to_owned(),
+                            relation_fields: Vec::new(),
+                            relation_schema: Vec::new(),
+                        },
+                    ],
+                    edges: vec![
+                        vec![
+                            demo_participant_edge(
+                                "manager: Load config",
+                                "Manager",
+                                "Runner",
+                                "Load config",
+                                1,
+                            ),
+                            demo_participant_edge(
+                                "session_auth: Accept session",
+                                "Client",
+                                "Manager",
+                                "Accept session",
+                                2,
+                            ),
+                        ],
+                        vec![demo_participant_edge(
+                            "shutdown: Finalize shutdown",
+                            "Manager",
+                            "Signal",
+                            "Finalize shutdown",
+                            2,
+                        )],
+                        Vec::new(),
+                    ],
+                    initial_indices: vec![0],
+                    deadlocks: vec![2],
+                    truncated: false,
+                    stutter_omitted: false,
+                    focus_indices: Vec::new(),
+                    reduction: nirvash_core::DocGraphReductionMode::Full,
+                    max_edge_actions_in_label: 2,
+                },
+            }],
+        });
+
+        assert!(section.contains("## Algorithm View"));
+        assert!(section.contains("case all_paths:"));
+        assert!(section.contains("subsystems: router, runtime"));
+        assert!(section.contains("process Manager:"));
+        assert!(section.contains("process Runner:"));
+        assert!(section.contains("process Client:"));
+        assert!(section.contains("process Signal:"));
+        assert!(section.contains("send Load config to Runner"));
+        assert!(section.contains("receive Accept session from Client"));
+        assert!(section.contains("send Finalize shutdown to Signal"));
+        assert!(section.contains("receive Finalize shutdown from Manager"));
+        assert!(section.contains("invariants:"));
+        assert!(section.contains("  - system_invariant"));
+        assert!(section.contains("state_constraints:"));
+        assert!(section.contains("  - system_state_constraint"));
     }
 
     #[test]

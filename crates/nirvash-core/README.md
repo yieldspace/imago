@@ -85,7 +85,7 @@ assert!(result.is_ok());
 - それでも足りない型だけ `#[signature(custom)]` で companion trait を手書きする
 
 重要なのは、`Signature` は **spec state space の正本ではない** ことです。  
-通常 spec の source of truth は `TransitionSystem::initial_states()`、`TransitionSystem::actions()`、`TransitionSystem::transition()` で、checker も docs の State Graph もそこから reachable graph を構築します。並行 spec では `ConcurrentTransitionSystem::{initial_states, atomic_actions, atomic_transition, footprint_reads, footprint_writes}` を atomic 正本にし、top-level `TransitionSystem` 側で `ConcurrentAction` を合成します。`Signature` は helper 型の有限境界を与えるための補助に限定します。
+通常 spec の source of truth は `TransitionSystem::initial_states()`、`TransitionSystem::actions()`、`TransitionSystem::transition()` で、checker と docs の `State Graph` / `Sequence Diagram` / `Algorithm View` もそこから reachable graph を構築します。並行 spec では `ConcurrentTransitionSystem::{initial_states, atomic_actions, atomic_transition, footprint_reads, footprint_writes}` を atomic 正本にし、top-level `TransitionSystem` 側で `ConcurrentAction` を合成します。`Signature` は helper 型の有限境界を与えるための補助に限定します。
 
 field 単位では次を使えます。
 
@@ -295,11 +295,29 @@ fn main() {
 }
 ```
 
-これにより `#[formal_tests(...)]` が付いた spec では reachable graph から生成した Mermaid の `State Graph` section が、すべての spec では registered invariant / property / fairness / constraint / subsystem 一覧を含む Mermaid の `Meta Model` section が rustdoc 上に注入されます。`State Graph` は docs 専用の boundary-path reduction を通すため、直線的な通常経路は 1 本の edge に畳まれ、同じ始点/終点に向かう平行 edge も 1 本にまとめられます。分岐/合流/終端/edge case state が優先的に残ります。Mermaid runtime は doc fragment に inline で埋め込まれるため、`cargo doc --open` でも `file://` 経由の local asset 読み込みに依存せず表示できます。`build.rs` は再帰ビルドを避けるために `NIRVASH_DOCGEN_SKIP` を尊重します。
+これにより `#[formal_tests(...)]` が付いた spec では reachable graph から生成した Mermaid の `State Graph` / `Sequence Diagram` section と、process summary の `Algorithm View` section が、すべての spec では registered invariant / property / fairness / constraint / subsystem 一覧を含む Mermaid の `Meta Model` section が rustdoc 上に注入されます。`State Graph` は docs 専用の boundary-path reduction を通す reduced reachable graph を使い、直線的な通常経路は 1 本の edge に畳まれ、同じ始点/終点に向かう平行 edge も 1 本にまとめられます。`Sequence Diagram` と `Algorithm View` は full reachable graph を補助に使いますが、actor/process の正本は action presentation metadata です。`State Graph` の edge label だけは Mermaid `stateDiagram-v2` の制約に合わせて `:` や `->` を安全な見た目へ正規化します。Mermaid runtime は doc fragment に inline で埋め込まれるため、`cargo doc --open` でも `file://` 経由の local asset 読み込みに依存せず表示できます。`build.rs` は再帰ビルドを避けるために `NIRVASH_DOCGEN_SKIP` を尊重します。
 
 ## State Graph Rendering
 
 - `State Graph` の node は Mermaid の丸ノードで描画されます。
 - node label は full state 全体ではなく、`initial` か `from Sx` に続く「前状態から変化した行」だけを表示します。
 - full state の `Debug` 出力は図の下の `<details>` に畳み込まれた `Full State Legend` に残るため、図自体は密度を抑えつつ詳細も追えます。
-- edge label は Mermaid parser が壊れないよう quoted label として出力されるため、`Manager(LoadExistingConfig)` のような括弧付き action 名もそのまま扱えます。
+- edge label は Mermaid parser が壊れないよう `:` や `->` を安全な見た目へ正規化して出力するため、`Manager(LoadExistingConfig)` のような括弧付き action 名も `manager - Load config → ...` のような collapsed label も崩さず表示できます。
+- `State Graph` は reduced reachable graph を使うため、collapsed path の詳細は別 section に退避されます。
+- reduced graph の node 数が `50` を超える case では図を出さず、omit note だけを表示します。
+
+## Sequence Diagram Rendering
+
+- `Sequence Diagram` は actor/process metadata に基づく multi-actor case だけを対象にし、single-actor spec では section 自体を出しません。
+- lane は `State` / `Spec` ではなく、metadata が明示した actor role だけを participant にします。
+- 分岐は `alt` / `else`、並行 edge は `par` / `and`、cycle と back-edge は 1 周分だけ `loop` で明示して停止します。
+- reconverge して既に展開済みの state に入る枝は `continue at Sx` note で止め、shared suffix を無限に重複展開しないようにします。
+- action 文言は first-line rustdoc と manual presentation metadata が正本で、system spec では `Client` / `Manager` / `Runner` のような role-level actor を使います。
+- 各 step の note には `Sx -> Sy` と state delta か target state の要約を載せ、deadlock / terminal state も note で明示します。
+
+## Algorithm View
+
+- `Algorithm View` は `process X:` / `while TRUE:` ベースの summary を `text` code block で表示します。
+- multi-actor case では actor ごとの process block、single-actor case では `process Spec:` を 1 本だけ出します。
+- action presentation metadata の `Do / Send / Receive / Wait / Emit` を `do ...`, `send ...`, `receive ...`, `wait ...`, `emit ...` に写し、reachable graph の branch/cycle だけを `either:` / `or:` / `continue at Sx` へ要約します。
+- registered invariant / property / fairness / constraint / symmetry 関数は `Algorithm View` の末尾に一覧表示されます。

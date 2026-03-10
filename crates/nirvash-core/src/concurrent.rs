@@ -291,8 +291,14 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::any::{Any, TypeId};
+
     use super::*;
-    use crate::{TransitionSystem, format_doc_graph_action};
+    use crate::{
+        DocGraphActionPresentation, DocGraphProcessKind, DocGraphProcessStep,
+        RegisteredActionDocPresentation, TransitionSystem, describe_doc_graph_action,
+        format_doc_graph_action,
+    };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     enum ResourceKey {
@@ -397,6 +403,76 @@ mod tests {
 
     #[derive(Debug, Clone, Copy, Default)]
     struct LegacySpec;
+
+    fn atomic_action_type_id() -> TypeId {
+        TypeId::of::<AtomicAction>()
+    }
+
+    fn atomic_action_presentation(value: &dyn Any) -> Option<DocGraphActionPresentation> {
+        let value = value
+            .downcast_ref::<AtomicAction>()
+            .expect("registered action doc downcast");
+        let label = match value {
+            AtomicAction::IncLeft => "Increment left",
+            AtomicAction::IncRight => "Increment right",
+            AtomicAction::ToggleGate => "Toggle gate",
+            AtomicAction::ResetLeft => "Reset left",
+        };
+        Some(DocGraphActionPresentation::new(label))
+    }
+
+    inventory::submit! {
+        RegisteredActionDocPresentation {
+            value_type_id: atomic_action_type_id,
+            format: atomic_action_presentation,
+        }
+    }
+
+    fn concurrent_action_type_id() -> TypeId {
+        TypeId::of::<ConcurrentAction<AtomicAction>>()
+    }
+
+    fn concurrent_action_presentation(value: &dyn Any) -> Option<DocGraphActionPresentation> {
+        let action = value
+            .downcast_ref::<ConcurrentAction<AtomicAction>>()
+            .expect("registered action doc downcast");
+        let steps = action
+            .atoms()
+            .iter()
+            .map(describe_doc_graph_action)
+            .collect::<Vec<_>>();
+        let label = if steps.len() == 1 {
+            steps[0].label.clone()
+        } else {
+            format!(
+                "parallel({})",
+                steps
+                    .iter()
+                    .map(|step| step.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        Some(DocGraphActionPresentation::with_steps(
+            label,
+            Vec::new(),
+            steps
+                .into_iter()
+                .flat_map(|step| step.process_steps)
+                .map(|inner| match inner.actor {
+                    Some(actor) => DocGraphProcessStep::for_actor(actor, inner.kind, inner.label),
+                    None => DocGraphProcessStep::for_actor("Concurrent", inner.kind, inner.label),
+                })
+                .collect(),
+        ))
+    }
+
+    inventory::submit! {
+        RegisteredActionDocPresentation {
+            value_type_id: concurrent_action_type_id,
+            format: concurrent_action_presentation,
+        }
+    }
 
     impl TransitionSystem for LegacySpec {
         type State = LegacyState;
@@ -535,11 +611,26 @@ mod tests {
 
         assert_eq!(
             format_doc_graph_action(&action),
-            "parallel(IncLeft, IncRight)"
+            "parallel(Increment left, Increment right)"
         );
         assert_eq!(
             format_doc_graph_action(&ConcurrentAction::from_atomic(AtomicAction::IncLeft)),
-            "IncLeft"
+            "Increment left"
+        );
+        assert_eq!(
+            describe_doc_graph_action(&action).process_steps,
+            vec![
+                DocGraphProcessStep::for_actor(
+                    "Concurrent",
+                    DocGraphProcessKind::Do,
+                    "Increment left",
+                ),
+                DocGraphProcessStep::for_actor(
+                    "Concurrent",
+                    DocGraphProcessKind::Do,
+                    "Increment right",
+                ),
+            ]
         );
     }
 

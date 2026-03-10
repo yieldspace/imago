@@ -1,6 +1,7 @@
 use crate::{
     ActionConstraint, DocGraphPolicy, Fairness, Ltl, ModelCheckConfig, StateConstraint,
     StatePredicate, SymmetryReducer,
+    VizPolicy,
 };
 
 pub trait ActionVocabulary: Sized {
@@ -92,6 +93,7 @@ pub struct ModelCase<S, A> {
     check_deadlocks: bool,
     doc_checker_config: Option<ModelCheckConfig>,
     doc_graph_policy: DocGraphPolicy<S>,
+    viz_policy: Option<VizPolicy>,
 }
 
 impl<S, A> ModelCase<S, A> {
@@ -105,6 +107,7 @@ impl<S, A> ModelCase<S, A> {
             check_deadlocks: true,
             doc_checker_config: None,
             doc_graph_policy: DocGraphPolicy::default(),
+            viz_policy: None,
         }
     }
 
@@ -152,6 +155,11 @@ impl<S, A> ModelCase<S, A> {
         self
     }
 
+    pub fn with_viz_policy(mut self, viz_policy: VizPolicy) -> Self {
+        self.viz_policy = Some(viz_policy);
+        self
+    }
+
     pub fn state_constraints(&self) -> &[StateConstraint<S>] {
         &self.state_constraints
     }
@@ -184,6 +192,10 @@ impl<S, A> ModelCase<S, A> {
 
     pub fn doc_graph_policy(&self) -> &DocGraphPolicy<S> {
         &self.doc_graph_policy
+    }
+
+    pub fn viz_policy(&self) -> VizPolicy {
+        self.viz_policy.clone().unwrap_or_default()
     }
 }
 

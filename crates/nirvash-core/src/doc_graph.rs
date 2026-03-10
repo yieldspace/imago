@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     RelationFieldSchema, RelationFieldSummary, StatePredicate, collect_relational_state_schema,
-    collect_relational_state_summary, registry::lookup_action_doc_label,
+    collect_relational_state_summary,
+    registry::{lookup_action_doc_label, lookup_action_doc_presentation},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,13 +35,269 @@ pub struct DocGraphState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocGraphEdge {
     pub label: String,
+    pub compact_label: Option<String>,
+    pub scenario_priority: Option<i32>,
+    pub interaction_steps: Vec<DocGraphInteractionStep>,
+    pub process_steps: Vec<DocGraphProcessStep>,
     pub target: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocGraphInteractionStep {
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub label: String,
+}
+
+impl DocGraphInteractionStep {
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            from: None,
+            to: None,
+            label: label.into(),
+        }
+    }
+
+    pub fn between(
+        from: impl Into<String>,
+        to: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Self {
+        Self {
+            from: Some(from.into()),
+            to: Some(to.into()),
+            label: label.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DocGraphProcessKind {
+    Do,
+    Send,
+    Receive,
+    Wait,
+    Emit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocGraphProcessStep {
+    pub actor: Option<String>,
+    pub kind: DocGraphProcessKind,
+    pub label: String,
+}
+
+impl DocGraphProcessStep {
+    pub fn new(kind: DocGraphProcessKind, label: impl Into<String>) -> Self {
+        Self {
+            actor: None,
+            kind,
+            label: label.into(),
+        }
+    }
+
+    pub fn for_actor(
+        actor: impl Into<String>,
+        kind: DocGraphProcessKind,
+        label: impl Into<String>,
+    ) -> Self {
+        Self {
+            actor: Some(actor.into()),
+            kind,
+            label: label.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocGraphActionPresentation {
+    pub label: String,
+    pub compact_label: Option<String>,
+    pub scenario_priority: Option<i32>,
+    pub interaction_steps: Vec<DocGraphInteractionStep>,
+    pub process_steps: Vec<DocGraphProcessStep>,
+}
+
+impl DocGraphActionPresentation {
+    pub fn new(label: impl Into<String>) -> Self {
+        let label = label.into();
+        Self::with_steps(
+            label.clone(),
+            Vec::new(),
+            vec![DocGraphProcessStep::new(DocGraphProcessKind::Do, label)],
+        )
+    }
+
+    pub fn with_steps(
+        label: impl Into<String>,
+        interaction_steps: Vec<DocGraphInteractionStep>,
+        process_steps: Vec<DocGraphProcessStep>,
+    ) -> Self {
+        let label = label.into();
+        let process_steps = if process_steps.is_empty() {
+            vec![DocGraphProcessStep::new(
+                DocGraphProcessKind::Do,
+                label.clone(),
+            )]
+        } else {
+            process_steps
+        };
+        Self {
+            label,
+            compact_label: None,
+            scenario_priority: None,
+            interaction_steps,
+            process_steps,
+        }
+    }
+
+    pub fn with_compact_label(mut self, compact_label: impl Into<String>) -> Self {
+        let compact_label = compact_label.into();
+        if !compact_label.trim().is_empty() {
+            self.compact_label = Some(compact_label);
+        }
+        self
+    }
+
+    pub fn with_scenario_priority(mut self, scenario_priority: i32) -> Self {
+        self.scenario_priority = Some(scenario_priority);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DocGraphReductionMode {
     Full,
     BoundaryPaths,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum SpecVizKind {
+    Subsystem,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VizPolicy {
+    pub max_inline_states: usize,
+    pub max_scenarios: usize,
+    pub focus_path_limit: usize,
+    pub large_graph_threshold: usize,
+}
+
+impl Default for VizPolicy {
+    fn default() -> Self {
+        Self {
+            max_inline_states: 50,
+            max_scenarios: 4,
+            focus_path_limit: 24,
+            large_graph_threshold: 50,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecVizRegistrationSet {
+    pub invariants: Vec<String>,
+    pub properties: Vec<String>,
+    pub fairness: Vec<String>,
+    pub state_constraints: Vec<String>,
+    pub action_constraints: Vec<String>,
+    pub symmetries: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecVizMetadata {
+    pub kind: Option<SpecVizKind>,
+    pub state_ty: String,
+    pub action_ty: String,
+    pub model_cases: Option<String>,
+    pub subsystems: Vec<String>,
+    pub registrations: SpecVizRegistrationSet,
+    pub policy: VizPolicy,
+}
+
+impl Default for SpecVizMetadata {
+    fn default() -> Self {
+        Self {
+            kind: None,
+            state_ty: String::new(),
+            action_ty: String::new(),
+            model_cases: None,
+            subsystems: Vec::new(),
+            registrations: SpecVizRegistrationSet::default(),
+            policy: VizPolicy::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecVizActionDescriptor {
+    pub label: String,
+    pub compact_label: Option<String>,
+    pub scenario_priority: Option<i32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum VizScenarioKind {
+    DeadlockPath,
+    FocusPath,
+    CycleWitness,
+    HappyPath,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VizScenarioStep {
+    pub source: usize,
+    pub target: usize,
+    pub label: String,
+    pub compact_label: Option<String>,
+    pub scenario_priority: Option<i32>,
+    pub interaction_steps: Vec<DocGraphInteractionStep>,
+    pub process_steps: Vec<DocGraphProcessStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VizScenario {
+    pub label: String,
+    pub kind: VizScenarioKind,
+    pub state_path: Vec<usize>,
+    pub steps: Vec<VizScenarioStep>,
+    pub actors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecVizCaseStats {
+    pub full_state_count: usize,
+    pub full_edge_count: usize,
+    pub reduced_state_count: usize,
+    pub reduced_edge_count: usize,
+    pub focus_state_count: usize,
+    pub deadlock_count: usize,
+    pub truncated: bool,
+    pub stutter_omitted: bool,
+    pub large_graph_fallback: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecVizCase {
+    pub label: String,
+    pub graph: DocGraphSnapshot,
+    pub reduced_graph: ReducedDocGraph,
+    pub focus_graph: Option<ReducedDocGraph>,
+    pub scenarios: Vec<VizScenario>,
+    pub actors: Vec<String>,
+    pub loop_groups: Vec<Vec<usize>>,
+    pub stats: SpecVizCaseStats,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecVizBundle {
+    pub spec_name: String,
+    pub metadata: SpecVizMetadata,
+    pub action_vocabulary: Vec<SpecVizActionDescriptor>,
+    pub relation_schema: Vec<RelationFieldSchema>,
+    pub cases: Vec<SpecVizCase>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,7 +377,18 @@ pub struct RegisteredDocGraphProvider {
     pub build: fn() -> Box<dyn DocGraphProvider>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub trait SpecVizProvider {
+    fn spec_name(&self) -> &'static str;
+
+    fn bundle(&self) -> SpecVizBundle;
+}
+
+pub struct RegisteredSpecVizProvider {
+    pub spec_name: &'static str,
+    pub build: fn() -> Box<dyn SpecVizProvider>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReducedDocGraphNode {
     pub original_index: usize,
     pub state: DocGraphState,
@@ -128,7 +396,7 @@ pub struct ReducedDocGraphNode {
     pub is_deadlock: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReducedDocGraphEdge {
     pub source: usize,
     pub target: usize,
@@ -136,7 +404,7 @@ pub struct ReducedDocGraphEdge {
     pub collapsed_state_indices: Vec<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReducedDocGraph {
     pub states: Vec<ReducedDocGraphNode>,
     pub edges: Vec<ReducedDocGraphEdge>,
@@ -145,6 +413,7 @@ pub struct ReducedDocGraph {
 }
 
 inventory::collect!(RegisteredDocGraphProvider);
+inventory::collect!(RegisteredSpecVizProvider);
 
 pub fn summarize_doc_graph_state<T>(state: &T) -> DocGraphState
 where
@@ -175,11 +444,26 @@ where
     }
 }
 
+pub fn describe_doc_graph_action<T>(value: &T) -> DocGraphActionPresentation
+where
+    T: Debug + 'static,
+{
+    if let Some(presentation) = lookup_action_doc_presentation(value as &dyn std::any::Any) {
+        return presentation;
+    }
+
+    if let Some(label) = lookup_action_doc_label(value as &dyn std::any::Any) {
+        return DocGraphActionPresentation::new(label);
+    }
+
+    DocGraphActionPresentation::new(format!("{value:?}"))
+}
+
 pub fn format_doc_graph_action<T>(value: &T) -> String
 where
     T: Debug + 'static,
 {
-    lookup_action_doc_label(value as &dyn std::any::Any).unwrap_or_else(|| format!("{value:?}"))
+    describe_doc_graph_action(value).label
 }
 
 pub fn summarize_doc_graph_text(input: &str) -> String {
@@ -258,11 +542,557 @@ pub fn collect_doc_graph_specs() -> Vec<DocGraphSpec> {
     specs
 }
 
+pub fn collect_spec_viz_bundles() -> Vec<SpecVizBundle> {
+    let mut bundles_by_name = BTreeMap::<String, SpecVizBundle>::new();
+    for entry in inventory::iter::<RegisteredSpecVizProvider> {
+        let provider = (entry.build)();
+        let candidate = provider.bundle();
+        if let Some(existing) = bundles_by_name.get_mut(&candidate.spec_name) {
+            merge_spec_viz_bundle(existing, candidate);
+        } else {
+            bundles_by_name.insert(candidate.spec_name.clone(), candidate);
+        }
+    }
+    let mut bundles = bundles_by_name.into_values().collect::<Vec<_>>();
+    bundles.sort_by(|left, right| left.spec_name.cmp(&right.spec_name));
+    bundles
+}
+
+fn merge_spec_viz_bundle(target: &mut SpecVizBundle, candidate: SpecVizBundle) {
+    if target.cases.len() < candidate.cases.len() {
+        target.cases = candidate.cases;
+    }
+    if target.metadata.kind.is_none() {
+        target.metadata.kind = candidate.metadata.kind;
+    }
+    if target.metadata.model_cases.is_none() {
+        target.metadata.model_cases = candidate.metadata.model_cases;
+    }
+    if target.metadata.subsystems.is_empty() {
+        target.metadata.subsystems = candidate.metadata.subsystems;
+    }
+    if target.metadata.registrations.invariants.is_empty() {
+        target.metadata.registrations.invariants = candidate.metadata.registrations.invariants;
+    }
+    if target.metadata.registrations.properties.is_empty() {
+        target.metadata.registrations.properties = candidate.metadata.registrations.properties;
+    }
+    if target.metadata.registrations.fairness.is_empty() {
+        target.metadata.registrations.fairness = candidate.metadata.registrations.fairness;
+    }
+    if target.metadata.registrations.state_constraints.is_empty() {
+        target.metadata.registrations.state_constraints =
+            candidate.metadata.registrations.state_constraints;
+    }
+    if target.metadata.registrations.action_constraints.is_empty() {
+        target.metadata.registrations.action_constraints =
+            candidate.metadata.registrations.action_constraints;
+    }
+    if target.metadata.registrations.symmetries.is_empty() {
+        target.metadata.registrations.symmetries = candidate.metadata.registrations.symmetries;
+    }
+}
+
 pub fn reduce_doc_graph(snapshot: &DocGraphSnapshot) -> ReducedDocGraph {
     match snapshot.reduction {
         DocGraphReductionMode::Full => full_doc_graph(snapshot),
         DocGraphReductionMode::BoundaryPaths => boundary_path_reduced_graph(snapshot),
     }
+}
+
+impl SpecVizBundle {
+    pub fn from_doc_graph_spec(
+        spec_name: impl Into<String>,
+        metadata: SpecVizMetadata,
+        cases: Vec<DocGraphCase>,
+    ) -> Self {
+        let mut relation_schema = Vec::new();
+        let mut action_vocabulary = Vec::new();
+        let cases = cases
+            .into_iter()
+            .map(|case| {
+                let viz_case = SpecVizCase::from_doc_graph_case(&metadata.policy, case);
+                for state in &viz_case.graph.states {
+                    for field in &state.relation_schema {
+                        if !relation_schema.contains(field) {
+                            relation_schema.push(field.clone());
+                        }
+                    }
+                }
+                for outgoing in &viz_case.graph.edges {
+                    for edge in outgoing {
+                        let descriptor = SpecVizActionDescriptor {
+                            label: edge.label.clone(),
+                            compact_label: edge.compact_label.clone(),
+                            scenario_priority: edge.scenario_priority,
+                        };
+                        if !action_vocabulary.contains(&descriptor) {
+                            action_vocabulary.push(descriptor);
+                        }
+                    }
+                }
+                viz_case
+            })
+            .collect();
+
+        Self {
+            spec_name: spec_name.into(),
+            metadata,
+            action_vocabulary,
+            relation_schema,
+            cases,
+        }
+    }
+}
+
+impl SpecVizCase {
+    fn from_doc_graph_case(policy: &VizPolicy, case: DocGraphCase) -> Self {
+        let reduced_graph = reduce_doc_graph(&case.graph);
+        let loop_groups = collect_loop_groups(&case.graph);
+        let scenarios = select_viz_scenarios(&case.graph, policy);
+        let focus_graph = (reduced_graph.states.len() > policy.large_graph_threshold)
+            .then(|| build_focus_graph(&case.graph, &scenarios))
+            .flatten();
+        let actors = collect_case_actors(&case.graph);
+        let full_edge_count = case.graph.edges.iter().map(Vec::len).sum();
+        let reduced_edge_count = reduced_graph.edges.len();
+        let focus_state_count = focus_graph
+            .as_ref()
+            .map(|graph| graph.states.len())
+            .unwrap_or(reduced_graph.states.len());
+        let large_graph_fallback = reduced_graph.states.len() > policy.large_graph_threshold;
+
+        Self {
+            label: case.label,
+            graph: case.graph,
+            reduced_graph,
+            focus_graph,
+            scenarios,
+            actors,
+            loop_groups,
+            stats: SpecVizCaseStats {
+                full_state_count: 0,
+                full_edge_count,
+                reduced_state_count: 0,
+                reduced_edge_count,
+                focus_state_count,
+                deadlock_count: 0,
+                truncated: false,
+                stutter_omitted: false,
+                large_graph_fallback,
+            },
+        }
+        .with_graph_stats()
+    }
+
+    fn with_graph_stats(mut self) -> Self {
+        self.stats.full_state_count = self.graph.states.len();
+        self.stats.reduced_state_count = self.reduced_graph.states.len();
+        self.stats.deadlock_count = self.graph.deadlocks.len();
+        self.stats.truncated = self.graph.truncated;
+        self.stats.stutter_omitted = self.graph.stutter_omitted;
+        self
+    }
+}
+
+fn collect_case_actors(graph: &DocGraphSnapshot) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut ordered = Vec::new();
+    for outgoing in &graph.edges {
+        for edge in outgoing {
+            for actor in edge
+                .interaction_steps
+                .iter()
+                .flat_map(|step| step.from.iter().chain(step.to.iter()))
+            {
+                if seen.insert(actor.clone()) {
+                    ordered.push(actor.clone());
+                }
+            }
+            for actor in edge.process_steps.iter().filter_map(|step| step.actor.as_ref()) {
+                if seen.insert(actor.clone()) {
+                    ordered.push(actor.clone());
+                }
+            }
+        }
+    }
+    ordered
+}
+
+fn select_viz_scenarios(graph: &DocGraphSnapshot, policy: &VizPolicy) -> Vec<VizScenario> {
+    let mut scenarios = Vec::new();
+    let mut seen_paths = BTreeSet::new();
+
+    if let Some(path) = shortest_path_to_any(graph, &graph.deadlocks) {
+        push_viz_scenario(
+            &mut scenarios,
+            &mut seen_paths,
+            graph,
+            VizScenarioKind::DeadlockPath,
+            "deadlock shortest path",
+            path,
+        );
+    }
+
+    let focus_targets = graph
+        .focus_indices
+        .iter()
+        .copied()
+        .filter(|index| !graph.deadlocks.contains(index))
+        .collect::<Vec<_>>();
+    if let Some(path) = shortest_path_to_any(graph, &focus_targets) {
+        push_viz_scenario(
+            &mut scenarios,
+            &mut seen_paths,
+            graph,
+            VizScenarioKind::FocusPath,
+            "focus predicate shortest path",
+            path,
+        );
+    }
+
+    if let Some(path) = cycle_witness_path(graph) {
+        push_viz_scenario(
+            &mut scenarios,
+            &mut seen_paths,
+            graph,
+            VizScenarioKind::CycleWitness,
+            "cycle witness",
+            path,
+        );
+    }
+
+    if let Some(path) = happy_path(graph) {
+        push_viz_scenario(
+            &mut scenarios,
+            &mut seen_paths,
+            graph,
+            VizScenarioKind::HappyPath,
+            "happy path",
+            path,
+        );
+    }
+
+    scenarios.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then(left.label.cmp(&right.label))
+            .then(left.state_path.cmp(&right.state_path))
+    });
+    scenarios.truncate(policy.max_scenarios);
+    scenarios
+}
+
+fn push_viz_scenario(
+    scenarios: &mut Vec<VizScenario>,
+    seen_paths: &mut BTreeSet<Vec<usize>>,
+    graph: &DocGraphSnapshot,
+    kind: VizScenarioKind,
+    label: &'static str,
+    state_path: Vec<usize>,
+) {
+    if state_path.len() < 2 || !seen_paths.insert(state_path.clone()) {
+        return;
+    }
+
+    let mut steps = Vec::new();
+    let mut actors = BTreeSet::new();
+    for window in state_path.windows(2) {
+        let Some(edge) = graph.edges[window[0]].iter().find(|edge| edge.target == window[1]) else {
+            return;
+        };
+        for actor in edge
+            .interaction_steps
+            .iter()
+            .flat_map(|step| step.from.iter().chain(step.to.iter()))
+        {
+            actors.insert(actor.clone());
+        }
+        steps.push(VizScenarioStep {
+            source: window[0],
+            target: window[1],
+            label: edge.label.clone(),
+            compact_label: edge.compact_label.clone(),
+            scenario_priority: edge.scenario_priority,
+            interaction_steps: edge.interaction_steps.clone(),
+            process_steps: edge.process_steps.clone(),
+        });
+    }
+
+    scenarios.push(VizScenario {
+        label: label.to_owned(),
+        kind,
+        state_path,
+        steps,
+        actors: actors.into_iter().collect(),
+    });
+}
+
+fn shortest_path_to_any(graph: &DocGraphSnapshot, targets: &[usize]) -> Option<Vec<usize>> {
+    let target_set = targets.iter().copied().collect::<BTreeSet<_>>();
+    if target_set.is_empty() {
+        return None;
+    }
+
+    let mut queue = std::collections::VecDeque::new();
+    let mut parent = BTreeMap::new();
+    let mut visited = BTreeSet::new();
+
+    let mut initials = graph.initial_indices.clone();
+    initials.sort_unstable();
+    for initial in initials {
+        visited.insert(initial);
+        queue.push_back(initial);
+    }
+
+    while let Some(state) = queue.pop_front() {
+        if target_set.contains(&state) {
+            return Some(reconstruct_state_path(state, &parent));
+        }
+
+        let mut outgoing = graph.edges[state]
+            .iter()
+            .map(|edge| {
+                (
+                    edge.scenario_priority.unwrap_or_default(),
+                    edge.target,
+                    edge.label.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        outgoing.sort_by(|left, right| {
+            right.0
+                .cmp(&left.0)
+                .then(left.2.cmp(right.2))
+                .then(left.1.cmp(&right.1))
+        });
+
+        for (_, target, _) in outgoing {
+            if visited.insert(target) {
+                parent.insert(target, state);
+                queue.push_back(target);
+            }
+        }
+    }
+
+    None
+}
+
+fn reconstruct_state_path(
+    mut current: usize,
+    parent: &BTreeMap<usize, usize>,
+) -> Vec<usize> {
+    let mut path = vec![current];
+    while let Some(prev) = parent.get(&current).copied() {
+        path.push(prev);
+        current = prev;
+    }
+    path.reverse();
+    path
+}
+
+fn happy_path(graph: &DocGraphSnapshot) -> Option<Vec<usize>> {
+    let terminals = graph
+        .edges
+        .iter()
+        .enumerate()
+        .filter_map(|(index, outgoing)| {
+            (outgoing.is_empty() && !graph.deadlocks.contains(&index)).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if !terminals.is_empty() {
+        return shortest_path_to_any(graph, &terminals);
+    }
+
+    let mut candidates = (0..graph.states.len())
+        .map(|index| shortest_path_to_any(graph, &[index]))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .as_ref()
+            .map(Vec::len)
+            .cmp(&left.as_ref().map(Vec::len))
+            .then(left.cmp(right))
+    });
+    candidates.into_iter().flatten().next()
+}
+
+fn cycle_witness_path(graph: &DocGraphSnapshot) -> Option<Vec<usize>> {
+    let loop_groups = collect_loop_groups(graph);
+    let group = loop_groups.into_iter().next()?;
+    let entry = *group.iter().min()?;
+    let entry_path = shortest_path_to_any(graph, &[entry])?;
+    if graph.edges[entry].iter().any(|edge| edge.target == entry) {
+        let mut path = entry_path;
+        path.push(entry);
+        return Some(path);
+    }
+
+    let group_set = group.into_iter().collect::<BTreeSet<_>>();
+    for edge in &graph.edges[entry] {
+        if !group_set.contains(&edge.target) {
+            continue;
+        }
+        if let Some(mut suffix) = shortest_path_within(graph, edge.target, entry, &group_set) {
+            let mut path = entry_path.clone();
+            path.push(edge.target);
+            if !suffix.is_empty() {
+                suffix.remove(0);
+            }
+            path.extend(suffix);
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn shortest_path_within(
+    graph: &DocGraphSnapshot,
+    start: usize,
+    target: usize,
+    allowed: &BTreeSet<usize>,
+) -> Option<Vec<usize>> {
+    let mut queue = std::collections::VecDeque::from([start]);
+    let mut parent = BTreeMap::new();
+    let mut visited = BTreeSet::from([start]);
+
+    while let Some(state) = queue.pop_front() {
+        if state == target {
+            return Some(reconstruct_state_path(state, &parent));
+        }
+        let mut outgoing = graph.edges[state]
+            .iter()
+            .filter(|edge| allowed.contains(&edge.target))
+            .map(|edge| (edge.target, edge.label.as_str()))
+            .collect::<Vec<_>>();
+        outgoing.sort_by(|left, right| left.1.cmp(right.1).then(left.0.cmp(&right.0)));
+        for (next, _) in outgoing {
+            if visited.insert(next) {
+                parent.insert(next, state);
+                queue.push_back(next);
+            }
+        }
+    }
+
+    None
+}
+
+fn build_focus_graph(
+    graph: &DocGraphSnapshot,
+    scenarios: &[VizScenario],
+) -> Option<ReducedDocGraph> {
+    let mut nodes = BTreeSet::new();
+    let mut edges = Vec::new();
+    for scenario in scenarios {
+        for state in &scenario.state_path {
+            nodes.insert(*state);
+        }
+        for step in &scenario.steps {
+            edges.push((step.source, step.target, step.label.clone()));
+        }
+    }
+
+    if nodes.is_empty() {
+        return None;
+    }
+
+    let states = nodes
+        .iter()
+        .copied()
+        .map(|index| ReducedDocGraphNode {
+            original_index: index,
+            state: graph.states[index].clone(),
+            is_initial: graph.initial_indices.contains(&index),
+            is_deadlock: graph.deadlocks.contains(&index),
+        })
+        .collect::<Vec<_>>();
+    let edges = edges
+        .into_iter()
+        .map(|(source, target, label)| ReducedDocGraphEdge {
+            source,
+            target,
+            label,
+            collapsed_state_indices: Vec::new(),
+        })
+        .collect();
+
+    Some(ReducedDocGraph {
+        states,
+        edges,
+        truncated: graph.truncated,
+        stutter_omitted: graph.stutter_omitted,
+    })
+}
+
+fn collect_loop_groups(graph: &DocGraphSnapshot) -> Vec<Vec<usize>> {
+    struct Tarjan<'a> {
+        graph: &'a DocGraphSnapshot,
+        index: usize,
+        stack: Vec<usize>,
+        on_stack: BTreeSet<usize>,
+        indices: BTreeMap<usize, usize>,
+        lowlinks: BTreeMap<usize, usize>,
+        groups: Vec<Vec<usize>>,
+    }
+
+    impl<'a> Tarjan<'a> {
+        fn visit(&mut self, state: usize) {
+            self.indices.insert(state, self.index);
+            self.lowlinks.insert(state, self.index);
+            self.index += 1;
+            self.stack.push(state);
+            self.on_stack.insert(state);
+
+            for edge in &self.graph.edges[state] {
+                if !self.indices.contains_key(&edge.target) {
+                    self.visit(edge.target);
+                    let next_low = *self.lowlinks.get(&edge.target).expect("target visited");
+                    let low = self.lowlinks.get_mut(&state).expect("state lowlink exists");
+                    *low = (*low).min(next_low);
+                } else if self.on_stack.contains(&edge.target) {
+                    let target_index = *self.indices.get(&edge.target).expect("target index exists");
+                    let low = self.lowlinks.get_mut(&state).expect("state lowlink exists");
+                    *low = (*low).min(target_index);
+                }
+            }
+
+            if self.indices.get(&state) == self.lowlinks.get(&state) {
+                let mut group = Vec::new();
+                while let Some(candidate) = self.stack.pop() {
+                    self.on_stack.remove(&candidate);
+                    group.push(candidate);
+                    if candidate == state {
+                        break;
+                    }
+                }
+                let has_cycle = group.len() > 1
+                    || group
+                        .iter()
+                        .any(|member| self.graph.edges[*member].iter().any(|edge| edge.target == *member));
+                if has_cycle {
+                    group.sort_unstable();
+                    self.groups.push(group);
+                }
+            }
+        }
+    }
+
+    let mut tarjan = Tarjan {
+        graph,
+        index: 0,
+        stack: Vec::new(),
+        on_stack: BTreeSet::new(),
+        indices: BTreeMap::new(),
+        lowlinks: BTreeMap::new(),
+        groups: Vec::new(),
+    };
+    for state in 0..graph.states.len() {
+        if !tarjan.indices.contains_key(&state) {
+            tarjan.visit(state);
+        }
+    }
+    tarjan.groups.sort();
+    tarjan.groups
 }
 
 fn full_doc_graph(snapshot: &DocGraphSnapshot) -> ReducedDocGraph {
@@ -476,8 +1306,9 @@ mod tests {
     use std::any::{Any, TypeId};
 
     use crate::{
-        BoundedDomain, RegisteredActionDocLabel, RegisteredRelationalState, RelAtom, RelSet,
-        Relation2, RelationField, RelationalState, Signature,
+        BoundedDomain, RegisteredActionDocLabel, RegisteredActionDocPresentation,
+        RegisteredRelationalState, RelAtom, RelSet, Relation2, RelationField, RelationalState,
+        Signature,
     };
 
     #[test]
@@ -595,10 +1426,21 @@ mod tests {
         }
     }
 
+    fn nested_doc_action_presentation(value: &dyn Any) -> Option<DocGraphActionPresentation> {
+        nested_doc_action_format(value).map(DocGraphActionPresentation::new)
+    }
+
     inventory::submit! {
         RegisteredActionDocLabel {
             value_type_id: nested_doc_action_type_id,
             format: nested_doc_action_format,
+        }
+    }
+
+    inventory::submit! {
+        RegisteredActionDocPresentation {
+            value_type_id: nested_doc_action_type_id,
+            format: nested_doc_action_presentation,
         }
     }
 
@@ -624,10 +1466,40 @@ mod tests {
         }
     }
 
+    fn wrapper_doc_action_presentation(value: &dyn Any) -> Option<DocGraphActionPresentation> {
+        let value = value
+            .downcast_ref::<WrapperDocAction>()
+            .expect("registered action doc downcast");
+        match value {
+            WrapperDocAction::Direct => Some(DocGraphActionPresentation::with_steps(
+                "direct action doc",
+                vec![DocGraphInteractionStep::between(
+                    "Wrapper",
+                    "Observer",
+                    "direct action doc",
+                )],
+                vec![DocGraphProcessStep::for_actor(
+                    "Wrapper",
+                    DocGraphProcessKind::Emit,
+                    "direct action doc",
+                )],
+            )),
+            WrapperDocAction::Delegated(inner) => Some(describe_doc_graph_action(inner)),
+            WrapperDocAction::Missing => None,
+        }
+    }
+
     inventory::submit! {
         RegisteredActionDocLabel {
             value_type_id: wrapper_doc_action_type_id,
             format: wrapper_doc_action_format,
+        }
+    }
+
+    inventory::submit! {
+        RegisteredActionDocPresentation {
+            value_type_id: wrapper_doc_action_type_id,
+            format: wrapper_doc_action_presentation,
         }
     }
 
@@ -661,6 +1533,25 @@ mod tests {
             format_doc_graph_action(&WrapperDocAction::Missing),
             "Missing"
         );
+
+        let presentation = describe_doc_graph_action(&WrapperDocAction::Direct);
+        assert_eq!(presentation.label, "direct action doc");
+        assert_eq!(
+            presentation.interaction_steps,
+            vec![DocGraphInteractionStep::between(
+                "Wrapper",
+                "Observer",
+                "direct action doc",
+            )]
+        );
+        assert_eq!(
+            presentation.process_steps,
+            vec![DocGraphProcessStep::for_actor(
+                "Wrapper",
+                DocGraphProcessKind::Emit,
+                "direct action doc",
+            )]
+        );
     }
 
     #[test]
@@ -683,6 +1574,18 @@ mod tests {
         }
     }
 
+    fn demo_edge(label: &str, target: usize) -> DocGraphEdge {
+        let presentation = DocGraphActionPresentation::new(label);
+        DocGraphEdge {
+            label: label.to_owned(),
+            compact_label: presentation.compact_label,
+            scenario_priority: presentation.scenario_priority,
+            interaction_steps: presentation.interaction_steps,
+            process_steps: presentation.process_steps,
+            target,
+        }
+    }
+
     fn demo_snapshot() -> DocGraphSnapshot {
         DocGraphSnapshot {
             states: vec![
@@ -693,24 +1596,9 @@ mod tests {
                 demo_state("S4"),
             ],
             edges: vec![
-                vec![DocGraphEdge {
-                    label: "A".to_owned(),
-                    target: 1,
-                }],
-                vec![DocGraphEdge {
-                    label: "B".to_owned(),
-                    target: 2,
-                }],
-                vec![
-                    DocGraphEdge {
-                        label: "C".to_owned(),
-                        target: 3,
-                    },
-                    DocGraphEdge {
-                        label: "D".to_owned(),
-                        target: 4,
-                    },
-                ],
+                vec![demo_edge("A", 1)],
+                vec![demo_edge("B", 2)],
+                vec![demo_edge("C", 3), demo_edge("D", 4)],
                 Vec::new(),
                 Vec::new(),
             ],
@@ -768,14 +1656,8 @@ mod tests {
         let snapshot = DocGraphSnapshot {
             states: vec![demo_state("S0"), demo_state("S1"), demo_state("S2")],
             edges: vec![
-                vec![DocGraphEdge {
-                    label: "Advance".to_owned(),
-                    target: 1,
-                }],
-                vec![DocGraphEdge {
-                    label: "Loop".to_owned(),
-                    target: 1,
-                }],
+                vec![demo_edge("Advance", 1)],
+                vec![demo_edge("Loop", 1)],
                 Vec::new(),
             ],
             initial_indices: vec![0],
@@ -808,18 +1690,9 @@ mod tests {
                 demo_state("S3"),
             ],
             edges: vec![
-                vec![DocGraphEdge {
-                    label: "A".to_owned(),
-                    target: 1,
-                }],
-                vec![DocGraphEdge {
-                    label: "B".to_owned(),
-                    target: 2,
-                }],
-                vec![DocGraphEdge {
-                    label: "C".to_owned(),
-                    target: 3,
-                }],
+                vec![demo_edge("A", 1)],
+                vec![demo_edge("B", 2)],
+                vec![demo_edge("C", 3)],
                 Vec::new(),
             ],
             initial_indices: vec![0],
@@ -844,18 +1717,9 @@ mod tests {
             states: vec![demo_state("S0"), demo_state("S1")],
             edges: vec![
                 vec![
-                    DocGraphEdge {
-                        label: "Start(CommandKind::Deploy)".to_owned(),
-                        target: 1,
-                    },
-                    DocGraphEdge {
-                        label: "SetRunning".to_owned(),
-                        target: 1,
-                    },
-                    DocGraphEdge {
-                        label: "RequestCancel".to_owned(),
-                        target: 1,
-                    },
+                    demo_edge("Start(CommandKind::Deploy)", 1),
+                    demo_edge("SetRunning", 1),
+                    demo_edge("RequestCancel", 1),
                 ],
                 Vec::new(),
             ],

@@ -28,6 +28,7 @@ enum DemoState {
 )]
 enum DemoAction {
     /// Start demo
+    #[viz(compact_label = "start", scenario_priority = 7)]
     Start,
     /// Reset demo
     Reset,
@@ -98,4 +99,6 @@ fn formal_tests_use_doc_driven_edge_labels() {
         .expect("demo spec should be registered");
     let case = spec.cases.into_iter().next().expect("default case");
     assert_eq!(case.graph.edges[0][0].label, "Start demo");
+    assert_eq!(case.graph.edges[0][0].compact_label.as_deref(), Some("start"));
+    assert_eq!(case.graph.edges[0][0].scenario_priority, Some(7));
 }

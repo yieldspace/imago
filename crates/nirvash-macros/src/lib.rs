@@ -11,7 +11,7 @@ use syn::{
     parse_macro_input,
 };
 
-#[proc_macro_derive(Signature, attributes(signature, sig, signature_invariant))]
+#[proc_macro_derive(Signature, attributes(signature, sig, signature_invariant, viz))]
 pub fn derive_signature(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand_signature_derive(input) {
@@ -1411,10 +1411,24 @@ fn signature_action_doc_registration(
     let ident_snake = to_upper_snake(&ident.to_string()).to_lowercase();
     let type_id_fn_ident = format_ident!("__nirvash_action_doc_type_id_{}", ident_snake);
     let format_fn_ident = format_ident!("__nirvash_action_doc_format_{}", ident_snake);
+    let presentation_fn_ident = format_ident!("__nirvash_action_doc_presentation_{}", ident_snake);
     let type_id_item = guard_item(quote! {
         #[doc(hidden)]
         fn #type_id_fn_ident() -> ::std::any::TypeId {
             ::std::any::TypeId::of::<#ident>()
+        }
+    });
+    let presentation_item = guard_item(quote! {
+        #[doc(hidden)]
+        fn #presentation_fn_ident(
+            value: &dyn ::std::any::Any,
+        ) -> ::std::option::Option<::nirvash_core::DocGraphActionPresentation> {
+            let value = value
+                .downcast_ref::<#ident>()
+                .expect("registered action doc downcast");
+            match value {
+                #(#match_arms)*
+            }
         }
     });
     let format_item = guard_item(quote! {
@@ -1422,12 +1436,7 @@ fn signature_action_doc_registration(
         fn #format_fn_ident(
             value: &dyn ::std::any::Any,
         ) -> ::std::option::Option<::std::string::String> {
-            let value = value
-                .downcast_ref::<#ident>()
-                .expect("registered action doc downcast");
-            match value {
-                #(#match_arms)*
-            }
+            #presentation_fn_ident(value).map(|presentation| presentation.label)
         }
     });
     let inventory_item = guard_item(quote! {
@@ -1438,11 +1447,21 @@ fn signature_action_doc_registration(
             }
         }
     });
+    let presentation_inventory_item = guard_item(quote! {
+        ::nirvash_core::inventory::submit! {
+            ::nirvash_core::RegisteredActionDocPresentation {
+                value_type_id: #type_id_fn_ident,
+                format: #presentation_fn_ident,
+            }
+        }
+    });
 
     Ok(quote! {
         #type_id_item
+        #presentation_item
         #format_item
         #inventory_item
+        #presentation_inventory_item
     })
 }
 
@@ -1451,10 +1470,32 @@ fn signature_action_doc_match_arm(
     variant: &syn::Variant,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let variant_ident = &variant.ident;
+    let (compact_label, scenario_priority) = parse_viz_metadata(&variant.attrs)?;
     if let Some(summary) = first_doc_line(&variant.attrs) {
         let pattern = variant_ignore_pattern(enum_ident, variant_ident, &variant.fields);
+        let compact_label = compact_label
+            .as_ref()
+            .map(|label| {
+                quote! {
+                    presentation = presentation.with_compact_label(#label.to_owned());
+                }
+            })
+            .unwrap_or_default();
+        let scenario_priority = scenario_priority
+            .map(|priority| {
+                quote! {
+                    presentation = presentation.with_scenario_priority(#priority);
+                }
+            })
+            .unwrap_or_default();
         return Ok(quote! {
-            #pattern => ::std::option::Option::Some(#summary.to_owned()),
+            #pattern => {
+                let mut presentation =
+                    ::nirvash_core::DocGraphActionPresentation::new(#summary.to_owned());
+                #compact_label
+                #scenario_priority
+                ::std::option::Option::Some(presentation)
+            },
         });
     }
 
@@ -1489,6 +1530,31 @@ fn first_doc_line(attrs: &[Attribute]) -> Option<LitStr> {
     })
 }
 
+fn parse_viz_metadata(attrs: &[Attribute]) -> syn::Result<(Option<LitStr>, Option<i32>)> {
+    let mut compact_label = None;
+    let mut scenario_priority = None;
+
+    for attr in attrs {
+        if !attr.path().is_ident("viz") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("compact_label") {
+                compact_label = Some(meta.value()?.parse()?);
+                return Ok(());
+            }
+            if meta.path.is_ident("scenario_priority") {
+                let value: syn::LitInt = meta.value()?.parse()?;
+                scenario_priority = Some(value.base10_parse()?);
+                return Ok(());
+            }
+            Err(meta.error("unsupported viz option"))
+        })?;
+    }
+
+    Ok((compact_label, scenario_priority))
+}
+
 fn variant_ignore_pattern(
     enum_ident: &Ident,
     variant_ident: &Ident,
@@ -1511,7 +1577,7 @@ fn single_field_delegate_arm(
             let binding = format_ident!("__nirvash_inner");
             Some(quote! {
                 #enum_ident::#variant_ident(#binding) => ::std::option::Option::Some(
-                    ::nirvash_core::format_doc_graph_action(#binding)
+                    ::nirvash_core::describe_doc_graph_action(#binding)
                 ),
             })
         }
@@ -1520,7 +1586,7 @@ fn single_field_delegate_arm(
             let field_ident = fields.named.first()?.ident.as_ref()?;
             Some(quote! {
                 #enum_ident::#variant_ident { #field_ident: #binding } => ::std::option::Option::Some(
-                    ::nirvash_core::format_doc_graph_action(#binding)
+                    ::nirvash_core::describe_doc_graph_action(#binding)
                 ),
             })
         }
@@ -2405,12 +2471,33 @@ fn expand_temporal_spec(
     emit_composition: bool,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let self_ty = (*item.self_ty).clone();
+    let spec_path = match &self_ty {
+        Type::Path(type_path) if type_path.qself.is_none() => type_path.path.clone(),
+        _ => {
+            return Err(syn::Error::new(
+                self_ty.span(),
+                "#[system_spec]/#[subsystem_spec] requires a simple path type",
+            ));
+        }
+    };
+    let spec_tail = path_tail_ident(&spec_path)?.clone();
+    let spec_name = LitStr::new(&spec_tail.to_string(), spec_tail.span());
+    let spec_viz_provider_ident = format_ident!("__NirvashSpecVizMetadataProvider{}", spec_tail);
+    let spec_viz_provider_build_ident = format_ident!(
+        "__nirvash_spec_viz_metadata_provider_build_{}",
+        spec_tail.to_string().to_lowercase()
+    );
     let doc_attrs = doc_fragment_attrs(&self_ty)?;
     let state_ty = associated_type(&item, "State")?;
     let action_ty = associated_type(&item, "Action")?;
 
     let model_cases = args.model_cases;
     let subsystems = args.subsystems;
+    let model_cases_name_expr = if let Some(model_cases) = &model_cases {
+        quote! { ::std::option::Option::Some(::core::stringify!(#model_cases)) }
+    } else {
+        quote! { ::std::option::Option::None }
+    };
 
     if !emit_composition && !subsystems.is_empty() {
         return Err(syn::Error::new(
@@ -2434,6 +2521,14 @@ fn expand_temporal_spec(
         let subsystem_values = subsystems.iter();
         quote! {
             impl #self_ty {
+                pub const fn spec_kind() -> ::nirvash_core::SpecVizKind {
+                    ::nirvash_core::SpecVizKind::System
+                }
+
+                pub const fn model_cases_name() -> ::std::option::Option<&'static str> {
+                    #model_cases_name_expr
+                }
+
                 pub const fn registered_subsystems() -> &'static [&'static str] {
                     &[#(#subsystem_values),*]
                 }
@@ -2458,7 +2553,21 @@ fn expand_temporal_spec(
             }
         }
     } else {
-        quote! {}
+        quote! {
+            impl #self_ty {
+                pub const fn spec_kind() -> ::nirvash_core::SpecVizKind {
+                    ::nirvash_core::SpecVizKind::Subsystem
+                }
+
+                pub const fn model_cases_name() -> ::std::option::Option<&'static str> {
+                    #model_cases_name_expr
+                }
+
+                pub const fn registered_subsystems() -> &'static [&'static str] {
+                    &[]
+                }
+            }
+        }
     };
 
     Ok(quote! {
@@ -2487,6 +2596,47 @@ fn expand_temporal_spec(
                 }
                 ::nirvash_core::registry::apply_registered_model_case_metadata::<Self>(&mut model_cases);
                 model_cases
+            }
+        }
+
+        #[doc(hidden)]
+        struct #spec_viz_provider_ident;
+
+        impl ::nirvash_core::SpecVizProvider for #spec_viz_provider_ident {
+            fn spec_name(&self) -> &'static str {
+                #spec_name
+            }
+
+            fn bundle(&self) -> ::nirvash_core::SpecVizBundle {
+                let metadata = ::nirvash_core::SpecVizMetadata {
+                    kind: ::std::option::Option::Some(<#self_ty>::spec_kind()),
+                    state_ty: ::std::any::type_name::<#state_ty>().to_owned(),
+                    action_ty: ::std::any::type_name::<#action_ty>().to_owned(),
+                    model_cases: <#self_ty>::model_cases_name().map(|name| name.to_owned()),
+                    subsystems: <#self_ty>::registered_subsystems()
+                        .iter()
+                        .map(|name| (*name).to_owned())
+                        .collect::<::std::vec::Vec<_>>(),
+                    registrations: ::nirvash_core::registry::collect_spec_viz_registrations::<#self_ty>(),
+                    policy: ::nirvash_core::VizPolicy::default(),
+                };
+                ::nirvash_core::SpecVizBundle::from_doc_graph_spec(
+                    #spec_name,
+                    metadata,
+                    ::std::vec::Vec::new(),
+                )
+            }
+        }
+
+        #[doc(hidden)]
+        fn #spec_viz_provider_build_ident() -> ::std::boxed::Box<dyn ::nirvash_core::SpecVizProvider> {
+            ::std::boxed::Box::new(#spec_viz_provider_ident)
+        }
+
+        ::nirvash_core::inventory::submit! {
+            ::nirvash_core::RegisteredSpecVizProvider {
+                spec_name: #spec_name,
+                build: #spec_viz_provider_build_ident,
             }
         }
 
@@ -2520,6 +2670,11 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
     );
     let doc_provider_link_ident = format_ident!(
         "__nirvash_doc_graph_provider_link_{}",
+        spec_tail.to_string().to_lowercase()
+    );
+    let spec_viz_provider_ident = format_ident!("__NirvashSpecVizProvider{}", spec_tail);
+    let spec_viz_provider_build_ident = format_ident!(
+        "__nirvash_spec_viz_provider_build_{}",
         spec_tail.to_string().to_lowercase()
     );
     let spec_name = LitStr::new(&spec_tail.to_string(), spec_tail.span());
@@ -2617,9 +2772,21 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                                     .map(|outgoing| {
                                         outgoing
                                             .iter()
-                                            .map(|edge| ::nirvash_core::DocGraphEdge {
-                                                label: ::nirvash_core::format_doc_graph_action(&edge.action),
-                                                target: edge.target,
+                                            .map(|edge| {
+                                                let presentation =
+                                                    ::nirvash_core::describe_doc_graph_action(
+                                                        &edge.action,
+                                                    );
+                                                ::nirvash_core::DocGraphEdge {
+                                                    label: presentation.label,
+                                                    compact_label: presentation.compact_label,
+                                                    scenario_priority: presentation
+                                                        .scenario_priority,
+                                                    interaction_steps: presentation
+                                                        .interaction_steps,
+                                                    process_steps: presentation.process_steps,
+                                                    target: edge.target,
+                                                }
                                             })
                                             .collect::<::std::vec::Vec<_>>()
                                     })
@@ -2661,19 +2828,59 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
         }
 
         #[doc(hidden)]
+        struct #spec_viz_provider_ident;
+
+        impl ::nirvash_core::SpecVizProvider for #spec_viz_provider_ident {
+            fn spec_name(&self) -> &'static str {
+                #spec_name
+            }
+
+            fn bundle(&self) -> ::nirvash_core::SpecVizBundle {
+                let doc_cases =
+                    <#doc_provider_ident as ::nirvash_core::DocGraphProvider>::cases(&#doc_provider_ident);
+                let metadata = ::nirvash_core::SpecVizMetadata {
+                    kind: ::std::option::Option::Some(<#spec_ty>::spec_kind()),
+                    state_ty: ::std::any::type_name::<<#spec_ty as ::nirvash_core::TransitionSystem>::State>().to_owned(),
+                    action_ty: ::std::any::type_name::<<#spec_ty as ::nirvash_core::TransitionSystem>::Action>().to_owned(),
+                    model_cases: <#spec_ty>::model_cases_name().map(|name| name.to_owned()),
+                    subsystems: <#spec_ty>::registered_subsystems()
+                        .iter()
+                        .map(|name| (*name).to_owned())
+                        .collect::<::std::vec::Vec<_>>(),
+                    registrations: ::nirvash_core::registry::collect_spec_viz_registrations::<#spec_ty>(),
+                    policy: ::nirvash_core::VizPolicy::default(),
+                };
+                ::nirvash_core::SpecVizBundle::from_doc_graph_spec(#spec_name, metadata, doc_cases)
+            }
+        }
+
+        #[doc(hidden)]
         fn #doc_provider_build_ident() -> ::std::boxed::Box<dyn ::nirvash_core::DocGraphProvider> {
             ::std::boxed::Box::new(#doc_provider_ident)
         }
 
         #[doc(hidden)]
+        fn #spec_viz_provider_build_ident() -> ::std::boxed::Box<dyn ::nirvash_core::SpecVizProvider> {
+            ::std::boxed::Box::new(#spec_viz_provider_ident)
+        }
+
+        #[doc(hidden)]
         pub fn #doc_provider_link_ident() {
             let _ = #doc_provider_build_ident as fn() -> ::std::boxed::Box<dyn ::nirvash_core::DocGraphProvider>;
+            let _ = #spec_viz_provider_build_ident as fn() -> ::std::boxed::Box<dyn ::nirvash_core::SpecVizProvider>;
         }
 
         ::nirvash_core::inventory::submit! {
             ::nirvash_core::RegisteredDocGraphProvider {
                 spec_name: #spec_name,
                 build: #doc_provider_build_ident,
+            }
+        }
+
+        ::nirvash_core::inventory::submit! {
+            ::nirvash_core::RegisteredSpecVizProvider {
+                spec_name: #spec_name,
+                build: #spec_viz_provider_build_ident,
             }
         }
 

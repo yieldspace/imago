@@ -25,11 +25,16 @@ pub use conformance::{
     run_registered_code_witness_tests,
 };
 pub use doc_graph::{
-    DocGraphCase, DocGraphEdge, DocGraphPolicy, DocGraphProvider, DocGraphReductionMode,
-    DocGraphSnapshot, DocGraphSpec, DocGraphState, ReachableGraphEdge, ReachableGraphSnapshot,
-    ReducedDocGraph, ReducedDocGraphEdge, ReducedDocGraphNode, RegisteredDocGraphProvider,
-    collect_doc_graph_specs, format_doc_graph_action, reduce_doc_graph, summarize_doc_graph_state,
-    summarize_doc_graph_text,
+    DocGraphActionPresentation, DocGraphCase, DocGraphEdge, DocGraphInteractionStep,
+    DocGraphPolicy, DocGraphProcessKind, DocGraphProcessStep, DocGraphProvider,
+    DocGraphReductionMode, DocGraphSnapshot, DocGraphSpec, DocGraphState, ReachableGraphEdge,
+    ReachableGraphSnapshot, ReducedDocGraph, ReducedDocGraphEdge, ReducedDocGraphNode,
+    RegisteredDocGraphProvider, RegisteredSpecVizProvider, SpecVizActionDescriptor,
+    SpecVizBundle, SpecVizCase, SpecVizCaseStats, SpecVizKind, SpecVizMetadata,
+    SpecVizProvider, SpecVizRegistrationSet, VizPolicy, VizScenario, VizScenarioKind,
+    VizScenarioStep, collect_doc_graph_specs, collect_spec_viz_bundles,
+    describe_doc_graph_action, format_doc_graph_action, reduce_doc_graph,
+    summarize_doc_graph_state, summarize_doc_graph_text,
 };
 pub use domain::{
     BoundedDomain, IntoBoundedDomain, OpaqueModelValue, Signature, bounded_vec_domain,
@@ -39,7 +44,7 @@ pub use fairness::Fairness;
 pub use inventory;
 pub use ltl::Ltl;
 pub use predicate::{ActionConstraint, StateConstraint, StatePredicate, StepPredicate};
-pub use registry::RegisteredActionDocLabel;
+pub use registry::{RegisteredActionDocLabel, RegisteredActionDocPresentation};
 pub use relation::{
     RegisteredRelationalState, RelAtom, RelSet, Relation2, RelationError, RelationField,
     RelationFieldKind, RelationFieldSchema, RelationFieldSummary, RelationalState,
