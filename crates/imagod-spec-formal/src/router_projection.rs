@@ -1,4 +1,4 @@
-use imagod_spec::{RouterOutputSummary, RouterStateSummary, SummaryRequestKind};
+use imagod_spec::{RouterOutputSummary, RouterStateSummary};
 use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
@@ -8,8 +8,8 @@ use nirvash_macros::{ActionVocabulary, Signature};
 use crate::{
     CommandKind, CommandProtocolAction,
     atoms::{RequestKindAtom, SessionAtom, StreamAtom},
-    session_auth::SessionAuthState,
     session_auth::SessionAuthAction,
+    session_auth::SessionAuthState,
     session_transport::SessionTransportState,
     summary_mapping::system_effects,
     system::{SystemAtomicAction, SystemEffect, SystemSpec, SystemState},
@@ -165,55 +165,6 @@ impl RouterProjectionSpec {
             }
         }
     }
-
-    fn request_kind(self, action: RouterProjectionAction) -> SummaryRequestKind {
-        match action {
-            RouterProjectionAction::HelloNegotiate => SummaryRequestKind::HelloNegotiate,
-            RouterProjectionAction::DeployPrepare => SummaryRequestKind::DeployPrepare,
-            RouterProjectionAction::ArtifactPush => SummaryRequestKind::ArtifactPush,
-            RouterProjectionAction::ArtifactCommit => SummaryRequestKind::ArtifactCommit,
-            RouterProjectionAction::StateRequest => SummaryRequestKind::StateRequest,
-            RouterProjectionAction::ServicesList => SummaryRequestKind::ServicesList,
-            RouterProjectionAction::CommandCancel => SummaryRequestKind::CommandCancel,
-            RouterProjectionAction::RpcInvoke => SummaryRequestKind::RpcInvoke,
-            RouterProjectionAction::BindingsCertUpload => SummaryRequestKind::BindingsCertUpload,
-        }
-    }
-
-    pub fn initial_summary(self) -> RouterStateSummary {
-        RouterStateSummary::initial_admin_stream()
-    }
-
-    pub fn action_allowed(self, summary: &RouterStateSummary, action: RouterProjectionAction) -> bool {
-        if !summary.active_session || summary.request.is_some() {
-            return false;
-        }
-        match action {
-            RouterProjectionAction::HelloNegotiate => true,
-            RouterProjectionAction::DeployPrepare => summary.deploy_prepare_authorized,
-            RouterProjectionAction::ArtifactPush => summary.artifact_push_authorized,
-            RouterProjectionAction::ArtifactCommit => summary.artifact_commit_authorized,
-            RouterProjectionAction::StateRequest => summary.state_request_authorized,
-            RouterProjectionAction::ServicesList => summary.services_list_authorized,
-            RouterProjectionAction::CommandCancel => summary.command_cancel_authorized,
-            RouterProjectionAction::RpcInvoke => summary.rpc_invoke_authorized,
-            RouterProjectionAction::BindingsCertUpload => summary.bindings_cert_upload_authorized,
-        }
-    }
-
-    pub fn advance_summary(
-        self,
-        summary: &RouterStateSummary,
-        action: RouterProjectionAction,
-    ) -> RouterStateSummary {
-        let mut next = *summary;
-        next.request = Some(self.request_kind(action));
-        if matches!(action, RouterProjectionAction::BindingsCertUpload) {
-            next.authority_uploaded = true;
-        }
-        next
-    }
-
 }
 
 impl TransitionSystem for RouterProjectionSpec {

@@ -603,13 +603,8 @@ mod tests {
         ContractEffectSummary, ErrorCode, LogsOutputSummary, LogsStateSummary, SummaryLogChunk,
         SummaryRequestKind, SummaryStreamId,
     };
-    use imagod_spec_formal::{
-        LogsProjectionAction, LogsProjectionSpec,
-    };
-    use nirvash_core::{
-        conformance::{ActionApplier, ProtocolRuntimeBinding, StateObserver},
-    };
-    use nirvash_macros::code_tests;
+    use imagod_spec_formal::{LogsProjectionAction, LogsProjectionSpec};
+    use nirvash_macros::nirvash_runtime_contract;
     use tokio::sync::{Notify, broadcast};
 
     use super::*;
@@ -747,122 +742,117 @@ mod tests {
     impl LogsProjectionRuntime {
         fn new() -> Self {
             Self {
-                summary: tokio::sync::Mutex::new(LogsProjectionSpec::new().initial_summary()),
+                summary: tokio::sync::Mutex::new(LogsStateSummary::default()),
                 pending: tokio::sync::Mutex::new(VecDeque::new()),
             }
         }
     }
 
-    #[derive(Debug, Default, Clone, Copy)]
-    struct LogsProjectionBinding;
-
-    impl ProtocolRuntimeBinding<LogsProjectionSpec> for LogsProjectionBinding {
-        type Runtime = LogsProjectionRuntime;
-        type Context = ();
-
-        async fn fresh_runtime(_spec: &LogsProjectionSpec) -> Self::Runtime {
-            LogsProjectionRuntime::new()
+    fn logs_request_output(_result: &()) -> LogsOutputSummary {
+        LogsOutputSummary {
+            effects: vec![ContractEffectSummary::Response(
+                SummaryStreamId::Stream1,
+                SummaryRequestKind::LogsRequest,
+            )],
         }
-
-        fn context(_spec: &LogsProjectionSpec) -> Self::Context {}
     }
 
-    impl ActionApplier for LogsProjectionRuntime {
-        type Action = LogsProjectionAction;
-        type Output = LogsOutputSummary;
-        type Context = ();
+    fn logs_chunk_output(_result: &()) -> LogsOutputSummary {
+        LogsOutputSummary {
+            effects: vec![ContractEffectSummary::LogChunk(
+                SummaryStreamId::Stream1,
+                SummaryLogChunk::Chunk0,
+            )],
+        }
+    }
 
-        async fn execute_action(
-            &self,
-            _context: &Self::Context,
-            action: &Self::Action,
-        ) -> Self::Output {
-            let spec = LogsProjectionSpec::new();
-            let prev = *self.summary.lock().await;
-            if !spec.action_allowed(&prev, *action) {
-                return LogsOutputSummary::default();
-            }
+    fn logs_end_output(_result: &()) -> LogsOutputSummary {
+        LogsOutputSummary {
+            effects: vec![ContractEffectSummary::LogsEnd(SummaryStreamId::Stream1)],
+        }
+    }
 
-            match action {
-                LogsProjectionAction::LogsRequest => {
-                    let session =
-                        Arc::new(FakeProtocolSession::new(2048, vec![Ok(()), Ok(()), Ok(())]));
-                    run_logs_forwarder(
-                        session.clone(),
-                        Uuid::from_u128(17),
-                        Uuid::from_u128(18),
-                        vec![sample_subscription("svc-a", b"hello-log")],
-                        false,
-                    )
-                    .await;
-                    *self.pending.lock().await = decode_datagram_kinds(&session.sent_datagrams());
-                }
-                LogsProjectionAction::LogsChunk => {
-                    let mut pending = self.pending.lock().await;
-                    let mut saw_chunk = false;
-                    while let Some(kind) = pending.front().copied() {
-                        match kind {
-                            RecordedDatagramKind::Chunk => {
-                                saw_chunk = true;
-                                pending.pop_front();
-                            }
-                            RecordedDatagramKind::End => break,
-                        }
-                    }
-                    assert!(
-                        saw_chunk,
-                        "logs forwarder should emit at least one logs.chunk"
-                    );
-                }
-                LogsProjectionAction::LogsEnd => {
-                    let mut pending = self.pending.lock().await;
-                    while matches!(pending.front(), Some(RecordedDatagramKind::Chunk)) {
+    #[nirvash_runtime_contract(
+        spec = LogsProjectionSpec,
+        binding = LogsProjectionBinding,
+        context = (),
+        context_expr = (),
+        summary = LogsStateSummary,
+        output = LogsOutputSummary,
+        summary_field = summary,
+        initial_summary = LogsStateSummary::default(),
+        fresh_runtime = LogsProjectionRuntime::new(),
+        tests(grouped)
+    )]
+    impl LogsProjectionRuntime {
+        #[nirvash_macros::contract_case(
+            action = LogsProjectionAction::LogsRequest,
+            requires = summary.service_running && summary.logs_authorized && !summary.acknowledged,
+            update(acknowledged = true),
+            output = logs_request_output,
+            law_output = logs_request_output(&())
+        )]
+        async fn contract_logs_request(&self) {
+            let session = Arc::new(FakeProtocolSession::new(2048, vec![Ok(()), Ok(()), Ok(())]));
+            run_logs_forwarder(
+                session.clone(),
+                Uuid::from_u128(17),
+                Uuid::from_u128(18),
+                vec![sample_subscription("svc-a", b"hello-log")],
+                false,
+            )
+            .await;
+            *self.pending.lock().await = decode_datagram_kinds(&session.sent_datagrams());
+        }
+
+        #[nirvash_macros::contract_case(
+            action = LogsProjectionAction::LogsChunk,
+            requires = summary.acknowledged && !summary.chunk_seen && !summary.ended,
+            update(chunk_seen = true),
+            output = logs_chunk_output,
+            law_output = logs_chunk_output(&())
+        )]
+        async fn contract_logs_chunk(&self) {
+            let mut pending = self.pending.lock().await;
+            let mut saw_chunk = false;
+            while let Some(kind) = pending.front().copied() {
+                match kind {
+                    RecordedDatagramKind::Chunk => {
+                        saw_chunk = true;
                         pending.pop_front();
                     }
-                    assert_eq!(
-                        pending.pop_front(),
-                        Some(RecordedDatagramKind::End),
-                        "logs forwarder should terminate with logs.end",
-                    );
-                    assert!(
-                        pending.is_empty(),
-                        "logs projection should consume all forwarded datagrams",
-                    );
+                    RecordedDatagramKind::End => break,
                 }
             }
+            assert!(
+                saw_chunk,
+                "logs forwarder should emit at least one logs.chunk"
+            );
+        }
 
-            *self.summary.lock().await = spec.advance_summary(&prev, *action);
-            match action {
-                LogsProjectionAction::LogsRequest => LogsOutputSummary {
-                    effects: vec![ContractEffectSummary::Response(
-                        SummaryStreamId::Stream1,
-                        SummaryRequestKind::LogsRequest,
-                    )],
-                },
-                LogsProjectionAction::LogsChunk => LogsOutputSummary {
-                    effects: vec![ContractEffectSummary::LogChunk(
-                        SummaryStreamId::Stream1,
-                        SummaryLogChunk::Chunk0,
-                    )],
-                },
-                LogsProjectionAction::LogsEnd => LogsOutputSummary {
-                    effects: vec![ContractEffectSummary::LogsEnd(SummaryStreamId::Stream1)],
-                },
+        #[nirvash_macros::contract_case(
+            action = LogsProjectionAction::LogsEnd,
+            requires = summary.acknowledged && !summary.ended,
+            update(ended = true),
+            output = logs_end_output,
+            law_output = logs_end_output(&())
+        )]
+        async fn contract_logs_end(&self) {
+            let mut pending = self.pending.lock().await;
+            while matches!(pending.front(), Some(RecordedDatagramKind::Chunk)) {
+                pending.pop_front();
             }
+            assert_eq!(
+                pending.pop_front(),
+                Some(RecordedDatagramKind::End),
+                "logs forwarder should terminate with logs.end",
+            );
+            assert!(
+                pending.is_empty(),
+                "logs projection should consume all forwarded datagrams",
+            );
         }
     }
-
-    impl StateObserver for LogsProjectionRuntime {
-        type SummaryState = LogsStateSummary;
-        type Context = ();
-
-        async fn observe_state(&self, _context: &Self::Context) -> Self::SummaryState {
-            *self.summary.lock().await
-        }
-    }
-
-    #[code_tests(spec = LogsProjectionSpec, binding = LogsProjectionBinding)]
-    const _: () = ();
 
     #[tokio::test]
     async fn given_retryable_datagram_error__when_send_datagram_with_retry__then_second_attempt_succeeds()

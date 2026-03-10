@@ -36,9 +36,10 @@ impl RpcState {
             || summary.remote_completed
             || summary.remote_disconnected
         {
-            state
-                .bindings
-                .insert(ServiceAtom::Service0, binding_target_for(ServiceAtom::Service0));
+            state.bindings.insert(
+                ServiceAtom::Service0,
+                binding_target_for(ServiceAtom::Service0),
+            );
         }
         if summary.local_rpc_resolved {
             state
@@ -58,20 +59,18 @@ impl RpcState {
             state
                 .remote_connection_owners
                 .insert(RpcConnectionAtom::Connection0, ServiceAtom::Service0);
-            state.remote_connection_authorities.insert(
-                RpcConnectionAtom::Connection0,
-                RemoteAuthorityAtom::Edge0,
-            );
+            state
+                .remote_connection_authorities
+                .insert(RpcConnectionAtom::Connection0, RemoteAuthorityAtom::Edge0);
         }
         let remote_call = remote_call_for(ServiceAtom::Service0);
         if summary.remote_completed || summary.remote_denied {
             state
                 .remote_call_owners
                 .insert(remote_call, ServiceAtom::Service0);
-            state.remote_call_targets.insert(
-                remote_call,
-                binding_target_for(ServiceAtom::Service0),
-            );
+            state
+                .remote_call_targets
+                .insert(remote_call, binding_target_for(ServiceAtom::Service0));
         }
         if summary.remote_completed {
             state.completed_remote_calls.insert(remote_call);

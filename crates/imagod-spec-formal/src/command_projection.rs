@@ -30,10 +30,7 @@ impl CommandProjectionSpec {
         self.system().initial_state()
     }
 
-    fn command_observed_state(
-        self,
-        observed: &RuntimeCommandStateSummary,
-    ) -> CommandProtocolState {
+    fn command_observed_state(self, observed: &RuntimeCommandStateSummary) -> CommandProtocolState {
         CommandProtocolState {
             tracked: observed.tracked,
             lifecycle_state: observed.lifecycle_state,

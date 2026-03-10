@@ -219,6 +219,62 @@ where
     spec.abstract_output(summary)
 }
 
+pub fn assert_initial_refinement<Spec>(spec: &Spec, summary: &Spec::SummaryState)
+where
+    Spec: ProtocolConformanceSpec,
+    Spec::State: PartialEq,
+{
+    let projected = spec.abstract_state(summary);
+    let initial_states = <Spec as TransitionSystem>::initial_states(spec);
+    assert!(
+        initial_states.contains(&projected),
+        "runtime initial state {:?} must be one of the declared initial states {:?}",
+        projected,
+        initial_states,
+    );
+}
+
+pub fn assert_step_refinement<Spec>(
+    spec: &Spec,
+    before_summary: &Spec::SummaryState,
+    action: &Spec::Action,
+    after_summary: &Spec::SummaryState,
+) -> Spec::State
+where
+    Spec: ProtocolConformanceSpec,
+    Spec::State: PartialEq,
+{
+    let before = spec.abstract_state(before_summary);
+    let expected_next = <Spec as TransitionSystem>::transition(spec, &before, action)
+        .expect("step refinement requires an allowed abstract transition");
+    let projected_after = spec.abstract_state(after_summary);
+    assert_eq!(
+        projected_after, expected_next,
+        "summary/state next mismatch for {action:?} from {before_summary:?}",
+    );
+    expected_next
+}
+
+pub fn assert_output_refinement<Spec>(
+    spec: &Spec,
+    before_summary: &Spec::SummaryState,
+    action: &Spec::Action,
+    after_summary: &Spec::SummaryState,
+    output_summary: &Spec::SummaryOutput,
+) where
+    Spec: ProtocolConformanceSpec,
+    Spec::State: PartialEq,
+{
+    let before = spec.abstract_state(before_summary);
+    let next = spec.abstract_state(after_summary);
+    let expected_output = spec.expected_output(&before, action, Some(&next));
+    let projected_output = spec.abstract_output(output_summary);
+    assert_eq!(
+        projected_output, expected_output,
+        "summary/state output mismatch for {action:?} from {before_summary:?}",
+    );
+}
+
 #[derive(Debug, Default)]
 struct WitnessHarnessArgs {
     filter: Option<String>,
@@ -340,4 +396,95 @@ pub fn run_registered_code_witness_tests() {
         failures.len()
     );
     process::exit(101);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ActionVocabulary;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum DummyAction {
+        Advance,
+        Reject,
+    }
+
+    impl ActionVocabulary for DummyAction {
+        fn action_vocabulary() -> Vec<Self> {
+            vec![Self::Advance, Self::Reject]
+        }
+    }
+
+    #[derive(Debug, Default, Clone, Copy)]
+    struct DummySpec;
+
+    impl TransitionSystem for DummySpec {
+        type State = bool;
+        type Action = DummyAction;
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![false]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            DummyAction::action_vocabulary()
+        }
+
+        fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+            match (state, action) {
+                (false, DummyAction::Advance) => Some(true),
+                _ => None,
+            }
+        }
+    }
+
+    impl ProtocolConformanceSpec for DummySpec {
+        type ExpectedOutput = &'static str;
+        type SummaryState = bool;
+        type SummaryOutput = &'static str;
+
+        fn expected_output(
+            &self,
+            _prev: &Self::State,
+            _action: &Self::Action,
+            _next: Option<&Self::State>,
+        ) -> Self::ExpectedOutput {
+            "ok"
+        }
+
+        fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State {
+            *summary
+        }
+
+        fn abstract_output(&self, summary: &Self::SummaryOutput) -> Self::ExpectedOutput {
+            *summary
+        }
+    }
+
+    #[test]
+    fn refinement_helpers_accept_allowed_step_and_output() {
+        let spec = DummySpec;
+        assert_initial_refinement(&spec, &false);
+        let next = assert_step_refinement(&spec, &false, &DummyAction::Advance, &true);
+        assert!(next);
+        assert_output_refinement(&spec, &false, &DummyAction::Advance, &true, &"ok");
+    }
+
+    #[test]
+    fn step_refinement_panics_for_rejected_transition() {
+        let spec = DummySpec;
+        let panic = std::panic::catch_unwind(|| {
+            let _ = assert_step_refinement(&spec, &false, &DummyAction::Reject, &false);
+        });
+        assert!(panic.is_err(), "rejected transition should panic");
+    }
+
+    #[test]
+    fn output_refinement_panics_for_mismatched_output() {
+        let spec = DummySpec;
+        let panic = std::panic::catch_unwind(|| {
+            assert_output_refinement(&spec, &false, &DummyAction::Advance, &true, &"bad");
+        });
+        assert!(panic.is_err(), "mismatched output should panic");
+    }
 }

@@ -7,8 +7,8 @@ use nirvash_macros::{
     subsystem_spec,
 };
 
-use crate::summary_mapping::request_kind_atom;
 use crate::atoms::{CommandEventAtom, LogChunkAtom, RequestKindAtom, StreamAtom};
+use crate::summary_mapping::request_kind_atom;
 
 #[derive(Debug, Clone, PartialEq, Eq, RelationalState)]
 pub struct WireProtocolState {
@@ -31,7 +31,9 @@ impl WireProtocolState {
             log_ended: RelSet::empty(),
         };
         if let Some(kind) = summary.request {
-            state.requests.insert(StreamAtom::Stream0, request_kind_atom(kind));
+            state
+                .requests
+                .insert(StreamAtom::Stream0, request_kind_atom(kind));
             state
                 .responses
                 .insert(StreamAtom::Stream0, request_kind_atom(kind));

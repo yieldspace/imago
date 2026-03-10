@@ -52,9 +52,7 @@ pub enum SummaryLogChunk {
     Chunk0,
 }
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum SummaryTaskState {
     #[default]
     NotStarted,
@@ -62,9 +60,7 @@ pub enum SummaryTaskState {
     Failed,
 }
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum SummaryShutdownPhase {
     #[default]
     Idle,

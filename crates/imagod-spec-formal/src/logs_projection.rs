@@ -125,36 +125,6 @@ impl LogsProjectionSpec {
             LogsProjectionAction::LogsEnd => WireProtocolAction::LogsEnd(StreamAtom::Stream1),
         }
     }
-
-    pub fn initial_summary(self) -> LogsStateSummary {
-        LogsStateSummary::initial_running_service()
-    }
-
-    pub fn action_allowed(self, summary: &LogsStateSummary, action: LogsProjectionAction) -> bool {
-        match action {
-            LogsProjectionAction::LogsRequest => {
-                summary.service_running && summary.logs_authorized && !summary.acknowledged
-            }
-            LogsProjectionAction::LogsChunk => {
-                summary.acknowledged && !summary.chunk_seen && !summary.ended
-            }
-            LogsProjectionAction::LogsEnd => summary.acknowledged && !summary.ended,
-        }
-    }
-
-    pub fn advance_summary(
-        self,
-        summary: &LogsStateSummary,
-        action: LogsProjectionAction,
-    ) -> LogsStateSummary {
-        let mut next = *summary;
-        match action {
-            LogsProjectionAction::LogsRequest => next.acknowledged = true,
-            LogsProjectionAction::LogsChunk => next.chunk_seen = true,
-            LogsProjectionAction::LogsEnd => next.ended = true,
-        }
-        next
-    }
 }
 
 impl TransitionSystem for LogsProjectionSpec {

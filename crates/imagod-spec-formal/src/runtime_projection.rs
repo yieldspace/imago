@@ -1,4 +1,4 @@
-use imagod_spec::{RuntimeOutputSummary, RuntimeStateSummary, SummaryShutdownPhase};
+use imagod_spec::{RuntimeOutputSummary, RuntimeStateSummary};
 use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
     concurrent::ConcurrentAction, conformance::ProtocolConformanceSpec,
@@ -152,121 +152,6 @@ impl RuntimeProjectionSpec {
         next.rpc = RpcState::from_runtime_summary(&rpc_summary);
         Some(next)
     }
-
-    pub fn initial_summary(self) -> RuntimeStateSummary {
-        RuntimeStateSummary::default()
-    }
-
-    pub fn action_allowed(
-        self,
-        summary: &RuntimeStateSummary,
-        action: RuntimeProjectionAction,
-    ) -> bool {
-        let shutdown_idle = matches!(summary.shutdown.phase, SummaryShutdownPhase::Idle);
-        match action {
-            RuntimeProjectionAction::DeployService0 => {
-                shutdown_idle && !summary.service0_promoted && !summary.service0_running
-            }
-            RuntimeProjectionAction::DeployService1 => {
-                shutdown_idle && !summary.service1_promoted && !summary.service1_running
-            }
-            RuntimeProjectionAction::RollbackService0 => {
-                shutdown_idle
-                    && summary.service0_promoted
-                    && !summary.service0_running
-                    && !summary.service0_rolled_back
-            }
-            RuntimeProjectionAction::LocalRpcResolved => {
-                shutdown_idle
-                    && summary.service0_running
-                    && summary.service1_running
-                    && !summary.local_rpc_resolved
-                    && !summary.local_rpc_denied
-            }
-            RuntimeProjectionAction::LocalRpcDenied => {
-                shutdown_idle
-                    && summary.service0_running
-                    && !summary.service1_running
-                    && !summary.local_rpc_resolved
-                    && !summary.local_rpc_denied
-            }
-            RuntimeProjectionAction::RemoteRpcLifecycle => {
-                shutdown_idle
-                    && summary.service0_running
-                    && !summary.remote_completed
-                    && !summary.remote_denied
-            }
-            RuntimeProjectionAction::StopService0 | RuntimeProjectionAction::ReapExitedService0 => {
-                summary.service0_running && summary.manager_shutdown_started
-            }
-            RuntimeProjectionAction::ShutdownDrain => shutdown_idle && !summary.manager_shutdown_started,
-        }
-    }
-
-    pub fn advance_summary(
-        self,
-        summary: &RuntimeStateSummary,
-        action: RuntimeProjectionAction,
-    ) -> RuntimeStateSummary {
-        let mut next = *summary;
-        match action {
-            RuntimeProjectionAction::DeployService0 => {
-                next.service0_promoted = true;
-                next.service0_running = true;
-                next.service0_reaped = false;
-                next.service0_rolled_back = false;
-            }
-            RuntimeProjectionAction::DeployService1 => {
-                next.service1_promoted = true;
-                next.service1_running = true;
-                next.service1_reaped = false;
-            }
-            RuntimeProjectionAction::RollbackService0 => {
-                next.service0_promoted = false;
-                next.service0_rolled_back = true;
-            }
-            RuntimeProjectionAction::LocalRpcResolved => {
-                next.binding_granted_service0 = true;
-                next.local_rpc_resolved = true;
-            }
-            RuntimeProjectionAction::LocalRpcDenied => {
-                next.local_rpc_denied = true;
-            }
-            RuntimeProjectionAction::RemoteRpcLifecycle => {
-                next.binding_granted_service0 = true;
-                next.remote_connected = true;
-                next.remote_completed = true;
-                next.remote_disconnected = true;
-            }
-            RuntimeProjectionAction::StopService0 | RuntimeProjectionAction::ReapExitedService0 => {
-                next.service0_running = false;
-                next.service0_reaped = true;
-            }
-            RuntimeProjectionAction::ShutdownDrain => {
-                let had_service0 = next.service0_running;
-                let had_service1 = next.service1_running;
-                next.manager_shutdown_started = true;
-                next.manager_stopped = true;
-                next.session_shutdown_requested = true;
-                next.service0_running = false;
-                next.service1_running = false;
-                next.service0_reaped = had_service0 || next.service0_reaped;
-                next.service1_reaped = had_service1 || next.service1_reaped;
-                next.local_rpc_resolved = false;
-                next.local_rpc_denied = false;
-                next.remote_connected = false;
-                next.remote_completed = false;
-                next.remote_disconnected = false;
-                next.remote_denied = false;
-                next.shutdown.phase = SummaryShutdownPhase::Completed;
-                next.shutdown.accepts_stopped = true;
-                next.shutdown.sessions_drained = true;
-                next.shutdown.services_stopped = true;
-                next.shutdown.maintenance_stopped = true;
-            }
-        }
-        next
-    }
 }
 
 impl TransitionSystem for RuntimeProjectionSpec {
@@ -286,8 +171,10 @@ impl TransitionSystem for RuntimeProjectionSpec {
     }
 
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        let shutdown_idle =
-            matches!(state.shutdown.phase, crate::shutdown_flow::ShutdownPhase::Idle);
+        let shutdown_idle = matches!(
+            state.shutdown.phase,
+            crate::shutdown_flow::ShutdownPhase::Idle
+        );
         match action {
             RuntimeProjectionAction::DeployService0 => {
                 if !shutdown_idle
@@ -307,21 +194,24 @@ impl TransitionSystem for RuntimeProjectionSpec {
                 }
                 self.deploy_service(state, ServiceAtom::Service1)
             }
-            RuntimeProjectionAction::RollbackService0 => self.apply_many(
-                state,
-                [
-                    SystemAtomicAction::Deploy(DeployAction::TriggerRollback(
-                        ServiceAtom::Service0,
-                    )),
-                    SystemAtomicAction::Deploy(DeployAction::FinishRollback(ServiceAtom::Service0)),
-                ],
-            )
-            .filter(|_| {
-                shutdown_idle
-                    && state.deploy.release_promoted(ServiceAtom::Service0)
-                    && !state.supervision.service_is_running(ServiceAtom::Service0)
-                    && !state.deploy.rollback_observed(ServiceAtom::Service0)
-            }),
+            RuntimeProjectionAction::RollbackService0 => self
+                .apply_many(
+                    state,
+                    [
+                        SystemAtomicAction::Deploy(DeployAction::TriggerRollback(
+                            ServiceAtom::Service0,
+                        )),
+                        SystemAtomicAction::Deploy(DeployAction::FinishRollback(
+                            ServiceAtom::Service0,
+                        )),
+                    ],
+                )
+                .filter(|_| {
+                    shutdown_idle
+                        && state.deploy.release_promoted(ServiceAtom::Service0)
+                        && !state.supervision.service_is_running(ServiceAtom::Service0)
+                        && !state.deploy.rollback_observed(ServiceAtom::Service0)
+                }),
             RuntimeProjectionAction::LocalRpcResolved => {
                 if !shutdown_idle
                     || !state.supervision.service_is_running(ServiceAtom::Service0)
@@ -358,7 +248,9 @@ impl TransitionSystem for RuntimeProjectionSpec {
             RuntimeProjectionAction::RemoteRpcLifecycle => {
                 if !shutdown_idle
                     || !state.supervision.service_is_running(ServiceAtom::Service0)
-                    || state.rpc.has_completed_remote_call_for(ServiceAtom::Service0)
+                    || state
+                        .rpc
+                        .has_completed_remote_call_for(ServiceAtom::Service0)
                     || state.rpc.has_denied_remote_call_for(ServiceAtom::Service0)
                 {
                     return None;
@@ -368,12 +260,16 @@ impl TransitionSystem for RuntimeProjectionSpec {
                     self.with_binding_prefix(
                         state,
                         vec![
-                            SystemAtomicAction::Rpc(RpcAction::ConnectRemote(ServiceAtom::Service0)),
+                            SystemAtomicAction::Rpc(RpcAction::ConnectRemote(
+                                ServiceAtom::Service0,
+                            )),
                             SystemAtomicAction::Rpc(RpcAction::InvokeRemote(ServiceAtom::Service0)),
                             SystemAtomicAction::Rpc(RpcAction::CompleteRemoteCall(
                                 ServiceAtom::Service0,
                             )),
-                            SystemAtomicAction::Rpc(RpcAction::DisconnectRemote(ServiceAtom::Service0)),
+                            SystemAtomicAction::Rpc(RpcAction::DisconnectRemote(
+                                ServiceAtom::Service0,
+                            )),
                         ],
                     ),
                 )
@@ -475,8 +371,6 @@ impl ProtocolConformanceSpec for RuntimeProjectionSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nirvash_core::ActionVocabulary as _;
-
     #[test]
     fn deploy_service_action_reaches_running_state() {
         let spec = RuntimeProjectionSpec::new();
@@ -507,55 +401,5 @@ mod tests {
             spec.expected_output(&state, &RuntimeProjectionAction::ShutdownDrain, Some(&next)),
             vec![SystemEffect::ShutdownComplete]
         );
-    }
-
-    #[test]
-    fn summary_transition_law_holds_for_all_projection_states() {
-        let spec = RuntimeProjectionSpec::new();
-        let actions = RuntimeProjectionAction::action_vocabulary();
-        let mut pending = vec![spec.initial_summary()];
-        let mut visited = Vec::new();
-
-        while let Some(summary) = pending.pop() {
-            if visited.contains(&summary) {
-                continue;
-            }
-            visited.push(summary);
-
-            let prev = spec.abstract_state(&summary);
-            for action in &actions {
-                let allowed_by_summary = spec.action_allowed(&summary, *action);
-                let expected_next = spec.transition(&prev, action);
-                assert_eq!(
-                    allowed_by_summary,
-                    expected_next.is_some(),
-                    "summary/state enabled mismatch for {action:?} from {summary:?}",
-                );
-                if let Some(expected_next) = expected_next {
-                    let next_summary = spec.advance_summary(&summary, *action);
-                    let abstract_next = spec.abstract_state(&next_summary);
-                    assert_eq!(
-                        abstract_next,
-                        expected_next,
-                        "summary/state next mismatch for {action:?} from {summary:?}",
-                    );
-                    let output = if matches!(action, RuntimeProjectionAction::ShutdownDrain) {
-                        RuntimeOutputSummary {
-                            effects: vec![imagod_spec::ContractEffectSummary::ShutdownComplete],
-                        }
-                    } else {
-                        RuntimeOutputSummary::default()
-                    };
-                    assert_eq!(
-                        spec.abstract_output(&output),
-                        spec.expected_output(&prev, action, Some(&expected_next)),
-                        "summary/state output mismatch for {action:?} from {summary:?}",
-                    );
-                    if !visited.contains(&next_summary) {
-                        pending.push(next_summary);
-                    }
-                }
-            }
-        }
     }
 }

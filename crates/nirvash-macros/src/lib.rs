@@ -97,6 +97,21 @@ pub fn code_witness_tests(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+#[proc_macro_attribute]
+pub fn nirvash_runtime_contract(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as RuntimeContractArgs);
+    let item = parse_macro_input!(item as ItemImpl);
+    match expand_runtime_contract(args, item) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[proc_macro_attribute]
+pub fn contract_case(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 #[proc_macro]
 pub fn code_witness_test_main(input: TokenStream) -> TokenStream {
     let _ = parse_macro_input!(input as syn::parse::Nothing);
@@ -495,6 +510,197 @@ impl syn::parse::Parse for CodeTestArgs {
             binding: binding
                 .ok_or_else(|| syn::Error::new(Span::call_site(), "missing binding = ..."))?,
             cases,
+        })
+    }
+}
+
+#[derive(Default)]
+struct RuntimeContractTests {
+    grouped: bool,
+    witness: bool,
+}
+
+struct RuntimeContractArgs {
+    spec: Path,
+    binding: Path,
+    context_ty: Type,
+    context_expr: Option<Expr>,
+    runtime_ty: Option<Type>,
+    fresh_runtime: Expr,
+    summary_ty: Option<Type>,
+    output_ty: Option<Type>,
+    summary_field: Option<Ident>,
+    initial_summary: Option<Expr>,
+    input_ty: Option<Type>,
+    session_ty: Option<Type>,
+    fresh_session: Option<Expr>,
+    probe_context: Option<Expr>,
+    tests: RuntimeContractTests,
+}
+
+impl Parse for RuntimeContractArgs {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let mut spec = None;
+        let mut binding = None;
+        let mut context_ty = None;
+        let mut context_expr = None;
+        let mut runtime_ty = None;
+        let mut fresh_runtime = None;
+        let mut summary_ty = None;
+        let mut output_ty = None;
+        let mut summary_field = None;
+        let mut initial_summary = None;
+        let mut input_ty = None;
+        let mut session_ty = None;
+        let mut fresh_session = None;
+        let mut probe_context = None;
+        let mut tests = RuntimeContractTests::default();
+
+        while !input.is_empty() {
+            let ident: Ident = input.parse()?;
+            if ident == "tests" {
+                let content;
+                syn::parenthesized!(content in input);
+                while !content.is_empty() {
+                    let value: Ident = content.parse()?;
+                    match value.to_string().as_str() {
+                        "grouped" => tests.grouped = true,
+                        "witness" => tests.witness = true,
+                        _ => {
+                            return Err(syn::Error::new(
+                                value.span(),
+                                "unsupported tests(...) entry",
+                            ));
+                        }
+                    }
+                    if content.peek(Token![,]) {
+                        let _ = content.parse::<Token![,]>()?;
+                    }
+                }
+            } else {
+                let _eq: Token![=] = input.parse()?;
+                match ident.to_string().as_str() {
+                    "spec" => spec = Some(input.parse()?),
+                    "binding" => binding = Some(input.parse()?),
+                    "context" => context_ty = Some(input.parse()?),
+                    "context_expr" => context_expr = Some(input.parse()?),
+                    "runtime" => runtime_ty = Some(input.parse()?),
+                    "fresh_runtime" => fresh_runtime = Some(input.parse()?),
+                    "summary" => summary_ty = Some(input.parse()?),
+                    "output" => output_ty = Some(input.parse()?),
+                    "summary_field" => summary_field = Some(input.parse()?),
+                    "initial_summary" => initial_summary = Some(input.parse()?),
+                    "input" => input_ty = Some(input.parse()?),
+                    "session" => session_ty = Some(input.parse()?),
+                    "fresh_session" => fresh_session = Some(input.parse()?),
+                    "probe_context" => probe_context = Some(input.parse()?),
+                    _ => {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            "unsupported nirvash_runtime_contract argument",
+                        ));
+                    }
+                }
+            }
+            if input.peek(Token![,]) {
+                let _ = input.parse::<Token![,]>()?;
+            }
+        }
+
+        Ok(Self {
+            spec: spec.ok_or_else(|| syn::Error::new(Span::call_site(), "missing spec = ..."))?,
+            binding: binding
+                .ok_or_else(|| syn::Error::new(Span::call_site(), "missing binding = ..."))?,
+            context_ty: context_ty
+                .ok_or_else(|| syn::Error::new(Span::call_site(), "missing context = ..."))?,
+            context_expr,
+            runtime_ty,
+            fresh_runtime: fresh_runtime
+                .ok_or_else(|| syn::Error::new(Span::call_site(), "missing fresh_runtime = ..."))?,
+            summary_ty,
+            output_ty,
+            summary_field,
+            initial_summary,
+            input_ty,
+            session_ty,
+            fresh_session,
+            probe_context,
+            tests,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct ContractCaseArgs {
+    action: Expr,
+    _call: Option<Expr>,
+    requires: Expr,
+    updates: Vec<(Ident, Expr)>,
+    _positive: Option<Path>,
+    _negative: Option<Path>,
+    output: Option<Expr>,
+    law_output: Option<Expr>,
+}
+
+impl Parse for ContractCaseArgs {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let mut action = None;
+        let mut call = None;
+        let mut requires = None;
+        let mut updates = Vec::new();
+        let mut positive = None;
+        let mut negative = None;
+        let mut output = None;
+        let mut law_output = None;
+
+        while !input.is_empty() {
+            let ident: Ident = input.parse()?;
+            if ident == "update" {
+                let content;
+                syn::parenthesized!(content in input);
+                while !content.is_empty() {
+                    let field: Ident = content.parse()?;
+                    let _eq: Token![=] = content.parse()?;
+                    let expr: Expr = content.parse()?;
+                    updates.push((field, expr));
+                    if content.peek(Token![,]) {
+                        let _ = content.parse::<Token![,]>()?;
+                    }
+                }
+            } else {
+                let _eq: Token![=] = input.parse()?;
+                match ident.to_string().as_str() {
+                    "action" => action = Some(input.parse()?),
+                    "call" => call = Some(input.parse()?),
+                    "requires" => requires = Some(input.parse()?),
+                    "positive" => positive = Some(input.parse()?),
+                    "negative" => negative = Some(input.parse()?),
+                    "output" => output = Some(input.parse()?),
+                    "law_output" => law_output = Some(input.parse()?),
+                    _ => {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            "unsupported contract_case argument",
+                        ));
+                    }
+                }
+            }
+            if input.peek(Token![,]) {
+                let _ = input.parse::<Token![,]>()?;
+            }
+        }
+
+        Ok(Self {
+            action: action.ok_or_else(|| {
+                syn::Error::new(Span::call_site(), "contract_case requires action = ...")
+            })?,
+            _call: call,
+            requires: requires.unwrap_or_else(|| syn::parse_quote!(true)),
+            updates,
+            _positive: positive,
+            _negative: negative,
+            output,
+            law_output,
         })
     }
 }
@@ -3280,6 +3486,568 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                 build: #provider_build_ident,
             }
         }
+    })
+}
+
+fn expand_runtime_contract(
+    args: RuntimeContractArgs,
+    item: ItemImpl,
+) -> syn::Result<proc_macro2::TokenStream> {
+    if item.generics.params.iter().next().is_some() {
+        return Err(syn::Error::new(
+            item.generics.span(),
+            "nirvash_runtime_contract does not support generic impl blocks",
+        ));
+    }
+
+    let spec_ty = args.spec.clone();
+    let binding_ty = args.binding.clone();
+    let grouped_tokens = if args.tests.grouped {
+        Some(expand_code_tests(CodeTestArgs {
+            spec: args.spec.clone(),
+            binding: args.binding.clone(),
+            cases: None,
+        })?)
+    } else {
+        None
+    };
+    let witness_tokens = if args.tests.witness {
+        Some(expand_code_witness_tests(CodeTestArgs {
+            spec: args.spec.clone(),
+            binding: args.binding.clone(),
+            cases: None,
+        })?)
+    } else {
+        None
+    };
+
+    if let Some(runtime_ty) = args.runtime_ty.clone() {
+        return expand_runtime_contract_binding_mode(
+            args,
+            item,
+            spec_ty,
+            binding_ty,
+            runtime_ty,
+            grouped_tokens,
+            witness_tokens,
+        );
+    }
+
+    expand_runtime_contract_runtime_mode(
+        args,
+        item,
+        spec_ty,
+        binding_ty,
+        grouped_tokens,
+        witness_tokens,
+    )
+}
+
+fn expand_runtime_contract_binding_mode(
+    args: RuntimeContractArgs,
+    item: ItemImpl,
+    spec_ty: Path,
+    binding_ty: Path,
+    runtime_ty: Type,
+    grouped_tokens: Option<TokenStream2>,
+    witness_tokens: Option<TokenStream2>,
+) -> syn::Result<TokenStream2> {
+    let context_ty = args.context_ty;
+    let context_expr = args
+        .context_expr
+        .unwrap_or_else(|| syn::parse_quote!(::core::default::Default::default()));
+    let fresh_runtime = args.fresh_runtime;
+    let input_ty: Type = args.input_ty.unwrap_or_else(
+        || syn::parse_quote!(<#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action),
+    );
+    let session_ty: Type = args.session_ty.unwrap_or_else(|| context_ty.clone());
+    let fresh_session = args.fresh_session.unwrap_or_else(|| context_expr.clone());
+    let probe_context = args
+        .probe_context
+        .unwrap_or_else(|| syn::parse_quote!(session.clone()));
+    let self_ty = item.self_ty.as_ref().clone();
+    let self_binding_ident = match &self_ty {
+        Type::Path(type_path) if type_path.qself.is_none() => type_path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.clone()),
+        _ => None,
+    };
+    let binding_ident = path_tail_ident(&binding_ty)?.clone();
+    if self_binding_ident.as_ref() != Some(&binding_ident) {
+        return Err(syn::Error::new(
+            item.self_ty.span(),
+            format!(
+                "binding-mode nirvash_runtime_contract must be attached to impl {}",
+                binding_ident
+            ),
+        ));
+    }
+
+    let witness_impl = if witness_tokens.is_some() {
+        quote! {
+            impl ::nirvash_core::conformance::ProtocolInputWitnessBinding<#spec_ty> for #self_ty {
+                type Input = #input_ty;
+                type Session = #session_ty;
+
+                async fn fresh_session(_spec: &#spec_ty) -> Self::Session {
+                    #fresh_session
+                }
+
+                fn positive_witnesses(
+                    _spec: &#spec_ty,
+                    session: &Self::Session,
+                    _prev: &<#spec_ty as ::nirvash_core::conformance::TransitionSystem>::State,
+                    action: &<#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action,
+                    _next: &<#spec_ty as ::nirvash_core::conformance::TransitionSystem>::State,
+                ) -> ::std::vec::Vec<::nirvash_core::conformance::PositiveWitness<Self::Context, Self::Input>> {
+                    vec![
+                        ::nirvash_core::conformance::PositiveWitness::new(
+                            "principal",
+                            session.clone(),
+                            action.clone(),
+                        ).with_canonical(true)
+                    ]
+                }
+
+                fn negative_witnesses(
+                    _spec: &#spec_ty,
+                    session: &Self::Session,
+                    _prev: &<#spec_ty as ::nirvash_core::conformance::TransitionSystem>::State,
+                    action: &<#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action,
+                ) -> ::std::vec::Vec<::nirvash_core::conformance::NegativeWitness<Self::Context, Self::Input>> {
+                    vec![
+                        ::nirvash_core::conformance::NegativeWitness::new(
+                            "principal",
+                            session.clone(),
+                            action.clone(),
+                        )
+                    ]
+                }
+
+                async fn execute_input(
+                    runtime: &Self::Runtime,
+                    _session: &mut Self::Session,
+                    context: &Self::Context,
+                    input: &Self::Input,
+                ) -> <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::SummaryOutput {
+                    <Self::Runtime as ::nirvash_core::conformance::ActionApplier>::execute_action(
+                        runtime,
+                        context,
+                        input,
+                    )
+                    .await
+                }
+
+                fn probe_context(session: &Self::Session) -> Self::Context {
+                    #probe_context
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    Ok(quote! {
+        #item
+
+        impl ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty> for #self_ty {
+            type Runtime = #runtime_ty;
+            type Context = #context_ty;
+
+            async fn fresh_runtime(_spec: &#spec_ty) -> Self::Runtime {
+                #fresh_runtime
+            }
+
+            fn context(_spec: &#spec_ty) -> Self::Context {
+                #context_expr
+            }
+        }
+
+        #witness_impl
+
+        #grouped_tokens
+        #witness_tokens
+    })
+}
+
+fn expand_runtime_contract_runtime_mode(
+    args: RuntimeContractArgs,
+    mut item: ItemImpl,
+    spec_ty: Path,
+    binding_ty: Path,
+    grouped_tokens: Option<TokenStream2>,
+    witness_tokens: Option<TokenStream2>,
+) -> syn::Result<TokenStream2> {
+    if witness_tokens.is_some() {
+        return Err(syn::Error::new(
+            item.self_ty.span(),
+            "witness generation on runtime-mode contracts is not supported yet; use binding mode for identity witnesses",
+        ));
+    }
+
+    let summary_ty = args.summary_ty.ok_or_else(|| {
+        syn::Error::new(
+            Span::call_site(),
+            "runtime-mode contract requires summary = ...",
+        )
+    })?;
+    let output_ty = args.output_ty.ok_or_else(|| {
+        syn::Error::new(
+            Span::call_site(),
+            "runtime-mode contract requires output = ...",
+        )
+    })?;
+    let summary_field = args.summary_field.ok_or_else(|| {
+        syn::Error::new(
+            Span::call_site(),
+            "runtime-mode contract requires summary_field = ...",
+        )
+    })?;
+    let initial_summary = args.initial_summary.ok_or_else(|| {
+        syn::Error::new(
+            Span::call_site(),
+            "runtime-mode contract requires initial_summary = ...",
+        )
+    })?;
+    let context_ty = args.context_ty;
+    let context_expr = args
+        .context_expr
+        .unwrap_or_else(|| syn::parse_quote!(::core::default::Default::default()));
+    let fresh_runtime = args.fresh_runtime;
+    let self_ty = item.self_ty.as_ref().clone();
+    let binding_ident = path_tail_ident(&binding_ty)?.clone();
+    let self_path_ident = match &self_ty {
+        Type::Path(type_path) if type_path.qself.is_none() => type_path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.clone()),
+        _ => None,
+    };
+    let generate_binding_struct = self_path_ident
+        .as_ref()
+        .is_none_or(|ident| *ident != binding_ident);
+
+    let mut cases = Vec::<(Ident, ContractCaseArgs, bool)>::new();
+    let mut seen_actions = BTreeSet::new();
+    for impl_item in &mut item.items {
+        let ImplItem::Fn(method) = impl_item else {
+            continue;
+        };
+        let mut kept_attrs = Vec::new();
+        let mut contract_case = None;
+        for attr in method.attrs.drain(..) {
+            if attr
+                .path()
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "contract_case")
+            {
+                let parsed = attr.parse_args::<ContractCaseArgs>()?;
+                let action_key = parsed.action.to_token_stream().to_string();
+                if !seen_actions.insert(action_key) {
+                    return Err(syn::Error::new(
+                        attr.span(),
+                        "duplicate contract_case action",
+                    ));
+                }
+                contract_case = Some(parsed);
+            } else {
+                kept_attrs.push(attr);
+            }
+        }
+        method.attrs = kept_attrs;
+        if let Some(contract_case) = contract_case {
+            if method.sig.receiver().is_none() || method.sig.inputs.len() != 1 {
+                return Err(syn::Error::new(
+                    method.sig.span(),
+                    "contract_case methods must take only &self or &mut self",
+                ));
+            }
+            let returns_result = match &method.sig.output {
+                syn::ReturnType::Type(_, ty) => match ty.as_ref() {
+                    Type::Path(type_path) if type_path.qself.is_none() => type_path
+                        .path
+                        .segments
+                        .last()
+                        .is_some_and(|segment| segment.ident == "Result"),
+                    _ => false,
+                },
+                syn::ReturnType::Default => false,
+            };
+            cases.push((method.sig.ident.clone(), contract_case, returns_result));
+        }
+    }
+
+    if cases.is_empty() {
+        return Err(syn::Error::new(
+            item.self_ty.span(),
+            "runtime-mode contract requires at least one #[contract_case(...)] method",
+        ));
+    }
+
+    let execute_branches = cases.iter().map(|(method_ident, case, returns_result)| {
+        let action = &case.action;
+        let requires = &case.requires;
+        let update_bindings = case
+            .updates
+            .iter()
+            .enumerate()
+            .map(|(index, (field, expr))| {
+                let value_ident = format_ident!("__nirvash_update_value_{index}");
+                quote! {
+                    let #value_ident = {
+                        let summary = &prev_summary;
+                        #expr
+                    };
+                    summary.#field = #value_ident;
+                }
+            });
+        let output_expr = if let Some(output) = &case.output {
+            quote! { (#output)(&result) }
+        } else {
+            quote! { <#output_ty as ::core::default::Default>::default() }
+        };
+        let success_update = if *returns_result {
+            let message = LitStr::new(
+                &format!("{method_ident} should succeed for allowed contract action"),
+                method_ident.span(),
+            );
+            quote! {
+                if result.is_ok() {
+                    let mut summary_guard = self.#summary_field.lock().await;
+                    let summary = &mut *summary_guard;
+                    let prev_summary = (*summary).clone();
+                    #(#update_bindings)*
+                }
+                result.expect(#message);
+            }
+        } else {
+            quote! {
+                {
+                    let mut summary_guard = self.#summary_field.lock().await;
+                    let summary = &mut *summary_guard;
+                    let prev_summary = (*summary).clone();
+                    #(#update_bindings)*
+                }
+            }
+        };
+        quote! {
+            if *action == #action {
+                let current_summary = *self.#summary_field.lock().await;
+                let summary = &current_summary;
+                if !(#requires) {
+                    return <#output_ty as ::core::default::Default>::default();
+                }
+                let result = self.#method_ident().await;
+                let output = #output_expr;
+                #success_update
+                return output;
+            }
+        }
+    });
+
+    let law_allowed_branches = cases.iter().map(|(_, case, _)| {
+        let action = &case.action;
+        let requires = &case.requires;
+        quote! {
+            if *action == #action {
+                let summary = summary;
+                return #requires;
+            }
+        }
+    });
+
+    let law_advance_branches = cases.iter().map(|(_, case, _)| {
+        let action = &case.action;
+        let updates = case
+            .updates
+            .iter()
+            .enumerate()
+            .map(|(index, (field, expr))| {
+                let value_ident = format_ident!("__nirvash_update_value_{index}");
+                quote! {
+                    let #value_ident = {
+                        let summary = &prev_summary;
+                        #expr
+                    };
+                    next.#field = #value_ident;
+                }
+            });
+        quote! {
+            if *action == #action {
+                let prev_summary = summary.clone();
+                let mut next = prev_summary.clone();
+                #(#updates)*
+                return next;
+            }
+        }
+    });
+
+    let law_output_branches = cases.iter().map(|(_, case, _)| {
+        let action = &case.action;
+        let law_output = case.law_output.clone().unwrap_or_else(
+            || syn::parse_quote!(<#output_ty as ::core::default::Default>::default()),
+        );
+        quote! {
+            if *action == #action {
+                return #law_output;
+            }
+        }
+    });
+
+    let binding_struct = if generate_binding_struct {
+        quote! {
+            #[derive(Debug, Default, Clone, Copy)]
+            struct #binding_ident;
+        }
+    } else {
+        quote! {}
+    };
+
+    let law_test_ident = format_ident!(
+        "__nirvash_summary_law_{}",
+        binding_ident.to_string().to_lowercase()
+    );
+    let law_module_ident = format_ident!(
+        "__nirvash_runtime_contract_{}",
+        binding_ident.to_string().to_lowercase()
+    );
+
+    Ok(quote! {
+        #item
+
+        #binding_struct
+
+        impl ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty> for #binding_ty {
+            type Runtime = #self_ty;
+            type Context = #context_ty;
+
+            async fn fresh_runtime(spec: &#spec_ty) -> Self::Runtime {
+                #fresh_runtime
+            }
+
+            fn context(_spec: &#spec_ty) -> Self::Context {
+                #context_expr
+            }
+        }
+
+        impl ::nirvash_core::conformance::ActionApplier for #self_ty {
+            type Action = <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action;
+            type Output = #output_ty;
+            type Context = #context_ty;
+
+            async fn execute_action(
+                &self,
+                _context: &Self::Context,
+                action: &Self::Action,
+            ) -> Self::Output {
+                #(#execute_branches)*
+                panic!("no contract_case registered for action {:?}", action);
+            }
+        }
+
+        impl ::nirvash_core::conformance::StateObserver for #self_ty {
+            type SummaryState = #summary_ty;
+            type Context = #context_ty;
+
+            async fn observe_state(&self, _context: &Self::Context) -> Self::SummaryState {
+                *self.#summary_field.lock().await
+            }
+        }
+
+        #[cfg(test)]
+        mod #law_module_ident {
+            use super::*;
+
+            fn generated_initial_summary() -> #summary_ty {
+                #initial_summary
+            }
+
+            fn generated_action_allowed(
+                summary: &#summary_ty,
+                action: &<#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action,
+            ) -> bool {
+                #(#law_allowed_branches)*
+                false
+            }
+
+            fn generated_advance_summary(
+                summary: &#summary_ty,
+                action: &<#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action,
+            ) -> #summary_ty {
+                #(#law_advance_branches)*
+                *summary
+            }
+
+            fn generated_law_output(
+                action: &<#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action,
+            ) -> #output_ty {
+                #(#law_output_branches)*
+                <#output_ty as ::core::default::Default>::default()
+            }
+
+            #[test]
+            fn #law_test_ident() {
+                let spec = <#spec_ty as ::core::default::Default>::default();
+                let actions =
+                    <<#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action as ::nirvash_core::ActionVocabulary>::action_vocabulary();
+                let initial_summary = generated_initial_summary();
+                ::nirvash_core::conformance::assert_initial_refinement(&spec, &initial_summary);
+                let mut pending = vec![initial_summary];
+                let mut visited = Vec::new();
+
+                while let Some(summary) = pending.pop() {
+                    if visited.contains(&summary) {
+                        continue;
+                    }
+                    visited.push(summary);
+
+                    for action in &actions {
+                        let allowed_by_summary = generated_action_allowed(&summary, action);
+                        let prev =
+                            <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_state(
+                                &spec,
+                                &summary,
+                            );
+                        let expected_next =
+                            <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::transition(
+                                &spec,
+                                &prev,
+                                action,
+                            );
+                        assert_eq!(
+                            allowed_by_summary,
+                            expected_next.is_some(),
+                            "summary/state enabled mismatch for {action:?} from {summary:?}",
+                        );
+                        if expected_next.is_some() {
+                            let next_summary = generated_advance_summary(&summary, action);
+                            ::nirvash_core::conformance::assert_step_refinement(
+                                &spec,
+                                &summary,
+                                action,
+                                &next_summary,
+                            );
+                            ::nirvash_core::conformance::assert_output_refinement(
+                                &spec,
+                                &summary,
+                                action,
+                                &next_summary,
+                                &generated_law_output(action),
+                            );
+                            if !visited.contains(&next_summary) {
+                                pending.push(next_summary);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #grouped_tokens
     })
 }
 

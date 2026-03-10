@@ -19,8 +19,8 @@ pub mod session_auth;
 pub mod session_auth_projection;
 pub mod session_transport;
 pub mod shutdown_flow;
-pub mod supervision;
 mod summary_mapping;
+pub mod supervision;
 pub mod system;
 pub mod wire_protocol;
 
@@ -32,8 +32,7 @@ pub use deploy::{DeployAction, DeploySpec, DeployState};
 pub use imagod_spec::{
     CommandErrorKind, CommandKind, CommandLifecycleState, CommandProtocolAction,
     CommandProtocolStageId, LogsStateSummary, ManagerRuntimeStateSummary, OperationPhase,
-    PluginKind, RouterStateSummary, RunnerAppType, RuntimeStateSummary,
-    SessionAuthStateSummary,
+    PluginKind, RouterStateSummary, RunnerAppType, RuntimeStateSummary, SessionAuthStateSummary,
 };
 pub use logs_projection::{LogsProjectionAction, LogsProjectionSpec};
 pub use manager_runtime::{
@@ -46,9 +45,7 @@ pub use plugin_platform::{PluginPlatformAction, PluginPlatformSpec, PluginPlatfo
 pub use router_projection::{RouterProjectionAction, RouterProjectionSpec};
 pub use rpc::{RpcAction, RpcSpec, RpcState};
 pub use runtime_projection::{RuntimeProjectionAction, RuntimeProjectionSpec};
-pub use session_auth_projection::{
-    SessionAuthProjectionAction, SessionAuthProjectionSpec,
-};
+pub use session_auth_projection::{SessionAuthProjectionAction, SessionAuthProjectionSpec};
 pub use supervision::{SupervisionAction, SupervisionSpec, SupervisionState};
 pub use system::{
     SystemAction, SystemEffect, SystemMessageBinding, SystemSpec, SystemState,

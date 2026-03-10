@@ -74,7 +74,9 @@ fn install_running_service(state: &mut SupervisionState, service: ServiceAtom) {
     state.ready_services.insert(service);
     state.running_services.insert(service);
     state.reaped_services.remove(&service);
-    state.service_runners.insert(service, service_runner(service));
+    state
+        .service_runners
+        .insert(service, service_runner(service));
     state.service_apps.insert(service, ServiceAppAtom::Rpc);
 }
 

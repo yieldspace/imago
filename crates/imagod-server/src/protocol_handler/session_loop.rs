@@ -37,13 +37,8 @@ mod conformance_tests {
         ContractEffectSummary, SessionAuthOutputSummary, SessionAuthStateSummary,
         SummaryRequestKind, SummaryStreamId,
     };
-    use imagod_spec_formal::{
-        SessionAuthProjectionAction, SessionAuthProjectionSpec,
-    };
-    use nirvash_core::{
-        conformance::{ActionApplier, ProtocolRuntimeBinding, StateObserver},
-    };
-    use nirvash_macros::code_tests;
+    use imagod_spec_formal::{SessionAuthProjectionAction, SessionAuthProjectionSpec};
+    use nirvash_macros::nirvash_runtime_contract;
     use rustls::pki_types::CertificateDer;
 
     use super::*;
@@ -111,181 +106,239 @@ mod conformance_tests {
 
     impl SessionAuthRuntime {
         fn new() -> Self {
-            Self {
-                summary: tokio::sync::Mutex::new(SessionAuthProjectionSpec::new().initial_summary()),
-            }
-        }
-    }
-
-    #[derive(Debug, Default, Clone, Copy)]
-    struct SessionAuthBinding;
-
-    impl ProtocolRuntimeBinding<SessionAuthProjectionSpec> for SessionAuthBinding {
-        type Runtime = SessionAuthRuntime;
-        type Context = ();
-
-        async fn fresh_runtime(_spec: &SessionAuthProjectionSpec) -> Self::Runtime {
             let _guard = lock_dynamic_public_keys_for_tests();
             replace_dynamic_public_keys_for_tests(&[], &[]);
             drop(_guard);
-            SessionAuthRuntime::new()
+            Self {
+                summary: tokio::sync::Mutex::new(SessionAuthStateSummary::default()),
+            }
         }
-
-        fn context(_spec: &SessionAuthProjectionSpec) -> Self::Context {}
     }
 
-    impl ActionApplier for SessionAuthRuntime {
-        type Action = SessionAuthProjectionAction;
-        type Output = SessionAuthOutputSummary;
-        type Context = ();
+    fn reject_unauthorized_output(_result: &()) -> SessionAuthOutputSummary {
+        SessionAuthOutputSummary {
+            effects: vec![ContractEffectSummary::AuthorizationRejected(
+                SummaryStreamId::Stream0,
+                SummaryRequestKind::ServicesList,
+            )],
+        }
+    }
 
-        async fn execute_action(
-            &self,
-            _context: &Self::Context,
-            action: &Self::Action,
-        ) -> Self::Output {
+    #[nirvash_runtime_contract(
+        spec = SessionAuthProjectionSpec,
+        binding = SessionAuthBinding,
+        context = (),
+        context_expr = (),
+        summary = SessionAuthStateSummary,
+        output = SessionAuthOutputSummary,
+        summary_field = summary,
+        initial_summary = SessionAuthStateSummary::default(),
+        fresh_runtime = SessionAuthRuntime::new(),
+        tests(grouped)
+    )]
+    impl SessionAuthRuntime {
+        #[nirvash_macros::contract_case(
+            action = SessionAuthProjectionAction::AcceptSession,
+            requires = !summary.active_session && !summary.shutdown_requested,
+            update(active_session = true)
+        )]
+        async fn contract_accept_session(&self) {}
+
+        #[nirvash_macros::contract_case(
+            action = SessionAuthProjectionAction::AuthenticateAdmin,
+            requires = summary.active_session && summary.role.is_none(),
+            update(role = Some(imagod_spec::SummarySessionRole::Admin))
+        )]
+        async fn contract_authenticate_admin(&self) {
             let _guard = lock_dynamic_public_keys_for_tests();
-            let spec = SessionAuthProjectionSpec::new();
-            let prev = *self.summary.lock().await;
-            if !spec.action_allowed(&prev, *action) {
-                return SessionAuthOutputSummary::default();
-            }
+            replace_dynamic_public_keys_for_tests(&[[0x11u8; 32]], &[]);
+            let session = FakeProtocolSession {
+                identity: FakePeerIdentity::Ed25519([0x11u8; 32]),
+            };
+            let context =
+                resolve_session_auth_context(&session).expect("admin auth should resolve");
+            assert_eq!(context.role, DynamicClientRole::Admin);
+        }
 
-            match action {
-                SessionAuthProjectionAction::AcceptSession => {}
-                SessionAuthProjectionAction::AuthenticateAdmin => {
-                    replace_dynamic_public_keys_for_tests(&[[0x11u8; 32]], &[]);
-                    let session = FakeProtocolSession {
-                        identity: FakePeerIdentity::Ed25519([0x11u8; 32]),
-                    };
-                    let context =
-                        resolve_session_auth_context(&session).expect("admin auth should resolve");
-                    assert_eq!(context.role, DynamicClientRole::Admin);
-                }
-                SessionAuthProjectionAction::AuthenticateClient => {
-                    replace_dynamic_public_keys_for_tests(&[], &[[0x22u8; 32]]);
-                    let session = FakeProtocolSession {
-                        identity: FakePeerIdentity::Ed25519([0x22u8; 32]),
-                    };
-                    let context =
-                        resolve_session_auth_context(&session).expect("client auth should resolve");
-                    assert_eq!(context.role, DynamicClientRole::Client);
-                }
-                SessionAuthProjectionAction::AuthenticateUnknown => {
-                    replace_dynamic_public_keys_for_tests(&[], &[]);
-                    let session = FakeProtocolSession {
-                        identity: FakePeerIdentity::Ed25519([0x33u8; 32]),
-                    };
-                    let context = resolve_session_auth_context(&session)
-                        .expect("unknown auth context should resolve");
-                    assert_eq!(context.role, DynamicClientRole::Unknown);
-                }
-                SessionAuthProjectionAction::AuthorizeAdminServicesList => {
-                    let request = Envelope::new(
-                        MessageType::ServicesList,
-                        Uuid::new_v4(),
-                        Uuid::new_v4(),
-                        serde_json::json!({}),
-                    );
-                    ensure_message_type_allowed(
-                        &request,
-                        &SessionAuthContext {
-                            role: DynamicClientRole::Admin,
-                            public_key_hex: hex_32(0x11),
-                        },
-                    )
-                    .expect("admin should authorize services.list");
-                }
-                SessionAuthProjectionAction::AuthorizeClientHello => {
-                    let request = Envelope::new(
-                        MessageType::HelloNegotiate,
-                        Uuid::new_v4(),
-                        Uuid::new_v4(),
-                        serde_json::json!({}),
-                    );
-                    ensure_message_type_allowed(
-                        &request,
-                        &SessionAuthContext {
-                            role: DynamicClientRole::Client,
-                            public_key_hex: hex_32(0x22),
-                        },
-                    )
-                    .expect("client should authorize hello.negotiate");
-                }
-                SessionAuthProjectionAction::AuthorizeClientRpc => {
-                    let request = Envelope::new(
-                        MessageType::RpcInvoke,
-                        Uuid::new_v4(),
-                        Uuid::new_v4(),
-                        serde_json::json!({}),
-                    );
-                    ensure_message_type_allowed(
-                        &request,
-                        &SessionAuthContext {
-                            role: DynamicClientRole::Client,
-                            public_key_hex: hex_32(0x22),
-                        },
-                    )
-                    .expect("client should authorize rpc.invoke");
-                }
-                SessionAuthProjectionAction::RejectUnauthorizedServicesList => {
-                    let request = Envelope::new(
-                        MessageType::ServicesList,
-                        Uuid::new_v4(),
-                        Uuid::new_v4(),
-                        serde_json::json!({}),
-                    );
-                    let err = ensure_message_type_allowed(
-                        &request,
-                        &SessionAuthContext {
-                            role: DynamicClientRole::Unknown,
-                            public_key_hex: hex_32(0x33),
-                        },
-                    )
-                    .expect_err("unknown role should be rejected");
-                    assert_eq!(err.code, ErrorCode::Unauthorized);
-                }
-                SessionAuthProjectionAction::ReadTimeout => {
-                    let err = read_stream_with_timeout(
-                        std::future::pending::<Result<Vec<u8>, std::io::Error>>(),
-                        Duration::from_millis(1),
-                    )
-                    .await
-                    .expect_err("timeout should fail");
-                    assert_eq!(err.code, ErrorCode::OperationTimeout);
-                }
-                SessionAuthProjectionAction::CloseStream => {}
-                SessionAuthProjectionAction::UploadClientAuthority => {
-                    upsert_dynamic_client_public_key(&hex_32(0x22))
-                        .expect("authority upload should succeed");
-                }
-            }
+        #[nirvash_macros::contract_case(
+            action = SessionAuthProjectionAction::AuthenticateClient,
+            requires = summary.active_session && summary.role.is_none(),
+            update(role = Some(imagod_spec::SummarySessionRole::Client))
+        )]
+        async fn contract_authenticate_client(&self) {
+            let _guard = lock_dynamic_public_keys_for_tests();
+            replace_dynamic_public_keys_for_tests(&[], &[[0x22u8; 32]]);
+            let session = FakeProtocolSession {
+                identity: FakePeerIdentity::Ed25519([0x22u8; 32]),
+            };
+            let context =
+                resolve_session_auth_context(&session).expect("client auth should resolve");
+            assert_eq!(context.role, DynamicClientRole::Client);
+        }
 
-            *self.summary.lock().await = spec.advance_summary(&prev, *action);
-            if matches!(action, SessionAuthProjectionAction::RejectUnauthorizedServicesList) {
-                SessionAuthOutputSummary {
-                    effects: vec![ContractEffectSummary::AuthorizationRejected(
-                        SummaryStreamId::Stream0,
-                        SummaryRequestKind::ServicesList,
-                    )],
-                }
-            } else {
-                SessionAuthOutputSummary::default()
-            }
+        #[nirvash_macros::contract_case(
+            action = SessionAuthProjectionAction::AuthenticateUnknown,
+            requires = summary.active_session && summary.role.is_none(),
+            update(role = Some(imagod_spec::SummarySessionRole::Unknown))
+        )]
+        async fn contract_authenticate_unknown(&self) {
+            let _guard = lock_dynamic_public_keys_for_tests();
+            replace_dynamic_public_keys_for_tests(&[], &[]);
+            let session = FakeProtocolSession {
+                identity: FakePeerIdentity::Ed25519([0x33u8; 32]),
+            };
+            let context = resolve_session_auth_context(&session)
+                .expect("unknown auth context should resolve");
+            assert_eq!(context.role, DynamicClientRole::Unknown);
+        }
+
+        #[nirvash_macros::contract_case(
+            action = SessionAuthProjectionAction::AuthorizeAdminServicesList,
+            requires = summary.active_session
+                && matches!(summary.role, Some(imagod_spec::SummarySessionRole::Admin))
+                && !summary.shutdown_requested
+                && !summary.read_timed_out
+                && !summary.stream_closed,
+            update(admin_services_list_authorized = true)
+        )]
+        async fn contract_authorize_admin_services_list(&self) {
+            let request = Envelope::new(
+                MessageType::ServicesList,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                serde_json::json!({}),
+            );
+            ensure_message_type_allowed(
+                &request,
+                &SessionAuthContext {
+                    role: DynamicClientRole::Admin,
+                    public_key_hex: hex_32(0x11),
+                },
+            )
+            .expect("admin should authorize services.list");
+        }
+
+        #[nirvash_macros::contract_case(
+            action = SessionAuthProjectionAction::AuthorizeClientHello,
+            requires = summary.active_session
+                && matches!(summary.role, Some(imagod_spec::SummarySessionRole::Client))
+                && !summary.shutdown_requested
+                && !summary.read_timed_out
+                && !summary.stream_closed,
+            update(client_hello_authorized = true)
+        )]
+        async fn contract_authorize_client_hello(&self) {
+            let request = Envelope::new(
+                MessageType::HelloNegotiate,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                serde_json::json!({}),
+            );
+            ensure_message_type_allowed(
+                &request,
+                &SessionAuthContext {
+                    role: DynamicClientRole::Client,
+                    public_key_hex: hex_32(0x22),
+                },
+            )
+            .expect("client should authorize hello.negotiate");
+        }
+
+        #[nirvash_macros::contract_case(
+            action = SessionAuthProjectionAction::AuthorizeClientRpc,
+            requires = summary.active_session
+                && matches!(summary.role, Some(imagod_spec::SummarySessionRole::Client))
+                && !summary.shutdown_requested
+                && !summary.read_timed_out
+                && !summary.stream_closed
+                && summary.client_authority_uploaded,
+            update(client_rpc_authorized = true)
+        )]
+        async fn contract_authorize_client_rpc(&self) {
+            let request = Envelope::new(
+                MessageType::RpcInvoke,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                serde_json::json!({}),
+            );
+            ensure_message_type_allowed(
+                &request,
+                &SessionAuthContext {
+                    role: DynamicClientRole::Client,
+                    public_key_hex: hex_32(0x22),
+                },
+            )
+            .expect("client should authorize rpc.invoke");
+        }
+
+        #[nirvash_macros::contract_case(
+            action = SessionAuthProjectionAction::RejectUnauthorizedServicesList,
+            requires = !summary.admin_services_list_authorized,
+            update(unauthorized_services_list_rejected = true),
+            output = reject_unauthorized_output,
+            law_output = reject_unauthorized_output(&())
+        )]
+        async fn contract_reject_unauthorized_services_list(&self) {
+            let request = Envelope::new(
+                MessageType::ServicesList,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                serde_json::json!({}),
+            );
+            let err = ensure_message_type_allowed(
+                &request,
+                &SessionAuthContext {
+                    role: DynamicClientRole::Unknown,
+                    public_key_hex: hex_32(0x33),
+                },
+            )
+            .expect_err("unknown role should be rejected");
+            assert_eq!(err.code, ErrorCode::Unauthorized);
+        }
+
+        #[nirvash_macros::contract_case(
+            action = SessionAuthProjectionAction::ReadTimeout,
+            requires = !summary.read_timed_out && !summary.stream_closed,
+            update(
+                read_timed_out = true,
+                admin_services_list_authorized = false,
+                client_hello_authorized = false,
+                client_rpc_authorized = false
+            )
+        )]
+        async fn contract_read_timeout(&self) {
+            let err = read_stream_with_timeout(
+                std::future::pending::<Result<Vec<u8>, std::io::Error>>(),
+                Duration::from_millis(1),
+            )
+            .await
+            .expect_err("timeout should fail");
+            assert_eq!(err.code, ErrorCode::OperationTimeout);
+        }
+
+        #[nirvash_macros::contract_case(
+            action = SessionAuthProjectionAction::CloseStream,
+            requires = !summary.stream_closed,
+            update(
+                stream_closed = true,
+                admin_services_list_authorized = false,
+                client_hello_authorized = false,
+                client_rpc_authorized = false
+            )
+        )]
+        async fn contract_close_stream(&self) {}
+
+        #[nirvash_macros::contract_case(
+            action = SessionAuthProjectionAction::UploadClientAuthority,
+            requires = !summary.shutdown_requested && !summary.client_authority_uploaded,
+            update(client_authority_uploaded = true)
+        )]
+        async fn contract_upload_client_authority(&self) {
+            let _guard = lock_dynamic_public_keys_for_tests();
+            upsert_dynamic_client_public_key(&hex_32(0x22))
+                .expect("authority upload should succeed");
         }
     }
-
-    impl StateObserver for SessionAuthRuntime {
-        type SummaryState = SessionAuthStateSummary;
-        type Context = ();
-
-        async fn observe_state(&self, _context: &Self::Context) -> Self::SummaryState {
-            *self.summary.lock().await
-        }
-    }
-
-    #[code_tests(spec = SessionAuthProjectionSpec, binding = SessionAuthBinding)]
-    const _: () = ();
 }
 
 #[async_trait]

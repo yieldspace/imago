@@ -499,14 +499,11 @@ fn log_service_shutdown_errors(stop_errors: Vec<(String, ImagodError)>, force: b
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imagod_spec::{ContractEffectSummary, ManagerRuntimeOutputSummary, ManagerRuntimeStateSummary};
-    use imagod_spec_formal::{
-        ManagerRuntimeProjectionAction, ManagerRuntimeProjectionSpec,
+    use imagod_spec::{
+        ContractEffectSummary, ManagerRuntimeOutputSummary, ManagerRuntimeStateSummary,
     };
-    use nirvash_core::{
-        conformance::{ActionApplier, ProtocolRuntimeBinding, StateObserver},
-    };
-    use nirvash_macros::code_tests;
+    use imagod_spec_formal::{ManagerRuntimeProjectionAction, ManagerRuntimeProjectionSpec};
+    use nirvash_macros::nirvash_runtime_contract;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug)]
@@ -519,122 +516,225 @@ mod tests {
         fn new() -> Self {
             Self {
                 probe: ManagerRuntimeProbe::default(),
-                summary: tokio::sync::Mutex::new(
-                    ManagerRuntimeProjectionSpec::new().initial_summary(),
-                ),
+                summary: tokio::sync::Mutex::new(ManagerRuntimeStateSummary::default()),
             }
         }
     }
 
-    impl ActionApplier for ManagerRuntimeProjectionRuntime {
-        type Action = ManagerRuntimeProjectionAction;
-        type Output = ManagerRuntimeOutputSummary;
-        type Context = ();
-
-        async fn execute_action(
-            &self,
-            _context: &Self::Context,
-            action: &Self::Action,
-        ) -> Self::Output {
-            let spec = ManagerRuntimeProjectionSpec::new();
-            let prev = *self.summary.lock().await;
-            if !spec.action_allowed(&prev, *action) {
-                return ManagerRuntimeOutputSummary::default();
-            }
-            match action {
-                ManagerRuntimeProjectionAction::LoadExistingConfig => {
-                    self.probe.record_config_loaded(false);
-                }
-                ManagerRuntimeProjectionAction::CreateDefaultConfig => {
-                    self.probe.record_config_loaded(true);
-                }
-                ManagerRuntimeProjectionAction::RunPluginGcSucceeded => {
-                    self.probe
-                        .record_plugin_gc(ManagerRuntimeTaskState::Succeeded);
-                }
-                ManagerRuntimeProjectionAction::RunPluginGcFailed => {
-                    self.probe.record_plugin_gc(ManagerRuntimeTaskState::Failed);
-                }
-                ManagerRuntimeProjectionAction::RunBootRestoreSucceeded => {
-                    self.probe
-                        .record_boot_restore(ManagerRuntimeTaskState::Succeeded);
-                    self.probe.record_listening();
-                }
-                ManagerRuntimeProjectionAction::RunBootRestoreFailed => {
-                    self.probe
-                        .record_boot_restore(ManagerRuntimeTaskState::Failed);
-                    self.probe.record_listening();
-                }
-                ManagerRuntimeProjectionAction::BeginShutdown => {
-                    self.probe.record_shutdown_started();
-                }
-                ManagerRuntimeProjectionAction::StopServicesGraceful => {
-                    stop_managed_services(
-                        |_| async { Vec::new() },
-                        || async { false },
-                        &self.probe,
-                    )
-                    .await;
-                }
-                ManagerRuntimeProjectionAction::StopServicesForced => {
-                    stop_managed_services(|_| async { Vec::new() }, || async { true }, &self.probe)
-                        .await;
-                }
-                ManagerRuntimeProjectionAction::StopMaintenance => {
-                    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-                    let probe = self.probe.clone();
-                    let task = tokio::spawn(maintenance_loop(
-                        shutdown_rx,
-                        Duration::from_millis(1),
-                        Duration::from_millis(1),
-                        probe,
-                        || async {},
-                        || async { false },
-                    ));
-                    let _ = shutdown_tx.send(true);
-                    task.await.expect("maintenance loop should join");
-                }
-                ManagerRuntimeProjectionAction::FinishShutdown => {}
-            }
-            *self.summary.lock().await = spec.advance_summary(&prev, *action);
-            if matches!(action, ManagerRuntimeProjectionAction::FinishShutdown) {
-                ManagerRuntimeOutputSummary {
-                    effects: vec![ContractEffectSummary::ShutdownComplete],
-                }
-            } else {
-                ManagerRuntimeOutputSummary::default()
-            }
+    fn shutdown_complete_output(_result: &()) -> ManagerRuntimeOutputSummary {
+        ManagerRuntimeOutputSummary {
+            effects: vec![ContractEffectSummary::ShutdownComplete],
         }
     }
 
-    impl StateObserver for ManagerRuntimeProjectionRuntime {
-        type SummaryState = ManagerRuntimeStateSummary;
-        type Context = ();
-
-        async fn observe_state(&self, _context: &Self::Context) -> Self::SummaryState {
-            *self.summary.lock().await
-        }
-    }
-
-    #[derive(Debug, Default, Clone, Copy)]
-    struct ManagerRuntimeProjectionBinding;
-
-    impl ProtocolRuntimeBinding<ManagerRuntimeProjectionSpec> for ManagerRuntimeProjectionBinding {
-        type Runtime = ManagerRuntimeProjectionRuntime;
-        type Context = ();
-
-        async fn fresh_runtime(_spec: &ManagerRuntimeProjectionSpec) -> Self::Runtime {
-            ManagerRuntimeProjectionRuntime::new()
-        }
-
-        fn context(_spec: &ManagerRuntimeProjectionSpec) -> Self::Context {}
-    }
-
-    #[code_tests(
+    #[nirvash_runtime_contract(
         spec = ManagerRuntimeProjectionSpec,
-        binding = ManagerRuntimeProjectionBinding
+        binding = ManagerRuntimeProjectionBinding,
+        context = (),
+        context_expr = (),
+        summary = ManagerRuntimeStateSummary,
+        output = ManagerRuntimeOutputSummary,
+        summary_field = summary,
+        initial_summary = ManagerRuntimeStateSummary::default(),
+        fresh_runtime = ManagerRuntimeProjectionRuntime::new(),
+        tests(grouped)
     )]
-    const _: () = ();
+    impl ManagerRuntimeProjectionRuntime {
+        #[nirvash_macros::contract_case(
+            action = ManagerRuntimeProjectionAction::LoadExistingConfig,
+            requires = !summary.config_loaded,
+            update(
+                config_loaded = true,
+                created_default = false
+            )
+        )]
+        async fn contract_load_existing_config(&self) {
+            self.probe.record_config_loaded(false);
+        }
+
+        #[nirvash_macros::contract_case(
+            action = ManagerRuntimeProjectionAction::CreateDefaultConfig,
+            requires = !summary.config_loaded,
+            update(
+                config_loaded = true,
+                created_default = true
+            )
+        )]
+        async fn contract_create_default_config(&self) {
+            self.probe.record_config_loaded(true);
+        }
+
+        #[nirvash_macros::contract_case(
+            action = ManagerRuntimeProjectionAction::RunPluginGcSucceeded,
+            requires = summary.config_loaded
+                && matches!(summary.plugin_gc, imagod_spec::SummaryTaskState::NotStarted),
+            update(plugin_gc = imagod_spec::SummaryTaskState::Succeeded)
+        )]
+        async fn contract_run_plugin_gc_succeeded(&self) {
+            self.probe
+                .record_plugin_gc(ManagerRuntimeTaskState::Succeeded);
+        }
+
+        #[nirvash_macros::contract_case(
+            action = ManagerRuntimeProjectionAction::RunPluginGcFailed,
+            requires = summary.config_loaded
+                && matches!(summary.plugin_gc, imagod_spec::SummaryTaskState::NotStarted),
+            update(plugin_gc = imagod_spec::SummaryTaskState::Failed)
+        )]
+        async fn contract_run_plugin_gc_failed(&self) {
+            self.probe.record_plugin_gc(ManagerRuntimeTaskState::Failed);
+        }
+
+        #[nirvash_macros::contract_case(
+            action = ManagerRuntimeProjectionAction::RunBootRestoreSucceeded,
+            requires = summary.config_loaded
+                && !matches!(summary.plugin_gc, imagod_spec::SummaryTaskState::NotStarted)
+                && matches!(summary.boot_restore, imagod_spec::SummaryTaskState::NotStarted),
+            update(
+                boot_restore = imagod_spec::SummaryTaskState::Succeeded,
+                listening = true
+            )
+        )]
+        async fn contract_run_boot_restore_succeeded(&self) {
+            self.probe
+                .record_boot_restore(ManagerRuntimeTaskState::Succeeded);
+            self.probe.record_listening();
+        }
+
+        #[nirvash_macros::contract_case(
+            action = ManagerRuntimeProjectionAction::RunBootRestoreFailed,
+            requires = summary.config_loaded
+                && !matches!(summary.plugin_gc, imagod_spec::SummaryTaskState::NotStarted)
+                && matches!(summary.boot_restore, imagod_spec::SummaryTaskState::NotStarted),
+            update(
+                boot_restore = imagod_spec::SummaryTaskState::Failed,
+                listening = true
+            )
+        )]
+        async fn contract_run_boot_restore_failed(&self) {
+            self.probe
+                .record_boot_restore(ManagerRuntimeTaskState::Failed);
+            self.probe.record_listening();
+        }
+
+        #[nirvash_macros::contract_case(
+            action = ManagerRuntimeProjectionAction::BeginShutdown,
+            requires = summary.listening
+                && matches!(summary.shutdown.phase, imagod_spec::SummaryShutdownPhase::Idle),
+            update(
+                manager_shutdown_started = true,
+                session_shutdown_requested = true,
+                shutdown = imagod_spec::ShutdownStateSummary {
+                    phase: imagod_spec::SummaryShutdownPhase::DrainingSessions,
+                    accepts_stopped: true,
+                    sessions_drained: false,
+                    services_stopped: false,
+                    maintenance_stopped: false,
+                    forced_stop_attempted: summary.shutdown.forced_stop_attempted,
+                }
+            )
+        )]
+        async fn contract_begin_shutdown(&self) {
+            self.probe.record_shutdown_started();
+        }
+
+        #[nirvash_macros::contract_case(
+            action = ManagerRuntimeProjectionAction::StopServicesGraceful,
+            requires = matches!(
+                summary.shutdown.phase,
+                imagod_spec::SummaryShutdownPhase::DrainingSessions
+                    | imagod_spec::SummaryShutdownPhase::StoppingServices
+            ) && !summary.shutdown.services_stopped,
+            update(
+                shutdown = imagod_spec::ShutdownStateSummary {
+                    phase: imagod_spec::SummaryShutdownPhase::StoppingMaintenance,
+                    accepts_stopped: summary.shutdown.accepts_stopped,
+                    sessions_drained: true,
+                    services_stopped: true,
+                    maintenance_stopped: false,
+                    forced_stop_attempted: summary.shutdown.forced_stop_attempted,
+                }
+            )
+        )]
+        async fn contract_stop_services_graceful(&self) {
+            stop_managed_services(|_| async { Vec::new() }, || async { false }, &self.probe).await;
+        }
+
+        #[nirvash_macros::contract_case(
+            action = ManagerRuntimeProjectionAction::StopServicesForced,
+            requires = matches!(
+                summary.shutdown.phase,
+                imagod_spec::SummaryShutdownPhase::DrainingSessions
+                    | imagod_spec::SummaryShutdownPhase::StoppingServices
+            ) && !summary.shutdown.services_stopped,
+            update(
+                shutdown = imagod_spec::ShutdownStateSummary {
+                    phase: imagod_spec::SummaryShutdownPhase::StoppingMaintenance,
+                    accepts_stopped: summary.shutdown.accepts_stopped,
+                    sessions_drained: true,
+                    services_stopped: true,
+                    maintenance_stopped: false,
+                    forced_stop_attempted: true,
+                }
+            )
+        )]
+        async fn contract_stop_services_forced(&self) {
+            stop_managed_services(|_| async { Vec::new() }, || async { true }, &self.probe).await;
+        }
+
+        #[nirvash_macros::contract_case(
+            action = ManagerRuntimeProjectionAction::StopMaintenance,
+            requires = matches!(
+                summary.shutdown.phase,
+                imagod_spec::SummaryShutdownPhase::StoppingMaintenance
+            ),
+            update(
+                shutdown = imagod_spec::ShutdownStateSummary {
+                    phase: summary.shutdown.phase,
+                    accepts_stopped: summary.shutdown.accepts_stopped,
+                    sessions_drained: summary.shutdown.sessions_drained,
+                    services_stopped: summary.shutdown.services_stopped,
+                    maintenance_stopped: true,
+                    forced_stop_attempted: summary.shutdown.forced_stop_attempted,
+                }
+            )
+        )]
+        async fn contract_stop_maintenance(&self) {
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let probe = self.probe.clone();
+            let task = tokio::spawn(maintenance_loop(
+                shutdown_rx,
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+                probe,
+                || async {},
+                || async { false },
+            ));
+            let _ = shutdown_tx.send(true);
+            task.await.expect("maintenance loop should join");
+        }
+
+        #[nirvash_macros::contract_case(
+            action = ManagerRuntimeProjectionAction::FinishShutdown,
+            requires = summary.manager_shutdown_started
+                && summary.shutdown.maintenance_stopped
+                && !summary.manager_stopped,
+            update(
+                manager_stopped = true,
+                shutdown = imagod_spec::ShutdownStateSummary {
+                    phase: imagod_spec::SummaryShutdownPhase::Completed,
+                    accepts_stopped: summary.shutdown.accepts_stopped,
+                    sessions_drained: summary.shutdown.sessions_drained,
+                    services_stopped: summary.shutdown.services_stopped,
+                    maintenance_stopped: summary.shutdown.maintenance_stopped,
+                    forced_stop_attempted: summary.shutdown.forced_stop_attempted,
+                }
+            ),
+            output = shutdown_complete_output,
+            law_output = shutdown_complete_output(&())
+        )]
+        async fn contract_finish_shutdown(&self) {}
+    }
 
     #[test]
     fn manager_runtime_probe_records_boot_and_shutdown_milestones() {

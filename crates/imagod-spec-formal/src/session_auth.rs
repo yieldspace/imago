@@ -7,10 +7,10 @@ use nirvash_macros::{
     subsystem_spec,
 };
 
-use crate::summary_mapping::session_role_atom;
 use crate::atoms::{
     RemoteAuthorityAtom, RequestKindAtom, SessionAtom, SessionRoleAtom, StreamAtom,
 };
+use crate::summary_mapping::session_role_atom;
 
 #[derive(Debug, Clone, PartialEq, Eq, RelationalState)]
 pub struct SessionAuthState {
@@ -80,13 +80,14 @@ impl SessionAuthState {
                 .insert(StreamAtom::Stream0, RequestKindAtom::RpcInvoke);
         }
         if summary.bindings_cert_upload_authorized {
-            state.admin_authorized_streams.insert(
-                StreamAtom::Stream0,
-                RequestKindAtom::BindingsCertUpload,
-            );
+            state
+                .admin_authorized_streams
+                .insert(StreamAtom::Stream0, RequestKindAtom::BindingsCertUpload);
         }
         if summary.authority_uploaded {
-            state.uploaded_authorities.insert(RemoteAuthorityAtom::Edge0);
+            state
+                .uploaded_authorities
+                .insert(RemoteAuthorityAtom::Edge0);
         }
         state
     }
@@ -111,16 +112,14 @@ impl SessionAuthState {
                 .insert(SessionAtom::Session0, session_role_atom(role));
         }
         if summary.admin_services_list_authorized {
-            state.admin_authorized_streams.insert(
-                StreamAtom::Stream0,
-                RequestKindAtom::ServicesList,
-            );
+            state
+                .admin_authorized_streams
+                .insert(StreamAtom::Stream0, RequestKindAtom::ServicesList);
         }
         if summary.client_hello_authorized {
-            state.client_authorized_streams.insert(
-                StreamAtom::Stream0,
-                RequestKindAtom::HelloNegotiate,
-            );
+            state
+                .client_authorized_streams
+                .insert(StreamAtom::Stream0, RequestKindAtom::HelloNegotiate);
         }
         if summary.client_rpc_authorized {
             state
@@ -139,7 +138,9 @@ impl SessionAuthState {
             state.closed_streams.insert(StreamAtom::Stream0);
         }
         if summary.client_authority_uploaded {
-            state.uploaded_authorities.insert(RemoteAuthorityAtom::Edge0);
+            state
+                .uploaded_authorities
+                .insert(RemoteAuthorityAtom::Edge0);
         }
         state
     }

@@ -4,9 +4,7 @@ use imagod_spec::{
 };
 
 use crate::{
-    atoms::{
-        CommandEventAtom, LogChunkAtom, RequestKindAtom, SessionRoleAtom, StreamAtom,
-    },
+    atoms::{CommandEventAtom, LogChunkAtom, RequestKindAtom, SessionRoleAtom, StreamAtom},
     manager_runtime::TaskState,
     shutdown_flow::ShutdownPhase,
     system::SystemEffect,

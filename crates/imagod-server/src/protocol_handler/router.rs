@@ -1247,11 +1247,7 @@ mod tests {
 
 #[cfg(test)]
 mod conformance_tests {
-    use std::{
-        collections::BTreeMap,
-        path::PathBuf,
-        sync::{Arc, Mutex},
-    };
+    use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
     use async_trait::async_trait;
     use imagod_config::{RuntimeConfig, TlsConfig, load_or_create_default};
@@ -1260,20 +1256,16 @@ mod conformance_tests {
         ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushChunkHeader,
         ArtifactPushRequest, ArtifactStatus, BindingsCertUploadRequest, ByteRange,
         CommandCancelRequest, CommandKind, CommandProtocolAction, CommandProtocolContext,
-        CommandProtocolOutput, ContractEffectSummary, DeployCommandPayload,
-        DeployPrepareRequest, DeployPrepareResponse, ErrorCode, HelloNegotiateRequest,
-        MessageType, RouterOutputSummary, RouterStateSummary, RpcInvokeRequest,
-        RpcInvokeTargetService, RunCommandPayload, ServiceListRequest, ServiceState,
-        ServiceStatusEntry, StateRequest, StopCommandPayload, SummaryRequestKind,
-        SummaryStreamId,
+        CommandProtocolOutput, ContractEffectSummary, DeployCommandPayload, DeployPrepareRequest,
+        DeployPrepareResponse, ErrorCode, HelloNegotiateRequest, MessageType, RouterOutputSummary,
+        RouterStateSummary, RpcInvokeRequest, RpcInvokeTargetService, RunCommandPayload,
+        ServiceListRequest, ServiceState, ServiceStatusEntry, StateRequest, StopCommandPayload,
+        SummaryRequestKind, SummaryStreamId,
     };
     use imagod_spec_formal::{
         RouterProjectionAction, RouterProjectionSpec, SystemMessageBinding, system_message_binding,
     };
-    use nirvash_core::conformance::{
-        ActionApplier as ProtocolActionApplier, ProtocolRuntimeBinding, StateObserver,
-    };
-    use nirvash_macros::code_tests;
+    use nirvash_macros::nirvash_runtime_contract;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -1282,14 +1274,10 @@ mod conformance_tests {
         Envelope, ProtocolHandler, ProtocolOperations,
     };
 
-    #[derive(Debug, Default, Clone, Copy)]
-    struct RouterProjectionBinding;
-
-    #[derive(Clone)]
     struct RouterRuntime {
         handler: ProtocolHandler,
-        summary: Arc<Mutex<RouterStateSummary>>,
-        _config_root: Arc<PathBuf>,
+        summary: tokio::sync::Mutex<RouterStateSummary>,
+        _config_root: PathBuf,
     }
 
     struct FakeArtifacts;
@@ -1440,6 +1428,53 @@ mod conformance_tests {
     }
 
     impl RouterRuntime {
+        async fn new() -> Self {
+            let config_root =
+                std::env::temp_dir().join(format!("imagod-router-projection-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&config_root).expect("config root should exist");
+            let config_path = config_root.join("imagod.toml");
+            let loaded = load_or_create_default(&config_path).expect("default config should load");
+            let mut config = loaded.config;
+            config.server_version = "imagod/test".to_string();
+            config.runtime = RuntimeConfig::default();
+            config.listen_addr = "127.0.0.1:4443".to_string();
+            if config.tls.server_key.as_os_str().is_empty() {
+                config.tls = TlsConfig {
+                    server_key: PathBuf::new(),
+                    admin_public_keys: Vec::new(),
+                    client_public_keys: Vec::new(),
+                    known_public_keys: BTreeMap::new(),
+                };
+            }
+
+            let manager = Arc::new(OperationManager::new());
+            manager
+                .execute_action(
+                    &CommandProtocolContext {
+                        request_id: Uuid::from_u128(7),
+                    },
+                    &CommandProtocolAction::Start(CommandKind::Deploy),
+                )
+                .await;
+            let handler = ProtocolHandler::new_with_clients(
+                Arc::new(config),
+                config_path,
+                Arc::new(FakeArtifacts),
+                Arc::new(FakeOperations {
+                    manager: manager.clone(),
+                }),
+                Arc::new(FakeOrchestrator),
+                Arc::new(crate::protocol_handler::codec::LengthPrefixedFrameCodec),
+                Arc::new(crate::protocol_handler::clock::SystemServerClock),
+                Arc::new(crate::protocol_handler::logs_forwarder::DefaultLogsForwarder),
+            );
+            Self {
+                handler,
+                summary: tokio::sync::Mutex::new(RouterStateSummary::default()),
+                _config_root: config_root,
+            }
+        }
+
         fn request_for(&self, action: RouterProjectionAction) -> Envelope {
             let request_id = Uuid::from_u128(7);
             let correlation_id = Uuid::from_u128(2);
@@ -1556,9 +1591,19 @@ mod conformance_tests {
                 | SystemMessageBinding::LogsEnd => RouterOutputSummary::default(),
             }
         }
+
+        async fn dispatch(
+            &self,
+            action: RouterProjectionAction,
+        ) -> Result<Envelope, imagod_common::ImagodError> {
+            let request = self.request_for(action);
+            self.handler.handle_single(request).await
+        }
     }
 
-    fn summary_request_kind(kind: imagod_spec_formal::atoms::RequestKindAtom) -> SummaryRequestKind {
+    fn summary_request_kind(
+        kind: imagod_spec_formal::atoms::RequestKindAtom,
+    ) -> SummaryRequestKind {
         match kind {
             imagod_spec_formal::atoms::RequestKindAtom::HelloNegotiate => {
                 SummaryRequestKind::HelloNegotiate
@@ -1587,9 +1632,7 @@ mod conformance_tests {
             imagod_spec_formal::atoms::RequestKindAtom::LogsRequest => {
                 SummaryRequestKind::LogsRequest
             }
-            imagod_spec_formal::atoms::RequestKindAtom::RpcInvoke => {
-                SummaryRequestKind::RpcInvoke
-            }
+            imagod_spec_formal::atoms::RequestKindAtom::RpcInvoke => SummaryRequestKind::RpcInvoke,
             imagod_spec_formal::atoms::RequestKindAtom::BindingsCertUpload => {
                 SummaryRequestKind::BindingsCertUpload
             }
@@ -1597,114 +1640,181 @@ mod conformance_tests {
         }
     }
 
-    impl ProtocolRuntimeBinding<RouterProjectionSpec> for RouterProjectionBinding {
-        type Runtime = RouterRuntime;
-        type Context = ();
-
-        async fn fresh_runtime(spec: &RouterProjectionSpec) -> Self::Runtime {
-            let config_root =
-                std::env::temp_dir().join(format!("imagod-router-projection-{}", Uuid::new_v4()));
-            std::fs::create_dir_all(&config_root).expect("config root should exist");
-            let config_path = config_root.join("imagod.toml");
-            let loaded = load_or_create_default(&config_path).expect("default config should load");
-            let mut config = loaded.config;
-            config.server_version = "imagod/test".to_string();
-            config.runtime = RuntimeConfig::default();
-            config.listen_addr = "127.0.0.1:4443".to_string();
-            if config.tls.server_key.as_os_str().is_empty() {
-                config.tls = TlsConfig {
-                    server_key: PathBuf::new(),
-                    admin_public_keys: Vec::new(),
-                    client_public_keys: Vec::new(),
-                    known_public_keys: BTreeMap::new(),
-                };
-            }
-
-            let manager = Arc::new(OperationManager::new());
-            manager
-                .execute_action(
-                    &CommandProtocolContext {
-                        request_id: Uuid::from_u128(7),
-                    },
-                    &CommandProtocolAction::Start(CommandKind::Deploy),
-                )
-                .await;
-            let handler = ProtocolHandler::new_with_clients(
-                Arc::new(config),
-                config_path,
-                Arc::new(FakeArtifacts),
-                Arc::new(FakeOperations {
-                    manager: manager.clone(),
-                }),
-                Arc::new(FakeOrchestrator),
-                Arc::new(crate::protocol_handler::codec::LengthPrefixedFrameCodec),
-                Arc::new(crate::protocol_handler::clock::SystemServerClock),
-                Arc::new(crate::protocol_handler::logs_forwarder::DefaultLogsForwarder),
-            );
-            RouterRuntime {
-                handler,
-                summary: Arc::new(Mutex::new(spec.initial_summary())),
-                _config_root: Arc::new(config_root),
-            }
-        }
-
-        fn context(_spec: &RouterProjectionSpec) -> Self::Context {}
+    fn router_output(
+        runtime: &RouterRuntime,
+        result: &Result<Envelope, imagod_common::ImagodError>,
+    ) -> RouterOutputSummary {
+        runtime.output_for_response(result.as_ref().expect("router response should exist"))
     }
 
-    impl ProtocolActionApplier for RouterRuntime {
-        type Action = RouterProjectionAction;
-        type Output = RouterOutputSummary;
-        type Context = ();
+    fn router_law_output(kind: SummaryRequestKind) -> RouterOutputSummary {
+        RouterOutputSummary {
+            effects: vec![ContractEffectSummary::Response(
+                SummaryStreamId::Stream0,
+                kind,
+            )],
+        }
+    }
 
-        async fn execute_action(
+    #[nirvash_runtime_contract(
+        spec = RouterProjectionSpec,
+        binding = RouterProjectionBinding,
+        context = (),
+        context_expr = (),
+        summary = RouterStateSummary,
+        output = RouterOutputSummary,
+        summary_field = summary,
+        initial_summary = RouterStateSummary::initial_admin_stream(),
+        fresh_runtime = RouterRuntime::new().await,
+        tests(grouped)
+    )]
+    impl RouterRuntime {
+        #[nirvash_macros::contract_case(
+            action = RouterProjectionAction::HelloNegotiate,
+            requires = summary.active_session && summary.request.is_none(),
+            update(request = Some(SummaryRequestKind::HelloNegotiate)),
+            output = |result| router_output(self, result),
+            law_output = router_law_output(SummaryRequestKind::HelloNegotiate)
+        )]
+        async fn contract_hello_negotiate(&self) -> Result<Envelope, imagod_common::ImagodError> {
+            self.dispatch(RouterProjectionAction::HelloNegotiate).await
+        }
+
+        #[nirvash_macros::contract_case(
+            action = RouterProjectionAction::DeployPrepare,
+            requires = summary.active_session
+                && summary.deploy_prepare_authorized
+                && summary.request.is_none(),
+            update(request = Some(SummaryRequestKind::DeployPrepare)),
+            output = |result| router_output(self, result),
+            law_output = router_law_output(SummaryRequestKind::DeployPrepare)
+        )]
+        async fn contract_deploy_prepare(&self) -> Result<Envelope, imagod_common::ImagodError> {
+            self.dispatch(RouterProjectionAction::DeployPrepare).await
+        }
+
+        #[nirvash_macros::contract_case(
+            action = RouterProjectionAction::ArtifactPush,
+            requires = summary.active_session
+                && summary.artifact_push_authorized
+                && summary.request.is_none(),
+            update(request = Some(SummaryRequestKind::ArtifactPush)),
+            output = |result| router_output(self, result),
+            law_output = router_law_output(SummaryRequestKind::ArtifactPush)
+        )]
+        async fn contract_artifact_push(&self) -> Result<Envelope, imagod_common::ImagodError> {
+            self.dispatch(RouterProjectionAction::ArtifactPush).await
+        }
+
+        #[nirvash_macros::contract_case(
+            action = RouterProjectionAction::ArtifactCommit,
+            requires = summary.active_session
+                && summary.artifact_commit_authorized
+                && summary.request.is_none(),
+            update(request = Some(SummaryRequestKind::ArtifactCommit)),
+            output = |result| router_output(self, result),
+            law_output = router_law_output(SummaryRequestKind::ArtifactCommit)
+        )]
+        async fn contract_artifact_commit(&self) -> Result<Envelope, imagod_common::ImagodError> {
+            self.dispatch(RouterProjectionAction::ArtifactCommit).await
+        }
+
+        #[nirvash_macros::contract_case(
+            action = RouterProjectionAction::StateRequest,
+            requires = summary.active_session
+                && summary.state_request_authorized
+                && summary.request.is_none(),
+            update(request = Some(SummaryRequestKind::StateRequest)),
+            output = |result| router_output(self, result),
+            law_output = router_law_output(SummaryRequestKind::StateRequest)
+        )]
+        async fn contract_state_request(&self) -> Result<Envelope, imagod_common::ImagodError> {
+            self.dispatch(RouterProjectionAction::StateRequest).await
+        }
+
+        #[nirvash_macros::contract_case(
+            action = RouterProjectionAction::ServicesList,
+            requires = summary.active_session
+                && summary.services_list_authorized
+                && summary.request.is_none(),
+            update(request = Some(SummaryRequestKind::ServicesList)),
+            output = |result| router_output(self, result),
+            law_output = router_law_output(SummaryRequestKind::ServicesList)
+        )]
+        async fn contract_services_list(&self) -> Result<Envelope, imagod_common::ImagodError> {
+            self.dispatch(RouterProjectionAction::ServicesList).await
+        }
+
+        #[nirvash_macros::contract_case(
+            action = RouterProjectionAction::CommandCancel,
+            requires = summary.active_session
+                && summary.command_cancel_authorized
+                && summary.request.is_none(),
+            update(request = Some(SummaryRequestKind::CommandCancel)),
+            output = |result| router_output(self, result),
+            law_output = router_law_output(SummaryRequestKind::CommandCancel)
+        )]
+        async fn contract_command_cancel(&self) -> Result<Envelope, imagod_common::ImagodError> {
+            self.dispatch(RouterProjectionAction::CommandCancel).await
+        }
+
+        #[nirvash_macros::contract_case(
+            action = RouterProjectionAction::RpcInvoke,
+            requires = summary.active_session
+                && summary.rpc_invoke_authorized
+                && summary.request.is_none(),
+            update(request = Some(SummaryRequestKind::RpcInvoke)),
+            output = |result| router_output(self, result),
+            law_output = router_law_output(SummaryRequestKind::RpcInvoke)
+        )]
+        async fn contract_rpc_invoke(&self) -> Result<Envelope, imagod_common::ImagodError> {
+            self.dispatch(RouterProjectionAction::RpcInvoke).await
+        }
+
+        #[nirvash_macros::contract_case(
+            action = RouterProjectionAction::BindingsCertUpload,
+            requires = summary.active_session
+                && summary.bindings_cert_upload_authorized
+                && summary.request.is_none(),
+            update(
+                request = Some(SummaryRequestKind::BindingsCertUpload),
+                authority_uploaded = true
+            ),
+            output = |result| router_output(self, result),
+            law_output = router_law_output(SummaryRequestKind::BindingsCertUpload)
+        )]
+        async fn contract_bindings_cert_upload(
             &self,
-            _context: &Self::Context,
-            action: &Self::Action,
-        ) -> Self::Output {
-            let spec = RouterProjectionSpec::new();
-            let prev = *self.summary.lock().expect("summary lock");
-            if !spec.action_allowed(&prev, *action) {
-                return RouterOutputSummary::default();
-            }
-            let request = self.request_for(*action);
-            let response = self
-                .handler
-                .handle_single(request)
+        ) -> Result<Envelope, imagod_common::ImagodError> {
+            self.dispatch(RouterProjectionAction::BindingsCertUpload)
                 .await
-                .expect("router action should succeed");
-            *self.summary.lock().expect("summary lock") = spec.advance_summary(&prev, *action);
-            self.output_for_response(&response)
         }
     }
-
-    impl StateObserver for RouterRuntime {
-        type SummaryState = RouterStateSummary;
-        type Context = ();
-
-        async fn observe_state(&self, _context: &Self::Context) -> Self::SummaryState {
-            *self.summary.lock().expect("summary lock")
-        }
-    }
-
-    #[code_tests(spec = RouterProjectionSpec, binding = RouterProjectionBinding)]
-    const _: () = ();
 
     #[test]
     fn router_runtime_maps_services_list_to_system_response() {
         let spec = RouterProjectionSpec::new();
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime: RouterRuntime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime should build")
-            .block_on(async { RouterProjectionBinding::fresh_runtime(&spec).await });
+            .block_on(async {
+                <RouterProjectionBinding as nirvash_core::conformance::ProtocolRuntimeBinding<
+                    RouterProjectionSpec,
+                >>::fresh_runtime(&spec)
+                .await
+            });
         let output = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime should build")
             .block_on(async {
-                runtime
-                    .execute_action(&(), &RouterProjectionAction::ServicesList)
-                    .await
+                <RouterRuntime as nirvash_core::conformance::ActionApplier>::execute_action(
+                    &runtime,
+                    &(),
+                    &RouterProjectionAction::ServicesList,
+                )
+                .await
             });
         assert_eq!(
             output,
