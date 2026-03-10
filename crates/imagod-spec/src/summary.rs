@@ -4,27 +4,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CommandProtocolObservedState, CommandProtocolOutput};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum SummaryServiceId {
+    #[default]
     Service0,
     Service1,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum SummaryStreamId {
+    #[default]
     Stream0,
     Stream1,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum SummarySessionRole {
+    #[default]
     Admin,
     Client,
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum SummaryRequestKind {
+    #[default]
     HelloNegotiate,
     DeployPrepare,
     ArtifactPush,
@@ -38,8 +42,9 @@ pub enum SummaryRequestKind {
     BindingsCertUpload,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum SummaryCommandEvent {
+    #[default]
     Accepted,
     Running,
     Succeeded,
@@ -47,8 +52,9 @@ pub enum SummaryCommandEvent {
     Canceled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum SummaryLogChunk {
+    #[default]
     Chunk0,
 }
 
@@ -60,8 +66,9 @@ pub enum SummaryTaskState {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum SummaryTaskKind {
+    #[default]
     PluginGc,
     BootRestore,
 }

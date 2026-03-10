@@ -1,0 +1,5 @@
+error: enum ProtocolInputWitness derive requires #[protocol_input_witness(action = ...)]
+ --> tests/fixtures/derive_protocol_input_witness_invalid.rs:4:6
+  |
+4 | enum BadInput {
+  |      ^^^^^^^^

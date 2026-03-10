@@ -34,7 +34,9 @@ flowchart LR
   - `#[derive(RelAtom)]` / `#[derive(RelationalState)]`
   - `#[subsystem_spec]` / `#[system_spec]`
   - `#[formal_tests]` / `#[code_tests]`
-  - `#[nirvash_projection_contract]`
+  - `nirvash_projection_model!`
+  - `#[nirvash_projection_contract]` (low-level fallback)
+  - `#[derive(ProtocolInputWitness)]`
   - `#[invariant(...)]` などの registry 登録
 - `crates/imagod-spec`
   - `command_contract` / `wire` / `ipc` の shared contract
@@ -77,7 +79,7 @@ flowchart TD
 - concurrent edge の doc label は `parallel(a, b, c)` 形式で表示され、resource footprint に衝突しない atomic action だけが自動合成されます。
 - `formal_tests` は spec 単体を検査します。
 - `code_tests` は `nirvash_core::conformance::ProtocolConformanceSpec` と `ProtocolRuntimeBinding` を使って grouped な runtime conformance を生成し、`ActionApplier` / `StateObserver` 経由で `before_probe -> summarize_state -> abstract_state`、`output_probe -> summarize_output -> abstract_output`、`after_probe -> summarize_state -> abstract_state` を比較します。runtime contract macro も同じ probe-first の流れを生成し、runtime 側には `observe_state(...) -> ProbeState` と `observe_output(...) -> ProbeOutput` だけを要求します。
-- `code_witness_tests` は `ProtocolInputWitnessBinding` で positive / negative witness を受け取り、reachable graph から semantic case を自動検出して witness 単位の strict test を custom harness で列挙します。現行の command witness は `command_projection` が `system` から command surface を投影し、実行先は `OperationManager` に限定されます。ほかの boundary は grouped `code_tests` で `router_projection` / `session_auth_projection` / `logs_projection -> imagod-server`、`runtime_projection -> imagod-control`、`manager_runtime_projection -> imagod` に接続します。
+- `code_witness_tests` は `ProtocolInputWitnessBinding` で positive / negative witness を受け取り、reachable graph から semantic case を自動検出して witness 単位の strict test を custom harness で列挙します。`Input = Action` 以外の witness は `#[derive(ProtocolInputWitness)]` で `ProtocolInputWitnessCodec<Action>` を自動実装し、runtime contract では `input_codec = ...` と `dispatch_input = ...` を組み合わせて auto-generated witness を使えます。現行の command witness は `command_projection` が `system` から command surface を投影し、実行先は `OperationManager` に限定されます。ほかの boundary は grouped `code_tests` で `router_projection` / `session_auth_projection` / `logs_projection -> imagod-server`、`runtime_projection -> imagod-control`、`manager_runtime_projection -> imagod` に接続します。
 - shared contract は `imagod-spec`、conformance API は `nirvash-core` にあり、formal spec 本体は `imagod-spec-formal`、runtime binding と `code_tests` 実行は runtime crate の integration test に置きます。
 
 ## imagod-control のシステム
@@ -149,7 +151,7 @@ flowchart LR
 
 server はこの trait 契約をそのまま使って command action を適用します。  
 `imagod-control` の integration test に置かれた `code_tests` も同じ trait 契約だけを前提に、reachable graph の prefix を実コードへ適用したうえで before/after probe を `summary -> abstract` へ射影して比較します。spec/runtime 間で「別の adapter API」を挟みません。
-`command_projection` は binding-mode identity witness の例外で、`OperationManager` が既に formal 向け observed state/output を直接返せる前提を使います。その他の boundary は `probe -> summary -> abstract` を正本とし、runtime wrapper は concrete snapshot/event だけを probe として返し、projection spec 側の `ProbeState/ProbeOutput -> SummaryState/SummaryOutput -> AbstractState/ExpectedOutput` の写像を `#[nirvash_projection_contract]` で宣言します。現在は `router_projection` / `session_auth_projection` / `logs_projection` が `imagod-server`、`runtime_projection` が `imagod-control`、`manager_runtime_projection` が `imagod` に接続済みです。
+`command_projection` は binding-mode identity witness の例外で、`OperationManager` が既に formal 向け observed state/output を直接返せる前提を使います。その他の boundary は `probe -> summary -> abstract` を正本とし、runtime wrapper は concrete snapshot/event だけを probe として返し、projection spec 側の `ProbeState/ProbeOutput -> SummaryState/SummaryOutput -> AbstractState/ExpectedOutput` の写像を `nirvash_projection_model!` で宣言します。`#[nirvash_projection_contract]` は generated DSL では足りない特殊ケースの fallback です。現在は `router_projection` / `session_auth_projection` / `logs_projection` が `imagod-server`、`runtime_projection` が `imagod-control`、`manager_runtime_projection` が `imagod` に接続済みです。
 
 ## spec と runtime の接続
 

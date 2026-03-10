@@ -7,7 +7,7 @@ use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
     Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprRange, Field, Fields, Ident,
-    ImplItem, ItemConst, ItemFn, ItemImpl, Lit, LitStr, Path, RangeLimits, Token, Type,
+    ImplItem, ItemConst, ItemFn, ItemImpl, Lit, LitStr, Pat, Path, RangeLimits, Token, Type,
     parse_macro_input,
 };
 
@@ -24,6 +24,15 @@ pub fn derive_signature(input: TokenStream) -> TokenStream {
 pub fn derive_action_vocabulary(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand_action_vocabulary_derive(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[proc_macro_derive(ProtocolInputWitness, attributes(protocol_input_witness))]
+pub fn derive_protocol_input_witness(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match expand_protocol_input_witness_derive(input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
@@ -112,6 +121,15 @@ pub fn nirvash_projection_contract(attr: TokenStream, item: TokenStream) -> Toke
     let args = parse_macro_input!(attr as ProjectionContractArgs);
     let item = parse_macro_input!(item as ItemImpl);
     match expand_projection_contract(args, item) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[proc_macro]
+pub fn nirvash_projection_model(input: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(input as ProjectionModelArgs);
+    match expand_projection_model(args) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
@@ -542,6 +560,7 @@ struct RuntimeContractArgs {
     observe_state: Option<Expr>,
     observe_output: Option<Expr>,
     dispatch_input: Option<Expr>,
+    input_codec: Option<Path>,
     input_ty: Option<Type>,
     session_ty: Option<Type>,
     fresh_session: Option<Expr>,
@@ -558,6 +577,41 @@ struct ProjectionContractArgs {
     summarize_output: Expr,
     abstract_state: Expr,
     abstract_output: Expr,
+}
+
+struct ProjectionModelFieldAssign {
+    target: Ident,
+    value: Expr,
+}
+
+struct ProjectionModelStateAssign {
+    target: TokenStream2,
+    value: Expr,
+}
+
+enum ProjectionModelOutputValue {
+    Drop,
+    Expr(Expr),
+}
+
+struct ProjectionModelOutputArm {
+    pattern: Pat,
+    value: ProjectionModelOutputValue,
+}
+
+struct ProjectionModelArgs {
+    probe_state_ty: Type,
+    probe_output_ty: Type,
+    summary_state_ty: Type,
+    summary_output_ty: Type,
+    abstract_state_ty: Type,
+    expected_output_ty: Type,
+    state_seed: Expr,
+    state_summary: Vec<ProjectionModelFieldAssign>,
+    output_summary: Vec<ProjectionModelFieldAssign>,
+    state_abstract: Vec<ProjectionModelStateAssign>,
+    output_abstract: Vec<ProjectionModelOutputArm>,
+    item: ItemImpl,
 }
 
 impl Parse for ProjectionContractArgs {
@@ -621,6 +675,190 @@ impl Parse for ProjectionContractArgs {
     }
 }
 
+impl Parse for ProjectionModelFieldAssign {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        Ok(Self {
+            target: input.parse()?,
+            value: {
+                let _le: Token![<=] = input.parse()?;
+                input.parse()?
+            },
+        })
+    }
+}
+
+impl Parse for ProjectionModelStateAssign {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let mut target = TokenStream2::new();
+        while !input.peek(Token![<=]) {
+            let token: TokenTree = input.parse()?;
+            target.extend(std::iter::once(token));
+        }
+        Ok(Self {
+            target,
+            value: {
+                let _le: Token![<=] = input.parse()?;
+                input.parse()?
+            },
+        })
+    }
+}
+
+impl Parse for ProjectionModelOutputArm {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let pattern = input.call(Pat::parse_single)?;
+        let _fat_arrow: Token![=>] = input.parse()?;
+        let value = if input.peek(Ident) {
+            let fork = input.fork();
+            let ident: Ident = fork.parse()?;
+            if ident == "drop" {
+                let _drop: Ident = input.parse()?;
+                ProjectionModelOutputValue::Drop
+            } else {
+                ProjectionModelOutputValue::Expr(input.parse()?)
+            }
+        } else {
+            ProjectionModelOutputValue::Expr(input.parse()?)
+        };
+        Ok(Self { pattern, value })
+    }
+}
+
+impl Parse for ProjectionModelArgs {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let mut probe_state_ty = None;
+        let mut probe_output_ty = None;
+        let mut summary_state_ty = None;
+        let mut summary_output_ty = None;
+        let mut abstract_state_ty = None;
+        let mut expected_output_ty = None;
+        let mut state_seed = None;
+        let mut state_summary = None;
+        let mut output_summary = None;
+        let mut state_abstract = None;
+        let mut output_abstract = None;
+        let mut item = None;
+
+        while !input.is_empty() {
+            if input.peek(Token![impl]) {
+                item = Some(input.parse()?);
+                break;
+            }
+            let ident: Ident = input.parse()?;
+            if input.peek(Token![=]) {
+                let _eq: Token![=] = input.parse()?;
+                match ident.to_string().as_str() {
+                    "probe_state" => probe_state_ty = Some(input.parse()?),
+                    "probe_output" => probe_output_ty = Some(input.parse()?),
+                    "summary_state" => summary_state_ty = Some(input.parse()?),
+                    "summary_output" => summary_output_ty = Some(input.parse()?),
+                    "abstract_state" => abstract_state_ty = Some(input.parse()?),
+                    "expected_output" => expected_output_ty = Some(input.parse()?),
+                    "state_seed" => state_seed = Some(input.parse()?),
+                    _ => {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            "unsupported nirvash_projection_model argument",
+                        ));
+                    }
+                }
+            } else {
+                let content;
+                syn::braced!(content in input);
+                match ident.to_string().as_str() {
+                    "state_summary" => {
+                        let mut entries = Vec::new();
+                        while !content.is_empty() {
+                            entries.push(content.parse()?);
+                            if content.peek(Token![,]) {
+                                let _ = content.parse::<Token![,]>()?;
+                            }
+                        }
+                        state_summary = Some(entries);
+                    }
+                    "output_summary" => {
+                        let mut entries = Vec::new();
+                        while !content.is_empty() {
+                            entries.push(content.parse()?);
+                            if content.peek(Token![,]) {
+                                let _ = content.parse::<Token![,]>()?;
+                            }
+                        }
+                        output_summary = Some(entries);
+                    }
+                    "state_abstract" => {
+                        let mut entries = Vec::new();
+                        while !content.is_empty() {
+                            entries.push(content.parse()?);
+                            if content.peek(Token![,]) {
+                                let _ = content.parse::<Token![,]>()?;
+                            }
+                        }
+                        state_abstract = Some(entries);
+                    }
+                    "output_abstract" => {
+                        let mut arms = Vec::new();
+                        while !content.is_empty() {
+                            arms.push(content.parse()?);
+                            if content.peek(Token![,]) {
+                                let _ = content.parse::<Token![,]>()?;
+                            }
+                        }
+                        output_abstract = Some(arms);
+                    }
+                    _ => {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            "unsupported nirvash_projection_model block",
+                        ));
+                    }
+                }
+            }
+            if input.peek(Token![,]) {
+                let _ = input.parse::<Token![,]>()?;
+            }
+        }
+
+        Ok(Self {
+            probe_state_ty: probe_state_ty
+                .ok_or_else(|| syn::Error::new(Span::call_site(), "missing probe_state = ..."))?,
+            probe_output_ty: probe_output_ty
+                .ok_or_else(|| syn::Error::new(Span::call_site(), "missing probe_output = ..."))?,
+            summary_state_ty: summary_state_ty
+                .ok_or_else(|| syn::Error::new(Span::call_site(), "missing summary_state = ..."))?,
+            summary_output_ty: summary_output_ty.ok_or_else(|| {
+                syn::Error::new(Span::call_site(), "missing summary_output = ...")
+            })?,
+            abstract_state_ty: abstract_state_ty.ok_or_else(|| {
+                syn::Error::new(Span::call_site(), "missing abstract_state = ...")
+            })?,
+            expected_output_ty: expected_output_ty.ok_or_else(|| {
+                syn::Error::new(Span::call_site(), "missing expected_output = ...")
+            })?,
+            state_seed: state_seed
+                .ok_or_else(|| syn::Error::new(Span::call_site(), "missing state_seed = ..."))?,
+            state_summary: state_summary.ok_or_else(|| {
+                syn::Error::new(Span::call_site(), "missing state_summary { ... }")
+            })?,
+            output_summary: output_summary.ok_or_else(|| {
+                syn::Error::new(Span::call_site(), "missing output_summary { ... }")
+            })?,
+            state_abstract: state_abstract.ok_or_else(|| {
+                syn::Error::new(Span::call_site(), "missing state_abstract { ... }")
+            })?,
+            output_abstract: output_abstract.ok_or_else(|| {
+                syn::Error::new(Span::call_site(), "missing output_abstract { ... }")
+            })?,
+            item: item.ok_or_else(|| {
+                syn::Error::new(
+                    Span::call_site(),
+                    "missing impl ProtocolConformanceSpec for ... { ... }",
+                )
+            })?,
+        })
+    }
+}
+
 impl Parse for RuntimeContractArgs {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let mut spec = None;
@@ -634,6 +872,7 @@ impl Parse for RuntimeContractArgs {
         let mut observe_state = None;
         let mut observe_output = None;
         let mut dispatch_input = None;
+        let mut input_codec = None;
         let mut input_ty = None;
         let mut session_ty = None;
         let mut fresh_session = None;
@@ -675,6 +914,7 @@ impl Parse for RuntimeContractArgs {
                     "observe_state" => observe_state = Some(input.parse()?),
                     "observe_output" | "output" => observe_output = Some(input.parse()?),
                     "dispatch_input" => dispatch_input = Some(input.parse()?),
+                    "input_codec" => input_codec = Some(input.parse()?),
                     "input" => input_ty = Some(input.parse()?),
                     "session" => session_ty = Some(input.parse()?),
                     "fresh_session" => fresh_session = Some(input.parse()?),
@@ -713,6 +953,7 @@ impl Parse for RuntimeContractArgs {
             observe_state,
             observe_output,
             dispatch_input,
+            input_codec,
             input_ty,
             session_ty,
             fresh_session,
@@ -1277,6 +1518,179 @@ fn single_field_delegate_arm(
         }
         _ => None,
     }
+}
+
+#[derive(Default)]
+struct ProtocolInputWitnessArgs {
+    action_ty: Option<Type>,
+    action_field: Option<Ident>,
+}
+
+impl ProtocolInputWitnessArgs {
+    fn from_attrs(attrs: &[Attribute]) -> syn::Result<Self> {
+        let mut args = Self::default();
+        for attr in attrs {
+            if !attr.path().is_ident("protocol_input_witness") {
+                continue;
+            }
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("action") {
+                    args.action_ty = Some(meta.value()?.parse()?);
+                    return Ok(());
+                }
+                if meta.path.is_ident("field") {
+                    args.action_field = Some(meta.value()?.parse()?);
+                    return Ok(());
+                }
+                Err(meta.error("unsupported #[protocol_input_witness(...)] option"))
+            })?;
+        }
+        Ok(args)
+    }
+}
+
+fn expand_protocol_input_witness_derive(
+    input: DeriveInput,
+) -> syn::Result<proc_macro2::TokenStream> {
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            input.generics.span(),
+            "ProtocolInputWitness derive does not support generics",
+        ));
+    }
+
+    let args = ProtocolInputWitnessArgs::from_attrs(&input.attrs)?;
+    let ident = input.ident;
+
+    match input.data {
+        Data::Struct(data) => expand_protocol_input_witness_struct(&ident, data, args),
+        Data::Enum(data) => expand_protocol_input_witness_enum(&ident, data, args),
+        Data::Union(data) => Err(syn::Error::new(
+            data.union_token.span(),
+            "ProtocolInputWitness derive does not support unions",
+        )),
+    }
+}
+
+fn expand_protocol_input_witness_struct(
+    ident: &Ident,
+    data: DataStruct,
+    args: ProtocolInputWitnessArgs,
+) -> syn::Result<proc_macro2::TokenStream> {
+    match data.fields {
+        Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+            let action_ty = fields
+                .unnamed
+                .first()
+                .map(|field| field.ty.clone())
+                .ok_or_else(|| syn::Error::new(fields.span(), "missing newtype field"))?;
+            Ok(quote! {
+                impl ::nirvash_core::conformance::ProtocolInputWitnessCodec<#action_ty> for #ident {
+                    fn encode_positive(action: &#action_ty) -> Self {
+                        Self(action.clone())
+                    }
+                }
+            })
+        }
+        Fields::Named(fields) => {
+            let action_ty = args.action_ty.ok_or_else(|| {
+                syn::Error::new(
+                    fields.span(),
+                    "named struct ProtocolInputWitness derive requires #[protocol_input_witness(action = ...)]",
+                )
+            })?;
+            let action_field = if let Some(action_field) = args.action_field {
+                action_field
+            } else {
+                let matching_fields = fields
+                    .named
+                    .iter()
+                    .filter(|field| {
+                        field.ty.to_token_stream().to_string()
+                            == action_ty.to_token_stream().to_string()
+                    })
+                    .collect::<Vec<_>>();
+                if matching_fields.len() == 1 {
+                    matching_fields[0]
+                        .ident
+                        .clone()
+                        .expect("named field should have ident")
+                } else {
+                    return Err(syn::Error::new(
+                        fields.span(),
+                        "named struct ProtocolInputWitness derive requires #[protocol_input_witness(field = ...)] when the action field is ambiguous",
+                    ));
+                }
+            };
+            Ok(quote! {
+                impl ::nirvash_core::conformance::ProtocolInputWitnessCodec<#action_ty> for #ident {
+                    fn encode_positive(action: &#action_ty) -> Self {
+                        let mut input = <Self as ::core::default::Default>::default();
+                        input.#action_field = action.clone();
+                        input
+                    }
+                }
+            })
+        }
+        Fields::Unit => Err(syn::Error::new(
+            ident.span(),
+            "ProtocolInputWitness derive does not support unit structs",
+        )),
+        Fields::Unnamed(fields) => Err(syn::Error::new(
+            fields.span(),
+            "ProtocolInputWitness derive only supports newtype tuple structs",
+        )),
+    }
+}
+
+fn expand_protocol_input_witness_enum(
+    ident: &Ident,
+    data: DataEnum,
+    args: ProtocolInputWitnessArgs,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let action_ty = args.action_ty.ok_or_else(|| {
+        syn::Error::new(
+            ident.span(),
+            "enum ProtocolInputWitness derive requires #[protocol_input_witness(action = ...)]",
+        )
+    })?;
+    let arms = data
+        .variants
+        .iter()
+        .map(|variant| {
+            let variant_ident = &variant.ident;
+            let constructor = match &variant.fields {
+                Fields::Unit => quote! { Self::#variant_ident },
+                Fields::Unnamed(fields) => {
+                    let defaults = fields
+                        .unnamed
+                        .iter()
+                        .map(|_| quote!(::core::default::Default::default()));
+                    quote! { Self::#variant_ident(#(#defaults),*) }
+                }
+                Fields::Named(fields) => {
+                    let defaults = fields.named.iter().map(|field| {
+                        let field_ident =
+                            field.ident.as_ref().expect("named field should have ident");
+                        quote!(#field_ident: ::core::default::Default::default())
+                    });
+                    quote! { Self::#variant_ident { #(#defaults),* } }
+                }
+            };
+            Ok(quote! {
+                #action_ty::#variant_ident => #constructor,
+            })
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+    Ok(quote! {
+        impl ::nirvash_core::conformance::ProtocolInputWitnessCodec<#action_ty> for #ident {
+            fn encode_positive(action: &#action_ty) -> Self {
+                match action {
+                    #(#arms)*
+                }
+            }
+        }
+    })
 }
 
 fn expand_rel_atom_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
@@ -3751,6 +4165,268 @@ fn expand_projection_contract(
     Ok(quote! { #item })
 }
 
+fn expand_projection_model(args: ProjectionModelArgs) -> syn::Result<TokenStream2> {
+    let ProjectionModelArgs {
+        probe_state_ty,
+        probe_output_ty,
+        summary_state_ty,
+        summary_output_ty,
+        abstract_state_ty,
+        expected_output_ty,
+        state_seed,
+        state_summary,
+        output_summary,
+        state_abstract,
+        output_abstract,
+        item,
+    } = args;
+
+    let self_ty = item.self_ty.as_ref().clone();
+    let spec_ident = match &self_ty {
+        Type::Path(type_path) if type_path.qself.is_none() => type_path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.clone())
+            .ok_or_else(|| {
+                syn::Error::new(
+                    type_path.span(),
+                    "projection model requires a named self type",
+                )
+            })?,
+        _ => {
+            return Err(syn::Error::new(
+                self_ty.span(),
+                "projection model requires a named self type",
+            ));
+        }
+    };
+    let snake = to_upper_snake(&spec_ident.to_string()).to_lowercase();
+    let summarize_state_ident =
+        format_ident!("__nirvash_projection_model_{}_summarize_state", snake);
+    let summarize_output_ident =
+        format_ident!("__nirvash_projection_model_{}_summarize_output", snake);
+    let abstract_state_ident = format_ident!("__nirvash_projection_model_{}_abstract_state", snake);
+    let abstract_output_ident =
+        format_ident!("__nirvash_projection_model_{}_abstract_output", snake);
+    let tests_mod_ident = format_ident!("__nirvash_projection_model_{}_laws", snake);
+
+    let state_summary_fields = state_summary
+        .iter()
+        .map(|entry| {
+            let target = &entry.target;
+            let value = &entry.value;
+            quote! { #target: #value }
+        })
+        .collect::<Vec<_>>();
+    let output_summary_fields = output_summary
+        .iter()
+        .map(|entry| {
+            let target = &entry.target;
+            let value = &entry.value;
+            quote! { #target: #value }
+        })
+        .collect::<Vec<_>>();
+    let state_abstract_assignments = state_abstract
+        .iter()
+        .map(|entry| {
+            let target = &entry.target;
+            let value = &entry.value;
+            quote! { #target = #value; }
+        })
+        .collect::<Vec<_>>();
+    let output_match_arms = output_abstract
+        .iter()
+        .map(|arm| {
+            let pattern = &arm.pattern;
+            match &arm.value {
+                ProjectionModelOutputValue::Drop => quote! {
+                    #pattern => {}
+                },
+                ProjectionModelOutputValue::Expr(expr) => quote! {
+                    #pattern => {
+                        output.push(#expr);
+                    }
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let output_test_samples = output_abstract
+        .iter()
+        .map(|arm| {
+            let sample_expr = projection_model_sample_expr(&arm.pattern)?;
+            let pattern = &arm.pattern;
+            let expected = match &arm.value {
+                ProjectionModelOutputValue::Drop => quote! {
+                    match &sample_effect {
+                        #pattern => {}
+                        _ => unreachable!("projection-model sample should match declared arm"),
+                    }
+                },
+                ProjectionModelOutputValue::Expr(expr) => quote! {
+                    match &sample_effect {
+                        #pattern => expected_output.push(#expr),
+                        _ => unreachable!("projection-model sample should match declared arm"),
+                    }
+                },
+            };
+            Ok(quote! {
+                let sample_effect = #sample_expr;
+                sample_effects.push(sample_effect.clone());
+                #expected
+            })
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+
+    let projection_tokens = expand_projection_contract(
+        ProjectionContractArgs {
+            probe_state_ty: probe_state_ty.clone(),
+            probe_output_ty: probe_output_ty.clone(),
+            summary_state_ty: summary_state_ty.clone(),
+            summary_output_ty: summary_output_ty.clone(),
+            summarize_state: syn::parse_quote!(#summarize_state_ident),
+            summarize_output: syn::parse_quote!(#summarize_output_ident),
+            abstract_state: syn::parse_quote!(#abstract_state_ident),
+            abstract_output: syn::parse_quote!(#abstract_output_ident),
+        },
+        item,
+    )?;
+
+    Ok(quote! {
+        #[doc(hidden)]
+        fn #summarize_state_ident(probe: &#probe_state_ty) -> #summary_state_ty {
+            #summary_state_ty {
+                #(#state_summary_fields),*
+            }
+        }
+
+        #[doc(hidden)]
+        fn #summarize_output_ident(probe: &#probe_output_ty) -> #summary_output_ty {
+            #summary_output_ty {
+                #(#output_summary_fields),*
+            }
+        }
+
+        #[doc(hidden)]
+        #[allow(unused_assignments)]
+        fn #abstract_state_ident(spec: &#self_ty, summary: &#summary_state_ty) -> #abstract_state_ty {
+            let spec = spec;
+            let mut state: #abstract_state_ty = #state_seed;
+            #(#state_abstract_assignments)*
+            state
+        }
+
+        #[doc(hidden)]
+        fn #abstract_output_ident(
+            _spec: &#self_ty,
+            summary: &#summary_output_ty,
+        ) -> #expected_output_ty {
+            let mut output: #expected_output_ty = ::core::default::Default::default();
+            for effect in &summary.effects {
+                match effect {
+                    #(#output_match_arms,)*
+                    _ => panic!("projection model encountered undeclared summary effect: {:?}", effect),
+                }
+            }
+            output
+        }
+
+        #projection_tokens
+
+        #[cfg(test)]
+        #[allow(clippy::needless_update)]
+        mod #tests_mod_ident {
+            use super::*;
+
+            #[test]
+            #[allow(unused_assignments)]
+            fn declared_state_projection_matches_model() {
+                let spec = <#self_ty as ::core::default::Default>::default();
+                let probe = <#probe_state_ty as ::core::default::Default>::default();
+                let summary =
+                    <#self_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::summarize_state(
+                        &spec,
+                        &probe,
+                    );
+                let expected_summary = {
+                    let probe = &probe;
+                    #summary_state_ty {
+                        #(#state_summary_fields),*
+                    }
+                };
+                let projected =
+                    <#self_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_state(
+                        &spec,
+                        &summary,
+                    );
+                let expected_state: #abstract_state_ty = {
+                    let spec = &spec;
+                    let summary = &summary;
+                    let mut state: #abstract_state_ty = #state_seed;
+                    #(#state_abstract_assignments)*
+                    state
+                };
+                ::nirvash_core::conformance::assert_declared_state_projection(
+                    &summary,
+                    &expected_summary,
+                    &projected,
+                    &expected_state,
+                );
+            }
+
+            #[test]
+            fn declared_output_projection_matches_model() {
+                let spec = <#self_ty as ::core::default::Default>::default();
+                let mut sample_effects = ::std::vec::Vec::new();
+                let mut expected_output: #expected_output_ty = ::core::default::Default::default();
+                #(#output_test_samples)*
+                let summary = #summary_output_ty {
+                    effects: sample_effects,
+                    ..<#summary_output_ty as ::core::default::Default>::default()
+                };
+                let projected =
+                    <#self_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_output(
+                        &spec,
+                        &summary,
+                    );
+                ::nirvash_core::conformance::assert_declared_output_projection(
+                    &projected,
+                    &expected_output,
+                );
+            }
+        }
+    })
+}
+
+fn projection_model_sample_expr(pattern: &Pat) -> syn::Result<Expr> {
+    match pattern {
+        Pat::Ident(ident) => {
+            if let Some((_, subpat)) = &ident.subpat {
+                projection_model_sample_expr(subpat)
+            } else {
+                Err(syn::Error::new(
+                    ident.span(),
+                    "nirvash_projection_model output_abstract identifier patterns require `name @ Variant(...)`",
+                ))
+            }
+        }
+        Pat::Path(path) => Ok(syn::parse_quote!(#path)),
+        Pat::TupleStruct(tuple_struct) => {
+            let path = &tuple_struct.path;
+            let defaults = tuple_struct
+                .elems
+                .iter()
+                .map(|_| quote!(::core::default::Default::default()));
+            Ok(syn::parse_quote!(#path(#(#defaults),*)))
+        }
+        _ => Err(syn::Error::new(
+            pattern.span(),
+            "nirvash_projection_model output_abstract only supports tuple-variant and unit-variant patterns",
+        )),
+    }
+}
+
 fn expand_runtime_contract_binding_mode(
     args: RuntimeContractArgs,
     item: ItemImpl,
@@ -3765,6 +4441,12 @@ fn expand_runtime_contract_binding_mode(
         .context_expr
         .unwrap_or_else(|| syn::parse_quote!(::core::default::Default::default()));
     let fresh_runtime = args.fresh_runtime;
+    if args.input_codec.is_some() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "binding-mode nirvash_runtime_contract does not support input_codec = ...",
+        ));
+    }
     let input_ty: Type = args.input_ty.unwrap_or_else(
         || syn::parse_quote!(<#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action),
     );
@@ -3927,6 +4609,7 @@ fn expand_runtime_contract_runtime_mode(
         .probe_context
         .unwrap_or_else(|| syn::parse_quote!(session.clone()));
     let dispatch_input = args.dispatch_input;
+    let input_codec = args.input_codec;
     let self_ty = item.self_ty.as_ref().clone();
     let binding_ident = path_tail_ident(&binding_ty)?.clone();
     let self_path_ident = match &self_ty {
@@ -4021,9 +4704,7 @@ fn expand_runtime_contract_runtime_mode(
         }
     });
 
-    let identity_positive_witness = if input_ty_is_explicit {
-        quote! { ::std::vec::Vec::new() }
-    } else {
+    let generated_positive_witness = if !input_ty_is_explicit {
         quote! {
             vec![
                 ::nirvash_core::conformance::PositiveWitness::new(
@@ -4034,10 +4715,26 @@ fn expand_runtime_contract_runtime_mode(
                 .with_canonical(true),
             ]
         }
-    };
-    let identity_negative_witness = if input_ty_is_explicit {
-        quote! { ::std::vec::Vec::new() }
+    } else if let Some(input_codec) = &input_codec {
+        let probe_context_expr = probe_context.clone();
+        quote! {
+            vec![
+                ::nirvash_core::conformance::PositiveWitness::new(
+                    <#input_codec as ::nirvash_core::conformance::ProtocolInputWitnessCodec<
+                        <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action
+                    >>::witness_name(action),
+                    #probe_context_expr,
+                    <#input_codec as ::nirvash_core::conformance::ProtocolInputWitnessCodec<
+                        <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action
+                    >>::encode_positive(action),
+                )
+                .with_canonical(true),
+            ]
+        }
     } else {
+        quote! { ::std::vec::Vec::new() }
+    };
+    let generated_negative_witness = if !input_ty_is_explicit {
         quote! {
             vec![
                 ::nirvash_core::conformance::NegativeWitness::new(
@@ -4047,6 +4744,23 @@ fn expand_runtime_contract_runtime_mode(
                 ),
             ]
         }
+    } else if let Some(input_codec) = &input_codec {
+        let probe_context_expr = probe_context.clone();
+        quote! {
+            vec![
+                ::nirvash_core::conformance::NegativeWitness::new(
+                    <#input_codec as ::nirvash_core::conformance::ProtocolInputWitnessCodec<
+                        <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action
+                    >>::witness_name(action),
+                    #probe_context_expr,
+                    <#input_codec as ::nirvash_core::conformance::ProtocolInputWitnessCodec<
+                        <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action
+                    >>::encode_negative(action),
+                ),
+            ]
+        }
+    } else {
+        quote! { ::std::vec::Vec::new() }
     };
     let positive_witness_branches = cases.iter().map(|(_, case, _)| {
         let action = &case.action;
@@ -4059,7 +4773,7 @@ fn expand_runtime_contract_runtime_mode(
         } else {
             quote! {
                 if *action == #action {
-                    return #identity_positive_witness;
+                    return #generated_positive_witness;
                 }
             }
         }
@@ -4075,7 +4789,7 @@ fn expand_runtime_contract_runtime_mode(
         } else {
             quote! {
                 if *action == #action {
-                    return #identity_negative_witness;
+                    return #generated_negative_witness;
                 }
             }
         }

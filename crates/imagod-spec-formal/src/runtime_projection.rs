@@ -5,7 +5,7 @@ use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
     concurrent::ConcurrentAction, conformance::ProtocolConformanceSpec,
 };
-use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_contract};
+use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_model};
 
 use crate::{
     atoms::ServiceAtom,
@@ -16,7 +16,7 @@ use crate::{
     rpc::RpcState,
     session_transport::SessionTransportAction,
     shutdown_flow::ShutdownFlowAction,
-    summary_mapping::{shutdown_phase, system_effects},
+    summary_mapping::{shutdown_phase, system_effect},
     supervision::SupervisionAction,
     supervision::SupervisionState,
     system::{SystemAtomicAction, SystemEffect, SystemSpec, SystemState},
@@ -156,46 +156,6 @@ impl RuntimeProjectionSpec {
     }
 }
 
-fn summarize_runtime_state(probe: &RuntimeProbeState) -> RuntimeStateSummary {
-    (*probe).into()
-}
-
-fn summarize_runtime_output(probe: &RuntimeProbeOutput) -> RuntimeOutputSummary {
-    probe.output.clone()
-}
-
-fn abstract_runtime_state(
-    spec: &RuntimeProjectionSpec,
-    summary: &RuntimeStateSummary,
-) -> SystemState {
-    let mut state = spec.initial_state();
-    state.deploy = DeployState::from_runtime_summary(summary);
-    state.supervision = SupervisionState::from_runtime_summary(summary);
-    state.rpc = RpcState::from_runtime_summary(summary);
-    state.manager.phase = if summary.manager_stopped {
-        crate::manager_runtime::ManagerRuntimePhase::Stopped
-    } else if summary.manager_shutdown_started {
-        crate::manager_runtime::ManagerRuntimePhase::ShutdownRequested
-    } else {
-        crate::manager_runtime::ManagerRuntimePhase::Listening
-    };
-    state.session.shutdown_requested = summary.session_shutdown_requested;
-    state.shutdown.phase = shutdown_phase(summary.shutdown.phase);
-    state.shutdown.accepts_stopped = summary.shutdown.accepts_stopped;
-    state.shutdown.sessions_drained = summary.shutdown.sessions_drained;
-    state.shutdown.services_stopped = summary.shutdown.services_stopped;
-    state.shutdown.maintenance_stopped = summary.shutdown.maintenance_stopped;
-    state.shutdown.forced_stop_attempted = summary.shutdown.forced_stop_attempted;
-    state
-}
-
-fn abstract_runtime_output(
-    _spec: &RuntimeProjectionSpec,
-    summary: &RuntimeOutputSummary,
-) -> Vec<SystemEffect> {
-    system_effects(&summary.effects)
-}
-
 fn runtime_summary_from_state(state: &SystemState) -> RuntimeStateSummary {
     let service0_running = state.supervision.service_is_running(ServiceAtom::Service0);
     let service1_running = state.supervision.service_is_running(ServiceAtom::Service1);
@@ -223,7 +183,9 @@ fn runtime_summary_from_state(state: &SystemState) -> RuntimeStateSummary {
         session_shutdown_requested: state.session.shutdown_requested,
         shutdown: imagod_spec::ShutdownStateSummary {
             phase: match state.shutdown.phase {
-                crate::shutdown_flow::ShutdownPhase::Idle => imagod_spec::SummaryShutdownPhase::Idle,
+                crate::shutdown_flow::ShutdownPhase::Idle => {
+                    imagod_spec::SummaryShutdownPhase::Idle
+                }
                 crate::shutdown_flow::ShutdownPhase::SignalReceived => {
                     imagod_spec::SummaryShutdownPhase::SignalReceived
                 }
@@ -251,7 +213,7 @@ fn runtime_summary_from_state(state: &SystemState) -> RuntimeStateSummary {
 
 fn normalize_runtime_state(spec: RuntimeProjectionSpec, state: SystemState) -> SystemState {
     let summary = runtime_summary_from_state(&state);
-    abstract_runtime_state(&spec, &summary)
+    <RuntimeProjectionSpec as ProtocolConformanceSpec>::abstract_state(&spec, &summary)
 }
 
 impl TransitionSystem for RuntimeProjectionSpec {
@@ -431,29 +393,82 @@ impl ModelCaseSource for RuntimeProjectionSpec {
     }
 }
 
-#[nirvash_projection_contract(
+nirvash_projection_model! {
     probe_state = RuntimeProbeState,
     probe_output = RuntimeProbeOutput,
     summary_state = RuntimeStateSummary,
     summary_output = RuntimeOutputSummary,
-    summarize_state = summarize_runtime_state,
-    summarize_output = summarize_runtime_output,
-    abstract_state = abstract_runtime_state,
-    abstract_output = abstract_runtime_output
-)]
-impl ProtocolConformanceSpec for RuntimeProjectionSpec {
-    type ExpectedOutput = Vec<SystemEffect>;
-
-    fn expected_output(
-        &self,
-        _prev: &Self::State,
-        action: &Self::Action,
-        next: Option<&Self::State>,
-    ) -> Self::ExpectedOutput {
-        if matches!(action, RuntimeProjectionAction::ShutdownDrain) && next.is_some() {
-            vec![SystemEffect::ShutdownComplete]
+    abstract_state = SystemState,
+    expected_output = Vec<SystemEffect>,
+    state_seed = spec.initial_state(),
+    state_summary {
+        service0_promoted <= probe.service0_promoted,
+        service1_promoted <= probe.service1_promoted,
+        service0_running <= probe.service0_running,
+        service1_running <= probe.service1_running,
+        service0_reaped <= probe.service0_reaped,
+        service1_reaped <= probe.service1_reaped,
+        service0_rolled_back <= probe.service0_rolled_back,
+        binding_granted_service0 <= probe.binding_granted_service0,
+        remote_connected <= probe.remote_connected,
+        manager_shutdown_started <= probe.manager_shutdown_started,
+        manager_stopped <= probe.manager_stopped,
+        session_shutdown_requested <= probe.session_shutdown_requested,
+        shutdown <= probe.shutdown,
+    }
+    output_summary {
+        effects <= probe.output.effects.clone()
+    }
+    state_abstract {
+        state.deploy <= DeployState::from_runtime_summary(summary),
+        state.supervision <= SupervisionState::from_runtime_summary(summary),
+        state.rpc <= RpcState::from_runtime_summary(summary),
+        state.manager.phase <= if summary.manager_stopped {
+            crate::manager_runtime::ManagerRuntimePhase::Stopped
+        } else if summary.manager_shutdown_started {
+            crate::manager_runtime::ManagerRuntimePhase::ShutdownRequested
         } else {
-            Vec::new()
+            crate::manager_runtime::ManagerRuntimePhase::Listening
+        },
+        state.session.shutdown_requested <= summary.session_shutdown_requested,
+        state.shutdown.phase <= shutdown_phase(summary.shutdown.phase),
+        state.shutdown.accepts_stopped <= summary.shutdown.accepts_stopped,
+        state.shutdown.sessions_drained <= summary.shutdown.sessions_drained,
+        state.shutdown.services_stopped <= summary.shutdown.services_stopped,
+        state.shutdown.maintenance_stopped <= summary.shutdown.maintenance_stopped,
+        state.shutdown.forced_stop_attempted <= summary.shutdown.forced_stop_attempted,
+    }
+    output_abstract {
+        imagod_spec::ContractEffectSummary::RequestObserved(_, _) => drop,
+        effect @ imagod_spec::ContractEffectSummary::Response(_, _) => system_effect(effect).expect("response effect should map"),
+        effect @ imagod_spec::ContractEffectSummary::CommandEvent(_, _) => system_effect(effect).expect("command event should map"),
+        effect @ imagod_spec::ContractEffectSummary::LogChunk(_, _) => system_effect(effect).expect("log chunk should map"),
+        effect @ imagod_spec::ContractEffectSummary::LogsEnd(_) => system_effect(effect).expect("logs end should map"),
+        imagod_spec::ContractEffectSummary::AuthorizationGranted(_, _) => drop,
+        effect @ imagod_spec::ContractEffectSummary::AuthorizationRejected(_, _) => system_effect(effect).expect("authorization rejection should map"),
+        imagod_spec::ContractEffectSummary::LocalRpcResolved(_) => drop,
+        imagod_spec::ContractEffectSummary::LocalRpcDenied(_) => drop,
+        imagod_spec::ContractEffectSummary::RemoteRpcConnected(_) => drop,
+        imagod_spec::ContractEffectSummary::RemoteRpcCompleted(_) => drop,
+        imagod_spec::ContractEffectSummary::RemoteRpcDisconnected(_) => drop,
+        imagod_spec::ContractEffectSummary::RemoteRpcDenied(_) => drop,
+        imagod_spec::ContractEffectSummary::TaskMilestone(_, _) => drop,
+        effect @ imagod_spec::ContractEffectSummary::ShutdownComplete => system_effect(effect).expect("shutdown completion should map")
+    }
+    impl ProtocolConformanceSpec for RuntimeProjectionSpec {
+        type ExpectedOutput = Vec<SystemEffect>;
+
+        fn expected_output(
+            &self,
+            _prev: &Self::State,
+            action: &Self::Action,
+            next: Option<&Self::State>,
+        ) -> Self::ExpectedOutput {
+            if matches!(action, RuntimeProjectionAction::ShutdownDrain) && next.is_some() {
+                vec![SystemEffect::ShutdownComplete]
+            } else {
+                Vec::new()
+            }
         }
     }
 }

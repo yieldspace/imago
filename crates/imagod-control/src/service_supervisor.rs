@@ -2202,7 +2202,8 @@ mod tests {
 
         async fn shutdown_drain(&self) -> Result<(), ImagodError> {
             self.manager_shutdown_started.store(true, Ordering::SeqCst);
-            self.session_shutdown_requested.store(true, Ordering::SeqCst);
+            self.session_shutdown_requested
+                .store(true, Ordering::SeqCst);
             let errors = self.supervisor.stop_all(true).await;
             if errors.is_empty() {
                 self.manager_stopped.store(true, Ordering::SeqCst);
@@ -2236,8 +2237,12 @@ mod tests {
         _context: &(),
     ) -> RuntimeProbeState {
         let guard = runtime.supervisor.inner.read().await;
-        let service0 = guard.get(RuntimeProjectionRuntime::service_name(ServiceAtom::Service0));
-        let service1 = guard.get(RuntimeProjectionRuntime::service_name(ServiceAtom::Service1));
+        let service0 = guard.get(RuntimeProjectionRuntime::service_name(
+            ServiceAtom::Service0,
+        ));
+        let service1 = guard.get(RuntimeProjectionRuntime::service_name(
+            ServiceAtom::Service1,
+        ));
         let service0_release = active_release(&runtime.root, ServiceAtom::Service0);
         let service1_release = active_release(&runtime.root, ServiceAtom::Service1);
 
@@ -2246,26 +2251,32 @@ mod tests {
 
         RuntimeProbeState {
             service0_promoted: service0_release.as_deref()
-                == Some(RuntimeProjectionRuntime::release_hash(ServiceAtom::Service0)),
+                == Some(RuntimeProjectionRuntime::release_hash(
+                    ServiceAtom::Service0,
+                )),
             service1_promoted: service1_release.as_deref()
-                == Some(RuntimeProjectionRuntime::release_hash(ServiceAtom::Service1)),
+                == Some(RuntimeProjectionRuntime::release_hash(
+                    ServiceAtom::Service1,
+                )),
             service0_running: service0.is_some(),
             service1_running: service1.is_some(),
             service0_reaped: service0.is_none()
                 && service0_release.as_deref()
-                    == Some(RuntimeProjectionRuntime::release_hash(ServiceAtom::Service0)),
+                    == Some(RuntimeProjectionRuntime::release_hash(
+                        ServiceAtom::Service0,
+                    )),
             service1_reaped: service1.is_none()
                 && service1_release.as_deref()
-                    == Some(RuntimeProjectionRuntime::release_hash(ServiceAtom::Service1)),
+                    == Some(RuntimeProjectionRuntime::release_hash(
+                        ServiceAtom::Service1,
+                    )),
             service0_rolled_back: service0_release.as_deref() == Some("release-previous"),
             binding_granted_service0: runtime.binding_granted_service0.load(Ordering::SeqCst)
                 || service0.is_some_and(|service| !service.bindings.is_empty()),
             remote_connected: false,
             manager_shutdown_started,
             manager_stopped,
-            session_shutdown_requested: runtime
-                .session_shutdown_requested
-                .load(Ordering::SeqCst),
+            session_shutdown_requested: runtime.session_shutdown_requested.load(Ordering::SeqCst),
             shutdown: imagod_spec::ShutdownStateSummary {
                 phase: if manager_stopped {
                     imagod_spec::SummaryShutdownPhase::Completed

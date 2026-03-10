@@ -1,0 +1,32 @@
+use nirvash_core::conformance::ProtocolInputWitnessCodec;
+use nirvash_macros::{ActionVocabulary as FormalActionVocabulary, ProtocolInputWitness, Signature as FormalSignature};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature, FormalActionVocabulary, Default)]
+enum Action {
+    #[default]
+    Start,
+    Stop,
+}
+
+#[derive(Clone, Debug, ProtocolInputWitness)]
+struct NewtypeInput(Action);
+
+#[derive(Clone, Debug, ProtocolInputWitness)]
+#[protocol_input_witness(action = Action)]
+enum EnumInput {
+    Start,
+    Stop,
+}
+
+#[derive(Clone, Debug, Default, ProtocolInputWitness)]
+#[protocol_input_witness(action = Action, field = action)]
+struct StructInput {
+    action: Action,
+    dry_run: bool,
+}
+
+fn main() {
+    let _ = <NewtypeInput as ProtocolInputWitnessCodec<Action>>::encode_positive(&Action::Start);
+    let _ = <EnumInput as ProtocolInputWitnessCodec<Action>>::encode_positive(&Action::Stop);
+    let _ = <StructInput as ProtocolInputWitnessCodec<Action>>::encode_negative(&Action::Start);
+}

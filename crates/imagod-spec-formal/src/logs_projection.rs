@@ -3,14 +3,13 @@ use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };
-use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_contract};
+use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_model};
 
 use crate::{
     atoms::{LogChunkAtom, RequestKindAtom, ServiceAtom, SessionAtom, StreamAtom},
     deploy::DeployAction,
     deploy::DeployState,
     session_auth::SessionAuthAction,
-    summary_mapping::system_effects,
     supervision::SupervisionAction,
     supervision::SupervisionState,
     system::{SystemAtomicAction, SystemEffect, SystemSpec, SystemState},
@@ -125,51 +124,14 @@ impl LogsProjectionSpec {
             LogsProjectionAction::LogsEnd => WireProtocolAction::LogsEnd(StreamAtom::Stream1),
         }
     }
-}
 
-fn summarize_logs_state(probe: &LogsProbeState) -> LogsStateSummary {
-    (*probe).into()
-}
-
-fn summarize_logs_output(probe: &LogsProbeOutput) -> LogsOutputSummary {
-    probe.output.clone()
-}
-
-fn abstract_logs_state(spec: &LogsProjectionSpec, summary: &LogsStateSummary) -> SystemState {
-    let mut state = spec.initial_state();
-    state.deploy = DeployState::from_logs_summary(summary);
-    state.supervision = SupervisionState::from_logs_summary(summary);
-    state.wire = crate::wire_protocol::WireProtocolState::from_logs_summary(summary);
-    state
-}
-
-fn abstract_logs_output(
-    _spec: &LogsProjectionSpec,
-    summary: &LogsOutputSummary,
-) -> Vec<SystemEffect> {
-    system_effects(&summary.effects)
-}
-
-fn logs_summary_from_state(state: &SystemState) -> LogsStateSummary {
-    let acknowledged = state.wire.logs_acknowledged(StreamAtom::Stream1);
-    let completed = state.wire.log_stream_ended(StreamAtom::Stream1);
-
-    LogsStateSummary {
-        service_running: state.supervision.service_is_running(ServiceAtom::Service0),
-        logs_authorized: state
-            .session_auth
-            .stream_authorized(StreamAtom::Stream1, RequestKindAtom::LogsRequest),
-        stream_open: acknowledged && !completed,
-        chunk_pending: acknowledged
-            && !completed
-            && !state.wire.saw_log_chunk(StreamAtom::Stream1, LogChunkAtom::Chunk0),
-        completed,
+    fn state_from_summary(self, summary: &LogsStateSummary) -> SystemState {
+        let mut state = self.initial_state();
+        state.deploy = DeployState::from_logs_summary(summary);
+        state.supervision = SupervisionState::from_logs_summary(summary);
+        state.wire = crate::wire_protocol::WireProtocolState::from_logs_summary(summary);
+        state
     }
-}
-
-fn normalize_logs_state(spec: LogsProjectionSpec, state: SystemState) -> SystemState {
-    let summary = logs_summary_from_state(&state);
-    abstract_logs_state(&spec, &summary)
 }
 
 impl TransitionSystem for LogsProjectionSpec {
@@ -196,13 +158,32 @@ impl TransitionSystem for LogsProjectionSpec {
         {
             return None;
         }
-        self.system().transition(
-            state,
-            &nirvash_core::concurrent::ConcurrentAction::from_atomic(SystemAtomicAction::Wire(
-                self.wire_action(*action),
-            )),
-        )
-        .map(|next| normalize_logs_state(*self, next))
+        self.system()
+            .transition(
+                state,
+                &nirvash_core::concurrent::ConcurrentAction::from_atomic(SystemAtomicAction::Wire(
+                    self.wire_action(*action),
+                )),
+            )
+            .map(|next| {
+                let acknowledged = next.wire.logs_acknowledged(StreamAtom::Stream1);
+                let completed = next.wire.log_stream_ended(StreamAtom::Stream1);
+                let probe = LogsProbeState {
+                    service_running: next.supervision.service_is_running(ServiceAtom::Service0),
+                    logs_authorized: next
+                        .session_auth
+                        .stream_authorized(StreamAtom::Stream1, RequestKindAtom::LogsRequest),
+                    stream_open: acknowledged && !completed,
+                    chunk_pending: acknowledged
+                        && !completed
+                        && !next
+                            .wire
+                            .saw_log_chunk(StreamAtom::Stream1, LogChunkAtom::Chunk0),
+                    completed,
+                };
+                let summary = <Self as ProtocolConformanceSpec>::summarize_state(self, &probe);
+                <Self as ProtocolConformanceSpec>::abstract_state(self, &summary)
+            })
     }
 }
 
@@ -218,32 +199,67 @@ impl ModelCaseSource for LogsProjectionSpec {
     }
 }
 
-#[nirvash_projection_contract(
+nirvash_projection_model! {
     probe_state = LogsProbeState,
     probe_output = LogsProbeOutput,
     summary_state = LogsStateSummary,
     summary_output = LogsOutputSummary,
-    summarize_state = summarize_logs_state,
-    summarize_output = summarize_logs_output,
-    abstract_state = abstract_logs_state,
-    abstract_output = abstract_logs_output
-)]
-impl ProtocolConformanceSpec for LogsProjectionSpec {
-    type ExpectedOutput = Vec<SystemEffect>;
+    abstract_state = SystemState,
+    expected_output = Vec<SystemEffect>,
+    state_seed = spec.initial_state(),
+    state_summary {
+        service_running <= probe.service_running,
+        logs_authorized <= probe.logs_authorized,
+        stream_open <= probe.stream_open,
+        chunk_pending <= probe.chunk_pending,
+        completed <= probe.completed,
+    }
+    output_summary {
+        effects <= probe.output.effects.clone(),
+    }
+    state_abstract {
+        state <= spec.state_from_summary(summary),
+    }
+    output_abstract {
+        imagod_spec::ContractEffectSummary::RequestObserved(_, _) => drop,
+        effect @ imagod_spec::ContractEffectSummary::Response(_, _) => crate::summary_mapping::system_effect(effect)
+            .expect("logs projection response should map to SystemEffect"),
+        imagod_spec::ContractEffectSummary::AuthorizationGranted(_, _) => drop,
+        effect @ imagod_spec::ContractEffectSummary::CommandEvent(_, _) => crate::summary_mapping::system_effect(effect)
+            .expect("logs projection command event should map to SystemEffect"),
+        effect @ imagod_spec::ContractEffectSummary::LogChunk(_, _) => crate::summary_mapping::system_effect(effect)
+            .expect("logs projection log chunk should map to SystemEffect"),
+        effect @ imagod_spec::ContractEffectSummary::LogsEnd(_) => crate::summary_mapping::system_effect(effect)
+            .expect("logs projection logs end should map to SystemEffect"),
+        effect @ imagod_spec::ContractEffectSummary::AuthorizationRejected(_, _) => crate::summary_mapping::system_effect(effect)
+            .expect("logs projection authorization rejection should map to SystemEffect"),
+        imagod_spec::ContractEffectSummary::LocalRpcResolved(_) => drop,
+        imagod_spec::ContractEffectSummary::LocalRpcDenied(_) => drop,
+        imagod_spec::ContractEffectSummary::RemoteRpcConnected(_) => drop,
+        imagod_spec::ContractEffectSummary::RemoteRpcCompleted(_) => drop,
+        imagod_spec::ContractEffectSummary::RemoteRpcDisconnected(_) => drop,
+        imagod_spec::ContractEffectSummary::RemoteRpcDenied(_) => drop,
+        imagod_spec::ContractEffectSummary::TaskMilestone(_, _) => drop,
+        effect @ imagod_spec::ContractEffectSummary::ShutdownComplete => crate::summary_mapping::system_effect(effect)
+            .expect("logs projection shutdown completion should map to SystemEffect"),
+    }
+    impl ProtocolConformanceSpec for LogsProjectionSpec {
+        type ExpectedOutput = Vec<SystemEffect>;
 
-    fn expected_output(
-        &self,
-        prev: &Self::State,
-        action: &Self::Action,
-        next: Option<&Self::State>,
-    ) -> Self::ExpectedOutput {
-        self.system().expected_output(
-            prev,
-            &nirvash_core::concurrent::ConcurrentAction::from_atomic(SystemAtomicAction::Wire(
-                self.wire_action(*action),
-            )),
-            next,
-        )
+        fn expected_output(
+            &self,
+            prev: &Self::State,
+            action: &Self::Action,
+            next: Option<&Self::State>,
+        ) -> Self::ExpectedOutput {
+            self.system().expected_output(
+                prev,
+                &nirvash_core::concurrent::ConcurrentAction::from_atomic(SystemAtomicAction::Wire(
+                    self.wire_action(*action),
+                )),
+                next,
+            )
+        }
     }
 }
 

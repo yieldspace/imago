@@ -6,14 +6,13 @@ use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };
-use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_contract};
+use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_model};
 
 use crate::{
     atoms::{RemoteAuthorityAtom, RequestKindAtom, SessionAtom, StreamAtom},
     session_auth::SessionAuthAction,
     session_auth::SessionAuthState,
     session_transport::SessionTransportState,
-    summary_mapping::system_effects,
     system::{SystemAtomicAction, SystemEffect, SystemSpec, SystemState},
 };
 
@@ -106,32 +105,14 @@ impl SessionAuthProjectionSpec {
             }
         }
     }
-}
 
-fn summarize_session_auth_state(probe: &SessionAuthProbeState) -> SessionAuthStateSummary {
-    (*probe).into()
-}
-
-fn summarize_session_auth_output(probe: &SessionAuthProbeOutput) -> SessionAuthOutputSummary {
-    probe.output.clone()
-}
-
-fn abstract_session_auth_state(
-    spec: &SessionAuthProjectionSpec,
-    summary: &SessionAuthStateSummary,
-) -> SystemState {
-    let mut state = spec.initial_state();
-    state.session =
-        SessionTransportState::from_summary(summary.active_session, summary.shutdown_requested);
-    state.session_auth = SessionAuthState::from_summary(summary);
-    state
-}
-
-fn abstract_session_auth_output(
-    _spec: &SessionAuthProjectionSpec,
-    summary: &SessionAuthOutputSummary,
-) -> Vec<SystemEffect> {
-    system_effects(&summary.effects)
+    fn state_from_summary(self, summary: &SessionAuthStateSummary) -> SystemState {
+        let mut state = self.initial_state();
+        state.session =
+            SessionTransportState::from_summary(summary.active_session, summary.shutdown_requested);
+        state.session_auth = SessionAuthState::from_summary(summary);
+        state
+    }
 }
 
 impl TransitionSystem for SessionAuthProjectionSpec {
@@ -172,32 +153,68 @@ impl ModelCaseSource for SessionAuthProjectionSpec {
     }
 }
 
-#[nirvash_projection_contract(
+nirvash_projection_model! {
     probe_state = SessionAuthProbeState,
     probe_output = SessionAuthProbeOutput,
     summary_state = SessionAuthStateSummary,
     summary_output = SessionAuthOutputSummary,
-    summarize_state = summarize_session_auth_state,
-    summarize_output = summarize_session_auth_output,
-    abstract_state = abstract_session_auth_state,
-    abstract_output = abstract_session_auth_output
-)]
-impl ProtocolConformanceSpec for SessionAuthProjectionSpec {
-    type ExpectedOutput = Vec<SystemEffect>;
+    abstract_state = SystemState,
+    expected_output = Vec<SystemEffect>,
+    state_seed = spec.initial_state(),
+    state_summary {
+        active_session <= probe.active_session,
+        shutdown_requested <= probe.shutdown_requested,
+        role <= probe.role,
+        read_timed_out <= probe.read_timed_out,
+        stream_closed <= probe.stream_closed,
+        client_authority_uploaded <= probe.client_authority_uploaded,
+    }
+    output_summary {
+        effects <= probe.output.effects.clone(),
+    }
+    state_abstract {
+        state <= spec.state_from_summary(summary),
+    }
+    output_abstract {
+        imagod_spec::ContractEffectSummary::RequestObserved(_, _) => drop,
+        effect @ imagod_spec::ContractEffectSummary::Response(_, _) => crate::summary_mapping::system_effect(effect)
+            .expect("session auth projection response should map to SystemEffect"),
+        imagod_spec::ContractEffectSummary::AuthorizationGranted(_, _) => drop,
+        effect @ imagod_spec::ContractEffectSummary::CommandEvent(_, _) => crate::summary_mapping::system_effect(effect)
+            .expect("session auth projection command event should map to SystemEffect"),
+        effect @ imagod_spec::ContractEffectSummary::LogChunk(_, _) => crate::summary_mapping::system_effect(effect)
+            .expect("session auth projection log chunk should map to SystemEffect"),
+        effect @ imagod_spec::ContractEffectSummary::LogsEnd(_) => crate::summary_mapping::system_effect(effect)
+            .expect("session auth projection logs end should map to SystemEffect"),
+        effect @ imagod_spec::ContractEffectSummary::AuthorizationRejected(_, _) => crate::summary_mapping::system_effect(effect)
+            .expect("session auth projection authorization rejection should map to SystemEffect"),
+        imagod_spec::ContractEffectSummary::LocalRpcResolved(_) => drop,
+        imagod_spec::ContractEffectSummary::LocalRpcDenied(_) => drop,
+        imagod_spec::ContractEffectSummary::RemoteRpcConnected(_) => drop,
+        imagod_spec::ContractEffectSummary::RemoteRpcCompleted(_) => drop,
+        imagod_spec::ContractEffectSummary::RemoteRpcDisconnected(_) => drop,
+        imagod_spec::ContractEffectSummary::RemoteRpcDenied(_) => drop,
+        imagod_spec::ContractEffectSummary::TaskMilestone(_, _) => drop,
+        effect @ imagod_spec::ContractEffectSummary::ShutdownComplete => crate::summary_mapping::system_effect(effect)
+            .expect("session auth projection shutdown completion should map to SystemEffect"),
+    }
+    impl ProtocolConformanceSpec for SessionAuthProjectionSpec {
+        type ExpectedOutput = Vec<SystemEffect>;
 
-    fn expected_output(
-        &self,
-        prev: &Self::State,
-        action: &Self::Action,
-        next: Option<&Self::State>,
-    ) -> Self::ExpectedOutput {
-        self.system().expected_output(
-            prev,
-            &nirvash_core::concurrent::ConcurrentAction::from_atomic(
-                SystemAtomicAction::SessionAuth(self.projected_action(*action)),
-            ),
-            next,
-        )
+        fn expected_output(
+            &self,
+            prev: &Self::State,
+            action: &Self::Action,
+            next: Option<&Self::State>,
+        ) -> Self::ExpectedOutput {
+            self.system().expected_output(
+                prev,
+                &nirvash_core::concurrent::ConcurrentAction::from_atomic(
+                    SystemAtomicAction::SessionAuth(self.projected_action(*action)),
+                ),
+                next,
+            )
+        }
     }
 }
 

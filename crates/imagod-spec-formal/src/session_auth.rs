@@ -3,8 +3,7 @@ use nirvash_core::{
     StatePredicate, StepPredicate, TransitionSystem,
 };
 use nirvash_macros::{
-    ActionVocabulary, RelationalState, action_constraint, fairness, property,
-    subsystem_spec,
+    ActionVocabulary, RelationalState, action_constraint, fairness, property, subsystem_spec,
 };
 
 use crate::atoms::{

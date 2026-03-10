@@ -1,0 +1,13 @@
+error: binding-mode nirvash_runtime_contract does not support input_codec = ...
+  --> tests/fixtures/runtime_contract_input_codec_invalid.rs:65:1
+   |
+65 | / #[nirvash_runtime_contract(
+66 | |     spec = Spec,
+67 | |     binding = Binding,
+68 | |     runtime = Binding,
+...  |
+74 | |     tests(witness)
+75 | | )]
+   | |__^
+   |
+   = note: this error originates in the attribute macro `nirvash_runtime_contract` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -143,9 +143,11 @@ relation-first spec で service ごとの独立 transition をまとめたい場
 
 runtime 側が返すのは concrete runtime から直接読める `ProbeState` / `ProbeOutput` だけで、履歴由来の一時事実や model 向け正規化は spec 側の `summarize_*` に閉じ込めます。`StateObserver` trait の associated type 名は `SummaryState` のままですが、`ProtocolRuntimeBinding` ではこれを `ProtocolConformanceSpec::ProbeState` に束縛します。
 
+projection spec の正本は `nirvash_macros::nirvash_projection_model!` です。`state_summary` / `output_summary` / `state_abstract` / `output_abstract` を宣言すると、`summarize_state` / `summarize_output` / `abstract_state` / `abstract_output` と law test が自動生成されます。`#[nirvash_projection_contract]` は低レベル fallback としてだけ残ります。
+
 `nirvash_macros::code_tests` はこの契約だけを使って reachable graph の prefix を実コードへ適用し、各 step の `before_probe -> summarize_state -> abstract_state` と `after_probe -> summarize_state -> abstract_state` を `transition` の next state と突き合わせます。output も `probe_output -> summarize_output -> abstract_output` で比較するので、runtime 側は trace replay や shadow state を持たずに済みます。実運用では spec crate に `ProtocolConformanceSpec` を置き、runtime crate の integration test に `ProtocolRuntimeBinding` と `#[code_tests(...)]` を置く構成が依存方向を最も保ちやすいです。
 
-`nirvash_macros::code_witness_tests` は `ProtocolInputWitnessBinding` を追加で使い、reachable graph から semantic case を自動検出して witness 単位の strict test を custom harness (`code_witness_test_main!()`) で個別実行します。`model_cases` は formal 側の探索分割に残しつつ、runtime binding 側は concrete input witness だけを実装すれば十分です。
+`nirvash_macros::code_witness_tests` は `ProtocolInputWitnessBinding` を追加で使い、reachable graph から semantic case を自動検出して witness 単位の strict test を custom harness (`code_witness_test_main!()`) で個別実行します。`model_cases` は formal 側の探索分割に残しつつ、runtime binding 側は concrete input witness だけを実装すれば十分です。`Input = Action` 以外の witness は `#[derive(ProtocolInputWitness)]` で `ProtocolInputWitnessCodec<Action>` を自動実装でき、runtime-mode `#[nirvash_runtime_contract(..., input = Input, input_codec = Input, dispatch_input = ...)]` で positive / negative witness を自動生成できます。
 
 ```rust
 use nirvash_core::conformance::{

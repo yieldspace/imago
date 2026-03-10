@@ -3,7 +3,7 @@ use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };
-use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_contract};
+use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_model};
 
 use crate::{
     CommandKind, CommandProtocolAction,
@@ -11,7 +11,6 @@ use crate::{
     session_auth::SessionAuthAction,
     session_auth::SessionAuthState,
     session_transport::SessionTransportState,
-    summary_mapping::system_effects,
     system::{SystemAtomicAction, SystemEffect, SystemSpec, SystemState},
     wire_protocol::WireProtocolAction,
 };
@@ -165,84 +164,14 @@ impl RouterProjectionSpec {
             }
         }
     }
-}
 
-fn summarize_router_state(probe: &RouterProbeState) -> RouterStateSummary {
-    (*probe).into()
-}
-
-fn summarize_router_output(probe: &RouterProbeOutput) -> RouterOutputSummary {
-    probe.output.clone()
-}
-
-fn abstract_router_state(spec: &RouterProjectionSpec, summary: &RouterStateSummary) -> SystemState {
-    let mut state = spec.initial_state();
-    state.session = SessionTransportState::from_summary(summary.active_session, false);
-    state.session_auth = SessionAuthState::from_router_summary(summary);
-    state.wire = crate::wire_protocol::WireProtocolState::from_router_summary(summary);
-    state
-}
-
-fn abstract_router_output(
-    _spec: &RouterProjectionSpec,
-    summary: &RouterOutputSummary,
-) -> Vec<SystemEffect> {
-    system_effects(&summary.effects)
-}
-
-fn router_summary_from_state(state: &SystemState) -> RouterStateSummary {
-    let role = if state.session_auth.any_authenticated_as(SessionRoleAtom::Admin) {
-        Some(imagod_spec::SummarySessionRole::Admin)
-    } else if state
-        .session_auth
-        .any_authenticated_as(SessionRoleAtom::Client)
-    {
-        Some(imagod_spec::SummarySessionRole::Client)
-    } else if state
-        .session_auth
-        .any_authenticated_as(SessionRoleAtom::Unknown)
-    {
-        Some(imagod_spec::SummarySessionRole::Unknown)
-    } else {
-        None
-    };
-
-    RouterStateSummary {
-        active_session: state.session.has_active_sessions(),
-        role,
-        deploy_prepare_authorized: state
-            .session_auth
-            .stream_authorized(StreamAtom::Stream0, RequestKindAtom::DeployPrepare),
-        artifact_push_authorized: state
-            .session_auth
-            .stream_authorized(StreamAtom::Stream0, RequestKindAtom::ArtifactPush),
-        artifact_commit_authorized: state
-            .session_auth
-            .stream_authorized(StreamAtom::Stream0, RequestKindAtom::ArtifactCommit),
-        state_request_authorized: state
-            .session_auth
-            .stream_authorized(StreamAtom::Stream0, RequestKindAtom::StateRequest),
-        services_list_authorized: state
-            .session_auth
-            .stream_authorized(StreamAtom::Stream0, RequestKindAtom::ServicesList),
-        command_cancel_authorized: state
-            .session_auth
-            .stream_authorized(StreamAtom::Stream0, RequestKindAtom::CommandCancel),
-        rpc_invoke_authorized: state
-            .session_auth
-            .stream_authorized(StreamAtom::Stream0, RequestKindAtom::RpcInvoke),
-        bindings_cert_upload_authorized: state
-            .session_auth
-            .stream_authorized(StreamAtom::Stream0, RequestKindAtom::BindingsCertUpload),
-        authority_uploaded: state
-            .session_auth
-            .authority_uploaded(RemoteAuthorityAtom::Edge0),
+    fn state_from_summary(self, summary: &RouterStateSummary) -> SystemState {
+        let mut state = self.initial_state();
+        state.session = SessionTransportState::from_summary(summary.active_session, false);
+        state.session_auth = SessionAuthState::from_router_summary(summary);
+        state.wire = crate::wire_protocol::WireProtocolState::from_router_summary(summary);
+        state
     }
-}
-
-fn normalize_router_state(spec: RouterProjectionSpec, state: SystemState) -> SystemState {
-    let summary = router_summary_from_state(&state);
-    abstract_router_state(&spec, &summary)
 }
 
 impl TransitionSystem for RouterProjectionSpec {
@@ -262,13 +191,67 @@ impl TransitionSystem for RouterProjectionSpec {
     }
 
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        self.system().transition(
-            state,
-            &nirvash_core::concurrent::ConcurrentAction::from_atomic(SystemAtomicAction::Wire(
-                self.wire_action(*action),
-            )),
-        )
-        .map(|next| normalize_router_state(*self, next))
+        self.system()
+            .transition(
+                state,
+                &nirvash_core::concurrent::ConcurrentAction::from_atomic(SystemAtomicAction::Wire(
+                    self.wire_action(*action),
+                )),
+            )
+            .map(|next| {
+                let role = if next
+                    .session_auth
+                    .any_authenticated_as(SessionRoleAtom::Admin)
+                {
+                    Some(imagod_spec::SummarySessionRole::Admin)
+                } else if next
+                    .session_auth
+                    .any_authenticated_as(SessionRoleAtom::Client)
+                {
+                    Some(imagod_spec::SummarySessionRole::Client)
+                } else if next
+                    .session_auth
+                    .any_authenticated_as(SessionRoleAtom::Unknown)
+                {
+                    Some(imagod_spec::SummarySessionRole::Unknown)
+                } else {
+                    None
+                };
+                let probe = RouterProbeState {
+                    active_session: next.session.has_active_sessions(),
+                    role,
+                    deploy_prepare_authorized: next
+                        .session_auth
+                        .stream_authorized(StreamAtom::Stream0, RequestKindAtom::DeployPrepare),
+                    artifact_push_authorized: next
+                        .session_auth
+                        .stream_authorized(StreamAtom::Stream0, RequestKindAtom::ArtifactPush),
+                    artifact_commit_authorized: next
+                        .session_auth
+                        .stream_authorized(StreamAtom::Stream0, RequestKindAtom::ArtifactCommit),
+                    state_request_authorized: next
+                        .session_auth
+                        .stream_authorized(StreamAtom::Stream0, RequestKindAtom::StateRequest),
+                    services_list_authorized: next
+                        .session_auth
+                        .stream_authorized(StreamAtom::Stream0, RequestKindAtom::ServicesList),
+                    command_cancel_authorized: next
+                        .session_auth
+                        .stream_authorized(StreamAtom::Stream0, RequestKindAtom::CommandCancel),
+                    rpc_invoke_authorized: next
+                        .session_auth
+                        .stream_authorized(StreamAtom::Stream0, RequestKindAtom::RpcInvoke),
+                    bindings_cert_upload_authorized: next.session_auth.stream_authorized(
+                        StreamAtom::Stream0,
+                        RequestKindAtom::BindingsCertUpload,
+                    ),
+                    authority_uploaded: next
+                        .session_auth
+                        .authority_uploaded(RemoteAuthorityAtom::Edge0),
+                };
+                let summary = <Self as ProtocolConformanceSpec>::summarize_state(self, &probe);
+                <Self as ProtocolConformanceSpec>::abstract_state(self, &summary)
+            })
     }
 }
 
@@ -284,32 +267,73 @@ impl ModelCaseSource for RouterProjectionSpec {
     }
 }
 
-#[nirvash_projection_contract(
+nirvash_projection_model! {
     probe_state = RouterProbeState,
     probe_output = RouterProbeOutput,
     summary_state = RouterStateSummary,
     summary_output = RouterOutputSummary,
-    summarize_state = summarize_router_state,
-    summarize_output = summarize_router_output,
-    abstract_state = abstract_router_state,
-    abstract_output = abstract_router_output
-)]
-impl ProtocolConformanceSpec for RouterProjectionSpec {
-    type ExpectedOutput = Vec<SystemEffect>;
+    abstract_state = SystemState,
+    expected_output = Vec<SystemEffect>,
+    state_seed = spec.initial_state(),
+    state_summary {
+        active_session <= probe.active_session,
+        role <= probe.role,
+        deploy_prepare_authorized <= probe.deploy_prepare_authorized,
+        artifact_push_authorized <= probe.artifact_push_authorized,
+        artifact_commit_authorized <= probe.artifact_commit_authorized,
+        state_request_authorized <= probe.state_request_authorized,
+        services_list_authorized <= probe.services_list_authorized,
+        command_cancel_authorized <= probe.command_cancel_authorized,
+        rpc_invoke_authorized <= probe.rpc_invoke_authorized,
+        bindings_cert_upload_authorized <= probe.bindings_cert_upload_authorized,
+        authority_uploaded <= probe.authority_uploaded,
+    }
+    output_summary {
+        effects <= probe.output.effects.clone(),
+    }
+    state_abstract {
+        state <= spec.state_from_summary(summary),
+    }
+    output_abstract {
+        imagod_spec::ContractEffectSummary::RequestObserved(_, _) => drop,
+        effect @ imagod_spec::ContractEffectSummary::Response(_, _) => crate::summary_mapping::system_effect(effect)
+            .expect("router projection response should map to SystemEffect"),
+        imagod_spec::ContractEffectSummary::AuthorizationGranted(_, _) => drop,
+        effect @ imagod_spec::ContractEffectSummary::CommandEvent(_, _) => crate::summary_mapping::system_effect(effect)
+            .expect("router projection command event should map to SystemEffect"),
+        effect @ imagod_spec::ContractEffectSummary::LogChunk(_, _) => crate::summary_mapping::system_effect(effect)
+            .expect("router projection log chunk should map to SystemEffect"),
+        effect @ imagod_spec::ContractEffectSummary::LogsEnd(_) => crate::summary_mapping::system_effect(effect)
+            .expect("router projection logs end should map to SystemEffect"),
+        effect @ imagod_spec::ContractEffectSummary::AuthorizationRejected(_, _) => crate::summary_mapping::system_effect(effect)
+            .expect("router projection authorization rejection should map to SystemEffect"),
+        imagod_spec::ContractEffectSummary::LocalRpcResolved(_) => drop,
+        imagod_spec::ContractEffectSummary::LocalRpcDenied(_) => drop,
+        imagod_spec::ContractEffectSummary::RemoteRpcConnected(_) => drop,
+        imagod_spec::ContractEffectSummary::RemoteRpcCompleted(_) => drop,
+        imagod_spec::ContractEffectSummary::RemoteRpcDisconnected(_) => drop,
+        imagod_spec::ContractEffectSummary::RemoteRpcDenied(_) => drop,
+        imagod_spec::ContractEffectSummary::TaskMilestone(_, _) => drop,
+        effect @ imagod_spec::ContractEffectSummary::ShutdownComplete => crate::summary_mapping::system_effect(effect)
+            .expect("router projection shutdown completion should map to SystemEffect"),
+    }
+    impl ProtocolConformanceSpec for RouterProjectionSpec {
+        type ExpectedOutput = Vec<SystemEffect>;
 
-    fn expected_output(
-        &self,
-        prev: &Self::State,
-        action: &Self::Action,
-        next: Option<&Self::State>,
-    ) -> Self::ExpectedOutput {
-        self.system().expected_output(
-            prev,
-            &nirvash_core::concurrent::ConcurrentAction::from_atomic(SystemAtomicAction::Wire(
-                self.wire_action(*action),
-            )),
-            next,
-        )
+        fn expected_output(
+            &self,
+            prev: &Self::State,
+            action: &Self::Action,
+            next: Option<&Self::State>,
+        ) -> Self::ExpectedOutput {
+            self.system().expected_output(
+                prev,
+                &nirvash_core::concurrent::ConcurrentAction::from_atomic(SystemAtomicAction::Wire(
+                    self.wire_action(*action),
+                )),
+                next,
+            )
+        }
     }
 }
 
@@ -339,10 +363,7 @@ mod tests {
         let spec = RouterProjectionSpec::new();
         let prev = spec.initial_state();
         let state = spec
-            .transition(
-                &prev,
-                &RouterProjectionAction::BindingsCertUpload,
-            )
+            .transition(&prev, &RouterProjectionAction::BindingsCertUpload)
             .expect("bindings.cert.upload should be allowed");
 
         assert_eq!(

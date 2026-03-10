@@ -125,6 +125,28 @@ impl<Context, Input> NegativeWitness<Context, Input> {
     }
 }
 
+/// Declares how an abstract action is encoded as a concrete witness input.
+pub trait ProtocolInputWitnessCodec<Action>: Clone + Debug {
+    /// Encodes the concrete input used for an allowed abstract transition.
+    fn encode_positive(action: &Action) -> Self;
+
+    /// Encodes the concrete input used for a rejected abstract transition.
+    fn encode_negative(action: &Action) -> Self {
+        Self::encode_positive(action)
+    }
+
+    /// Returns the stable witness label used by generated witnesses.
+    fn witness_name(_action: &Action) -> String {
+        "principal".to_owned()
+    }
+}
+
+/// Borrowed witness family used by helper validation.
+pub enum WitnessFamily<'a, Context, Input> {
+    Positive(&'a [PositiveWitness<Context, Input>]),
+    Negative(&'a [NegativeWitness<Context, Input>]),
+}
+
 /// Binding that can materialize concrete runtime inputs for abstract conformance actions.
 #[allow(async_fn_in_trait)]
 pub trait ProtocolInputWitnessBinding<Spec>: ProtocolRuntimeBinding<Spec>
@@ -308,6 +330,74 @@ pub fn assert_output_refinement<Spec>(
         projected_output, expected_output,
         "summary/state output mismatch for {action:?} from {before_summary:?}",
     );
+}
+
+pub fn assert_declared_state_projection<Summary, State>(
+    summary: &Summary,
+    expected_summary: &Summary,
+    projected_state: &State,
+    expected_state: &State,
+) where
+    Summary: Debug + PartialEq,
+    State: Debug + PartialEq,
+{
+    assert_eq!(
+        summary, expected_summary,
+        "declared summary projection mismatch",
+    );
+    assert_eq!(
+        projected_state, expected_state,
+        "declared abstract state projection mismatch",
+    );
+}
+
+pub fn assert_declared_output_projection<Output>(
+    projected_output: &Output,
+    expected_output: &Output,
+) where
+    Output: Debug + PartialEq,
+{
+    assert_eq!(
+        projected_output, expected_output,
+        "declared abstract output projection mismatch",
+    );
+}
+
+pub fn assert_witness_family_completeness<Context, Input>(
+    label: &str,
+    family: WitnessFamily<'_, Context, Input>,
+) where
+    Context: Debug,
+    Input: Debug,
+{
+    match family {
+        WitnessFamily::Positive(witnesses) => {
+            assert!(
+                !witnesses.is_empty(),
+                "{label}: positive witnesses are empty"
+            );
+            let canonical = witnesses
+                .iter()
+                .filter(|witness| witness.canonical())
+                .count();
+            assert_eq!(
+                canonical,
+                1,
+                "{label}: expected canonical positive witness count = 1, found {} from {:?}",
+                canonical,
+                witnesses
+                    .iter()
+                    .map(|witness| format!("{}(canonical={})", witness.name(), witness.canonical()))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        WitnessFamily::Negative(witnesses) => {
+            assert!(
+                !witnesses.is_empty(),
+                "{label}: negative witnesses are empty"
+            );
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -540,5 +630,21 @@ mod tests {
         assert!(enabled_from_summary(&spec, &false, &DummyAction::Advance));
         assert!(!enabled_from_summary(&spec, &false, &DummyAction::Reject));
         assert!(!enabled_from_summary(&spec, &true, &DummyAction::Advance));
+    }
+
+    #[test]
+    fn declared_projection_helpers_accept_matching_values() {
+        assert_declared_state_projection(&true, &true, &"state", &"state");
+        assert_declared_output_projection(&vec!["ok"], &vec!["ok"]);
+    }
+
+    #[test]
+    fn witness_family_helper_accepts_positive_and_negative_cases() {
+        let positive =
+            vec![PositiveWitness::new("principal", (), DummyAction::Advance).with_canonical(true)];
+        let negative = vec![NegativeWitness::new("principal", (), DummyAction::Reject)];
+
+        assert_witness_family_completeness("positive", WitnessFamily::Positive(&positive));
+        assert_witness_family_completeness("negative", WitnessFamily::Negative(&negative));
     }
 }
