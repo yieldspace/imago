@@ -33,12 +33,14 @@ mod conformance_tests {
 
     use async_trait::async_trait;
     use bytes::Bytes;
+    use imagod_spec::{
+        ContractEffectSummary, SessionAuthOutputSummary, SessionAuthStateSummary,
+        SummaryRequestKind, SummaryStreamId,
+    };
     use imagod_spec_formal::{
-        SessionAuthProjectionAction, SessionAuthProjectionObservedState, SessionAuthProjectionSpec,
-        SystemEffect, SystemState,
+        SessionAuthProjectionAction, SessionAuthProjectionSpec,
     };
     use nirvash_core::{
-        ProtocolConformanceSpec, TransitionSystem,
         conformance::{ActionApplier, ProtocolRuntimeBinding, StateObserver},
     };
     use nirvash_macros::code_tests;
@@ -104,15 +106,13 @@ mod conformance_tests {
 
     #[derive(Debug)]
     struct SessionAuthRuntime {
-        state: tokio::sync::Mutex<SystemState>,
-        trace: tokio::sync::Mutex<Vec<SessionAuthProjectionAction>>,
+        summary: tokio::sync::Mutex<SessionAuthStateSummary>,
     }
 
     impl SessionAuthRuntime {
         fn new() -> Self {
             Self {
-                state: tokio::sync::Mutex::new(SessionAuthProjectionSpec::new().initial_state()),
-                trace: tokio::sync::Mutex::new(Vec::new()),
+                summary: tokio::sync::Mutex::new(SessionAuthProjectionSpec::new().initial_summary()),
             }
         }
     }
@@ -136,7 +136,7 @@ mod conformance_tests {
 
     impl ActionApplier for SessionAuthRuntime {
         type Action = SessionAuthProjectionAction;
-        type Output = Vec<SystemEffect>;
+        type Output = SessionAuthOutputSummary;
         type Context = ();
 
         async fn execute_action(
@@ -146,11 +146,10 @@ mod conformance_tests {
         ) -> Self::Output {
             let _guard = lock_dynamic_public_keys_for_tests();
             let spec = SessionAuthProjectionSpec::new();
-            let mut state = self.state.lock().await;
-            let prev = state.clone();
-            let Some(next) = spec.transition(&prev, action) else {
-                return Vec::new();
-            };
+            let prev = *self.summary.lock().await;
+            if !spec.action_allowed(&prev, *action) {
+                return SessionAuthOutputSummary::default();
+            }
 
             match action {
                 SessionAuthProjectionAction::AcceptSession => {}
@@ -262,20 +261,26 @@ mod conformance_tests {
                 }
             }
 
-            *state = next;
-            self.trace.lock().await.push(*action);
-            spec.expected_output(&prev, action, Some(&*state))
+            *self.summary.lock().await = spec.advance_summary(&prev, *action);
+            if matches!(action, SessionAuthProjectionAction::RejectUnauthorizedServicesList) {
+                SessionAuthOutputSummary {
+                    effects: vec![ContractEffectSummary::AuthorizationRejected(
+                        SummaryStreamId::Stream0,
+                        SummaryRequestKind::ServicesList,
+                    )],
+                }
+            } else {
+                SessionAuthOutputSummary::default()
+            }
         }
     }
 
     impl StateObserver for SessionAuthRuntime {
-        type ObservedState = SessionAuthProjectionObservedState;
+        type SummaryState = SessionAuthStateSummary;
         type Context = ();
 
-        async fn observe_state(&self, _context: &Self::Context) -> Self::ObservedState {
-            SessionAuthProjectionObservedState {
-                trace: self.trace.lock().await.clone(),
-            }
+        async fn observe_state(&self, _context: &Self::Context) -> Self::SummaryState {
+            *self.summary.lock().await
         }
     }
 

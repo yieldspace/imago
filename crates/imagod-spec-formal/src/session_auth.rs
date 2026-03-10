@@ -7,6 +7,7 @@ use nirvash_macros::{
     subsystem_spec,
 };
 
+use crate::summary_mapping::session_role_atom;
 use crate::atoms::{
     RemoteAuthorityAtom, RequestKindAtom, SessionAtom, SessionRoleAtom, StreamAtom,
 };
@@ -24,6 +25,125 @@ pub struct SessionAuthState {
 }
 
 impl SessionAuthState {
+    pub fn from_router_summary(summary: &imagod_spec::RouterStateSummary) -> Self {
+        let mut state = Self {
+            accepted_sessions: RelSet::empty(),
+            authenticated_roles: Relation2::empty(),
+            admin_authorized_streams: Relation2::empty(),
+            client_authorized_streams: Relation2::empty(),
+            rejected_streams: Relation2::empty(),
+            timed_out_streams: RelSet::empty(),
+            closed_streams: RelSet::empty(),
+            uploaded_authorities: RelSet::empty(),
+        };
+        if summary.active_session {
+            state.accepted_sessions.insert(SessionAtom::Session0);
+        }
+        if let Some(role) = summary.role {
+            state
+                .authenticated_roles
+                .insert(SessionAtom::Session0, session_role_atom(role));
+        }
+        if summary.deploy_prepare_authorized {
+            state
+                .admin_authorized_streams
+                .insert(StreamAtom::Stream0, RequestKindAtom::DeployPrepare);
+        }
+        if summary.artifact_push_authorized {
+            state
+                .admin_authorized_streams
+                .insert(StreamAtom::Stream0, RequestKindAtom::ArtifactPush);
+        }
+        if summary.artifact_commit_authorized {
+            state
+                .admin_authorized_streams
+                .insert(StreamAtom::Stream0, RequestKindAtom::ArtifactCommit);
+        }
+        if summary.state_request_authorized {
+            state
+                .admin_authorized_streams
+                .insert(StreamAtom::Stream0, RequestKindAtom::StateRequest);
+        }
+        if summary.services_list_authorized {
+            state
+                .admin_authorized_streams
+                .insert(StreamAtom::Stream0, RequestKindAtom::ServicesList);
+        }
+        if summary.command_cancel_authorized {
+            state
+                .admin_authorized_streams
+                .insert(StreamAtom::Stream0, RequestKindAtom::CommandCancel);
+        }
+        if summary.rpc_invoke_authorized {
+            state
+                .admin_authorized_streams
+                .insert(StreamAtom::Stream0, RequestKindAtom::RpcInvoke);
+        }
+        if summary.bindings_cert_upload_authorized {
+            state.admin_authorized_streams.insert(
+                StreamAtom::Stream0,
+                RequestKindAtom::BindingsCertUpload,
+            );
+        }
+        if summary.authority_uploaded {
+            state.uploaded_authorities.insert(RemoteAuthorityAtom::Edge0);
+        }
+        state
+    }
+
+    pub fn from_summary(summary: &imagod_spec::SessionAuthStateSummary) -> Self {
+        let mut state = Self {
+            accepted_sessions: RelSet::empty(),
+            authenticated_roles: Relation2::empty(),
+            admin_authorized_streams: Relation2::empty(),
+            client_authorized_streams: Relation2::empty(),
+            rejected_streams: Relation2::empty(),
+            timed_out_streams: RelSet::empty(),
+            closed_streams: RelSet::empty(),
+            uploaded_authorities: RelSet::empty(),
+        };
+        if summary.active_session {
+            state.accepted_sessions.insert(SessionAtom::Session0);
+        }
+        if let Some(role) = summary.role {
+            state
+                .authenticated_roles
+                .insert(SessionAtom::Session0, session_role_atom(role));
+        }
+        if summary.admin_services_list_authorized {
+            state.admin_authorized_streams.insert(
+                StreamAtom::Stream0,
+                RequestKindAtom::ServicesList,
+            );
+        }
+        if summary.client_hello_authorized {
+            state.client_authorized_streams.insert(
+                StreamAtom::Stream0,
+                RequestKindAtom::HelloNegotiate,
+            );
+        }
+        if summary.client_rpc_authorized {
+            state
+                .client_authorized_streams
+                .insert(StreamAtom::Stream0, RequestKindAtom::RpcInvoke);
+        }
+        if summary.unauthorized_services_list_rejected {
+            state
+                .rejected_streams
+                .insert(StreamAtom::Stream0, RequestKindAtom::ServicesList);
+        }
+        if summary.read_timed_out {
+            state.timed_out_streams.insert(StreamAtom::Stream0);
+        }
+        if summary.stream_closed {
+            state.closed_streams.insert(StreamAtom::Stream0);
+        }
+        if summary.client_authority_uploaded {
+            state.uploaded_authorities.insert(RemoteAuthorityAtom::Edge0);
+        }
+        state
+    }
+
     pub fn authority_uploaded(&self, authority: RemoteAuthorityAtom) -> bool {
         self.uploaded_authorities.contains(&authority)
     }

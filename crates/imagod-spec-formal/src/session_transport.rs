@@ -75,6 +75,18 @@ impl SessionTransportSpec {
     }
 }
 
+impl SessionTransportState {
+    pub fn from_summary(active_session: bool, shutdown_requested: bool) -> Self {
+        let mut state = SessionTransportSpec::new().initial_state();
+        if active_session {
+            state.active_sessions.insert(SessionAtom::Session0);
+            state.last_outcome = SessionOutcome::Accepted;
+        }
+        state.shutdown_requested = shutdown_requested;
+        state
+    }
+}
+
 #[invariant(SessionTransportSpec)]
 fn shutdown_blocks_accept() -> StatePredicate<SessionTransportState> {
     StatePredicate::new("shutdown_blocks_accept", |state| {

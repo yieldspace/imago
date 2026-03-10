@@ -947,10 +947,10 @@ mod tests {
     }
 
     impl StateObserver for TestRuntime {
-        type ObservedState = TestState;
+        type SummaryState = TestState;
         type Context = ();
 
-        async fn observe_state(&self, _context: &Self::Context) -> Self::ObservedState {
+        async fn observe_state(&self, _context: &Self::Context) -> Self::SummaryState {
             *self.state.lock().expect("lock test runtime state")
         }
     }

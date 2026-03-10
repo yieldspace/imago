@@ -1,3 +1,4 @@
+use imagod_spec::{RouterOutputSummary, RouterStateSummary, SummaryRequestKind};
 use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
@@ -7,7 +8,10 @@ use nirvash_macros::{ActionVocabulary, Signature};
 use crate::{
     CommandKind, CommandProtocolAction,
     atoms::{RequestKindAtom, SessionAtom, StreamAtom},
+    session_auth::SessionAuthState,
     session_auth::SessionAuthAction,
+    session_transport::SessionTransportState,
+    summary_mapping::system_effects,
     system::{SystemAtomicAction, SystemEffect, SystemSpec, SystemState},
     wire_protocol::WireProtocolAction,
 };
@@ -37,11 +41,6 @@ pub enum RouterProjectionAction {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RouterProjectionSpec;
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct RouterProjectionObservedState {
-    pub trace: Vec<RouterProjectionAction>,
-}
 
 impl RouterProjectionSpec {
     pub const fn new() -> Self {
@@ -166,6 +165,55 @@ impl RouterProjectionSpec {
             }
         }
     }
+
+    fn request_kind(self, action: RouterProjectionAction) -> SummaryRequestKind {
+        match action {
+            RouterProjectionAction::HelloNegotiate => SummaryRequestKind::HelloNegotiate,
+            RouterProjectionAction::DeployPrepare => SummaryRequestKind::DeployPrepare,
+            RouterProjectionAction::ArtifactPush => SummaryRequestKind::ArtifactPush,
+            RouterProjectionAction::ArtifactCommit => SummaryRequestKind::ArtifactCommit,
+            RouterProjectionAction::StateRequest => SummaryRequestKind::StateRequest,
+            RouterProjectionAction::ServicesList => SummaryRequestKind::ServicesList,
+            RouterProjectionAction::CommandCancel => SummaryRequestKind::CommandCancel,
+            RouterProjectionAction::RpcInvoke => SummaryRequestKind::RpcInvoke,
+            RouterProjectionAction::BindingsCertUpload => SummaryRequestKind::BindingsCertUpload,
+        }
+    }
+
+    pub fn initial_summary(self) -> RouterStateSummary {
+        RouterStateSummary::initial_admin_stream()
+    }
+
+    pub fn action_allowed(self, summary: &RouterStateSummary, action: RouterProjectionAction) -> bool {
+        if !summary.active_session || summary.request.is_some() {
+            return false;
+        }
+        match action {
+            RouterProjectionAction::HelloNegotiate => true,
+            RouterProjectionAction::DeployPrepare => summary.deploy_prepare_authorized,
+            RouterProjectionAction::ArtifactPush => summary.artifact_push_authorized,
+            RouterProjectionAction::ArtifactCommit => summary.artifact_commit_authorized,
+            RouterProjectionAction::StateRequest => summary.state_request_authorized,
+            RouterProjectionAction::ServicesList => summary.services_list_authorized,
+            RouterProjectionAction::CommandCancel => summary.command_cancel_authorized,
+            RouterProjectionAction::RpcInvoke => summary.rpc_invoke_authorized,
+            RouterProjectionAction::BindingsCertUpload => summary.bindings_cert_upload_authorized,
+        }
+    }
+
+    pub fn advance_summary(
+        self,
+        summary: &RouterStateSummary,
+        action: RouterProjectionAction,
+    ) -> RouterStateSummary {
+        let mut next = *summary;
+        next.request = Some(self.request_kind(action));
+        if matches!(action, RouterProjectionAction::BindingsCertUpload) {
+            next.authority_uploaded = true;
+        }
+        next
+    }
+
 }
 
 impl TransitionSystem for RouterProjectionSpec {
@@ -208,8 +256,8 @@ impl ModelCaseSource for RouterProjectionSpec {
 
 impl ProtocolConformanceSpec for RouterProjectionSpec {
     type ExpectedOutput = Vec<SystemEffect>;
-    type ObservedState = RouterProjectionObservedState;
-    type ObservedOutput = Vec<SystemEffect>;
+    type SummaryState = RouterStateSummary;
+    type SummaryOutput = RouterOutputSummary;
 
     fn expected_output(
         &self,
@@ -226,18 +274,16 @@ impl ProtocolConformanceSpec for RouterProjectionSpec {
         )
     }
 
-    fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
-        observed
-            .trace
-            .iter()
-            .fold(self.initial_state(), |state, action| {
-                self.transition(&state, action)
-                    .expect("router projection trace should stay valid")
-            })
+    fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State {
+        let mut state = self.initial_state();
+        state.session = SessionTransportState::from_summary(summary.active_session, false);
+        state.session_auth = SessionAuthState::from_router_summary(summary);
+        state.wire = crate::wire_protocol::WireProtocolState::from_router_summary(summary);
+        state
     }
 
-    fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {
-        observed.clone()
+    fn abstract_output(&self, summary: &Self::SummaryOutput) -> Self::ExpectedOutput {
+        system_effects(&summary.effects)
     }
 }
 

@@ -1,6 +1,6 @@
 use imagod_spec::{
-    CommandProtocolObservedState as RuntimeCommandProtocolObservedState,
-    CommandProtocolOutput as RuntimeCommandProtocolOutput,
+    CommandOutputSummary as RuntimeCommandOutputSummary,
+    CommandStateSummary as RuntimeCommandStateSummary,
 };
 use nirvash_core::{
     ActionVocabulary, ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
@@ -32,7 +32,7 @@ impl CommandProjectionSpec {
 
     fn command_observed_state(
         self,
-        observed: &RuntimeCommandProtocolObservedState,
+        observed: &RuntimeCommandStateSummary,
     ) -> CommandProtocolState {
         CommandProtocolState {
             tracked: observed.tracked,
@@ -81,8 +81,8 @@ impl ModelCaseSource for CommandProjectionSpec {
 
 impl ProtocolConformanceSpec for CommandProjectionSpec {
     type ExpectedOutput = CommandProtocolExpectedOutput;
-    type ObservedState = RuntimeCommandProtocolObservedState;
-    type ObservedOutput = RuntimeCommandProtocolOutput;
+    type SummaryState = RuntimeCommandStateSummary;
+    type SummaryOutput = RuntimeCommandOutputSummary;
 
     fn expected_output(
         &self,
@@ -98,14 +98,14 @@ impl ProtocolConformanceSpec for CommandProjectionSpec {
         )
     }
 
-    fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
+    fn abstract_state(&self, observed: &Self::SummaryState) -> Self::State {
         let mut state = self.initial_state();
         state.command = self.command_observed_state(observed);
         state
     }
 
-    fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {
-        <CommandProtocolSpec as ProtocolConformanceSpec>::project_output(
+    fn abstract_output(&self, observed: &Self::SummaryOutput) -> Self::ExpectedOutput {
+        <CommandProtocolSpec as ProtocolConformanceSpec>::abstract_output(
             &CommandProtocolSpec::new(),
             observed,
         )

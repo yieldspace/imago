@@ -1,3 +1,4 @@
+use imagod_spec::{SessionAuthOutputSummary, SessionAuthStateSummary};
 use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
@@ -7,6 +8,9 @@ use nirvash_macros::{ActionVocabulary, Signature};
 use crate::{
     atoms::{RemoteAuthorityAtom, RequestKindAtom, SessionAtom, StreamAtom},
     session_auth::SessionAuthAction,
+    session_auth::SessionAuthState,
+    session_transport::SessionTransportState,
+    summary_mapping::system_effects,
     system::{SystemAtomicAction, SystemEffect, SystemSpec, SystemState},
 };
 
@@ -39,11 +43,6 @@ pub enum SessionAuthProjectionAction {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SessionAuthProjectionSpec;
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct SessionAuthProjectionObservedState {
-    pub trace: Vec<SessionAuthProjectionAction>,
-}
 
 impl SessionAuthProjectionSpec {
     pub const fn new() -> Self {
@@ -104,6 +103,108 @@ impl SessionAuthProjectionSpec {
             }
         }
     }
+
+    pub fn initial_summary(self) -> SessionAuthStateSummary {
+        SessionAuthStateSummary::default()
+    }
+
+    pub fn action_allowed(
+        self,
+        summary: &SessionAuthStateSummary,
+        action: SessionAuthProjectionAction,
+    ) -> bool {
+        match action {
+            SessionAuthProjectionAction::AcceptSession => {
+                !summary.active_session && !summary.shutdown_requested
+            }
+            SessionAuthProjectionAction::AuthenticateAdmin
+            | SessionAuthProjectionAction::AuthenticateClient
+            | SessionAuthProjectionAction::AuthenticateUnknown => {
+                summary.active_session && summary.role.is_none()
+            }
+            SessionAuthProjectionAction::AuthorizeAdminServicesList => {
+                summary.active_session
+                    && matches!(summary.role, Some(imagod_spec::SummarySessionRole::Admin))
+                    && !summary.shutdown_requested
+                    && !summary.read_timed_out
+                    && !summary.stream_closed
+                    && !summary.admin_services_list_authorized
+            }
+            SessionAuthProjectionAction::AuthorizeClientHello => {
+                summary.active_session
+                    && matches!(summary.role, Some(imagod_spec::SummarySessionRole::Client))
+                    && !summary.shutdown_requested
+                    && !summary.read_timed_out
+                    && !summary.stream_closed
+                    && !summary.client_hello_authorized
+            }
+            SessionAuthProjectionAction::AuthorizeClientRpc => {
+                summary.active_session
+                    && matches!(summary.role, Some(imagod_spec::SummarySessionRole::Client))
+                    && !summary.shutdown_requested
+                    && !summary.read_timed_out
+                    && !summary.stream_closed
+                    && summary.client_authority_uploaded
+                    && !summary.client_rpc_authorized
+            }
+            SessionAuthProjectionAction::RejectUnauthorizedServicesList => {
+                !summary.admin_services_list_authorized
+            }
+            SessionAuthProjectionAction::ReadTimeout => !summary.stream_closed,
+            SessionAuthProjectionAction::CloseStream => !summary.stream_closed,
+            SessionAuthProjectionAction::UploadClientAuthority => {
+                !summary.shutdown_requested && !summary.client_authority_uploaded
+            }
+        }
+    }
+
+    pub fn advance_summary(
+        self,
+        summary: &SessionAuthStateSummary,
+        action: SessionAuthProjectionAction,
+    ) -> SessionAuthStateSummary {
+        let mut next = *summary;
+        match action {
+            SessionAuthProjectionAction::AcceptSession => next.active_session = true,
+            SessionAuthProjectionAction::AuthenticateAdmin => {
+                next.role = Some(imagod_spec::SummarySessionRole::Admin);
+            }
+            SessionAuthProjectionAction::AuthenticateClient => {
+                next.role = Some(imagod_spec::SummarySessionRole::Client);
+            }
+            SessionAuthProjectionAction::AuthenticateUnknown => {
+                next.role = Some(imagod_spec::SummarySessionRole::Unknown);
+            }
+            SessionAuthProjectionAction::AuthorizeAdminServicesList => {
+                next.admin_services_list_authorized = true;
+            }
+            SessionAuthProjectionAction::AuthorizeClientHello => {
+                next.client_hello_authorized = true;
+            }
+            SessionAuthProjectionAction::AuthorizeClientRpc => {
+                next.client_rpc_authorized = true;
+            }
+            SessionAuthProjectionAction::RejectUnauthorizedServicesList => {
+                next.unauthorized_services_list_rejected = true;
+            }
+            SessionAuthProjectionAction::ReadTimeout => {
+                next.read_timed_out = true;
+                next.admin_services_list_authorized = false;
+                next.client_hello_authorized = false;
+                next.client_rpc_authorized = false;
+            }
+            SessionAuthProjectionAction::CloseStream => {
+                next.stream_closed = true;
+                next.admin_services_list_authorized = false;
+                next.client_hello_authorized = false;
+                next.client_rpc_authorized = false;
+            }
+            SessionAuthProjectionAction::UploadClientAuthority => {
+                next.client_authority_uploaded = true;
+            }
+        }
+        next
+    }
 }
 
 impl TransitionSystem for SessionAuthProjectionSpec {
@@ -146,8 +247,8 @@ impl ModelCaseSource for SessionAuthProjectionSpec {
 
 impl ProtocolConformanceSpec for SessionAuthProjectionSpec {
     type ExpectedOutput = Vec<SystemEffect>;
-    type ObservedState = SessionAuthProjectionObservedState;
-    type ObservedOutput = Vec<SystemEffect>;
+    type SummaryState = SessionAuthStateSummary;
+    type SummaryOutput = SessionAuthOutputSummary;
 
     fn expected_output(
         &self,
@@ -164,18 +265,16 @@ impl ProtocolConformanceSpec for SessionAuthProjectionSpec {
         )
     }
 
-    fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
-        observed
-            .trace
-            .iter()
-            .fold(self.initial_state(), |state, action| {
-                self.transition(&state, action)
-                    .expect("session auth projection trace should stay valid")
-            })
+    fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State {
+        let mut state = self.initial_state();
+        state.session =
+            SessionTransportState::from_summary(summary.active_session, summary.shutdown_requested);
+        state.session_auth = SessionAuthState::from_summary(summary);
+        state
     }
 
-    fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {
-        observed.clone()
+    fn abstract_output(&self, summary: &Self::SummaryOutput) -> Self::ExpectedOutput {
+        system_effects(&summary.effects)
     }
 }
 

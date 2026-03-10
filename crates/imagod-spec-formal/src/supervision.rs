@@ -22,6 +22,29 @@ pub struct SupervisionState {
 }
 
 impl SupervisionState {
+    pub fn from_logs_summary(summary: &imagod_spec::LogsStateSummary) -> Self {
+        let mut state = SupervisionSpec::new().initial_state();
+        if summary.service_running {
+            install_running_service(&mut state, ServiceAtom::Service0);
+        }
+        state
+    }
+
+    pub fn from_runtime_summary(summary: &imagod_spec::RuntimeStateSummary) -> Self {
+        let mut state = SupervisionSpec::new().initial_state();
+        if summary.service0_running {
+            install_running_service(&mut state, ServiceAtom::Service0);
+        } else if summary.service0_reaped {
+            state.reaped_services.insert(ServiceAtom::Service0);
+        }
+        if summary.service1_running {
+            install_running_service(&mut state, ServiceAtom::Service1);
+        } else if summary.service1_reaped {
+            state.reaped_services.insert(ServiceAtom::Service1);
+        }
+        state
+    }
+
     pub fn service_is_ready(&self, service: ServiceAtom) -> bool {
         self.ready_services.contains(&service)
     }
@@ -43,6 +66,16 @@ impl SupervisionState {
             && !self.reaped_services.contains(&service)
             && !self.service_runners.domain().contains(&service)
     }
+}
+
+fn install_running_service(state: &mut SupervisionState, service: ServiceAtom) {
+    state.endpoint_prepared.insert(service);
+    state.registered_services.insert(service);
+    state.ready_services.insert(service);
+    state.running_services.insert(service);
+    state.reaped_services.remove(&service);
+    state.service_runners.insert(service, service_runner(service));
+    state.service_apps.insert(service, ServiceAppAtom::Rpc);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, nirvash_macros::Signature, ActionVocabulary)]

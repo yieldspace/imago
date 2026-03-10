@@ -204,10 +204,10 @@ pub trait ActionApplier {
 
 #[allow(async_fn_in_trait)]
 pub trait StateObserver {
-    type ObservedState;
+    type SummaryState;
     type Context;
 
-    async fn observe_state(&self, context: &Self::Context) -> Self::ObservedState;
+    async fn observe_state(&self, context: &Self::Context) -> Self::SummaryState;
 }
 
 #[derive(Debug, Clone)]

@@ -23,12 +23,40 @@ pub struct DeployState {
 }
 
 impl DeployState {
+    pub fn from_logs_summary(summary: &imagod_spec::LogsStateSummary) -> Self {
+        let mut state = DeploySpec::new().initial_state();
+        if summary.service_running {
+            install_committed_promoted_release(&mut state, ServiceAtom::Service0);
+        }
+        state
+    }
+
+    pub fn from_runtime_summary(summary: &imagod_spec::RuntimeStateSummary) -> Self {
+        let mut state = DeploySpec::new().initial_state();
+        if summary.service0_promoted || summary.service0_running {
+            install_runtime_release(&mut state, ServiceAtom::Service0);
+        }
+        if summary.service1_promoted || summary.service1_running {
+            install_runtime_release(&mut state, ServiceAtom::Service1);
+        }
+        if summary.service0_rolled_back {
+            state.promoted_releases.remove(&ServiceAtom::Service0);
+            state.rollback_pending.remove(&ServiceAtom::Service0);
+            state.rolled_back.insert(ServiceAtom::Service0);
+        }
+        state
+    }
+
     pub fn release_promoted(&self, service: ServiceAtom) -> bool {
         self.promoted_releases.contains(&service)
     }
 
     pub fn rollback_pending(&self, service: ServiceAtom) -> bool {
         self.rollback_pending.contains(&service)
+    }
+
+    pub fn rollback_observed(&self, service: ServiceAtom) -> bool {
+        self.rolled_back.contains(&service)
     }
 
     pub fn service_is_quiescent(&self, service: ServiceAtom) -> bool {
@@ -42,6 +70,17 @@ impl DeployState {
             && !self.restart_policy_persisted.contains(&service)
             && !self.auto_rollback_enabled.contains(&service)
     }
+}
+
+fn install_committed_promoted_release(state: &mut DeployState, service: ServiceAtom) {
+    state.committed_uploads.insert(service);
+    state.promoted_releases.insert(service);
+}
+
+fn install_runtime_release(state: &mut DeployState, service: ServiceAtom) {
+    install_committed_promoted_release(state, service);
+    state.restart_policy_persisted.insert(service);
+    state.auto_rollback_enabled.insert(service);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, nirvash_macros::Signature, ActionVocabulary)]

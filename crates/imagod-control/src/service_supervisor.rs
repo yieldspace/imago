@@ -1714,12 +1714,11 @@ fn inject_kill_and_wait_failure_for_pid(pid: u32) {
 mod tests {
     use super::*;
     use crate::artifact_store::ArtifactStore;
+    use imagod_spec::{ContractEffectSummary, RuntimeOutputSummary, RuntimeStateSummary};
     use imagod_spec_formal::{
-        RuntimeProjectionAction, RuntimeProjectionObservedState, RuntimeProjectionSpec,
-        SystemEffect, SystemState, atoms::ServiceAtom,
+        RuntimeProjectionAction, RuntimeProjectionSpec, atoms::ServiceAtom,
     };
     use nirvash_core::{
-        ProtocolConformanceSpec, TransitionSystem,
         conformance::{
             ActionApplier as ProtocolActionApplier, ProtocolRuntimeBinding, StateObserver,
         },
@@ -1855,8 +1854,7 @@ mod tests {
         root: PathBuf,
         artifact_store: ArtifactStore,
         supervisor: ServiceSupervisor,
-        state: tokio::sync::Mutex<SystemState>,
-        trace: tokio::sync::Mutex<Vec<RuntimeProjectionAction>>,
+        summary: tokio::sync::Mutex<RuntimeStateSummary>,
     }
 
     impl RuntimeProjectionRuntime {
@@ -1874,8 +1872,7 @@ mod tests {
                 root,
                 artifact_store,
                 supervisor,
-                state: tokio::sync::Mutex::new(RuntimeProjectionSpec::new().initial_state()),
-                trace: tokio::sync::Mutex::new(Vec::new()),
+                summary: tokio::sync::Mutex::new(RuntimeProjectionSpec::new().initial_summary()),
             }
         }
 
@@ -2242,7 +2239,7 @@ mod tests {
 
     impl ProtocolActionApplier for RuntimeProjectionRuntime {
         type Action = RuntimeProjectionAction;
-        type Output = Vec<SystemEffect>;
+        type Output = RuntimeOutputSummary;
         type Context = ();
 
         async fn execute_action(
@@ -2251,10 +2248,10 @@ mod tests {
             action: &Self::Action,
         ) -> Self::Output {
             let spec = RuntimeProjectionSpec::new();
-            let prev = self.state.lock().await.clone();
-            let Some(next) = spec.transition(&prev, action) else {
-                return Vec::new();
-            };
+            let prev = *self.summary.lock().await;
+            if !spec.action_allowed(&prev, *action) {
+                return RuntimeOutputSummary::default();
+            }
 
             let result = match action {
                 RuntimeProjectionAction::DeployService0 => {
@@ -2273,20 +2270,23 @@ mod tests {
             };
             result.expect("runtime projection action should succeed");
 
-            *self.state.lock().await = next.clone();
-            self.trace.lock().await.push(*action);
-            spec.expected_output(&prev, action, Some(&next))
+            *self.summary.lock().await = spec.advance_summary(&prev, *action);
+            if matches!(action, RuntimeProjectionAction::ShutdownDrain) {
+                RuntimeOutputSummary {
+                    effects: vec![ContractEffectSummary::ShutdownComplete],
+                }
+            } else {
+                RuntimeOutputSummary::default()
+            }
         }
     }
 
     impl StateObserver for RuntimeProjectionRuntime {
-        type ObservedState = RuntimeProjectionObservedState;
+        type SummaryState = RuntimeStateSummary;
         type Context = ();
 
-        async fn observe_state(&self, _context: &Self::Context) -> Self::ObservedState {
-            RuntimeProjectionObservedState {
-                trace: self.trace.lock().await.clone(),
-            }
+        async fn observe_state(&self, _context: &Self::Context) -> Self::SummaryState {
+            *self.summary.lock().await
         }
     }
 

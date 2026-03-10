@@ -1337,8 +1337,8 @@ impl TransitionSystem for SystemSpec {
 
 impl ProtocolConformanceSpec for SystemSpec {
     type ExpectedOutput = Vec<SystemEffect>;
-    type ObservedState = SystemState;
-    type ObservedOutput = Vec<SystemEffect>;
+    type SummaryState = SystemState;
+    type SummaryOutput = Vec<SystemEffect>;
 
     fn expected_output(
         &self,
@@ -1364,11 +1364,11 @@ impl ProtocolConformanceSpec for SystemSpec {
         effects
     }
 
-    fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
+    fn abstract_state(&self, observed: &Self::SummaryState) -> Self::State {
         observed.clone()
     }
 
-    fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {
+    fn abstract_output(&self, observed: &Self::SummaryOutput) -> Self::ExpectedOutput {
         observed.clone()
     }
 }

@@ -102,8 +102,8 @@ impl TemporalSpec for Spec {
 
 impl ProtocolConformanceSpec for Spec {
     type ExpectedOutput = Output;
-    type ObservedState = State;
-    type ObservedOutput = Output;
+    type SummaryState = State;
+    type SummaryOutput = Output;
 
     fn expected_output(
         &self,
@@ -118,11 +118,11 @@ impl ProtocolConformanceSpec for Spec {
         }
     }
 
-    fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
+    fn abstract_state(&self, observed: &Self::SummaryState) -> Self::State {
         *observed
     }
 
-    fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {
+    fn abstract_output(&self, observed: &Self::SummaryOutput) -> Self::ExpectedOutput {
         observed.clone()
     }
 }
@@ -241,7 +241,7 @@ impl ActionApplier for Driver {
 }
 
 impl StateObserver for Driver {
-    type ObservedState = State;
+    type SummaryState = State;
     type Context = Context;
 
     async fn observe_state(&self, _context: &Context) -> State {

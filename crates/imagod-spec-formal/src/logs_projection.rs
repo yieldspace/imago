@@ -1,3 +1,4 @@
+use imagod_spec::{LogsOutputSummary, LogsStateSummary};
 use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
@@ -7,8 +8,11 @@ use nirvash_macros::{ActionVocabulary, Signature};
 use crate::{
     atoms::{LogChunkAtom, RequestKindAtom, ServiceAtom, SessionAtom, StreamAtom},
     deploy::DeployAction,
+    deploy::DeployState,
     session_auth::SessionAuthAction,
+    summary_mapping::system_effects,
     supervision::SupervisionAction,
+    supervision::SupervisionState,
     system::{SystemAtomicAction, SystemEffect, SystemSpec, SystemState},
     wire_protocol::WireProtocolAction,
 };
@@ -26,11 +30,6 @@ pub enum LogsProjectionAction {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LogsProjectionSpec;
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct LogsProjectionObservedState {
-    pub trace: Vec<LogsProjectionAction>,
-}
 
 impl LogsProjectionSpec {
     pub const fn new() -> Self {
@@ -126,6 +125,36 @@ impl LogsProjectionSpec {
             LogsProjectionAction::LogsEnd => WireProtocolAction::LogsEnd(StreamAtom::Stream1),
         }
     }
+
+    pub fn initial_summary(self) -> LogsStateSummary {
+        LogsStateSummary::initial_running_service()
+    }
+
+    pub fn action_allowed(self, summary: &LogsStateSummary, action: LogsProjectionAction) -> bool {
+        match action {
+            LogsProjectionAction::LogsRequest => {
+                summary.service_running && summary.logs_authorized && !summary.acknowledged
+            }
+            LogsProjectionAction::LogsChunk => {
+                summary.acknowledged && !summary.chunk_seen && !summary.ended
+            }
+            LogsProjectionAction::LogsEnd => summary.acknowledged && !summary.ended,
+        }
+    }
+
+    pub fn advance_summary(
+        self,
+        summary: &LogsStateSummary,
+        action: LogsProjectionAction,
+    ) -> LogsStateSummary {
+        let mut next = *summary;
+        match action {
+            LogsProjectionAction::LogsRequest => next.acknowledged = true,
+            LogsProjectionAction::LogsChunk => next.chunk_seen = true,
+            LogsProjectionAction::LogsEnd => next.ended = true,
+        }
+        next
+    }
 }
 
 impl TransitionSystem for LogsProjectionSpec {
@@ -175,8 +204,8 @@ impl ModelCaseSource for LogsProjectionSpec {
 
 impl ProtocolConformanceSpec for LogsProjectionSpec {
     type ExpectedOutput = Vec<SystemEffect>;
-    type ObservedState = LogsProjectionObservedState;
-    type ObservedOutput = Vec<SystemEffect>;
+    type SummaryState = LogsStateSummary;
+    type SummaryOutput = LogsOutputSummary;
 
     fn expected_output(
         &self,
@@ -193,18 +222,16 @@ impl ProtocolConformanceSpec for LogsProjectionSpec {
         )
     }
 
-    fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
-        observed
-            .trace
-            .iter()
-            .fold(self.initial_state(), |state, action| {
-                self.transition(&state, action)
-                    .expect("logs projection trace should stay valid")
-            })
+    fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State {
+        let mut state = self.initial_state();
+        state.deploy = DeployState::from_logs_summary(summary);
+        state.supervision = SupervisionState::from_logs_summary(summary);
+        state.wire = crate::wire_protocol::WireProtocolState::from_logs_summary(summary);
+        state
     }
 
-    fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {
-        observed.clone()
+    fn abstract_output(&self, summary: &Self::SummaryOutput) -> Self::ExpectedOutput {
+        system_effects(&summary.effects)
     }
 }
 

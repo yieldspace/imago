@@ -3,6 +3,7 @@ pub mod envelope;
 pub mod error;
 pub mod ipc;
 pub mod messages;
+pub mod summary;
 pub mod validate;
 pub mod wire;
 
@@ -12,6 +13,7 @@ pub use command_contract::{
     CommandProtocolStageId, OperationPhase,
 };
 pub use ipc::*;
+pub use summary::*;
 pub use wire::*;
 
 #[cfg(test)]

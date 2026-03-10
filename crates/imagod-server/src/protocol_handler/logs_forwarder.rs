@@ -599,13 +599,14 @@ mod tests {
     use bytes::Bytes;
     use imago_protocol::from_cbor;
     use imagod_control::{ServiceLogEvent, ServiceLogStream, ServiceLogSubscription};
-    use imagod_spec::ErrorCode;
+    use imagod_spec::{
+        ContractEffectSummary, ErrorCode, LogsOutputSummary, LogsStateSummary, SummaryLogChunk,
+        SummaryRequestKind, SummaryStreamId,
+    };
     use imagod_spec_formal::{
-        LogsProjectionAction, LogsProjectionObservedState, LogsProjectionSpec, SystemEffect,
-        SystemState,
+        LogsProjectionAction, LogsProjectionSpec,
     };
     use nirvash_core::{
-        ProtocolConformanceSpec, TransitionSystem,
         conformance::{ActionApplier, ProtocolRuntimeBinding, StateObserver},
     };
     use nirvash_macros::code_tests;
@@ -739,16 +740,14 @@ mod tests {
 
     #[derive(Debug)]
     struct LogsProjectionRuntime {
-        state: tokio::sync::Mutex<SystemState>,
-        trace: tokio::sync::Mutex<Vec<LogsProjectionAction>>,
+        summary: tokio::sync::Mutex<LogsStateSummary>,
         pending: tokio::sync::Mutex<VecDeque<RecordedDatagramKind>>,
     }
 
     impl LogsProjectionRuntime {
         fn new() -> Self {
             Self {
-                state: tokio::sync::Mutex::new(LogsProjectionSpec::new().initial_state()),
-                trace: tokio::sync::Mutex::new(Vec::new()),
+                summary: tokio::sync::Mutex::new(LogsProjectionSpec::new().initial_summary()),
                 pending: tokio::sync::Mutex::new(VecDeque::new()),
             }
         }
@@ -770,7 +769,7 @@ mod tests {
 
     impl ActionApplier for LogsProjectionRuntime {
         type Action = LogsProjectionAction;
-        type Output = Vec<SystemEffect>;
+        type Output = LogsOutputSummary;
         type Context = ();
 
         async fn execute_action(
@@ -779,11 +778,10 @@ mod tests {
             action: &Self::Action,
         ) -> Self::Output {
             let spec = LogsProjectionSpec::new();
-            let mut state = self.state.lock().await;
-            let prev = state.clone();
-            let Some(next) = spec.transition(&prev, action) else {
-                return Vec::new();
-            };
+            let prev = *self.summary.lock().await;
+            if !spec.action_allowed(&prev, *action) {
+                return LogsOutputSummary::default();
+            }
 
             match action {
                 LogsProjectionAction::LogsRequest => {
@@ -833,20 +831,33 @@ mod tests {
                 }
             }
 
-            *state = next;
-            self.trace.lock().await.push(*action);
-            spec.expected_output(&prev, action, Some(&*state))
+            *self.summary.lock().await = spec.advance_summary(&prev, *action);
+            match action {
+                LogsProjectionAction::LogsRequest => LogsOutputSummary {
+                    effects: vec![ContractEffectSummary::Response(
+                        SummaryStreamId::Stream1,
+                        SummaryRequestKind::LogsRequest,
+                    )],
+                },
+                LogsProjectionAction::LogsChunk => LogsOutputSummary {
+                    effects: vec![ContractEffectSummary::LogChunk(
+                        SummaryStreamId::Stream1,
+                        SummaryLogChunk::Chunk0,
+                    )],
+                },
+                LogsProjectionAction::LogsEnd => LogsOutputSummary {
+                    effects: vec![ContractEffectSummary::LogsEnd(SummaryStreamId::Stream1)],
+                },
+            }
         }
     }
 
     impl StateObserver for LogsProjectionRuntime {
-        type ObservedState = LogsProjectionObservedState;
+        type SummaryState = LogsStateSummary;
         type Context = ();
 
-        async fn observe_state(&self, _context: &Self::Context) -> Self::ObservedState {
-            LogsProjectionObservedState {
-                trace: self.trace.lock().await.clone(),
-            }
+        async fn observe_state(&self, _context: &Self::Context) -> Self::SummaryState {
+            *self.summary.lock().await
         }
     }
 

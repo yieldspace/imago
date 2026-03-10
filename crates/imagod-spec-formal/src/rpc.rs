@@ -28,6 +28,62 @@ pub struct RpcState {
 }
 
 impl RpcState {
+    pub fn from_runtime_summary(summary: &imagod_spec::RuntimeStateSummary) -> Self {
+        let mut state = RpcSpec::new().initial_state();
+        if summary.binding_granted_service0
+            || summary.local_rpc_resolved
+            || summary.remote_connected
+            || summary.remote_completed
+            || summary.remote_disconnected
+        {
+            state
+                .bindings
+                .insert(ServiceAtom::Service0, binding_target_for(ServiceAtom::Service0));
+        }
+        if summary.local_rpc_resolved {
+            state
+                .local_call_owners
+                .insert(local_call_for(ServiceAtom::Service0), ServiceAtom::Service0);
+            state.local_call_targets.insert(
+                local_call_for(ServiceAtom::Service0),
+                binding_target_for(ServiceAtom::Service0),
+            );
+        }
+        if summary.local_rpc_denied {
+            state
+                .denied_local_calls
+                .insert(local_call_for(ServiceAtom::Service0), ServiceAtom::Service0);
+        }
+        if summary.remote_connected && !summary.remote_disconnected {
+            state
+                .remote_connection_owners
+                .insert(RpcConnectionAtom::Connection0, ServiceAtom::Service0);
+            state.remote_connection_authorities.insert(
+                RpcConnectionAtom::Connection0,
+                RemoteAuthorityAtom::Edge0,
+            );
+        }
+        let remote_call = remote_call_for(ServiceAtom::Service0);
+        if summary.remote_completed || summary.remote_denied {
+            state
+                .remote_call_owners
+                .insert(remote_call, ServiceAtom::Service0);
+            state.remote_call_targets.insert(
+                remote_call,
+                binding_target_for(ServiceAtom::Service0),
+            );
+        }
+        if summary.remote_completed {
+            state.completed_remote_calls.insert(remote_call);
+        }
+        if summary.remote_denied {
+            state
+                .denied_remote_calls
+                .insert(remote_call, ServiceAtom::Service0);
+        }
+        state
+    }
+
     pub fn binding_allowed(&self, source: ServiceAtom) -> bool {
         self.bindings.contains(&source, &binding_target_for(source))
     }
@@ -285,7 +341,10 @@ fn transition_state(prev: &RpcState, action: &RpcAction) -> Option<RpcState> {
         RpcAction::ResolveLocal(source)
             if prev.binding_allowed(*source) && !prev.has_local_resolution_for(*source) =>
         {
-            let call = next_free_call(prev)?;
+            let call = local_call_for(*source);
+            if call_is_taken(prev, call) {
+                return None;
+            }
             candidate.local_call_owners.insert(call, *source);
             candidate
                 .local_call_targets
@@ -293,7 +352,10 @@ fn transition_state(prev: &RpcState, action: &RpcAction) -> Option<RpcState> {
             true
         }
         RpcAction::RejectLocal(source) if !prev.has_local_resolution_for(*source) => {
-            let call = next_free_call(prev)?;
+            let call = local_call_for(*source);
+            if call_is_taken(prev, call) {
+                return None;
+            }
             candidate.denied_local_calls.insert(call, *source);
             true
         }
@@ -310,7 +372,10 @@ fn transition_state(prev: &RpcState, action: &RpcAction) -> Option<RpcState> {
         RpcAction::InvokeRemote(source)
             if prev.binding_allowed(*source) && prev.has_remote_connection_for(*source) =>
         {
-            let call = next_free_call(prev)?;
+            let call = remote_call_for(*source);
+            if call_is_taken(prev, call) {
+                return None;
+            }
             let connection = connection_for_source(prev, *source)?;
             candidate.remote_call_owners.insert(call, *source);
             candidate
@@ -320,7 +385,10 @@ fn transition_state(prev: &RpcState, action: &RpcAction) -> Option<RpcState> {
             true
         }
         RpcAction::RejectRemoteInvoke(source) => {
-            let call = next_free_call(prev)?;
+            let call = remote_call_for(*source);
+            if call_is_taken(prev, call) {
+                return None;
+            }
             candidate.denied_remote_calls.insert(call, *source);
             true
         }
@@ -378,17 +446,26 @@ fn resolve_or_reject_remote_step() -> StepPredicate<RpcState, RpcAction> {
     })
 }
 
-fn next_free_call(state: &RpcState) -> Option<RpcCallAtom> {
-    RpcCallAtom::bounded_domain()
-        .into_vec()
-        .into_iter()
-        .find(|call| {
-            !state.local_call_owners.domain().contains(call)
-                && !state.denied_local_calls.domain().contains(call)
-                && !state.remote_call_owners.domain().contains(call)
-                && !state.denied_remote_calls.domain().contains(call)
-                && !state.completed_remote_calls.contains(call)
-        })
+fn call_is_taken(state: &RpcState, call: RpcCallAtom) -> bool {
+    state.local_call_owners.domain().contains(&call)
+        || state.denied_local_calls.domain().contains(&call)
+        || state.remote_call_owners.domain().contains(&call)
+        || state.denied_remote_calls.domain().contains(&call)
+        || state.completed_remote_calls.contains(&call)
+}
+
+fn local_call_for(source: ServiceAtom) -> RpcCallAtom {
+    match source {
+        ServiceAtom::Service0 => RpcCallAtom::Call0,
+        ServiceAtom::Service1 => RpcCallAtom::Call1,
+    }
+}
+
+fn remote_call_for(source: ServiceAtom) -> RpcCallAtom {
+    match source {
+        ServiceAtom::Service0 => RpcCallAtom::Call1,
+        ServiceAtom::Service1 => RpcCallAtom::Call0,
+    }
 }
 
 fn next_free_connection(state: &RpcState) -> Option<RpcConnectionAtom> {

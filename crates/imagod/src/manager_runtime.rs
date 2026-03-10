@@ -499,42 +499,36 @@ fn log_service_shutdown_errors(stop_errors: Vec<(String, ImagodError)>, force: b
 #[cfg(test)]
 mod tests {
     use super::*;
+    use imagod_spec::{ContractEffectSummary, ManagerRuntimeOutputSummary, ManagerRuntimeStateSummary};
     use imagod_spec_formal::{
-        ManagerRuntimeProjectionAction, ManagerRuntimeProjectionObservedState,
-        ManagerRuntimeProjectionSpec, SystemEffect,
+        ManagerRuntimeProjectionAction, ManagerRuntimeProjectionSpec,
     };
     use nirvash_core::{
-        TransitionSystem,
         conformance::{ActionApplier, ProtocolRuntimeBinding, StateObserver},
     };
     use nirvash_macros::code_tests;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::Mutex as AsyncMutex;
 
     #[derive(Debug)]
     struct ManagerRuntimeProjectionRuntime {
         probe: ManagerRuntimeProbe,
-        state: AsyncMutex<imagod_spec_formal::SystemState>,
-        trace: AsyncMutex<Vec<ManagerRuntimeProjectionAction>>,
+        summary: tokio::sync::Mutex<ManagerRuntimeStateSummary>,
     }
 
     impl ManagerRuntimeProjectionRuntime {
         fn new() -> Self {
             Self {
                 probe: ManagerRuntimeProbe::default(),
-                state: AsyncMutex::new(ManagerRuntimeProjectionSpec::new().initial_state()),
-                trace: AsyncMutex::new(Vec::new()),
+                summary: tokio::sync::Mutex::new(
+                    ManagerRuntimeProjectionSpec::new().initial_summary(),
+                ),
             }
-        }
-
-        async fn push_trace(&self, action: ManagerRuntimeProjectionAction) {
-            self.trace.lock().await.push(action);
         }
     }
 
     impl ActionApplier for ManagerRuntimeProjectionRuntime {
         type Action = ManagerRuntimeProjectionAction;
-        type Output = Vec<SystemEffect>;
+        type Output = ManagerRuntimeOutputSummary;
         type Context = ();
 
         async fn execute_action(
@@ -543,10 +537,10 @@ mod tests {
             action: &Self::Action,
         ) -> Self::Output {
             let spec = ManagerRuntimeProjectionSpec::new();
-            let mut state = self.state.lock().await;
-            let Some(next) = spec.transition(&state, action) else {
-                return Vec::new();
-            };
+            let prev = *self.summary.lock().await;
+            if !spec.action_allowed(&prev, *action) {
+                return ManagerRuntimeOutputSummary::default();
+            }
             match action {
                 ManagerRuntimeProjectionAction::LoadExistingConfig => {
                     self.probe.record_config_loaded(false);
@@ -602,24 +596,23 @@ mod tests {
                 }
                 ManagerRuntimeProjectionAction::FinishShutdown => {}
             }
-            *state = next;
-            self.push_trace(*action).await;
+            *self.summary.lock().await = spec.advance_summary(&prev, *action);
             if matches!(action, ManagerRuntimeProjectionAction::FinishShutdown) {
-                vec![SystemEffect::ShutdownComplete]
+                ManagerRuntimeOutputSummary {
+                    effects: vec![ContractEffectSummary::ShutdownComplete],
+                }
             } else {
-                Vec::new()
+                ManagerRuntimeOutputSummary::default()
             }
         }
     }
 
     impl StateObserver for ManagerRuntimeProjectionRuntime {
-        type ObservedState = ManagerRuntimeProjectionObservedState;
+        type SummaryState = ManagerRuntimeStateSummary;
         type Context = ();
 
-        async fn observe_state(&self, _context: &Self::Context) -> Self::ObservedState {
-            ManagerRuntimeProjectionObservedState {
-                trace: self.trace.lock().await.clone(),
-            }
+        async fn observe_state(&self, _context: &Self::Context) -> Self::SummaryState {
+            *self.summary.lock().await
         }
     }
 

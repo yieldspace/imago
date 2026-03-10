@@ -1,3 +1,4 @@
+use imagod_spec::{ManagerRuntimeOutputSummary, ManagerRuntimeStateSummary};
 use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
     concurrent::ConcurrentAction, conformance::ProtocolConformanceSpec,
@@ -8,6 +9,7 @@ use crate::{
     manager_runtime::{ManagerRuntimeAction, ManagerRuntimeSpec},
     session_transport::{SessionTransportAction, SessionTransportSpec},
     shutdown_flow::{ShutdownFlowAction, ShutdownFlowSpec, ShutdownPhase},
+    summary_mapping::{shutdown_phase, system_effects, task_state},
     system::{SystemAtomicAction, SystemEffect, SystemSpec, SystemState},
 };
 
@@ -40,11 +42,6 @@ pub enum ManagerRuntimeProjectionAction {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ManagerRuntimeProjectionSpec;
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct ManagerRuntimeProjectionObservedState {
-    pub trace: Vec<ManagerRuntimeProjectionAction>,
-}
 
 impl ManagerRuntimeProjectionSpec {
     pub const fn new() -> Self {
@@ -101,6 +98,111 @@ impl ManagerRuntimeProjectionSpec {
         candidate.manager = ManagerRuntimeSpec::new()
             .transition(&candidate.manager, &ManagerRuntimeAction::FinishShutdown)?;
         Some(candidate)
+    }
+
+    pub fn initial_summary(self) -> ManagerRuntimeStateSummary {
+        ManagerRuntimeStateSummary::default()
+    }
+
+    pub fn action_allowed(
+        self,
+        summary: &ManagerRuntimeStateSummary,
+        action: ManagerRuntimeProjectionAction,
+    ) -> bool {
+        match action {
+            ManagerRuntimeProjectionAction::LoadExistingConfig
+            | ManagerRuntimeProjectionAction::CreateDefaultConfig => !summary.config_loaded,
+            ManagerRuntimeProjectionAction::RunPluginGcSucceeded
+            | ManagerRuntimeProjectionAction::RunPluginGcFailed => {
+                summary.config_loaded
+                    && matches!(summary.plugin_gc, imagod_spec::SummaryTaskState::NotStarted)
+            }
+            ManagerRuntimeProjectionAction::RunBootRestoreSucceeded
+            | ManagerRuntimeProjectionAction::RunBootRestoreFailed => {
+                summary.config_loaded
+                    && !matches!(summary.plugin_gc, imagod_spec::SummaryTaskState::NotStarted)
+                    && matches!(summary.boot_restore, imagod_spec::SummaryTaskState::NotStarted)
+            }
+            ManagerRuntimeProjectionAction::BeginShutdown => {
+                summary.listening && matches!(summary.shutdown.phase, imagod_spec::SummaryShutdownPhase::Idle)
+            }
+            ManagerRuntimeProjectionAction::StopServicesGraceful
+            | ManagerRuntimeProjectionAction::StopServicesForced => {
+                matches!(
+                    summary.shutdown.phase,
+                    imagod_spec::SummaryShutdownPhase::DrainingSessions
+                        | imagod_spec::SummaryShutdownPhase::StoppingServices
+                ) && !summary.shutdown.services_stopped
+            }
+            ManagerRuntimeProjectionAction::StopMaintenance => {
+                matches!(
+                    summary.shutdown.phase,
+                    imagod_spec::SummaryShutdownPhase::StoppingMaintenance
+                )
+            }
+            ManagerRuntimeProjectionAction::FinishShutdown => {
+                summary.manager_shutdown_started
+                    && summary.shutdown.maintenance_stopped
+                    && !summary.manager_stopped
+            }
+        }
+    }
+
+    pub fn advance_summary(
+        self,
+        summary: &ManagerRuntimeStateSummary,
+        action: ManagerRuntimeProjectionAction,
+    ) -> ManagerRuntimeStateSummary {
+        let mut next = *summary;
+        match action {
+            ManagerRuntimeProjectionAction::LoadExistingConfig => {
+                next.config_loaded = true;
+                next.created_default = false;
+            }
+            ManagerRuntimeProjectionAction::CreateDefaultConfig => {
+                next.config_loaded = true;
+                next.created_default = true;
+            }
+            ManagerRuntimeProjectionAction::RunPluginGcSucceeded => {
+                next.plugin_gc = imagod_spec::SummaryTaskState::Succeeded;
+            }
+            ManagerRuntimeProjectionAction::RunPluginGcFailed => {
+                next.plugin_gc = imagod_spec::SummaryTaskState::Failed;
+            }
+            ManagerRuntimeProjectionAction::RunBootRestoreSucceeded => {
+                next.boot_restore = imagod_spec::SummaryTaskState::Succeeded;
+                next.listening = true;
+            }
+            ManagerRuntimeProjectionAction::RunBootRestoreFailed => {
+                next.boot_restore = imagod_spec::SummaryTaskState::Failed;
+                next.listening = true;
+            }
+            ManagerRuntimeProjectionAction::BeginShutdown => {
+                next.manager_shutdown_started = true;
+                next.session_shutdown_requested = true;
+                next.shutdown.phase = imagod_spec::SummaryShutdownPhase::DrainingSessions;
+                next.shutdown.accepts_stopped = true;
+            }
+            ManagerRuntimeProjectionAction::StopServicesGraceful => {
+                next.shutdown.phase = imagod_spec::SummaryShutdownPhase::StoppingMaintenance;
+                next.shutdown.sessions_drained = true;
+                next.shutdown.services_stopped = true;
+            }
+            ManagerRuntimeProjectionAction::StopServicesForced => {
+                next.shutdown.phase = imagod_spec::SummaryShutdownPhase::StoppingMaintenance;
+                next.shutdown.sessions_drained = true;
+                next.shutdown.services_stopped = true;
+                next.shutdown.forced_stop_attempted = true;
+            }
+            ManagerRuntimeProjectionAction::StopMaintenance => {
+                next.shutdown.maintenance_stopped = true;
+            }
+            ManagerRuntimeProjectionAction::FinishShutdown => {
+                next.shutdown.phase = imagod_spec::SummaryShutdownPhase::Completed;
+                next.manager_stopped = true;
+            }
+        }
+        next
     }
 }
 
@@ -177,8 +279,8 @@ impl ModelCaseSource for ManagerRuntimeProjectionSpec {
 
 impl ProtocolConformanceSpec for ManagerRuntimeProjectionSpec {
     type ExpectedOutput = Vec<SystemEffect>;
-    type ObservedState = ManagerRuntimeProjectionObservedState;
-    type ObservedOutput = Vec<SystemEffect>;
+    type SummaryState = ManagerRuntimeStateSummary;
+    type SummaryOutput = ManagerRuntimeOutputSummary;
 
     fn expected_output(
         &self,
@@ -193,18 +295,39 @@ impl ProtocolConformanceSpec for ManagerRuntimeProjectionSpec {
         }
     }
 
-    fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
-        observed
-            .trace
-            .iter()
-            .fold(self.initial_state(), |state, action| {
-                self.transition(&state, action)
-                    .expect("manager runtime projection trace should stay valid")
-            })
+    fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State {
+        let mut state = self.initial_state();
+        state.manager.config_loaded = summary.config_loaded;
+        state.manager.created_default = summary.created_default;
+        state.manager.plugin_gc = task_state(summary.plugin_gc);
+        state.manager.boot_restore = task_state(summary.boot_restore);
+        state.manager.phase = if summary.manager_stopped {
+            crate::manager_runtime::ManagerRuntimePhase::Stopped
+        } else if summary.manager_shutdown_started {
+            crate::manager_runtime::ManagerRuntimePhase::ShutdownRequested
+        } else if summary.listening {
+            crate::manager_runtime::ManagerRuntimePhase::Listening
+        } else if summary.config_loaded
+            && matches!(summary.plugin_gc, imagod_spec::SummaryTaskState::NotStarted)
+        {
+            crate::manager_runtime::ManagerRuntimePhase::ConfigReady
+        } else if summary.config_loaded {
+            crate::manager_runtime::ManagerRuntimePhase::Restoring
+        } else {
+            crate::manager_runtime::ManagerRuntimePhase::Booting
+        };
+        state.session.shutdown_requested = summary.session_shutdown_requested;
+        state.shutdown.phase = shutdown_phase(summary.shutdown.phase);
+        state.shutdown.accepts_stopped = summary.shutdown.accepts_stopped;
+        state.shutdown.sessions_drained = summary.shutdown.sessions_drained;
+        state.shutdown.services_stopped = summary.shutdown.services_stopped;
+        state.shutdown.maintenance_stopped = summary.shutdown.maintenance_stopped;
+        state.shutdown.forced_stop_attempted = summary.shutdown.forced_stop_attempted;
+        state
     }
 
-    fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {
-        observed.clone()
+    fn abstract_output(&self, summary: &Self::SummaryOutput) -> Self::ExpectedOutput {
+        system_effects(&summary.effects)
     }
 }
 
@@ -212,6 +335,7 @@ impl ProtocolConformanceSpec for ManagerRuntimeProjectionSpec {
 mod tests {
     use super::*;
     use crate::manager_runtime::{ManagerRuntimePhase, TaskState};
+    use nirvash_core::ActionVocabulary as _;
 
     #[test]
     fn boot_projection_reaches_listening_state() {
@@ -289,5 +413,56 @@ mod tests {
             ),
             vec![SystemEffect::ShutdownComplete]
         );
+    }
+
+    #[test]
+    fn summary_transition_law_holds_for_all_projection_states() {
+        let spec = ManagerRuntimeProjectionSpec::new();
+        let actions = ManagerRuntimeProjectionAction::action_vocabulary();
+        let mut pending = vec![spec.initial_summary()];
+        let mut visited = Vec::new();
+
+        while let Some(summary) = pending.pop() {
+            if visited.contains(&summary) {
+                continue;
+            }
+            visited.push(summary);
+
+            let prev = spec.abstract_state(&summary);
+            for action in &actions {
+                let allowed_by_summary = spec.action_allowed(&summary, *action);
+                let expected_next = spec.transition(&prev, action);
+                assert_eq!(
+                    allowed_by_summary,
+                    expected_next.is_some(),
+                    "summary/state enabled mismatch for {action:?} from {summary:?}",
+                );
+                if let Some(expected_next) = expected_next {
+                    let next_summary = spec.advance_summary(&summary, *action);
+                    let abstract_next = spec.abstract_state(&next_summary);
+                    assert_eq!(
+                        abstract_next,
+                        expected_next,
+                        "summary/state next mismatch for {action:?} from {summary:?}",
+                    );
+                    let output = if matches!(action, ManagerRuntimeProjectionAction::FinishShutdown)
+                    {
+                        ManagerRuntimeOutputSummary {
+                            effects: vec![imagod_spec::ContractEffectSummary::ShutdownComplete],
+                        }
+                    } else {
+                        ManagerRuntimeOutputSummary::default()
+                    };
+                    assert_eq!(
+                        spec.abstract_output(&output),
+                        spec.expected_output(&prev, action, Some(&expected_next)),
+                        "summary/state output mismatch for {action:?} from {summary:?}",
+                    );
+                    if !visited.contains(&next_summary) {
+                        pending.push(next_summary);
+                    }
+                }
+            }
+        }
     }
 }

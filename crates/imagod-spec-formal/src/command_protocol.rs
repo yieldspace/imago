@@ -1,6 +1,6 @@
 use imagod_spec::{
-    CommandProtocolObservedState as RuntimeCommandProtocolObservedState,
-    CommandProtocolOutput as RuntimeCommandProtocolOutput,
+    CommandOutputSummary as RuntimeCommandOutputSummary,
+    CommandStateSummary as RuntimeCommandStateSummary,
 };
 use nirvash_core::{
     DocGraphPolicy, ModelCase, StatePredicate, TransitionSystem,
@@ -401,8 +401,8 @@ impl TransitionSystem for CommandProtocolSpec {
 
 impl ProtocolConformanceSpec for CommandProtocolSpec {
     type ExpectedOutput = CommandProtocolExpectedOutput;
-    type ObservedState = RuntimeCommandProtocolObservedState;
-    type ObservedOutput = RuntimeCommandProtocolOutput;
+    type SummaryState = RuntimeCommandStateSummary;
+    type SummaryOutput = RuntimeCommandOutputSummary;
 
     fn expected_output(
         &self,
@@ -413,7 +413,7 @@ impl ProtocolConformanceSpec for CommandProtocolSpec {
         self.transition_output(prev, action, next)
     }
 
-    fn project_state(&self, observed: &Self::ObservedState) -> Self::State {
+    fn abstract_state(&self, observed: &Self::SummaryState) -> Self::State {
         CommandProtocolState {
             tracked: observed.tracked,
             lifecycle_state: observed.lifecycle_state,
@@ -422,10 +422,10 @@ impl ProtocolConformanceSpec for CommandProtocolSpec {
         }
     }
 
-    fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput {
+    fn abstract_output(&self, observed: &Self::SummaryOutput) -> Self::ExpectedOutput {
         match observed {
-            RuntimeCommandProtocolOutput::Ack => CommandProtocolExpectedOutput::Ack,
-            RuntimeCommandProtocolOutput::StateSnapshot {
+            RuntimeCommandOutputSummary::Ack => CommandProtocolExpectedOutput::Ack,
+            RuntimeCommandOutputSummary::StateSnapshot {
                 state,
                 stage,
                 updated_at_unix_secs,
@@ -434,20 +434,20 @@ impl ProtocolConformanceSpec for CommandProtocolSpec {
                 stage_non_empty: !stage.is_empty(),
                 updated_at_non_zero: *updated_at_unix_secs > 0,
             },
-            RuntimeCommandProtocolOutput::CancelResponse {
+            RuntimeCommandOutputSummary::CancelResponse {
                 cancellable,
                 final_state,
             } => CommandProtocolExpectedOutput::CancelResponse {
                 cancellable: *cancellable,
                 final_state: *final_state,
             },
-            RuntimeCommandProtocolOutput::SpawnResult { spawned, canceled } => {
+            RuntimeCommandOutputSummary::SpawnResult { spawned, canceled } => {
                 CommandProtocolExpectedOutput::SpawnResult {
                     spawned: *spawned,
                     canceled: *canceled,
                 }
             }
-            RuntimeCommandProtocolOutput::Rejected { code, stage } => {
+            RuntimeCommandOutputSummary::Rejected { code, stage } => {
                 CommandProtocolExpectedOutput::Rejected {
                     code: *code,
                     stage: *stage,

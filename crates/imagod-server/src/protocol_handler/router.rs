@@ -1258,22 +1258,20 @@ mod conformance_tests {
     use imagod_control::{ActionApplier, OperationManager, ServiceLogSubscription};
     use imagod_spec::{
         ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushChunkHeader,
-        ArtifactPushRequest, ArtifactStatus, BindingsCertUploadRequest, ByteRange, CommandKind,
-        CommandCancelRequest, CommandProtocolAction, CommandProtocolContext,
-        CommandProtocolOutput, DeployCommandPayload, DeployPrepareRequest,
-        DeployPrepareResponse, ErrorCode, HelloNegotiateRequest, MessageType, RpcInvokeRequest,
+        ArtifactPushRequest, ArtifactStatus, BindingsCertUploadRequest, ByteRange,
+        CommandCancelRequest, CommandKind, CommandProtocolAction, CommandProtocolContext,
+        CommandProtocolOutput, ContractEffectSummary, DeployCommandPayload,
+        DeployPrepareRequest, DeployPrepareResponse, ErrorCode, HelloNegotiateRequest,
+        MessageType, RouterOutputSummary, RouterStateSummary, RpcInvokeRequest,
         RpcInvokeTargetService, RunCommandPayload, ServiceListRequest, ServiceState,
-        ServiceStatusEntry, StateRequest, StopCommandPayload,
+        ServiceStatusEntry, StateRequest, StopCommandPayload, SummaryRequestKind,
+        SummaryStreamId,
     };
     use imagod_spec_formal::{
-        RouterProjectionAction, RouterProjectionObservedState, RouterProjectionSpec, SystemEffect,
-        SystemMessageBinding, SystemState, atoms, system_message_binding,
+        RouterProjectionAction, RouterProjectionSpec, SystemMessageBinding, system_message_binding,
     };
-    use nirvash_core::{
-        TransitionSystem,
-        conformance::{
-            ActionApplier as ProtocolActionApplier, ProtocolRuntimeBinding, StateObserver,
-        },
+    use nirvash_core::conformance::{
+        ActionApplier as ProtocolActionApplier, ProtocolRuntimeBinding, StateObserver,
     };
     use nirvash_macros::code_tests;
     use serde_json::json;
@@ -1290,9 +1288,7 @@ mod conformance_tests {
     #[derive(Clone)]
     struct RouterRuntime {
         handler: ProtocolHandler,
-        spec: RouterProjectionSpec,
-        state: Arc<Mutex<SystemState>>,
-        trace: Arc<Mutex<Vec<RouterProjectionAction>>>,
+        summary: Arc<Mutex<RouterStateSummary>>,
         _config_root: Arc<PathBuf>,
     }
 
@@ -1545,23 +1541,59 @@ mod conformance_tests {
             }
         }
 
-        fn output_for_response(
-            &self,
-            action: RouterProjectionAction,
-            response: &Envelope,
-        ) -> Vec<SystemEffect> {
+        fn output_for_response(&self, response: &Envelope) -> RouterOutputSummary {
             match system_message_binding(response.message_type) {
                 SystemMessageBinding::Request(kind) | SystemMessageBinding::Response(kind) => {
-                    let stream = match action {
-                        RouterProjectionAction::BindingsCertUpload => atoms::StreamAtom::Stream0,
-                        _ => atoms::StreamAtom::Stream0,
-                    };
-                    vec![SystemEffect::Response(stream, kind)]
+                    RouterOutputSummary {
+                        effects: vec![ContractEffectSummary::Response(
+                            SummaryStreamId::Stream0,
+                            summary_request_kind(kind),
+                        )],
+                    }
                 }
                 SystemMessageBinding::CommandEvent
                 | SystemMessageBinding::LogChunk
-                | SystemMessageBinding::LogsEnd => Vec::new(),
+                | SystemMessageBinding::LogsEnd => RouterOutputSummary::default(),
             }
+        }
+    }
+
+    fn summary_request_kind(kind: imagod_spec_formal::atoms::RequestKindAtom) -> SummaryRequestKind {
+        match kind {
+            imagod_spec_formal::atoms::RequestKindAtom::HelloNegotiate => {
+                SummaryRequestKind::HelloNegotiate
+            }
+            imagod_spec_formal::atoms::RequestKindAtom::DeployPrepare => {
+                SummaryRequestKind::DeployPrepare
+            }
+            imagod_spec_formal::atoms::RequestKindAtom::ArtifactPush => {
+                SummaryRequestKind::ArtifactPush
+            }
+            imagod_spec_formal::atoms::RequestKindAtom::ArtifactCommit => {
+                SummaryRequestKind::ArtifactCommit
+            }
+            imagod_spec_formal::atoms::RequestKindAtom::CommandStart => {
+                SummaryRequestKind::CommandStart
+            }
+            imagod_spec_formal::atoms::RequestKindAtom::StateRequest => {
+                SummaryRequestKind::StateRequest
+            }
+            imagod_spec_formal::atoms::RequestKindAtom::ServicesList => {
+                SummaryRequestKind::ServicesList
+            }
+            imagod_spec_formal::atoms::RequestKindAtom::CommandCancel => {
+                SummaryRequestKind::CommandCancel
+            }
+            imagod_spec_formal::atoms::RequestKindAtom::LogsRequest => {
+                SummaryRequestKind::LogsRequest
+            }
+            imagod_spec_formal::atoms::RequestKindAtom::RpcInvoke => {
+                SummaryRequestKind::RpcInvoke
+            }
+            imagod_spec_formal::atoms::RequestKindAtom::BindingsCertUpload => {
+                SummaryRequestKind::BindingsCertUpload
+            }
+            other => panic!("unexpected router request kind: {other:?}"),
         }
     }
 
@@ -1611,9 +1643,7 @@ mod conformance_tests {
             );
             RouterRuntime {
                 handler,
-                spec: *spec,
-                state: Arc::new(Mutex::new(spec.initial_state())),
-                trace: Arc::new(Mutex::new(Vec::new())),
+                summary: Arc::new(Mutex::new(spec.initial_summary())),
                 _config_root: Arc::new(config_root),
             }
         }
@@ -1623,7 +1653,7 @@ mod conformance_tests {
 
     impl ProtocolActionApplier for RouterRuntime {
         type Action = RouterProjectionAction;
-        type Output = Vec<SystemEffect>;
+        type Output = RouterOutputSummary;
         type Context = ();
 
         async fn execute_action(
@@ -1631,30 +1661,28 @@ mod conformance_tests {
             _context: &Self::Context,
             action: &Self::Action,
         ) -> Self::Output {
-            let prev = self.state.lock().expect("state lock").clone();
-            let Some(next) = self.spec.transition(&prev, action) else {
-                return Vec::new();
-            };
+            let spec = RouterProjectionSpec::new();
+            let prev = *self.summary.lock().expect("summary lock");
+            if !spec.action_allowed(&prev, *action) {
+                return RouterOutputSummary::default();
+            }
             let request = self.request_for(*action);
             let response = self
                 .handler
                 .handle_single(request)
                 .await
                 .expect("router action should succeed");
-            *self.state.lock().expect("state lock") = next;
-            self.trace.lock().expect("trace lock").push(*action);
-            self.output_for_response(*action, &response)
+            *self.summary.lock().expect("summary lock") = spec.advance_summary(&prev, *action);
+            self.output_for_response(&response)
         }
     }
 
     impl StateObserver for RouterRuntime {
-        type ObservedState = RouterProjectionObservedState;
+        type SummaryState = RouterStateSummary;
         type Context = ();
 
-        async fn observe_state(&self, _context: &Self::Context) -> Self::ObservedState {
-            RouterProjectionObservedState {
-                trace: self.trace.lock().expect("trace lock").clone(),
-            }
+        async fn observe_state(&self, _context: &Self::Context) -> Self::SummaryState {
+            *self.summary.lock().expect("summary lock")
         }
     }
 
@@ -1680,10 +1708,12 @@ mod conformance_tests {
             });
         assert_eq!(
             output,
-            vec![SystemEffect::Response(
-                atoms::StreamAtom::Stream0,
-                atoms::RequestKindAtom::ServicesList,
-            )]
+            RouterOutputSummary {
+                effects: vec![ContractEffectSummary::Response(
+                    SummaryStreamId::Stream0,
+                    SummaryRequestKind::ServicesList,
+                )],
+            }
         );
     }
 }

@@ -81,7 +81,7 @@ impl ProtocolInputWitnessBinding<CommandProjectionSpec> for CommandProtocolBindi
         _session: &mut Self::Session,
         context: &Self::Context,
         input: &Self::Input,
-    ) -> <CommandProjectionSpec as nirvash_core::conformance::ProtocolConformanceSpec>::ObservedOutput
+    ) -> <CommandProjectionSpec as nirvash_core::conformance::ProtocolConformanceSpec>::SummaryOutput
     {
         runtime.execute_action(context, input).await
     }

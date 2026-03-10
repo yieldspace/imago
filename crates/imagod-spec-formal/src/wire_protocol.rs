@@ -7,6 +7,7 @@ use nirvash_macros::{
     subsystem_spec,
 };
 
+use crate::summary_mapping::request_kind_atom;
 use crate::atoms::{CommandEventAtom, LogChunkAtom, RequestKindAtom, StreamAtom};
 
 #[derive(Debug, Clone, PartialEq, Eq, RelationalState)]
@@ -20,6 +21,53 @@ pub struct WireProtocolState {
 }
 
 impl WireProtocolState {
+    pub fn from_router_summary(summary: &imagod_spec::RouterStateSummary) -> Self {
+        let mut state = Self {
+            requests: Relation2::empty(),
+            responses: Relation2::empty(),
+            command_events: Relation2::empty(),
+            log_follow_streams: RelSet::empty(),
+            log_chunks: Relation2::empty(),
+            log_ended: RelSet::empty(),
+        };
+        if let Some(kind) = summary.request {
+            state.requests.insert(StreamAtom::Stream0, request_kind_atom(kind));
+            state
+                .responses
+                .insert(StreamAtom::Stream0, request_kind_atom(kind));
+        }
+        state
+    }
+
+    pub fn from_logs_summary(summary: &imagod_spec::LogsStateSummary) -> Self {
+        let mut state = Self {
+            requests: Relation2::empty(),
+            responses: Relation2::empty(),
+            command_events: Relation2::empty(),
+            log_follow_streams: RelSet::empty(),
+            log_chunks: Relation2::empty(),
+            log_ended: RelSet::empty(),
+        };
+        if summary.acknowledged {
+            state
+                .requests
+                .insert(StreamAtom::Stream1, RequestKindAtom::LogsRequest);
+            state
+                .responses
+                .insert(StreamAtom::Stream1, RequestKindAtom::LogsRequest);
+            state.log_follow_streams.insert(StreamAtom::Stream1);
+        }
+        if summary.chunk_seen {
+            state
+                .log_chunks
+                .insert(StreamAtom::Stream1, LogChunkAtom::Chunk0);
+        }
+        if summary.ended {
+            state.log_ended.insert(StreamAtom::Stream1);
+        }
+        state
+    }
+
     pub fn saw_request(&self, stream: StreamAtom, kind: RequestKindAtom) -> bool {
         self.requests.contains(&stream, &kind)
     }

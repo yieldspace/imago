@@ -147,7 +147,7 @@ flowchart LR
 - `StateObserver::observe_state(&self, &CommandProtocolContext) -> CommandProtocolObservedState`
 
 server はこの trait 契約をそのまま使って command action を適用します。  
-`imagod-control` の integration test に置かれた `code_tests` も同じ trait 契約だけを前提に runtime を replay するため、spec/runtime 間で「別の adapter API」を挟みません。
+`imagod-control` の integration test に置かれた `code_tests` も同じ trait 契約だけを前提に、reachable graph の prefix を実コードへ適用したうえで before/after summary を抽象化して比較します。spec/runtime 間で「別の adapter API」を挟みません。
 `command_projection` は witness-based に `OperationManager` へ接続し、外部 boundary は `system` から切り出した projection spec で grouped runtime conformance を取ります。現在は `router_projection` / `session_auth_projection` / `logs_projection` が `imagod-server`、`runtime_projection` が `imagod-control`、`manager_runtime_projection` が `imagod` に接続済みです。
 
 ## spec と runtime の接続
@@ -158,7 +158,7 @@ command runtime は、いま次の形で接続されています。
 flowchart LR
     A["imagod-spec::command_contract<br/>CommandProtocolAction<br/>CommandProtocolContext<br/>CommandProtocolOutput"] --> B["imagod-spec-formal::command_projection"]
     A --> C["imagod-control::OperationManager"]
-    B --> D["system transition(...) + projected expected_output(...)"]
+    B --> D["system transition(...) + abstract expected_output(...)"]
     F["imagod-control/tests<br/>CommandProtocolBinding"] --> G["fresh_runtime / context"]
     G --> C
     C --> E["execute_action(...)"]
@@ -177,8 +177,8 @@ flowchart LR
 
 - `system` の command projection 上で許可された action は、実コードでも受理される
 - `system` の command projection で拒否される action は、実コードでも拒否される
-- 実コードの observed state を `system` 側へ射影した結果が `transition` の next state と一致する
-- 実コードの output を投影した結果が projected `expected_output` と一致する
+- 実コードの summary state を `system` 側へ抽象化した結果が `transition` の next state と一致する
+- 実コードの output summary を抽象化した結果が `expected_output` と一致する
 
 `system` spec は、boot / session / wire / deploy / supervision / service RPC / plugin / shutdown を manager/session/trust/shutdown と束ねる unified top-level の正本です。  
 full implementation の private state をそのまま複製するのではなく、daemon-visible contract と cross-link invariant を `system` に集約し、boundary ごとの runtime conformance は `*_projection` spec へ射影して接続します。`legacy_system` は boot / command / plugin を含む旧 synchronized baseline として残しています。

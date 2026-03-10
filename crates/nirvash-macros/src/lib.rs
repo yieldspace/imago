@@ -2218,10 +2218,10 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                 <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::Context;
             type GeneratedExpectedOutput =
                 <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ExpectedOutput;
-            type GeneratedObservedState =
-                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ObservedState;
-            type GeneratedObservedOutput =
-                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ObservedOutput;
+            type GeneratedSummaryState =
+                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::SummaryState;
+            type GeneratedSummaryOutput =
+                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::SummaryOutput;
 
             fn generated_cases() -> ::std::vec::Vec<#spec_ty> {
                 #cases_expr
@@ -2281,7 +2281,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                 )
                 .await;
                 let mut projected =
-                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_state(
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_state(
                         spec,
                         &observed,
                     );
@@ -2314,7 +2314,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                     )
                     .await;
                     let projected_output =
-                        <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_output(
+                        <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_output(
                             spec,
                             &output,
                         );
@@ -2326,7 +2326,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                         )
                         .await;
                     let projected_after =
-                        <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_state(
+                        <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_state(
                             spec,
                             &observed_after,
                         );
@@ -2362,7 +2362,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                     )
                 .await;
                 let projected_before =
-                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_state(
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_state(
                         spec,
                         &observed_before,
                     );
@@ -2387,7 +2387,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                 )
                 .await;
                 let projected_output =
-                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_output(
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_output(
                         spec,
                         &output,
                     );
@@ -2398,7 +2398,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                     )
                     .await;
                 let projected_after =
-                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_state(
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_state(
                         spec,
                         &observed_after,
                     );
@@ -2598,10 +2598,10 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                 <#binding_ty as ::nirvash_core::conformance::ProtocolInputWitnessBinding<#spec_ty>>::Session;
             type GeneratedExpectedOutput =
                 <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ExpectedOutput;
-            type GeneratedObservedState =
-                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ObservedState;
-            type GeneratedObservedOutput =
-                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ObservedOutput;
+            type GeneratedSummaryState =
+                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::SummaryState;
+            type GeneratedSummaryOutput =
+                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::SummaryOutput;
             type GeneratedPositiveWitness =
                 ::nirvash_core::conformance::PositiveWitness<GeneratedContext, GeneratedInput>;
             type GeneratedNegativeWitness =
@@ -2840,7 +2840,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                     &context,
                 )
                 .await;
-                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_state(
+                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_state(
                     spec,
                     &observed,
                 )
@@ -2944,7 +2944,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                         )
                         .await;
                     let projected_output =
-                        <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_output(
+                        <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_output(
                             spec,
                             &output,
                         );
@@ -3119,7 +3119,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                                 )
                                 .await;
                             let projected_output =
-                                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_output(
+                                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_output(
                                     spec.as_ref(),
                                     &output,
                                 );
@@ -3188,7 +3188,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                                 )
                                 .await;
                             let projected_output =
-                                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::project_output(
+                                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_output(
                                     spec.as_ref(),
                                     &output,
                                 );

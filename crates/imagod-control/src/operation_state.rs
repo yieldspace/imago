@@ -296,10 +296,10 @@ impl ActionApplier for OperationManager {
 }
 
 impl StateObserver for OperationManager {
-    type ObservedState = CommandProtocolObservedState;
+    type SummaryState = CommandProtocolObservedState;
     type Context = CommandProtocolContext;
 
-    async fn observe_state(&self, context: &Self::Context) -> Self::ObservedState {
+    async fn observe_state(&self, context: &Self::Context) -> Self::SummaryState {
         let inner = self.inner.read().await;
         match inner.get(&context.request_id) {
             Some(entry) => CommandProtocolObservedState {

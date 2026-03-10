@@ -8,8 +8,8 @@ pub use crate::{ModelChecker, ReachableGraphSnapshot};
 /// Spec-side contract for replaying runtime behavior against a transition system.
 pub trait ProtocolConformanceSpec: TransitionSystem {
     type ExpectedOutput: Clone + Debug + PartialEq + Eq;
-    type ObservedState: Clone + Debug;
-    type ObservedOutput: Clone + Debug;
+    type SummaryState: Clone + Debug;
+    type SummaryOutput: Clone + Debug;
 
     fn expected_output(
         &self,
@@ -18,9 +18,9 @@ pub trait ProtocolConformanceSpec: TransitionSystem {
         next: Option<&Self::State>,
     ) -> Self::ExpectedOutput;
 
-    fn project_state(&self, observed: &Self::ObservedState) -> Self::State;
+    fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State;
 
-    fn project_output(&self, observed: &Self::ObservedOutput) -> Self::ExpectedOutput;
+    fn abstract_output(&self, summary: &Self::SummaryOutput) -> Self::ExpectedOutput;
 }
 
 /// Binding between a spec and a concrete runtime implementation.
@@ -29,8 +29,8 @@ pub trait ProtocolRuntimeBinding<Spec>
 where
     Spec: ProtocolConformanceSpec,
 {
-    type Runtime: ActionApplier<Action = Spec::Action, Output = Spec::ObservedOutput, Context = Self::Context>
-        + StateObserver<ObservedState = Spec::ObservedState, Context = Self::Context>;
+    type Runtime: ActionApplier<Action = Spec::Action, Output = Spec::SummaryOutput, Context = Self::Context>
+        + StateObserver<SummaryState = Spec::SummaryState, Context = Self::Context>;
     type Context: Clone;
 
     async fn fresh_runtime(spec: &Spec) -> Self::Runtime;
@@ -154,7 +154,7 @@ where
         session: &mut Self::Session,
         context: &Self::Context,
         input: &Self::Input,
-    ) -> Spec::ObservedOutput;
+    ) -> Spec::SummaryOutput;
 
     /// Returns the probe context used to observe the authoritative runtime state.
     fn probe_context(session: &Self::Session) -> Self::Context;
@@ -194,6 +194,30 @@ pub struct RegisteredCodeWitnessTestProvider {
 }
 
 crate::inventory::collect!(RegisteredCodeWitnessTestProvider);
+
+pub fn abstract_initial_state<Spec>(spec: &Spec, summary: &Spec::SummaryState) -> Spec::State
+where
+    Spec: ProtocolConformanceSpec,
+{
+    spec.abstract_state(summary)
+}
+
+pub fn abstract_next_state<Spec>(spec: &Spec, summary: &Spec::SummaryState) -> Spec::State
+where
+    Spec: ProtocolConformanceSpec,
+{
+    spec.abstract_state(summary)
+}
+
+pub fn abstract_expected_output<Spec>(
+    spec: &Spec,
+    summary: &Spec::SummaryOutput,
+) -> Spec::ExpectedOutput
+where
+    Spec: ProtocolConformanceSpec,
+{
+    spec.abstract_output(summary)
+}
 
 #[derive(Debug, Default)]
 struct WitnessHarnessArgs {
