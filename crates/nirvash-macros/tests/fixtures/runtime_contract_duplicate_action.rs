@@ -1,4 +1,9 @@
-use nirvash_core::{ActionVocabulary, TransitionSystem, conformance::ProtocolConformanceSpec};
+use std::sync::Mutex;
+
+use nirvash_core::{
+    ActionVocabulary, TransitionSystem,
+    conformance::ProtocolConformanceSpec,
+};
 use nirvash_macros::{
     ActionVocabulary as FormalActionVocabulary, Signature as FormalSignature,
     nirvash_runtime_contract,
@@ -7,20 +12,10 @@ use nirvash_macros::{
 #[derive(Clone, Copy, Debug, Default)]
 struct Spec;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, FormalSignature)]
 enum State {
+    #[default]
     Idle,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
-struct Summary {
-    state: State,
-}
-
-impl Default for Summary {
-    fn default() -> Self {
-        Self { state: State::Idle }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature, FormalActionVocabulary)]
@@ -30,6 +25,7 @@ enum Action {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 enum Output {
+    Ack,
     #[default]
     Rejected,
 }
@@ -53,9 +49,9 @@ impl TransitionSystem for Spec {
 
 impl ProtocolConformanceSpec for Spec {
     type ExpectedOutput = Output;
-    type ProbeState = Summary;
+    type ProbeState = State;
     type ProbeOutput = Output;
-    type SummaryState = Summary;
+    type SummaryState = State;
     type SummaryOutput = Output;
 
     fn expected_output(
@@ -64,7 +60,7 @@ impl ProtocolConformanceSpec for Spec {
         _action: &Self::Action,
         _next: Option<&Self::State>,
     ) -> Self::ExpectedOutput {
-        Output::Rejected
+        Output::Ack
     }
 
     fn summarize_state(&self, probe: &Self::ProbeState) -> Self::SummaryState {
@@ -72,11 +68,11 @@ impl ProtocolConformanceSpec for Spec {
     }
 
     fn summarize_output(&self, probe: &Self::ProbeOutput) -> Self::SummaryOutput {
-        probe.clone()
+        *probe
     }
 
     fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State {
-        summary.state
+        *summary
     }
 
     fn abstract_output(&self, summary: &Self::SummaryOutput) -> Self::ExpectedOutput {
@@ -86,16 +82,20 @@ impl ProtocolConformanceSpec for Spec {
 
 #[derive(Debug, Default)]
 struct Driver {
-    summary: AsyncSummaryCell,
+    state: Mutex<State>,
 }
 
-#[derive(Debug, Default)]
-struct AsyncSummaryCell(std::sync::Mutex<Summary>);
+async fn observe_driver_state(runtime: &Driver, _context: &()) -> State {
+    *runtime.state.lock().expect("lock state")
+}
 
-impl AsyncSummaryCell {
-    async fn lock(&self) -> std::sync::MutexGuard<'_, Summary> {
-        self.0.lock().expect("lock summary")
-    }
+fn observe_driver_output(
+    _runtime: &Driver,
+    _context: &(),
+    _action: &Action,
+    _result: &(),
+) -> Output {
+    Output::Ack
 }
 
 #[nirvash_runtime_contract(
@@ -103,18 +103,18 @@ impl AsyncSummaryCell {
     binding = Binding,
     context = (),
     context_expr = (),
-    summary = Summary,
-    output = Output,
-    summary_field = summary,
-    initial_summary = Summary::default(),
+    probe_state = State,
+    probe_output = Output,
+    observe_state = observe_driver_state,
+    observe_output = observe_driver_output,
     fresh_runtime = Driver::default(),
     tests(grouped)
 )]
 impl Driver {
-    #[nirvash_macros::contract_case(action = Action::Start, update(state = State::Idle))]
+    #[nirvash_macros::contract_case(action = Action::Start)]
     async fn one(&self) {}
 
-    #[nirvash_macros::contract_case(action = Action::Start, update(state = State::Idle))]
+    #[nirvash_macros::contract_case(action = Action::Start)]
     async fn two(&self) {}
 }
 

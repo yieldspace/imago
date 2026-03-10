@@ -1,0 +1,5 @@
+error: runtime-mode nirvash_runtime_contract no longer accepts summary/summary_field/initial_summary; use probe_state/probe_output/observe_state/observe_output
+  --> tests/fixtures/runtime_contract_legacy_summary_args.rs:89:5
+   |
+89 |     summary = State,
+   |     ^^^^^^^

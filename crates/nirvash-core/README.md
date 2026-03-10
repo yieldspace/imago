@@ -120,9 +120,9 @@ relation-first spec で service ごとの独立 transition をまとめたい場
 
 - runtime capability
   - `ActionApplier`
-    - `execute_action(Context, Action) -> Output`
+    - `execute_action(Context, Action) -> ProbeOutput`
   - `StateObserver`
-    - `observe_state(Context) -> SummaryState`
+    - `observe_state(Context) -> ProbeState`
 - spec 側契約
   - `ProtocolConformanceSpec`
     - `summarize_state(...)`
@@ -141,7 +141,9 @@ relation-first spec で service ごとの独立 transition をまとめたい場
     - `execute_input(...)`
     - `probe_context(...)`
 
-`nirvash_macros::code_tests` はこの契約だけを使って reachable graph の prefix を実コードへ適用し、各 step の `before_probe -> summarize_state -> abstract_state` と `after_probe -> summarize_state -> abstract_state` を `transition` の next state と突き合わせます。output も `summarize_output -> abstract_output` で比較するので、runtime 側は trace replay や shadow state を持たずに済みます。実運用では spec crate に `ProtocolConformanceSpec` を置き、runtime crate の integration test に `ProtocolRuntimeBinding` と `#[code_tests(...)]` を置く構成が依存方向を最も保ちやすいです。
+runtime 側が返すのは concrete runtime から直接読める `ProbeState` / `ProbeOutput` だけで、履歴由来の一時事実や model 向け正規化は spec 側の `summarize_*` に閉じ込めます。`StateObserver` trait の associated type 名は `SummaryState` のままですが、`ProtocolRuntimeBinding` ではこれを `ProtocolConformanceSpec::ProbeState` に束縛します。
+
+`nirvash_macros::code_tests` はこの契約だけを使って reachable graph の prefix を実コードへ適用し、各 step の `before_probe -> summarize_state -> abstract_state` と `after_probe -> summarize_state -> abstract_state` を `transition` の next state と突き合わせます。output も `probe_output -> summarize_output -> abstract_output` で比較するので、runtime 側は trace replay や shadow state を持たずに済みます。実運用では spec crate に `ProtocolConformanceSpec` を置き、runtime crate の integration test に `ProtocolRuntimeBinding` と `#[code_tests(...)]` を置く構成が依存方向を最も保ちやすいです。
 
 `nirvash_macros::code_witness_tests` は `ProtocolInputWitnessBinding` を追加で使い、reachable graph から semantic case を自動検出して witness 単位の strict test を custom harness (`code_witness_test_main!()`) で個別実行します。`model_cases` は formal 側の探索分割に残しつつ、runtime binding 側は concrete input witness だけを実装すれば十分です。
 
@@ -192,6 +194,7 @@ impl ActionApplier for Runtime {
 }
 
 impl StateObserver for Runtime {
+    // `ProtocolRuntimeBinding` maps this slot to `Spec::ProbeState`.
     type SummaryState = SpecState;
     type Context = RuntimeContext;
 
@@ -250,12 +253,12 @@ impl ProtocolConformanceSpec for Spec {
         RuntimeOutput::Ack
     }
 
-    fn abstract_state(&self, observed: &Self::SummaryState) -> Self::State {
-        *observed
+    fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State {
+        *summary
     }
 
-    fn abstract_output(&self, observed: &Self::SummaryOutput) -> Self::ExpectedOutput {
-        *observed
+    fn abstract_output(&self, summary: &Self::SummaryOutput) -> Self::ExpectedOutput {
+        *summary
     }
 }
 

@@ -7,7 +7,7 @@ use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_contract};
 
 use crate::{
     CommandKind, CommandProtocolAction,
-    atoms::{RequestKindAtom, SessionAtom, StreamAtom},
+    atoms::{RemoteAuthorityAtom, RequestKindAtom, SessionAtom, SessionRoleAtom, StreamAtom},
     session_auth::SessionAuthAction,
     session_auth::SessionAuthState,
     session_transport::SessionTransportState,
@@ -168,11 +168,11 @@ impl RouterProjectionSpec {
 }
 
 fn summarize_router_state(probe: &RouterProbeState) -> RouterStateSummary {
-    *probe
+    (*probe).into()
 }
 
 fn summarize_router_output(probe: &RouterProbeOutput) -> RouterOutputSummary {
-    probe.clone()
+    probe.output.clone()
 }
 
 fn abstract_router_state(spec: &RouterProjectionSpec, summary: &RouterStateSummary) -> SystemState {
@@ -188,6 +188,61 @@ fn abstract_router_output(
     summary: &RouterOutputSummary,
 ) -> Vec<SystemEffect> {
     system_effects(&summary.effects)
+}
+
+fn router_summary_from_state(state: &SystemState) -> RouterStateSummary {
+    let role = if state.session_auth.any_authenticated_as(SessionRoleAtom::Admin) {
+        Some(imagod_spec::SummarySessionRole::Admin)
+    } else if state
+        .session_auth
+        .any_authenticated_as(SessionRoleAtom::Client)
+    {
+        Some(imagod_spec::SummarySessionRole::Client)
+    } else if state
+        .session_auth
+        .any_authenticated_as(SessionRoleAtom::Unknown)
+    {
+        Some(imagod_spec::SummarySessionRole::Unknown)
+    } else {
+        None
+    };
+
+    RouterStateSummary {
+        active_session: state.session.has_active_sessions(),
+        role,
+        deploy_prepare_authorized: state
+            .session_auth
+            .stream_authorized(StreamAtom::Stream0, RequestKindAtom::DeployPrepare),
+        artifact_push_authorized: state
+            .session_auth
+            .stream_authorized(StreamAtom::Stream0, RequestKindAtom::ArtifactPush),
+        artifact_commit_authorized: state
+            .session_auth
+            .stream_authorized(StreamAtom::Stream0, RequestKindAtom::ArtifactCommit),
+        state_request_authorized: state
+            .session_auth
+            .stream_authorized(StreamAtom::Stream0, RequestKindAtom::StateRequest),
+        services_list_authorized: state
+            .session_auth
+            .stream_authorized(StreamAtom::Stream0, RequestKindAtom::ServicesList),
+        command_cancel_authorized: state
+            .session_auth
+            .stream_authorized(StreamAtom::Stream0, RequestKindAtom::CommandCancel),
+        rpc_invoke_authorized: state
+            .session_auth
+            .stream_authorized(StreamAtom::Stream0, RequestKindAtom::RpcInvoke),
+        bindings_cert_upload_authorized: state
+            .session_auth
+            .stream_authorized(StreamAtom::Stream0, RequestKindAtom::BindingsCertUpload),
+        authority_uploaded: state
+            .session_auth
+            .authority_uploaded(RemoteAuthorityAtom::Edge0),
+    }
+}
+
+fn normalize_router_state(spec: RouterProjectionSpec, state: SystemState) -> SystemState {
+    let summary = router_summary_from_state(&state);
+    abstract_router_state(&spec, &summary)
 }
 
 impl TransitionSystem for RouterProjectionSpec {
@@ -213,6 +268,7 @@ impl TransitionSystem for RouterProjectionSpec {
                 self.wire_action(*action),
             )),
         )
+        .map(|next| normalize_router_state(*self, next))
     }
 }
 
@@ -281,17 +337,24 @@ mod tests {
     #[test]
     fn bindings_cert_upload_updates_authority_projection() {
         let spec = RouterProjectionSpec::new();
+        let prev = spec.initial_state();
         let state = spec
             .transition(
-                &spec.initial_state(),
+                &prev,
                 &RouterProjectionAction::BindingsCertUpload,
             )
             .expect("bindings.cert.upload should be allowed");
 
-        assert!(
-            state
-                .wire
-                .saw_request(StreamAtom::Stream0, RequestKindAtom::BindingsCertUpload)
+        assert_eq!(
+            spec.expected_output(
+                &prev,
+                &RouterProjectionAction::BindingsCertUpload,
+                Some(&state)
+            ),
+            vec![SystemEffect::Response(
+                StreamAtom::Stream0,
+                RequestKindAtom::BindingsCertUpload,
+            )]
         );
         assert!(
             state

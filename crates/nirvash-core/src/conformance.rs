@@ -242,6 +242,18 @@ where
     spec.abstract_output(&summary)
 }
 
+pub fn enabled_from_summary<Spec>(
+    spec: &Spec,
+    summary: &Spec::SummaryState,
+    action: &Spec::Action,
+) -> bool
+where
+    Spec: ProtocolConformanceSpec,
+{
+    let projected = spec.abstract_state(summary);
+    <Spec as TransitionSystem>::transition(spec, &projected, action).is_some()
+}
+
 pub fn assert_initial_refinement<Spec>(spec: &Spec, summary: &Spec::SummaryState)
 where
     Spec: ProtocolConformanceSpec,
@@ -519,5 +531,14 @@ mod tests {
             assert_output_refinement(&spec, &false, &DummyAction::Advance, &true, &"bad");
         });
         assert!(panic.is_err(), "mismatched output should panic");
+    }
+
+    #[test]
+    fn enabled_from_summary_matches_transition_reachability() {
+        let spec = DummySpec;
+
+        assert!(enabled_from_summary(&spec, &false, &DummyAction::Advance));
+        assert!(!enabled_from_summary(&spec, &false, &DummyAction::Reject));
+        assert!(!enabled_from_summary(&spec, &true, &DummyAction::Advance));
     }
 }

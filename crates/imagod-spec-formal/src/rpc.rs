@@ -30,55 +30,19 @@ pub struct RpcState {
 impl RpcState {
     pub fn from_runtime_summary(summary: &imagod_spec::RuntimeStateSummary) -> Self {
         let mut state = RpcSpec::new().initial_state();
-        if summary.binding_granted_service0
-            || summary.local_rpc_resolved
-            || summary.remote_connected
-            || summary.remote_completed
-            || summary.remote_disconnected
-        {
+        if summary.binding_granted_service0 || summary.remote_connected {
             state.bindings.insert(
                 ServiceAtom::Service0,
                 binding_target_for(ServiceAtom::Service0),
             );
         }
-        if summary.local_rpc_resolved {
-            state
-                .local_call_owners
-                .insert(local_call_for(ServiceAtom::Service0), ServiceAtom::Service0);
-            state.local_call_targets.insert(
-                local_call_for(ServiceAtom::Service0),
-                binding_target_for(ServiceAtom::Service0),
-            );
-        }
-        if summary.local_rpc_denied {
-            state
-                .denied_local_calls
-                .insert(local_call_for(ServiceAtom::Service0), ServiceAtom::Service0);
-        }
-        if summary.remote_connected && !summary.remote_disconnected {
+        if summary.remote_connected {
             state
                 .remote_connection_owners
                 .insert(RpcConnectionAtom::Connection0, ServiceAtom::Service0);
             state
                 .remote_connection_authorities
                 .insert(RpcConnectionAtom::Connection0, RemoteAuthorityAtom::Edge0);
-        }
-        let remote_call = remote_call_for(ServiceAtom::Service0);
-        if summary.remote_completed || summary.remote_denied {
-            state
-                .remote_call_owners
-                .insert(remote_call, ServiceAtom::Service0);
-            state
-                .remote_call_targets
-                .insert(remote_call, binding_target_for(ServiceAtom::Service0));
-        }
-        if summary.remote_completed {
-            state.completed_remote_calls.insert(remote_call);
-        }
-        if summary.remote_denied {
-            state
-                .denied_remote_calls
-                .insert(remote_call, ServiceAtom::Service0);
         }
         state
     }

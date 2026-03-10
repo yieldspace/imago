@@ -79,21 +79,41 @@ pub const fn shutdown_phase(summary: SummaryShutdownPhase) -> ShutdownPhase {
 pub fn system_effects(effects: &[ContractEffectSummary]) -> Vec<SystemEffect> {
     effects
         .iter()
-        .map(|effect| match effect {
+        .filter_map(|effect| match effect {
+            ContractEffectSummary::RequestObserved(_, _) => None,
             ContractEffectSummary::Response(stream, kind) => {
-                SystemEffect::Response(stream_atom(*stream), request_kind_atom(*kind))
+                Some(SystemEffect::Response(stream_atom(*stream), request_kind_atom(*kind)))
             }
             ContractEffectSummary::CommandEvent(stream, event) => {
-                SystemEffect::CommandEvent(stream_atom(*stream), command_event_atom(*event))
+                Some(SystemEffect::CommandEvent(
+                    stream_atom(*stream),
+                    command_event_atom(*event),
+                ))
             }
             ContractEffectSummary::LogChunk(stream, chunk) => {
-                SystemEffect::LogChunk(stream_atom(*stream), log_chunk_atom(*chunk))
+                Some(SystemEffect::LogChunk(
+                    stream_atom(*stream),
+                    log_chunk_atom(*chunk),
+                ))
             }
-            ContractEffectSummary::LogsEnd(stream) => SystemEffect::LogsEnd(stream_atom(*stream)),
+            ContractEffectSummary::LogsEnd(stream) => {
+                Some(SystemEffect::LogsEnd(stream_atom(*stream)))
+            }
+            ContractEffectSummary::AuthorizationGranted(_, _) => None,
             ContractEffectSummary::AuthorizationRejected(stream, kind) => {
-                SystemEffect::AuthorizationRejected(stream_atom(*stream), request_kind_atom(*kind))
+                Some(SystemEffect::AuthorizationRejected(
+                    stream_atom(*stream),
+                    request_kind_atom(*kind),
+                ))
             }
-            ContractEffectSummary::ShutdownComplete => SystemEffect::ShutdownComplete,
+            ContractEffectSummary::LocalRpcResolved(_)
+            | ContractEffectSummary::LocalRpcDenied(_)
+            | ContractEffectSummary::RemoteRpcConnected(_)
+            | ContractEffectSummary::RemoteRpcCompleted(_)
+            | ContractEffectSummary::RemoteRpcDisconnected(_)
+            | ContractEffectSummary::RemoteRpcDenied(_)
+            | ContractEffectSummary::TaskMilestone(_, _) => None,
+            ContractEffectSummary::ShutdownComplete => Some(SystemEffect::ShutdownComplete),
         })
         .collect()
 }

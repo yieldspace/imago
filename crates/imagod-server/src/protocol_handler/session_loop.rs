@@ -29,13 +29,20 @@ struct SessionAuthContext {
 
 #[cfg(test)]
 mod conformance_tests {
-    use std::{any::Any, time::Duration};
+    use std::{
+        any::Any,
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
 
     use async_trait::async_trait;
     use bytes::Bytes;
     use imagod_spec::{
-        ContractEffectSummary, SessionAuthOutputSummary, SessionAuthStateSummary,
-        SummaryRequestKind, SummaryStreamId,
+        ContractEffectSummary, SessionAuthOutputSummary, SessionAuthProbeOutput,
+        SessionAuthProbeState, SummaryRequestKind, SummarySessionRole, SummaryStreamId,
     };
     use imagod_spec_formal::{SessionAuthProjectionAction, SessionAuthProjectionSpec};
     use nirvash_macros::nirvash_runtime_contract;
@@ -101,7 +108,12 @@ mod conformance_tests {
 
     #[derive(Debug)]
     struct SessionAuthRuntime {
-        summary: tokio::sync::Mutex<SessionAuthStateSummary>,
+        active_session: AtomicBool,
+        shutdown_requested: AtomicBool,
+        role: Mutex<Option<SummarySessionRole>>,
+        read_timed_out: AtomicBool,
+        stream_closed: AtomicBool,
+        client_authority_uploaded: AtomicBool,
     }
 
     impl SessionAuthRuntime {
@@ -110,17 +122,66 @@ mod conformance_tests {
             replace_dynamic_public_keys_for_tests(&[], &[]);
             drop(_guard);
             Self {
-                summary: tokio::sync::Mutex::new(SessionAuthStateSummary::default()),
+                active_session: AtomicBool::new(false),
+                shutdown_requested: AtomicBool::new(false),
+                role: Mutex::new(None),
+                read_timed_out: AtomicBool::new(false),
+                stream_closed: AtomicBool::new(false),
+                client_authority_uploaded: AtomicBool::new(false),
             }
         }
     }
 
-    fn reject_unauthorized_output(_result: &()) -> SessionAuthOutputSummary {
-        SessionAuthOutputSummary {
-            effects: vec![ContractEffectSummary::AuthorizationRejected(
-                SummaryStreamId::Stream0,
-                SummaryRequestKind::ServicesList,
-            )],
+    async fn observe_session_auth_probe_state(
+        runtime: &SessionAuthRuntime,
+        _context: &(),
+    ) -> SessionAuthProbeState {
+        SessionAuthProbeState {
+            active_session: runtime.active_session.load(Ordering::SeqCst),
+            shutdown_requested: runtime.shutdown_requested.load(Ordering::SeqCst),
+            role: *runtime.role.lock().expect("role lock should succeed"),
+            read_timed_out: runtime.read_timed_out.load(Ordering::SeqCst),
+            stream_closed: runtime.stream_closed.load(Ordering::SeqCst),
+            client_authority_uploaded: runtime.client_authority_uploaded.load(Ordering::SeqCst),
+        }
+    }
+
+    fn observe_session_auth_probe_output(
+        _runtime: &SessionAuthRuntime,
+        _context: &(),
+        action: &SessionAuthProjectionAction,
+        _result: &(),
+    ) -> SessionAuthProbeOutput {
+        let effects = match action {
+            SessionAuthProjectionAction::AuthorizeAdminServicesList => {
+                vec![ContractEffectSummary::AuthorizationGranted(
+                    SummaryStreamId::Stream0,
+                    SummaryRequestKind::ServicesList,
+                )]
+            }
+            SessionAuthProjectionAction::AuthorizeClientHello => {
+                vec![ContractEffectSummary::AuthorizationGranted(
+                    SummaryStreamId::Stream0,
+                    SummaryRequestKind::HelloNegotiate,
+                )]
+            }
+            SessionAuthProjectionAction::AuthorizeClientRpc => {
+                vec![ContractEffectSummary::AuthorizationGranted(
+                    SummaryStreamId::Stream0,
+                    SummaryRequestKind::RpcInvoke,
+                )]
+            }
+            SessionAuthProjectionAction::RejectUnauthorizedServicesList => {
+                vec![ContractEffectSummary::AuthorizationRejected(
+                    SummaryStreamId::Stream0,
+                    SummaryRequestKind::ServicesList,
+                )]
+            }
+            _ => Vec::new(),
+        };
+
+        SessionAuthProbeOutput {
+            output: SessionAuthOutputSummary { effects },
         }
     }
 
@@ -129,26 +190,20 @@ mod conformance_tests {
         binding = SessionAuthBinding,
         context = (),
         context_expr = (),
-        summary = SessionAuthStateSummary,
-        output = SessionAuthOutputSummary,
-        summary_field = summary,
-        initial_summary = SessionAuthStateSummary::default(),
+        probe_state = SessionAuthProbeState,
+        probe_output = SessionAuthProbeOutput,
+        observe_state = observe_session_auth_probe_state,
+        output = observe_session_auth_probe_output,
         fresh_runtime = SessionAuthRuntime::new(),
         tests(grouped)
     )]
     impl SessionAuthRuntime {
-        #[nirvash_macros::contract_case(
-            action = SessionAuthProjectionAction::AcceptSession,
-            requires = !summary.active_session && !summary.shutdown_requested,
-            update(active_session = true)
-        )]
-        async fn contract_accept_session(&self) {}
+        #[nirvash_macros::contract_case(action = SessionAuthProjectionAction::AcceptSession)]
+        async fn contract_accept_session(&self) {
+            self.active_session.store(true, Ordering::SeqCst);
+        }
 
-        #[nirvash_macros::contract_case(
-            action = SessionAuthProjectionAction::AuthenticateAdmin,
-            requires = summary.active_session && summary.role.is_none(),
-            update(role = Some(imagod_spec::SummarySessionRole::Admin))
-        )]
+        #[nirvash_macros::contract_case(action = SessionAuthProjectionAction::AuthenticateAdmin)]
         async fn contract_authenticate_admin(&self) {
             let _guard = lock_dynamic_public_keys_for_tests();
             replace_dynamic_public_keys_for_tests(&[[0x11u8; 32]], &[]);
@@ -158,13 +213,10 @@ mod conformance_tests {
             let context =
                 resolve_session_auth_context(&session).expect("admin auth should resolve");
             assert_eq!(context.role, DynamicClientRole::Admin);
+            *self.role.lock().expect("role lock should succeed") = Some(SummarySessionRole::Admin);
         }
 
-        #[nirvash_macros::contract_case(
-            action = SessionAuthProjectionAction::AuthenticateClient,
-            requires = summary.active_session && summary.role.is_none(),
-            update(role = Some(imagod_spec::SummarySessionRole::Client))
-        )]
+        #[nirvash_macros::contract_case(action = SessionAuthProjectionAction::AuthenticateClient)]
         async fn contract_authenticate_client(&self) {
             let _guard = lock_dynamic_public_keys_for_tests();
             replace_dynamic_public_keys_for_tests(&[], &[[0x22u8; 32]]);
@@ -174,13 +226,10 @@ mod conformance_tests {
             let context =
                 resolve_session_auth_context(&session).expect("client auth should resolve");
             assert_eq!(context.role, DynamicClientRole::Client);
+            *self.role.lock().expect("role lock should succeed") = Some(SummarySessionRole::Client);
         }
 
-        #[nirvash_macros::contract_case(
-            action = SessionAuthProjectionAction::AuthenticateUnknown,
-            requires = summary.active_session && summary.role.is_none(),
-            update(role = Some(imagod_spec::SummarySessionRole::Unknown))
-        )]
+        #[nirvash_macros::contract_case(action = SessionAuthProjectionAction::AuthenticateUnknown)]
         async fn contract_authenticate_unknown(&self) {
             let _guard = lock_dynamic_public_keys_for_tests();
             replace_dynamic_public_keys_for_tests(&[], &[]);
@@ -190,16 +239,12 @@ mod conformance_tests {
             let context = resolve_session_auth_context(&session)
                 .expect("unknown auth context should resolve");
             assert_eq!(context.role, DynamicClientRole::Unknown);
+            *self.role.lock().expect("role lock should succeed") =
+                Some(SummarySessionRole::Unknown);
         }
 
         #[nirvash_macros::contract_case(
-            action = SessionAuthProjectionAction::AuthorizeAdminServicesList,
-            requires = summary.active_session
-                && matches!(summary.role, Some(imagod_spec::SummarySessionRole::Admin))
-                && !summary.shutdown_requested
-                && !summary.read_timed_out
-                && !summary.stream_closed,
-            update(admin_services_list_authorized = true)
+            action = SessionAuthProjectionAction::AuthorizeAdminServicesList
         )]
         async fn contract_authorize_admin_services_list(&self) {
             let request = Envelope::new(
@@ -218,15 +263,7 @@ mod conformance_tests {
             .expect("admin should authorize services.list");
         }
 
-        #[nirvash_macros::contract_case(
-            action = SessionAuthProjectionAction::AuthorizeClientHello,
-            requires = summary.active_session
-                && matches!(summary.role, Some(imagod_spec::SummarySessionRole::Client))
-                && !summary.shutdown_requested
-                && !summary.read_timed_out
-                && !summary.stream_closed,
-            update(client_hello_authorized = true)
-        )]
+        #[nirvash_macros::contract_case(action = SessionAuthProjectionAction::AuthorizeClientHello)]
         async fn contract_authorize_client_hello(&self) {
             let request = Envelope::new(
                 MessageType::HelloNegotiate,
@@ -244,16 +281,7 @@ mod conformance_tests {
             .expect("client should authorize hello.negotiate");
         }
 
-        #[nirvash_macros::contract_case(
-            action = SessionAuthProjectionAction::AuthorizeClientRpc,
-            requires = summary.active_session
-                && matches!(summary.role, Some(imagod_spec::SummarySessionRole::Client))
-                && !summary.shutdown_requested
-                && !summary.read_timed_out
-                && !summary.stream_closed
-                && summary.client_authority_uploaded,
-            update(client_rpc_authorized = true)
-        )]
+        #[nirvash_macros::contract_case(action = SessionAuthProjectionAction::AuthorizeClientRpc)]
         async fn contract_authorize_client_rpc(&self) {
             let request = Envelope::new(
                 MessageType::RpcInvoke,
@@ -272,11 +300,7 @@ mod conformance_tests {
         }
 
         #[nirvash_macros::contract_case(
-            action = SessionAuthProjectionAction::RejectUnauthorizedServicesList,
-            requires = !summary.admin_services_list_authorized,
-            update(unauthorized_services_list_rejected = true),
-            output = reject_unauthorized_output,
-            law_output = reject_unauthorized_output(&())
+            action = SessionAuthProjectionAction::RejectUnauthorizedServicesList
         )]
         async fn contract_reject_unauthorized_services_list(&self) {
             let request = Envelope::new(
@@ -296,16 +320,7 @@ mod conformance_tests {
             assert_eq!(err.code, ErrorCode::Unauthorized);
         }
 
-        #[nirvash_macros::contract_case(
-            action = SessionAuthProjectionAction::ReadTimeout,
-            requires = !summary.read_timed_out && !summary.stream_closed,
-            update(
-                read_timed_out = true,
-                admin_services_list_authorized = false,
-                client_hello_authorized = false,
-                client_rpc_authorized = false
-            )
-        )]
+        #[nirvash_macros::contract_case(action = SessionAuthProjectionAction::ReadTimeout)]
         async fn contract_read_timeout(&self) {
             let err = read_stream_with_timeout(
                 std::future::pending::<Result<Vec<u8>, std::io::Error>>(),
@@ -314,29 +329,22 @@ mod conformance_tests {
             .await
             .expect_err("timeout should fail");
             assert_eq!(err.code, ErrorCode::OperationTimeout);
+            self.read_timed_out.store(true, Ordering::SeqCst);
+        }
+
+        #[nirvash_macros::contract_case(action = SessionAuthProjectionAction::CloseStream)]
+        async fn contract_close_stream(&self) {
+            self.stream_closed.store(true, Ordering::SeqCst);
         }
 
         #[nirvash_macros::contract_case(
-            action = SessionAuthProjectionAction::CloseStream,
-            requires = !summary.stream_closed,
-            update(
-                stream_closed = true,
-                admin_services_list_authorized = false,
-                client_hello_authorized = false,
-                client_rpc_authorized = false
-            )
-        )]
-        async fn contract_close_stream(&self) {}
-
-        #[nirvash_macros::contract_case(
-            action = SessionAuthProjectionAction::UploadClientAuthority,
-            requires = !summary.shutdown_requested && !summary.client_authority_uploaded,
-            update(client_authority_uploaded = true)
+            action = SessionAuthProjectionAction::UploadClientAuthority
         )]
         async fn contract_upload_client_authority(&self) {
             let _guard = lock_dynamic_public_keys_for_tests();
             upsert_dynamic_client_public_key(&hex_32(0x22))
                 .expect("authority upload should succeed");
+            self.client_authority_uploaded.store(true, Ordering::SeqCst);
         }
     }
 }

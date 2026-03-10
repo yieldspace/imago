@@ -145,23 +145,23 @@ impl RuntimeProjectionSpec {
             }
         }
         actions.extend([
-            SystemAtomicAction::Shutdown(ShutdownFlowAction::StopServicesGraceful),
+            SystemAtomicAction::Shutdown(ShutdownFlowAction::StopServicesForced),
             SystemAtomicAction::Shutdown(ShutdownFlowAction::StopMaintenance),
             SystemAtomicAction::Shutdown(ShutdownFlowAction::Finalize),
             SystemAtomicAction::Manager(ManagerRuntimeAction::FinishShutdown),
         ]);
         let mut next = self.apply_many(&pre_shutdown, actions)?;
         next.rpc = RpcState::from_runtime_summary(&rpc_summary);
-        Some(next)
+        Some(normalize_runtime_state(self, next))
     }
 }
 
 fn summarize_runtime_state(probe: &RuntimeProbeState) -> RuntimeStateSummary {
-    *probe
+    (*probe).into()
 }
 
 fn summarize_runtime_output(probe: &RuntimeProbeOutput) -> RuntimeOutputSummary {
-    probe.clone()
+    probe.output.clone()
 }
 
 fn abstract_runtime_state(
@@ -196,6 +196,64 @@ fn abstract_runtime_output(
     system_effects(&summary.effects)
 }
 
+fn runtime_summary_from_state(state: &SystemState) -> RuntimeStateSummary {
+    let service0_running = state.supervision.service_is_running(ServiceAtom::Service0);
+    let service1_running = state.supervision.service_is_running(ServiceAtom::Service1);
+    let manager_stopped = matches!(
+        state.manager.phase,
+        crate::manager_runtime::ManagerRuntimePhase::Stopped
+    );
+
+    RuntimeStateSummary {
+        service0_promoted: state.deploy.release_promoted(ServiceAtom::Service0),
+        service1_promoted: state.deploy.release_promoted(ServiceAtom::Service1),
+        service0_running,
+        service1_running,
+        service0_reaped: !service0_running && state.deploy.release_promoted(ServiceAtom::Service0),
+        service1_reaped: !service1_running && state.deploy.release_promoted(ServiceAtom::Service1),
+        service0_rolled_back: state.deploy.rollback_observed(ServiceAtom::Service0),
+        binding_granted_service0: state.rpc.binding_allowed(ServiceAtom::Service0),
+        remote_connected: state.rpc.has_remote_connection_for(ServiceAtom::Service0),
+        manager_shutdown_started: manager_stopped
+            || matches!(
+                state.manager.phase,
+                crate::manager_runtime::ManagerRuntimePhase::ShutdownRequested
+            ),
+        manager_stopped,
+        session_shutdown_requested: state.session.shutdown_requested,
+        shutdown: imagod_spec::ShutdownStateSummary {
+            phase: match state.shutdown.phase {
+                crate::shutdown_flow::ShutdownPhase::Idle => imagod_spec::SummaryShutdownPhase::Idle,
+                crate::shutdown_flow::ShutdownPhase::SignalReceived => {
+                    imagod_spec::SummaryShutdownPhase::SignalReceived
+                }
+                crate::shutdown_flow::ShutdownPhase::DrainingSessions => {
+                    imagod_spec::SummaryShutdownPhase::DrainingSessions
+                }
+                crate::shutdown_flow::ShutdownPhase::StoppingServices => {
+                    imagod_spec::SummaryShutdownPhase::StoppingServices
+                }
+                crate::shutdown_flow::ShutdownPhase::StoppingMaintenance => {
+                    imagod_spec::SummaryShutdownPhase::StoppingMaintenance
+                }
+                crate::shutdown_flow::ShutdownPhase::Completed => {
+                    imagod_spec::SummaryShutdownPhase::Completed
+                }
+            },
+            accepts_stopped: state.shutdown.accepts_stopped,
+            sessions_drained: state.shutdown.sessions_drained,
+            services_stopped: state.shutdown.services_stopped,
+            maintenance_stopped: state.shutdown.maintenance_stopped,
+            forced_stop_attempted: state.shutdown.forced_stop_attempted,
+        },
+    }
+}
+
+fn normalize_runtime_state(spec: RuntimeProjectionSpec, state: SystemState) -> SystemState {
+    let summary = runtime_summary_from_state(&state);
+    abstract_runtime_state(&spec, &summary)
+}
+
 impl TransitionSystem for RuntimeProjectionSpec {
     type State = SystemState;
     type Action = RuntimeProjectionAction;
@@ -226,6 +284,7 @@ impl TransitionSystem for RuntimeProjectionSpec {
                     return None;
                 }
                 self.deploy_service(state, ServiceAtom::Service0)
+                    .map(|next| normalize_runtime_state(*self, next))
             }
             RuntimeProjectionAction::DeployService1 => {
                 if !shutdown_idle
@@ -235,6 +294,7 @@ impl TransitionSystem for RuntimeProjectionSpec {
                     return None;
                 }
                 self.deploy_service(state, ServiceAtom::Service1)
+                    .map(|next| normalize_runtime_state(*self, next))
             }
             RuntimeProjectionAction::RollbackService0 => self
                 .apply_many(
@@ -253,7 +313,8 @@ impl TransitionSystem for RuntimeProjectionSpec {
                         && state.deploy.release_promoted(ServiceAtom::Service0)
                         && !state.supervision.service_is_running(ServiceAtom::Service0)
                         && !state.deploy.rollback_observed(ServiceAtom::Service0)
-                }),
+                })
+                .map(|next| normalize_runtime_state(*self, next)),
             RuntimeProjectionAction::LocalRpcResolved => {
                 if !shutdown_idle
                     || !state.supervision.service_is_running(ServiceAtom::Service0)
@@ -272,6 +333,7 @@ impl TransitionSystem for RuntimeProjectionSpec {
                         ))],
                     ),
                 )
+                .map(|next| normalize_runtime_state(*self, next))
             }
             RuntimeProjectionAction::LocalRpcDenied => {
                 if !shutdown_idle
@@ -286,6 +348,7 @@ impl TransitionSystem for RuntimeProjectionSpec {
                     state,
                     SystemAtomicAction::Rpc(RpcAction::RejectLocal(ServiceAtom::Service0)),
                 )
+                .map(|next| normalize_runtime_state(*self, next))
             }
             RuntimeProjectionAction::RemoteRpcLifecycle => {
                 if !shutdown_idle
@@ -315,6 +378,7 @@ impl TransitionSystem for RuntimeProjectionSpec {
                         ],
                     ),
                 )
+                .map(|next| normalize_runtime_state(*self, next))
             }
             RuntimeProjectionAction::StopService0 => {
                 if !state.supervision.service_is_running(ServiceAtom::Service0)
@@ -326,6 +390,7 @@ impl TransitionSystem for RuntimeProjectionSpec {
                     return None;
                 }
                 self.stop_service(state, ServiceAtom::Service0)
+                    .map(|next| normalize_runtime_state(*self, next))
             }
             RuntimeProjectionAction::ReapExitedService0 => {
                 if !state.supervision.service_is_running(ServiceAtom::Service0)
@@ -337,6 +402,7 @@ impl TransitionSystem for RuntimeProjectionSpec {
                     return None;
                 }
                 self.stop_service(state, ServiceAtom::Service0)
+                    .map(|next| normalize_runtime_state(*self, next))
             }
             RuntimeProjectionAction::ShutdownDrain => {
                 if !shutdown_idle

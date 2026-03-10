@@ -1,9 +1,9 @@
 use nirvash_core::{
     ActionConstraint, Fairness, Ltl, ModelCase, ModelCheckConfig, RelSet, Relation2,
-    Signature as _, StatePredicate, StepPredicate, TransitionSystem,
+    StatePredicate, StepPredicate, TransitionSystem,
 };
 use nirvash_macros::{
-    ActionVocabulary, RelationalState, action_constraint, fairness, invariant, property,
+    ActionVocabulary, RelationalState, action_constraint, fairness, property,
     subsystem_spec,
 };
 
@@ -16,9 +16,6 @@ use crate::summary_mapping::session_role_atom;
 pub struct SessionAuthState {
     accepted_sessions: RelSet<SessionAtom>,
     authenticated_roles: Relation2<SessionAtom, SessionRoleAtom>,
-    admin_authorized_streams: Relation2<StreamAtom, RequestKindAtom>,
-    client_authorized_streams: Relation2<StreamAtom, RequestKindAtom>,
-    rejected_streams: Relation2<StreamAtom, RequestKindAtom>,
     timed_out_streams: RelSet<StreamAtom>,
     closed_streams: RelSet<StreamAtom>,
     uploaded_authorities: RelSet<RemoteAuthorityAtom>,
@@ -29,9 +26,6 @@ impl SessionAuthState {
         let mut state = Self {
             accepted_sessions: RelSet::empty(),
             authenticated_roles: Relation2::empty(),
-            admin_authorized_streams: Relation2::empty(),
-            client_authorized_streams: Relation2::empty(),
-            rejected_streams: Relation2::empty(),
             timed_out_streams: RelSet::empty(),
             closed_streams: RelSet::empty(),
             uploaded_authorities: RelSet::empty(),
@@ -43,46 +37,6 @@ impl SessionAuthState {
             state
                 .authenticated_roles
                 .insert(SessionAtom::Session0, session_role_atom(role));
-        }
-        if summary.deploy_prepare_authorized {
-            state
-                .admin_authorized_streams
-                .insert(StreamAtom::Stream0, RequestKindAtom::DeployPrepare);
-        }
-        if summary.artifact_push_authorized {
-            state
-                .admin_authorized_streams
-                .insert(StreamAtom::Stream0, RequestKindAtom::ArtifactPush);
-        }
-        if summary.artifact_commit_authorized {
-            state
-                .admin_authorized_streams
-                .insert(StreamAtom::Stream0, RequestKindAtom::ArtifactCommit);
-        }
-        if summary.state_request_authorized {
-            state
-                .admin_authorized_streams
-                .insert(StreamAtom::Stream0, RequestKindAtom::StateRequest);
-        }
-        if summary.services_list_authorized {
-            state
-                .admin_authorized_streams
-                .insert(StreamAtom::Stream0, RequestKindAtom::ServicesList);
-        }
-        if summary.command_cancel_authorized {
-            state
-                .admin_authorized_streams
-                .insert(StreamAtom::Stream0, RequestKindAtom::CommandCancel);
-        }
-        if summary.rpc_invoke_authorized {
-            state
-                .admin_authorized_streams
-                .insert(StreamAtom::Stream0, RequestKindAtom::RpcInvoke);
-        }
-        if summary.bindings_cert_upload_authorized {
-            state
-                .admin_authorized_streams
-                .insert(StreamAtom::Stream0, RequestKindAtom::BindingsCertUpload);
         }
         if summary.authority_uploaded {
             state
@@ -96,9 +50,6 @@ impl SessionAuthState {
         let mut state = Self {
             accepted_sessions: RelSet::empty(),
             authenticated_roles: Relation2::empty(),
-            admin_authorized_streams: Relation2::empty(),
-            client_authorized_streams: Relation2::empty(),
-            rejected_streams: Relation2::empty(),
             timed_out_streams: RelSet::empty(),
             closed_streams: RelSet::empty(),
             uploaded_authorities: RelSet::empty(),
@@ -110,26 +61,6 @@ impl SessionAuthState {
             state
                 .authenticated_roles
                 .insert(SessionAtom::Session0, session_role_atom(role));
-        }
-        if summary.admin_services_list_authorized {
-            state
-                .admin_authorized_streams
-                .insert(StreamAtom::Stream0, RequestKindAtom::ServicesList);
-        }
-        if summary.client_hello_authorized {
-            state
-                .client_authorized_streams
-                .insert(StreamAtom::Stream0, RequestKindAtom::HelloNegotiate);
-        }
-        if summary.client_rpc_authorized {
-            state
-                .client_authorized_streams
-                .insert(StreamAtom::Stream0, RequestKindAtom::RpcInvoke);
-        }
-        if summary.unauthorized_services_list_rejected {
-            state
-                .rejected_streams
-                .insert(StreamAtom::Stream0, RequestKindAtom::ServicesList);
         }
         if summary.read_timed_out {
             state.timed_out_streams.insert(StreamAtom::Stream0);
@@ -162,8 +93,32 @@ impl SessionAuthState {
     }
 
     pub fn stream_authorized(&self, stream: StreamAtom, kind: RequestKindAtom) -> bool {
-        self.admin_authorized_streams.contains(&stream, &kind)
-            || self.client_authorized_streams.contains(&stream, &kind)
+        if self.timed_out_streams.contains(&stream) || self.closed_streams.contains(&stream) {
+            return false;
+        }
+
+        if self.any_authenticated_as(SessionRoleAtom::Admin) {
+            return matches!(
+                kind,
+                RequestKindAtom::DeployPrepare
+                    | RequestKindAtom::ArtifactPush
+                    | RequestKindAtom::ArtifactCommit
+                    | RequestKindAtom::CommandStart
+                    | RequestKindAtom::StateRequest
+                    | RequestKindAtom::ServicesList
+                    | RequestKindAtom::CommandCancel
+                    | RequestKindAtom::RpcInvoke
+                    | RequestKindAtom::BindingsCertUpload
+                    | RequestKindAtom::LogsRequest
+            );
+        }
+
+        self.any_authenticated_as(SessionRoleAtom::Client)
+            && match kind {
+                RequestKindAtom::HelloNegotiate => true,
+                RequestKindAtom::RpcInvoke => self.authority_uploaded(RemoteAuthorityAtom::Edge0),
+                _ => false,
+            }
     }
 }
 
@@ -203,9 +158,6 @@ impl SessionAuthSpec {
         SessionAuthState {
             accepted_sessions: RelSet::empty(),
             authenticated_roles: Relation2::empty(),
-            admin_authorized_streams: Relation2::empty(),
-            client_authorized_streams: Relation2::empty(),
-            rejected_streams: Relation2::empty(),
             timed_out_streams: RelSet::empty(),
             closed_streams: RelSet::empty(),
             uploaded_authorities: RelSet::empty(),
@@ -313,49 +265,6 @@ fn session_for_action(action: SessionAuthAction) -> Option<SessionAtom> {
     }
 }
 
-fn client_request_allowed(kind: RequestKindAtom) -> bool {
-    matches!(
-        kind,
-        RequestKindAtom::HelloNegotiate | RequestKindAtom::RpcInvoke
-    )
-}
-
-#[invariant(SessionAuthSpec)]
-fn authorization_excludes_closed_or_timed_out_streams() -> StatePredicate<SessionAuthState> {
-    StatePredicate::new(
-        "authorization_excludes_closed_or_timed_out_streams",
-        |state| {
-            StreamAtom::bounded_domain()
-                .into_vec()
-                .into_iter()
-                .all(|stream| {
-                    (!state.timed_out_streams.contains(&stream)
-                        && !state.closed_streams.contains(&stream))
-                        || (!state.admin_authorized_streams.domain().contains(&stream)
-                            && !state.client_authorized_streams.domain().contains(&stream))
-                })
-        },
-    )
-}
-
-#[invariant(SessionAuthSpec)]
-fn client_authorization_is_limited() -> StatePredicate<SessionAuthState> {
-    StatePredicate::new("client_authorization_is_limited", |state| {
-        StreamAtom::bounded_domain()
-            .into_vec()
-            .into_iter()
-            .all(|stream| {
-                RequestKindAtom::bounded_domain()
-                    .into_vec()
-                    .into_iter()
-                    .all(|kind| {
-                        !state.client_authorized_streams.contains(&stream, &kind)
-                            || client_request_allowed(kind)
-                    })
-            })
-    })
-}
-
 #[property(SessionAuthSpec)]
 fn accepted_session_leads_to_authentication() -> Ltl<SessionAuthState, SessionAuthAction> {
     Ltl::leads_to(
@@ -446,32 +355,18 @@ fn transition_session_auth(
             true
         }
         SessionAuthAction::AuthorizeAdmin(stream, kind)
-            if prev
-                .authenticated_roles
-                .range()
-                .contains(&SessionRoleAtom::Admin)
-                && !prev.timed_out_streams.contains(stream)
-                && !prev.closed_streams.contains(stream) =>
+            if prev.stream_authorized(*stream, *kind) =>
         {
-            candidate.admin_authorized_streams.insert(*stream, *kind);
             true
         }
         SessionAuthAction::AuthorizeClient(stream, kind)
-            if prev
-                .authenticated_roles
-                .range()
-                .contains(&SessionRoleAtom::Client)
-                && client_request_allowed(*kind)
-                && !prev.timed_out_streams.contains(stream)
-                && !prev.closed_streams.contains(stream) =>
+            if prev.stream_authorized(*stream, *kind) =>
         {
-            candidate.client_authorized_streams.insert(*stream, *kind);
             true
         }
         SessionAuthAction::RejectUnauthorized(stream, kind)
             if !prev.stream_authorized(*stream, *kind) =>
         {
-            candidate.rejected_streams.insert(*stream, *kind);
             true
         }
         SessionAuthAction::ReadTimeout(stream)
@@ -479,18 +374,10 @@ fn transition_session_auth(
                 && !prev.closed_streams.contains(stream) =>
         {
             candidate.timed_out_streams.insert(*stream);
-            for kind in RequestKindAtom::bounded_domain().into_vec() {
-                candidate.admin_authorized_streams.remove(stream, &kind);
-                candidate.client_authorized_streams.remove(stream, &kind);
-            }
             true
         }
         SessionAuthAction::CloseStream(stream) if !prev.closed_streams.contains(stream) => {
             candidate.closed_streams.insert(*stream);
-            for kind in RequestKindAtom::bounded_domain().into_vec() {
-                candidate.admin_authorized_streams.remove(stream, &kind);
-                candidate.client_authorized_streams.remove(stream, &kind);
-            }
             true
         }
         SessionAuthAction::UploadClientAuthority(authority)
@@ -524,6 +411,12 @@ mod tests {
                 )
             })
             .expect("client authentication should succeed");
+        let state = spec
+            .transition(
+                &state,
+                &SessionAuthAction::UploadClientAuthority(RemoteAuthorityAtom::Edge0),
+            )
+            .expect("authority upload should succeed");
 
         assert!(
             spec.transition(

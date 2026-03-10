@@ -6,7 +6,7 @@ use nirvash_core::{
 };
 use nirvash_macros::{
     ActionVocabulary as FormalActionVocabulary, Signature as FormalSignature,
-    nirvash_runtime_contract,
+    code_witness_test_main, nirvash_runtime_contract,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -116,24 +116,22 @@ fn observe_driver_output(
     probe_state = State,
     probe_output = Output,
     observe_state = observe_driver_state,
-    observe_output = observe_driver_output,
+    output = observe_driver_output,
     fresh_runtime = Driver::default(),
-    tests(grouped)
+    tests(witness)
 )]
 impl Driver {
     #[nirvash_macros::contract_case(action = Action::Start)]
     async fn contract_start(&self) {
         let mut state = self.state.lock().expect("lock state");
-        assert_eq!(*state, State::Idle);
         *state = State::Busy;
     }
 
     #[nirvash_macros::contract_case(action = Action::Stop)]
     async fn contract_stop(&self) {
         let mut state = self.state.lock().expect("lock state");
-        assert_eq!(*state, State::Busy);
         *state = State::Idle;
     }
 }
 
-fn main() {}
+code_witness_test_main!();

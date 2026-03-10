@@ -1714,11 +1714,17 @@ fn inject_kill_and_wait_failure_for_pid(pid: u32) {
 mod tests {
     use super::*;
     use crate::artifact_store::ArtifactStore;
-    use imagod_spec::{ContractEffectSummary, RuntimeOutputSummary, RuntimeStateSummary};
+    use imagod_spec::{
+        ContractEffectSummary, RuntimeOutputSummary, RuntimeProbeOutput, RuntimeProbeState,
+        SummaryServiceId,
+    };
     use imagod_spec_formal::{RuntimeProjectionAction, RuntimeProjectionSpec, atoms::ServiceAtom};
     use nirvash_macros::nirvash_runtime_contract;
     use sha2::{Digest, Sha256};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::{
+        sync::atomic::AtomicBool,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
     use tar::{Builder, Header};
     use tokio::{net::UnixListener, process::Command};
 
@@ -1844,7 +1850,11 @@ mod tests {
         root: PathBuf,
         artifact_store: ArtifactStore,
         supervisor: ServiceSupervisor,
-        summary: tokio::sync::Mutex<RuntimeStateSummary>,
+        binding_granted_service0: AtomicBool,
+        manager_shutdown_started: AtomicBool,
+        manager_stopped: AtomicBool,
+        session_shutdown_requested: AtomicBool,
+        forced_stop_attempted: AtomicBool,
     }
 
     impl RuntimeProjectionRuntime {
@@ -1862,7 +1872,11 @@ mod tests {
                 root,
                 artifact_store,
                 supervisor,
-                summary: tokio::sync::Mutex::new(RuntimeStateSummary::default()),
+                binding_granted_service0: AtomicBool::new(false),
+                manager_shutdown_started: AtomicBool::new(false),
+                manager_stopped: AtomicBool::new(false),
+                session_shutdown_requested: AtomicBool::new(false),
+                forced_stop_attempted: AtomicBool::new(false),
             }
         }
 
@@ -2030,7 +2044,10 @@ mod tests {
             )
             .await;
             match response {
-                ControlResponse::ResolvedInvocationTarget { .. } => Ok(()),
+                ControlResponse::ResolvedInvocationTarget { .. } => {
+                    self.binding_granted_service0.store(true, Ordering::SeqCst);
+                    Ok(())
+                }
                 ControlResponse::Error(err) => {
                     Err(ImagodError::new(err.code, err.stage, err.message))
                 }
@@ -2139,6 +2156,7 @@ mod tests {
                 .await
                 .map_err(|e| ImagodError::new(ErrorCode::Internal, STAGE_INVOKE, e.to_string()))?;
             let _ = std::fs::remove_file(&runner_endpoint);
+            self.binding_granted_service0.store(true, Ordering::SeqCst);
             Ok(())
         }
 
@@ -2183,8 +2201,12 @@ mod tests {
         }
 
         async fn shutdown_drain(&self) -> Result<(), ImagodError> {
+            self.manager_shutdown_started.store(true, Ordering::SeqCst);
+            self.session_shutdown_requested.store(true, Ordering::SeqCst);
             let errors = self.supervisor.stop_all(true).await;
             if errors.is_empty() {
+                self.manager_stopped.store(true, Ordering::SeqCst);
+                self.forced_stop_attempted.store(true, Ordering::SeqCst);
                 Ok(())
             } else {
                 let (service, err) = errors.into_iter().next().expect("errors should exist");
@@ -2197,9 +2219,100 @@ mod tests {
         }
     }
 
-    fn runtime_shutdown_output(_result: &Result<(), ImagodError>) -> RuntimeOutputSummary {
-        RuntimeOutputSummary {
-            effects: vec![ContractEffectSummary::ShutdownComplete],
+    fn active_release_path(root: &Path, service: ServiceAtom) -> PathBuf {
+        root.join("services")
+            .join(RuntimeProjectionRuntime::service_name(service))
+            .join("active_release")
+    }
+
+    fn active_release(root: &Path, service: ServiceAtom) -> Option<String> {
+        std::fs::read_to_string(active_release_path(root, service))
+            .ok()
+            .map(|release| release.trim().to_string())
+    }
+
+    async fn observe_runtime_probe_state(
+        runtime: &RuntimeProjectionRuntime,
+        _context: &(),
+    ) -> RuntimeProbeState {
+        let guard = runtime.supervisor.inner.read().await;
+        let service0 = guard.get(RuntimeProjectionRuntime::service_name(ServiceAtom::Service0));
+        let service1 = guard.get(RuntimeProjectionRuntime::service_name(ServiceAtom::Service1));
+        let service0_release = active_release(&runtime.root, ServiceAtom::Service0);
+        let service1_release = active_release(&runtime.root, ServiceAtom::Service1);
+
+        let manager_shutdown_started = runtime.manager_shutdown_started.load(Ordering::SeqCst);
+        let manager_stopped = runtime.manager_stopped.load(Ordering::SeqCst);
+
+        RuntimeProbeState {
+            service0_promoted: service0_release.as_deref()
+                == Some(RuntimeProjectionRuntime::release_hash(ServiceAtom::Service0)),
+            service1_promoted: service1_release.as_deref()
+                == Some(RuntimeProjectionRuntime::release_hash(ServiceAtom::Service1)),
+            service0_running: service0.is_some(),
+            service1_running: service1.is_some(),
+            service0_reaped: service0.is_none()
+                && service0_release.as_deref()
+                    == Some(RuntimeProjectionRuntime::release_hash(ServiceAtom::Service0)),
+            service1_reaped: service1.is_none()
+                && service1_release.as_deref()
+                    == Some(RuntimeProjectionRuntime::release_hash(ServiceAtom::Service1)),
+            service0_rolled_back: service0_release.as_deref() == Some("release-previous"),
+            binding_granted_service0: runtime.binding_granted_service0.load(Ordering::SeqCst)
+                || service0.is_some_and(|service| !service.bindings.is_empty()),
+            remote_connected: false,
+            manager_shutdown_started,
+            manager_stopped,
+            session_shutdown_requested: runtime
+                .session_shutdown_requested
+                .load(Ordering::SeqCst),
+            shutdown: imagod_spec::ShutdownStateSummary {
+                phase: if manager_stopped {
+                    imagod_spec::SummaryShutdownPhase::Completed
+                } else if manager_shutdown_started {
+                    imagod_spec::SummaryShutdownPhase::DrainingSessions
+                } else {
+                    imagod_spec::SummaryShutdownPhase::Idle
+                },
+                accepts_stopped: manager_shutdown_started,
+                sessions_drained: manager_stopped,
+                services_stopped: manager_stopped,
+                maintenance_stopped: manager_stopped,
+                forced_stop_attempted: runtime.forced_stop_attempted.load(Ordering::SeqCst),
+            },
+        }
+    }
+
+    fn observe_runtime_probe_output(
+        _runtime: &RuntimeProjectionRuntime,
+        _context: &(),
+        action: &RuntimeProjectionAction,
+        result: &Result<(), ImagodError>,
+    ) -> RuntimeProbeOutput {
+        let effects = match action {
+            RuntimeProjectionAction::LocalRpcResolved if result.is_ok() => {
+                vec![ContractEffectSummary::LocalRpcResolved(
+                    SummaryServiceId::Service0,
+                )]
+            }
+            RuntimeProjectionAction::LocalRpcDenied if result.is_ok() => {
+                vec![ContractEffectSummary::LocalRpcDenied(
+                    SummaryServiceId::Service0,
+                )]
+            }
+            RuntimeProjectionAction::RemoteRpcLifecycle if result.is_ok() => vec![
+                ContractEffectSummary::RemoteRpcConnected(SummaryServiceId::Service0),
+                ContractEffectSummary::RemoteRpcCompleted(SummaryServiceId::Service0),
+                ContractEffectSummary::RemoteRpcDisconnected(SummaryServiceId::Service0),
+            ],
+            RuntimeProjectionAction::ShutdownDrain if result.is_ok() => {
+                vec![ContractEffectSummary::ShutdownComplete]
+            }
+            _ => Vec::new(),
+        };
+
+        RuntimeProbeOutput {
+            output: RuntimeOutputSummary { effects },
         }
     }
 
@@ -2208,160 +2321,55 @@ mod tests {
         binding = RuntimeProjectionBinding,
         context = (),
         context_expr = (),
-        summary = RuntimeStateSummary,
-        output = RuntimeOutputSummary,
-        summary_field = summary,
-        initial_summary = RuntimeStateSummary::default(),
+        probe_state = RuntimeProbeState,
+        probe_output = RuntimeProbeOutput,
+        observe_state = observe_runtime_probe_state,
+        output = observe_runtime_probe_output,
         fresh_runtime = RuntimeProjectionRuntime::new().await,
         tests(grouped)
     )]
     impl RuntimeProjectionRuntime {
-        #[nirvash_macros::contract_case(
-            action = RuntimeProjectionAction::DeployService0,
-            requires = matches!(summary.shutdown.phase, imagod_spec::SummaryShutdownPhase::Idle)
-                && !summary.service0_promoted
-                && !summary.service0_running,
-            update(
-                service0_promoted = true,
-                service0_running = true,
-                service0_reaped = false,
-                service0_rolled_back = false
-            )
-        )]
+        #[nirvash_macros::contract_case(action = RuntimeProjectionAction::DeployService0)]
         async fn contract_deploy_service0(&self) -> Result<(), ImagodError> {
             self.deploy_service(ServiceAtom::Service0).await
         }
 
-        #[nirvash_macros::contract_case(
-            action = RuntimeProjectionAction::DeployService1,
-            requires = matches!(summary.shutdown.phase, imagod_spec::SummaryShutdownPhase::Idle)
-                && !summary.service1_promoted
-                && !summary.service1_running,
-            update(
-                service1_promoted = true,
-                service1_running = true,
-                service1_reaped = false
-            )
-        )]
+        #[nirvash_macros::contract_case(action = RuntimeProjectionAction::DeployService1)]
         async fn contract_deploy_service1(&self) -> Result<(), ImagodError> {
             self.deploy_service(ServiceAtom::Service1).await
         }
 
-        #[nirvash_macros::contract_case(
-            action = RuntimeProjectionAction::RollbackService0,
-            requires = matches!(summary.shutdown.phase, imagod_spec::SummaryShutdownPhase::Idle)
-                && summary.service0_promoted
-                && !summary.service0_running
-                && !summary.service0_rolled_back,
-            update(
-                service0_promoted = false,
-                service0_rolled_back = true
-            )
-        )]
+        #[nirvash_macros::contract_case(action = RuntimeProjectionAction::RollbackService0)]
         async fn contract_rollback_service0(&self) -> Result<(), ImagodError> {
             self.rollback_service0().await
         }
 
-        #[nirvash_macros::contract_case(
-            action = RuntimeProjectionAction::LocalRpcResolved,
-            requires = matches!(summary.shutdown.phase, imagod_spec::SummaryShutdownPhase::Idle)
-                && summary.service0_running
-                && summary.service1_running
-                && !summary.local_rpc_resolved
-                && !summary.local_rpc_denied,
-            update(
-                binding_granted_service0 = true,
-                local_rpc_resolved = true
-            )
-        )]
+        #[nirvash_macros::contract_case(action = RuntimeProjectionAction::LocalRpcResolved)]
         async fn contract_local_rpc_resolved(&self) -> Result<(), ImagodError> {
             self.local_rpc_resolved().await
         }
 
-        #[nirvash_macros::contract_case(
-            action = RuntimeProjectionAction::LocalRpcDenied,
-            requires = matches!(summary.shutdown.phase, imagod_spec::SummaryShutdownPhase::Idle)
-                && summary.service0_running
-                && !summary.service1_running
-                && !summary.local_rpc_resolved
-                && !summary.local_rpc_denied,
-            update(local_rpc_denied = true)
-        )]
+        #[nirvash_macros::contract_case(action = RuntimeProjectionAction::LocalRpcDenied)]
         async fn contract_local_rpc_denied(&self) -> Result<(), ImagodError> {
             self.local_rpc_denied().await
         }
 
-        #[nirvash_macros::contract_case(
-            action = RuntimeProjectionAction::RemoteRpcLifecycle,
-            requires = matches!(summary.shutdown.phase, imagod_spec::SummaryShutdownPhase::Idle)
-                && summary.service0_running
-                && !summary.remote_completed
-                && !summary.remote_denied,
-            update(
-                binding_granted_service0 = true,
-                remote_connected = true,
-                remote_completed = true,
-                remote_disconnected = true
-            )
-        )]
+        #[nirvash_macros::contract_case(action = RuntimeProjectionAction::RemoteRpcLifecycle)]
         async fn contract_remote_rpc_lifecycle(&self) -> Result<(), ImagodError> {
             self.remote_rpc_lifecycle().await
         }
 
-        #[nirvash_macros::contract_case(
-            action = RuntimeProjectionAction::StopService0,
-            requires = summary.service0_running && summary.manager_shutdown_started,
-            update(
-                service0_running = false,
-                service0_reaped = true
-            )
-        )]
+        #[nirvash_macros::contract_case(action = RuntimeProjectionAction::StopService0)]
         async fn contract_stop_service0(&self) -> Result<(), ImagodError> {
             self.stop_service0().await
         }
 
-        #[nirvash_macros::contract_case(
-            action = RuntimeProjectionAction::ReapExitedService0,
-            requires = summary.service0_running && summary.manager_shutdown_started,
-            update(
-                service0_running = false,
-                service0_reaped = true
-            )
-        )]
+        #[nirvash_macros::contract_case(action = RuntimeProjectionAction::ReapExitedService0)]
         async fn contract_reap_exited_service0(&self) -> Result<(), ImagodError> {
             self.reap_exited_service0().await
         }
 
-        #[nirvash_macros::contract_case(
-            action = RuntimeProjectionAction::ShutdownDrain,
-            requires = matches!(summary.shutdown.phase, imagod_spec::SummaryShutdownPhase::Idle)
-                && !summary.manager_shutdown_started,
-            update(
-                manager_shutdown_started = true,
-                manager_stopped = true,
-                session_shutdown_requested = true,
-                service0_running = false,
-                service1_running = false,
-                service0_reaped = summary.service0_running || summary.service0_reaped,
-                service1_reaped = summary.service1_running || summary.service1_reaped,
-                local_rpc_resolved = false,
-                local_rpc_denied = false,
-                remote_connected = false,
-                remote_completed = false,
-                remote_disconnected = false,
-                remote_denied = false,
-                shutdown = imagod_spec::ShutdownStateSummary {
-                    phase: imagod_spec::SummaryShutdownPhase::Completed,
-                    accepts_stopped: true,
-                    sessions_drained: true,
-                    services_stopped: true,
-                    maintenance_stopped: true,
-                    forced_stop_attempted: summary.shutdown.forced_stop_attempted,
-                }
-            ),
-            output = runtime_shutdown_output,
-            law_output = runtime_shutdown_output(&Result::<(), ImagodError>::Ok(()))
-        )]
+        #[nirvash_macros::contract_case(action = RuntimeProjectionAction::ShutdownDrain)]
         async fn contract_shutdown_drain(&self) -> Result<(), ImagodError> {
             self.shutdown_drain().await
         }

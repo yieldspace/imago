@@ -591,7 +591,7 @@ mod tests {
         collections::VecDeque,
         sync::{
             Mutex,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
 
@@ -600,8 +600,8 @@ mod tests {
     use imago_protocol::from_cbor;
     use imagod_control::{ServiceLogEvent, ServiceLogStream, ServiceLogSubscription};
     use imagod_spec::{
-        ContractEffectSummary, ErrorCode, LogsOutputSummary, LogsStateSummary, SummaryLogChunk,
-        SummaryRequestKind, SummaryStreamId,
+        ContractEffectSummary, ErrorCode, LogsOutputSummary, LogsProbeOutput, LogsProbeState,
+        SummaryLogChunk, SummaryRequestKind, SummaryStreamId,
     };
     use imagod_spec_formal::{LogsProjectionAction, LogsProjectionSpec};
     use nirvash_macros::nirvash_runtime_contract;
@@ -735,40 +735,64 @@ mod tests {
 
     #[derive(Debug)]
     struct LogsProjectionRuntime {
-        summary: tokio::sync::Mutex<LogsStateSummary>,
         pending: tokio::sync::Mutex<VecDeque<RecordedDatagramKind>>,
+        started: AtomicBool,
     }
 
     impl LogsProjectionRuntime {
         fn new() -> Self {
             Self {
-                summary: tokio::sync::Mutex::new(LogsStateSummary::default()),
                 pending: tokio::sync::Mutex::new(VecDeque::new()),
+                started: AtomicBool::new(false),
             }
         }
     }
 
-    fn logs_request_output(_result: &()) -> LogsOutputSummary {
-        LogsOutputSummary {
-            effects: vec![ContractEffectSummary::Response(
-                SummaryStreamId::Stream1,
-                SummaryRequestKind::LogsRequest,
-            )],
+    async fn observe_logs_probe_state(
+        runtime: &LogsProjectionRuntime,
+        _context: &(),
+    ) -> LogsProbeState {
+        let started = runtime.started.load(Ordering::SeqCst);
+        let pending = runtime.pending.lock().await;
+        LogsProbeState {
+            service_running: true,
+            logs_authorized: true,
+            stream_open: started && !pending.is_empty(),
+            chunk_pending: pending
+                .iter()
+                .any(|kind| matches!(kind, RecordedDatagramKind::Chunk)),
+            completed: started && pending.is_empty(),
         }
     }
 
-    fn logs_chunk_output(_result: &()) -> LogsOutputSummary {
-        LogsOutputSummary {
-            effects: vec![ContractEffectSummary::LogChunk(
+    fn observe_logs_probe_output(
+        _runtime: &LogsProjectionRuntime,
+        _context: &(),
+        action: &LogsProjectionAction,
+        _result: &(),
+    ) -> LogsProbeOutput {
+        let effects = match action {
+            LogsProjectionAction::LogsRequest => vec![
+                ContractEffectSummary::RequestObserved(
+                    SummaryStreamId::Stream1,
+                    SummaryRequestKind::LogsRequest,
+                ),
+                ContractEffectSummary::Response(
+                    SummaryStreamId::Stream1,
+                    SummaryRequestKind::LogsRequest,
+                ),
+            ],
+            LogsProjectionAction::LogsChunk => vec![ContractEffectSummary::LogChunk(
                 SummaryStreamId::Stream1,
                 SummaryLogChunk::Chunk0,
             )],
-        }
-    }
+            LogsProjectionAction::LogsEnd => {
+                vec![ContractEffectSummary::LogsEnd(SummaryStreamId::Stream1)]
+            }
+        };
 
-    fn logs_end_output(_result: &()) -> LogsOutputSummary {
-        LogsOutputSummary {
-            effects: vec![ContractEffectSummary::LogsEnd(SummaryStreamId::Stream1)],
+        LogsProbeOutput {
+            output: LogsOutputSummary { effects },
         }
     }
 
@@ -777,21 +801,15 @@ mod tests {
         binding = LogsProjectionBinding,
         context = (),
         context_expr = (),
-        summary = LogsStateSummary,
-        output = LogsOutputSummary,
-        summary_field = summary,
-        initial_summary = LogsStateSummary::default(),
+        probe_state = LogsProbeState,
+        probe_output = LogsProbeOutput,
+        observe_state = observe_logs_probe_state,
+        output = observe_logs_probe_output,
         fresh_runtime = LogsProjectionRuntime::new(),
         tests(grouped)
     )]
     impl LogsProjectionRuntime {
-        #[nirvash_macros::contract_case(
-            action = LogsProjectionAction::LogsRequest,
-            requires = summary.service_running && summary.logs_authorized && !summary.acknowledged,
-            update(acknowledged = true),
-            output = logs_request_output,
-            law_output = logs_request_output(&())
-        )]
+        #[nirvash_macros::contract_case(action = LogsProjectionAction::LogsRequest)]
         async fn contract_logs_request(&self) {
             let session = Arc::new(FakeProtocolSession::new(2048, vec![Ok(()), Ok(()), Ok(())]));
             run_logs_forwarder(
@@ -802,16 +820,11 @@ mod tests {
                 false,
             )
             .await;
+            self.started.store(true, Ordering::SeqCst);
             *self.pending.lock().await = decode_datagram_kinds(&session.sent_datagrams());
         }
 
-        #[nirvash_macros::contract_case(
-            action = LogsProjectionAction::LogsChunk,
-            requires = summary.acknowledged && !summary.chunk_seen && !summary.ended,
-            update(chunk_seen = true),
-            output = logs_chunk_output,
-            law_output = logs_chunk_output(&())
-        )]
+        #[nirvash_macros::contract_case(action = LogsProjectionAction::LogsChunk)]
         async fn contract_logs_chunk(&self) {
             let mut pending = self.pending.lock().await;
             let mut saw_chunk = false;
@@ -830,13 +843,7 @@ mod tests {
             );
         }
 
-        #[nirvash_macros::contract_case(
-            action = LogsProjectionAction::LogsEnd,
-            requires = summary.acknowledged && !summary.ended,
-            update(ended = true),
-            output = logs_end_output,
-            law_output = logs_end_output(&())
-        )]
+        #[nirvash_macros::contract_case(action = LogsProjectionAction::LogsEnd)]
         async fn contract_logs_end(&self) {
             let mut pending = self.pending.lock().await;
             while matches!(pending.front(), Some(RecordedDatagramKind::Chunk)) {

@@ -8,8 +8,6 @@ use nirvash_macros::{
 };
 
 use crate::atoms::{CommandEventAtom, LogChunkAtom, RequestKindAtom, StreamAtom};
-use crate::summary_mapping::request_kind_atom;
-
 #[derive(Debug, Clone, PartialEq, Eq, RelationalState)]
 pub struct WireProtocolState {
     requests: Relation2<StreamAtom, RequestKindAtom>,
@@ -22,23 +20,15 @@ pub struct WireProtocolState {
 
 impl WireProtocolState {
     pub fn from_router_summary(summary: &imagod_spec::RouterStateSummary) -> Self {
-        let mut state = Self {
+        let _ = summary;
+        Self {
             requests: Relation2::empty(),
             responses: Relation2::empty(),
             command_events: Relation2::empty(),
             log_follow_streams: RelSet::empty(),
             log_chunks: Relation2::empty(),
             log_ended: RelSet::empty(),
-        };
-        if let Some(kind) = summary.request {
-            state
-                .requests
-                .insert(StreamAtom::Stream0, request_kind_atom(kind));
-            state
-                .responses
-                .insert(StreamAtom::Stream0, request_kind_atom(kind));
         }
-        state
     }
 
     pub fn from_logs_summary(summary: &imagod_spec::LogsStateSummary) -> Self {
@@ -50,21 +40,23 @@ impl WireProtocolState {
             log_chunks: Relation2::empty(),
             log_ended: RelSet::empty(),
         };
-        if summary.acknowledged {
+        if summary.stream_open || summary.completed {
             state
                 .requests
                 .insert(StreamAtom::Stream1, RequestKindAtom::LogsRequest);
             state
                 .responses
                 .insert(StreamAtom::Stream1, RequestKindAtom::LogsRequest);
+        }
+        if summary.stream_open {
             state.log_follow_streams.insert(StreamAtom::Stream1);
         }
-        if summary.chunk_seen {
+        if !summary.chunk_pending && (summary.stream_open || summary.completed) {
             state
                 .log_chunks
                 .insert(StreamAtom::Stream1, LogChunkAtom::Chunk0);
         }
-        if summary.ended {
+        if summary.completed {
             state.log_ended.insert(StreamAtom::Stream1);
         }
         state
@@ -219,12 +211,10 @@ fn one_request_kind_per_stream() -> StatePredicate<WireProtocolState> {
             .into_vec()
             .into_iter()
             .all(|stream| {
-                state
-                    .requests
-                    .domain()
-                    .items()
+                RequestKindAtom::bounded_domain()
+                    .into_vec()
                     .into_iter()
-                    .filter(|item| item == &stream)
+                    .filter(|kind| state.requests.contains(&stream, kind))
                     .count()
                     <= 1
             })

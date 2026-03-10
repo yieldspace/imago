@@ -1247,7 +1247,14 @@ mod tests {
 
 #[cfg(test)]
 mod conformance_tests {
-    use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+    use std::{
+        collections::BTreeMap,
+        path::PathBuf,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
     use async_trait::async_trait;
     use imagod_config::{RuntimeConfig, TlsConfig, load_or_create_default};
@@ -1258,9 +1265,9 @@ mod conformance_tests {
         CommandCancelRequest, CommandKind, CommandProtocolAction, CommandProtocolContext,
         CommandProtocolOutput, ContractEffectSummary, DeployCommandPayload, DeployPrepareRequest,
         DeployPrepareResponse, ErrorCode, HelloNegotiateRequest, MessageType, RouterOutputSummary,
-        RouterStateSummary, RpcInvokeRequest, RpcInvokeTargetService, RunCommandPayload,
-        ServiceListRequest, ServiceState, ServiceStatusEntry, StateRequest, StopCommandPayload,
-        SummaryRequestKind, SummaryStreamId,
+        RouterProbeOutput, RouterProbeState, RpcInvokeRequest, RpcInvokeTargetService,
+        RunCommandPayload, ServiceListRequest, ServiceState, ServiceStatusEntry, StateRequest,
+        StopCommandPayload, SummaryRequestKind, SummaryStreamId,
     };
     use imagod_spec_formal::{
         RouterProjectionAction, RouterProjectionSpec, SystemMessageBinding, system_message_binding,
@@ -1276,7 +1283,7 @@ mod conformance_tests {
 
     struct RouterRuntime {
         handler: ProtocolHandler,
-        summary: tokio::sync::Mutex<RouterStateSummary>,
+        client_authority_uploaded: AtomicBool,
         _config_root: PathBuf,
     }
 
@@ -1470,7 +1477,7 @@ mod conformance_tests {
             );
             Self {
                 handler,
-                summary: tokio::sync::Mutex::new(RouterStateSummary::default()),
+                client_authority_uploaded: AtomicBool::new(false),
                 _config_root: config_root,
             }
         }
@@ -1576,28 +1583,55 @@ mod conformance_tests {
             }
         }
 
-        fn output_for_response(&self, response: &Envelope) -> RouterOutputSummary {
-            match system_message_binding(response.message_type) {
-                SystemMessageBinding::Request(kind) | SystemMessageBinding::Response(kind) => {
-                    RouterOutputSummary {
-                        effects: vec![ContractEffectSummary::Response(
-                            SummaryStreamId::Stream0,
-                            summary_request_kind(kind),
-                        )],
-                    }
-                }
-                SystemMessageBinding::CommandEvent
-                | SystemMessageBinding::LogChunk
-                | SystemMessageBinding::LogsEnd => RouterOutputSummary::default(),
-            }
-        }
-
         async fn dispatch(
             &self,
             action: RouterProjectionAction,
         ) -> Result<Envelope, imagod_common::ImagodError> {
             let request = self.request_for(action);
-            self.handler.handle_single(request).await
+            let response = self.handler.handle_single(request).await;
+            if response.is_ok() && matches!(action, RouterProjectionAction::BindingsCertUpload) {
+                self.client_authority_uploaded.store(true, Ordering::SeqCst);
+            }
+            response
+        }
+    }
+
+    async fn observe_router_probe_state(
+        runtime: &RouterRuntime,
+        _context: &(),
+    ) -> RouterProbeState {
+        let mut probe = RouterProbeState::initial_admin_stream();
+        probe.authority_uploaded = runtime.client_authority_uploaded.load(Ordering::SeqCst);
+        probe
+    }
+
+    fn observe_router_probe_output(
+        _runtime: &RouterRuntime,
+        _context: &(),
+        action: &RouterProjectionAction,
+        result: &Result<Envelope, imagod_common::ImagodError>,
+    ) -> RouterProbeOutput {
+        let mut effects = vec![ContractEffectSummary::RequestObserved(
+            SummaryStreamId::Stream0,
+            router_request_kind(*action),
+        )];
+
+        if let Ok(response) = result {
+            match system_message_binding(response.message_type) {
+                SystemMessageBinding::Request(kind) | SystemMessageBinding::Response(kind) => {
+                    effects.push(ContractEffectSummary::Response(
+                        SummaryStreamId::Stream0,
+                        summary_request_kind(kind),
+                    ));
+                }
+                SystemMessageBinding::CommandEvent
+                | SystemMessageBinding::LogChunk
+                | SystemMessageBinding::LogsEnd => {}
+            }
+        }
+
+        RouterProbeOutput {
+            output: RouterOutputSummary { effects },
         }
     }
 
@@ -1640,19 +1674,17 @@ mod conformance_tests {
         }
     }
 
-    fn router_output(
-        runtime: &RouterRuntime,
-        result: &Result<Envelope, imagod_common::ImagodError>,
-    ) -> RouterOutputSummary {
-        runtime.output_for_response(result.as_ref().expect("router response should exist"))
-    }
-
-    fn router_law_output(kind: SummaryRequestKind) -> RouterOutputSummary {
-        RouterOutputSummary {
-            effects: vec![ContractEffectSummary::Response(
-                SummaryStreamId::Stream0,
-                kind,
-            )],
+    fn router_request_kind(action: RouterProjectionAction) -> SummaryRequestKind {
+        match action {
+            RouterProjectionAction::HelloNegotiate => SummaryRequestKind::HelloNegotiate,
+            RouterProjectionAction::DeployPrepare => SummaryRequestKind::DeployPrepare,
+            RouterProjectionAction::ArtifactPush => SummaryRequestKind::ArtifactPush,
+            RouterProjectionAction::ArtifactCommit => SummaryRequestKind::ArtifactCommit,
+            RouterProjectionAction::StateRequest => SummaryRequestKind::StateRequest,
+            RouterProjectionAction::ServicesList => SummaryRequestKind::ServicesList,
+            RouterProjectionAction::CommandCancel => SummaryRequestKind::CommandCancel,
+            RouterProjectionAction::RpcInvoke => SummaryRequestKind::RpcInvoke,
+            RouterProjectionAction::BindingsCertUpload => SummaryRequestKind::BindingsCertUpload,
         }
     }
 
@@ -1661,128 +1693,55 @@ mod conformance_tests {
         binding = RouterProjectionBinding,
         context = (),
         context_expr = (),
-        summary = RouterStateSummary,
-        output = RouterOutputSummary,
-        summary_field = summary,
-        initial_summary = RouterStateSummary::initial_admin_stream(),
+        probe_state = RouterProbeState,
+        probe_output = RouterProbeOutput,
+        observe_state = observe_router_probe_state,
+        output = observe_router_probe_output,
         fresh_runtime = RouterRuntime::new().await,
         tests(grouped)
     )]
     impl RouterRuntime {
-        #[nirvash_macros::contract_case(
-            action = RouterProjectionAction::HelloNegotiate,
-            requires = summary.active_session && summary.request.is_none(),
-            update(request = Some(SummaryRequestKind::HelloNegotiate)),
-            output = |result| router_output(self, result),
-            law_output = router_law_output(SummaryRequestKind::HelloNegotiate)
-        )]
+        #[nirvash_macros::contract_case(action = RouterProjectionAction::HelloNegotiate)]
         async fn contract_hello_negotiate(&self) -> Result<Envelope, imagod_common::ImagodError> {
             self.dispatch(RouterProjectionAction::HelloNegotiate).await
         }
 
-        #[nirvash_macros::contract_case(
-            action = RouterProjectionAction::DeployPrepare,
-            requires = summary.active_session
-                && summary.deploy_prepare_authorized
-                && summary.request.is_none(),
-            update(request = Some(SummaryRequestKind::DeployPrepare)),
-            output = |result| router_output(self, result),
-            law_output = router_law_output(SummaryRequestKind::DeployPrepare)
-        )]
+        #[nirvash_macros::contract_case(action = RouterProjectionAction::DeployPrepare)]
         async fn contract_deploy_prepare(&self) -> Result<Envelope, imagod_common::ImagodError> {
             self.dispatch(RouterProjectionAction::DeployPrepare).await
         }
 
-        #[nirvash_macros::contract_case(
-            action = RouterProjectionAction::ArtifactPush,
-            requires = summary.active_session
-                && summary.artifact_push_authorized
-                && summary.request.is_none(),
-            update(request = Some(SummaryRequestKind::ArtifactPush)),
-            output = |result| router_output(self, result),
-            law_output = router_law_output(SummaryRequestKind::ArtifactPush)
-        )]
+        #[nirvash_macros::contract_case(action = RouterProjectionAction::ArtifactPush)]
         async fn contract_artifact_push(&self) -> Result<Envelope, imagod_common::ImagodError> {
             self.dispatch(RouterProjectionAction::ArtifactPush).await
         }
 
-        #[nirvash_macros::contract_case(
-            action = RouterProjectionAction::ArtifactCommit,
-            requires = summary.active_session
-                && summary.artifact_commit_authorized
-                && summary.request.is_none(),
-            update(request = Some(SummaryRequestKind::ArtifactCommit)),
-            output = |result| router_output(self, result),
-            law_output = router_law_output(SummaryRequestKind::ArtifactCommit)
-        )]
+        #[nirvash_macros::contract_case(action = RouterProjectionAction::ArtifactCommit)]
         async fn contract_artifact_commit(&self) -> Result<Envelope, imagod_common::ImagodError> {
             self.dispatch(RouterProjectionAction::ArtifactCommit).await
         }
 
-        #[nirvash_macros::contract_case(
-            action = RouterProjectionAction::StateRequest,
-            requires = summary.active_session
-                && summary.state_request_authorized
-                && summary.request.is_none(),
-            update(request = Some(SummaryRequestKind::StateRequest)),
-            output = |result| router_output(self, result),
-            law_output = router_law_output(SummaryRequestKind::StateRequest)
-        )]
+        #[nirvash_macros::contract_case(action = RouterProjectionAction::StateRequest)]
         async fn contract_state_request(&self) -> Result<Envelope, imagod_common::ImagodError> {
             self.dispatch(RouterProjectionAction::StateRequest).await
         }
 
-        #[nirvash_macros::contract_case(
-            action = RouterProjectionAction::ServicesList,
-            requires = summary.active_session
-                && summary.services_list_authorized
-                && summary.request.is_none(),
-            update(request = Some(SummaryRequestKind::ServicesList)),
-            output = |result| router_output(self, result),
-            law_output = router_law_output(SummaryRequestKind::ServicesList)
-        )]
+        #[nirvash_macros::contract_case(action = RouterProjectionAction::ServicesList)]
         async fn contract_services_list(&self) -> Result<Envelope, imagod_common::ImagodError> {
             self.dispatch(RouterProjectionAction::ServicesList).await
         }
 
-        #[nirvash_macros::contract_case(
-            action = RouterProjectionAction::CommandCancel,
-            requires = summary.active_session
-                && summary.command_cancel_authorized
-                && summary.request.is_none(),
-            update(request = Some(SummaryRequestKind::CommandCancel)),
-            output = |result| router_output(self, result),
-            law_output = router_law_output(SummaryRequestKind::CommandCancel)
-        )]
+        #[nirvash_macros::contract_case(action = RouterProjectionAction::CommandCancel)]
         async fn contract_command_cancel(&self) -> Result<Envelope, imagod_common::ImagodError> {
             self.dispatch(RouterProjectionAction::CommandCancel).await
         }
 
-        #[nirvash_macros::contract_case(
-            action = RouterProjectionAction::RpcInvoke,
-            requires = summary.active_session
-                && summary.rpc_invoke_authorized
-                && summary.request.is_none(),
-            update(request = Some(SummaryRequestKind::RpcInvoke)),
-            output = |result| router_output(self, result),
-            law_output = router_law_output(SummaryRequestKind::RpcInvoke)
-        )]
+        #[nirvash_macros::contract_case(action = RouterProjectionAction::RpcInvoke)]
         async fn contract_rpc_invoke(&self) -> Result<Envelope, imagod_common::ImagodError> {
             self.dispatch(RouterProjectionAction::RpcInvoke).await
         }
 
-        #[nirvash_macros::contract_case(
-            action = RouterProjectionAction::BindingsCertUpload,
-            requires = summary.active_session
-                && summary.bindings_cert_upload_authorized
-                && summary.request.is_none(),
-            update(
-                request = Some(SummaryRequestKind::BindingsCertUpload),
-                authority_uploaded = true
-            ),
-            output = |result| router_output(self, result),
-            law_output = router_law_output(SummaryRequestKind::BindingsCertUpload)
-        )]
+        #[nirvash_macros::contract_case(action = RouterProjectionAction::BindingsCertUpload)]
         async fn contract_bindings_cert_upload(
             &self,
         ) -> Result<Envelope, imagod_common::ImagodError> {
@@ -1818,11 +1777,19 @@ mod conformance_tests {
             });
         assert_eq!(
             output,
-            RouterOutputSummary {
-                effects: vec![ContractEffectSummary::Response(
-                    SummaryStreamId::Stream0,
-                    SummaryRequestKind::ServicesList,
-                )],
+            RouterProbeOutput {
+                output: RouterOutputSummary {
+                    effects: vec![
+                        ContractEffectSummary::RequestObserved(
+                            SummaryStreamId::Stream0,
+                            SummaryRequestKind::ServicesList,
+                        ),
+                        ContractEffectSummary::Response(
+                            SummaryStreamId::Stream0,
+                            SummaryRequestKind::ServicesList,
+                        ),
+                    ],
+                },
             }
         );
     }

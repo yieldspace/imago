@@ -128,11 +128,11 @@ impl LogsProjectionSpec {
 }
 
 fn summarize_logs_state(probe: &LogsProbeState) -> LogsStateSummary {
-    *probe
+    (*probe).into()
 }
 
 fn summarize_logs_output(probe: &LogsProbeOutput) -> LogsOutputSummary {
-    probe.clone()
+    probe.output.clone()
 }
 
 fn abstract_logs_state(spec: &LogsProjectionSpec, summary: &LogsStateSummary) -> SystemState {
@@ -148,6 +148,28 @@ fn abstract_logs_output(
     summary: &LogsOutputSummary,
 ) -> Vec<SystemEffect> {
     system_effects(&summary.effects)
+}
+
+fn logs_summary_from_state(state: &SystemState) -> LogsStateSummary {
+    let acknowledged = state.wire.logs_acknowledged(StreamAtom::Stream1);
+    let completed = state.wire.log_stream_ended(StreamAtom::Stream1);
+
+    LogsStateSummary {
+        service_running: state.supervision.service_is_running(ServiceAtom::Service0),
+        logs_authorized: state
+            .session_auth
+            .stream_authorized(StreamAtom::Stream1, RequestKindAtom::LogsRequest),
+        stream_open: acknowledged && !completed,
+        chunk_pending: acknowledged
+            && !completed
+            && !state.wire.saw_log_chunk(StreamAtom::Stream1, LogChunkAtom::Chunk0),
+        completed,
+    }
+}
+
+fn normalize_logs_state(spec: LogsProjectionSpec, state: SystemState) -> SystemState {
+    let summary = logs_summary_from_state(&state);
+    abstract_logs_state(&spec, &summary)
 }
 
 impl TransitionSystem for LogsProjectionSpec {
@@ -180,6 +202,7 @@ impl TransitionSystem for LogsProjectionSpec {
                 self.wire_action(*action),
             )),
         )
+        .map(|next| normalize_logs_state(*self, next))
     }
 }
 

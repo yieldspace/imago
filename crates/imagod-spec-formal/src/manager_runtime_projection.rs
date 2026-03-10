@@ -93,6 +93,13 @@ impl ManagerRuntimeProjectionSpec {
     }
 
     fn apply_finish_shutdown(self, state: &SystemState) -> Option<SystemState> {
+        if matches!(
+            state.manager.phase,
+            crate::manager_runtime::ManagerRuntimePhase::Stopped
+        ) && matches!(state.shutdown.phase, ShutdownPhase::Completed)
+        {
+            return Some(state.clone());
+        }
         let mut candidate = state.clone();
         if !matches!(candidate.shutdown.phase, ShutdownPhase::Completed) {
             candidate.shutdown = ShutdownFlowSpec::new()
@@ -105,13 +112,13 @@ impl ManagerRuntimeProjectionSpec {
 }
 
 fn summarize_manager_runtime_state(probe: &ManagerRuntimeProbeState) -> ManagerRuntimeStateSummary {
-    *probe
+    (*probe).into()
 }
 
 fn summarize_manager_runtime_output(
     probe: &ManagerRuntimeProbeOutput,
 ) -> ManagerRuntimeOutputSummary {
-    probe.clone()
+    probe.output.clone()
 }
 
 fn abstract_manager_runtime_state(
@@ -153,6 +160,62 @@ fn abstract_manager_runtime_output(
     summary: &ManagerRuntimeOutputSummary,
 ) -> Vec<SystemEffect> {
     system_effects(&summary.effects)
+}
+
+fn manager_runtime_summary_from_state(state: &SystemState) -> ManagerRuntimeStateSummary {
+    let manager_shutdown_started = matches!(
+        state.manager.phase,
+        crate::manager_runtime::ManagerRuntimePhase::ShutdownRequested
+            | crate::manager_runtime::ManagerRuntimePhase::Stopped
+    );
+    let manager_stopped = matches!(
+        state.manager.phase,
+        crate::manager_runtime::ManagerRuntimePhase::Stopped
+    ) || (manager_shutdown_started && state.shutdown.maintenance_stopped);
+
+    ManagerRuntimeStateSummary {
+        config_loaded: state.manager.config_loaded,
+        created_default: state.manager.created_default,
+        plugin_gc: match state.manager.plugin_gc {
+            crate::manager_runtime::TaskState::NotStarted => imagod_spec::SummaryTaskState::NotStarted,
+            crate::manager_runtime::TaskState::Succeeded => imagod_spec::SummaryTaskState::Succeeded,
+            crate::manager_runtime::TaskState::Failed => imagod_spec::SummaryTaskState::Failed,
+        },
+        boot_restore: match state.manager.boot_restore {
+            crate::manager_runtime::TaskState::NotStarted => imagod_spec::SummaryTaskState::NotStarted,
+            crate::manager_runtime::TaskState::Succeeded => imagod_spec::SummaryTaskState::Succeeded,
+            crate::manager_runtime::TaskState::Failed => imagod_spec::SummaryTaskState::Failed,
+        },
+        listening: matches!(
+            state.manager.phase,
+            crate::manager_runtime::ManagerRuntimePhase::Listening
+        ),
+        manager_shutdown_started,
+        manager_stopped,
+        session_shutdown_requested: state.session.shutdown_requested,
+        shutdown: imagod_spec::ShutdownStateSummary {
+            phase: if manager_stopped {
+                imagod_spec::SummaryShutdownPhase::Completed
+            } else if manager_shutdown_started {
+                imagod_spec::SummaryShutdownPhase::StoppingMaintenance
+            } else {
+                imagod_spec::SummaryShutdownPhase::Idle
+            },
+            accepts_stopped: manager_shutdown_started,
+            sessions_drained: manager_shutdown_started,
+            services_stopped: manager_shutdown_started,
+            maintenance_stopped: state.shutdown.maintenance_stopped,
+            forced_stop_attempted: state.shutdown.forced_stop_attempted,
+        },
+    }
+}
+
+fn normalize_manager_runtime_state(
+    spec: ManagerRuntimeProjectionSpec,
+    state: SystemState,
+) -> SystemState {
+    let summary = manager_runtime_summary_from_state(&state);
+    abstract_manager_runtime_state(&spec, &summary)
 }
 
 impl TransitionSystem for ManagerRuntimeProjectionSpec {
@@ -210,7 +273,7 @@ impl TransitionSystem for ManagerRuntimeProjectionSpec {
             )?,
             ManagerRuntimeProjectionAction::FinishShutdown => self.apply_finish_shutdown(state)?,
         };
-        Some(next)
+        Some(normalize_manager_runtime_state(*self, next))
     }
 }
 

@@ -76,7 +76,7 @@ flowchart TD
 - `imagod-spec-formal` では構造を持つ subsystem を relation-first で書くのを既定にし、atom を `RelAtom`、state field を `RelSet` / `Relation2` で持ちます。phase progression や terminal status のような線形 gate だけ scalar を残し、doc graph 側は relation schema と Alloy 風 notation を追加表示します。
 - concurrent edge の doc label は `parallel(a, b, c)` 形式で表示され、resource footprint に衝突しない atomic action だけが自動合成されます。
 - `formal_tests` は spec 単体を検査します。
-- `code_tests` は `nirvash_core::conformance::ProtocolConformanceSpec` と `ProtocolRuntimeBinding` を使って grouped な runtime conformance を生成し、`ActionApplier` / `StateObserver` 経由で `before_probe -> summarize_state -> abstract_state`、`output_probe -> summarize_output -> abstract_output`、`after_probe -> summarize_state -> abstract_state` を比較します。
+- `code_tests` は `nirvash_core::conformance::ProtocolConformanceSpec` と `ProtocolRuntimeBinding` を使って grouped な runtime conformance を生成し、`ActionApplier` / `StateObserver` 経由で `before_probe -> summarize_state -> abstract_state`、`output_probe -> summarize_output -> abstract_output`、`after_probe -> summarize_state -> abstract_state` を比較します。runtime contract macro も同じ probe-first の流れを生成し、runtime 側には `observe_state(...) -> ProbeState` と `observe_output(...) -> ProbeOutput` だけを要求します。
 - `code_witness_tests` は `ProtocolInputWitnessBinding` で positive / negative witness を受け取り、reachable graph から semantic case を自動検出して witness 単位の strict test を custom harness で列挙します。現行の command witness は `command_projection` が `system` から command surface を投影し、実行先は `OperationManager` に限定されます。ほかの boundary は grouped `code_tests` で `router_projection` / `session_auth_projection` / `logs_projection -> imagod-server`、`runtime_projection -> imagod-control`、`manager_runtime_projection -> imagod` に接続します。
 - shared contract は `imagod-spec`、conformance API は `nirvash-core` にあり、formal spec 本体は `imagod-spec-formal`、runtime binding と `code_tests` 実行は runtime crate の integration test に置きます。
 
@@ -148,8 +148,8 @@ flowchart LR
 - `StateObserver::observe_state(&self, &CommandProtocolContext) -> CommandProtocolObservedState`
 
 server はこの trait 契約をそのまま使って command action を適用します。  
-`imagod-control` の integration test に置かれた `code_tests` も同じ trait 契約だけを前提に、reachable graph の prefix を実コードへ適用したうえで before/after summary を抽象化して比較します。spec/runtime 間で「別の adapter API」を挟みません。
-`command_projection` は witness-based に `OperationManager` へ接続し、外部 boundary は `system` から切り出した projection spec で grouped runtime conformance を取ります。projection spec 側の `ProbeState/ProbeOutput -> SummaryState/SummaryOutput -> AbstractState/ExpectedOutput` の写像は `#[nirvash_projection_contract]` で宣言し、現在は `router_projection` / `session_auth_projection` / `logs_projection` が `imagod-server`、`runtime_projection` が `imagod-control`、`manager_runtime_projection` が `imagod` に接続済みです。
+`imagod-control` の integration test に置かれた `code_tests` も同じ trait 契約だけを前提に、reachable graph の prefix を実コードへ適用したうえで before/after probe を `summary -> abstract` へ射影して比較します。spec/runtime 間で「別の adapter API」を挟みません。
+`command_projection` は binding-mode identity witness の例外で、`OperationManager` が既に formal 向け observed state/output を直接返せる前提を使います。その他の boundary は `probe -> summary -> abstract` を正本とし、runtime wrapper は concrete snapshot/event だけを probe として返し、projection spec 側の `ProbeState/ProbeOutput -> SummaryState/SummaryOutput -> AbstractState/ExpectedOutput` の写像を `#[nirvash_projection_contract]` で宣言します。現在は `router_projection` / `session_auth_projection` / `logs_projection` が `imagod-server`、`runtime_projection` が `imagod-control`、`manager_runtime_projection` が `imagod` に接続済みです。
 
 ## spec と runtime の接続
 
@@ -164,10 +164,10 @@ flowchart LR
     G --> C
     C --> E["execute_action(...)"]
     C --> H["observe_state(...)"]
-    E --> I["runtime output"]
-    H --> J["observed runtime state"]
-    I --> K["spec-local output projection"]
-    J --> L["spec-local state projection"]
+    E --> I["runtime probe output"]
+    H --> J["runtime probe state"]
+    I --> K["summarize_output -> abstract_output"]
+    J --> L["summarize_state -> abstract_state"]
     D --> M["nirvash_macros::code_tests comparison"]
     G --> M
     K --> M

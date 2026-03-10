@@ -109,11 +109,11 @@ impl SessionAuthProjectionSpec {
 }
 
 fn summarize_session_auth_state(probe: &SessionAuthProbeState) -> SessionAuthStateSummary {
-    *probe
+    (*probe).into()
 }
 
 fn summarize_session_auth_output(probe: &SessionAuthProbeOutput) -> SessionAuthOutputSummary {
-    probe.clone()
+    probe.output.clone()
 }
 
 fn abstract_session_auth_state(

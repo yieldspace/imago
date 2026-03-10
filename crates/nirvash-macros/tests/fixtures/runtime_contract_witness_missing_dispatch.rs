@@ -1,12 +1,9 @@
 use std::sync::Mutex;
 
-use nirvash_core::{
-    ActionVocabulary, TransitionSystem,
-    conformance::ProtocolConformanceSpec,
-};
+use nirvash_core::{ActionVocabulary, TransitionSystem, conformance::ProtocolConformanceSpec};
 use nirvash_macros::{
     ActionVocabulary as FormalActionVocabulary, Signature as FormalSignature,
-    nirvash_runtime_contract,
+    code_witness_test_main, nirvash_runtime_contract,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -16,21 +13,21 @@ struct Spec;
 enum State {
     #[default]
     Idle,
-    Busy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature, FormalActionVocabulary)]
 enum Action {
     Start,
-    Stop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 enum Output {
-    Ack,
     #[default]
     Rejected,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Input(Action);
 
 impl TransitionSystem for Spec {
     type State = State;
@@ -44,12 +41,8 @@ impl TransitionSystem for Spec {
         Action::action_vocabulary()
     }
 
-    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        match (state, action) {
-            (State::Idle, Action::Start) => Some(State::Busy),
-            (State::Busy, Action::Stop) => Some(State::Idle),
-            _ => None,
-        }
+    fn transition(&self, _state: &Self::State, _action: &Self::Action) -> Option<Self::State> {
+        Some(State::Idle)
     }
 }
 
@@ -62,15 +55,11 @@ impl ProtocolConformanceSpec for Spec {
 
     fn expected_output(
         &self,
-        prev: &Self::State,
-        action: &Self::Action,
-        next: Option<&Self::State>,
+        _prev: &Self::State,
+        _action: &Self::Action,
+        _next: Option<&Self::State>,
     ) -> Self::ExpectedOutput {
-        match (prev, action, next) {
-            (State::Idle, Action::Start, Some(State::Busy))
-            | (State::Busy, Action::Stop, Some(State::Idle)) => Output::Ack,
-            _ => Output::Rejected,
-        }
+        Output::Rejected
     }
 
     fn summarize_state(&self, probe: &Self::ProbeState) -> Self::SummaryState {
@@ -105,7 +94,7 @@ fn observe_driver_output(
     _action: &Action,
     _result: &(),
 ) -> Output {
-    Output::Ack
+    Output::Rejected
 }
 
 #[nirvash_runtime_contract(
@@ -116,24 +105,14 @@ fn observe_driver_output(
     probe_state = State,
     probe_output = Output,
     observe_state = observe_driver_state,
-    observe_output = observe_driver_output,
+    output = observe_driver_output,
     fresh_runtime = Driver::default(),
-    tests(grouped)
+    input = Input,
+    tests(witness)
 )]
 impl Driver {
     #[nirvash_macros::contract_case(action = Action::Start)]
-    async fn contract_start(&self) {
-        let mut state = self.state.lock().expect("lock state");
-        assert_eq!(*state, State::Idle);
-        *state = State::Busy;
-    }
-
-    #[nirvash_macros::contract_case(action = Action::Stop)]
-    async fn contract_stop(&self) {
-        let mut state = self.state.lock().expect("lock state");
-        assert_eq!(*state, State::Busy);
-        *state = State::Idle;
-    }
+    async fn contract_start(&self) {}
 }
 
-fn main() {}
+code_witness_test_main!();
