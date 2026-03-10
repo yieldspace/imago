@@ -1,3 +1,5 @@
+#[cfg(test)]
+use imagod_spec::{ContractEffectSummary, SummaryServiceId};
 use imagod_spec::{
     RuntimeOutputSummary, RuntimeProbeOutput, RuntimeProbeState, RuntimeStateSummary,
 };
@@ -393,6 +395,38 @@ impl ModelCaseSource for RuntimeProjectionSpec {
     }
 }
 
+#[cfg(test)]
+fn runtime_probe_state_domain() -> nirvash_core::BoundedDomain<RuntimeProbeState> {
+    <RuntimeProbeState as nirvash_core::Signature>::bounded_domain()
+}
+
+#[cfg(test)]
+fn runtime_summary_output_domain() -> nirvash_core::BoundedDomain<RuntimeOutputSummary> {
+    nirvash_core::BoundedDomain::new(vec![
+        RuntimeOutputSummary::default(),
+        RuntimeOutputSummary {
+            effects: vec![ContractEffectSummary::LocalRpcResolved(
+                SummaryServiceId::Service0,
+            )],
+        },
+        RuntimeOutputSummary {
+            effects: vec![ContractEffectSummary::LocalRpcDenied(
+                SummaryServiceId::Service0,
+            )],
+        },
+        RuntimeOutputSummary {
+            effects: vec![
+                ContractEffectSummary::RemoteRpcConnected(SummaryServiceId::Service0),
+                ContractEffectSummary::RemoteRpcCompleted(SummaryServiceId::Service0),
+                ContractEffectSummary::RemoteRpcDisconnected(SummaryServiceId::Service0),
+            ],
+        },
+        RuntimeOutputSummary {
+            effects: vec![ContractEffectSummary::ShutdownComplete],
+        },
+    ])
+}
+
 nirvash_projection_model! {
     probe_state = RuntimeProbeState,
     probe_output = RuntimeProbeOutput,
@@ -400,6 +434,8 @@ nirvash_projection_model! {
     summary_output = RuntimeOutputSummary,
     abstract_state = SystemState,
     expected_output = Vec<SystemEffect>,
+    probe_state_domain = runtime_probe_state_domain,
+    summary_output_domain = runtime_summary_output_domain,
     state_seed = spec.initial_state(),
     state_summary {
         service0_promoted <= probe.service0_promoted,

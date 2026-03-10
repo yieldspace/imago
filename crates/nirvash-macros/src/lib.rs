@@ -606,6 +606,8 @@ struct ProjectionModelArgs {
     summary_output_ty: Type,
     abstract_state_ty: Type,
     expected_output_ty: Type,
+    probe_state_domain: Option<Path>,
+    summary_output_domain: Option<Path>,
     state_seed: Expr,
     state_summary: Vec<ProjectionModelFieldAssign>,
     output_summary: Vec<ProjectionModelFieldAssign>,
@@ -732,6 +734,8 @@ impl Parse for ProjectionModelArgs {
         let mut summary_output_ty = None;
         let mut abstract_state_ty = None;
         let mut expected_output_ty = None;
+        let mut probe_state_domain = None;
+        let mut summary_output_domain = None;
         let mut state_seed = None;
         let mut state_summary = None;
         let mut output_summary = None;
@@ -754,6 +758,8 @@ impl Parse for ProjectionModelArgs {
                     "summary_output" => summary_output_ty = Some(input.parse()?),
                     "abstract_state" => abstract_state_ty = Some(input.parse()?),
                     "expected_output" => expected_output_ty = Some(input.parse()?),
+                    "probe_state_domain" => probe_state_domain = Some(input.parse()?),
+                    "summary_output_domain" => summary_output_domain = Some(input.parse()?),
                     "state_seed" => state_seed = Some(input.parse()?),
                     _ => {
                         return Err(syn::Error::new(
@@ -835,6 +841,8 @@ impl Parse for ProjectionModelArgs {
             expected_output_ty: expected_output_ty.ok_or_else(|| {
                 syn::Error::new(Span::call_site(), "missing expected_output = ...")
             })?,
+            probe_state_domain,
+            summary_output_domain,
             state_seed: state_seed
                 .ok_or_else(|| syn::Error::new(Span::call_site(), "missing state_seed = ..."))?,
             state_summary: state_summary.ok_or_else(|| {
@@ -1586,7 +1594,7 @@ fn expand_protocol_input_witness_struct(
                 .ok_or_else(|| syn::Error::new(fields.span(), "missing newtype field"))?;
             Ok(quote! {
                 impl ::nirvash_core::conformance::ProtocolInputWitnessCodec<#action_ty> for #ident {
-                    fn encode_positive(action: &#action_ty) -> Self {
+                    fn canonical_positive(action: &#action_ty) -> Self {
                         Self(action.clone())
                     }
                 }
@@ -1624,7 +1632,7 @@ fn expand_protocol_input_witness_struct(
             };
             Ok(quote! {
                 impl ::nirvash_core::conformance::ProtocolInputWitnessCodec<#action_ty> for #ident {
-                    fn encode_positive(action: &#action_ty) -> Self {
+                    fn canonical_positive(action: &#action_ty) -> Self {
                         let mut input = <Self as ::core::default::Default>::default();
                         input.#action_field = action.clone();
                         input
@@ -1684,7 +1692,7 @@ fn expand_protocol_input_witness_enum(
         .collect::<syn::Result<Vec<_>>>()?;
     Ok(quote! {
         impl ::nirvash_core::conformance::ProtocolInputWitnessCodec<#action_ty> for #ident {
-            fn encode_positive(action: &#action_ty) -> Self {
+            fn canonical_positive(action: &#action_ty) -> Self {
                 match action {
                     #(#arms)*
                 }
@@ -4173,6 +4181,8 @@ fn expand_projection_model(args: ProjectionModelArgs) -> syn::Result<TokenStream
         summary_output_ty,
         abstract_state_ty,
         expected_output_ty,
+        probe_state_domain,
+        summary_output_domain,
         state_seed,
         state_summary,
         output_summary,
@@ -4278,6 +4288,135 @@ fn expand_projection_model(args: ProjectionModelArgs) -> syn::Result<TokenStream
             })
         })
         .collect::<syn::Result<Vec<_>>>()?;
+    let state_projection_test = if let Some(domain) = probe_state_domain {
+        quote! {
+            #[test]
+            #[allow(unused_assignments)]
+            fn declared_state_projection_matches_model() {
+                let spec = <#self_ty as ::core::default::Default>::default();
+                ::nirvash_core::conformance::assert_projection_exhaustive(
+                    "declared state projection",
+                    (#domain)(),
+                    |probe: &#probe_state_ty| {
+                        let summary =
+                            <#self_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::summarize_state(
+                                &spec,
+                                probe,
+                            );
+                        let projected =
+                            <#self_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_state(
+                                &spec,
+                                &summary,
+                            );
+                        (summary, projected)
+                    },
+                    |probe: &#probe_state_ty| {
+                        let probe = probe;
+                        let summary = #summary_state_ty {
+                            #(#state_summary_fields),*
+                        };
+                        let projected = {
+                            let spec = &spec;
+                            let summary = &summary;
+                            let mut state: #abstract_state_ty = #state_seed;
+                            #(#state_abstract_assignments)*
+                            state
+                        };
+                        (summary, projected)
+                    },
+                );
+            }
+        }
+    } else {
+        quote! {
+            #[test]
+            #[allow(unused_assignments)]
+            fn declared_state_projection_matches_model() {
+                let spec = <#self_ty as ::core::default::Default>::default();
+                let probe = <#probe_state_ty as ::core::default::Default>::default();
+                let summary =
+                    <#self_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::summarize_state(
+                        &spec,
+                        &probe,
+                    );
+                let expected_summary = {
+                    let probe = &probe;
+                    #summary_state_ty {
+                        #(#state_summary_fields),*
+                    }
+                };
+                let projected =
+                    <#self_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_state(
+                        &spec,
+                        &summary,
+                    );
+                let expected_state: #abstract_state_ty = {
+                    let spec = &spec;
+                    let summary = &summary;
+                    let mut state: #abstract_state_ty = #state_seed;
+                    #(#state_abstract_assignments)*
+                    state
+                };
+                ::nirvash_core::conformance::assert_declared_state_projection(
+                    &summary,
+                    &expected_summary,
+                    &projected,
+                    &expected_state,
+                );
+            }
+        }
+    };
+    let output_projection_test = if let Some(domain) = summary_output_domain {
+        quote! {
+            #[test]
+            fn declared_output_projection_matches_model() {
+                let spec = <#self_ty as ::core::default::Default>::default();
+                ::nirvash_core::conformance::assert_projection_exhaustive(
+                    "declared output projection",
+                    (#domain)(),
+                    |summary: &#summary_output_ty| {
+                        <#self_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_output(
+                            &spec,
+                            summary,
+                        )
+                    },
+                    |summary: &#summary_output_ty| {
+                        let mut output: #expected_output_ty = ::core::default::Default::default();
+                        for effect in &summary.effects {
+                            match effect {
+                                #(#output_match_arms,)*
+                                _ => panic!("projection model encountered undeclared summary effect: {:?}", effect),
+                            }
+                        }
+                        output
+                    },
+                );
+            }
+        }
+    } else {
+        quote! {
+            #[test]
+            fn declared_output_projection_matches_model() {
+                let spec = <#self_ty as ::core::default::Default>::default();
+                let mut sample_effects = ::std::vec::Vec::new();
+                let mut expected_output: #expected_output_ty = ::core::default::Default::default();
+                #(#output_test_samples)*
+                let summary = #summary_output_ty {
+                    effects: sample_effects,
+                    ..<#summary_output_ty as ::core::default::Default>::default()
+                };
+                let projected =
+                    <#self_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_output(
+                        &spec,
+                        &summary,
+                    );
+                ::nirvash_core::conformance::assert_declared_output_projection(
+                    &projected,
+                    &expected_output,
+                );
+            }
+        }
+    };
 
     let projection_tokens = expand_projection_contract(
         ProjectionContractArgs {
@@ -4339,62 +4478,9 @@ fn expand_projection_model(args: ProjectionModelArgs) -> syn::Result<TokenStream
         mod #tests_mod_ident {
             use super::*;
 
-            #[test]
-            #[allow(unused_assignments)]
-            fn declared_state_projection_matches_model() {
-                let spec = <#self_ty as ::core::default::Default>::default();
-                let probe = <#probe_state_ty as ::core::default::Default>::default();
-                let summary =
-                    <#self_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::summarize_state(
-                        &spec,
-                        &probe,
-                    );
-                let expected_summary = {
-                    let probe = &probe;
-                    #summary_state_ty {
-                        #(#state_summary_fields),*
-                    }
-                };
-                let projected =
-                    <#self_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_state(
-                        &spec,
-                        &summary,
-                    );
-                let expected_state: #abstract_state_ty = {
-                    let spec = &spec;
-                    let summary = &summary;
-                    let mut state: #abstract_state_ty = #state_seed;
-                    #(#state_abstract_assignments)*
-                    state
-                };
-                ::nirvash_core::conformance::assert_declared_state_projection(
-                    &summary,
-                    &expected_summary,
-                    &projected,
-                    &expected_state,
-                );
-            }
+            #state_projection_test
 
-            #[test]
-            fn declared_output_projection_matches_model() {
-                let spec = <#self_ty as ::core::default::Default>::default();
-                let mut sample_effects = ::std::vec::Vec::new();
-                let mut expected_output: #expected_output_ty = ::core::default::Default::default();
-                #(#output_test_samples)*
-                let summary = #summary_output_ty {
-                    effects: sample_effects,
-                    ..<#summary_output_ty as ::core::default::Default>::default()
-                };
-                let projected =
-                    <#self_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_output(
-                        &spec,
-                        &summary,
-                    );
-                ::nirvash_core::conformance::assert_declared_output_projection(
-                    &projected,
-                    &expected_output,
-                );
-            }
+            #output_projection_test
         }
     })
 }
@@ -4718,18 +4804,30 @@ fn expand_runtime_contract_runtime_mode(
     } else if let Some(input_codec) = &input_codec {
         let probe_context_expr = probe_context.clone();
         quote! {
-            vec![
-                ::nirvash_core::conformance::PositiveWitness::new(
-                    <#input_codec as ::nirvash_core::conformance::ProtocolInputWitnessCodec<
-                        <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action
-                    >>::witness_name(action),
-                    #probe_context_expr,
-                    <#input_codec as ::nirvash_core::conformance::ProtocolInputWitnessCodec<
-                        <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action
-                    >>::encode_positive(action),
-                )
-                .with_canonical(true),
-            ]
+            <#input_codec as ::nirvash_core::conformance::ProtocolInputWitnessCodec<
+                <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action
+            >>::positive_family(action)
+                .into_iter()
+                .enumerate()
+                .map(|(index, input)| {
+                    ::nirvash_core::conformance::PositiveWitness::new(
+                        <#input_codec as ::nirvash_core::conformance::ProtocolInputWitnessCodec<
+                            <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action
+                        >>::witness_name(
+                            action,
+                            if index == 0 {
+                                ::nirvash_core::conformance::WitnessKind::CanonicalPositive
+                            } else {
+                                ::nirvash_core::conformance::WitnessKind::Positive
+                            },
+                            index,
+                        ),
+                        #probe_context_expr,
+                        input,
+                    )
+                    .with_canonical(index == 0)
+                })
+                .collect()
         }
     } else {
         quote! { ::std::vec::Vec::new() }
@@ -4747,17 +4845,25 @@ fn expand_runtime_contract_runtime_mode(
     } else if let Some(input_codec) = &input_codec {
         let probe_context_expr = probe_context.clone();
         quote! {
-            vec![
-                ::nirvash_core::conformance::NegativeWitness::new(
-                    <#input_codec as ::nirvash_core::conformance::ProtocolInputWitnessCodec<
-                        <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action
-                    >>::witness_name(action),
-                    #probe_context_expr,
-                    <#input_codec as ::nirvash_core::conformance::ProtocolInputWitnessCodec<
-                        <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action
-                    >>::encode_negative(action),
-                ),
-            ]
+            <#input_codec as ::nirvash_core::conformance::ProtocolInputWitnessCodec<
+                <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action
+            >>::negative_family(action)
+                .into_iter()
+                .enumerate()
+                .map(|(index, input)| {
+                    ::nirvash_core::conformance::NegativeWitness::new(
+                        <#input_codec as ::nirvash_core::conformance::ProtocolInputWitnessCodec<
+                            <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::Action
+                        >>::witness_name(
+                            action,
+                            ::nirvash_core::conformance::WitnessKind::Negative,
+                            index,
+                        ),
+                        #probe_context_expr,
+                        input,
+                    )
+                })
+                .collect()
         }
     } else {
         quote! { ::std::vec::Vec::new() }

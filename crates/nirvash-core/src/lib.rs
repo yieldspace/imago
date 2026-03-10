@@ -21,7 +21,8 @@ pub use concurrent::{ConcurrentAction, ConcurrentTransitionSystem};
 pub use conformance::{
     DynamicTestCase, NegativeWitness, PositiveWitness, ProtocolConformanceSpec,
     ProtocolInputWitnessBinding, ProtocolInputWitnessCodec, ProtocolRuntimeBinding,
-    RegisteredCodeWitnessTestProvider, WitnessFamily, run_registered_code_witness_tests,
+    RegisteredCodeWitnessTestProvider, WitnessFamily, WitnessKind,
+    run_registered_code_witness_tests,
 };
 pub use doc_graph::{
     DocGraphCase, DocGraphEdge, DocGraphPolicy, DocGraphProvider, DocGraphReductionMode,

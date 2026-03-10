@@ -1,3 +1,5 @@
+#[cfg(test)]
+use imagod_spec::{ContractEffectSummary, SummaryLogChunk, SummaryRequestKind, SummaryStreamId};
 use imagod_spec::{LogsOutputSummary, LogsProbeOutput, LogsProbeState, LogsStateSummary};
 use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
@@ -199,6 +201,38 @@ impl ModelCaseSource for LogsProjectionSpec {
     }
 }
 
+#[cfg(test)]
+fn logs_probe_state_domain() -> nirvash_core::BoundedDomain<LogsProbeState> {
+    <LogsProbeState as nirvash_core::Signature>::bounded_domain()
+}
+
+#[cfg(test)]
+fn logs_summary_output_domain() -> nirvash_core::BoundedDomain<LogsOutputSummary> {
+    nirvash_core::BoundedDomain::new(vec![
+        LogsOutputSummary {
+            effects: vec![
+                ContractEffectSummary::RequestObserved(
+                    SummaryStreamId::Stream1,
+                    SummaryRequestKind::LogsRequest,
+                ),
+                ContractEffectSummary::Response(
+                    SummaryStreamId::Stream1,
+                    SummaryRequestKind::LogsRequest,
+                ),
+            ],
+        },
+        LogsOutputSummary {
+            effects: vec![ContractEffectSummary::LogChunk(
+                SummaryStreamId::Stream1,
+                SummaryLogChunk::Chunk0,
+            )],
+        },
+        LogsOutputSummary {
+            effects: vec![ContractEffectSummary::LogsEnd(SummaryStreamId::Stream1)],
+        },
+    ])
+}
+
 nirvash_projection_model! {
     probe_state = LogsProbeState,
     probe_output = LogsProbeOutput,
@@ -206,6 +240,8 @@ nirvash_projection_model! {
     summary_output = LogsOutputSummary,
     abstract_state = SystemState,
     expected_output = Vec<SystemEffect>,
+    probe_state_domain = logs_probe_state_domain,
+    summary_output_domain = logs_summary_output_domain,
     state_seed = spec.initial_state(),
     state_summary {
         service_running <= probe.service_running,

@@ -1,3 +1,5 @@
+#[cfg(test)]
+use imagod_spec::{ContractEffectSummary, SummaryRequestKind, SummaryStreamId};
 use imagod_spec::{RouterOutputSummary, RouterProbeOutput, RouterProbeState, RouterStateSummary};
 use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
@@ -267,6 +269,41 @@ impl ModelCaseSource for RouterProjectionSpec {
     }
 }
 
+#[cfg(test)]
+fn router_probe_state_domain() -> nirvash_core::BoundedDomain<RouterProbeState> {
+    <RouterProbeState as nirvash_core::Signature>::bounded_domain()
+}
+
+#[cfg(test)]
+fn router_summary_output_domain() -> nirvash_core::BoundedDomain<RouterOutputSummary> {
+    let mut values = vec![RouterOutputSummary::default()];
+    for kind in [
+        SummaryRequestKind::HelloNegotiate,
+        SummaryRequestKind::DeployPrepare,
+        SummaryRequestKind::ArtifactPush,
+        SummaryRequestKind::ArtifactCommit,
+        SummaryRequestKind::StateRequest,
+        SummaryRequestKind::ServicesList,
+        SummaryRequestKind::CommandCancel,
+        SummaryRequestKind::RpcInvoke,
+        SummaryRequestKind::BindingsCertUpload,
+    ] {
+        values.push(RouterOutputSummary {
+            effects: vec![ContractEffectSummary::RequestObserved(
+                SummaryStreamId::Stream0,
+                kind,
+            )],
+        });
+        values.push(RouterOutputSummary {
+            effects: vec![
+                ContractEffectSummary::RequestObserved(SummaryStreamId::Stream0, kind),
+                ContractEffectSummary::Response(SummaryStreamId::Stream0, kind),
+            ],
+        });
+    }
+    nirvash_core::BoundedDomain::new(values)
+}
+
 nirvash_projection_model! {
     probe_state = RouterProbeState,
     probe_output = RouterProbeOutput,
@@ -274,6 +311,8 @@ nirvash_projection_model! {
     summary_output = RouterOutputSummary,
     abstract_state = SystemState,
     expected_output = Vec<SystemEffect>,
+    probe_state_domain = router_probe_state_domain,
+    summary_output_domain = router_summary_output_domain,
     state_seed = spec.initial_state(),
     state_summary {
         active_session <= probe.active_session,

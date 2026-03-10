@@ -4,21 +4,57 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CommandProtocolObservedState, CommandProtocolOutput};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    Serialize,
+    Deserialize,
+    nirvash_macros::Signature,
+)]
 pub enum SummaryServiceId {
     #[default]
     Service0,
     Service1,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    Serialize,
+    Deserialize,
+    nirvash_macros::Signature,
+)]
 pub enum SummaryStreamId {
     #[default]
     Stream0,
     Stream1,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    Serialize,
+    Deserialize,
+    nirvash_macros::Signature,
+)]
 pub enum SummarySessionRole {
     #[default]
     Admin,
@@ -26,7 +62,19 @@ pub enum SummarySessionRole {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    Serialize,
+    Deserialize,
+    nirvash_macros::Signature,
+)]
 pub enum SummaryRequestKind {
     #[default]
     HelloNegotiate,
@@ -42,7 +90,19 @@ pub enum SummaryRequestKind {
     BindingsCertUpload,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    Serialize,
+    Deserialize,
+    nirvash_macros::Signature,
+)]
 pub enum SummaryCommandEvent {
     #[default]
     Accepted,
@@ -52,13 +112,37 @@ pub enum SummaryCommandEvent {
     Canceled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    Serialize,
+    Deserialize,
+    nirvash_macros::Signature,
+)]
 pub enum SummaryLogChunk {
     #[default]
     Chunk0,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    Serialize,
+    Deserialize,
+    nirvash_macros::Signature,
+)]
 pub enum SummaryTaskState {
     #[default]
     NotStarted,
@@ -66,14 +150,38 @@ pub enum SummaryTaskState {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    Serialize,
+    Deserialize,
+    nirvash_macros::Signature,
+)]
 pub enum SummaryTaskKind {
     #[default]
     PluginGc,
     BootRestore,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    Serialize,
+    Deserialize,
+    nirvash_macros::Signature,
+)]
 pub enum SummaryShutdownPhase {
     #[default]
     Idle,
@@ -84,7 +192,32 @@ pub enum SummaryShutdownPhase {
     Completed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    Serialize,
+    Deserialize,
+    nirvash_macros::Signature,
+)]
+pub enum SummaryManagerRuntimePhase {
+    #[default]
+    Booting,
+    ConfigReady,
+    Restoring,
+    Listening,
+    ShutdownRequested,
+    Stopped,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, nirvash_macros::Signature,
+)]
 pub struct ShutdownStateSummary {
     pub phase: SummaryShutdownPhase,
     pub accepts_stopped: bool,
@@ -94,7 +227,9 @@ pub struct ShutdownStateSummary {
     pub forced_stop_attempted: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, nirvash_macros::Signature,
+)]
 pub enum ContractEffectSummary {
     RequestObserved(SummaryStreamId, SummaryRequestKind),
     Response(SummaryStreamId, SummaryRequestKind),
@@ -168,7 +303,7 @@ pub struct ManagerRuntimeProbeOutput {
     pub output: ManagerRuntimeOutputSummary,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, nirvash_macros::Signature)]
 pub struct RouterProbeState {
     pub active_session: bool,
     pub role: Option<SummarySessionRole>,
@@ -207,7 +342,7 @@ impl Default for RouterProbeState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, nirvash_macros::Signature)]
 pub struct RouterStateSummary {
     pub active_session: bool,
     pub role: Option<SummarySessionRole>,
@@ -246,7 +381,9 @@ impl Default for RouterStateSummary {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, nirvash_macros::Signature,
+)]
 pub struct SessionAuthProbeState {
     pub active_session: bool,
     pub shutdown_requested: bool,
@@ -256,7 +393,9 @@ pub struct SessionAuthProbeState {
     pub client_authority_uploaded: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, nirvash_macros::Signature,
+)]
 pub struct SessionAuthStateSummary {
     pub active_session: bool,
     pub shutdown_requested: bool,
@@ -279,7 +418,7 @@ impl From<SessionAuthProbeState> for SessionAuthStateSummary {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, nirvash_macros::Signature)]
 pub struct LogsProbeState {
     pub service_running: bool,
     pub logs_authorized: bool,
@@ -306,7 +445,7 @@ impl Default for LogsProbeState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, nirvash_macros::Signature)]
 pub struct LogsStateSummary {
     pub service_running: bool,
     pub logs_authorized: bool,
@@ -333,7 +472,9 @@ impl Default for LogsStateSummary {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, nirvash_macros::Signature,
+)]
 pub struct RuntimeProbeState {
     pub service0_promoted: bool,
     pub service1_promoted: bool,
@@ -350,7 +491,9 @@ pub struct RuntimeProbeState {
     pub shutdown: ShutdownStateSummary,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, nirvash_macros::Signature,
+)]
 pub struct RuntimeStateSummary {
     pub service0_promoted: bool,
     pub service1_promoted: bool,
@@ -387,12 +530,13 @@ impl From<RuntimeProbeState> for RuntimeStateSummary {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, nirvash_macros::Signature,
+)]
 pub struct ManagerRuntimeProbeState {
     pub config_loaded: bool,
     pub created_default: bool,
-    pub plugin_gc: SummaryTaskState,
-    pub boot_restore: SummaryTaskState,
+    pub manager_phase: SummaryManagerRuntimePhase,
     pub listening: bool,
     pub manager_shutdown_started: bool,
     pub manager_stopped: bool,
@@ -400,12 +544,13 @@ pub struct ManagerRuntimeProbeState {
     pub shutdown: ShutdownStateSummary,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, nirvash_macros::Signature,
+)]
 pub struct ManagerRuntimeStateSummary {
     pub config_loaded: bool,
     pub created_default: bool,
-    pub plugin_gc: SummaryTaskState,
-    pub boot_restore: SummaryTaskState,
+    pub manager_phase: SummaryManagerRuntimePhase,
     pub listening: bool,
     pub manager_shutdown_started: bool,
     pub manager_stopped: bool,
@@ -418,8 +563,7 @@ impl From<ManagerRuntimeProbeState> for ManagerRuntimeStateSummary {
         Self {
             config_loaded: probe.config_loaded,
             created_default: probe.created_default,
-            plugin_gc: probe.plugin_gc,
-            boot_restore: probe.boot_restore,
+            manager_phase: probe.manager_phase,
             listening: probe.listening,
             manager_shutdown_started: probe.manager_shutdown_started,
             manager_stopped: probe.manager_stopped,

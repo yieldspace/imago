@@ -133,8 +133,6 @@ impl SystemSpec {
                 phase: ManagerRuntimePhase::Listening,
                 config_loaded: true,
                 created_default: false,
-                plugin_gc: crate::manager_runtime::TaskState::Succeeded,
-                boot_restore: crate::manager_runtime::TaskState::Succeeded,
             },
             session: SessionTransportSpec::new().initial_state(),
             session_auth: SessionAuthSpec::new().initial_state(),
@@ -2672,21 +2670,16 @@ mod tests {
     }
 
     #[test]
-    fn boot_case_reaches_listening_with_completed_boot_tasks() {
+    fn boot_case_reaches_listening() {
         let spec = SystemSpec::new();
         let snapshot = reachable_snapshot_for_case(&spec, "boot_gc_and_restore");
 
-        assert!(snapshot.states.iter().any(|state| {
-            matches!(state.manager.phase, ManagerRuntimePhase::Listening)
-                && matches!(
-                    state.manager.plugin_gc,
-                    crate::manager_runtime::TaskState::Succeeded
-                )
-                && matches!(
-                    state.manager.boot_restore,
-                    crate::manager_runtime::TaskState::Succeeded
-                )
-        }));
+        assert!(
+            snapshot
+                .states
+                .iter()
+                .any(|state| { matches!(state.manager.phase, ManagerRuntimePhase::Listening) })
+        );
     }
 
     #[test]

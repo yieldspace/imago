@@ -23,8 +23,6 @@ pub struct ManagerRuntimeState {
     pub phase: ManagerRuntimePhase,
     pub config_loaded: bool,
     pub created_default: bool,
-    pub plugin_gc: TaskState,
-    pub boot_restore: TaskState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, ActionVocabulary)]
@@ -62,8 +60,6 @@ impl ManagerRuntimeSpec {
             phase: ManagerRuntimePhase::Booting,
             config_loaded: false,
             created_default: false,
-            plugin_gc: TaskState::NotStarted,
-            boot_restore: TaskState::NotStarted,
         }
     }
 }
@@ -81,23 +77,6 @@ fn listening_requires_config() -> nirvash_core::StatePredicate<ManagerRuntimeSta
                 | ManagerRuntimePhase::ShutdownRequested
                 | ManagerRuntimePhase::Stopped
         ) || state.config_loaded
-    })
-}
-
-#[invariant(ManagerRuntimeSpec)]
-fn restore_depends_on_plugin_gc() -> nirvash_core::StatePredicate<ManagerRuntimeState> {
-    nirvash_core::StatePredicate::new("restore_depends_on_plugin_gc", |state| {
-        !matches!(state.phase, ManagerRuntimePhase::Restoring)
-            || !matches!(state.plugin_gc, TaskState::NotStarted)
-    })
-}
-
-#[invariant(ManagerRuntimeSpec)]
-fn booting_keeps_boot_tasks_idle() -> nirvash_core::StatePredicate<ManagerRuntimeState> {
-    nirvash_core::StatePredicate::new("booting_keeps_boot_tasks_idle", |state| {
-        !matches!(state.phase, ManagerRuntimePhase::Booting)
-            || (matches!(state.plugin_gc, TaskState::NotStarted)
-                && matches!(state.boot_restore, TaskState::NotStarted))
     })
 }
 
@@ -257,35 +236,30 @@ fn transition_state(
             if matches!(prev.phase, ManagerRuntimePhase::ConfigReady) =>
         {
             candidate.phase = ManagerRuntimePhase::Restoring;
-            candidate.plugin_gc = TaskState::Succeeded;
             Some(candidate)
         }
         ManagerRuntimeAction::RunPluginGcFailed
             if matches!(prev.phase, ManagerRuntimePhase::ConfigReady) =>
         {
             candidate.phase = ManagerRuntimePhase::Restoring;
-            candidate.plugin_gc = TaskState::Failed;
             Some(candidate)
         }
         ManagerRuntimeAction::RunBootRestoreSucceeded
             if matches!(prev.phase, ManagerRuntimePhase::Restoring) =>
         {
             candidate.phase = ManagerRuntimePhase::Listening;
-            candidate.boot_restore = TaskState::Succeeded;
             Some(candidate)
         }
         ManagerRuntimeAction::RunBootRestoreFailed
             if matches!(prev.phase, ManagerRuntimePhase::Restoring) =>
         {
             candidate.phase = ManagerRuntimePhase::Listening;
-            candidate.boot_restore = TaskState::Failed;
             Some(candidate)
         }
         ManagerRuntimeAction::StartListening
             if matches!(prev.phase, ManagerRuntimePhase::ConfigReady) =>
         {
             candidate.phase = ManagerRuntimePhase::Listening;
-            candidate.boot_restore = TaskState::Succeeded;
             Some(candidate)
         }
         ManagerRuntimeAction::BeginShutdown

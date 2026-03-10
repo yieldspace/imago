@@ -25,6 +25,7 @@ fn signature_derive_behaves_for_supported_inputs() {
     t.pass("tests/fixtures/runtime_contract_input_codec_ok.rs");
     t.pass("tests/fixtures/projection_contract_ok.rs");
     t.pass("tests/fixtures/projection_model_ok.rs");
+    t.pass("tests/fixtures/projection_model_exhaustive_ok.rs");
     t.pass("tests/fixtures/derive_protocol_input_witness_ok.rs");
     t.compile_fail("tests/fixtures/attribute_missing_target.rs");
     t.compile_fail("tests/fixtures/attribute_wrong_type.rs");

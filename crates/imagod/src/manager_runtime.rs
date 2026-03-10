@@ -1,9 +1,17 @@
-use std::{future::Future, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use imagod_common::ImagodError;
 use imagod_config::{ImagodConfig, load_or_create_default, resolve_config_path};
 use imagod_control::{ArtifactStore, OperationManager, Orchestrator, ServiceSupervisor};
 use imagod_server::{ProtocolHandler, build_server};
+use imagod_spec::{
+    ShutdownStateSummary, SummaryManagerRuntimePhase, SummaryTaskKind, SummaryTaskState,
+};
 use web_transport_quinn::http::StatusCode;
 
 use crate::shutdown::{
@@ -21,6 +29,95 @@ pub(crate) enum ManagerRuntimeTaskState {
     Failed,
 }
 
+impl ManagerRuntimeTaskState {
+    #[allow(dead_code)]
+    const fn summary(self) -> SummaryTaskState {
+        match self {
+            Self::NotStarted => SummaryTaskState::NotStarted,
+            Self::Succeeded => SummaryTaskState::Succeeded,
+            Self::Failed => SummaryTaskState::Failed,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ManagerRuntimeSnapshot {
+    pub config_loaded: bool,
+    pub created_default: bool,
+    pub manager_phase: SummaryManagerRuntimePhase,
+    pub listening: bool,
+    pub session_shutdown_requested: bool,
+    pub shutdown: ShutdownStateSummary,
+}
+
+impl Default for ManagerRuntimeSnapshot {
+    fn default() -> Self {
+        Self {
+            config_loaded: false,
+            created_default: false,
+            manager_phase: SummaryManagerRuntimePhase::Booting,
+            listening: false,
+            session_shutdown_requested: false,
+            shutdown: ShutdownStateSummary::default(),
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ManagerRuntimeEffect {
+    TaskMilestone(SummaryTaskKind, SummaryTaskState),
+    ShutdownComplete,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+struct ManagerRuntimeObservationState {
+    snapshot: ManagerRuntimeSnapshot,
+    effects: Vec<ManagerRuntimeEffect>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ManagerRuntimeObservation {
+    inner: Arc<Mutex<ManagerRuntimeObservationState>>,
+}
+
+#[allow(dead_code)]
+impl ManagerRuntimeObservation {
+    pub(crate) fn snapshot(&self) -> ManagerRuntimeSnapshot {
+        self.inner
+            .lock()
+            .expect("manager runtime observation should not be poisoned")
+            .snapshot
+    }
+
+    pub(crate) fn drain_effects(&self) -> Vec<ManagerRuntimeEffect> {
+        let mut guard = self
+            .inner
+            .lock()
+            .expect("manager runtime observation should not be poisoned");
+        std::mem::take(&mut guard.effects)
+    }
+
+    fn update_snapshot(&self, apply: impl FnOnce(&mut ManagerRuntimeSnapshot)) {
+        let mut guard = self
+            .inner
+            .lock()
+            .expect("manager runtime observation should not be poisoned");
+        apply(&mut guard.snapshot);
+    }
+
+    fn push_effect(&self, effect: ManagerRuntimeEffect) {
+        let mut guard = self
+            .inner
+            .lock()
+            .expect("manager runtime observation should not be poisoned");
+        guard.effects.push(effect);
+    }
+}
+
 trait ManagerRuntimeObserver: Clone {
     fn note_config_loaded(&self, _created_default: bool) {}
 
@@ -32,15 +129,97 @@ trait ManagerRuntimeObserver: Clone {
 
     fn note_shutdown_started(&self) {}
 
+    fn note_services_stopped(&self, _forced: bool) {}
+
     fn note_forced_stop_used(&self) {}
 
     fn note_maintenance_stopped(&self) {}
+
+    fn note_shutdown_completed(&self) {}
 }
 
 #[derive(Debug, Clone, Default)]
 struct NoopManagerRuntimeObserver;
 
 impl ManagerRuntimeObserver for NoopManagerRuntimeObserver {}
+
+impl ManagerRuntimeObserver for ManagerRuntimeObservation {
+    fn note_config_loaded(&self, created_default: bool) {
+        self.update_snapshot(|snapshot| {
+            snapshot.config_loaded = true;
+            snapshot.created_default = created_default;
+            snapshot.manager_phase = SummaryManagerRuntimePhase::ConfigReady;
+        });
+    }
+
+    fn note_plugin_gc(&self, state: ManagerRuntimeTaskState) {
+        self.update_snapshot(|snapshot| {
+            snapshot.manager_phase = SummaryManagerRuntimePhase::Restoring;
+        });
+        self.push_effect(ManagerRuntimeEffect::TaskMilestone(
+            SummaryTaskKind::PluginGc,
+            state.summary(),
+        ));
+    }
+
+    fn note_boot_restore(&self, state: ManagerRuntimeTaskState) {
+        self.update_snapshot(|snapshot| {
+            snapshot.manager_phase = SummaryManagerRuntimePhase::Listening;
+        });
+        self.push_effect(ManagerRuntimeEffect::TaskMilestone(
+            SummaryTaskKind::BootRestore,
+            state.summary(),
+        ));
+    }
+
+    fn note_listening(&self) {
+        self.update_snapshot(|snapshot| {
+            snapshot.listening = true;
+            snapshot.manager_phase = SummaryManagerRuntimePhase::Listening;
+        });
+    }
+
+    fn note_shutdown_started(&self) {
+        self.update_snapshot(|snapshot| {
+            snapshot.listening = false;
+            snapshot.session_shutdown_requested = true;
+            snapshot.manager_phase = SummaryManagerRuntimePhase::ShutdownRequested;
+            snapshot.shutdown.phase = imagod_spec::SummaryShutdownPhase::DrainingSessions;
+            snapshot.shutdown.accepts_stopped = true;
+        });
+    }
+
+    fn note_services_stopped(&self, forced: bool) {
+        self.update_snapshot(|snapshot| {
+            snapshot.shutdown.phase = imagod_spec::SummaryShutdownPhase::StoppingMaintenance;
+            snapshot.shutdown.sessions_drained = true;
+            snapshot.shutdown.services_stopped = true;
+            snapshot.shutdown.forced_stop_attempted |= forced;
+        });
+    }
+
+    fn note_forced_stop_used(&self) {
+        self.update_snapshot(|snapshot| {
+            snapshot.shutdown.forced_stop_attempted = true;
+        });
+    }
+
+    fn note_maintenance_stopped(&self) {
+        self.update_snapshot(|snapshot| {
+            snapshot.shutdown.phase = imagod_spec::SummaryShutdownPhase::StoppingMaintenance;
+            snapshot.shutdown.maintenance_stopped = true;
+        });
+    }
+
+    fn note_shutdown_completed(&self) {
+        self.update_snapshot(|snapshot| {
+            snapshot.manager_phase = SummaryManagerRuntimePhase::Stopped;
+            snapshot.listening = false;
+            snapshot.shutdown.phase = imagod_spec::SummaryShutdownPhase::Completed;
+        });
+        self.push_effect(ManagerRuntimeEffect::ShutdownComplete);
+    }
+}
 
 struct BootContext {
     handler: ProtocolHandler,
@@ -416,6 +595,7 @@ where
 
     let _ = maintenance.shutdown_tx.send(true);
     wait_for_maintenance_shutdown(maintenance.task).await?;
+    observer.note_shutdown_completed();
     Ok(())
 }
 
@@ -431,10 +611,14 @@ async fn stop_managed_services<O, StopAll, StopAllFuture, HasLive, HasLiveFuture
     HasLiveFuture: Future<Output = bool>,
 {
     log_service_shutdown_errors(stop_all_services(false).await, false);
-    if has_live_services().await {
+    let forced = if has_live_services().await {
         observer.note_forced_stop_used();
         log_service_shutdown_errors(stop_all_services(true).await, true);
-    }
+        true
+    } else {
+        false
+    };
+    observer.note_services_stopped(forced);
 }
 
 fn log_service_shutdown_errors(stop_errors: Vec<(String, ImagodError)>, force: bool) {

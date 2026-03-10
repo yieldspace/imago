@@ -3,6 +3,7 @@ use std::{fmt::Debug, panic::AssertUnwindSafe, process};
 pub use crate::system::{
     ActionApplier, ModelCase, ModelCaseSource, StateObserver, TransitionSystem,
 };
+use crate::{IntoBoundedDomain, into_bounded_domain};
 pub use crate::{ModelChecker, ReachableGraphSnapshot};
 
 /// Spec-side contract for replaying runtime behavior against a transition system.
@@ -126,18 +127,36 @@ impl<Context, Input> NegativeWitness<Context, Input> {
 }
 
 /// Declares how an abstract action is encoded as a concrete witness input.
-pub trait ProtocolInputWitnessCodec<Action>: Clone + Debug {
-    /// Encodes the concrete input used for an allowed abstract transition.
-    fn encode_positive(action: &Action) -> Self;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WitnessKind {
+    CanonicalPositive,
+    Positive,
+    Negative,
+}
 
-    /// Encodes the concrete input used for a rejected abstract transition.
-    fn encode_negative(action: &Action) -> Self {
-        Self::encode_positive(action)
+pub trait ProtocolInputWitnessCodec<Action>: Clone + Debug {
+    /// Encodes the canonical concrete input used for an allowed abstract transition.
+    fn canonical_positive(action: &Action) -> Self;
+
+    /// Returns the concrete inputs used for allowed abstract transitions.
+    ///
+    /// Implementations should place the canonical witness at index `0`.
+    fn positive_family(action: &Action) -> Vec<Self> {
+        vec![Self::canonical_positive(action)]
+    }
+
+    /// Returns the concrete inputs used for rejected abstract transitions.
+    fn negative_family(action: &Action) -> Vec<Self> {
+        vec![Self::canonical_positive(action)]
     }
 
     /// Returns the stable witness label used by generated witnesses.
-    fn witness_name(_action: &Action) -> String {
-        "principal".to_owned()
+    fn witness_name(_action: &Action, kind: WitnessKind, index: usize) -> String {
+        match kind {
+            WitnessKind::CanonicalPositive => "principal".to_owned(),
+            WitnessKind::Positive => format!("positive_{index}"),
+            WitnessKind::Negative => format!("negative_{index}"),
+        }
     }
 }
 
@@ -363,6 +382,28 @@ pub fn assert_declared_output_projection<Output>(
     );
 }
 
+pub fn assert_projection_exhaustive<Input, Output, Domain, Actual, Expected>(
+    label: &str,
+    domain: Domain,
+    actual: Actual,
+    expected: Expected,
+) where
+    Input: Debug,
+    Output: Debug + PartialEq,
+    Domain: IntoBoundedDomain<Input>,
+    Actual: Fn(&Input) -> Output,
+    Expected: Fn(&Input) -> Output,
+{
+    for value in into_bounded_domain(domain).into_vec() {
+        let projected = actual(&value);
+        let expected_value = expected(&value);
+        assert_eq!(
+            projected, expected_value,
+            "{label}: exhaustive projection mismatch for input {value:?}",
+        );
+    }
+}
+
 pub fn assert_witness_family_completeness<Context, Input>(
     label: &str,
     family: WitnessFamily<'_, Context, Input>,
@@ -397,6 +438,65 @@ pub fn assert_witness_family_completeness<Context, Input>(
                 "{label}: negative witnesses are empty"
             );
         }
+    }
+}
+
+pub fn assert_witness_codec_exhaustive<Action, Input, Domain, Canonical, Positive, Negative, Name>(
+    label: &str,
+    domain: Domain,
+    canonical_positive: Canonical,
+    positive_family: Positive,
+    negative_family: Negative,
+    witness_name: Name,
+) where
+    Action: Debug,
+    Input: Debug + Clone,
+    Domain: IntoBoundedDomain<Action>,
+    Canonical: Fn(&Action) -> Input,
+    Positive: Fn(&Action) -> Vec<Input>,
+    Negative: Fn(&Action) -> Vec<Input>,
+    Name: Fn(&Action, WitnessKind, usize) -> String,
+{
+    for action in into_bounded_domain(domain).into_vec() {
+        let _canonical = canonical_positive(&action);
+        let positive = positive_family(&action);
+        let negative = negative_family(&action);
+        assert!(
+            !positive.is_empty(),
+            "{label}: positive witness codec family is empty for action {action:?}",
+        );
+        assert!(
+            !negative.is_empty(),
+            "{label}: negative witness codec family is empty for action {action:?}",
+        );
+        let positive_names = positive
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                witness_name(
+                    &action,
+                    if index == 0 {
+                        WitnessKind::CanonicalPositive
+                    } else {
+                        WitnessKind::Positive
+                    },
+                    index,
+                )
+            })
+            .collect::<Vec<_>>();
+        let negative_names = negative
+            .iter()
+            .enumerate()
+            .map(|(index, _)| witness_name(&action, WitnessKind::Negative, index))
+            .collect::<Vec<_>>();
+        assert!(
+            positive_names.iter().all(|name| !name.is_empty()),
+            "{label}: positive witness codec produced an empty name for action {action:?}",
+        );
+        assert!(
+            negative_names.iter().all(|name| !name.is_empty()),
+            "{label}: negative witness codec produced an empty name for action {action:?}",
+        );
     }
 }
 
@@ -646,5 +746,27 @@ mod tests {
 
         assert_witness_family_completeness("positive", WitnessFamily::Positive(&positive));
         assert_witness_family_completeness("negative", WitnessFamily::Negative(&negative));
+    }
+
+    #[test]
+    fn exhaustive_helpers_accept_matching_domains() {
+        assert_projection_exhaustive(
+            "bool identity",
+            [false, true],
+            |value| !value,
+            |value| !value,
+        );
+        assert_witness_codec_exhaustive(
+            "dummy codec",
+            [DummyAction::Advance, DummyAction::Reject],
+            |action| *action,
+            |action| vec![*action],
+            |action| vec![*action],
+            |_action, kind, index| match kind {
+                WitnessKind::CanonicalPositive => format!("canonical_{index}"),
+                WitnessKind::Positive => format!("positive_{index}"),
+                WitnessKind::Negative => format!("negative_{index}"),
+            },
+        );
     }
 }

@@ -1,4 +1,4 @@
-use nirvash_core::conformance::ProtocolInputWitnessCodec;
+use nirvash_core::conformance::{ProtocolInputWitnessCodec, WitnessKind};
 use nirvash_macros::{ActionVocabulary as FormalActionVocabulary, ProtocolInputWitness, Signature as FormalSignature};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature, FormalActionVocabulary, Default)]
@@ -26,7 +26,12 @@ struct StructInput {
 }
 
 fn main() {
-    let _ = <NewtypeInput as ProtocolInputWitnessCodec<Action>>::encode_positive(&Action::Start);
-    let _ = <EnumInput as ProtocolInputWitnessCodec<Action>>::encode_positive(&Action::Stop);
-    let _ = <StructInput as ProtocolInputWitnessCodec<Action>>::encode_negative(&Action::Start);
+    let _ = <NewtypeInput as ProtocolInputWitnessCodec<Action>>::canonical_positive(&Action::Start);
+    let _ = <EnumInput as ProtocolInputWitnessCodec<Action>>::positive_family(&Action::Stop);
+    let _ = <StructInput as ProtocolInputWitnessCodec<Action>>::negative_family(&Action::Start);
+    let _ = <StructInput as ProtocolInputWitnessCodec<Action>>::witness_name(
+        &Action::Start,
+        WitnessKind::CanonicalPositive,
+        0,
+    );
 }

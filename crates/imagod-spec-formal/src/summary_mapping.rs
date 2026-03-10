@@ -1,11 +1,11 @@
 use imagod_spec::{
-    ContractEffectSummary, SummaryCommandEvent, SummaryLogChunk, SummaryRequestKind,
-    SummarySessionRole, SummaryShutdownPhase, SummaryStreamId, SummaryTaskState,
+    ContractEffectSummary, SummaryCommandEvent, SummaryLogChunk, SummaryManagerRuntimePhase,
+    SummaryRequestKind, SummarySessionRole, SummaryShutdownPhase, SummaryStreamId,
 };
 
 use crate::{
     atoms::{CommandEventAtom, LogChunkAtom, RequestKindAtom, SessionRoleAtom, StreamAtom},
-    manager_runtime::TaskState,
+    manager_runtime::ManagerRuntimePhase,
     shutdown_flow::ShutdownPhase,
     system::SystemEffect,
 };
@@ -57,14 +57,6 @@ pub const fn log_chunk_atom(chunk: SummaryLogChunk) -> LogChunkAtom {
     }
 }
 
-pub const fn task_state(summary: SummaryTaskState) -> TaskState {
-    match summary {
-        SummaryTaskState::NotStarted => TaskState::NotStarted,
-        SummaryTaskState::Succeeded => TaskState::Succeeded,
-        SummaryTaskState::Failed => TaskState::Failed,
-    }
-}
-
 pub const fn shutdown_phase(summary: SummaryShutdownPhase) -> ShutdownPhase {
     match summary {
         SummaryShutdownPhase::Idle => ShutdownPhase::Idle,
@@ -73,6 +65,17 @@ pub const fn shutdown_phase(summary: SummaryShutdownPhase) -> ShutdownPhase {
         SummaryShutdownPhase::StoppingServices => ShutdownPhase::StoppingServices,
         SummaryShutdownPhase::StoppingMaintenance => ShutdownPhase::StoppingMaintenance,
         SummaryShutdownPhase::Completed => ShutdownPhase::Completed,
+    }
+}
+
+pub const fn manager_runtime_phase(summary: SummaryManagerRuntimePhase) -> ManagerRuntimePhase {
+    match summary {
+        SummaryManagerRuntimePhase::Booting => ManagerRuntimePhase::Booting,
+        SummaryManagerRuntimePhase::ConfigReady => ManagerRuntimePhase::ConfigReady,
+        SummaryManagerRuntimePhase::Restoring => ManagerRuntimePhase::Restoring,
+        SummaryManagerRuntimePhase::Listening => ManagerRuntimePhase::Listening,
+        SummaryManagerRuntimePhase::ShutdownRequested => ManagerRuntimePhase::ShutdownRequested,
+        SummaryManagerRuntimePhase::Stopped => ManagerRuntimePhase::Stopped,
     }
 }
 

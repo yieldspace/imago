@@ -706,7 +706,6 @@ mod tests {
 
     use super::*;
     use crate::{
-        manager_runtime::TaskState,
         runner_bootstrap::{AuthProofState, BootstrapSizeClass, EndpointState},
         runner_runtime::{ComponentLoadClass, WasmTuningClass},
         session_transport::SessionOutcome,
@@ -871,8 +870,6 @@ mod tests {
                 phase: ManagerRuntimePhase::Listening,
                 config_loaded: true,
                 created_default: false,
-                plugin_gc: TaskState::Succeeded,
-                boot_restore: TaskState::Succeeded,
             },
             transport: SessionTransportSpec::new().initial_state(),
             command: CommandProtocolSpec::new().initial_state(),

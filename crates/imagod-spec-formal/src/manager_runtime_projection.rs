@@ -1,3 +1,5 @@
+#[cfg(test)]
+use imagod_spec::{ContractEffectSummary, SummaryTaskKind, SummaryTaskState};
 use imagod_spec::{
     ManagerRuntimeOutputSummary, ManagerRuntimeProbeOutput, ManagerRuntimeProbeState,
     ManagerRuntimeStateSummary,
@@ -12,7 +14,7 @@ use crate::{
     manager_runtime::{ManagerRuntimeAction, ManagerRuntimeSpec},
     session_transport::{SessionTransportAction, SessionTransportSpec},
     shutdown_flow::{ShutdownFlowAction, ShutdownFlowSpec, ShutdownPhase},
-    summary_mapping::{shutdown_phase, system_effect, task_state},
+    summary_mapping::{manager_runtime_phase, shutdown_phase, system_effect},
     system::{SystemAtomicAction, SystemEffect, SystemSpec, SystemState},
 };
 
@@ -125,23 +127,25 @@ fn manager_runtime_summary_from_state(state: &SystemState) -> ManagerRuntimeStat
     ManagerRuntimeStateSummary {
         config_loaded: state.manager.config_loaded,
         created_default: state.manager.created_default,
-        plugin_gc: match state.manager.plugin_gc {
-            crate::manager_runtime::TaskState::NotStarted => {
-                imagod_spec::SummaryTaskState::NotStarted
+        manager_phase: match state.manager.phase {
+            crate::manager_runtime::ManagerRuntimePhase::Booting => {
+                imagod_spec::SummaryManagerRuntimePhase::Booting
             }
-            crate::manager_runtime::TaskState::Succeeded => {
-                imagod_spec::SummaryTaskState::Succeeded
+            crate::manager_runtime::ManagerRuntimePhase::ConfigReady => {
+                imagod_spec::SummaryManagerRuntimePhase::ConfigReady
             }
-            crate::manager_runtime::TaskState::Failed => imagod_spec::SummaryTaskState::Failed,
-        },
-        boot_restore: match state.manager.boot_restore {
-            crate::manager_runtime::TaskState::NotStarted => {
-                imagod_spec::SummaryTaskState::NotStarted
+            crate::manager_runtime::ManagerRuntimePhase::Restoring => {
+                imagod_spec::SummaryManagerRuntimePhase::Restoring
             }
-            crate::manager_runtime::TaskState::Succeeded => {
-                imagod_spec::SummaryTaskState::Succeeded
+            crate::manager_runtime::ManagerRuntimePhase::Listening => {
+                imagod_spec::SummaryManagerRuntimePhase::Listening
             }
-            crate::manager_runtime::TaskState::Failed => imagod_spec::SummaryTaskState::Failed,
+            crate::manager_runtime::ManagerRuntimePhase::ShutdownRequested => {
+                imagod_spec::SummaryManagerRuntimePhase::ShutdownRequested
+            }
+            crate::manager_runtime::ManagerRuntimePhase::Stopped => {
+                imagod_spec::SummaryManagerRuntimePhase::Stopped
+            }
         },
         listening: matches!(
             state.manager.phase,
@@ -253,6 +257,46 @@ impl ModelCaseSource for ManagerRuntimeProjectionSpec {
     }
 }
 
+#[cfg(test)]
+fn manager_runtime_probe_state_domain() -> nirvash_core::BoundedDomain<ManagerRuntimeProbeState> {
+    <ManagerRuntimeProbeState as nirvash_core::Signature>::bounded_domain()
+}
+
+#[cfg(test)]
+fn manager_runtime_summary_output_domain()
+-> nirvash_core::BoundedDomain<ManagerRuntimeOutputSummary> {
+    nirvash_core::BoundedDomain::new(vec![
+        ManagerRuntimeOutputSummary::default(),
+        ManagerRuntimeOutputSummary {
+            effects: vec![ContractEffectSummary::TaskMilestone(
+                SummaryTaskKind::PluginGc,
+                SummaryTaskState::Succeeded,
+            )],
+        },
+        ManagerRuntimeOutputSummary {
+            effects: vec![ContractEffectSummary::TaskMilestone(
+                SummaryTaskKind::PluginGc,
+                SummaryTaskState::Failed,
+            )],
+        },
+        ManagerRuntimeOutputSummary {
+            effects: vec![ContractEffectSummary::TaskMilestone(
+                SummaryTaskKind::BootRestore,
+                SummaryTaskState::Succeeded,
+            )],
+        },
+        ManagerRuntimeOutputSummary {
+            effects: vec![ContractEffectSummary::TaskMilestone(
+                SummaryTaskKind::BootRestore,
+                SummaryTaskState::Failed,
+            )],
+        },
+        ManagerRuntimeOutputSummary {
+            effects: vec![ContractEffectSummary::ShutdownComplete],
+        },
+    ])
+}
+
 nirvash_projection_model! {
     probe_state = ManagerRuntimeProbeState,
     probe_output = ManagerRuntimeProbeOutput,
@@ -260,12 +304,13 @@ nirvash_projection_model! {
     summary_output = ManagerRuntimeOutputSummary,
     abstract_state = SystemState,
     expected_output = Vec<SystemEffect>,
+    probe_state_domain = manager_runtime_probe_state_domain,
+    summary_output_domain = manager_runtime_summary_output_domain,
     state_seed = spec.initial_state(),
     state_summary {
         config_loaded <= probe.config_loaded,
         created_default <= probe.created_default,
-        plugin_gc <= probe.plugin_gc,
-        boot_restore <= probe.boot_restore,
+        manager_phase <= probe.manager_phase,
         listening <= probe.listening,
         manager_shutdown_started <= probe.manager_shutdown_started,
         manager_stopped <= probe.manager_stopped,
@@ -278,23 +323,7 @@ nirvash_projection_model! {
     state_abstract {
         state.manager.config_loaded <= summary.config_loaded,
         state.manager.created_default <= summary.created_default,
-        state.manager.plugin_gc <= task_state(summary.plugin_gc),
-        state.manager.boot_restore <= task_state(summary.boot_restore),
-        state.manager.phase <= if summary.manager_stopped {
-            crate::manager_runtime::ManagerRuntimePhase::Stopped
-        } else if summary.manager_shutdown_started {
-            crate::manager_runtime::ManagerRuntimePhase::ShutdownRequested
-        } else if summary.listening {
-            crate::manager_runtime::ManagerRuntimePhase::Listening
-        } else if summary.config_loaded
-            && matches!(summary.plugin_gc, imagod_spec::SummaryTaskState::NotStarted)
-        {
-            crate::manager_runtime::ManagerRuntimePhase::ConfigReady
-        } else if summary.config_loaded {
-            crate::manager_runtime::ManagerRuntimePhase::Restoring
-        } else {
-            crate::manager_runtime::ManagerRuntimePhase::Booting
-        },
+        state.manager.phase <= manager_runtime_phase(summary.manager_phase),
         state.session.shutdown_requested <= summary.session_shutdown_requested,
         state.shutdown.phase <= shutdown_phase(summary.shutdown.phase),
         state.shutdown.accepts_stopped <= summary.shutdown.accepts_stopped,
@@ -341,7 +370,7 @@ nirvash_projection_model! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manager_runtime::{ManagerRuntimePhase, TaskState};
+    use crate::manager_runtime::ManagerRuntimePhase;
     #[test]
     fn boot_projection_reaches_listening_state() {
         let spec = ManagerRuntimeProjectionSpec::new();
@@ -368,8 +397,6 @@ mod tests {
             state.manager.phase,
             ManagerRuntimePhase::Listening
         ));
-        assert!(matches!(state.manager.plugin_gc, TaskState::Succeeded));
-        assert!(matches!(state.manager.boot_restore, TaskState::Succeeded));
     }
 
     #[test]

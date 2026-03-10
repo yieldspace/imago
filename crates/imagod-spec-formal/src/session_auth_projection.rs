@@ -1,3 +1,5 @@
+#[cfg(test)]
+use imagod_spec::{ContractEffectSummary, SummaryRequestKind, SummaryStreamId};
 use imagod_spec::{
     SessionAuthOutputSummary, SessionAuthProbeOutput, SessionAuthProbeState,
     SessionAuthStateSummary,
@@ -153,6 +155,42 @@ impl ModelCaseSource for SessionAuthProjectionSpec {
     }
 }
 
+#[cfg(test)]
+fn session_auth_probe_state_domain() -> nirvash_core::BoundedDomain<SessionAuthProbeState> {
+    <SessionAuthProbeState as nirvash_core::Signature>::bounded_domain()
+}
+
+#[cfg(test)]
+fn session_auth_summary_output_domain() -> nirvash_core::BoundedDomain<SessionAuthOutputSummary> {
+    nirvash_core::BoundedDomain::new(vec![
+        SessionAuthOutputSummary::default(),
+        SessionAuthOutputSummary {
+            effects: vec![ContractEffectSummary::AuthorizationGranted(
+                SummaryStreamId::Stream0,
+                SummaryRequestKind::ServicesList,
+            )],
+        },
+        SessionAuthOutputSummary {
+            effects: vec![ContractEffectSummary::AuthorizationGranted(
+                SummaryStreamId::Stream0,
+                SummaryRequestKind::HelloNegotiate,
+            )],
+        },
+        SessionAuthOutputSummary {
+            effects: vec![ContractEffectSummary::AuthorizationGranted(
+                SummaryStreamId::Stream0,
+                SummaryRequestKind::RpcInvoke,
+            )],
+        },
+        SessionAuthOutputSummary {
+            effects: vec![ContractEffectSummary::AuthorizationRejected(
+                SummaryStreamId::Stream0,
+                SummaryRequestKind::ServicesList,
+            )],
+        },
+    ])
+}
+
 nirvash_projection_model! {
     probe_state = SessionAuthProbeState,
     probe_output = SessionAuthProbeOutput,
@@ -160,6 +198,8 @@ nirvash_projection_model! {
     summary_output = SessionAuthOutputSummary,
     abstract_state = SystemState,
     expected_output = Vec<SystemEffect>,
+    probe_state_domain = session_auth_probe_state_domain,
+    summary_output_domain = session_auth_summary_output_domain,
     state_seed = spec.initial_state(),
     state_summary {
         active_session <= probe.active_session,
