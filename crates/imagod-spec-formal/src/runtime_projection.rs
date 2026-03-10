@@ -1,9 +1,11 @@
-use imagod_spec::{RuntimeOutputSummary, RuntimeStateSummary};
+use imagod_spec::{
+    RuntimeOutputSummary, RuntimeProbeOutput, RuntimeProbeState, RuntimeStateSummary,
+};
 use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
     concurrent::ConcurrentAction, conformance::ProtocolConformanceSpec,
 };
-use nirvash_macros::{ActionVocabulary, Signature};
+use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_contract};
 
 use crate::{
     atoms::ServiceAtom,
@@ -152,6 +154,46 @@ impl RuntimeProjectionSpec {
         next.rpc = RpcState::from_runtime_summary(&rpc_summary);
         Some(next)
     }
+}
+
+fn summarize_runtime_state(probe: &RuntimeProbeState) -> RuntimeStateSummary {
+    *probe
+}
+
+fn summarize_runtime_output(probe: &RuntimeProbeOutput) -> RuntimeOutputSummary {
+    probe.clone()
+}
+
+fn abstract_runtime_state(
+    spec: &RuntimeProjectionSpec,
+    summary: &RuntimeStateSummary,
+) -> SystemState {
+    let mut state = spec.initial_state();
+    state.deploy = DeployState::from_runtime_summary(summary);
+    state.supervision = SupervisionState::from_runtime_summary(summary);
+    state.rpc = RpcState::from_runtime_summary(summary);
+    state.manager.phase = if summary.manager_stopped {
+        crate::manager_runtime::ManagerRuntimePhase::Stopped
+    } else if summary.manager_shutdown_started {
+        crate::manager_runtime::ManagerRuntimePhase::ShutdownRequested
+    } else {
+        crate::manager_runtime::ManagerRuntimePhase::Listening
+    };
+    state.session.shutdown_requested = summary.session_shutdown_requested;
+    state.shutdown.phase = shutdown_phase(summary.shutdown.phase);
+    state.shutdown.accepts_stopped = summary.shutdown.accepts_stopped;
+    state.shutdown.sessions_drained = summary.shutdown.sessions_drained;
+    state.shutdown.services_stopped = summary.shutdown.services_stopped;
+    state.shutdown.maintenance_stopped = summary.shutdown.maintenance_stopped;
+    state.shutdown.forced_stop_attempted = summary.shutdown.forced_stop_attempted;
+    state
+}
+
+fn abstract_runtime_output(
+    _spec: &RuntimeProjectionSpec,
+    summary: &RuntimeOutputSummary,
+) -> Vec<SystemEffect> {
+    system_effects(&summary.effects)
 }
 
 impl TransitionSystem for RuntimeProjectionSpec {
@@ -323,10 +365,18 @@ impl ModelCaseSource for RuntimeProjectionSpec {
     }
 }
 
+#[nirvash_projection_contract(
+    probe_state = RuntimeProbeState,
+    probe_output = RuntimeProbeOutput,
+    summary_state = RuntimeStateSummary,
+    summary_output = RuntimeOutputSummary,
+    summarize_state = summarize_runtime_state,
+    summarize_output = summarize_runtime_output,
+    abstract_state = abstract_runtime_state,
+    abstract_output = abstract_runtime_output
+)]
 impl ProtocolConformanceSpec for RuntimeProjectionSpec {
     type ExpectedOutput = Vec<SystemEffect>;
-    type SummaryState = RuntimeStateSummary;
-    type SummaryOutput = RuntimeOutputSummary;
 
     fn expected_output(
         &self,
@@ -339,32 +389,6 @@ impl ProtocolConformanceSpec for RuntimeProjectionSpec {
         } else {
             Vec::new()
         }
-    }
-
-    fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State {
-        let mut state = self.initial_state();
-        state.deploy = DeployState::from_runtime_summary(summary);
-        state.supervision = SupervisionState::from_runtime_summary(summary);
-        state.rpc = RpcState::from_runtime_summary(summary);
-        state.manager.phase = if summary.manager_stopped {
-            crate::manager_runtime::ManagerRuntimePhase::Stopped
-        } else if summary.manager_shutdown_started {
-            crate::manager_runtime::ManagerRuntimePhase::ShutdownRequested
-        } else {
-            crate::manager_runtime::ManagerRuntimePhase::Listening
-        };
-        state.session.shutdown_requested = summary.session_shutdown_requested;
-        state.shutdown.phase = shutdown_phase(summary.shutdown.phase);
-        state.shutdown.accepts_stopped = summary.shutdown.accepts_stopped;
-        state.shutdown.sessions_drained = summary.shutdown.sessions_drained;
-        state.shutdown.services_stopped = summary.shutdown.services_stopped;
-        state.shutdown.maintenance_stopped = summary.shutdown.maintenance_stopped;
-        state.shutdown.forced_stop_attempted = summary.shutdown.forced_stop_attempted;
-        state
-    }
-
-    fn abstract_output(&self, summary: &Self::SummaryOutput) -> Self::ExpectedOutput {
-        system_effects(&summary.effects)
     }
 }
 

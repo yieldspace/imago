@@ -125,6 +125,8 @@ relation-first spec で service ごとの独立 transition をまとめたい場
     - `observe_state(Context) -> SummaryState`
 - spec 側契約
   - `ProtocolConformanceSpec`
+    - `summarize_state(...)`
+    - `summarize_output(...)`
     - `expected_output(...)`
     - `abstract_state(...)`
     - `abstract_output(...)`
@@ -139,7 +141,7 @@ relation-first spec で service ごとの独立 transition をまとめたい場
     - `execute_input(...)`
     - `probe_context(...)`
 
-`nirvash_macros::code_tests` はこの契約だけを使って reachable graph の prefix を実コードへ適用し、各 step の before/after summary を `abstract_state(...)` で抽象化して `transition` の next state と突き合わせます。output も `abstract_output(...)` で比較するので、runtime 側は trace replay や shadow state を持たずに済みます。実運用では spec crate に `ProtocolConformanceSpec` を置き、runtime crate の integration test に `ProtocolRuntimeBinding` と `#[code_tests(...)]` を置く構成が依存方向を最も保ちやすいです。
+`nirvash_macros::code_tests` はこの契約だけを使って reachable graph の prefix を実コードへ適用し、各 step の `before_probe -> summarize_state -> abstract_state` と `after_probe -> summarize_state -> abstract_state` を `transition` の next state と突き合わせます。output も `summarize_output -> abstract_output` で比較するので、runtime 側は trace replay や shadow state を持たずに済みます。実運用では spec crate に `ProtocolConformanceSpec` を置き、runtime crate の integration test に `ProtocolRuntimeBinding` と `#[code_tests(...)]` を置く構成が依存方向を最も保ちやすいです。
 
 `nirvash_macros::code_witness_tests` は `ProtocolInputWitnessBinding` を追加で使い、reachable graph から semantic case を自動検出して witness 単位の strict test を custom harness (`code_witness_test_main!()`) で個別実行します。`model_cases` は formal 側の探索分割に残しつつ、runtime binding 側は concrete input witness だけを実装すれば十分です。
 
@@ -225,8 +227,18 @@ impl TransitionSystem for Spec {
 
 impl ProtocolConformanceSpec for Spec {
     type ExpectedOutput = RuntimeOutput;
+    type ProbeState = SpecState;
+    type ProbeOutput = RuntimeOutput;
     type SummaryState = SpecState;
     type SummaryOutput = RuntimeOutput;
+
+    fn summarize_state(&self, probe: &Self::ProbeState) -> Self::SummaryState {
+        *probe
+    }
+
+    fn summarize_output(&self, probe: &Self::ProbeOutput) -> Self::SummaryOutput {
+        *probe
+    }
 
     fn expected_output(
         &self,

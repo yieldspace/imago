@@ -1,9 +1,9 @@
-use imagod_spec::{RouterOutputSummary, RouterStateSummary};
+use imagod_spec::{RouterOutputSummary, RouterProbeOutput, RouterProbeState, RouterStateSummary};
 use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };
-use nirvash_macros::{ActionVocabulary, Signature};
+use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_contract};
 
 use crate::{
     CommandKind, CommandProtocolAction,
@@ -167,6 +167,29 @@ impl RouterProjectionSpec {
     }
 }
 
+fn summarize_router_state(probe: &RouterProbeState) -> RouterStateSummary {
+    *probe
+}
+
+fn summarize_router_output(probe: &RouterProbeOutput) -> RouterOutputSummary {
+    probe.clone()
+}
+
+fn abstract_router_state(spec: &RouterProjectionSpec, summary: &RouterStateSummary) -> SystemState {
+    let mut state = spec.initial_state();
+    state.session = SessionTransportState::from_summary(summary.active_session, false);
+    state.session_auth = SessionAuthState::from_router_summary(summary);
+    state.wire = crate::wire_protocol::WireProtocolState::from_router_summary(summary);
+    state
+}
+
+fn abstract_router_output(
+    _spec: &RouterProjectionSpec,
+    summary: &RouterOutputSummary,
+) -> Vec<SystemEffect> {
+    system_effects(&summary.effects)
+}
+
 impl TransitionSystem for RouterProjectionSpec {
     type State = SystemState;
     type Action = RouterProjectionAction;
@@ -205,10 +228,18 @@ impl ModelCaseSource for RouterProjectionSpec {
     }
 }
 
+#[nirvash_projection_contract(
+    probe_state = RouterProbeState,
+    probe_output = RouterProbeOutput,
+    summary_state = RouterStateSummary,
+    summary_output = RouterOutputSummary,
+    summarize_state = summarize_router_state,
+    summarize_output = summarize_router_output,
+    abstract_state = abstract_router_state,
+    abstract_output = abstract_router_output
+)]
 impl ProtocolConformanceSpec for RouterProjectionSpec {
     type ExpectedOutput = Vec<SystemEffect>;
-    type SummaryState = RouterStateSummary;
-    type SummaryOutput = RouterOutputSummary;
 
     fn expected_output(
         &self,
@@ -223,18 +254,6 @@ impl ProtocolConformanceSpec for RouterProjectionSpec {
             )),
             next,
         )
-    }
-
-    fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State {
-        let mut state = self.initial_state();
-        state.session = SessionTransportState::from_summary(summary.active_session, false);
-        state.session_auth = SessionAuthState::from_router_summary(summary);
-        state.wire = crate::wire_protocol::WireProtocolState::from_router_summary(summary);
-        state
-    }
-
-    fn abstract_output(&self, summary: &Self::SummaryOutput) -> Self::ExpectedOutput {
-        system_effects(&summary.effects)
     }
 }
 

@@ -8,6 +8,8 @@ pub use crate::{ModelChecker, ReachableGraphSnapshot};
 /// Spec-side contract for replaying runtime behavior against a transition system.
 pub trait ProtocolConformanceSpec: TransitionSystem {
     type ExpectedOutput: Clone + Debug + PartialEq + Eq;
+    type ProbeState: Clone + Debug;
+    type ProbeOutput: Clone + Debug;
     type SummaryState: Clone + Debug;
     type SummaryOutput: Clone + Debug;
 
@@ -17,6 +19,10 @@ pub trait ProtocolConformanceSpec: TransitionSystem {
         action: &Self::Action,
         next: Option<&Self::State>,
     ) -> Self::ExpectedOutput;
+
+    fn summarize_state(&self, probe: &Self::ProbeState) -> Self::SummaryState;
+
+    fn summarize_output(&self, probe: &Self::ProbeOutput) -> Self::SummaryOutput;
 
     fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State;
 
@@ -29,8 +35,8 @@ pub trait ProtocolRuntimeBinding<Spec>
 where
     Spec: ProtocolConformanceSpec,
 {
-    type Runtime: ActionApplier<Action = Spec::Action, Output = Spec::SummaryOutput, Context = Self::Context>
-        + StateObserver<SummaryState = Spec::SummaryState, Context = Self::Context>;
+    type Runtime: ActionApplier<Action = Spec::Action, Output = Spec::ProbeOutput, Context = Self::Context>
+        + StateObserver<SummaryState = Spec::ProbeState, Context = Self::Context>;
     type Context: Clone;
 
     async fn fresh_runtime(spec: &Spec) -> Self::Runtime;
@@ -154,7 +160,7 @@ where
         session: &mut Self::Session,
         context: &Self::Context,
         input: &Self::Input,
-    ) -> Spec::SummaryOutput;
+    ) -> Spec::ProbeOutput;
 
     /// Returns the probe context used to observe the authoritative runtime state.
     fn probe_context(session: &Self::Session) -> Self::Context;
@@ -195,28 +201,45 @@ pub struct RegisteredCodeWitnessTestProvider {
 
 crate::inventory::collect!(RegisteredCodeWitnessTestProvider);
 
-pub fn abstract_initial_state<Spec>(spec: &Spec, summary: &Spec::SummaryState) -> Spec::State
+pub fn summarize_state<Spec>(spec: &Spec, probe: &Spec::ProbeState) -> Spec::SummaryState
 where
     Spec: ProtocolConformanceSpec,
 {
-    spec.abstract_state(summary)
+    spec.summarize_state(probe)
 }
 
-pub fn abstract_next_state<Spec>(spec: &Spec, summary: &Spec::SummaryState) -> Spec::State
+pub fn summarize_output<Spec>(spec: &Spec, probe: &Spec::ProbeOutput) -> Spec::SummaryOutput
 where
     Spec: ProtocolConformanceSpec,
 {
-    spec.abstract_state(summary)
+    spec.summarize_output(probe)
+}
+
+pub fn abstract_initial_state<Spec>(spec: &Spec, probe: &Spec::ProbeState) -> Spec::State
+where
+    Spec: ProtocolConformanceSpec,
+{
+    let summary = spec.summarize_state(probe);
+    spec.abstract_state(&summary)
+}
+
+pub fn abstract_next_state<Spec>(spec: &Spec, probe: &Spec::ProbeState) -> Spec::State
+where
+    Spec: ProtocolConformanceSpec,
+{
+    let summary = spec.summarize_state(probe);
+    spec.abstract_state(&summary)
 }
 
 pub fn abstract_expected_output<Spec>(
     spec: &Spec,
-    summary: &Spec::SummaryOutput,
+    probe: &Spec::ProbeOutput,
 ) -> Spec::ExpectedOutput
 where
     Spec: ProtocolConformanceSpec,
 {
-    spec.abstract_output(summary)
+    let summary = spec.summarize_output(probe);
+    spec.abstract_output(&summary)
 }
 
 pub fn assert_initial_refinement<Spec>(spec: &Spec, summary: &Spec::SummaryState)
@@ -319,7 +342,7 @@ fn parse_witness_harness_args() -> WitnessHarnessArgs {
     parsed
 }
 
-fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+pub fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<&'static str>() {
         (*message).to_owned()
     } else if let Some(message) = payload.downcast_ref::<String>() {
@@ -440,6 +463,8 @@ mod tests {
 
     impl ProtocolConformanceSpec for DummySpec {
         type ExpectedOutput = &'static str;
+        type ProbeState = bool;
+        type ProbeOutput = &'static str;
         type SummaryState = bool;
         type SummaryOutput = &'static str;
 
@@ -450,6 +475,14 @@ mod tests {
             _next: Option<&Self::State>,
         ) -> Self::ExpectedOutput {
             "ok"
+        }
+
+        fn summarize_state(&self, probe: &Self::ProbeState) -> Self::SummaryState {
+            *probe
+        }
+
+        fn summarize_output(&self, probe: &Self::ProbeOutput) -> Self::SummaryOutput {
+            *probe
         }
 
         fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State {

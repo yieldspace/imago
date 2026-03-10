@@ -21,6 +21,7 @@ fn signature_derive_behaves_for_supported_inputs() {
     t.pass("tests/fixtures/code_witness_tests_ok.rs");
     t.pass("tests/fixtures/runtime_contract_grouped_ok.rs");
     t.pass("tests/fixtures/runtime_contract_binding_witness_ok.rs");
+    t.pass("tests/fixtures/projection_contract_ok.rs");
     t.compile_fail("tests/fixtures/attribute_missing_target.rs");
     t.compile_fail("tests/fixtures/attribute_wrong_type.rs");
     t.compile_fail("tests/fixtures/case_scoped_constraints_invalid_option.rs");

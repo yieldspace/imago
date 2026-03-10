@@ -102,6 +102,8 @@ impl TemporalSpec for Spec {
 
 impl ProtocolConformanceSpec for Spec {
     type ExpectedOutput = Output;
+    type ProbeState = State;
+    type ProbeOutput = Output;
     type SummaryState = State;
     type SummaryOutput = Output;
 
@@ -116,6 +118,14 @@ impl ProtocolConformanceSpec for Spec {
         } else {
             Output::Rejected
         }
+    }
+
+    fn summarize_state(&self, probe: &Self::ProbeState) -> Self::SummaryState {
+        *probe
+    }
+
+    fn summarize_output(&self, probe: &Self::ProbeOutput) -> Self::SummaryOutput {
+        probe.clone()
     }
 
     fn abstract_state(&self, observed: &Self::SummaryState) -> Self::State {

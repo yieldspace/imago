@@ -118,6 +118,8 @@ pub struct ManagerRuntimeOutputSummary {
 
 pub type CommandStateSummary = CommandProtocolObservedState;
 pub type CommandOutputSummary = CommandProtocolOutput;
+pub type CommandProbeState = CommandStateSummary;
+pub type CommandProbeOutput = CommandOutputSummary;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouterStateSummary {
@@ -160,6 +162,9 @@ impl Default for RouterStateSummary {
     }
 }
 
+pub type RouterProbeState = RouterStateSummary;
+pub type RouterProbeOutput = RouterOutputSummary;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SessionAuthStateSummary {
     pub active_session: bool,
@@ -173,6 +178,9 @@ pub struct SessionAuthStateSummary {
     pub stream_closed: bool,
     pub client_authority_uploaded: bool,
 }
+
+pub type SessionAuthProbeState = SessionAuthStateSummary;
+pub type SessionAuthProbeOutput = SessionAuthOutputSummary;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogsStateSummary {
@@ -201,6 +209,9 @@ impl Default for LogsStateSummary {
     }
 }
 
+pub type LogsProbeState = LogsStateSummary;
+pub type LogsProbeOutput = LogsOutputSummary;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RuntimeStateSummary {
     pub service0_promoted: bool,
@@ -223,6 +234,9 @@ pub struct RuntimeStateSummary {
     pub shutdown: ShutdownStateSummary,
 }
 
+pub type RuntimeProbeState = RuntimeStateSummary;
+pub type RuntimeProbeOutput = RuntimeOutputSummary;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ManagerRuntimeStateSummary {
     pub config_loaded: bool,
@@ -235,3 +249,6 @@ pub struct ManagerRuntimeStateSummary {
     pub session_shutdown_requested: bool,
     pub shutdown: ShutdownStateSummary,
 }
+
+pub type ManagerRuntimeProbeState = ManagerRuntimeStateSummary;
+pub type ManagerRuntimeProbeOutput = ManagerRuntimeOutputSummary;

@@ -108,6 +108,16 @@ pub fn nirvash_runtime_contract(attr: TokenStream, item: TokenStream) -> TokenSt
 }
 
 #[proc_macro_attribute]
+pub fn nirvash_projection_contract(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as ProjectionContractArgs);
+    let item = parse_macro_input!(item as ItemImpl);
+    match expand_projection_contract(args, item) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[proc_macro_attribute]
 pub fn contract_case(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
@@ -536,6 +546,78 @@ struct RuntimeContractArgs {
     fresh_session: Option<Expr>,
     probe_context: Option<Expr>,
     tests: RuntimeContractTests,
+}
+
+struct ProjectionContractArgs {
+    probe_state_ty: Type,
+    probe_output_ty: Type,
+    summary_state_ty: Type,
+    summary_output_ty: Type,
+    summarize_state: Expr,
+    summarize_output: Expr,
+    abstract_state: Expr,
+    abstract_output: Expr,
+}
+
+impl Parse for ProjectionContractArgs {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let mut probe_state_ty = None;
+        let mut probe_output_ty = None;
+        let mut summary_state_ty = None;
+        let mut summary_output_ty = None;
+        let mut summarize_state = None;
+        let mut summarize_output = None;
+        let mut abstract_state = None;
+        let mut abstract_output = None;
+
+        while !input.is_empty() {
+            let ident: Ident = input.parse()?;
+            let _eq: Token![=] = input.parse()?;
+            match ident.to_string().as_str() {
+                "probe_state" => probe_state_ty = Some(input.parse()?),
+                "probe_output" => probe_output_ty = Some(input.parse()?),
+                "summary_state" => summary_state_ty = Some(input.parse()?),
+                "summary_output" => summary_output_ty = Some(input.parse()?),
+                "summarize_state" => summarize_state = Some(input.parse()?),
+                "summarize_output" => summarize_output = Some(input.parse()?),
+                "abstract_state" => abstract_state = Some(input.parse()?),
+                "abstract_output" => abstract_output = Some(input.parse()?),
+                _ => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "unsupported nirvash_projection_contract argument",
+                    ));
+                }
+            }
+            if input.peek(Token![,]) {
+                let _ = input.parse::<Token![,]>()?;
+            }
+        }
+
+        Ok(Self {
+            probe_state_ty: probe_state_ty
+                .ok_or_else(|| syn::Error::new(Span::call_site(), "missing probe_state = ..."))?,
+            probe_output_ty: probe_output_ty
+                .ok_or_else(|| syn::Error::new(Span::call_site(), "missing probe_output = ..."))?,
+            summary_state_ty: summary_state_ty
+                .ok_or_else(|| syn::Error::new(Span::call_site(), "missing summary_state = ..."))?,
+            summary_output_ty: summary_output_ty.ok_or_else(|| {
+                syn::Error::new(Span::call_site(), "missing summary_output = ...")
+            })?,
+            summarize_state: summarize_state.ok_or_else(|| {
+                syn::Error::new(Span::call_site(), "missing summarize_state = ...")
+            })?,
+            summarize_output: summarize_output.ok_or_else(|| {
+                syn::Error::new(Span::call_site(), "missing summarize_output = ...")
+            })?,
+            abstract_state: abstract_state.ok_or_else(|| {
+                syn::Error::new(Span::call_site(), "missing abstract_state = ...")
+            })?,
+            abstract_output: abstract_output.ok_or_else(|| {
+                syn::Error::new(Span::call_site(), "missing abstract_output = ...")
+            })?,
+        })
+    }
 }
 
 impl Parse for RuntimeContractArgs {
@@ -2424,6 +2506,10 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                 <#binding_ty as ::nirvash_core::conformance::ProtocolRuntimeBinding<#spec_ty>>::Context;
             type GeneratedExpectedOutput =
                 <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ExpectedOutput;
+            type GeneratedProbeState =
+                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ProbeState;
+            type GeneratedProbeOutput =
+                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ProbeOutput;
             type GeneratedSummaryState =
                 <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::SummaryState;
             type GeneratedSummaryOutput =
@@ -2486,19 +2572,17 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                     context,
                 )
                 .await;
-                let mut projected =
-                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_state(
+                let observed_summary =
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::summarize_state(
                         spec,
                         &observed,
                     );
-                let initial_states =
-                    <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::initial_states(spec);
-                assert!(
-                    initial_states.iter().any(|state| *state == projected),
-                    "runtime initial state {:?} must be one of the declared initial states {:?}",
-                    projected,
-                    initial_states,
-                );
+                let mut projected =
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_state(
+                        spec,
+                        &observed_summary,
+                    );
+                ::nirvash_core::conformance::assert_initial_refinement(spec, &observed_summary);
                 for action in path {
                     let expected_next =
                         <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::transition(
@@ -2519,10 +2603,15 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                         action,
                     )
                     .await;
+                    let output_summary =
+                        <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::summarize_output(
+                            spec,
+                            &output,
+                        );
                     let projected_output =
                         <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_output(
                             spec,
-                            &output,
+                            &output_summary,
                         );
                     assert_eq!(projected_output, expected_output);
                     let observed_after =
@@ -2531,10 +2620,15 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                             context,
                         )
                         .await;
+                    let observed_after_summary =
+                        <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::summarize_state(
+                            spec,
+                            &observed_after,
+                        );
                     let projected_after =
                         <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_state(
                             spec,
-                            &observed_after,
+                            &observed_after_summary,
                         );
                     match expected_next {
                         ::core::option::Option::Some(next) => {
@@ -2567,10 +2661,15 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                         context,
                     )
                 .await;
+                let observed_before_summary =
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::summarize_state(
+                        spec,
+                        &observed_before,
+                    );
                 let projected_before =
                     <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_state(
                         spec,
-                        &observed_before,
+                        &observed_before_summary,
                     );
                 assert_eq!(projected_before, *expected_state);
                 let expected_next =
@@ -2592,10 +2691,15 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                     action,
                 )
                 .await;
+                let output_summary =
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::summarize_output(
+                        spec,
+                        &output,
+                    );
                 let projected_output =
                     <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_output(
                         spec,
-                        &output,
+                        &output_summary,
                     );
                 let observed_after =
                     <GeneratedRuntime as ::nirvash_core::conformance::StateObserver>::observe_state(
@@ -2603,10 +2707,15 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                         context,
                     )
                     .await;
+                let observed_after_summary =
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::summarize_state(
+                        spec,
+                        &observed_after,
+                    );
                 let projected_after =
                     <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_state(
                         spec,
-                        &observed_after,
+                        &observed_after_summary,
                     );
                 assert_eq!(projected_output, expected_output);
                 (expected_next, projected_output, projected_after)
@@ -2804,6 +2913,10 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                 <#binding_ty as ::nirvash_core::conformance::ProtocolInputWitnessBinding<#spec_ty>>::Session;
             type GeneratedExpectedOutput =
                 <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ExpectedOutput;
+            type GeneratedProbeState =
+                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ProbeState;
+            type GeneratedProbeOutput =
+                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::ProbeOutput;
             type GeneratedSummaryState =
                 <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::SummaryState;
             type GeneratedSummaryOutput =
@@ -3046,9 +3159,14 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                     &context,
                 )
                 .await;
+                let observed_summary =
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::summarize_state(
+                        spec,
+                        &observed,
+                    );
                 <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_state(
                     spec,
-                    &observed,
+                    &observed_summary,
                 )
             }
 
@@ -3087,18 +3205,32 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                 runtime: &GeneratedRuntime,
                 session: &mut GeneratedSession,
             ) -> ::std::result::Result<(), ::std::string::String> {
-                let initial_projected = generated_observe_projected_state(spec, runtime, session).await;
-                let initial_states =
-                    <#spec_ty as ::nirvash_core::conformance::TransitionSystem>::initial_states(spec);
-                if !initial_states
-                    .iter()
-                    .any(|state| *state == initial_projected)
-                {
+                let initial_context =
+                    <#binding_ty as ::nirvash_core::conformance::ProtocolInputWitnessBinding<#spec_ty>>::probe_context(session);
+                let initial_probe =
+                    <GeneratedRuntime as ::nirvash_core::conformance::StateObserver>::observe_state(
+                        runtime,
+                        &initial_context,
+                    )
+                    .await;
+                let initial_summary =
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::summarize_state(
+                        spec,
+                        &initial_probe,
+                    );
+                let initial_projected =
+                    <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_state(
+                        spec,
+                        &initial_summary,
+                    );
+                let initial_refinement = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
+                    ::nirvash_core::conformance::assert_initial_refinement(spec, &initial_summary);
+                }));
+                if let Err(payload) = initial_refinement {
                     return Err(format!(
-                        "{}runtime initial state {:?} must be one of {:?}",
+                        "{}{}",
                         generated_failure_prelude(semantic_case, "<initial-state>"),
-                        initial_projected,
-                        initial_states,
+                        ::nirvash_core::conformance::panic_payload_to_string(payload),
                     ));
                 }
                 let mut projected = initial_projected;
@@ -3149,10 +3281,15 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                             witness.input(),
                         )
                         .await;
+                    let output_summary =
+                        <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::summarize_output(
+                            spec,
+                            &output,
+                        );
                     let projected_output =
                         <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_output(
                             spec,
-                            &output,
+                            &output_summary,
                         );
                     let expected_output =
                         <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::expected_output(
@@ -3324,10 +3461,15 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                                     witness.input(),
                                 )
                                 .await;
+                            let output_summary =
+                                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::summarize_output(
+                                    spec.as_ref(),
+                                    &output,
+                                );
                             let projected_output =
                                 <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_output(
                                     spec.as_ref(),
-                                    &output,
+                                    &output_summary,
                                 );
                             let expected_output =
                                 <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::expected_output(
@@ -3393,10 +3535,15 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                                     witness.input(),
                                 )
                                 .await;
+                            let output_summary =
+                                <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::summarize_output(
+                                    spec.as_ref(),
+                                    &output,
+                                );
                             let projected_output =
                                 <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::abstract_output(
                                     spec.as_ref(),
-                                    &output,
+                                    &output_summary,
                                 );
                             let expected_output =
                                 <#spec_ty as ::nirvash_core::conformance::ProtocolConformanceSpec>::expected_output(
@@ -3541,6 +3688,74 @@ fn expand_runtime_contract(
         grouped_tokens,
         witness_tokens,
     )
+}
+
+fn expand_projection_contract(
+    args: ProjectionContractArgs,
+    mut item: ItemImpl,
+) -> syn::Result<TokenStream2> {
+    if item.generics.params.iter().next().is_some() {
+        return Err(syn::Error::new(
+            item.generics.span(),
+            "nirvash_projection_contract does not support generic impl blocks",
+        ));
+    }
+
+    item.items.retain(|impl_item| match impl_item {
+        ImplItem::Type(ty) => !matches!(
+            ty.ident.to_string().as_str(),
+            "ProbeState" | "ProbeOutput" | "SummaryState" | "SummaryOutput"
+        ),
+        ImplItem::Fn(method) => !matches!(
+            method.sig.ident.to_string().as_str(),
+            "summarize_state" | "summarize_output" | "abstract_state" | "abstract_output"
+        ),
+        _ => true,
+    });
+
+    let probe_state_ty = args.probe_state_ty;
+    let probe_output_ty = args.probe_output_ty;
+    let summary_state_ty = args.summary_state_ty;
+    let summary_output_ty = args.summary_output_ty;
+    let summarize_state = args.summarize_state;
+    let summarize_output = args.summarize_output;
+    let abstract_state = args.abstract_state;
+    let abstract_output = args.abstract_output;
+
+    item.items.push(syn::parse_quote! {
+        type ProbeState = #probe_state_ty;
+    });
+    item.items.push(syn::parse_quote! {
+        type ProbeOutput = #probe_output_ty;
+    });
+    item.items.push(syn::parse_quote! {
+        type SummaryState = #summary_state_ty;
+    });
+    item.items.push(syn::parse_quote! {
+        type SummaryOutput = #summary_output_ty;
+    });
+    item.items.push(syn::parse_quote! {
+        fn summarize_state(&self, probe: &Self::ProbeState) -> Self::SummaryState {
+            (#summarize_state)(probe)
+        }
+    });
+    item.items.push(syn::parse_quote! {
+        fn summarize_output(&self, probe: &Self::ProbeOutput) -> Self::SummaryOutput {
+            (#summarize_output)(probe)
+        }
+    });
+    item.items.push(syn::parse_quote! {
+        fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State {
+            (#abstract_state)(self, summary)
+        }
+    });
+    item.items.push(syn::parse_quote! {
+        fn abstract_output(&self, summary: &Self::SummaryOutput) -> Self::ExpectedOutput {
+            (#abstract_output)(self, summary)
+        }
+    });
+
+    Ok(quote! { #item })
 }
 
 fn expand_runtime_contract_binding_mode(

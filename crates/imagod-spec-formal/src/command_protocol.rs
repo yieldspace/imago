@@ -401,6 +401,8 @@ impl TransitionSystem for CommandProtocolSpec {
 
 impl ProtocolConformanceSpec for CommandProtocolSpec {
     type ExpectedOutput = CommandProtocolExpectedOutput;
+    type ProbeState = RuntimeCommandStateSummary;
+    type ProbeOutput = RuntimeCommandOutputSummary;
     type SummaryState = RuntimeCommandStateSummary;
     type SummaryOutput = RuntimeCommandOutputSummary;
 
@@ -411,6 +413,14 @@ impl ProtocolConformanceSpec for CommandProtocolSpec {
         next: Option<&Self::State>,
     ) -> Self::ExpectedOutput {
         self.transition_output(prev, action, next)
+    }
+
+    fn summarize_state(&self, probe: &Self::ProbeState) -> Self::SummaryState {
+        *probe
+    }
+
+    fn summarize_output(&self, probe: &Self::ProbeOutput) -> Self::SummaryOutput {
+        probe.clone()
     }
 
     fn abstract_state(&self, observed: &Self::SummaryState) -> Self::State {

@@ -1,9 +1,9 @@
-use imagod_spec::{LogsOutputSummary, LogsStateSummary};
+use imagod_spec::{LogsOutputSummary, LogsProbeOutput, LogsProbeState, LogsStateSummary};
 use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };
-use nirvash_macros::{ActionVocabulary, Signature};
+use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_contract};
 
 use crate::{
     atoms::{LogChunkAtom, RequestKindAtom, ServiceAtom, SessionAtom, StreamAtom},
@@ -127,6 +127,29 @@ impl LogsProjectionSpec {
     }
 }
 
+fn summarize_logs_state(probe: &LogsProbeState) -> LogsStateSummary {
+    *probe
+}
+
+fn summarize_logs_output(probe: &LogsProbeOutput) -> LogsOutputSummary {
+    probe.clone()
+}
+
+fn abstract_logs_state(spec: &LogsProjectionSpec, summary: &LogsStateSummary) -> SystemState {
+    let mut state = spec.initial_state();
+    state.deploy = DeployState::from_logs_summary(summary);
+    state.supervision = SupervisionState::from_logs_summary(summary);
+    state.wire = crate::wire_protocol::WireProtocolState::from_logs_summary(summary);
+    state
+}
+
+fn abstract_logs_output(
+    _spec: &LogsProjectionSpec,
+    summary: &LogsOutputSummary,
+) -> Vec<SystemEffect> {
+    system_effects(&summary.effects)
+}
+
 impl TransitionSystem for LogsProjectionSpec {
     type State = SystemState;
     type Action = LogsProjectionAction;
@@ -172,10 +195,18 @@ impl ModelCaseSource for LogsProjectionSpec {
     }
 }
 
+#[nirvash_projection_contract(
+    probe_state = LogsProbeState,
+    probe_output = LogsProbeOutput,
+    summary_state = LogsStateSummary,
+    summary_output = LogsOutputSummary,
+    summarize_state = summarize_logs_state,
+    summarize_output = summarize_logs_output,
+    abstract_state = abstract_logs_state,
+    abstract_output = abstract_logs_output
+)]
 impl ProtocolConformanceSpec for LogsProjectionSpec {
     type ExpectedOutput = Vec<SystemEffect>;
-    type SummaryState = LogsStateSummary;
-    type SummaryOutput = LogsOutputSummary;
 
     fn expected_output(
         &self,
@@ -190,18 +221,6 @@ impl ProtocolConformanceSpec for LogsProjectionSpec {
             )),
             next,
         )
-    }
-
-    fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State {
-        let mut state = self.initial_state();
-        state.deploy = DeployState::from_logs_summary(summary);
-        state.supervision = SupervisionState::from_logs_summary(summary);
-        state.wire = crate::wire_protocol::WireProtocolState::from_logs_summary(summary);
-        state
-    }
-
-    fn abstract_output(&self, summary: &Self::SummaryOutput) -> Self::ExpectedOutput {
-        system_effects(&summary.effects)
     }
 }
 

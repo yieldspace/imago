@@ -1,11 +1,13 @@
 use imagod_spec::{
     CommandOutputSummary as RuntimeCommandOutputSummary,
+    CommandProbeOutput as RuntimeCommandProbeOutput, CommandProbeState as RuntimeCommandProbeState,
     CommandStateSummary as RuntimeCommandStateSummary,
 };
 use nirvash_core::{
     ActionVocabulary, ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
     concurrent::ConcurrentAction, conformance::ProtocolConformanceSpec,
 };
+use nirvash_macros::nirvash_projection_contract;
 
 use crate::{
     CommandProtocolAction,
@@ -38,6 +40,33 @@ impl CommandProjectionSpec {
             phase: observed.phase,
         }
     }
+}
+
+fn summarize_command_state(probe: &RuntimeCommandProbeState) -> RuntimeCommandStateSummary {
+    *probe
+}
+
+fn summarize_command_output(probe: &RuntimeCommandProbeOutput) -> RuntimeCommandOutputSummary {
+    probe.clone()
+}
+
+fn abstract_command_state(
+    spec: &CommandProjectionSpec,
+    observed: &RuntimeCommandStateSummary,
+) -> SystemState {
+    let mut state = spec.initial_state();
+    state.command = spec.command_observed_state(observed);
+    state
+}
+
+fn abstract_command_output(
+    _spec: &CommandProjectionSpec,
+    observed: &RuntimeCommandOutputSummary,
+) -> CommandProtocolExpectedOutput {
+    <CommandProtocolSpec as ProtocolConformanceSpec>::abstract_output(
+        &CommandProtocolSpec::new(),
+        observed,
+    )
 }
 
 impl TransitionSystem for CommandProjectionSpec {
@@ -76,10 +105,18 @@ impl ModelCaseSource for CommandProjectionSpec {
     }
 }
 
+#[nirvash_projection_contract(
+    probe_state = RuntimeCommandProbeState,
+    probe_output = RuntimeCommandProbeOutput,
+    summary_state = RuntimeCommandStateSummary,
+    summary_output = RuntimeCommandOutputSummary,
+    summarize_state = summarize_command_state,
+    summarize_output = summarize_command_output,
+    abstract_state = abstract_command_state,
+    abstract_output = abstract_command_output
+)]
 impl ProtocolConformanceSpec for CommandProjectionSpec {
     type ExpectedOutput = CommandProtocolExpectedOutput;
-    type SummaryState = RuntimeCommandStateSummary;
-    type SummaryOutput = RuntimeCommandOutputSummary;
 
     fn expected_output(
         &self,
@@ -92,19 +129,6 @@ impl ProtocolConformanceSpec for CommandProjectionSpec {
             &prev.command,
             action,
             next.map(|state| &state.command),
-        )
-    }
-
-    fn abstract_state(&self, observed: &Self::SummaryState) -> Self::State {
-        let mut state = self.initial_state();
-        state.command = self.command_observed_state(observed);
-        state
-    }
-
-    fn abstract_output(&self, observed: &Self::SummaryOutput) -> Self::ExpectedOutput {
-        <CommandProtocolSpec as ProtocolConformanceSpec>::abstract_output(
-            &CommandProtocolSpec::new(),
-            observed,
         )
     }
 }

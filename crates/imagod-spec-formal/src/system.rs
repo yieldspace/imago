@@ -1337,6 +1337,8 @@ impl TransitionSystem for SystemSpec {
 
 impl ProtocolConformanceSpec for SystemSpec {
     type ExpectedOutput = Vec<SystemEffect>;
+    type ProbeState = SystemState;
+    type ProbeOutput = Vec<SystemEffect>;
     type SummaryState = SystemState;
     type SummaryOutput = Vec<SystemEffect>;
 
@@ -1362,6 +1364,14 @@ impl ProtocolConformanceSpec for SystemSpec {
             effects.push(SystemEffect::ShutdownComplete);
         }
         effects
+    }
+
+    fn summarize_state(&self, probe: &Self::ProbeState) -> Self::SummaryState {
+        probe.clone()
+    }
+
+    fn summarize_output(&self, probe: &Self::ProbeOutput) -> Self::SummaryOutput {
+        probe.clone()
     }
 
     fn abstract_state(&self, observed: &Self::SummaryState) -> Self::State {

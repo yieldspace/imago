@@ -1,9 +1,12 @@
-use imagod_spec::{SessionAuthOutputSummary, SessionAuthStateSummary};
+use imagod_spec::{
+    SessionAuthOutputSummary, SessionAuthProbeOutput, SessionAuthProbeState,
+    SessionAuthStateSummary,
+};
 use nirvash_core::{
     ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };
-use nirvash_macros::{ActionVocabulary, Signature};
+use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_contract};
 
 use crate::{
     atoms::{RemoteAuthorityAtom, RequestKindAtom, SessionAtom, StreamAtom},
@@ -105,6 +108,32 @@ impl SessionAuthProjectionSpec {
     }
 }
 
+fn summarize_session_auth_state(probe: &SessionAuthProbeState) -> SessionAuthStateSummary {
+    *probe
+}
+
+fn summarize_session_auth_output(probe: &SessionAuthProbeOutput) -> SessionAuthOutputSummary {
+    probe.clone()
+}
+
+fn abstract_session_auth_state(
+    spec: &SessionAuthProjectionSpec,
+    summary: &SessionAuthStateSummary,
+) -> SystemState {
+    let mut state = spec.initial_state();
+    state.session =
+        SessionTransportState::from_summary(summary.active_session, summary.shutdown_requested);
+    state.session_auth = SessionAuthState::from_summary(summary);
+    state
+}
+
+fn abstract_session_auth_output(
+    _spec: &SessionAuthProjectionSpec,
+    summary: &SessionAuthOutputSummary,
+) -> Vec<SystemEffect> {
+    system_effects(&summary.effects)
+}
+
 impl TransitionSystem for SessionAuthProjectionSpec {
     type State = SystemState;
     type Action = SessionAuthProjectionAction;
@@ -143,10 +172,18 @@ impl ModelCaseSource for SessionAuthProjectionSpec {
     }
 }
 
+#[nirvash_projection_contract(
+    probe_state = SessionAuthProbeState,
+    probe_output = SessionAuthProbeOutput,
+    summary_state = SessionAuthStateSummary,
+    summary_output = SessionAuthOutputSummary,
+    summarize_state = summarize_session_auth_state,
+    summarize_output = summarize_session_auth_output,
+    abstract_state = abstract_session_auth_state,
+    abstract_output = abstract_session_auth_output
+)]
 impl ProtocolConformanceSpec for SessionAuthProjectionSpec {
     type ExpectedOutput = Vec<SystemEffect>;
-    type SummaryState = SessionAuthStateSummary;
-    type SummaryOutput = SessionAuthOutputSummary;
 
     fn expected_output(
         &self,
@@ -161,18 +198,6 @@ impl ProtocolConformanceSpec for SessionAuthProjectionSpec {
             ),
             next,
         )
-    }
-
-    fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State {
-        let mut state = self.initial_state();
-        state.session =
-            SessionTransportState::from_summary(summary.active_session, summary.shutdown_requested);
-        state.session_auth = SessionAuthState::from_summary(summary);
-        state
-    }
-
-    fn abstract_output(&self, summary: &Self::SummaryOutput) -> Self::ExpectedOutput {
-        system_effects(&summary.effects)
     }
 }
 

@@ -10,3 +10,5 @@
 
 `nirvash-core` / `nirvash-macros` / `nirvash-docgen` への依存はこの crate に閉じ込めます。  
 runtime crate は通常依存では `imagod-spec` の contract だけを使い、dev/test で formal な期待値が必要な境界だけ `imagod-spec-formal` に依存します。
+
+projection spec は `nirvash_projection_contract` で `ProbeState/ProbeOutput -> SummaryState/SummaryOutput -> AbstractState/ExpectedOutput` の写像を宣言し、runtime 側は concrete probe を観測するだけで grouped conformance を回せる形を正本にしています。
