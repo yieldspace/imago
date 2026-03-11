@@ -1,13 +1,9 @@
-use std::{
-    collections::BTreeMap,
-    env,
-    sync::{Mutex, OnceLock},
-    time::Duration,
-};
+use std::{collections::BTreeMap, env, time::Duration};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle};
 
 use super::CommandResult;
+use crate::runtime;
 
 const DOT_SPINNER_TICKS: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
 const UPLOAD_PROGRESS_CHARS: &str = "#>-";
@@ -102,18 +98,22 @@ pub enum UiMode {
 }
 
 #[derive(Debug)]
-struct UiRuntime {
+pub(crate) struct UiState {
     mode: UiMode,
-    rich: Option<Mutex<RichState>>,
+    rich: Option<RichState>,
 }
 
-impl UiRuntime {
-    fn new(mode: UiMode) -> Self {
+impl UiState {
+    pub(crate) fn new(mode: UiMode) -> Self {
         let rich = match mode {
-            UiMode::Rich => Some(Mutex::new(RichState::new())),
+            UiMode::Rich => Some(RichState::new()),
             UiMode::Plain => None,
         };
         Self { mode, rich }
+    }
+
+    pub(crate) fn mode(&self) -> UiMode {
+        self.mode
     }
 }
 
@@ -220,25 +220,13 @@ impl RichState {
     }
 }
 
-static UI_RUNTIME: OnceLock<Mutex<Option<UiRuntime>>> = OnceLock::new();
-
-fn runtime_cell() -> &'static Mutex<Option<UiRuntime>> {
-    UI_RUNTIME.get_or_init(|| Mutex::new(None))
-}
-
 pub fn initialize() -> UiMode {
-    let mode = detect_mode();
-    if let Ok(mut guard) = runtime_cell().lock() {
-        *guard = Some(UiRuntime::new(mode));
-    }
-    mode
+    current_mode()
 }
 
 pub fn current_mode() -> UiMode {
-    if let Ok(guard) = runtime_cell().lock()
-        && let Some(runtime) = guard.as_ref()
-    {
-        return runtime.mode;
+    if let Some(mode) = runtime::with_ui_state(|state| state.mode()) {
+        return mode;
     }
     detect_mode()
 }
@@ -253,11 +241,11 @@ pub fn emit_startup_banner(version: &str) {
     let Some((header, rule)) = startup_banner_lines_for_mode(current_mode(), version) else {
         return;
     };
-    println!("{header}");
-    println!("{rule}");
+    let _ = runtime::write_stdout_line(&header);
+    let _ = runtime::write_stdout_line(&rule);
 }
 
-fn detect_mode() -> UiMode {
+pub(crate) fn detect_mode() -> UiMode {
     let ci_env = env::var("CI").ok();
     detect_mode_from_ci(ci_env.as_deref())
 }
@@ -275,16 +263,14 @@ fn is_ci_value_enabled(value: &str) -> bool {
 }
 
 fn with_rich_state<R>(f: impl FnOnce(&mut RichState) -> R) -> Option<R> {
-    let guard = runtime_cell().lock().ok()?;
-    let runtime = guard.as_ref()?;
-    let rich_mutex = runtime.rich.as_ref()?;
-    let mut rich = rich_mutex.lock().ok()?;
-    Some(f(&mut rich))
+    runtime::with_ui_state(|state| state.rich.as_mut().map(f)).flatten()
 }
 
 pub fn command_start(command: &str, detail: &str) {
     match current_mode() {
-        UiMode::Plain => println!("{}", plain_start_message(command, detail)),
+        UiMode::Plain => {
+            let _ = runtime::write_stdout_line(&plain_start_message(command, detail));
+        }
         UiMode::Rich => {
             let _ = with_rich_state(|state| {
                 state.ensure_spinner(command, detail);
@@ -295,7 +281,9 @@ pub fn command_start(command: &str, detail: &str) {
 
 pub fn command_stage(command: &str, stage: &str, detail: &str) {
     match current_mode() {
-        UiMode::Plain => println!("{}", plain_stage_message(command, stage, detail)),
+        UiMode::Plain => {
+            let _ = runtime::write_stdout_line(&plain_stage_message(command, stage, detail));
+        }
         UiMode::Rich => {
             let _ = with_rich_state(|state| {
                 let spinner = state.ensure_spinner(command, "started");
@@ -308,7 +296,9 @@ pub fn command_stage(command: &str, stage: &str, detail: &str) {
 
 pub fn command_warn(command: &str, message: &str) {
     match current_mode() {
-        UiMode::Plain => println!("{}", plain_warn_message(command, message)),
+        UiMode::Plain => {
+            let _ = runtime::write_stdout_line(&plain_warn_message(command, message));
+        }
         UiMode::Rich => {
             let _ = with_rich_state(|state| {
                 emit_rich_inline_line(state, command, rich_warn_message(command, message));
@@ -357,7 +347,7 @@ fn emit_rich_inline_line(state: &mut RichState, command: &str, line: String) {
     if let Some(spinner) = state.spinners.get(command) {
         spinner.println(line);
     } else {
-        println!("{line}");
+        let _ = runtime::write_stdout_line(&line);
     }
 }
 
@@ -367,7 +357,9 @@ pub fn command_info(command: &str, message: &str) {
         return;
     };
     match mode {
-        UiMode::Plain => println!("{formatted}"),
+        UiMode::Plain => {
+            let _ = runtime::write_stdout_line(&formatted);
+        }
         UiMode::Rich => {
             let _ = with_rich_state(|state| {
                 emit_rich_inline_line(state, command, formatted);
@@ -378,10 +370,13 @@ pub fn command_info(command: &str, message: &str) {
 
 pub fn command_upload_start(command: &str, total_bytes: u64, detail: &str) {
     match current_mode() {
-        UiMode::Plain => println!(
-            "{}",
-            plain_upload_start_message(command, total_bytes, detail)
-        ),
+        UiMode::Plain => {
+            let _ = runtime::write_stdout_line(&plain_upload_start_message(
+                command,
+                total_bytes,
+                detail,
+            ));
+        }
         UiMode::Rich => {
             let _ = with_rich_state(|state| {
                 let bar = if let Some(existing) = state.byte_bars.get(command) {
@@ -428,7 +423,9 @@ pub fn command_upload_finish(command: &str) {
 
 pub fn command_finish(command: &str, succeeded: bool, detail: &str) {
     match current_mode() {
-        UiMode::Plain => println!("{}", plain_finish_message(command, succeeded, detail)),
+        UiMode::Plain => {
+            let _ = runtime::write_stdout_line(&plain_finish_message(command, succeeded, detail));
+        }
         UiMode::Rich => {
             let _ = with_rich_state(|state| {
                 if let Some(bar) = state.byte_bars.remove(command) {
@@ -442,9 +439,9 @@ pub fn command_finish(command: &str, succeeded: bool, detail: &str) {
                         spinner.finish_with_message(rich_failure_message(command, detail));
                     }
                 } else if succeeded {
-                    println!("{}", rich_success_message(command, detail));
+                    let _ = runtime::write_stdout_line(&rich_success_message(command, detail));
                 } else {
-                    println!("{}", rich_failure_message(command, detail));
+                    let _ = runtime::write_stdout_line(&rich_failure_message(command, detail));
                 }
             });
         }
@@ -523,7 +520,7 @@ fn success_meta_lines(result: &CommandResult) -> Vec<String> {
 
 pub fn finalize_result(result: &CommandResult) {
     if let Some(message) = finalize_error_output_line(result) {
-        eprintln!("{message}");
+        let _ = runtime::write_stderr_line(&message);
         return;
     }
 
@@ -532,7 +529,7 @@ pub fn finalize_result(result: &CommandResult) {
     }
 
     for line in success_meta_lines(result) {
-        println!("{line}");
+        let _ = runtime::write_stdout_line(&line);
     }
 }
 
@@ -540,6 +537,28 @@ pub fn finalize_result(result: &CommandResult) {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::{path::Path, sync::Arc};
+
+    use crate::runtime::{self, BufferedOutputSink, CliRuntime, OutputSink, SshTargetConnector};
+
+    fn plain_runtime(output_sink: Arc<dyn OutputSink>) -> Arc<CliRuntime> {
+        Arc::new(CliRuntime::plain(
+            Path::new("."),
+            Arc::new(SshTargetConnector),
+            output_sink,
+        ))
+    }
+
+    fn capture_output(action: impl std::future::Future<Output = ()>) -> runtime::BufferedOutput {
+        let output_sink = Arc::new(BufferedOutputSink::default());
+        let runtime = plain_runtime(output_sink.clone());
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime should build")
+            .block_on(runtime::scope(runtime, action));
+        output_sink.snapshot()
+    }
 
     #[test]
     fn detects_plain_when_ci_enabled() {
@@ -662,6 +681,45 @@ mod tests {
             .insert("service".to_string(), "svc-a".to_string());
 
         assert_eq!(success_meta_lines(&result), vec!["  service: svc-a"]);
+    }
+
+    #[test]
+    fn finalize_result_writes_failure_to_runtime_stderr() {
+        let result = CommandResult {
+            command: "deploy".to_string(),
+            exit_code: 2,
+            stderr: Some("error: failed".to_string()),
+            duration_ms: 0,
+            meta: BTreeMap::new(),
+        };
+
+        let output = capture_output(async move {
+            finalize_result(&result);
+        });
+
+        assert_eq!(output.stdout, "");
+        assert_eq!(output.stderr, "error: failed\n");
+    }
+
+    #[test]
+    fn finalize_result_writes_success_meta_to_runtime_stdout() {
+        let mut result = CommandResult {
+            command: "deploy".to_string(),
+            exit_code: 0,
+            stderr: None,
+            duration_ms: 0,
+            meta: BTreeMap::new(),
+        };
+        result
+            .meta
+            .insert("target".to_string(), "default".to_string());
+
+        let output = capture_output(async move {
+            finalize_result(&result);
+        });
+
+        assert_eq!(output.stdout, "  target: default\n");
+        assert_eq!(output.stderr, "");
     }
 
     #[test]

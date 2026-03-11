@@ -16,6 +16,7 @@ use crate::{
         error_diagnostics::{self, summarize_command_failure},
         ui,
     },
+    runtime,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,7 +79,7 @@ async fn run_async(args: StopArgs, project_root: &Path) -> anyhow::Result<StopSu
     );
 
     ui::command_stage("service.stop", "connect", "connecting target");
-    let connected = deploy::connect_target(&target).await?;
+    let connected = runtime::connect_target(&target).await?;
     let correlation_id = Uuid::new_v4();
     ui::command_stage("service.stop", "hello", "negotiating hello");
     let hello = negotiate_hello(&connected, correlation_id).await?;

@@ -1,4 +1,3 @@
-use super::certs::write_local_ssh_config;
 use super::cli::{CmdOutput, run_imago_cli};
 use super::cluster::Cluster;
 use super::http::wait_http_response;
@@ -61,7 +60,7 @@ impl ServiceHandle {
 pub struct Scenario {
     workspace_root: PathBuf,
     _temp_dir: TempDir,
-    control_home: PathBuf,
+    daemon_package: String,
     cluster: Cluster,
     projects_base_dir: PathBuf,
     services: BTreeMap<String, Service>,
@@ -79,10 +78,6 @@ impl Scenario {
         let temp_dir = TempDirBuilder::new().prefix(&prefix).tempdir()?;
         let root = temp_dir.path().to_path_buf();
 
-        let control_home = root.join("h");
-        fs::create_dir_all(&control_home)?;
-        write_local_ssh_config(&control_home)?;
-
         let cluster = Cluster::new_with_daemon_package(
             workspace_root.clone(),
             root.join("n"),
@@ -94,7 +89,7 @@ impl Scenario {
         Ok(Self {
             workspace_root,
             _temp_dir: temp_dir,
-            control_home,
+            daemon_package: daemon_package.to_string(),
             cluster,
             projects_base_dir,
             services: BTreeMap::new(),
@@ -230,7 +225,7 @@ impl Scenario {
         run_imago_cli(
             &self.workspace_root,
             &service.project.project_dir,
-            &self.control_home,
+            &self.daemon_package,
             args,
         )
     }

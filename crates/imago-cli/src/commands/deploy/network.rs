@@ -1,10 +1,11 @@
 use async_trait::async_trait;
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use crate::commands::build;
 
 #[async_trait]
-pub(crate) trait AdminTransport: Send + Sync {
+#[doc(hidden)]
+pub trait AdminTransport: Send + Sync {
     fn close(&self);
 
     async fn request_response_bytes(
@@ -25,7 +26,8 @@ pub(crate) trait AdminTransport: Send + Sync {
 }
 
 #[async_trait]
-pub(crate) trait TargetConnector {
+#[doc(hidden)]
+pub trait TargetConnector: Send + Sync {
     async fn connect(
         &self,
         target: &build::DeployTargetConfig,
@@ -33,7 +35,8 @@ pub(crate) trait TargetConnector {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct SshTargetConnector;
+#[doc(hidden)]
+pub struct SshTargetConnector;
 
 #[async_trait]
 impl TargetConnector for SshTargetConnector {
@@ -45,35 +48,65 @@ impl TargetConnector for SshTargetConnector {
     }
 }
 
+#[derive(Debug, Clone)]
+#[doc(hidden)]
+pub struct LocalProxyTargetConnector {
+    imagod_binary: PathBuf,
+}
+
+impl LocalProxyTargetConnector {
+    pub fn new(imagod_binary: PathBuf) -> Self {
+        Self { imagod_binary }
+    }
+}
+
+#[async_trait]
+impl TargetConnector for LocalProxyTargetConnector {
+    async fn connect(
+        &self,
+        target: &build::DeployTargetConfig,
+    ) -> anyhow::Result<super::ConnectedTargetSession> {
+        super::connect_local_proxy_target(target, &self.imagod_binary)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SshTargetConnector, TargetConnector};
-    use crate::commands::build::{self, DeployTargetConfig};
+    use super::LocalProxyTargetConnector;
+    use crate::commands::build;
+    use std::path::PathBuf;
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn ssh_connector_connect_delegates_error_path_to_connect_target() {
-        let target = DeployTargetConfig {
-            remote: "ssh://localhost?socket=/run/imago/imagod.sock".to_string(),
-            ssh_remote: build::SshTargetRemote {
-                user: None,
-                host: "localhost".to_string(),
-                port: None,
-                socket_path: Some("/run/imago/imagod.sock".to_string()),
-            },
+    #[test]
+    fn ssh_proxy_command_args_match_proxy_stdio_contract() {
+        let remote = build::SshTargetRemote {
+            user: Some("root".to_string()),
+            host: "edge.example.com".to_string(),
+            port: Some(2222),
+            socket_path: Some("/tmp/imagod.sock".to_string()),
         };
 
-        let direct = super::super::connect_target(&target)
-            .await
-            .expect("direct connect_target should establish ssh transport session");
-        let delegated = SshTargetConnector
-            .connect(&target)
-            .await
-            .expect("delegated connect should establish ssh transport session");
+        let args = super::super::ssh_proxy_command_args(&remote);
 
-        assert_eq!(delegated.authority, direct.authority);
-        assert_eq!(delegated.resolved_addr, direct.resolved_addr);
-        assert_eq!(delegated.remote_input, direct.remote_input);
-        direct.close(0, b"test complete");
-        delegated.close(0, b"test complete");
+        assert_eq!(
+            args,
+            vec![
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                "-p",
+                "2222",
+                "root@edge.example.com",
+                "imagod",
+                "proxy-stdio",
+                "--socket",
+                "/tmp/imagod.sock",
+            ]
+        );
+    }
+
+    #[test]
+    fn local_proxy_connector_keeps_binary_path() {
+        let connector = LocalProxyTargetConnector::new(PathBuf::from("/tmp/imagod"));
+        assert_eq!(connector.imagod_binary, PathBuf::from("/tmp/imagod"));
     }
 }

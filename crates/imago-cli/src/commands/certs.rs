@@ -24,6 +24,7 @@ use crate::{
         error_diagnostics::{format_command_error, summarize_command_failure},
         ui,
     },
+    runtime,
 };
 
 use super::CommandResult;
@@ -68,14 +69,16 @@ pub fn run_generate(args: CertsGenerateArgs) -> CommandResult {
     );
     match run_generate_inner(args) {
         Ok(output) => {
-            println!("generated key material:");
-            println!("  {}", output.paths.client_key.display());
-            println!("  {}", output.paths.gitignore.display());
-            println!(
+            let _ = runtime::write_stdout_line("generated key material:");
+            let _ = runtime::write_stdout_line(&format!("  {}", output.paths.client_key.display()));
+            let _ = runtime::write_stdout_line(&format!("  {}", output.paths.gitignore.display()));
+            let _ = runtime::write_stdout_line(&format!(
                 "  client_public_key_hex={}",
                 output.client_public_key_hex.as_str()
+            ));
+            let _ = runtime::write_stdout_line(
+                "private keys are sensitive. do not commit or share them.",
             );
-            println!("private keys are sensitive. do not commit or share them.");
 
             ui::command_finish("trust.client-key.generate", true, "");
             success_generate_result(started_at, output.client_public_key_hex)
@@ -311,7 +314,7 @@ fn build_remote_target(remote: &str) -> anyhow::Result<build::DeployTargetConfig
 
 async fn connect_remote(remote: &str) -> anyhow::Result<deploy::ConnectedTargetSession> {
     let target = build_remote_target(remote)?;
-    deploy::connect_target(&target).await
+    runtime::connect_target(&target).await
 }
 
 async fn negotiate_bindings_cert_hello(
@@ -477,9 +480,32 @@ fn write_private_key(path: &Path, contents: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::cli::BindingsCertUploadArgs;
+    use crate::runtime::{self, BufferedOutputSink, CliRuntime, OutputSink, SshTargetConnector};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use std::{path::Path, sync::Arc};
+
+    fn plain_runtime(output_sink: Arc<dyn OutputSink>) -> Arc<CliRuntime> {
+        Arc::new(CliRuntime::plain(
+            Path::new("."),
+            Arc::new(SshTargetConnector),
+            output_sink,
+        ))
+    }
+
+    fn capture_output(
+        action: impl std::future::Future<Output = CommandResult>,
+    ) -> (CommandResult, runtime::BufferedOutput) {
+        let output_sink = Arc::new(BufferedOutputSink::default());
+        let runtime = plain_runtime(output_sink.clone());
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime should build")
+            .block_on(runtime::scope(runtime, action));
+        (result, output_sink.snapshot())
+    }
 
     #[test]
     fn generates_client_key_and_public_key_hex() {
@@ -557,6 +583,30 @@ mod tests {
             result.meta.get("client_public_key_hex"),
             Some(&public_key_hex)
         );
+    }
+
+    #[test]
+    fn run_generate_writes_generated_material_to_runtime_stdout() {
+        let dir = temp_dir("run_generate_writes_generated_material_to_runtime_stdout");
+        let args = CertsGenerateArgs {
+            out_dir: dir.clone(),
+            force: false,
+        };
+
+        let (result, output) = capture_output(async move { run_generate(args) });
+
+        assert_eq!(result.exit_code, 0);
+        assert!(output.stdout.contains("generated key material:\n"));
+        assert!(output.stdout.contains("client.key"));
+        assert!(output.stdout.contains("client_public_key_hex="));
+        assert!(
+            output
+                .stdout
+                .contains("private keys are sensitive. do not commit or share them.")
+        );
+        assert_eq!(output.stderr, "");
+
+        cleanup(&dir);
     }
 
     #[tokio::test]

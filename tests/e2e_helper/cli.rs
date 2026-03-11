@@ -1,7 +1,11 @@
-use super::binaries::resolve_imago_cli_binary;
+use super::binaries::resolve_imagod_binary;
 use anyhow::{Result, bail};
-use std::path::Path;
-use std::process::Command;
+use clap::Parser;
+use imago_cli::{
+    ParsedCli, dispatch_with_runtime,
+    runtime::{BufferedOutputSink, CliRuntime, LocalProxyTargetConnector, OutputSink},
+};
+use std::{path::Path, sync::Arc};
 
 #[derive(Debug, Clone)]
 pub struct CmdOutput {
@@ -342,26 +346,49 @@ error: another failure\n\
 pub fn run_imago_cli(
     workspace_root: &Path,
     project_dir: &Path,
-    home_dir: &Path,
+    daemon_package: &str,
     args: &[&str],
 ) -> Result<CmdOutput> {
-    let cli_binary = resolve_imago_cli_binary(workspace_root)?;
-    let output = Command::new(cli_binary)
-        .args(args)
-        .current_dir(project_dir)
-        .env("CI", "true")
-        .env("HOME", home_dir)
-        .env("USERPROFILE", home_dir)
-        .output()?;
+    let imagod_binary = resolve_imagod_binary(workspace_root, daemon_package)?;
+    let output_sink = Arc::new(BufferedOutputSink::default());
+    let cli_runtime = Arc::new(CliRuntime::plain(
+        project_dir,
+        Arc::new(LocalProxyTargetConnector::new(imagod_binary)),
+        output_sink.clone(),
+    ));
+    let argv = std::iter::once("imago".to_string())
+        .chain(args.iter().map(|arg| (*arg).to_string()))
+        .collect::<Vec<_>>();
 
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let runtime_result = match ParsedCli::try_parse_from(&argv) {
+        Ok(cli) => {
+            let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            let result = tokio_runtime.block_on(dispatch_with_runtime(cli, cli_runtime));
+            (result.exit_code, output_sink.snapshot())
+        }
+        Err(err) => {
+            let exit_code = err.exit_code();
+            let rendered = err.to_string();
+            if err.use_stderr() {
+                let _ = output_sink.write_stderr(rendered.as_bytes());
+            } else {
+                let _ = output_sink.write_stdout(rendered.as_bytes());
+            }
+            (exit_code, output_sink.snapshot())
+        }
+    };
+
+    let (exit_code, captured) = runtime_result;
+    let stdout = captured.stdout;
+    let stderr = captured.stderr;
     let combined = format!("{stdout}{stderr}");
 
     Ok(CmdOutput {
-        status: output.status.to_string(),
-        status_code: output.status.code(),
-        success: output.status.success(),
+        status: format!("exit status: {exit_code}"),
+        status_code: Some(exit_code),
+        success: exit_code == 0,
         stdout,
         stderr,
         combined,

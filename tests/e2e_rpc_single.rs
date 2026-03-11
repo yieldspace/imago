@@ -1,7 +1,6 @@
 #[path = "e2e_helper/mod.rs"]
 mod e2e_helper;
 
-use e2e_helper::certs::write_local_ssh_config;
 use e2e_helper::cli::{CmdOutput, run_imago_cli};
 use e2e_helper::wait::poll_until;
 use e2e_helper::{Cluster, TargetSpec, TestResult, WasmArtifact, wasm_file_name, wasm_path};
@@ -19,10 +18,6 @@ const LOG_POLL_INTERVAL: Duration = Duration::from_millis(200);
 fn e2e_rpc_single_node_local_flow() -> TestResult {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp = TempDirBuilder::new().prefix("ierpcl").tempdir()?;
-
-    let control_home = temp.path().join("h");
-    fs::create_dir_all(&control_home)?;
-    write_local_ssh_config(&control_home)?;
 
     let mut cluster = Cluster::new(workspace_root.clone(), temp.path().join("n"))?;
     let _default = cluster.add_node("default")?;
@@ -54,24 +49,20 @@ fn e2e_rpc_single_node_local_flow() -> TestResult {
     let deploy_greeter = run_imago_cli(
         &workspace_root,
         &greeter_dir,
-        &control_home,
+        "imagod",
         &["service", "deploy", "--target", "default", "--detach"],
     )?;
     ensure_success("rpc-greeter deploy", &deploy_greeter)?;
     assert_command_completed("rpc-greeter deploy", &deploy_greeter)?;
 
-    let deps_sync_client = run_imago_cli(
-        &workspace_root,
-        &client_dir,
-        &control_home,
-        &["deps", "sync"],
-    )?;
+    let deps_sync_client =
+        run_imago_cli(&workspace_root, &client_dir, "imagod", &["deps", "sync"])?;
     ensure_success("rpc-caller deps sync", &deps_sync_client)?;
 
     let deploy_client = run_imago_cli(
         &workspace_root,
         &client_dir,
-        &control_home,
+        "imagod",
         &["service", "deploy", "--target", "default", "--detach"],
     )?;
     ensure_success("rpc-caller deploy", &deploy_client)?;
@@ -80,7 +71,7 @@ fn e2e_rpc_single_node_local_flow() -> TestResult {
     let success_logs = wait_logs_with_marker(
         &workspace_root,
         &client_dir,
-        &control_home,
+        "imagod",
         SUCCESS_MARKER,
         LOG_WAIT_TIMEOUT,
     )?;
@@ -93,13 +84,13 @@ fn e2e_rpc_single_node_local_flow() -> TestResult {
     let _ = run_imago_cli(
         &workspace_root,
         &client_dir,
-        &control_home,
+        "imagod",
         &["service", "stop", "rpc-caller", "--target", "default"],
     );
     let _ = run_imago_cli(
         &workspace_root,
         &greeter_dir,
-        &control_home,
+        "imagod",
         &["service", "stop", "rpc-greeter", "--target", "default"],
     );
 
@@ -109,21 +100,21 @@ fn e2e_rpc_single_node_local_flow() -> TestResult {
 fn wait_logs(
     workspace_root: &Path,
     project_dir: &Path,
-    home: &Path,
+    daemon_package: &str,
     timeout: Duration,
 ) -> TestResult<String> {
     poll_until(
         "collecting rpc-caller logs",
         timeout,
         LOG_POLL_INTERVAL,
-        || fetch_logs_once(workspace_root, project_dir, home),
+        || fetch_logs_once(workspace_root, project_dir, daemon_package),
     )
 }
 
 fn wait_logs_with_marker(
     workspace_root: &Path,
     project_dir: &Path,
-    home: &Path,
+    daemon_package: &str,
     marker: &str,
     timeout: Duration,
 ) -> TestResult<String> {
@@ -133,7 +124,7 @@ fn wait_logs_with_marker(
         timeout,
         LOG_POLL_INTERVAL,
         || {
-            let Some(logs) = fetch_logs_once(workspace_root, project_dir, home)? else {
+            let Some(logs) = fetch_logs_once(workspace_root, project_dir, daemon_package)? else {
                 return Ok(None);
             };
             last_logs = logs.clone();
@@ -149,12 +140,12 @@ fn wait_logs_with_marker(
 fn fetch_logs_once(
     workspace_root: &Path,
     project_dir: &Path,
-    home: &Path,
+    daemon_package: &str,
 ) -> TestResult<Option<String>> {
     let logs = run_imago_cli(
         workspace_root,
         project_dir,
-        home,
+        daemon_package,
         &["service", "logs", "rpc-caller", "--tail", "200"],
     )?;
     if !logs.success {

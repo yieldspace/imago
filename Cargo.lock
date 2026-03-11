@@ -2357,11 +2357,14 @@ name = "imago"
 version = "0.3.1"
 dependencies = [
  "anyhow",
+ "clap",
  "hex",
+ "imago-cli",
  "imago-schema-gen",
  "rcgen",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

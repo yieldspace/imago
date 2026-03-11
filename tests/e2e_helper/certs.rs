@@ -1,8 +1,6 @@
 use anyhow::{Context, Result, bail};
 use rcgen::{KeyPair, PKCS_ED25519};
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -45,30 +43,6 @@ pub fn generate_key_material(cert_dir: &Path) -> Result<KeyMaterial> {
         admin_public_hex: public_key_hex(&admin_key)?,
         client_public_hex: public_key_hex(&client_key)?,
     })
-}
-
-pub fn write_local_ssh_config(home_dir: &Path) -> Result<PathBuf> {
-    let ssh_dir = home_dir.join(".ssh");
-    fs::create_dir_all(&ssh_dir)
-        .with_context(|| format!("failed to create ssh dir: {}", ssh_dir.display()))?;
-    #[cfg(unix)]
-    fs::set_permissions(&ssh_dir, fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("failed to chmod ssh dir: {}", ssh_dir.display()))?;
-
-    let config_path = ssh_dir.join("config");
-    let body = "\
-Host *
-    BatchMode yes
-    StrictHostKeyChecking no
-    UserKnownHostsFile /dev/null
-    LogLevel ERROR
-";
-    fs::write(&config_path, body)
-        .with_context(|| format!("failed to write ssh config: {}", config_path.display()))?;
-    #[cfg(unix)]
-    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("failed to chmod ssh config: {}", config_path.display()))?;
-    Ok(config_path)
 }
 
 fn public_key_hex(key_pair: &KeyPair) -> Result<String> {

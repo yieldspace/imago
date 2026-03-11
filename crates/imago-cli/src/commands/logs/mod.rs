@@ -1,10 +1,4 @@
-use std::{
-    borrow::Cow,
-    io::{self, Write},
-    path::Path,
-    time::Duration,
-    time::Instant,
-};
+use std::{borrow::Cow, path::Path, time::Duration, time::Instant};
 
 use anyhow::{Context, anyhow};
 use chrono::{DateTime, Local, Utc};
@@ -23,6 +17,7 @@ use crate::{
         error_diagnostics::{format_command_error, summarize_command_failure},
         ui,
     },
+    runtime,
 };
 
 const NON_FOLLOW_IDLE_TIMEOUT_SECS: u64 = 2;
@@ -220,7 +215,7 @@ async fn run_async_with_target_override(
         &format_local_context_line(project_root, service_name, &target_name, &target.remote),
     );
     ui::command_stage("service.logs", "connect", "connecting target");
-    let connected = deploy::connect_target(&target).await?;
+    let connected = runtime::connect_target(&target).await?;
     ui::command_stage("service.logs", "hello", "negotiating hello");
     let required_features = if with_timestamp {
         LOGS_HELLO_REQUIRED_FEATURES_WITH_TIMESTAMP.as_slice()
@@ -388,15 +383,9 @@ fn render_text_chunk(
     let timestamp = format_chunk_timestamp(chunk, with_timestamp)?;
     let rendered = renderable_chunk_bytes(chunk, all_processes, timestamp.as_deref(), prefix_state);
     if should_write_text_chunk_to_stderr(chunk, all_processes) {
-        let mut stderr = io::stderr().lock();
-        stderr
-            .write_all(rendered.as_ref())
-            .context("failed to write log chunk to stderr")?;
+        runtime::write_stderr(rendered.as_ref()).context("failed to write log chunk to stderr")?;
     } else {
-        let mut stdout = io::stdout().lock();
-        stdout
-            .write_all(rendered.as_ref())
-            .context("failed to write log chunk to stdout")?;
+        runtime::write_stdout(rendered.as_ref()).context("failed to write log chunk to stdout")?;
     }
 
     Ok(())

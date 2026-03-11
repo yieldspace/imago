@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     io::Read,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant},
 };
 
@@ -31,10 +31,12 @@ use crate::{
         shared::dependency::{DependencyResolver, StandardDependencyResolver},
         ui,
     },
+    runtime,
 };
 
 mod artifact;
-mod network;
+#[doc(hidden)]
+pub mod network;
 
 const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
@@ -60,6 +62,7 @@ const DETAIL_WASM_STDOUT: &str = "wasm.stdout";
 const DETAIL_WASM_STDERR: &str = "wasm.stderr";
 const AUTO_FOLLOW_TAIL_LINES: u32 = 200;
 const STDIO_MESSAGE_TERMINATOR: [u8; 4] = 0u32.to_be_bytes();
+const LOCAL_PROXY_STDERR_CAPTURE_TIMEOUT_MS: u64 = 1000;
 
 pub(crate) type Envelope = ProtocolEnvelope<Value>;
 
@@ -117,7 +120,8 @@ struct DeployRunSummary {
 }
 
 #[derive(Clone)]
-pub(crate) struct ConnectedTargetSession {
+#[doc(hidden)]
+pub struct ConnectedTargetSession {
     transport: Arc<dyn network::AdminTransport>,
     pub authority: String,
     pub resolved_addr: String,
@@ -128,7 +132,8 @@ pub(crate) struct ConnectedTargetSession {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StreamRequestTermination {
+#[doc(hidden)]
+pub enum StreamRequestTermination {
     Completed,
     Interrupted,
 }
@@ -136,14 +141,58 @@ pub(crate) enum StreamRequestTermination {
 struct SshTargetSession {
     remote: build::SshTargetRemote,
     remote_input: String,
-    inner: tokio::sync::Mutex<SshProcessIo>,
+    inner: tokio::sync::Mutex<ProcessIo>,
 }
 
-struct SshProcessIo {
+struct LocalProxyTargetSession {
+    imagod_binary: PathBuf,
+    socket_path: String,
+    remote_input: String,
+    inner: tokio::sync::Mutex<ProcessIo>,
+}
+
+struct ProcessIo {
     child: Child,
     stdin: ChildStdin,
     stdout: TokioBufReader<ChildStdout>,
+    stderr_capture: Option<LocalProxyStderrCapture>,
 }
+
+struct LocalProxyStderrCapture {
+    bytes: Arc<StdMutex<Vec<u8>>>,
+    drain_task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Debug)]
+struct LocalProxyTransportError {
+    summary: String,
+    stderr_note: LocalProxyTransportStderrNote,
+}
+
+#[derive(Debug)]
+struct LocalProxyTransportStderrNote {
+    detail: String,
+}
+
+impl std::fmt::Display for LocalProxyTransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.summary)
+    }
+}
+
+impl std::error::Error for LocalProxyTransportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.stderr_note)
+    }
+}
+
+impl std::fmt::Display for LocalProxyTransportStderrNote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "local proxy transport stderr: {}", self.detail)
+    }
+}
+
+impl std::error::Error for LocalProxyTransportStderrNote {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConnectedTargetMetadata {
@@ -175,6 +224,14 @@ impl ConnectedTargetSession {
 }
 
 impl SshTargetSession {
+    fn close_process(&self) {
+        if let Ok(mut inner) = self.inner.try_lock() {
+            terminate_ssh_process(&mut inner.child);
+        }
+    }
+}
+
+impl LocalProxyTargetSession {
     fn close_process(&self) {
         if let Ok(mut inner) = self.inner.try_lock() {
             terminate_ssh_process(&mut inner.child);
@@ -217,21 +274,117 @@ impl network::AdminTransport for SshTargetSession {
     }
 }
 
+#[async_trait::async_trait]
+impl network::AdminTransport for LocalProxyTargetSession {
+    fn close(&self) {
+        self.close_process();
+    }
+
+    async fn request_response_bytes(
+        &self,
+        framed: &[u8],
+        open_write_timeout: Duration,
+        read_timeout: Option<Duration>,
+    ) -> anyhow::Result<Vec<u8>> {
+        request_events_over_local_proxy(self, framed, open_write_timeout, read_timeout).await
+    }
+
+    async fn stream_response_frames(
+        &self,
+        framed: &[u8],
+        open_write_timeout: Duration,
+        read_idle_timeout: Option<Duration>,
+        follow: bool,
+        on_frame: &mut (dyn FnMut(Vec<u8>) -> anyhow::Result<bool> + Send),
+    ) -> anyhow::Result<StreamRequestTermination> {
+        request_streamed_frames_over_local_proxy(
+            self,
+            framed,
+            open_write_timeout,
+            read_idle_timeout,
+            follow,
+            on_frame,
+        )
+        .await
+    }
+}
+
 fn terminate_ssh_process(child: &mut Child) {
     let _ = child.start_kill();
 }
 
-fn replace_ssh_process_io(slot: &mut SshProcessIo, replacement: SshProcessIo) {
+fn replace_process_io(slot: &mut ProcessIo, replacement: ProcessIo) {
     let old = std::mem::replace(slot, replacement);
-    let SshProcessIo {
+    let ProcessIo {
         mut child,
         stdin: _stdin,
         stdout: _stdout,
+        stderr_capture: _stderr_capture,
     } = old;
     terminate_ssh_process(&mut child);
     tokio::spawn(async move {
         let _ = child.wait().await;
     });
+}
+
+fn format_local_proxy_stderr(stderr: &str) -> Option<String> {
+    let lines = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(lines.join(" | "))
+}
+
+async fn capture_local_proxy_stderr(inner: &mut ProcessIo) -> Option<String> {
+    terminate_ssh_process(&mut inner.child);
+    let stderr_capture = inner.stderr_capture.take()?;
+    let _ = tokio::time::timeout(
+        Duration::from_millis(LOCAL_PROXY_STDERR_CAPTURE_TIMEOUT_MS),
+        inner.child.wait(),
+    )
+    .await;
+    let _ = tokio::time::timeout(
+        Duration::from_millis(LOCAL_PROXY_STDERR_CAPTURE_TIMEOUT_MS),
+        stderr_capture.drain_task,
+    )
+    .await;
+    let bytes = stderr_capture.bytes.lock().ok()?.clone();
+
+    format_local_proxy_stderr(&String::from_utf8_lossy(&bytes))
+}
+
+fn annotate_local_proxy_transport_error(
+    err: anyhow::Error,
+    stderr: Option<String>,
+) -> anyhow::Error {
+    let Some(detail) = stderr else {
+        return err;
+    };
+    anyhow::Error::new(LocalProxyTransportError {
+        summary: err.to_string(),
+        stderr_note: LocalProxyTransportStderrNote { detail },
+    })
+}
+
+async fn reset_local_proxy_after_error<T>(
+    inner: &mut ProcessIo,
+    session: &LocalProxyTargetSession,
+    err: anyhow::Error,
+    reset_context: &'static str,
+) -> anyhow::Result<T> {
+    let err = annotate_local_proxy_transport_error(err, capture_local_proxy_stderr(inner).await);
+    reset_local_proxy_process(
+        inner,
+        &session.imagod_binary,
+        &session.socket_path,
+        &session.remote_input,
+    )
+    .context(reset_context)?;
+    Err(err)
 }
 
 fn deploy_phase_detail(phase: u8, detail: &str) -> String {
@@ -270,9 +423,9 @@ fn print_build_failure_logs(err: &anyhow::Error) {
         return;
     };
     for line in lines {
-        println!("{}", format_build_failure_log(line));
+        let _ = runtime::write_stdout_line(&format_build_failure_log(line));
     }
-    println!("{}", build_failure_footer_line());
+    let _ = runtime::write_stdout_line(build_failure_footer_line());
 }
 
 fn should_clear_deploy_spinner_before_follow(detach: bool) -> bool {
@@ -423,7 +576,7 @@ async fn run_async_with_target_override(
 ) -> anyhow::Result<DeployRunSummary> {
     let DeployArgs { target, detach } = args;
     let dependency_resolver = StandardDependencyResolver;
-    let target_connector = network::SshTargetConnector;
+    let target_connector = runtime::target_connector();
     let artifact_bundler = artifact::TarArtifactBundler;
 
     let target_name = target.unwrap_or_else(|| build::default_target_name().to_string());
@@ -515,7 +668,7 @@ async fn run_async_with_target_override(
     );
 
     let upload_result = run_upload_phase_with_resume(
-        &target_connector,
+        &*target_connector,
         UploadPhaseInputs {
             target: &target,
             target_for_protocol: &target_for_protocol,
@@ -642,7 +795,7 @@ async fn follow_logs_after_deploy(
     }
 }
 
-async fn run_upload_phase_with_resume<C: network::TargetConnector>(
+async fn run_upload_phase_with_resume<C: network::TargetConnector + ?Sized>(
     target_connector: &C,
     inputs: UploadPhaseInputs<'_>,
 ) -> anyhow::Result<UploadPhaseResult> {
@@ -676,7 +829,7 @@ async fn run_upload_phase_with_resume<C: network::TargetConnector>(
     ))
 }
 
-async fn run_upload_phase_once<C: network::TargetConnector>(
+async fn run_upload_phase_once<C: network::TargetConnector + ?Sized>(
     target_connector: &C,
     inputs: &UploadPhaseInputs<'_>,
 ) -> anyhow::Result<UploadPhaseResult> {
@@ -934,32 +1087,143 @@ async fn connect_ssh_target(
     })
 }
 
+pub(crate) fn connect_local_proxy_target(
+    target: &build::DeployTargetConfig,
+    imagod_binary: &Path,
+) -> anyhow::Result<ConnectedTargetSession> {
+    let socket_path = required_local_proxy_socket_path(&target.ssh_remote)?;
+    let authority = format_ssh_authority(&target.ssh_remote);
+    let resolved_addr = format!("local-proxy:{} via {}", target.ssh_remote.host, socket_path);
+    let metadata =
+        build_connected_target_metadata(target, &target.ssh_remote.host, &authority, resolved_addr);
+    let process_io = spawn_local_proxy_process(imagod_binary, socket_path, &target.remote)?;
+
+    Ok(ConnectedTargetSession {
+        transport: Arc::new(LocalProxyTargetSession {
+            imagod_binary: imagod_binary.to_path_buf(),
+            socket_path: socket_path.to_string(),
+            remote_input: target.remote.clone(),
+            inner: tokio::sync::Mutex::new(process_io),
+        }),
+        authority: metadata.authority,
+        resolved_addr: metadata.resolved_addr,
+        configured_host: metadata.configured_host,
+        remote_input: metadata.remote_input,
+    })
+}
+
+fn required_local_proxy_socket_path(remote: &build::SshTargetRemote) -> anyhow::Result<&str> {
+    if !matches!(
+        remote.host.as_str(),
+        "localhost" | "127.0.0.1" | "::1" | "[::1]"
+    ) {
+        return Err(anyhow!(
+            "local proxy connector only supports loopback ssh targets, got '{}'",
+            remote.host
+        ));
+    }
+
+    remote
+        .socket_path
+        .as_deref()
+        .ok_or_else(|| anyhow!("local proxy connector requires ?socket=/abs/path"))
+}
+
 fn spawn_ssh_proxy_process(
     remote: &build::SshTargetRemote,
     remote_input: &str,
-) -> anyhow::Result<SshProcessIo> {
+) -> anyhow::Result<ProcessIo> {
     let mut command = Command::new("ssh");
     command.args(ssh_proxy_command_args(remote));
+    spawn_process(
+        command,
+        remote_input,
+        "ssh transport",
+        "ssh stdin",
+        "ssh stdout",
+        false,
+        None,
+    )
+}
+
+fn spawn_local_proxy_process(
+    imagod_binary: &Path,
+    socket_path: &str,
+    remote_input: &str,
+) -> anyhow::Result<ProcessIo> {
+    let mut command = Command::new(imagod_binary);
+    command.arg("proxy-stdio");
+    command.arg("--socket");
+    command.arg(socket_path);
+    spawn_process(
+        command,
+        remote_input,
+        "local proxy transport",
+        "local proxy stdin",
+        "local proxy stdout",
+        true,
+        Some("local proxy stderr"),
+    )
+}
+
+fn spawn_process(
+    mut command: Command,
+    remote_input: &str,
+    label: &str,
+    stdin_label: &str,
+    stdout_label: &str,
+    capture_stderr: bool,
+    stderr_label: Option<&str>,
+) -> anyhow::Result<ProcessIo> {
     command.stdin(std::process::Stdio::piped());
     command.stdout(std::process::Stdio::piped());
-    command.stderr(std::process::Stdio::inherit());
+    if capture_stderr {
+        command.stderr(std::process::Stdio::piped());
+    } else {
+        command.stderr(std::process::Stdio::inherit());
+    }
 
     let mut child = command
         .spawn()
-        .with_context(|| format!("failed to spawn ssh transport for {remote_input}"))?;
+        .with_context(|| format!("failed to spawn {label} for {remote_input}"))?;
     let stdin = child
         .stdin
         .take()
-        .ok_or_else(|| anyhow!("failed to capture ssh stdin"))?;
+        .ok_or_else(|| anyhow!("failed to capture {stdin_label}"))?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| anyhow!("failed to capture ssh stdout"))?;
+        .ok_or_else(|| anyhow!("failed to capture {stdout_label}"))?;
+    let stderr_capture = if capture_stderr {
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow!("failed to capture {}", stderr_label.unwrap_or("stderr")))?;
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let task_bytes = bytes.clone();
+        let drain_task = tokio::spawn(async move {
+            let mut chunk = [0u8; 4096];
+            loop {
+                match stderr.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        if let Ok(mut guard) = task_bytes.lock() {
+                            guard.extend_from_slice(&chunk[..read]);
+                        }
+                    }
+                }
+            }
+        });
+        Some(LocalProxyStderrCapture { bytes, drain_task })
+    } else {
+        None
+    };
 
-    Ok(SshProcessIo {
+    Ok(ProcessIo {
         child,
         stdin,
         stdout: TokioBufReader::new(stdout),
+        stderr_capture,
     })
 }
 
@@ -999,12 +1263,23 @@ fn format_ssh_authority(remote: &build::SshTargetRemote) -> String {
 }
 
 fn reset_ssh_process(
-    inner: &mut SshProcessIo,
+    inner: &mut ProcessIo,
     remote: &build::SshTargetRemote,
     remote_input: &str,
 ) -> anyhow::Result<()> {
     let replacement = spawn_ssh_proxy_process(remote, remote_input)?;
-    replace_ssh_process_io(inner, replacement);
+    replace_process_io(inner, replacement);
+    Ok(())
+}
+
+fn reset_local_proxy_process(
+    inner: &mut ProcessIo,
+    imagod_binary: &Path,
+    socket_path: &str,
+    remote_input: &str,
+) -> anyhow::Result<()> {
+    let replacement = spawn_local_proxy_process(imagod_binary, socket_path, remote_input)?;
+    replace_process_io(inner, replacement);
     Ok(())
 }
 
@@ -1306,8 +1581,11 @@ async fn request_events_over_ssh(
 
     match read_timeout {
         Some(read_timeout) => {
-            match tokio::time::timeout(read_timeout, read_stdio_response_message(&mut inner.stdout))
-                .await
+            match tokio::time::timeout(
+                read_timeout,
+                read_stdio_response_message_with_label(&mut inner.stdout, "ssh transport"),
+            )
+            .await
             {
                 Ok(result) => recover_ssh_read_result(result, || {
                     reset_ssh_process(&mut inner, &session.remote, &session.remote_input)
@@ -1321,10 +1599,85 @@ async fn request_events_over_ssh(
                 }
             }
         }
-        None => {
-            recover_ssh_read_result(read_stdio_response_message(&mut inner.stdout).await, || {
-                reset_ssh_process(&mut inner, &session.remote, &session.remote_input)
-            })
+        None => recover_ssh_read_result(
+            read_stdio_response_message_with_label(&mut inner.stdout, "ssh transport").await,
+            || reset_ssh_process(&mut inner, &session.remote, &session.remote_input),
+        ),
+    }
+}
+
+async fn request_events_over_local_proxy(
+    session: &LocalProxyTargetSession,
+    framed: &[u8],
+    open_write_timeout: Duration,
+    read_timeout: Option<Duration>,
+) -> anyhow::Result<Vec<u8>> {
+    let mut inner = session.inner.lock().await;
+    let result = async {
+        tokio::time::timeout(open_write_timeout, inner.stdin.write_all(framed))
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "local proxy transport write timed out after {} ms",
+                    open_write_timeout.as_millis()
+                )
+            })??;
+        tokio::time::timeout(
+            open_write_timeout,
+            inner.stdin.write_all(&STDIO_MESSAGE_TERMINATOR),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "local proxy transport write timed out after {} ms",
+                open_write_timeout.as_millis()
+            )
+        })??;
+        tokio::time::timeout(open_write_timeout, inner.stdin.flush())
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "local proxy transport flush timed out after {} ms",
+                    open_write_timeout.as_millis()
+                )
+            })??;
+
+        match read_timeout {
+            Some(read_timeout) => {
+                match tokio::time::timeout(
+                    read_timeout,
+                    read_stdio_response_message_with_label(
+                        &mut inner.stdout,
+                        "local proxy transport",
+                    ),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow!(
+                        "local proxy transport read timed out after {} ms",
+                        read_timeout.as_millis()
+                    )),
+                }
+            }
+            None => {
+                read_stdio_response_message_with_label(&mut inner.stdout, "local proxy transport")
+                    .await
+            }
+        }
+    }
+    .await;
+
+    match result {
+        Ok(response) => Ok(response),
+        Err(err) => {
+            reset_local_proxy_after_error(
+                &mut inner,
+                session,
+                err,
+                "failed to reset local proxy transport after request failure",
+            )
+            .await
         }
     }
 }
@@ -1369,13 +1722,13 @@ async fn request_streamed_frames_over_ssh(
     loop {
         let next = if follow {
             tokio::select! {
-                frame = read_next_stdio_response_frame(&mut inner.stdout) => Some(frame),
+                frame = read_next_stdio_response_frame_with_label(&mut inner.stdout, "ssh transport") => Some(frame),
                 _ = tokio::signal::ctrl_c() => None,
             }
         } else if let Some(read_idle_timeout) = read_idle_timeout {
             match tokio::time::timeout(
                 read_idle_timeout,
-                read_next_stdio_response_frame(&mut inner.stdout),
+                read_next_stdio_response_frame_with_label(&mut inner.stdout, "ssh transport"),
             )
             .await
             {
@@ -1389,7 +1742,9 @@ async fn request_streamed_frames_over_ssh(
                 }
             }
         } else {
-            Some(read_next_stdio_response_frame(&mut inner.stdout).await)
+            Some(
+                read_next_stdio_response_frame_with_label(&mut inner.stdout, "ssh transport").await,
+            )
         };
         let Some(next) = next else {
             terminate_ssh_process(&mut inner.child);
@@ -1407,7 +1762,124 @@ async fn request_streamed_frames_over_ssh(
     }
 }
 
-async fn read_stdio_response_message<R>(reader: &mut R) -> anyhow::Result<Vec<u8>>
+async fn request_streamed_frames_over_local_proxy(
+    session: &LocalProxyTargetSession,
+    framed: &[u8],
+    open_write_timeout: Duration,
+    read_idle_timeout: Option<Duration>,
+    follow: bool,
+    on_frame: &mut (dyn FnMut(Vec<u8>) -> anyhow::Result<bool> + Send),
+) -> anyhow::Result<StreamRequestTermination> {
+    let mut inner = session.inner.lock().await;
+    let write_result: anyhow::Result<()> = async {
+        tokio::time::timeout(open_write_timeout, inner.stdin.write_all(framed))
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "local proxy transport write timed out after {} ms",
+                    open_write_timeout.as_millis()
+                )
+            })??;
+        tokio::time::timeout(
+            open_write_timeout,
+            inner.stdin.write_all(&STDIO_MESSAGE_TERMINATOR),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "local proxy transport write timed out after {} ms",
+                open_write_timeout.as_millis()
+            )
+        })??;
+        tokio::time::timeout(open_write_timeout, inner.stdin.flush())
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "local proxy transport flush timed out after {} ms",
+                    open_write_timeout.as_millis()
+                )
+            })??;
+        Ok(())
+    }
+    .await;
+    if let Err(err) = write_result {
+        return reset_local_proxy_after_error(
+            &mut inner,
+            session,
+            err,
+            "failed to reset local proxy transport after request failure",
+        )
+        .await;
+    }
+
+    loop {
+        let next = if follow {
+            tokio::select! {
+                frame = read_next_stdio_response_frame_with_label(&mut inner.stdout, "local proxy transport") => Some(frame),
+                _ = tokio::signal::ctrl_c() => None,
+            }
+        } else if let Some(read_idle_timeout) = read_idle_timeout {
+            match tokio::time::timeout(
+                read_idle_timeout,
+                read_next_stdio_response_frame_with_label(
+                    &mut inner.stdout,
+                    "local proxy transport",
+                ),
+            )
+            .await
+            {
+                Ok(result) => Some(result),
+                Err(_) => {
+                    return reset_local_proxy_after_error(
+                        &mut inner,
+                        session,
+                        anyhow!(
+                            "local proxy transport read timed out after {} ms",
+                            read_idle_timeout.as_millis()
+                        ),
+                        "failed to reset local proxy transport after request failure",
+                    )
+                    .await;
+                }
+            }
+        } else {
+            Some(
+                read_next_stdio_response_frame_with_label(
+                    &mut inner.stdout,
+                    "local proxy transport",
+                )
+                .await,
+            )
+        };
+        let Some(next) = next else {
+            terminate_ssh_process(&mut inner.child);
+            return Ok(StreamRequestTermination::Interrupted);
+        };
+        let next = match next {
+            Ok(next) => next,
+            Err(err) => {
+                return reset_local_proxy_after_error(
+                    &mut inner,
+                    session,
+                    err,
+                    "failed to reset local proxy transport after request failure",
+                )
+                .await;
+            }
+        };
+        let Some(frame) = next else {
+            return Ok(StreamRequestTermination::Completed);
+        };
+        if on_frame(frame)? {
+            return Ok(StreamRequestTermination::Completed);
+        }
+    }
+}
+
+async fn read_stdio_response_message_with_label<R>(
+    reader: &mut R,
+    transport_label: &str,
+) -> anyhow::Result<Vec<u8>>
 where
     R: AsyncRead + Unpin,
 {
@@ -1417,10 +1889,14 @@ where
         match reader.read_exact(&mut header).await {
             Ok(_) => {}
             Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof && out.is_empty() => {
-                return Err(anyhow!("ssh transport closed before returning a response"));
+                return Err(anyhow!(
+                    "{transport_label} closed before returning a response"
+                ));
             }
             Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Err(anyhow!("ssh transport closed in the middle of a response"));
+                return Err(anyhow!(
+                    "{transport_label} closed in the middle of a response"
+                ));
             }
             Err(err) => return Err(anyhow::Error::from(err)),
         }
@@ -1429,7 +1905,7 @@ where
         if len == 0 {
             break;
         }
-        ensure_stdio_response_message_growth(out.len(), len)?;
+        ensure_stdio_response_message_growth_with_label(out.len(), len, transport_label)?;
 
         let mut payload = vec![0u8; len];
         reader.read_exact(&mut payload).await?;
@@ -1438,20 +1914,21 @@ where
     Ok(out)
 }
 
-fn ensure_stdio_response_message_growth(
+fn ensure_stdio_response_message_growth_with_label(
     current_len: usize,
     payload_len: usize,
+    transport_label: &str,
 ) -> anyhow::Result<()> {
-    ensure_stdio_response_frame_len(payload_len)?;
+    ensure_stdio_response_frame_len_with_label(payload_len, transport_label)?;
     let next_frame_len = 4usize.checked_add(payload_len).ok_or_else(|| {
-        anyhow!("ssh transport response exceeds max size {MAX_STREAM_BYTES} bytes")
+        anyhow!("{transport_label} response exceeds max size {MAX_STREAM_BYTES} bytes")
     })?;
     let projected_len = current_len.checked_add(next_frame_len).ok_or_else(|| {
-        anyhow!("ssh transport response exceeds max size {MAX_STREAM_BYTES} bytes")
+        anyhow!("{transport_label} response exceeds max size {MAX_STREAM_BYTES} bytes")
     })?;
     if projected_len > MAX_STREAM_BYTES {
         return Err(anyhow!(
-            "ssh transport response exceeds max size {MAX_STREAM_BYTES} bytes"
+            "{transport_label} response exceeds max size {MAX_STREAM_BYTES} bytes"
         ));
     }
     Ok(())
@@ -1483,7 +1960,10 @@ where
         .await
 }
 
-async fn read_next_stdio_response_frame<R>(reader: &mut R) -> anyhow::Result<Option<Vec<u8>>>
+async fn read_next_stdio_response_frame_with_label<R>(
+    reader: &mut R,
+    transport_label: &str,
+) -> anyhow::Result<Option<Vec<u8>>>
 where
     R: AsyncRead + Unpin,
 {
@@ -1493,16 +1973,19 @@ where
     if len == 0 {
         return Ok(None);
     }
-    ensure_stdio_response_frame_len(len)?;
+    ensure_stdio_response_frame_len_with_label(len, transport_label)?;
     let mut payload = vec![0u8; len];
     reader.read_exact(&mut payload).await?;
     Ok(Some(payload))
 }
 
-fn ensure_stdio_response_frame_len(len: usize) -> anyhow::Result<()> {
+fn ensure_stdio_response_frame_len_with_label(
+    len: usize,
+    transport_label: &str,
+) -> anyhow::Result<()> {
     if len > MAX_STREAM_BYTES {
         return Err(anyhow!(
-            "ssh transport response frame exceeds max size {MAX_STREAM_BYTES} bytes"
+            "{transport_label} response frame exceeds max size {MAX_STREAM_BYTES} bytes"
         ));
     }
     Ok(())
@@ -2056,6 +2539,7 @@ fn decode_frames(value: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
 mod tests {
     use super::*;
     use crate::commands::dependency_cache;
+    use crate::commands::error_diagnostics::format_command_error;
     use crate::lockfile::{
         ComponentExpectation, DependencyExpectation, IMAGO_LOCK_VERSION, ImagoLock,
         ImagoLockResolved, ImagoLockResolvedDependency, LockCapabilityPolicy, LockDependencyKind,
@@ -2258,6 +2742,52 @@ mod tests {
     }
 
     #[test]
+    fn required_local_proxy_socket_path_accepts_loopback_socket() {
+        let remote = build::SshTargetRemote {
+            user: None,
+            host: "localhost".to_string(),
+            port: None,
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+
+        assert_eq!(
+            required_local_proxy_socket_path(&remote).expect("loopback socket should be accepted"),
+            "/tmp/imagod.sock"
+        );
+    }
+
+    #[test]
+    fn required_local_proxy_socket_path_rejects_missing_socket() {
+        let remote = build::SshTargetRemote {
+            user: None,
+            host: "localhost".to_string(),
+            port: None,
+            socket_path: None,
+        };
+
+        let err = required_local_proxy_socket_path(&remote)
+            .expect_err("missing socket should be rejected");
+        assert!(err.to_string().contains("requires ?socket=/abs/path"));
+    }
+
+    #[test]
+    fn required_local_proxy_socket_path_rejects_non_loopback_host() {
+        let remote = build::SshTargetRemote {
+            user: None,
+            host: "edge.example.com".to_string(),
+            port: None,
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+
+        let err = required_local_proxy_socket_path(&remote)
+            .expect_err("non-loopback host should be rejected");
+        assert!(
+            err.to_string()
+                .contains("only supports loopback ssh targets")
+        );
+    }
+
+    #[test]
     fn recover_ssh_read_result_resets_only_on_error() {
         let reset_calls = std::cell::Cell::new(0usize);
 
@@ -2279,6 +2809,20 @@ mod tests {
         .expect_err("error result should remain an error");
         assert!(err.to_string().contains("ssh read failed"));
         assert_eq!(reset_calls.get(), 1);
+    }
+
+    #[test]
+    fn local_proxy_request_failure_includes_transport_stderr_in_diagnostics() {
+        let err = annotate_local_proxy_transport_error(
+            anyhow!("local proxy transport read timed out after 100 ms"),
+            Some("proxy socket unavailable".to_string()),
+        );
+
+        let diagnostic = format_command_error("service.deploy", &err);
+        assert!(
+            diagnostic.contains("local proxy transport stderr: proxy socket unavailable"),
+            "unexpected diagnostic: {diagnostic}"
+        );
     }
 
     #[tokio::test]
@@ -2546,19 +3090,24 @@ mod tests {
 
     #[test]
     fn stdio_response_message_growth_enforces_frame_and_total_limits() {
-        let oversized_frame = ensure_stdio_response_frame_len(MAX_STREAM_BYTES + 1)
-            .expect_err("frame larger than limit should be rejected");
+        let oversized_frame =
+            ensure_stdio_response_frame_len_with_label(MAX_STREAM_BYTES + 1, "test transport")
+                .expect_err("frame larger than limit should be rejected");
         assert!(
             oversized_frame
                 .to_string()
                 .contains("frame exceeds max size")
         );
 
-        ensure_stdio_response_message_growth(0, MAX_STREAM_BYTES - 4)
+        ensure_stdio_response_message_growth_with_label(0, MAX_STREAM_BYTES - 4, "test transport")
             .expect("a single framed response at the exact limit should be accepted");
 
-        let oversized_total = ensure_stdio_response_message_growth(MAX_STREAM_BYTES - 4, 1)
-            .expect_err("cumulative framed bytes above the limit should be rejected");
+        let oversized_total = ensure_stdio_response_message_growth_with_label(
+            MAX_STREAM_BYTES - 4,
+            1,
+            "test transport",
+        )
+        .expect_err("cumulative framed bytes above the limit should be rejected");
         assert!(
             oversized_total
                 .to_string()
@@ -2573,7 +3122,7 @@ mod tests {
             .to_be_bytes();
         let mut reader = &header[..];
 
-        let err = read_stdio_response_message(&mut reader)
+        let err = read_stdio_response_message_with_label(&mut reader, "test transport")
             .await
             .expect_err("oversized frame length should be rejected before allocation");
         assert!(err.to_string().contains("frame exceeds max size"));
@@ -2586,7 +3135,7 @@ mod tests {
             .to_be_bytes();
         let mut reader = &header[..];
 
-        let err = read_next_stdio_response_frame(&mut reader)
+        let err = read_next_stdio_response_frame_with_label(&mut reader, "test transport")
             .await
             .expect_err("oversized frame length should be rejected before allocation");
         assert!(err.to_string().contains("frame exceeds max size"));
@@ -2597,7 +3146,7 @@ mod tests {
         let header = 0u32.to_be_bytes();
         let mut reader = &header[..];
 
-        let frame = read_next_stdio_response_frame(&mut reader)
+        let frame = read_next_stdio_response_frame_with_label(&mut reader, "test transport")
             .await
             .expect("zero-length frame should terminate the stream");
         assert!(

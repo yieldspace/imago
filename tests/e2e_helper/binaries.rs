@@ -6,18 +6,7 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 const E2E_IMAGOD_BIN_ENV: &str = "IMAGO_E2E_IMAGOD_BIN";
-const E2E_IMAGO_CLI_BIN_ENV: &str = "IMAGO_E2E_IMAGO_CLI_BIN";
-
 static BUILT_PACKAGES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-
-pub fn resolve_imago_cli_binary(workspace_root: &Path) -> Result<PathBuf> {
-    resolve_binary_for_package(
-        workspace_root,
-        "imago-cli",
-        "imago",
-        Some(E2E_IMAGO_CLI_BIN_ENV),
-    )
-}
 
 pub fn resolve_imagod_binary(workspace_root: &Path, daemon_package: &str) -> Result<PathBuf> {
     let env_override = if daemon_package == "imagod" {
