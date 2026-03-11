@@ -152,7 +152,7 @@ struct LocalProxyTargetSession {
 }
 
 struct ProcessIo {
-    child: Child,
+    child: Option<Child>,
     stdin: ChildStdin,
     stdout: TokioBufReader<ChildStdout>,
     stderr_capture: Option<LocalProxyStderrCapture>,
@@ -252,7 +252,7 @@ impl Drop for ConnectedSessionCloseGuard<'_> {
 impl SshTargetSession {
     fn close_process(&self) {
         if let Ok(mut inner) = self.inner.try_lock() {
-            terminate_ssh_process(&mut inner.child);
+            terminate_process_and_reap(&mut inner.child);
         }
     }
 }
@@ -260,7 +260,7 @@ impl SshTargetSession {
 impl LocalProxyTargetSession {
     fn close_process(&self) {
         if let Ok(mut inner) = self.inner.try_lock() {
-            terminate_ssh_process(&mut inner.child);
+            terminate_process_and_reap(&mut inner.child);
         }
     }
 }
@@ -339,6 +339,16 @@ fn terminate_ssh_process(child: &mut Child) {
     let _ = child.start_kill();
 }
 
+fn terminate_process_and_reap(child: &mut Option<Child>) {
+    let Some(mut child) = child.take() else {
+        return;
+    };
+    terminate_ssh_process(&mut child);
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
+}
+
 fn replace_process_io(slot: &mut ProcessIo, replacement: ProcessIo) {
     let old = std::mem::replace(slot, replacement);
     let ProcessIo {
@@ -347,10 +357,7 @@ fn replace_process_io(slot: &mut ProcessIo, replacement: ProcessIo) {
         stdout: _stdout,
         stderr_capture: _stderr_capture,
     } = old;
-    terminate_ssh_process(&mut child);
-    tokio::spawn(async move {
-        let _ = child.wait().await;
-    });
+    terminate_process_and_reap(&mut child);
 }
 
 fn format_local_proxy_stderr(stderr: &str) -> Option<String> {
@@ -366,11 +373,12 @@ fn format_local_proxy_stderr(stderr: &str) -> Option<String> {
 }
 
 async fn capture_local_proxy_stderr(inner: &mut ProcessIo) -> Option<String> {
-    terminate_ssh_process(&mut inner.child);
+    let mut child = inner.child.take()?;
+    terminate_ssh_process(&mut child);
     let stderr_capture = inner.stderr_capture.take()?;
     let _ = tokio::time::timeout(
         Duration::from_millis(LOCAL_PROXY_STDERR_CAPTURE_TIMEOUT_MS),
-        inner.child.wait(),
+        child.wait(),
     )
     .await;
     let _ = tokio::time::timeout(
@@ -1252,7 +1260,7 @@ fn spawn_process(
     };
 
     Ok(ProcessIo {
-        child,
+        child: Some(child),
         stdin,
         stdout: TokioBufReader::new(stdout),
         stderr_capture,
@@ -1779,7 +1787,7 @@ async fn request_streamed_frames_over_ssh(
             )
         };
         let Some(next) = next else {
-            terminate_ssh_process(&mut inner.child);
+            terminate_process_and_reap(&mut inner.child);
             return Ok(StreamRequestTermination::Interrupted);
         };
         let next = recover_ssh_read_result(next, || {
@@ -1884,7 +1892,7 @@ async fn request_streamed_frames_over_local_proxy(
             )
         };
         let Some(next) = next else {
-            terminate_ssh_process(&mut inner.child);
+            terminate_process_and_reap(&mut inner.child);
             return Ok(StreamRequestTermination::Interrupted);
         };
         let next = match next {

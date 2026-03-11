@@ -237,6 +237,8 @@ async fn inspect_public_key_from_remote(
 ) -> anyhow::Result<String> {
     ui::command_stage(command_name, "connect", "connecting source admin endpoint");
     let connected = connect_remote(remote).await?;
+    let _session_close_guard =
+        deploy::ConnectedSessionCloseGuard::new(&connected, b"trust cert inspect complete");
     let correlation_id = Uuid::new_v4();
 
     ui::command_stage(command_name, "hello", "negotiating hello (source)");
@@ -260,7 +262,6 @@ async fn inspect_public_key_from_remote(
     )?;
     let response: BindingsCertInspectResponse =
         deploy::response_payload(deploy::request_response(&connected, &request).await?)?;
-    connected.close(0, b"trust cert inspect complete");
     normalize_ed25519_public_key_hex(&response.public_key_hex)
         .context("bindings.cert.inspect returned invalid public key")
 }
@@ -277,6 +278,8 @@ async fn upload_public_key_to_remote(
         "connecting destination admin endpoint",
     );
     let connected = connect_remote(remote).await?;
+    let _session_close_guard =
+        deploy::ConnectedSessionCloseGuard::new(&connected, b"trust cert upload complete");
     let correlation_id = Uuid::new_v4();
 
     ui::command_stage(command_name, "hello", "negotiating hello (destination)");
@@ -300,7 +303,6 @@ async fn upload_public_key_to_remote(
         authority,
     )
     .await?;
-    connected.close(0, b"trust cert upload complete");
     Ok(())
 }
 
