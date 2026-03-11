@@ -2031,6 +2031,14 @@ mod tests {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("parent should be created");
         }
+        if path.file_name().and_then(|name| name.to_str()) == Some("imago.toml") {
+            let rendered = String::from_utf8_lossy(bytes).replace(
+                "remote = \"127.0.0.1:4443\"",
+                "remote = \"ssh://localhost?socket=/run/imago/imagod.sock\"",
+            );
+            fs::write(path, rendered.as_bytes()).expect("file write should succeed");
+            return;
+        }
         fs::write(path, bytes).expect("file write should succeed");
     }
 
@@ -2173,7 +2181,7 @@ mod tests {
     path = "registry/example"
     
     [target.default]
-    remote = "127.0.0.1:4443"
+    remote = "ssh://localhost?socket=/run/imago/imagod.sock"
     "#,
         );
         write(
@@ -2232,7 +2240,7 @@ mod tests {
     wit = "yieldspace:example"
     
     [target.default]
-    remote = "127.0.0.1:4443"
+    remote = "ssh://localhost?socket=/run/imago/imagod.sock"
     "#,
         );
         write(
@@ -4638,6 +4646,16 @@ mod tests {
                 "chikoski:hello/untouched".to_string()
             ]
         );
+        fs::write(
+            root.join("imago.toml"),
+            fs::read_to_string(root.join("imago.toml"))
+                .expect("imago.toml should exist")
+                .replace(
+                    "remote = \"127.0.0.1:4443\"",
+                    "remote = \"ssh://localhost?socket=/run/imago/imagod.sock\"",
+                ),
+        )
+        .expect("imago.toml should be rewritten with ssh target");
         build::build_project("default", &root)
             .expect("build should succeed after rewrite by using synchronized dependency cache");
 

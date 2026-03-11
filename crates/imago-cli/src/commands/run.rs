@@ -83,13 +83,7 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<RunSumm
         .context("failed to resolve service name for service start")?;
     ui::command_info(
         "service.start",
-        &format_local_context_line(
-            project_root,
-            &service_name,
-            &target_name,
-            &target.remote,
-            target.server_name.as_deref(),
-        ),
+        &format_local_context_line(project_root, &service_name, &target_name, &target.remote),
     );
 
     ui::command_stage("service.start", "connect", "connecting target");

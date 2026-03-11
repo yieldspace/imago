@@ -2,4 +2,13 @@ FROM rust:bookworm
 
 WORKDIR /workspace
 RUN rustup target add wasm32-wasip2
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/*
 COPY . .
+RUN mkdir -p /root/.ssh \
+    && chmod 700 /root/.ssh \
+    && cp examples/imago-compose-bindings/docker/ssh/control/id_ed25519 /root/.ssh/id_ed25519 \
+    && chmod 600 /root/.ssh/id_ed25519 \
+    && printf 'Host *\n    StrictHostKeyChecking no\n    UserKnownHostsFile /dev/null\n    LogLevel ERROR\n' > /root/.ssh/config \
+    && chmod 600 /root/.ssh/config

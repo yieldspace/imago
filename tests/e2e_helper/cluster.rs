@@ -1,5 +1,5 @@
 use super::binaries::resolve_imagod_binary;
-use super::certs::{KnownHostEntry, generate_key_material};
+use super::certs::generate_key_material;
 use super::projects::TargetSpec;
 use anyhow::{Context, Result, anyhow, bail};
 use std::fs;
@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 pub struct Cluster {
     workspace_root: PathBuf,
     base_dir: PathBuf,
-    control_admin_public_hex: String,
     daemon_package: String,
     nodes: Vec<Node>,
     running: Vec<NodeProcess>,
@@ -34,11 +33,11 @@ impl NodeHandle {
 struct Node {
     name: String,
     target: TargetSpec,
+    listen_addr: String,
     work_dir: PathBuf,
     home_dir: PathBuf,
     storage_root: PathBuf,
     imagod_config_path: PathBuf,
-    known_host: KnownHostEntry,
 }
 
 #[derive(Debug)]
@@ -47,18 +46,13 @@ struct NodeProcess {
 }
 
 impl Cluster {
-    pub fn new(
-        workspace_root: PathBuf,
-        base_dir: PathBuf,
-        control_admin_public_hex: String,
-    ) -> Result<Self> {
-        Self::new_with_daemon_package(workspace_root, base_dir, control_admin_public_hex, "imagod")
+    pub fn new(workspace_root: PathBuf, base_dir: PathBuf) -> Result<Self> {
+        Self::new_with_daemon_package(workspace_root, base_dir, "imagod")
     }
 
     pub fn new_with_daemon_package(
         workspace_root: PathBuf,
         base_dir: PathBuf,
-        control_admin_public_hex: String,
         daemon_package: impl Into<String>,
     ) -> Result<Self> {
         fs::create_dir_all(&base_dir)
@@ -66,7 +60,6 @@ impl Cluster {
         Ok(Self {
             workspace_root,
             base_dir,
-            control_admin_public_hex,
             daemon_package: daemon_package.into(),
             nodes: Vec::new(),
             running: Vec::new(),
@@ -98,7 +91,6 @@ impl Cluster {
             port,
             control_socket_path.as_path(),
             keys.server_key_path.as_path(),
-            self.control_admin_public_hex.as_str(),
             keys.server_public_hex.as_str(),
         );
         fs::write(&imagod_config_path, config)
@@ -106,22 +98,20 @@ impl Cluster {
 
         let target = TargetSpec::new(
             name,
-            format!("127.0.0.1:{port}"),
-            "localhost",
-            "certs/control.key",
+            format!(
+                "ssh://localhost?socket={}",
+                control_socket_path.to_string_lossy()
+            ),
         );
 
         self.nodes.push(Node {
             name: name.to_string(),
             target,
+            listen_addr: format!("127.0.0.1:{port}"),
             work_dir,
             home_dir,
             storage_root,
             imagod_config_path,
-            known_host: KnownHostEntry {
-                authority: format!("localhost:{port}"),
-                public_key_hex: keys.server_public_hex,
-            },
         });
 
         Ok(NodeHandle {
@@ -158,7 +148,7 @@ impl Cluster {
 
             startups.push(NodeStartup {
                 name: node.name.clone(),
-                listen_addr: node.target.remote.clone(),
+                listen_addr: node.listen_addr.clone(),
                 manager_socket_path: node
                     .storage_root
                     .join("runtime")
@@ -215,18 +205,11 @@ impl Cluster {
             .ok_or_else(|| anyhow!("unknown target '{name}'"))
     }
 
-    pub fn known_hosts_entries(&self) -> Vec<KnownHostEntry> {
-        self.nodes
-            .iter()
-            .map(|node| node.known_host.clone())
-            .collect()
-    }
-
     pub fn authority_for(&self, name: &str) -> Result<String> {
         self.nodes
             .iter()
             .find(|node| node.name == name)
-            .map(|node| format!("rpc://{}", node.target.remote))
+            .map(|node| format!("rpc://{}", node.listen_addr))
             .ok_or_else(|| anyhow!("unknown node '{name}'"))
     }
 }
@@ -295,14 +278,12 @@ fn render_imagod_config(
     port: u16,
     control_socket_path: &Path,
     server_key_path: &Path,
-    control_admin_public_hex: &str,
     server_public_hex: &str,
 ) -> String {
     format!(
-        "listen_addr = \"127.0.0.1:{port}\"\ncontrol_socket_path = \"{}\"\nstorage_root = \"d\"\n\n[runtime]\nmax_chunks = 128\nchunk_timeout_ms = 10000\nidle_ttl_secs = 300\nhttp_max_body_bytes = 1048576\ntick_interval_ms = 5000\nrunner_ready_timeout_secs = 10\nhttp_queue_memory_budget_bytes = 67108864\nboot_plugin_gc_enabled = false\nboot_restore_enabled = false\n\n[tls]\nserver_key = \"{}\"\nadmin_public_keys = [\"{}\"]\nclient_public_keys = [\"{}\"]\n",
+        "listen_addr = \"127.0.0.1:{port}\"\ncontrol_socket_path = \"{}\"\nstorage_root = \"d\"\n\n[runtime]\nmax_chunks = 128\nchunk_timeout_ms = 10000\nidle_ttl_secs = 300\nhttp_max_body_bytes = 1048576\ntick_interval_ms = 5000\nrunner_ready_timeout_secs = 10\nhttp_queue_memory_budget_bytes = 67108864\nboot_plugin_gc_enabled = false\nboot_restore_enabled = false\n\n[tls]\nserver_key = \"{}\"\nclient_public_keys = [\"{}\"]\nknown_public_keys = {{}}\n",
         toml_escape(control_socket_path.to_string_lossy().as_ref()),
         toml_escape(server_key_path.to_string_lossy().as_ref()),
-        control_admin_public_hex,
         server_public_hex,
     )
 }
@@ -318,11 +299,11 @@ mod tests {
             4443,
             Path::new("/tmp/imago-e2e/n0/control.sock"),
             Path::new("/tmp/imago-e2e/n0/c/server.key"),
-            "admin-public-key",
             "client-public-key",
         );
 
         assert!(config.contains("control_socket_path = \"/tmp/imago-e2e/n0/control.sock\""));
         assert!(!config.contains("/run/imago/imagod.sock"));
+        assert!(!config.contains("admin_public_keys"));
     }
 }

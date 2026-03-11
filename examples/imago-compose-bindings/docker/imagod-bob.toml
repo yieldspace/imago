@@ -4,7 +4,6 @@ server_version = "imagod/imago-compose-bindings-bob"
 
 [tls]
 server_key = "/etc/imago/example/certs/bob/server.key"
-admin_public_keys = ["dce247b50928fc9b04e956739b1865e6468ad52303b6959bdfc98864f2354b94"]
 client_public_keys = ["9d7132feb8f208634935653b8af8eed729a4071ef026f101858b20e73a883b29"]
 known_public_keys = {}
 

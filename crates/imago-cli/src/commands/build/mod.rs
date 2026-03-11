@@ -54,26 +54,17 @@ const RESTART_POLICY_UNLESS_STOPPED: &str = "unless-stopped";
 #[derive(Debug, Clone)]
 pub struct TargetConfig {
     pub remote: String,
-    pub server_name: Option<String>,
-    pub client_key: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
 pub struct DeployTargetConfig {
     pub remote: String,
-    pub server_name: Option<String>,
-    pub client_key: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParsedTargetRemote {
-    Direct,
-    Ssh(SshTargetRemote),
+    pub ssh_remote: SshTargetRemote,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshTargetRemote {
-    pub user: String,
+    pub user: Option<String>,
     pub host: String,
     pub port: Option<u16>,
     pub socket_path: Option<String>,
@@ -81,52 +72,20 @@ pub struct SshTargetRemote {
 
 impl TargetConfig {
     pub fn as_manifest_target_map(&self) -> BTreeMap<String, String> {
-        let mut map = BTreeMap::new();
-        map.insert("remote".to_string(), self.remote.clone());
-        if let Some(server_name) = &self.server_name {
-            map.insert("server_name".to_string(), server_name.clone());
-        }
-        map
+        BTreeMap::from([("remote".to_string(), self.remote.clone())])
     }
 
     pub fn require_deploy_credentials(&self) -> anyhow::Result<DeployTargetConfig> {
-        match parse_target_remote(&self.remote)? {
-            ParsedTargetRemote::Direct => {
-                let client_key = self
-                    .client_key
-                    .clone()
-                    .ok_or_else(|| anyhow!("target is missing required key: client_key"))?;
-
-                Ok(DeployTargetConfig {
-                    remote: self.remote.clone(),
-                    server_name: self.server_name.clone(),
-                    client_key: Some(client_key),
-                })
-            }
-            ParsedTargetRemote::Ssh(_) => {
-                if self.server_name.is_some() {
-                    return Err(anyhow!(
-                        "target key 'server_name' is not supported for ssh targets"
-                    ));
-                }
-                if self.client_key.is_some() {
-                    return Err(anyhow!(
-                        "target key 'client_key' is not supported for ssh targets"
-                    ));
-                }
-                Ok(DeployTargetConfig {
-                    remote: self.remote.clone(),
-                    server_name: None,
-                    client_key: None,
-                })
-            }
-        }
+        Ok(DeployTargetConfig {
+            remote: self.remote.clone(),
+            ssh_remote: parse_target_remote(&self.remote)?,
+        })
     }
 }
 
-pub fn parse_target_remote(raw: &str) -> anyhow::Result<ParsedTargetRemote> {
+pub fn parse_target_remote(raw: &str) -> anyhow::Result<SshTargetRemote> {
     if !raw.starts_with("ssh://") {
-        return Ok(ParsedTargetRemote::Direct);
+        return Err(anyhow!("target remote must use ssh:// scheme: {raw}"));
     }
 
     let parsed = Url::parse(raw).with_context(|| format!("target remote is invalid: {raw}"))?;
@@ -150,11 +109,6 @@ pub fn parse_target_remote(raw: &str) -> anyhow::Result<ParsedTargetRemote> {
     }
 
     let user = parsed.username().trim();
-    if user.is_empty() {
-        return Err(anyhow!(
-            "target remote must include a non-empty user for ssh targets"
-        ));
-    }
     let host = parsed
         .host_str()
         .map(str::trim)
@@ -190,12 +144,12 @@ pub fn parse_target_remote(raw: &str) -> anyhow::Result<ParsedTargetRemote> {
         }
     }
 
-    Ok(ParsedTargetRemote::Ssh(SshTargetRemote {
-        user: user.to_string(),
+    Ok(SshTargetRemote {
+        user: (!user.is_empty()).then(|| user.to_string()),
         host: host.to_string(),
         port: parsed.port(),
         socket_path,
-    }))
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -1023,6 +977,10 @@ mod tests {
     }
 
     fn write_imago_toml(root: &Path, body: &str) {
+        let body = body.replace(
+            "remote = \"127.0.0.1:4443\"",
+            "remote = \"ssh://localhost?socket=/run/imago/imagod.sock\"",
+        );
         write_file(&root.join("imago.toml"), body.as_bytes());
     }
 
@@ -1197,7 +1155,7 @@ mod tests {
     SECRET_TOKEN = "abc"
     
     [target.default]
-    remote = "127.0.0.1:4443"
+    remote = "ssh://localhost?socket=/run/imago/imagod.sock"
     "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
@@ -1874,7 +1832,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_target_contains_only_remote_and_server_name() {
+    fn manifest_target_contains_only_remote() {
         let root = new_temp_dir("target-shape");
         write_imago_toml(
             &root,
@@ -1884,9 +1842,7 @@ mod tests {
     type = "cli"
     
     [target.default]
-    remote = "127.0.0.1:4443"
-    server_name = "localhost"
-    client_key = "certs/client.key"
+    remote = "ssh://localhost?socket=/run/imago/imagod.sock"
     "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
@@ -1896,13 +1852,9 @@ mod tests {
 
         assert_eq!(
             manifest.target.get("remote"),
-            Some(&"127.0.0.1:4443".to_string())
+            Some(&"ssh://localhost?socket=/run/imago/imagod.sock".to_string())
         );
-        assert_eq!(
-            manifest.target.get("server_name"),
-            Some(&"localhost".to_string())
-        );
-        assert_eq!(manifest.target.len(), 2);
+        assert_eq!(manifest.target.len(), 1);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -4052,162 +4004,21 @@ mod tests {
     }
 
     #[test]
-    fn target_client_key_path_is_resolved_relative_to_project_root() {
-        let root = new_temp_dir("target-client-key-relative");
-        write_imago_toml(
-            &root,
-            r#"
-    name = "svc"
-    main = "build/app.wasm"
-    type = "cli"
-    
-    [target.default]
-    remote = "127.0.0.1:4443"
-    client_key = "certs/client.key"
-    "#,
-        );
-        write_file(&root.join("build/app.wasm"), b"wasm-a");
-
-        let output = build_project("default", &root).expect("build should succeed");
-        assert_eq!(
-            output.target.client_key,
-            Some(root.join("certs/client.key"))
-        );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn target_client_key_path_allows_absolute_values() {
-        let root = new_temp_dir("target-client-key-absolute");
-        let abs_client_key = root.join("abs-client.key");
-        write_imago_toml(
-            &root,
-            &format!(
-                r#"
-    name = "svc"
-    main = "build/app.wasm"
-    type = "cli"
-    
-    [target.default]
-    remote = "127.0.0.1:4443"
-    client_key = "{}"
-    "#,
-                abs_client_key.display()
-            ),
-        );
-        write_file(&root.join("build/app.wasm"), b"wasm-a");
-
-        let output = build_project("default", &root).expect("build should succeed");
-        assert_eq!(output.target.client_key, Some(abs_client_key));
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn target_client_key_path_rejects_parent_traversal() {
-        let root = new_temp_dir("target-client-key-dotdot");
-        write_imago_toml(
-            &root,
-            r#"
-    name = "svc"
-    main = "build/app.wasm"
-    type = "cli"
-    
-    [target.default]
-    remote = "127.0.0.1:4443"
-    client_key = "../secrets/client.key"
-    "#,
-        );
-
-        let err = build_project("default", &root)
-            .expect_err("target cert path with parent traversal must fail");
-        assert!(
-            err.to_string()
-                .contains("target key 'client_key' must not contain path traversal")
-        );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn target_client_key_path_rejects_backslashes() {
-        let root = new_temp_dir("target-client-key-backslash");
-        write_imago_toml(
-            &root,
-            r#"
-    name = "svc"
-    main = "build/app.wasm"
-    type = "cli"
-    
-    [target.default]
-    remote = "127.0.0.1:4443"
-    client_key = "certs\\client.key"
-    "#,
-        );
-
-        let err = build_project("default", &root).expect_err("backslash path must be rejected");
-        assert!(
-            err.to_string()
-                .contains("target key 'client_key' must not contain backslashes")
-        );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn target_client_key_path_rejects_windows_prefix() {
-        let root = new_temp_dir("target-client-key-windows-prefix");
-        write_imago_toml(
-            &root,
-            r#"
-    name = "svc"
-    main = "build/app.wasm"
-    type = "cli"
-    
-    [target.default]
-    remote = "127.0.0.1:4443"
-    client_key = "C:/certs/client.key"
-    "#,
-        );
-
-        let err = build_project("default", &root)
-            .expect_err("windows-prefixed cert path must be rejected");
-        assert!(
-            err.to_string()
-                .contains("target key 'client_key' must not be windows-prefixed")
-        );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn require_deploy_credentials_rejects_ssh_target_server_name() {
-        let target = TargetConfig {
-            remote: "ssh://root@example.com".to_string(),
-            server_name: Some("example.com".to_string()),
-            client_key: None,
-        };
-
-        let err = target
-            .require_deploy_credentials()
-            .expect_err("ssh target server_name should be rejected");
-        assert!(err.to_string().contains("server_name"));
-    }
-
-    #[test]
     fn require_deploy_credentials_accepts_ssh_target_without_client_key() {
         let target = TargetConfig {
             remote: "ssh://root@example.com?socket=/run/imago/imagod.sock".to_string(),
-            server_name: None,
-            client_key: None,
         };
 
         let resolved = target
             .require_deploy_credentials()
-            .expect("ssh target should not require client_key");
+            .expect("ssh target should resolve");
         assert_eq!(resolved.remote, target.remote);
-        assert!(resolved.client_key.is_none());
+        assert_eq!(resolved.ssh_remote.host, "example.com");
+        assert_eq!(resolved.ssh_remote.user.as_deref(), Some("root"));
+        assert_eq!(
+            resolved.ssh_remote.socket_path.as_deref(),
+            Some("/run/imago/imagod.sock")
+        );
     }
 
     #[test]
@@ -4456,17 +4267,15 @@ mod tests {
     }
 
     #[test]
-    fn target_requires_deploy_credentials_only_for_deploy_phase() {
+    fn target_requires_ssh_remote_for_deploy_phase() {
         let target = TargetConfig {
             remote: "127.0.0.1:4443".to_string(),
-            server_name: Some("localhost".to_string()),
-            client_key: None,
         };
 
         let err = target
             .require_deploy_credentials()
-            .expect_err("missing cert should fail");
-        assert!(err.to_string().contains("client_key"));
+            .expect_err("non-ssh target should fail");
+        assert!(err.to_string().contains("ssh:// scheme"));
     }
 
     #[test]
@@ -4673,7 +4482,10 @@ mod tests {
         let target = load_target_config("default", &root)
             .expect("load_target_config should not require build-only validation");
 
-        assert_eq!(target.remote, "127.0.0.1:4443");
+        assert_eq!(
+            target.remote,
+            "ssh://localhost?socket=/run/imago/imagod.sock"
+        );
 
         let _ = fs::remove_dir_all(root);
     }

@@ -1,7 +1,7 @@
 #[path = "e2e_helper/mod.rs"]
 mod e2e_helper;
 
-use e2e_helper::certs::{generate_key_material, write_known_hosts};
+use e2e_helper::certs::write_local_ssh_config;
 use e2e_helper::cli::{CmdOutput, run_imago_cli};
 use e2e_helper::wait::poll_until;
 use e2e_helper::{Cluster, TargetSpec, TestResult, WasmArtifact, wasm_file_name, wasm_path};
@@ -24,19 +24,14 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp = TempDirBuilder::new().prefix("ierpc").tempdir()?;
 
-    let control_keys = generate_key_material(&temp.path().join("control"))?;
     let control_home = temp.path().join("h");
     fs::create_dir_all(&control_home)?;
+    write_local_ssh_config(&control_home)?;
 
-    let mut cluster = Cluster::new(
-        workspace_root.clone(),
-        temp.path().join("n"),
-        control_keys.admin_public_hex.clone(),
-    )?;
+    let mut cluster = Cluster::new(workspace_root.clone(), temp.path().join("n"))?;
     let _alice = cluster.add_node("alice")?;
     let _bob = cluster.add_node("bob")?;
     cluster.start_all()?;
-    write_known_hosts(&control_home, &cluster.known_hosts_entries())?;
 
     let services_root = temp.path().join("s");
     let greeter_dir = services_root.join("g");
@@ -44,8 +39,6 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
     prepare_project_dir(&greeter_dir)?;
     prepare_project_dir(&client_dir)?;
 
-    install_control_key(&greeter_dir, &control_keys.admin_key_path)?;
-    install_control_key(&client_dir, &control_keys.admin_key_path)?;
     install_wasm(&greeter_dir, WasmArtifact::RpcCallee)?;
     install_wasm(&client_dir, WasmArtifact::RpcCaller)?;
 
@@ -111,8 +104,12 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
             "cert",
             "replicate",
             "--from",
+            alice_target.remote.as_str(),
+            "--from-authority",
             alice_authority.as_str(),
             "--to",
+            bob_target.remote.as_str(),
+            "--to-authority",
             invalid_to_authority,
         ],
     )?;
@@ -158,8 +155,12 @@ fn e2e_rpc_two_nodes_cert_flow() -> TestResult {
             "cert",
             "replicate",
             "--from",
+            alice_target.remote.as_str(),
+            "--from-authority",
             alice_authority.as_str(),
             "--to",
+            bob_target.remote.as_str(),
+            "--to-authority",
             bob_authority.as_str(),
         ],
     )?;
@@ -339,14 +340,6 @@ fn assert_command_completed(label: &str, output: &CmdOutput) -> TestResult {
 
 fn prepare_project_dir(project_dir: &Path) -> TestResult {
     fs::create_dir_all(project_dir.join("components"))?;
-    fs::create_dir_all(project_dir.join("certs"))?;
-    Ok(())
-}
-
-fn install_control_key(project_dir: &Path, control_key_path: &Path) -> TestResult {
-    let cert_dir = project_dir.join("certs");
-    fs::create_dir_all(&cert_dir)?;
-    fs::copy(control_key_path, cert_dir.join("control.key"))?;
     Ok(())
 }
 
@@ -365,11 +358,9 @@ fn write_rpc_greeter_imago_toml(
     main_wasm_file: &str,
 ) -> TestResult {
     let body = format!(
-        "name = \"rpc-greeter\"\nmain = \"components/{}\"\ntype = \"rpc\"\n\n[capabilities]\nprivileged = false\nwasi = true\n\n[target.default]\nremote = \"{}\"\nserver_name = \"{}\"\nclient_key = \"{}\"\n",
+        "name = \"rpc-greeter\"\nmain = \"components/{}\"\ntype = \"rpc\"\n\n[capabilities]\nprivileged = false\nwasi = true\n\n[target.default]\nremote = \"{}\"\n",
         toml_escape(main_wasm_file),
         toml_escape(&target.remote),
-        toml_escape(&target.server_name),
-        toml_escape(&target.client_key_rel),
     );
     fs::write(project_dir.join("imago.toml"), body)?;
     Ok(())
@@ -388,14 +379,12 @@ fn write_cli_client_imago_toml(
         .join("wit");
     let rpc_greeter_wit_dir = workspace_root.join("e2e").join("wit").join("rpc-greeter");
     let body = format!(
-        "name = \"cli-client\"\nmain = \"components/{}\"\ntype = \"cli\"\n\n[[dependencies]]\nversion = \"0.1.0\"\nkind = \"native\"\npath = \"{}\"\n\n[capabilities]\nprivileged = false\nwasi = true\n\n[capabilities.deps]\n\"acme:clock\" = [\"*\"]\n\"imago:node\" = [\"*\"]\n\n[[bindings]]\nname = \"rpc-greeter\"\nversion = \"0.1.0\"\npath = \"{}\"\n\n[resources.env]\nIMAGO_RPC_ADDR = \"{}\"\n\n[target.default]\nremote = \"{}\"\nserver_name = \"{}\"\nclient_key = \"{}\"\n",
+        "name = \"cli-client\"\nmain = \"components/{}\"\ntype = \"cli\"\n\n[[dependencies]]\nversion = \"0.1.0\"\nkind = \"native\"\npath = \"{}\"\n\n[capabilities]\nprivileged = false\nwasi = true\n\n[capabilities.deps]\n\"acme:clock\" = [\"*\"]\n\"imago:node\" = [\"*\"]\n\n[[bindings]]\nname = \"rpc-greeter\"\nversion = \"0.1.0\"\npath = \"{}\"\n\n[resources.env]\nIMAGO_RPC_ADDR = \"{}\"\n\n[target.default]\nremote = \"{}\"\n",
         toml_escape(main_wasm_file),
         toml_escape(imago_node_wit.to_string_lossy().as_ref()),
         toml_escape(rpc_greeter_wit_dir.to_string_lossy().as_ref()),
         toml_escape(rpc_addr),
         toml_escape(&target.remote),
-        toml_escape(&target.server_name),
-        toml_escape(&target.client_key_rel),
     );
     fs::write(project_dir.join("imago.toml"), body)?;
     Ok(())

@@ -55,8 +55,6 @@ struct ComposeService {
 #[serde(deny_unknown_fields)]
 struct ComposeTarget {
     remote: String,
-    server_name: Option<String>,
-    client_key: Option<String>,
 }
 
 struct ResolvedComposeConfig<'a> {
@@ -670,7 +668,7 @@ fn ensure_compose_services_non_empty(
 fn resolve_compose_target(
     compose_file: &ComposeFile,
     target_name: &str,
-    project_root: &Path,
+    _project_root: &Path,
 ) -> anyhow::Result<build::TargetConfig> {
     let target = compose_file.target.get(target_name).ok_or_else(|| {
         anyhow!(
@@ -687,61 +685,8 @@ fn resolve_compose_target(
         ));
     }
 
-    let server_name = match target.server_name.as_deref() {
-        None => None,
-        Some(value) => {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                return Err(anyhow!(
-                    "target '{}' key 'server_name' must not be empty",
-                    target_name
-                ));
-            }
-            Some(trimmed.to_string())
-        }
-    };
-
-    let client_key = match target.client_key.as_deref() {
-        None => None,
-        Some(value) => {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                return Err(anyhow!(
-                    "target '{}' key 'client_key' must not be empty",
-                    target_name
-                ));
-            }
-            Some(build::resolve_target_credential_path(
-                trimmed,
-                "client_key",
-                project_root,
-            )?)
-        }
-    };
-
-    if matches!(
-        build::parse_target_remote(&remote)?,
-        build::ParsedTargetRemote::Ssh(_)
-    ) {
-        if server_name.is_some() {
-            return Err(anyhow!(
-                "target '{}' key 'server_name' is not supported for ssh targets",
-                target_name
-            ));
-        }
-        if client_key.is_some() {
-            return Err(anyhow!(
-                "target '{}' key 'client_key' is not supported for ssh targets",
-                target_name
-            ));
-        }
-    }
-
-    Ok(build::TargetConfig {
-        remote,
-        server_name,
-        client_key,
-    })
+    let _ = build::parse_target_remote(&remote)?;
+    Ok(build::TargetConfig { remote })
 }
 
 fn resolve_service_project_root(project_root: &Path, imago_path: &str) -> anyhow::Result<PathBuf> {
@@ -879,7 +824,7 @@ imago = "services/svc-a/imago.toml"
 config = "stack"
 
 [target.default]
-remote = "127.0.0.1:4443"
+remote = "ssh://localhost?socket=/run/imago/imagod.sock"
 "#,
         );
         write_file(
@@ -910,7 +855,7 @@ type = "cli"
     }
 
     #[tokio::test]
-    async fn compose_deploy_uses_compose_target_override_and_requires_client_key() {
+    async fn compose_deploy_rejects_non_ssh_compose_target_override() {
         let root = new_temp_dir("deploy-compose-target-override");
         write_file(
             &root.join(COMPOSE_FILE_NAME),
@@ -922,7 +867,7 @@ imago = "services/svc-a/imago.toml"
 config = "stack"
 
 [target.default]
-remote = "127.0.0.1:4443"
+remote = "ssh://localhost?socket=/run/imago/imagod.sock"
 "#,
         );
         write_file(
@@ -949,7 +894,6 @@ type = "cli"
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.expect("stderr should be present");
         assert!(stderr.contains("stack deploy failed"));
-        assert!(stderr.contains("target settings are invalid for service deploy"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1029,7 +973,7 @@ imago = "services/svc-b/imago.toml"
 config = "stack"
 
 [target.default]
-remote = "127.0.0.1:4443"
+remote = "ssh://localhost?socket=/run/imago/imagod.sock"
 "#,
         );
         write_file(
@@ -1073,7 +1017,7 @@ type = "cli"
     }
 
     #[tokio::test]
-    async fn compose_build_rejects_target_client_key_path_traversal() {
+    async fn compose_build_rejects_legacy_target_client_key() {
         let root = new_temp_dir("target-client-key-path-traversal");
         write_file(
             &root.join(COMPOSE_FILE_NAME),
@@ -1085,7 +1029,7 @@ imago = "services/svc-a/imago.toml"
 config = "stack"
 
 [target.default]
-remote = "127.0.0.1:4443"
+remote = "ssh://localhost?socket=/run/imago/imagod.sock"
 client_key = "../certs/client.key"
 "#,
         );
@@ -1116,7 +1060,7 @@ type = "cli"
                 .stderr
                 .as_deref()
                 .expect("stderr should be present")
-                .contains("must not contain path traversal")
+                .contains("client_key")
         );
 
         let _ = fs::remove_dir_all(root);
@@ -1178,8 +1122,7 @@ imago = "services/svc-a/imago.toml"
 config = "stack"
 
 [target.default]
-remote = "127.0.0.1:4443"
-client_key = "certs/client.key"
+remote = "ssh://localhost?socket=/run/imago/imagod.sock"
 "#,
         );
         write_file(
@@ -1190,8 +1133,6 @@ main = "build/app.wasm"
 type = "cli"
 "#,
         );
-        write_file(&root.join("certs/client.key"), b"dummy-client-key");
-
         let _guard = set_stack_ls_command_result_override(CommandResult {
             command: "service.ls".to_string(),
             exit_code: 0,
@@ -1253,7 +1194,7 @@ imago = "services/svc-a/imago.toml"
 config = "stack"
 
 [target.default]
-remote = "127.0.0.1:4443"
+remote = "ssh://localhost?socket=/run/imago/imagod.sock"
 "#,
         );
         write_file(

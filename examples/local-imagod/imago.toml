@@ -16,6 +16,4 @@ path = "assets/message.txt"
 mount = "/app/message.txt"
 
 [target.default]
-remote = "127.0.0.1:4443"
-server_name = "localhost"
-client_key = "certs/client.key"
+remote = "ssh://localhost?socket=/tmp/imagod-local.sock"

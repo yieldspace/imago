@@ -88,6 +88,7 @@ server_version = "imagod/0.1.0"
 ## The [tls] section
 
 This section configures server key material and public-key allowlists.
+QUIC/WebTransport listeners configured by `listen_addr` are reserved for node-to-node RPC; CLI admin traffic uses the local control socket via SSH and `imagod proxy-stdio`.
 
 ### The `server_key` field
 
@@ -104,28 +105,12 @@ server_key = "/absolute/path/to/server.key"
 
 - Validation error notes: missing key files fail at runtime key loading.
 
-### The `admin_public_keys` field
-
-- Type: `array(string)`
-- Required/Optional: Optional.
-- Accepted values / Constraints: each item is an ed25519 raw public key in 64 hex characters; items must be unique and must not overlap with `client_public_keys`.
-- Default: `[]`.
-- Example:
-
-```toml
-[tls]
-admin_public_keys = [
-  "2222222222222222222222222222222222222222222222222222222222222222",
-]
-```
-
-- Validation error notes: invalid length, non-hex values, duplicates, or overlap with client keys fail validation.
-
 ### The `client_public_keys` field
 
 - Type: `array(string)`
 - Required/Optional: Required.
 - Accepted values / Constraints: each item is an ed25519 raw public key in 64 hex characters; items must be unique; empty arrays are allowed.
+- Behavior notes: this allowlist is used only for QUIC node RPC clients. A remote node must present one of these keys during TLS client authentication.
 - Default: none.
 - Example:
 
@@ -141,6 +126,7 @@ client_public_keys = []
 - Type: `table<string, string>`
 - Required/Optional: Optional.
 - Accepted values / Constraints: authority keys must be non-empty after trim; table values must be ed25519 raw public keys in 64 hex characters.
+- Behavior notes: keys are indexed by normalized `rpc://host:port` authorities and are used when this daemon acts as a node RPC client.
 - Default: `{}`.
 - Example:
 
@@ -148,6 +134,9 @@ client_public_keys = []
 [tls]
 known_public_keys = { "rpc://node-a:4443" = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
 ```
+
+`tls.admin_public_keys` is no longer supported.
+Local admin access is granted by peer credentials on `control_socket_path`, and SSH endpoints should bridge to that socket with `imagod proxy-stdio`.
 
 - Validation error notes: empty authority names or invalid key values fail validation.
 

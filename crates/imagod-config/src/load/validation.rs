@@ -36,14 +36,18 @@ pub(crate) fn reject_legacy_keys(path: &Path, raw: &toml::Value) -> Result<(), I
     }
 
     if let Some(tls) = raw.get("tls").and_then(toml::Value::as_table) {
-        for legacy_key in ["server_cert", "client_ca_cert"] {
+        for legacy_key in ["server_cert", "client_ca_cert", "admin_public_keys"] {
             if tls.contains_key(legacy_key) {
                 return Err(ImagodError::new(
                     ErrorCode::BadRequest,
                     "config.load",
-                    format!(
-                        "tls.{legacy_key} is no longer supported; use tls.client_public_keys (ed25519 raw public key hex allowlist)"
-                    ),
+                    if legacy_key == "admin_public_keys" {
+                        "tls.admin_public_keys is no longer supported; local admin access is controlled by control_socket_path peer credentials and QUIC clients must use tls.client_public_keys".to_string()
+                    } else {
+                        format!(
+                            "tls.{legacy_key} is no longer supported; use tls.client_public_keys (ed25519 raw public key hex allowlist)"
+                        )
+                    },
                 )
                 .with_detail("path", path.to_string_lossy())
                 .with_detail("legacy_key", format!("tls.{legacy_key}")));
@@ -74,30 +78,9 @@ pub(crate) fn validate(config: &ImagodConfig) -> Result<(), ImagodError> {
         ));
     }
 
-    let client_keys =
-        parse_unique_public_key_hexes(&config.tls.client_public_keys, "tls.client_public_keys")?;
-    parse_unique_public_key_hexes(&config.tls.admin_public_keys, "tls.admin_public_keys")?;
+    parse_unique_public_key_hexes(&config.tls.client_public_keys, "tls.client_public_keys")?;
     parse_known_public_key_map(&config.tls.known_public_keys)?;
     validate_runtime_features(&config.runtime.features)?;
-
-    for (index, key_hex) in config.tls.admin_public_keys.iter().enumerate() {
-        let decoded = parse_ed25519_raw_public_key_hex(key_hex).map_err(|reason| {
-            ImagodError::new(
-                ErrorCode::BadRequest,
-                "config.load",
-                format!("tls.admin_public_keys[{index}] {reason}"),
-            )
-            .with_detail("index", index.to_string())
-        })?;
-        if client_keys.contains(&decoded) {
-            return Err(ImagodError::new(
-                ErrorCode::BadRequest,
-                "config.load",
-                format!("tls.admin_public_keys[{index}] overlaps tls.client_public_keys"),
-            )
-            .with_detail("index", index.to_string()));
-        }
-    }
 
     if config.runtime.stop_grace_timeout_secs == 0 {
         return Err(ImagodError::new(
@@ -381,7 +364,6 @@ mod tests {
             control_socket_path: PathBuf::from(DEFAULT_CONTROL_SOCKET_PATH),
             tls: TlsConfig {
                 server_key: PathBuf::from("/tmp/server.key"),
-                admin_public_keys: Vec::new(),
                 client_public_keys: Vec::new(),
                 known_public_keys: BTreeMap::new(),
             },

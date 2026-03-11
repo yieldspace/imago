@@ -47,7 +47,6 @@ pub(crate) enum DynamicClientRole {
 
 #[derive(Debug, Default)]
 struct DynamicPublicKeys {
-    admin_keys: HashSet<[u8; 32]>,
     client_keys: HashSet<[u8; 32]>,
 }
 
@@ -120,10 +119,6 @@ pub(crate) fn sync_dynamic_public_keys_from_config(
     let _test_guard = lock_dynamic_public_keys_for_tests();
 
     let updated = DynamicPublicKeys {
-        admin_keys: parse_configured_public_keys(
-            &config.tls.admin_public_keys,
-            "tls.admin_public_keys",
-        )?,
         client_keys: parse_configured_public_keys(
             &config.tls.client_public_keys,
             "tls.client_public_keys",
@@ -163,9 +158,6 @@ pub(crate) fn resolve_dynamic_client_role(public_key: &[u8; 32]) -> DynamicClien
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    if guard.admin_keys.contains(public_key) {
-        return DynamicClientRole::Admin;
-    }
     if guard.client_keys.contains(public_key) {
         return DynamicClientRole::Client;
     }
@@ -180,21 +172,17 @@ pub(crate) fn is_tls_client_key_allowlisted(public_key: &[u8; 32]) -> bool {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    guard.admin_keys.contains(public_key) || guard.client_keys.contains(public_key)
+    guard.client_keys.contains(public_key)
 }
 
 #[cfg(test)]
-pub(crate) fn replace_dynamic_public_keys_for_tests(
-    admin_keys: &[[u8; 32]],
-    client_keys: &[[u8; 32]],
-) {
+pub(crate) fn replace_dynamic_public_keys_for_tests(client_keys: &[[u8; 32]]) {
     let _test_guard = lock_dynamic_public_keys_for_tests();
 
     let mut guard = match dynamic_public_keys().write() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    guard.admin_keys = admin_keys.iter().copied().collect();
     guard.client_keys = client_keys.iter().copied().collect();
 }
 

@@ -93,13 +93,7 @@ async fn run_async_with_target_override(
     let service_context = ps_service_context(names_filter.as_deref());
     ui::command_info(
         "service.ls",
-        &format_local_context_line(
-            project_root,
-            &service_context,
-            &target_name,
-            &target.remote,
-            target.server_name.as_deref(),
-        ),
+        &format_local_context_line(project_root, &service_context, &target_name, &target.remote),
     );
 
     ui::command_stage("service.ls", "connect", "connecting target");

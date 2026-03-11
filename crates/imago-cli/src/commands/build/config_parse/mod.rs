@@ -38,9 +38,7 @@ pub(crate) use dependency::{
 pub(in crate::commands::build) use resources::*;
 pub(in crate::commands::build) use target::*;
 pub(in crate::commands::build) use validation::*;
-pub(crate) use validation::{
-    resolve_target_credential_path, validate_app_type, validate_service_name,
-};
+pub(crate) use validation::{validate_app_type, validate_service_name};
 
 #[cfg(test)]
 mod tests {

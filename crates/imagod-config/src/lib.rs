@@ -70,9 +70,6 @@ pub struct ImagodConfig {
 pub struct TlsConfig {
     /// Server private key in PEM format.
     pub server_key: PathBuf,
-    #[serde(default)]
-    /// Allowlist of admin Ed25519 raw public keys (32-byte hex).
-    pub admin_public_keys: Vec<String>,
     /// Allowlist of client Ed25519 raw public keys (32-byte hex).
     pub client_public_keys: Vec<String>,
     #[serde(default)]
@@ -1512,9 +1509,31 @@ client_public_keys = ["111111111111111111111111111111111111111111111111111111111
     }
 
     #[test]
-    fn accepts_admin_and_known_public_keys() {
+    fn accepts_known_public_keys() {
         let path = write_temp_config(
-            "accepts_admin_and_known_public_keys",
+            "accepts_known_public_keys",
+            r#"
+listen_addr = "127.0.0.1:4443"
+storage_root = "/tmp/imago"
+server_version = "imagod/test"
+
+[tls]
+server_key = "server.key"
+client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
+known_public_keys = { "rpc://node-a:4443" = "1111111111111111111111111111111111111111111111111111111111111111", "rpc://node-b:4443" = "2222222222222222222222222222222222222222222222222222222222222222" }
+"#,
+        );
+
+        let config = ImagodConfig::load(&path).expect("config should load");
+        assert_eq!(config.tls.known_public_keys.len(), 2);
+
+        cleanup_temp_path(path);
+    }
+
+    #[test]
+    fn rejects_legacy_admin_public_keys() {
+        let path = write_temp_config(
+            "rejects_legacy_admin_public_keys",
             r#"
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
@@ -1524,61 +1543,11 @@ server_version = "imagod/test"
 server_key = "server.key"
 client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
 admin_public_keys = ["2222222222222222222222222222222222222222222222222222222222222222"]
-known_public_keys = { "rpc://node-a:4443" = "1111111111111111111111111111111111111111111111111111111111111111", "rpc://node-b:4443" = "2222222222222222222222222222222222222222222222222222222222222222" }
 "#,
         );
 
-        let config = ImagodConfig::load(&path).expect("config should load");
-        assert_eq!(config.tls.admin_public_keys.len(), 1);
-        assert_eq!(config.tls.known_public_keys.len(), 2);
-
-        cleanup_temp_path(path);
-    }
-
-    #[test]
-    fn rejects_duplicate_admin_public_keys() {
-        let path = write_temp_config(
-            "rejects_duplicate_admin_public_keys",
-            r#"
-listen_addr = "127.0.0.1:4443"
-storage_root = "/tmp/imago"
-server_version = "imagod/test"
-
-[tls]
-server_key = "server.key"
-client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
-admin_public_keys = [
-  "2222222222222222222222222222222222222222222222222222222222222222",
-  "2222222222222222222222222222222222222222222222222222222222222222",
-]
-"#,
-        );
-
-        let err = ImagodConfig::load(&path).expect_err("config should reject duplicated admin key");
+        let err = ImagodConfig::load(&path).expect_err("config should reject legacy admin key");
         assert!(err.to_string().contains("tls.admin_public_keys"));
-        assert!(err.to_string().contains("duplicated"));
-
-        cleanup_temp_path(path);
-    }
-
-    #[test]
-    fn rejects_admin_client_key_overlap() {
-        let path = write_temp_config(
-            "rejects_admin_client_key_overlap",
-            r#"
-listen_addr = "127.0.0.1:4443"
-storage_root = "/tmp/imago"
-server_version = "imagod/test"
-
-[tls]
-server_key = "server.key"
-client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
-admin_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
-"#,
-        );
-
-        let err = ImagodConfig::load(&path).expect_err("config should reject overlap");
-        assert!(err.to_string().contains("overlaps"));
 
         cleanup_temp_path(path);
     }
@@ -1595,7 +1564,6 @@ server_version = "imagod/test"
 [tls]
 server_key = "server.key"
 client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
-admin_public_keys = ["2222222222222222222222222222222222222222222222222222222222222222"]
 known_public_keys = { "" = "2222222222222222222222222222222222222222222222222222222222222222" }
 "#,
         );

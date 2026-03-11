@@ -1,10 +1,10 @@
 listen_addr = "127.0.0.1:4443"
+control_socket_path = "/tmp/imagod-local-plugin-native-experimental-gpio.sock"
 storage_root = ".imagod-data"
 server_version = "imagod/local-plugin-native-experimental-gpio-example"
 
 [tls]
 server_key = "certs/server.key"
-admin_public_keys = ["cd89018994ede35b4c80b21d7958a4a6fc2684637846f6938175b0a87ccc9ff3"]
 client_public_keys = ["c067e1cd0edd79ebd91e2bdb81c131ed601906af13c82c4e8f02ad6c4cfc5960"]
 
 [runtime]

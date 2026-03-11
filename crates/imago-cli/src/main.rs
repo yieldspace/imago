@@ -427,7 +427,8 @@ mod tests {
                             public_key:
                                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                                     .to_string(),
-                            to: "rpc://node-a:4443".to_string(),
+                            to: "ssh://node-a?socket=/run/imago/imagod.sock".to_string(),
+                            authority: "not-an-authority".to_string(),
                         }),
                     }),
                 }),
@@ -443,7 +444,7 @@ mod tests {
                 .stderr
                 .as_deref()
                 .expect("stderr should be present")
-                .contains("failed to load target configuration")
+                .contains("invalid --authority")
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -456,8 +457,10 @@ mod tests {
                 command: Commands::Trust(TrustSubcommandArgs {
                     command: TrustCommands::Cert(TrustCertSubcommandArgs {
                         command: TrustCertCommands::Replicate(BindingsCertDeployArgs {
-                            to: "rpc://node-a:4443".to_string(),
-                            from: "rpc://node-b:4443".to_string(),
+                            to: "ssh://node-a?socket=/run/imago/imagod.sock".to_string(),
+                            to_authority: "rpc://node-a:4443".to_string(),
+                            from: "ssh://node-b?socket=/run/imago/imagod.sock".to_string(),
+                            from_authority: "rpc://node-b".to_string(),
                         }),
                     }),
                 }),
@@ -473,7 +476,7 @@ mod tests {
                 .stderr
                 .as_deref()
                 .expect("stderr should be present")
-                .contains("failed to load target configuration")
+                .contains("invalid --from-authority")
         );
         let _ = std::fs::remove_dir_all(root);
     }

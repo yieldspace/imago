@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, bail};
 use rcgen::{KeyPair, PKCS_ED25519};
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -11,12 +13,6 @@ pub struct KeyMaterial {
     pub server_public_hex: String,
     pub admin_public_hex: String,
     pub client_public_hex: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct KnownHostEntry {
-    pub authority: String,
-    pub public_key_hex: String,
 }
 
 pub fn generate_key_material(cert_dir: &Path) -> Result<KeyMaterial> {
@@ -51,35 +47,28 @@ pub fn generate_key_material(cert_dir: &Path) -> Result<KeyMaterial> {
     })
 }
 
-pub fn write_known_hosts(home_dir: &Path, entries: &[KnownHostEntry]) -> Result<PathBuf> {
-    let known_hosts_path = home_dir.join(".imago").join("known_hosts");
-    let parent = known_hosts_path.parent().ok_or_else(|| {
-        anyhow::anyhow!(
-            "failed to resolve parent for known_hosts: {}",
-            known_hosts_path.display()
-        )
-    })?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create known_hosts dir: {}", parent.display()))?;
+pub fn write_local_ssh_config(home_dir: &Path) -> Result<PathBuf> {
+    let ssh_dir = home_dir.join(".ssh");
+    fs::create_dir_all(&ssh_dir)
+        .with_context(|| format!("failed to create ssh dir: {}", ssh_dir.display()))?;
+    #[cfg(unix)]
+    fs::set_permissions(&ssh_dir, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("failed to chmod ssh dir: {}", ssh_dir.display()))?;
 
-    let mut body = String::new();
-    for entry in entries {
-        if entry.authority.is_empty() || entry.public_key_hex.is_empty() {
-            bail!("known_hosts entry requires non-empty authority and key");
-        }
-        body.push_str(&entry.authority);
-        body.push('\t');
-        body.push_str(&entry.public_key_hex);
-        body.push('\n');
-    }
-
-    fs::write(&known_hosts_path, body).with_context(|| {
-        format!(
-            "failed to write known_hosts: {}",
-            known_hosts_path.display()
-        )
-    })?;
-    Ok(known_hosts_path)
+    let config_path = ssh_dir.join("config");
+    let body = "\
+Host *
+    BatchMode yes
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    LogLevel ERROR
+";
+    fs::write(&config_path, body)
+        .with_context(|| format!("failed to write ssh config: {}", config_path.display()))?;
+    #[cfg(unix)]
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to chmod ssh config: {}", config_path.display()))?;
+    Ok(config_path)
 }
 
 fn public_key_hex(key_pair: &KeyPair) -> Result<String> {

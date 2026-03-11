@@ -35,9 +35,9 @@ const ED25519_SPKI_PREFIX: [u8; 12] = [
 const LOGS_STREAM_FEATURE: &str = "logs.stream";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SessionAuthContext {
-    role: DynamicClientRole,
-    public_key_hex: String,
+pub(crate) struct SessionAuthContext {
+    pub(crate) role: DynamicClientRole,
+    pub(crate) public_key_hex: String,
 }
 
 impl SessionAuthContext {
@@ -401,7 +401,7 @@ where
         return Ok(());
     }
 
-    let response = match handler.handle_single(request).await {
+    let response = match handler.handle_single(request, &auth_context).await {
         Ok(resp) => resp,
         Err(err) => error_envelope(
             response_message_type_for_request(request_message_type),
@@ -608,6 +608,7 @@ fn message_type_name(message_type: MessageType) -> &'static str {
         MessageType::LogsChunk => "logs.chunk",
         MessageType::LogsEnd => "logs.end",
         MessageType::RpcInvoke => "rpc.invoke",
+        MessageType::BindingsCertInspect => "bindings.cert.inspect",
         MessageType::BindingsCertUpload => "bindings.cert.upload",
     }
 }
@@ -873,7 +874,7 @@ mod tests {
     #[test]
     fn resolve_client_role_observes_dynamic_updates() {
         let _guard = lock_dynamic_public_keys_for_tests();
-        replace_dynamic_public_keys_for_tests(&[], &[]);
+        replace_dynamic_public_keys_for_tests(&[]);
         let key = [0x33u8; 32];
 
         assert_eq!(resolve_client_role(&key), DynamicClientRole::Unknown);
@@ -1095,7 +1096,7 @@ mod tests {
     fn given_known_and_unknown_keys__when_resolve_session_auth_context__then_role_and_hex_are_set()
     {
         let _guard = lock_dynamic_public_keys_for_tests();
-        replace_dynamic_public_keys_for_tests(&[], &[]);
+        replace_dynamic_public_keys_for_tests(&[]);
         upsert_dynamic_client_public_key(&hex_32(0x44)).expect("dynamic key upsert should succeed");
 
         let client = FakeProtocolSession {

@@ -26,22 +26,13 @@ impl AppKind {
 pub struct TargetSpec {
     pub name: String,
     pub remote: String,
-    pub server_name: String,
-    pub client_key_rel: String,
 }
 
 impl TargetSpec {
-    pub fn new(
-        name: impl Into<String>,
-        remote: impl Into<String>,
-        server_name: impl Into<String>,
-        client_key_rel: impl Into<String>,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, remote: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             remote: remote.into(),
-            server_name: server_name.into(),
-            client_key_rel: client_key_rel.into(),
         }
     }
 }
@@ -50,23 +41,18 @@ impl TargetSpec {
 pub struct ProjectLayout {
     pub project_dir: PathBuf,
     components_dir: PathBuf,
-    certs_dir: PathBuf,
 }
 
 impl ProjectLayout {
     pub fn new(base_dir: &Path, short_name: &str) -> Result<Self> {
         let project_dir = base_dir.join(short_name);
         let components_dir = project_dir.join("components");
-        let certs_dir = project_dir.join("certs");
         fs::create_dir_all(&components_dir)
             .with_context(|| format!("failed to create {}", components_dir.display()))?;
-        fs::create_dir_all(&certs_dir)
-            .with_context(|| format!("failed to create {}", certs_dir.display()))?;
 
         Ok(Self {
             project_dir,
             components_dir,
-            certs_dir,
         })
     }
 
@@ -74,13 +60,6 @@ impl ProjectLayout {
         let path = self.components_dir.join(file_name);
         fs::write(&path, bytes).with_context(|| format!("failed to write {}", path.display()))?;
         Ok(path)
-    }
-
-    pub fn copy_control_key(&self, from: &Path) -> Result<PathBuf> {
-        let to = self.certs_dir.join("control.key");
-        fs::copy(from, &to)
-            .with_context(|| format!("failed to copy {} -> {}", from.display(), to.display()))?;
-        Ok(to)
     }
 
     pub fn write_imago_toml(
@@ -135,11 +114,9 @@ impl ProjectLayout {
 
 fn append_target(body: &mut String, section_name: &str, target: &TargetSpec) {
     body.push_str(&format!(
-        "[target.{}]\nremote = \"{}\"\nserver_name = \"{}\"\nclient_key = \"{}\"\n\n",
+        "[target.{}]\nremote = \"{}\"\n\n",
         toml_key(section_name),
         toml_escape(&target.remote),
-        toml_escape(&target.server_name),
-        toml_escape(&target.client_key_rel),
     ));
 }
 

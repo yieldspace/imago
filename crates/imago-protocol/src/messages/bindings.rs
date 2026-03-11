@@ -4,6 +4,28 @@ use crate::validate::{Validate, ValidationError, ensure_required_strings};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct BindingsCertInspectRequest {}
+
+impl Validate for BindingsCertInspectRequest {
+    fn validate(&self) -> Result<(), ValidationError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BindingsCertInspectResponse {
+    pub public_key_hex: String,
+}
+
+impl Validate for BindingsCertInspectResponse {
+    fn validate(&self) -> Result<(), ValidationError> {
+        ensure_required_strings(&[(&self.public_key_hex, "public_key_hex")])
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BindingsCertUploadRequest {
     pub public_key_hex: String,
     pub authority: String,
@@ -41,6 +63,25 @@ mod tests {
     #[derive(Debug, Serialize)]
     struct BindingsCertUploadMissingAuthority<'a> {
         public_key_hex: &'a str,
+    }
+
+    #[test]
+    fn inspect_request_round_trip_and_validate() {
+        let request = BindingsCertInspectRequest {};
+
+        request.validate().expect("request should be valid");
+        let encoded = to_cbor(&request).expect("encoding should succeed");
+        let decoded =
+            from_cbor::<BindingsCertInspectRequest>(&encoded).expect("decoding should succeed");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn inspect_response_rejects_empty_public_key_hex() {
+        let response = BindingsCertInspectResponse {
+            public_key_hex: String::new(),
+        };
+        assert!(response.validate().is_err());
     }
 
     #[test]

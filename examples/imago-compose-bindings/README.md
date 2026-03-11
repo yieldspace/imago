@@ -7,6 +7,9 @@
 
 ## ローカル 1 ノード手順
 
+`stack deploy` / `stack logs` は `ssh://localhost?...` 経由で `imagod proxy-stdio` を呼びます。
+事前に `ssh localhost true` が対話なしで成功し、SSH ログインシェルの `PATH` から `imagod` を実行できる状態にしてください。
+
 1. ターミナル A で build/sync と `imagod` 起動を行います。
 
 ```bash
@@ -67,7 +70,11 @@ docker compose --project-name imago-compose-bindings-alice-bob-e2e \
 
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
-  cargo run -p imago-cli -- trust cert replicate --from imagod-alice:4443 --to imagod-bob:4443
+  cargo run -p imago-cli -- trust cert replicate \
+    --from ssh://imagod-alice?socket=/run/imago/imagod.sock \
+    --from-authority rpc://imagod-alice:4443 \
+    --to ssh://imagod-bob?socket=/run/imago/imagod.sock \
+    --to-authority rpc://imagod-bob:4443
 
 docker compose --project-name imago-compose-bindings-alice-bob-e2e \
   exec -T --workdir /workspace/examples/imago-compose-bindings/docker imago-deployer \
@@ -83,4 +90,5 @@ docker compose --project-name imago-compose-bindings-alice-bob-e2e \
 
 ## Troubleshooting
 
-- `localhost:4443` の TOFU pin 不整合で接続失敗する場合のみ、`$HOME/.imago/known_hosts` から該当エントリ（`localhost:4443` / `127.0.0.1:4443`）を削除して再実行してください。
+- ローカル 1 ノードで失敗する場合は `ssh localhost true` と `imagod proxy-stdio --socket /tmp/imagod-compose-bindings.sock` を同じユーザーで確認してください。
+- Docker cross-imagod では `imago-deployer` から `ssh imagod-alice true` / `ssh imagod-bob true` が通ることを先に確認してください。
