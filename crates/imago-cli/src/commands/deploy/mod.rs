@@ -717,7 +717,7 @@ async fn run_async_with_target_override(
         },
     )
     .await?;
-    let _session_close_guard =
+    let mut session_close_guard =
         ConnectedSessionCloseGuard::new(&upload_result.session, b"service.deploy complete");
 
     deploy_stage(
@@ -776,6 +776,10 @@ async fn run_async_with_target_override(
     match terminal.event_type {
         CommandEventType::Succeeded => {
             if should_clear_deploy_spinner_before_follow(detach) {
+                session_close_guard.disarm();
+                upload_result
+                    .session
+                    .close(0, b"service.deploy command session complete");
                 ui::command_clear("service.deploy");
                 follow_logs_after_deploy(project_root, &target_config_for_logs, &manifest.name)
                     .await;
@@ -2775,6 +2779,19 @@ mod tests {
         }
 
         assert_eq!(close_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn disarmed_close_guard_allows_manual_close_without_double_close() {
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let session = counting_session(close_count.clone());
+        {
+            let mut guard = ConnectedSessionCloseGuard::new(&session, b"done");
+            guard.disarm();
+            session.close(0, b"manual");
+        }
+
+        assert_eq!(close_count.load(Ordering::SeqCst), 1);
     }
 
     #[test]
