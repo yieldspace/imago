@@ -1,10 +1,10 @@
 listen_addr = "127.0.0.1:4443"
+control_socket_path = "/tmp/imagod-compose-bindings.sock"
 storage_root = ".imagod-data"
 server_version = "imagod/imago-compose-bindings-example"
 
 [tls]
 server_key = "certs/server.key"
-admin_public_keys = ["374227dfe0fdfe7ea12253eba0feb733e604079f1268ad919d38a95bc928e256"]
 client_public_keys = ["97b88f32a159f367c01daec6ae61236fea87826d75593e432a21f396434dab05"]
 known_public_keys = {}
 

@@ -13,12 +13,6 @@ pub struct KeyMaterial {
     pub client_public_hex: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct KnownHostEntry {
-    pub authority: String,
-    pub public_key_hex: String,
-}
-
 pub fn generate_key_material(cert_dir: &Path) -> Result<KeyMaterial> {
     fs::create_dir_all(cert_dir)
         .with_context(|| format!("failed to create cert dir: {}", cert_dir.display()))?;
@@ -49,37 +43,6 @@ pub fn generate_key_material(cert_dir: &Path) -> Result<KeyMaterial> {
         admin_public_hex: public_key_hex(&admin_key)?,
         client_public_hex: public_key_hex(&client_key)?,
     })
-}
-
-pub fn write_known_hosts(home_dir: &Path, entries: &[KnownHostEntry]) -> Result<PathBuf> {
-    let known_hosts_path = home_dir.join(".imago").join("known_hosts");
-    let parent = known_hosts_path.parent().ok_or_else(|| {
-        anyhow::anyhow!(
-            "failed to resolve parent for known_hosts: {}",
-            known_hosts_path.display()
-        )
-    })?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create known_hosts dir: {}", parent.display()))?;
-
-    let mut body = String::new();
-    for entry in entries {
-        if entry.authority.is_empty() || entry.public_key_hex.is_empty() {
-            bail!("known_hosts entry requires non-empty authority and key");
-        }
-        body.push_str(&entry.authority);
-        body.push('\t');
-        body.push_str(&entry.public_key_hex);
-        body.push('\n');
-    }
-
-    fs::write(&known_hosts_path, body).with_context(|| {
-        format!(
-            "failed to write known_hosts: {}",
-            known_hosts_path.display()
-        )
-    })?;
-    Ok(known_hosts_path)
 }
 
 fn public_key_hex(key_pair: &KeyPair) -> Result<String> {

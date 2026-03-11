@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeMap,
     future::Future,
+    io::BufReader,
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -8,7 +10,8 @@ use std::{
 };
 
 use imago_protocol::messages::{
-    BindingsCertUploadRequest, BindingsCertUploadResponse, RpcInvokeRequest, RpcInvokeResponse,
+    BindingsCertInspectRequest, BindingsCertInspectResponse, BindingsCertUploadRequest,
+    BindingsCertUploadResponse, RpcInvokeRequest, RpcInvokeResponse,
 };
 use imago_protocol::{
     ArtifactPushRequest, CommandCancelRequest, CommandEventType, CommandPayload,
@@ -26,15 +29,23 @@ use tokio::io::AsyncWrite;
 use super::{
     Envelope, ProtocolHandler,
     envelope_io::{bad_request, event_envelope, payload_take, response_envelope, write_envelope},
-    session_loop::ProtocolSession,
+    session_loop::{ProtocolSession, SessionAuthContext},
     upsert_dynamic_client_public_key,
 };
 
+const ED25519_SPKI_PREFIX: [u8; 12] = [
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+];
+
 impl ProtocolHandler {
     /// Dispatches non-command-start requests to the corresponding handler.
-    pub(crate) async fn handle_single(&self, request: Envelope) -> Result<Envelope, ImagodError> {
+    pub(crate) async fn handle_single(
+        &self,
+        request: Envelope,
+        auth_context: &SessionAuthContext,
+    ) -> Result<Envelope, ImagodError> {
         match request.message_type {
-            MessageType::HelloNegotiate => self.handle_hello(request),
+            MessageType::HelloNegotiate => self.handle_hello(request, auth_context),
             MessageType::DeployPrepare => self.handle_prepare(request).await,
             MessageType::ArtifactPush => self.handle_push(request).await,
             MessageType::ArtifactCommit => self.handle_commit(request).await,
@@ -42,6 +53,7 @@ impl ProtocolHandler {
             MessageType::ServicesList => self.handle_services_list(request).await,
             MessageType::CommandCancel => self.handle_command_cancel(request).await,
             MessageType::RpcInvoke => self.handle_rpc_invoke(request).await,
+            MessageType::BindingsCertInspect => self.handle_bindings_cert_inspect(request),
             MessageType::BindingsCertUpload => self.handle_bindings_cert_upload(request),
             _ => Err(ImagodError::new(
                 imago_protocol::ErrorCode::BadRequest,
@@ -51,7 +63,11 @@ impl ProtocolHandler {
         }
     }
 
-    fn handle_hello(&self, mut request: Envelope) -> Result<Envelope, ImagodError> {
+    fn handle_hello(
+        &self,
+        mut request: Envelope,
+        auth_context: &SessionAuthContext,
+    ) -> Result<Envelope, ImagodError> {
         let request_id = request.request_id;
         let correlation_id = request.correlation_id;
         let payload: imago_protocol::HelloNegotiateRequest = payload_take(&mut request)?;
@@ -94,24 +110,7 @@ impl ProtocolHandler {
                 server_protocol_version: PROTOCOL_VERSION.to_string(),
                 supported_protocol_version_range: SUPPORTED_PROTOCOL_VERSION_RANGE.to_string(),
                 compatibility_announcement,
-                features: vec![
-                    "hello.negotiate".to_string(),
-                    "deploy.prepare".to_string(),
-                    "artifact.push".to_string(),
-                    "artifact.commit".to_string(),
-                    "command.start".to_string(),
-                    "command.event".to_string(),
-                    "state.request".to_string(),
-                    "services.list".to_string(),
-                    "command.cancel".to_string(),
-                    "logs.request".to_string(),
-                    "logs.stream".to_string(),
-                    "logs.chunk".to_string(),
-                    "logs.chunk.timestamp".to_string(),
-                    "logs.end".to_string(),
-                    "rpc.invoke".to_string(),
-                    "bindings.cert.upload".to_string(),
-                ],
+                features: hello_features_for_auth_context(auth_context),
                 limits,
             },
         )
@@ -266,6 +265,24 @@ impl ProtocolHandler {
             request_id,
             correlation_id,
             &response,
+        )
+    }
+
+    fn handle_bindings_cert_inspect(&self, mut request: Envelope) -> Result<Envelope, ImagodError> {
+        let request_id = request.request_id;
+        let correlation_id = request.correlation_id;
+        let payload: BindingsCertInspectRequest = payload_take(&mut request)?;
+        payload
+            .validate()
+            .map_err(|e| bad_request("bindings.cert.inspect", e.to_string()))?;
+
+        response_envelope(
+            MessageType::BindingsCertInspect,
+            request_id,
+            correlation_id,
+            &BindingsCertInspectResponse {
+                public_key_hex: load_server_public_key_hex(&self.config.tls.server_key)?,
+            },
         )
     }
 
@@ -618,6 +635,91 @@ impl ProtocolHandler {
     }
 }
 
+fn hello_features_for_auth_context(auth_context: &SessionAuthContext) -> Vec<String> {
+    match auth_context.role {
+        super::DynamicClientRole::Admin => vec![
+            "hello.negotiate".to_string(),
+            "deploy.prepare".to_string(),
+            "artifact.push".to_string(),
+            "artifact.commit".to_string(),
+            "command.start".to_string(),
+            "command.event".to_string(),
+            "state.request".to_string(),
+            "services.list".to_string(),
+            "command.cancel".to_string(),
+            "logs.request".to_string(),
+            "logs.stream".to_string(),
+            "logs.chunk".to_string(),
+            "logs.chunk.timestamp".to_string(),
+            "logs.end".to_string(),
+            "rpc.invoke".to_string(),
+            "bindings.cert.inspect".to_string(),
+            "bindings.cert.upload".to_string(),
+        ],
+        super::DynamicClientRole::Client | super::DynamicClientRole::Unknown => {
+            vec!["hello.negotiate".to_string(), "rpc.invoke".to_string()]
+        }
+    }
+}
+
+fn load_server_public_key_hex(path: &Path) -> Result<String, ImagodError> {
+    let provider = web_transport_quinn::crypto::default_provider();
+    let file = std::fs::File::open(path).map_err(|err| {
+        bindings_cert_inspect_internal_error(format!(
+            "failed to open key {}: {err}",
+            path.display()
+        ))
+    })?;
+    let mut reader = BufReader::new(file);
+    let private_key = rustls_pemfile::private_key(&mut reader)
+        .map_err(|err| {
+            bindings_cert_inspect_internal_error(format!(
+                "failed to parse key {}: {err}",
+                path.display()
+            ))
+        })?
+        .ok_or_else(|| {
+            bindings_cert_inspect_internal_error(format!(
+                "private key is missing: {}",
+                path.display()
+            ))
+        })?;
+    let signing_key = provider
+        .key_provider
+        .load_private_key(private_key)
+        .map_err(|err| {
+            bindings_cert_inspect_internal_error(format!(
+                "failed to load key {}: {err}",
+                path.display()
+            ))
+        })?;
+    let public_key = signing_key.public_key().ok_or_else(|| {
+        bindings_cert_inspect_internal_error(format!(
+            "failed to derive public key from {}",
+            path.display()
+        ))
+    })?;
+    let bytes = public_key.as_ref();
+    if bytes.len() != ED25519_SPKI_PREFIX.len() + 32 || !bytes.starts_with(&ED25519_SPKI_PREFIX) {
+        return Err(bindings_cert_inspect_internal_error(format!(
+            "server key {} must be ed25519",
+            path.display()
+        )));
+    }
+    Ok(bytes[ED25519_SPKI_PREFIX.len()..]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn bindings_cert_inspect_internal_error(message: String) -> ImagodError {
+    ImagodError::new(
+        imago_protocol::ErrorCode::Internal,
+        "bindings.cert.inspect",
+        message,
+    )
+}
+
 pub(crate) fn protocol_compatibility_announcement(client_protocol_version: &str) -> Option<String> {
     let supported_range = match VersionReq::parse(SUPPORTED_PROTOCOL_VERSION_RANGE) {
         Ok(parsed) => parsed,
@@ -739,9 +841,9 @@ mod tests {
 
     use super::{
         ensure_command_start_allowed, ensure_command_start_request_id_match,
-        finalize_operation_after_terminal_event, protocol_compatibility_announcement,
-        resolve_logs_request_service_names, should_purge_deploy_session_after_terminal,
-        validate_push_payload,
+        finalize_operation_after_terminal_event, load_server_public_key_hex,
+        protocol_compatibility_announcement, resolve_logs_request_service_names,
+        should_purge_deploy_session_after_terminal, validate_push_payload,
     };
     use imago_protocol::ErrorCode;
 
@@ -831,6 +933,16 @@ mod tests {
         let err = validate_push_payload(&payload).expect_err("empty chunk should fail");
         assert_eq!(err.code, ErrorCode::BadRequest);
         assert_eq!(err.stage, "artifact.push");
+    }
+
+    #[test]
+    fn given_missing_server_key__when_load_server_public_key_hex__then_internal_error_is_returned()
+    {
+        let missing =
+            std::env::temp_dir().join(format!("imagod-server-missing-key-{}.pem", Uuid::new_v4()));
+        let err = load_server_public_key_hex(&missing).expect_err("missing file should fail");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert_eq!(err.stage, "bindings.cert.inspect");
     }
 
     #[test]

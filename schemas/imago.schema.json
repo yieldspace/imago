@@ -403,20 +403,8 @@
     "TargetEntry": {
       "additionalProperties": true,
       "properties": {
-        "client_key": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "remote": {
           "type": "string"
-        },
-        "server_name": {
-          "type": [
-            "string",
-            "null"
-          ]
         }
       },
       "required": [

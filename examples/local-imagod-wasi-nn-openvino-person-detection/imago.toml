@@ -22,6 +22,4 @@ guest_path = "/app/assets"
 wasi = true
 
 [target.default]
-remote = "127.0.0.1:4443"
-server_name = "localhost"
-client_key = "certs/client.key"
+remote = "ssh://localhost?socket=/tmp/imagod-local-wasi-nn-openvino-person-detection.sock"

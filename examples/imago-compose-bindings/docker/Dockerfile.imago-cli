@@ -2,4 +2,10 @@ FROM rust:bookworm
 
 WORKDIR /workspace
 RUN rustup target add wasm32-wasip2
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/*
 COPY . .
+COPY examples/imago-compose-bindings/docker/entrypoint-imago-cli.sh /usr/local/bin/entrypoint-imago-cli.sh
+RUN chmod 755 /usr/local/bin/entrypoint-imago-cli.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint-imago-cli.sh"]

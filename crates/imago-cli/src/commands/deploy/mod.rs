@@ -1,10 +1,8 @@
 use std::{
     collections::BTreeMap,
-    fs,
-    io::{BufReader as StdBufReader, Read, Write},
-    net::{IpAddr, SocketAddr},
+    io::Read,
     path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant},
 };
 
@@ -16,28 +14,15 @@ use imago_protocol::{
     DeployPrepareResponse, ErrorCode, HelloNegotiateRequest, HelloNegotiateResponse, LogChunk,
     LogEnd, MessageType, PROTOCOL_VERSION, ProtocolEnvelope, StructuredError, from_cbor, to_cbor,
 };
-use rustls::{
-    DigitallySignedStruct, SignatureScheme,
-    client::{
-        AlwaysResolvesClientRawPublicKeys,
-        danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    },
-    crypto::CryptoProvider,
-    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
-    sign::CertifiedKey,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader as TokioBufReader},
-    net::lookup_host,
     process::{Child, ChildStdin, ChildStdout, Command},
     task::JoinSet,
 };
-use url::Url;
 use uuid::Uuid;
-use web_transport_quinn::{Session, proto::ConnectRequest};
 
 use crate::{
     cli::{DeployArgs, LogsArgs},
@@ -46,15 +31,16 @@ use crate::{
         shared::dependency::{DependencyResolver, StandardDependencyResolver},
         ui,
     },
+    runtime,
 };
 
 mod artifact;
-mod network;
+#[doc(hidden)]
+pub mod network;
 
 const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
 const DEFAULT_MAX_INFLIGHT_CHUNKS: usize = 16;
-const TRANSPORT_CONNECT_STAGE: &str = "transport.connect";
 const UPLOAD_MAX_ATTEMPTS: usize = 4;
 const UPLOAD_RETRY_BASE_BACKOFF_MS: u64 = 250;
 const UPLOAD_RETRY_MAX_BACKOFF_MS: u64 = 1000;
@@ -72,22 +58,11 @@ const DEPLOY_PHASE_COMMIT: u8 = 7;
 const DEPLOY_PHASE_COMMAND: u8 = 8;
 const ANSI_DIM: &str = "\x1b[2m";
 const ANSI_RESET: &str = "\x1b[0m";
-const DATAGRAM_BUFFER_BYTES: usize = 1024 * 1024;
-const TRANSPORT_KEEPALIVE_INTERVAL_SECS: u64 = 5;
-const TRANSPORT_MAX_IDLE_TIMEOUT_SECS: u64 = 180;
-const IMAGO_DIR_NAME: &str = ".imago";
-const KNOWN_HOSTS_FILE_NAME: &str = "known_hosts";
 const DETAIL_WASM_STDOUT: &str = "wasm.stdout";
 const DETAIL_WASM_STDERR: &str = "wasm.stderr";
 const AUTO_FOLLOW_TAIL_LINES: u32 = 200;
-#[cfg(unix)]
-const IMAGO_DIR_MODE: u32 = 0o700;
-#[cfg(unix)]
-const KNOWN_HOSTS_MODE: u32 = 0o600;
-const ED25519_SPKI_PREFIX: [u8; 12] = [
-    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-];
 const STDIO_MESSAGE_TERMINATOR: [u8; 4] = 0u32.to_be_bytes();
+const LOCAL_PROXY_STDERR_CAPTURE_TIMEOUT_MS: u64 = 1000;
 
 pub(crate) type Envelope = ProtocolEnvelope<Value>;
 
@@ -145,8 +120,9 @@ struct DeployRunSummary {
 }
 
 #[derive(Clone)]
-pub(crate) struct ConnectedTargetSession {
-    transport: ConnectedTargetTransport,
+#[doc(hidden)]
+pub struct ConnectedTargetSession {
+    transport: Arc<dyn network::AdminTransport>,
     pub authority: String,
     pub resolved_addr: String,
     #[allow(dead_code)]
@@ -156,28 +132,67 @@ pub(crate) struct ConnectedTargetSession {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StreamRequestTermination {
+#[doc(hidden)]
+pub enum StreamRequestTermination {
     Completed,
     Interrupted,
-}
-
-#[derive(Clone)]
-enum ConnectedTargetTransport {
-    Quinn(Arc<Session>),
-    Ssh(Arc<SshTargetSession>),
 }
 
 struct SshTargetSession {
     remote: build::SshTargetRemote,
     remote_input: String,
-    inner: tokio::sync::Mutex<SshProcessIo>,
+    inner: tokio::sync::Mutex<ProcessIo>,
 }
 
-struct SshProcessIo {
-    child: Child,
+struct LocalProxyTargetSession {
+    imagod_binary: PathBuf,
+    socket_path: String,
+    remote_input: String,
+    inner: tokio::sync::Mutex<ProcessIo>,
+}
+
+struct ProcessIo {
+    child: Option<Child>,
     stdin: ChildStdin,
     stdout: TokioBufReader<ChildStdout>,
+    stderr_capture: Option<LocalProxyStderrCapture>,
 }
+
+struct LocalProxyStderrCapture {
+    bytes: Arc<StdMutex<Vec<u8>>>,
+    drain_task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Debug)]
+struct LocalProxyTransportError {
+    summary: String,
+    stderr_note: LocalProxyTransportStderrNote,
+}
+
+#[derive(Debug)]
+struct LocalProxyTransportStderrNote {
+    detail: String,
+}
+
+impl std::fmt::Display for LocalProxyTransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.summary)
+    }
+}
+
+impl std::error::Error for LocalProxyTransportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.stderr_note)
+    }
+}
+
+impl std::fmt::Display for LocalProxyTransportStderrNote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "local proxy transport stderr: {}", self.detail)
+    }
+}
+
+impl std::error::Error for LocalProxyTransportStderrNote {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConnectedTargetMetadata {
@@ -203,29 +218,120 @@ fn build_connected_target_metadata(
 
 impl ConnectedTargetSession {
     pub(crate) fn close(&self, code: u32, reason: &[u8]) {
-        match &self.transport {
-            ConnectedTargetTransport::Quinn(session) => session.close(code, reason),
-            ConnectedTargetTransport::Ssh(session) => session.close(),
+        let _ = (code, reason);
+        self.transport.close();
+    }
+}
+
+pub(crate) struct ConnectedSessionCloseGuard<'a> {
+    session: Option<&'a ConnectedTargetSession>,
+    reason: &'static [u8],
+}
+
+impl<'a> ConnectedSessionCloseGuard<'a> {
+    pub(crate) fn new(session: &'a ConnectedTargetSession, reason: &'static [u8]) -> Self {
+        Self {
+            session: Some(session),
+            reason,
         }
     }
 
-    pub(crate) fn uses_ssh_transport(&self) -> bool {
-        matches!(&self.transport, ConnectedTargetTransport::Ssh(_))
+    pub(crate) fn disarm(&mut self) {
+        self.session = None;
     }
+}
 
-    pub(crate) fn as_quinn_session(&self) -> Option<&Session> {
-        match &self.transport {
-            ConnectedTargetTransport::Quinn(session) => Some(session.as_ref()),
-            ConnectedTargetTransport::Ssh(_) => None,
+impl Drop for ConnectedSessionCloseGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.take() {
+            session.close(0, self.reason);
         }
     }
 }
 
 impl SshTargetSession {
-    fn close(&self) {
+    fn close_process(&self) {
         if let Ok(mut inner) = self.inner.try_lock() {
-            terminate_ssh_process(&mut inner.child);
+            terminate_process_and_reap(&mut inner.child);
         }
+    }
+}
+
+impl LocalProxyTargetSession {
+    fn close_process(&self) {
+        if let Ok(mut inner) = self.inner.try_lock() {
+            terminate_process_and_reap(&mut inner.child);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl network::AdminTransport for SshTargetSession {
+    fn close(&self) {
+        self.close_process();
+    }
+
+    async fn request_response_bytes(
+        &self,
+        framed: &[u8],
+        open_write_timeout: Duration,
+        read_timeout: Option<Duration>,
+    ) -> anyhow::Result<Vec<u8>> {
+        request_events_over_ssh(self, framed, open_write_timeout, read_timeout).await
+    }
+
+    async fn stream_response_frames(
+        &self,
+        framed: &[u8],
+        open_write_timeout: Duration,
+        read_idle_timeout: Option<Duration>,
+        follow: bool,
+        on_frame: &mut (dyn FnMut(Vec<u8>) -> anyhow::Result<bool> + Send),
+    ) -> anyhow::Result<StreamRequestTermination> {
+        request_streamed_frames_over_ssh(
+            self,
+            framed,
+            open_write_timeout,
+            read_idle_timeout,
+            follow,
+            on_frame,
+        )
+        .await
+    }
+}
+
+#[async_trait::async_trait]
+impl network::AdminTransport for LocalProxyTargetSession {
+    fn close(&self) {
+        self.close_process();
+    }
+
+    async fn request_response_bytes(
+        &self,
+        framed: &[u8],
+        open_write_timeout: Duration,
+        read_timeout: Option<Duration>,
+    ) -> anyhow::Result<Vec<u8>> {
+        request_events_over_local_proxy(self, framed, open_write_timeout, read_timeout).await
+    }
+
+    async fn stream_response_frames(
+        &self,
+        framed: &[u8],
+        open_write_timeout: Duration,
+        read_idle_timeout: Option<Duration>,
+        follow: bool,
+        on_frame: &mut (dyn FnMut(Vec<u8>) -> anyhow::Result<bool> + Send),
+    ) -> anyhow::Result<StreamRequestTermination> {
+        request_streamed_frames_over_local_proxy(
+            self,
+            framed,
+            open_write_timeout,
+            read_idle_timeout,
+            follow,
+            on_frame,
+        )
+        .await
     }
 }
 
@@ -233,17 +339,86 @@ fn terminate_ssh_process(child: &mut Child) {
     let _ = child.start_kill();
 }
 
-fn replace_ssh_process_io(slot: &mut SshProcessIo, replacement: SshProcessIo) {
-    let old = std::mem::replace(slot, replacement);
-    let SshProcessIo {
-        mut child,
-        stdin: _stdin,
-        stdout: _stdout,
-    } = old;
+fn terminate_process_and_reap(child: &mut Option<Child>) {
+    let Some(mut child) = child.take() else {
+        return;
+    };
     terminate_ssh_process(&mut child);
     tokio::spawn(async move {
         let _ = child.wait().await;
     });
+}
+
+fn replace_process_io(slot: &mut ProcessIo, replacement: ProcessIo) {
+    let old = std::mem::replace(slot, replacement);
+    let ProcessIo {
+        mut child,
+        stdin: _stdin,
+        stdout: _stdout,
+        stderr_capture: _stderr_capture,
+    } = old;
+    terminate_process_and_reap(&mut child);
+}
+
+fn format_local_proxy_stderr(stderr: &str) -> Option<String> {
+    let lines = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(lines.join(" | "))
+}
+
+async fn capture_local_proxy_stderr(inner: &mut ProcessIo) -> Option<String> {
+    let mut child = inner.child.take()?;
+    terminate_ssh_process(&mut child);
+    let stderr_capture = inner.stderr_capture.take()?;
+    let _ = tokio::time::timeout(
+        Duration::from_millis(LOCAL_PROXY_STDERR_CAPTURE_TIMEOUT_MS),
+        child.wait(),
+    )
+    .await;
+    let _ = tokio::time::timeout(
+        Duration::from_millis(LOCAL_PROXY_STDERR_CAPTURE_TIMEOUT_MS),
+        stderr_capture.drain_task,
+    )
+    .await;
+    let bytes = stderr_capture.bytes.lock().ok()?.clone();
+
+    format_local_proxy_stderr(&String::from_utf8_lossy(&bytes))
+}
+
+fn annotate_local_proxy_transport_error(
+    err: anyhow::Error,
+    stderr: Option<String>,
+) -> anyhow::Error {
+    let Some(detail) = stderr else {
+        return err;
+    };
+    anyhow::Error::new(LocalProxyTransportError {
+        summary: err.to_string(),
+        stderr_note: LocalProxyTransportStderrNote { detail },
+    })
+}
+
+async fn reset_local_proxy_after_error<T>(
+    inner: &mut ProcessIo,
+    session: &LocalProxyTargetSession,
+    err: anyhow::Error,
+    reset_context: &'static str,
+) -> anyhow::Result<T> {
+    let err = annotate_local_proxy_transport_error(err, capture_local_proxy_stderr(inner).await);
+    reset_local_proxy_process(
+        inner,
+        &session.imagod_binary,
+        &session.socket_path,
+        &session.remote_input,
+    )
+    .context(reset_context)?;
+    Err(err)
 }
 
 fn deploy_phase_detail(phase: u8, detail: &str) -> String {
@@ -282,9 +457,9 @@ fn print_build_failure_logs(err: &anyhow::Error) {
         return;
     };
     for line in lines {
-        println!("{}", format_build_failure_log(line));
+        let _ = runtime::write_stdout_line(&format_build_failure_log(line));
     }
-    println!("{}", build_failure_footer_line());
+    let _ = runtime::write_stdout_line(build_failure_footer_line());
 }
 
 fn should_clear_deploy_spinner_before_follow(detach: bool) -> bool {
@@ -343,108 +518,6 @@ impl std::fmt::Display for CommitNotVerifiedError {
 }
 
 impl std::error::Error for CommitNotVerifiedError {}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ServerIdentityStatus {
-    Matched {
-        presented_key_hex: String,
-    },
-    Unknown {
-        presented_key_hex: String,
-    },
-    Mismatch {
-        expected_key_hex: String,
-        presented_key_hex: String,
-    },
-}
-
-#[derive(Debug)]
-struct TofuServerCertVerifier {
-    provider: Arc<CryptoProvider>,
-    expected_key_hex: Option<String>,
-    observed_status: Mutex<Option<ServerIdentityStatus>>,
-}
-
-impl TofuServerCertVerifier {
-    fn new(provider: Arc<CryptoProvider>, expected_key_hex: Option<String>) -> Self {
-        Self {
-            provider,
-            expected_key_hex: expected_key_hex.map(|value| value.to_ascii_lowercase()),
-            observed_status: Mutex::new(None),
-        }
-    }
-
-    fn take_observed_status(&self) -> Option<ServerIdentityStatus> {
-        self.observed_status
-            .lock()
-            .ok()
-            .and_then(|mut guard| guard.take())
-    }
-}
-
-impl ServerCertVerifier for TofuServerCertVerifier {
-    fn verify_server_cert(
-        &self,
-        end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        let raw_key = extract_ed25519_raw_public_key_from_spki(end_entity.as_ref())
-            .map_err(|err| rustls::Error::General(err.to_string()))?;
-        let presented_key_hex = hex::encode(raw_key);
-
-        let status = match &self.expected_key_hex {
-            Some(expected_key_hex) if expected_key_hex.eq_ignore_ascii_case(&presented_key_hex) => {
-                ServerIdentityStatus::Matched { presented_key_hex }
-            }
-            Some(expected_key_hex) => ServerIdentityStatus::Mismatch {
-                expected_key_hex: expected_key_hex.clone(),
-                presented_key_hex,
-            },
-            None => ServerIdentityStatus::Unknown { presented_key_hex },
-        };
-        if let Ok(mut guard) = self.observed_status.lock() {
-            *guard = Some(status);
-        }
-
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Err(rustls::Error::General(
-            "TLS1.2 server signatures are not supported for raw public keys".to_string(),
-        ))
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature_with_raw_key(
-            message,
-            &rustls::pki_types::SubjectPublicKeyInfoDer::from(cert.as_ref()),
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![SignatureScheme::ED25519]
-    }
-
-    fn requires_raw_public_keys(&self) -> bool {
-        true
-    }
-}
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
@@ -537,7 +610,7 @@ async fn run_async_with_target_override(
 ) -> anyhow::Result<DeployRunSummary> {
     let DeployArgs { target, detach } = args;
     let dependency_resolver = StandardDependencyResolver;
-    let target_connector = network::QuinnTargetConnector;
+    let target_connector = runtime::target_connector();
     let artifact_bundler = artifact::TarArtifactBundler;
 
     let target_name = target.unwrap_or_else(|| build::default_target_name().to_string());
@@ -557,7 +630,6 @@ async fn run_async_with_target_override(
                 &service_name,
                 &target_name,
                 &context_target.remote,
-                context_target.server_name.as_deref(),
             ),
         );
     }
@@ -630,7 +702,7 @@ async fn run_async_with_target_override(
     );
 
     let upload_result = run_upload_phase_with_resume(
-        &target_connector,
+        &*target_connector,
         UploadPhaseInputs {
             target: &target,
             target_for_protocol: &target_for_protocol,
@@ -645,6 +717,8 @@ async fn run_async_with_target_override(
         },
     )
     .await?;
+    let mut session_close_guard =
+        ConnectedSessionCloseGuard::new(&upload_result.session, b"service.deploy complete");
 
     deploy_stage(
         DEPLOY_PHASE_COMMAND,
@@ -702,6 +776,10 @@ async fn run_async_with_target_override(
     match terminal.event_type {
         CommandEventType::Succeeded => {
             if should_clear_deploy_spinner_before_follow(detach) {
+                session_close_guard.disarm();
+                upload_result
+                    .session
+                    .close(0, b"service.deploy command session complete");
                 ui::command_clear("service.deploy");
                 follow_logs_after_deploy(project_root, &target_config_for_logs, &manifest.name)
                     .await;
@@ -757,7 +835,7 @@ async fn follow_logs_after_deploy(
     }
 }
 
-async fn run_upload_phase_with_resume<C: network::TargetConnector>(
+async fn run_upload_phase_with_resume<C: network::TargetConnector + ?Sized>(
     target_connector: &C,
     inputs: UploadPhaseInputs<'_>,
 ) -> anyhow::Result<UploadPhaseResult> {
@@ -791,7 +869,7 @@ async fn run_upload_phase_with_resume<C: network::TargetConnector>(
     ))
 }
 
-async fn run_upload_phase_once<C: network::TargetConnector>(
+async fn run_upload_phase_once<C: network::TargetConnector + ?Sized>(
     target_connector: &C,
     inputs: &UploadPhaseInputs<'_>,
 ) -> anyhow::Result<UploadPhaseResult> {
@@ -801,6 +879,8 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
         "establishing transport session",
     );
     let connected = target_connector.connect(inputs.target).await?;
+    let mut session_close_guard =
+        ConnectedSessionCloseGuard::new(&connected, b"service.deploy upload phase complete");
 
     deploy_stage(DEPLOY_PHASE_HELLO, "hello", "negotiating upload features");
     let hello = request_envelope(
@@ -911,6 +991,8 @@ async fn run_upload_phase_once<C: network::TargetConnector>(
 
     let authority = connected.authority.clone();
     let resolved_addr = connected.resolved_addr.clone();
+    session_close_guard.disarm();
+    drop(session_close_guard);
     Ok(UploadPhaseResult {
         session: connected,
         deploy_id: prepare_response.deploy_id,
@@ -1020,121 +1102,14 @@ fn contains_unauthorized_marker(err: &anyhow::Error) -> bool {
 pub(crate) async fn connect_target(
     target: &build::DeployTargetConfig,
 ) -> anyhow::Result<ConnectedTargetSession> {
-    match build::parse_target_remote(&target.remote)? {
-        build::ParsedTargetRemote::Direct => connect_direct_target(target).await,
-        build::ParsedTargetRemote::Ssh(remote) => connect_ssh_target(target, &remote).await,
-    }
-}
-
-async fn connect_direct_target(
-    target: &build::DeployTargetConfig,
-) -> anyhow::Result<ConnectedTargetSession> {
-    let client_key = load_private_key(
-        target
-            .client_key
-            .as_ref()
-            .ok_or_else(|| anyhow!("target is missing required key: client_key"))?,
-    )?;
-    let endpoint_info = parse_remote_endpoint(&target.remote).await?;
-    let configured_host = target.server_name.as_deref().unwrap_or(&endpoint_info.host);
-    let authority = format_authority(configured_host, endpoint_info.port);
-    let known_hosts_path = known_hosts_path()?;
-    let known_hosts_entries = load_known_hosts_entries(&known_hosts_path)?;
-    let expected_key_hex = known_hosts_entries.get(&authority).cloned();
-
-    let provider = web_transport_quinn::crypto::default_provider();
-    let verifier = Arc::new(TofuServerCertVerifier::new(
-        provider.clone(),
-        expected_key_hex,
-    ));
-    let client_resolver = build_client_raw_public_key_resolver(provider.clone(), &client_key)?;
-
-    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])?
-        .dangerous()
-        .with_custom_certificate_verifier(verifier.clone())
-        .with_client_cert_resolver(client_resolver);
-    tls.alpn_protocols = vec![web_transport_quinn::ALPN.as_bytes().to_vec()];
-
-    let quic_tls = quinn::crypto::rustls::QuicClientConfig::try_from(tls)?;
-    let mut quic_config = quinn::ClientConfig::new(Arc::new(quic_tls));
-    let mut transport = quinn::TransportConfig::default();
-    transport.datagram_send_buffer_size(DATAGRAM_BUFFER_BYTES);
-    transport.datagram_receive_buffer_size(Some(DATAGRAM_BUFFER_BYTES));
-    transport.keep_alive_interval(Some(Duration::from_secs(TRANSPORT_KEEPALIVE_INTERVAL_SECS)));
-    let idle_timeout =
-        quinn::IdleTimeout::try_from(Duration::from_secs(TRANSPORT_MAX_IDLE_TIMEOUT_SECS))
-            .expect("fixed transport max idle timeout must be representable");
-    transport.max_idle_timeout(Some(idle_timeout));
-    quic_config.transport_config(Arc::new(transport));
-    let endpoint = create_client_endpoint()?;
-
-    let sni = configured_host.to_string();
-    let connecting = endpoint
-        .connect_with(quic_config, endpoint_info.remote_addr, &sni)
-        .map_err(|e| anyhow!("failed to start quic connection: {e}"))?;
-    let connection = connecting.await.map_err(map_connect_connection_error)?;
-
-    let request_host = format_host_for_url(configured_host);
-    let request_url = Url::parse(&format!("https://{}:{}/", request_host, endpoint_info.port))
-        .context("failed to build webtransport request URL")?;
-    let request = ConnectRequest::new(request_url);
-    let session = Session::connect(connection, request)
-        .await
-        .map_err(map_webtransport_client_error)?;
-    let metadata = build_connected_target_metadata(
-        target,
-        configured_host,
-        &authority,
-        endpoint_info.remote_addr.to_string(),
-    );
-    let connected = ConnectedTargetSession {
-        transport: ConnectedTargetTransport::Quinn(Arc::new(session)),
-        authority: metadata.authority,
-        resolved_addr: metadata.resolved_addr,
-        configured_host: metadata.configured_host,
-        remote_input: metadata.remote_input,
-    };
-
-    match verifier.take_observed_status() {
-        Some(ServerIdentityStatus::Matched { .. }) => Ok(connected),
-        Some(ServerIdentityStatus::Unknown { presented_key_hex }) => {
-            if let Err(err) =
-                save_known_host_entry(&known_hosts_path, &authority, &presented_key_hex)
-            {
-                connected.close(0, b"failed to persist known_hosts entry");
-                return Err(err);
-            }
-            Ok(connected)
-        }
-        Some(ServerIdentityStatus::Mismatch {
-            expected_key_hex,
-            presented_key_hex,
-        }) => {
-            connected.close(0, b"server raw public key mismatch");
-            Err(server_identity_mismatch_error(
-                &authority,
-                &expected_key_hex,
-                &presented_key_hex,
-                &known_hosts_path,
-            ))
-        }
-        None => {
-            connected.close(0, b"missing server identity verification");
-            Err(missing_server_identity_error(&authority))
-        }
-    }
+    connect_ssh_target(target, &target.ssh_remote).await
 }
 
 async fn connect_ssh_target(
     target: &build::DeployTargetConfig,
     remote: &build::SshTargetRemote,
 ) -> anyhow::Result<ConnectedTargetSession> {
-    let authority = if let Some(port) = remote.port {
-        format!("ssh://{}@{}:{}", remote.user, remote.host, port)
-    } else {
-        format!("ssh://{}@{}", remote.user, remote.host)
-    };
+    let authority = format_ssh_authority(remote);
     let resolved_addr = remote
         .socket_path
         .as_deref()
@@ -1144,11 +1119,11 @@ async fn connect_ssh_target(
     let process_io = spawn_ssh_proxy_process(remote, &target.remote)?;
 
     Ok(ConnectedTargetSession {
-        transport: ConnectedTargetTransport::Ssh(Arc::new(SshTargetSession {
+        transport: Arc::new(SshTargetSession {
             remote: remote.clone(),
             remote_input: target.remote.clone(),
             inner: tokio::sync::Mutex::new(process_io),
-        })),
+        }),
         authority: metadata.authority,
         resolved_addr: metadata.resolved_addr,
         configured_host: metadata.configured_host,
@@ -1156,32 +1131,143 @@ async fn connect_ssh_target(
     })
 }
 
+pub(crate) fn connect_local_proxy_target(
+    target: &build::DeployTargetConfig,
+    imagod_binary: &Path,
+) -> anyhow::Result<ConnectedTargetSession> {
+    let socket_path = required_local_proxy_socket_path(&target.ssh_remote)?;
+    let authority = format_ssh_authority(&target.ssh_remote);
+    let resolved_addr = format!("local-proxy:{} via {}", target.ssh_remote.host, socket_path);
+    let metadata =
+        build_connected_target_metadata(target, &target.ssh_remote.host, &authority, resolved_addr);
+    let process_io = spawn_local_proxy_process(imagod_binary, socket_path, &target.remote)?;
+
+    Ok(ConnectedTargetSession {
+        transport: Arc::new(LocalProxyTargetSession {
+            imagod_binary: imagod_binary.to_path_buf(),
+            socket_path: socket_path.to_string(),
+            remote_input: target.remote.clone(),
+            inner: tokio::sync::Mutex::new(process_io),
+        }),
+        authority: metadata.authority,
+        resolved_addr: metadata.resolved_addr,
+        configured_host: metadata.configured_host,
+        remote_input: metadata.remote_input,
+    })
+}
+
+fn required_local_proxy_socket_path(remote: &build::SshTargetRemote) -> anyhow::Result<&str> {
+    if !matches!(
+        remote.host.as_str(),
+        "localhost" | "127.0.0.1" | "::1" | "[::1]"
+    ) {
+        return Err(anyhow!(
+            "local proxy connector only supports loopback ssh targets, got '{}'",
+            remote.host
+        ));
+    }
+
+    remote
+        .socket_path
+        .as_deref()
+        .ok_or_else(|| anyhow!("local proxy connector requires ?socket=/abs/path"))
+}
+
 fn spawn_ssh_proxy_process(
     remote: &build::SshTargetRemote,
     remote_input: &str,
-) -> anyhow::Result<SshProcessIo> {
+) -> anyhow::Result<ProcessIo> {
     let mut command = Command::new("ssh");
     command.args(ssh_proxy_command_args(remote));
+    spawn_process(
+        command,
+        remote_input,
+        "ssh transport",
+        "ssh stdin",
+        "ssh stdout",
+        false,
+        None,
+    )
+}
+
+fn spawn_local_proxy_process(
+    imagod_binary: &Path,
+    socket_path: &str,
+    remote_input: &str,
+) -> anyhow::Result<ProcessIo> {
+    let mut command = Command::new(imagod_binary);
+    command.arg("proxy-stdio");
+    command.arg("--socket");
+    command.arg(socket_path);
+    spawn_process(
+        command,
+        remote_input,
+        "local proxy transport",
+        "local proxy stdin",
+        "local proxy stdout",
+        true,
+        Some("local proxy stderr"),
+    )
+}
+
+fn spawn_process(
+    mut command: Command,
+    remote_input: &str,
+    label: &str,
+    stdin_label: &str,
+    stdout_label: &str,
+    capture_stderr: bool,
+    stderr_label: Option<&str>,
+) -> anyhow::Result<ProcessIo> {
     command.stdin(std::process::Stdio::piped());
     command.stdout(std::process::Stdio::piped());
-    command.stderr(std::process::Stdio::inherit());
+    if capture_stderr {
+        command.stderr(std::process::Stdio::piped());
+    } else {
+        command.stderr(std::process::Stdio::inherit());
+    }
 
     let mut child = command
         .spawn()
-        .with_context(|| format!("failed to spawn ssh transport for {remote_input}"))?;
+        .with_context(|| format!("failed to spawn {label} for {remote_input}"))?;
     let stdin = child
         .stdin
         .take()
-        .ok_or_else(|| anyhow!("failed to capture ssh stdin"))?;
+        .ok_or_else(|| anyhow!("failed to capture {stdin_label}"))?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| anyhow!("failed to capture ssh stdout"))?;
+        .ok_or_else(|| anyhow!("failed to capture {stdout_label}"))?;
+    let stderr_capture = if capture_stderr {
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow!("failed to capture {}", stderr_label.unwrap_or("stderr")))?;
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let task_bytes = bytes.clone();
+        let drain_task = tokio::spawn(async move {
+            let mut chunk = [0u8; 4096];
+            loop {
+                match stderr.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        if let Ok(mut guard) = task_bytes.lock() {
+                            guard.extend_from_slice(&chunk[..read]);
+                        }
+                    }
+                }
+            }
+        });
+        Some(LocalProxyStderrCapture { bytes, drain_task })
+    } else {
+        None
+    };
 
-    Ok(SshProcessIo {
-        child,
+    Ok(ProcessIo {
+        child: Some(child),
         stdin,
         stdout: TokioBufReader::new(stdout),
+        stderr_capture,
     })
 }
 
@@ -1195,7 +1281,10 @@ fn ssh_proxy_command_args(remote: &build::SshTargetRemote) -> Vec<String> {
         args.push("-p".to_string());
         args.push(port.to_string());
     }
-    args.push(format!("{}@{}", remote.user, remote.host));
+    args.push(match remote.user.as_deref() {
+        Some(user) => format!("{user}@{}", remote.host),
+        None => remote.host.clone(),
+    });
     args.push("imagod".to_string());
     args.push("proxy-stdio".to_string());
     if let Some(socket_path) = remote.socket_path.as_deref() {
@@ -1205,13 +1294,36 @@ fn ssh_proxy_command_args(remote: &build::SshTargetRemote) -> Vec<String> {
     args
 }
 
+fn format_ssh_authority(remote: &build::SshTargetRemote) -> String {
+    let authority_host = match remote.user.as_deref() {
+        Some(user) => format!("{user}@{}", remote.host),
+        None => remote.host.clone(),
+    };
+    if let Some(port) = remote.port {
+        format!("ssh://{authority_host}:{port}")
+    } else {
+        format!("ssh://{authority_host}")
+    }
+}
+
 fn reset_ssh_process(
-    inner: &mut SshProcessIo,
+    inner: &mut ProcessIo,
     remote: &build::SshTargetRemote,
     remote_input: &str,
 ) -> anyhow::Result<()> {
     let replacement = spawn_ssh_proxy_process(remote, remote_input)?;
-    replace_ssh_process_io(inner, replacement);
+    replace_process_io(inner, replacement);
+    Ok(())
+}
+
+fn reset_local_proxy_process(
+    inner: &mut ProcessIo,
+    imagod_binary: &Path,
+    socket_path: &str,
+    remote_input: &str,
+) -> anyhow::Result<()> {
+    let replacement = spawn_local_proxy_process(imagod_binary, socket_path, remote_input)?;
+    replace_process_io(inner, replacement);
     Ok(())
 }
 
@@ -1225,113 +1337,6 @@ where
             reset().context("failed to reset ssh transport after read failure")?;
             Err(err)
         }
-    }
-}
-
-fn server_identity_mismatch_error(
-    authority: &str,
-    expected_key_hex: &str,
-    presented_key_hex: &str,
-    known_hosts_path: &Path,
-) -> anyhow::Error {
-    unauthorized_connect_error(format!(
-        "server key mismatch for authority '{authority}': expected {expected_key_hex}, got {presented_key_hex}. if the server key changed intentionally, edit {} manually and retry",
-        known_hosts_path.display()
-    ))
-}
-
-fn missing_server_identity_error(authority: &str) -> anyhow::Error {
-    unauthorized_connect_error(format!(
-        "failed to verify server raw public key for authority: {authority}"
-    ))
-}
-
-fn is_certificate_alert_transport_code(code: quinn::TransportErrorCode) -> bool {
-    let raw_code = u64::from(code);
-    if !(0x100..0x200).contains(&raw_code) {
-        return false;
-    }
-    let alert_code = (raw_code & 0xff) as u8;
-    is_certificate_alert_code(alert_code)
-}
-
-fn is_certificate_alert_code(alert_code: u8) -> bool {
-    matches!(
-        alert_code,
-        code if code == u8::from(rustls::AlertDescription::NoCertificate)
-            || code == u8::from(rustls::AlertDescription::HandshakeFailure)
-            || code == u8::from(rustls::AlertDescription::BadCertificate)
-            || code == u8::from(rustls::AlertDescription::UnsupportedCertificate)
-            || code == u8::from(rustls::AlertDescription::CertificateRevoked)
-            || code == u8::from(rustls::AlertDescription::CertificateExpired)
-            || code == u8::from(rustls::AlertDescription::CertificateUnknown)
-            || code == u8::from(rustls::AlertDescription::UnknownCA)
-            || code == u8::from(rustls::AlertDescription::AccessDenied)
-            || code == u8::from(rustls::AlertDescription::BadCertificateStatusResponse)
-            || code == u8::from(rustls::AlertDescription::BadCertificateHashValue)
-            || code == u8::from(rustls::AlertDescription::CertificateRequired)
-    )
-}
-
-fn is_certificate_auth_connection_error(err: &quinn::ConnectionError) -> bool {
-    match err {
-        quinn::ConnectionError::TransportError(transport_error) => {
-            is_certificate_alert_transport_code(transport_error.code)
-        }
-        quinn::ConnectionError::ConnectionClosed(close) => {
-            is_certificate_alert_transport_code(close.error_code)
-        }
-        _ => false,
-    }
-}
-
-fn unauthorized_connect_error(source: impl std::fmt::Display) -> anyhow::Error {
-    anyhow!(
-        "server error: public key authentication failed (E_UNAUTHORIZED) at {TRANSPORT_CONNECT_STAGE}: {source}"
-    )
-}
-
-fn map_connect_rejection_status(
-    status: web_transport_quinn::http::StatusCode,
-    source: impl std::fmt::Display,
-) -> Option<anyhow::Error> {
-    if status == web_transport_quinn::http::StatusCode::UNAUTHORIZED
-        || status == web_transport_quinn::http::StatusCode::FORBIDDEN
-    {
-        return Some(unauthorized_connect_error(source));
-    }
-    None
-}
-
-fn parse_connect_error_status(message: &str) -> Option<web_transport_quinn::http::StatusCode> {
-    let (_, status_with_reason) = message.rsplit_once("http error status: ")?;
-    let status_token = status_with_reason.split_ascii_whitespace().next()?;
-    let code = status_token.parse::<u16>().ok()?;
-    web_transport_quinn::http::StatusCode::from_u16(code).ok()
-}
-
-fn map_connect_connection_error(err: quinn::ConnectionError) -> anyhow::Error {
-    if is_certificate_auth_connection_error(&err) {
-        return unauthorized_connect_error(err);
-    }
-    anyhow!("failed to establish quic connection: {err}")
-}
-
-fn map_webtransport_client_error(err: web_transport_quinn::ClientError) -> anyhow::Error {
-    match err {
-        web_transport_quinn::ClientError::Connection(connection_err) => {
-            map_connect_connection_error(connection_err)
-        }
-        web_transport_quinn::ClientError::HttpError(connect_err) => {
-            let rendered = connect_err.to_string();
-            if let Some(status) = parse_connect_error_status(&rendered)
-                && let Some(mapped) = map_connect_rejection_status(status, &rendered)
-            {
-                return mapped;
-            }
-            anyhow!("failed to establish webtransport session: {connect_err}")
-        }
-        other => anyhow!("failed to establish webtransport session: {other}"),
     }
 }
 
@@ -1425,86 +1430,6 @@ fn parse_positive_limit_u64(
             Ok(parsed)
         }
         None => Ok(default),
-    }
-}
-
-fn client_bind_candidates() -> [SocketAddr; 2] {
-    [
-        "[::]:0".parse().expect("valid ipv6 wildcard address"),
-        "0.0.0.0:0".parse().expect("valid ipv4 wildcard address"),
-    ]
-}
-
-fn create_client_endpoint() -> anyhow::Result<quinn::Endpoint> {
-    let mut last_error: Option<anyhow::Error> = None;
-    for bind_addr in client_bind_candidates() {
-        match quinn::Endpoint::client(bind_addr) {
-            Ok(endpoint) => return Ok(endpoint),
-            Err(err) => {
-                last_error = Some(anyhow!(
-                    "failed to bind client endpoint on {bind_addr}: {err}"
-                ));
-            }
-        }
-    }
-
-    Err(last_error.unwrap_or_else(|| anyhow!("failed to bind client endpoint")))
-}
-
-struct RemoteEndpoint {
-    remote_addr: SocketAddr,
-    host: String,
-    port: u16,
-}
-
-async fn parse_remote_endpoint(remote: &str) -> anyhow::Result<RemoteEndpoint> {
-    let url = normalize_remote_to_url(remote)?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow!("remote URL host is missing"))?
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_string();
-    let port = url.port().unwrap_or(4443);
-    let mut addresses = lookup_host((host.clone(), port))
-        .await
-        .with_context(|| format!("failed to resolve remote host: {host}:{port}"))?;
-    let addr = addresses
-        .next()
-        .ok_or_else(|| anyhow!("no resolved address for remote host"))?;
-
-    Ok(RemoteEndpoint {
-        remote_addr: addr,
-        host,
-        port,
-    })
-}
-
-fn normalize_remote_to_url(remote: &str) -> anyhow::Result<Url> {
-    if remote.contains("://") {
-        return Url::parse(remote).context("remote URL parse failed");
-    }
-
-    if let Ok(address) = remote.parse::<SocketAddr>() {
-        let host = format_host_for_url(&address.ip().to_string());
-        return Url::parse(&format!("https://{}:{}/", host, address.port()))
-            .context("remote socket address parse failed");
-    }
-
-    if let Ok(ip) = remote.parse::<IpAddr>() {
-        let host = format_host_for_url(&ip.to_string());
-        return Url::parse(&format!("https://{}:4443/", host))
-            .context("remote ip address parse failed");
-    }
-
-    Url::parse(&format!("https://{remote}")).context("remote URL parse failed")
-}
-
-fn format_host_for_url(host: &str) -> String {
-    if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
-        format!("[{host}]")
-    } else {
-        host.to_string()
     }
 }
 
@@ -1657,48 +1582,10 @@ async fn request_events_once(
     open_write_timeout: Duration,
     read_timeout: Option<Duration>,
 ) -> anyhow::Result<Vec<u8>> {
-    match &session.transport {
-        ConnectedTargetTransport::Quinn(quinn_session) => {
-            let (mut send, mut recv) =
-                tokio::time::timeout(open_write_timeout, quinn_session.open_bi())
-                    .await
-                    .map_err(|_| {
-                        anyhow!(
-                            "request stream open timed out after {} ms",
-                            open_write_timeout.as_millis()
-                        )
-                    })??;
-            tokio::time::timeout(open_write_timeout, send.write_all(framed))
-                .await
-                .map_err(|_| {
-                    anyhow!(
-                        "request stream write timed out after {} ms",
-                        open_write_timeout.as_millis()
-                    )
-                })??;
-            send.finish()?;
-            match read_timeout {
-                Some(read_timeout) => {
-                    tokio::time::timeout(read_timeout, recv.read_to_end(MAX_STREAM_BYTES))
-                        .await
-                        .map_err(|_| {
-                            anyhow!(
-                                "request stream read timed out after {} ms",
-                                read_timeout.as_millis()
-                            )
-                        })?
-                        .map_err(anyhow::Error::from)
-                }
-                None => recv
-                    .read_to_end(MAX_STREAM_BYTES)
-                    .await
-                    .map_err(anyhow::Error::from),
-            }
-        }
-        ConnectedTargetTransport::Ssh(ssh_session) => {
-            request_events_over_ssh(ssh_session, framed, open_write_timeout, read_timeout).await
-        }
-    }
+    session
+        .transport
+        .request_response_bytes(framed, open_write_timeout, read_timeout)
+        .await
 }
 
 async fn request_events_over_ssh(
@@ -1738,8 +1625,11 @@ async fn request_events_over_ssh(
 
     match read_timeout {
         Some(read_timeout) => {
-            match tokio::time::timeout(read_timeout, read_stdio_response_message(&mut inner.stdout))
-                .await
+            match tokio::time::timeout(
+                read_timeout,
+                read_stdio_response_message_with_label(&mut inner.stdout, "ssh transport"),
+            )
+            .await
             {
                 Ok(result) => recover_ssh_read_result(result, || {
                     reset_ssh_process(&mut inner, &session.remote, &session.remote_input)
@@ -1753,15 +1643,287 @@ async fn request_events_over_ssh(
                 }
             }
         }
-        None => {
-            recover_ssh_read_result(read_stdio_response_message(&mut inner.stdout).await, || {
-                reset_ssh_process(&mut inner, &session.remote, &session.remote_input)
-            })
+        None => recover_ssh_read_result(
+            read_stdio_response_message_with_label(&mut inner.stdout, "ssh transport").await,
+            || reset_ssh_process(&mut inner, &session.remote, &session.remote_input),
+        ),
+    }
+}
+
+async fn request_events_over_local_proxy(
+    session: &LocalProxyTargetSession,
+    framed: &[u8],
+    open_write_timeout: Duration,
+    read_timeout: Option<Duration>,
+) -> anyhow::Result<Vec<u8>> {
+    let mut inner = session.inner.lock().await;
+    let result = async {
+        tokio::time::timeout(open_write_timeout, inner.stdin.write_all(framed))
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "local proxy transport write timed out after {} ms",
+                    open_write_timeout.as_millis()
+                )
+            })??;
+        tokio::time::timeout(
+            open_write_timeout,
+            inner.stdin.write_all(&STDIO_MESSAGE_TERMINATOR),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "local proxy transport write timed out after {} ms",
+                open_write_timeout.as_millis()
+            )
+        })??;
+        tokio::time::timeout(open_write_timeout, inner.stdin.flush())
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "local proxy transport flush timed out after {} ms",
+                    open_write_timeout.as_millis()
+                )
+            })??;
+
+        match read_timeout {
+            Some(read_timeout) => {
+                match tokio::time::timeout(
+                    read_timeout,
+                    read_stdio_response_message_with_label(
+                        &mut inner.stdout,
+                        "local proxy transport",
+                    ),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow!(
+                        "local proxy transport read timed out after {} ms",
+                        read_timeout.as_millis()
+                    )),
+                }
+            }
+            None => {
+                read_stdio_response_message_with_label(&mut inner.stdout, "local proxy transport")
+                    .await
+            }
+        }
+    }
+    .await;
+
+    match result {
+        Ok(response) => Ok(response),
+        Err(err) => {
+            reset_local_proxy_after_error(
+                &mut inner,
+                session,
+                err,
+                "failed to reset local proxy transport after request failure",
+            )
+            .await
         }
     }
 }
 
-async fn read_stdio_response_message<R>(reader: &mut R) -> anyhow::Result<Vec<u8>>
+async fn request_streamed_frames_over_ssh(
+    session: &SshTargetSession,
+    framed: &[u8],
+    open_write_timeout: Duration,
+    read_idle_timeout: Option<Duration>,
+    follow: bool,
+    on_frame: &mut (dyn FnMut(Vec<u8>) -> anyhow::Result<bool> + Send),
+) -> anyhow::Result<StreamRequestTermination> {
+    let mut inner = session.inner.lock().await;
+    tokio::time::timeout(open_write_timeout, inner.stdin.write_all(framed))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "ssh transport write timed out after {} ms",
+                open_write_timeout.as_millis()
+            )
+        })??;
+    tokio::time::timeout(
+        open_write_timeout,
+        inner.stdin.write_all(&STDIO_MESSAGE_TERMINATOR),
+    )
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "ssh transport write timed out after {} ms",
+            open_write_timeout.as_millis()
+        )
+    })??;
+    tokio::time::timeout(open_write_timeout, inner.stdin.flush())
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "ssh transport flush timed out after {} ms",
+                open_write_timeout.as_millis()
+            )
+        })??;
+
+    loop {
+        let next = if follow {
+            tokio::select! {
+                frame = read_next_stdio_response_frame_with_label(&mut inner.stdout, "ssh transport") => Some(frame),
+                _ = tokio::signal::ctrl_c() => None,
+            }
+        } else if let Some(read_idle_timeout) = read_idle_timeout {
+            match tokio::time::timeout(
+                read_idle_timeout,
+                read_next_stdio_response_frame_with_label(&mut inner.stdout, "ssh transport"),
+            )
+            .await
+            {
+                Ok(result) => Some(result),
+                Err(_) => {
+                    reset_ssh_process(&mut inner, &session.remote, &session.remote_input)?;
+                    return Err(anyhow!(
+                        "ssh transport read timed out after {} ms",
+                        read_idle_timeout.as_millis()
+                    ));
+                }
+            }
+        } else {
+            Some(
+                read_next_stdio_response_frame_with_label(&mut inner.stdout, "ssh transport").await,
+            )
+        };
+        let Some(next) = next else {
+            terminate_process_and_reap(&mut inner.child);
+            return Ok(StreamRequestTermination::Interrupted);
+        };
+        let next = recover_ssh_read_result(next, || {
+            reset_ssh_process(&mut inner, &session.remote, &session.remote_input)
+        })?;
+        let Some(frame) = next else {
+            return Ok(StreamRequestTermination::Completed);
+        };
+        if on_frame(frame)? {
+            return Ok(StreamRequestTermination::Completed);
+        }
+    }
+}
+
+async fn request_streamed_frames_over_local_proxy(
+    session: &LocalProxyTargetSession,
+    framed: &[u8],
+    open_write_timeout: Duration,
+    read_idle_timeout: Option<Duration>,
+    follow: bool,
+    on_frame: &mut (dyn FnMut(Vec<u8>) -> anyhow::Result<bool> + Send),
+) -> anyhow::Result<StreamRequestTermination> {
+    let mut inner = session.inner.lock().await;
+    let write_result: anyhow::Result<()> = async {
+        tokio::time::timeout(open_write_timeout, inner.stdin.write_all(framed))
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "local proxy transport write timed out after {} ms",
+                    open_write_timeout.as_millis()
+                )
+            })??;
+        tokio::time::timeout(
+            open_write_timeout,
+            inner.stdin.write_all(&STDIO_MESSAGE_TERMINATOR),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "local proxy transport write timed out after {} ms",
+                open_write_timeout.as_millis()
+            )
+        })??;
+        tokio::time::timeout(open_write_timeout, inner.stdin.flush())
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "local proxy transport flush timed out after {} ms",
+                    open_write_timeout.as_millis()
+                )
+            })??;
+        Ok(())
+    }
+    .await;
+    if let Err(err) = write_result {
+        return reset_local_proxy_after_error(
+            &mut inner,
+            session,
+            err,
+            "failed to reset local proxy transport after request failure",
+        )
+        .await;
+    }
+
+    loop {
+        let next = if follow {
+            tokio::select! {
+                frame = read_next_stdio_response_frame_with_label(&mut inner.stdout, "local proxy transport") => Some(frame),
+                _ = tokio::signal::ctrl_c() => None,
+            }
+        } else if let Some(read_idle_timeout) = read_idle_timeout {
+            match tokio::time::timeout(
+                read_idle_timeout,
+                read_next_stdio_response_frame_with_label(
+                    &mut inner.stdout,
+                    "local proxy transport",
+                ),
+            )
+            .await
+            {
+                Ok(result) => Some(result),
+                Err(_) => {
+                    return reset_local_proxy_after_error(
+                        &mut inner,
+                        session,
+                        anyhow!(
+                            "local proxy transport read timed out after {} ms",
+                            read_idle_timeout.as_millis()
+                        ),
+                        "failed to reset local proxy transport after request failure",
+                    )
+                    .await;
+                }
+            }
+        } else {
+            Some(
+                read_next_stdio_response_frame_with_label(
+                    &mut inner.stdout,
+                    "local proxy transport",
+                )
+                .await,
+            )
+        };
+        let Some(next) = next else {
+            terminate_process_and_reap(&mut inner.child);
+            return Ok(StreamRequestTermination::Interrupted);
+        };
+        let next = match next {
+            Ok(next) => next,
+            Err(err) => {
+                return reset_local_proxy_after_error(
+                    &mut inner,
+                    session,
+                    err,
+                    "failed to reset local proxy transport after request failure",
+                )
+                .await;
+            }
+        };
+        let Some(frame) = next else {
+            return Ok(StreamRequestTermination::Completed);
+        };
+        if on_frame(frame)? {
+            return Ok(StreamRequestTermination::Completed);
+        }
+    }
+}
+
+async fn read_stdio_response_message_with_label<R>(
+    reader: &mut R,
+    transport_label: &str,
+) -> anyhow::Result<Vec<u8>>
 where
     R: AsyncRead + Unpin,
 {
@@ -1771,10 +1933,14 @@ where
         match reader.read_exact(&mut header).await {
             Ok(_) => {}
             Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof && out.is_empty() => {
-                return Err(anyhow!("ssh transport closed before returning a response"));
+                return Err(anyhow!(
+                    "{transport_label} closed before returning a response"
+                ));
             }
             Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Err(anyhow!("ssh transport closed in the middle of a response"));
+                return Err(anyhow!(
+                    "{transport_label} closed in the middle of a response"
+                ));
             }
             Err(err) => return Err(anyhow::Error::from(err)),
         }
@@ -1783,7 +1949,7 @@ where
         if len == 0 {
             break;
         }
-        ensure_stdio_response_message_growth(out.len(), len)?;
+        ensure_stdio_response_message_growth_with_label(out.len(), len, transport_label)?;
 
         let mut payload = vec![0u8; len];
         reader.read_exact(&mut payload).await?;
@@ -1792,20 +1958,21 @@ where
     Ok(out)
 }
 
-fn ensure_stdio_response_message_growth(
+fn ensure_stdio_response_message_growth_with_label(
     current_len: usize,
     payload_len: usize,
+    transport_label: &str,
 ) -> anyhow::Result<()> {
-    ensure_stdio_response_frame_len(payload_len)?;
+    ensure_stdio_response_frame_len_with_label(payload_len, transport_label)?;
     let next_frame_len = 4usize.checked_add(payload_len).ok_or_else(|| {
-        anyhow!("ssh transport response exceeds max size {MAX_STREAM_BYTES} bytes")
+        anyhow!("{transport_label} response exceeds max size {MAX_STREAM_BYTES} bytes")
     })?;
     let projected_len = current_len.checked_add(next_frame_len).ok_or_else(|| {
-        anyhow!("ssh transport response exceeds max size {MAX_STREAM_BYTES} bytes")
+        anyhow!("{transport_label} response exceeds max size {MAX_STREAM_BYTES} bytes")
     })?;
     if projected_len > MAX_STREAM_BYTES {
         return Err(anyhow!(
-            "ssh transport response exceeds max size {MAX_STREAM_BYTES} bytes"
+            "{transport_label} response exceeds max size {MAX_STREAM_BYTES} bytes"
         ));
     }
     Ok(())
@@ -1820,162 +1987,27 @@ pub(crate) async fn request_streamed_events<F>(
     mut on_envelope: F,
 ) -> anyhow::Result<StreamRequestTermination>
 where
-    F: FnMut(Envelope) -> anyhow::Result<bool>,
+    F: FnMut(Envelope) -> anyhow::Result<bool> + Send,
 {
     let payload = to_cbor(envelope)?;
     let framed = encode_frame(&payload);
-    match &session.transport {
-        ConnectedTargetTransport::Quinn(quinn_session) => {
-            let (mut send, mut recv) =
-                tokio::time::timeout(open_write_timeout, quinn_session.open_bi())
-                    .await
-                    .map_err(|_| {
-                        anyhow!(
-                            "request stream open timed out after {} ms",
-                            open_write_timeout.as_millis()
-                        )
-                    })??;
-            tokio::time::timeout(open_write_timeout, send.write_all(&framed))
-                .await
-                .map_err(|_| {
-                    anyhow!(
-                        "request stream write timed out after {} ms",
-                        open_write_timeout.as_millis()
-                    )
-                })??;
-            send.finish()?;
-            loop {
-                let next = if follow {
-                    tokio::select! {
-                        frame = read_next_length_prefixed_frame(&mut recv) => Some(frame),
-                        _ = tokio::signal::ctrl_c() => None,
-                    }
-                } else if let Some(read_idle_timeout) = read_idle_timeout {
-                    Some(
-                        tokio::time::timeout(
-                            read_idle_timeout,
-                            read_next_length_prefixed_frame(&mut recv),
-                        )
-                        .await
-                        .map_err(|_| {
-                            anyhow!(
-                                "request stream read timed out after {} ms",
-                                read_idle_timeout.as_millis()
-                            )
-                        })?,
-                    )
-                } else {
-                    Some(read_next_length_prefixed_frame(&mut recv).await)
-                };
-                let Some(next) = next else {
-                    return Ok(StreamRequestTermination::Interrupted);
-                };
-                let Some(frame) = next? else {
-                    return Ok(StreamRequestTermination::Completed);
-                };
-                if on_envelope(decode_response_envelope(&frame)?)? {
-                    return Ok(StreamRequestTermination::Completed);
-                }
-            }
-        }
-        ConnectedTargetTransport::Ssh(ssh_session) => {
-            let mut inner = ssh_session.inner.lock().await;
-            tokio::time::timeout(open_write_timeout, inner.stdin.write_all(&framed))
-                .await
-                .map_err(|_| {
-                    anyhow!(
-                        "ssh transport write timed out after {} ms",
-                        open_write_timeout.as_millis()
-                    )
-                })??;
-            tokio::time::timeout(
-                open_write_timeout,
-                inner.stdin.write_all(&STDIO_MESSAGE_TERMINATOR),
-            )
-            .await
-            .map_err(|_| {
-                anyhow!(
-                    "ssh transport write timed out after {} ms",
-                    open_write_timeout.as_millis()
-                )
-            })??;
-            tokio::time::timeout(open_write_timeout, inner.stdin.flush())
-                .await
-                .map_err(|_| {
-                    anyhow!(
-                        "ssh transport flush timed out after {} ms",
-                        open_write_timeout.as_millis()
-                    )
-                })??;
-
-            loop {
-                let next = if follow {
-                    tokio::select! {
-                        frame = read_next_stdio_response_frame(&mut inner.stdout) => Some(frame),
-                        _ = tokio::signal::ctrl_c() => None,
-                    }
-                } else if let Some(read_idle_timeout) = read_idle_timeout {
-                    match tokio::time::timeout(
-                        read_idle_timeout,
-                        read_next_stdio_response_frame(&mut inner.stdout),
-                    )
-                    .await
-                    {
-                        Ok(result) => Some(result),
-                        Err(_) => {
-                            reset_ssh_process(
-                                &mut inner,
-                                &ssh_session.remote,
-                                &ssh_session.remote_input,
-                            )?;
-                            return Err(anyhow!(
-                                "ssh transport read timed out after {} ms",
-                                read_idle_timeout.as_millis()
-                            ));
-                        }
-                    }
-                } else {
-                    Some(read_next_stdio_response_frame(&mut inner.stdout).await)
-                };
-                let Some(next) = next else {
-                    terminate_ssh_process(&mut inner.child);
-                    return Ok(StreamRequestTermination::Interrupted);
-                };
-                let next = recover_ssh_read_result(next, || {
-                    reset_ssh_process(&mut inner, &ssh_session.remote, &ssh_session.remote_input)
-                })?;
-                let Some(frame) = next else {
-                    return Ok(StreamRequestTermination::Completed);
-                };
-                if on_envelope(decode_response_envelope(&frame)?)? {
-                    return Ok(StreamRequestTermination::Completed);
-                }
-            }
-        }
-    }
+    let mut on_frame = |frame: Vec<u8>| on_envelope(decode_response_envelope(&frame)?);
+    session
+        .transport
+        .stream_response_frames(
+            &framed,
+            open_write_timeout,
+            read_idle_timeout,
+            follow,
+            &mut on_frame,
+        )
+        .await
 }
 
-async fn read_next_length_prefixed_frame<R>(reader: &mut R) -> anyhow::Result<Option<Vec<u8>>>
-where
-    R: AsyncRead + Unpin,
-{
-    let mut header = [0u8; 4];
-    match reader.read_exact(&mut header).await {
-        Ok(_) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(err) => return Err(anyhow::Error::from(err)),
-    }
-    let len = u32::from_be_bytes(header) as usize;
-    if len == 0 {
-        return Err(anyhow!("unexpected zero-length transport frame"));
-    }
-    ensure_stream_response_frame_len(len)?;
-    let mut payload = vec![0u8; len];
-    reader.read_exact(&mut payload).await?;
-    Ok(Some(payload))
-}
-
-async fn read_next_stdio_response_frame<R>(reader: &mut R) -> anyhow::Result<Option<Vec<u8>>>
+async fn read_next_stdio_response_frame_with_label<R>(
+    reader: &mut R,
+    transport_label: &str,
+) -> anyhow::Result<Option<Vec<u8>>>
 where
     R: AsyncRead + Unpin,
 {
@@ -1985,25 +2017,19 @@ where
     if len == 0 {
         return Ok(None);
     }
-    ensure_stdio_response_frame_len(len)?;
+    ensure_stdio_response_frame_len_with_label(len, transport_label)?;
     let mut payload = vec![0u8; len];
     reader.read_exact(&mut payload).await?;
     Ok(Some(payload))
 }
 
-fn ensure_stdio_response_frame_len(len: usize) -> anyhow::Result<()> {
+fn ensure_stdio_response_frame_len_with_label(
+    len: usize,
+    transport_label: &str,
+) -> anyhow::Result<()> {
     if len > MAX_STREAM_BYTES {
         return Err(anyhow!(
-            "ssh transport response frame exceeds max size {MAX_STREAM_BYTES} bytes"
-        ));
-    }
-    Ok(())
-}
-
-fn ensure_stream_response_frame_len(len: usize) -> anyhow::Result<()> {
-    if len > MAX_STREAM_BYTES {
-        return Err(anyhow!(
-            "transport response frame exceeds max size {MAX_STREAM_BYTES} bytes"
+            "{transport_label} response frame exceeds max size {MAX_STREAM_BYTES} bytes"
         ));
     }
     Ok(())
@@ -2164,11 +2190,7 @@ async fn push_artifact_ranges(
     let deploy_id = Arc::<str>::from(context.deploy_id.to_string());
     let upload_token = Arc::<str>::from(context.upload_token.to_string());
 
-    let max_inflight_chunks = if context.session.uses_ssh_transport() {
-        1
-    } else {
-        limits.max_inflight_chunks
-    };
+    let max_inflight_chunks = 1usize;
 
     for (offset, chunk_len) in chunk_plan {
         while uploads.len() >= max_inflight_chunks {
@@ -2364,9 +2386,6 @@ fn update_canonical_map(hasher: &mut Sha256, key: &str, map: &BTreeMap<String, S
 fn normalize_target_for_protocol(target: &build::DeployTargetConfig) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     map.insert("remote".to_string(), target.remote.clone());
-    if let Some(name) = &target.server_name {
-        map.insert("server_name".to_string(), name.clone());
-    }
     map
 }
 
@@ -2525,253 +2544,6 @@ fn add_file_to_tar<W: std::io::Write>(
     Ok(())
 }
 
-fn load_private_key(path: &Path) -> anyhow::Result<PrivateKeyDer<'static>> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("failed to open private key: {}", path.display()))?;
-    let mut reader = StdBufReader::new(file);
-    let key = rustls_pemfile::private_key(&mut reader)
-        .with_context(|| format!("failed to parse private key: {}", path.display()))?
-        .ok_or_else(|| anyhow!("private key is missing: {}", path.display()))?;
-    Ok(key)
-}
-
-fn build_client_raw_public_key_resolver(
-    provider: Arc<CryptoProvider>,
-    client_key: &PrivateKeyDer<'static>,
-) -> anyhow::Result<Arc<dyn rustls::client::ResolvesClientCert>> {
-    let signing_key = provider
-        .key_provider
-        .load_private_key(client_key.clone_key())
-        .map_err(|e| anyhow!("failed to load client private key: {e}"))?;
-
-    if signing_key.algorithm() != rustls::SignatureAlgorithm::ED25519 {
-        return Err(anyhow!(
-            "client private key must be ed25519 for raw public key TLS"
-        ));
-    }
-
-    let spki = signing_key
-        .public_key()
-        .ok_or_else(|| anyhow!("failed to derive client public key from private key"))?;
-    let _ = extract_ed25519_raw_public_key_from_spki(spki.as_ref())?;
-
-    let certified_key = CertifiedKey::new(
-        vec![CertificateDer::from(spki.as_ref().to_vec())],
-        signing_key,
-    );
-    Ok(Arc::new(AlwaysResolvesClientRawPublicKeys::new(Arc::new(
-        certified_key,
-    ))))
-}
-
-fn extract_ed25519_raw_public_key_from_spki(spki_der: &[u8]) -> anyhow::Result<[u8; 32]> {
-    if spki_der.len() != ED25519_SPKI_PREFIX.len() + 32 {
-        return Err(anyhow!(
-            "raw public key must be ed25519 (expected 32-byte key)"
-        ));
-    }
-    if !spki_der.starts_with(&ED25519_SPKI_PREFIX) {
-        return Err(anyhow!("raw public key must be ed25519"));
-    }
-
-    let mut raw = [0u8; 32];
-    raw.copy_from_slice(&spki_der[ED25519_SPKI_PREFIX.len()..]);
-    Ok(raw)
-}
-
-fn format_authority(host: &str, port: u16) -> String {
-    format!(
-        "{}:{}",
-        format_host_for_url(host).to_ascii_lowercase(),
-        port
-    )
-}
-
-fn known_hosts_path() -> anyhow::Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("failed to resolve home directory for known_hosts"))?;
-    Ok(home.join(IMAGO_DIR_NAME).join(KNOWN_HOSTS_FILE_NAME))
-}
-
-fn load_known_hosts_entries(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
-    if !path.exists() {
-        return Ok(BTreeMap::new());
-    }
-
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed to read known_hosts: {}", path.display()))?;
-    let mut entries = BTreeMap::new();
-    for (index, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        let (authority, key_hex) = trimmed.split_once('\t').ok_or_else(|| {
-            anyhow!(
-                "invalid known_hosts format at line {} in {}",
-                index + 1,
-                path.display()
-            )
-        })?;
-
-        let normalized_key = normalize_ed25519_raw_key_hex(key_hex).with_context(|| {
-            format!(
-                "invalid key at line {} in known_hosts {}",
-                index + 1,
-                path.display()
-            )
-        })?;
-
-        if entries
-            .insert(authority.to_string(), normalized_key)
-            .is_some()
-        {
-            return Err(anyhow!(
-                "duplicate authority '{}' in known_hosts {}",
-                authority,
-                path.display()
-            ));
-        }
-    }
-
-    Ok(entries)
-}
-
-fn save_known_host_entry(path: &Path, authority: &str, key_hex: &str) -> anyhow::Result<()> {
-    let normalized_key = normalize_ed25519_raw_key_hex(key_hex)?;
-    let mut entries = load_known_hosts_entries(path)?;
-
-    if let Some(existing) = entries.get(authority) {
-        if existing.eq_ignore_ascii_case(&normalized_key) {
-            return Ok(());
-        }
-        return Err(anyhow!(
-            "refusing to overwrite known_hosts entry for '{authority}': existing key differs; edit {} manually",
-            path.display()
-        ));
-    }
-
-    entries.insert(authority.to_string(), normalized_key);
-    write_known_hosts_entries(path, &entries)
-}
-
-fn normalize_ed25519_raw_key_hex(value: &str) -> anyhow::Result<String> {
-    let trimmed = value.trim();
-    let bytes = hex::decode(trimmed).with_context(|| format!("key is not valid hex: {trimmed}"))?;
-    if bytes.len() != 32 {
-        return Err(anyhow!(
-            "key must be a 32-byte ed25519 raw key (got {} bytes)",
-            bytes.len()
-        ));
-    }
-    Ok(hex::encode(bytes))
-}
-
-fn write_known_hosts_entries(
-    path: &Path,
-    entries: &BTreeMap<String, String>,
-) -> anyhow::Result<()> {
-    let dir = path.parent().ok_or_else(|| {
-        anyhow!(
-            "failed to determine parent directory for known_hosts: {}",
-            path.display()
-        )
-    })?;
-    fs::create_dir_all(dir)
-        .with_context(|| format!("failed to create known_hosts dir: {}", dir.display()))?;
-    set_restrictive_permissions_for_dir(dir)?;
-
-    let tmp_path = dir.join(format!(".{}.tmp-{}", KNOWN_HOSTS_FILE_NAME, Uuid::new_v4()));
-    {
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&tmp_path)
-            .with_context(|| format!("failed to open temp known_hosts: {}", tmp_path.display()))?;
-        set_restrictive_permissions_for_file(&tmp_path)?;
-
-        for (authority, key_hex) in entries {
-            writeln!(file, "{authority}\t{key_hex}").with_context(|| {
-                format!(
-                    "failed to write temp known_hosts entries: {}",
-                    tmp_path.display()
-                )
-            })?;
-        }
-        file.flush().with_context(|| {
-            format!(
-                "failed to flush temp known_hosts entries: {}",
-                tmp_path.display()
-            )
-        })?;
-        file.sync_all().with_context(|| {
-            format!(
-                "failed to sync temp known_hosts entries: {}",
-                tmp_path.display()
-            )
-        })?;
-    }
-
-    rename_replace(&tmp_path, path)?;
-    set_restrictive_permissions_for_file(path)?;
-    Ok(())
-}
-
-fn rename_replace(from: &Path, to: &Path) -> anyhow::Result<()> {
-    match fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            if to.exists() {
-                fs::remove_file(to).with_context(|| {
-                    format!(
-                        "failed to remove existing known_hosts file: {}",
-                        to.display()
-                    )
-                })?;
-                fs::rename(from, to).with_context(|| {
-                    format!("failed to replace known_hosts file: {}", to.display())
-                })
-            } else {
-                Err(err).with_context(|| {
-                    format!(
-                        "failed to move known_hosts temp file from {} to {}",
-                        from.display(),
-                        to.display()
-                    )
-                })
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-fn set_restrictive_permissions_for_dir(path: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(IMAGO_DIR_MODE))
-        .with_context(|| format!("failed to set directory permissions: {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn set_restrictive_permissions_for_dir(_path: &Path) -> anyhow::Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_restrictive_permissions_for_file(path: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(KNOWN_HOSTS_MODE))
-        .with_context(|| format!("failed to set known_hosts permissions: {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn set_restrictive_permissions_for_file(_path: &Path) -> anyhow::Result<()> {
-    Ok(())
-}
-
 fn encode_frame(payload: &[u8]) -> Vec<u8> {
     let len = payload.len() as u32;
     let mut frame = Vec::with_capacity(payload.len() + 4);
@@ -2811,6 +2583,7 @@ fn decode_frames(value: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
 mod tests {
     use super::*;
     use crate::commands::dependency_cache;
+    use crate::commands::error_diagnostics::format_command_error;
     use crate::lockfile::{
         ComponentExpectation, DependencyExpectation, IMAGO_LOCK_VERSION, ImagoLock,
         ImagoLockResolved, ImagoLockResolvedDependency, LockCapabilityPolicy, LockDependencyKind,
@@ -2819,6 +2592,11 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
@@ -2835,6 +2613,47 @@ mod tests {
             fs::create_dir_all(parent).expect("parent dir should be created");
         }
         fs::write(path, bytes).expect("file should be written");
+    }
+
+    struct CountingTransport {
+        close_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl network::AdminTransport for CountingTransport {
+        fn close(&self) {
+            self.close_count.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn request_response_bytes(
+            &self,
+            _framed: &[u8],
+            _open_write_timeout: Duration,
+            _read_timeout: Option<Duration>,
+        ) -> anyhow::Result<Vec<u8>> {
+            unreachable!("counting transport does not support requests")
+        }
+
+        async fn stream_response_frames(
+            &self,
+            _framed: &[u8],
+            _open_write_timeout: Duration,
+            _read_idle_timeout: Option<Duration>,
+            _follow: bool,
+            _on_frame: &mut (dyn FnMut(Vec<u8>) -> anyhow::Result<bool> + Send),
+        ) -> anyhow::Result<StreamRequestTermination> {
+            unreachable!("counting transport does not support streams")
+        }
+    }
+
+    fn counting_session(close_count: Arc<AtomicUsize>) -> ConnectedTargetSession {
+        ConnectedTargetSession {
+            transport: Arc::new(CountingTransport { close_count }),
+            authority: "authority".to_string(),
+            resolved_addr: "127.0.0.1:0".to_string(),
+            configured_host: "localhost".to_string(),
+            remote_input: "ssh://localhost".to_string(),
+        }
     }
 
     fn write_imago_lock(root: &Path, lock: &ImagoLock) {
@@ -2857,9 +2676,9 @@ mod tests {
     
     [dependencies.component]
     path = "registry/example-component.wasm"
-    
+
     [target.default]
-    remote = "127.0.0.1:4443"
+    remote = "ssh://localhost?socket=/run/imago/imagod.sock"
     "#,
         );
         write_file(
@@ -2940,21 +2759,39 @@ mod tests {
     }
 
     #[test]
-    fn maps_unknown_ca_transport_error_to_e_unauthorized() {
-        let unknown_ca_code =
-            quinn::TransportErrorCode::crypto(u8::from(rustls::AlertDescription::UnknownCA));
-        assert!(is_certificate_alert_transport_code(unknown_ca_code));
+    fn connected_session_close_guard_closes_session_on_drop() {
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let session = counting_session(close_count.clone());
+        {
+            let _guard = ConnectedSessionCloseGuard::new(&session, b"done");
+        }
 
-        let err = quinn::ConnectionError::ConnectionClosed(quinn::ConnectionClose {
-            error_code: unknown_ca_code,
-            frame_type: None,
-            reason: "unknown ca".into(),
-        });
+        assert_eq!(close_count.load(Ordering::SeqCst), 1);
+    }
 
-        let mapped = map_connect_connection_error(err);
-        let message = mapped.to_string();
-        assert!(message.contains("E_UNAUTHORIZED"));
-        assert!(message.contains("transport.connect"));
+    #[test]
+    fn connected_session_close_guard_can_be_disarmed() {
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let session = counting_session(close_count.clone());
+        {
+            let mut guard = ConnectedSessionCloseGuard::new(&session, b"done");
+            guard.disarm();
+        }
+
+        assert_eq!(close_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn disarmed_close_guard_allows_manual_close_without_double_close() {
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let session = counting_session(close_count.clone());
+        {
+            let mut guard = ConnectedSessionCloseGuard::new(&session, b"done");
+            guard.disarm();
+            session.close(0, b"manual");
+        }
+
+        assert_eq!(close_count.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -3010,7 +2847,7 @@ mod tests {
     #[test]
     fn ssh_proxy_command_args_enable_batch_mode_and_forward_socket_override() {
         let remote = build::SshTargetRemote {
-            user: "root".to_string(),
+            user: Some("root".to_string()),
             host: "edge.example.com".to_string(),
             port: Some(2222),
             socket_path: Some("/tmp/imagod.sock".to_string()),
@@ -3027,6 +2864,52 @@ mod tests {
         assert!(
             args.windows(2)
                 .any(|pair| pair == ["--socket", "/tmp/imagod.sock"])
+        );
+    }
+
+    #[test]
+    fn required_local_proxy_socket_path_accepts_loopback_socket() {
+        let remote = build::SshTargetRemote {
+            user: None,
+            host: "localhost".to_string(),
+            port: None,
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+
+        assert_eq!(
+            required_local_proxy_socket_path(&remote).expect("loopback socket should be accepted"),
+            "/tmp/imagod.sock"
+        );
+    }
+
+    #[test]
+    fn required_local_proxy_socket_path_rejects_missing_socket() {
+        let remote = build::SshTargetRemote {
+            user: None,
+            host: "localhost".to_string(),
+            port: None,
+            socket_path: None,
+        };
+
+        let err = required_local_proxy_socket_path(&remote)
+            .expect_err("missing socket should be rejected");
+        assert!(err.to_string().contains("requires ?socket=/abs/path"));
+    }
+
+    #[test]
+    fn required_local_proxy_socket_path_rejects_non_loopback_host() {
+        let remote = build::SshTargetRemote {
+            user: None,
+            host: "edge.example.com".to_string(),
+            port: None,
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+
+        let err = required_local_proxy_socket_path(&remote)
+            .expect_err("non-loopback host should be rejected");
+        assert!(
+            err.to_string()
+                .contains("only supports loopback ssh targets")
         );
     }
 
@@ -3055,100 +2938,17 @@ mod tests {
     }
 
     #[test]
-    fn maps_certificate_required_connection_closed_to_e_unauthorized() {
-        let err = quinn::ConnectionError::ConnectionClosed(quinn::ConnectionClose {
-            error_code: quinn::TransportErrorCode::crypto(u8::from(
-                rustls::AlertDescription::CertificateRequired,
-            )),
-            frame_type: None,
-            reason: "certificate required".into(),
-        });
-
-        let mapped = map_connect_connection_error(err);
-        let message = mapped.to_string();
-        assert!(message.contains("E_UNAUTHORIZED"));
-        assert!(message.contains("transport.connect"));
-    }
-
-    #[test]
-    fn does_not_map_non_certificate_tls_alert_to_e_unauthorized() {
-        let no_alpn_code = quinn::TransportErrorCode::crypto(u8::from(
-            rustls::AlertDescription::NoApplicationProtocol,
-        ));
-        assert!(!is_certificate_alert_transport_code(no_alpn_code));
-
-        let err = quinn::ConnectionError::ConnectionClosed(quinn::ConnectionClose {
-            error_code: no_alpn_code,
-            frame_type: None,
-            reason: "no application protocol".into(),
-        });
-
-        let mapped = map_connect_connection_error(err);
-        let message = mapped.to_string();
-        assert!(!message.contains("E_UNAUTHORIZED"));
-        assert!(message.contains("failed to establish quic connection"));
-    }
-
-    #[test]
-    fn maps_http_401_to_e_unauthorized() {
-        let mapped = map_connect_rejection_status(
-            web_transport_quinn::http::StatusCode::UNAUTHORIZED,
-            "http error status: 401 Unauthorized",
-        )
-        .expect("http 401 should map to unauthorized");
-
-        let message = mapped.to_string();
-        assert!(message.contains("E_UNAUTHORIZED"));
-        assert!(message.contains("transport.connect"));
-    }
-
-    #[test]
-    fn server_identity_mismatch_error_is_normalized_as_unauthorized() {
-        let err = server_identity_mismatch_error(
-            "example.com:4443",
-            &"aa".repeat(32),
-            &"bb".repeat(32),
-            Path::new("/tmp/.imago/known_hosts"),
+    fn local_proxy_request_failure_includes_transport_stderr_in_diagnostics() {
+        let err = annotate_local_proxy_transport_error(
+            anyhow!("local proxy transport read timed out after 100 ms"),
+            Some("proxy socket unavailable".to_string()),
         );
-        let message = err.to_string();
-        assert!(message.contains("E_UNAUTHORIZED"));
-        assert!(message.contains("transport.connect"));
-        assert!(message.contains("server key mismatch"));
-    }
 
-    #[test]
-    fn missing_server_identity_error_is_normalized_as_unauthorized() {
-        let err = missing_server_identity_error("example.com:4443");
-        let message = err.to_string();
-        assert!(message.contains("E_UNAUTHORIZED"));
-        assert!(message.contains("transport.connect"));
-        assert!(message.contains("failed to verify server raw public key"));
-    }
-
-    #[test]
-    fn parse_connect_error_status_ignores_unrelated_numbers_before_status() {
-        let status = parse_connect_error_status(
-            "connection to 127.0.0.1:443 failed: http error status: 401 Unauthorized",
+        let diagnostic = format_command_error("service.deploy", &err);
+        assert!(
+            diagnostic.contains("local proxy transport stderr: proxy socket unavailable"),
+            "unexpected diagnostic: {diagnostic}"
         );
-        assert_eq!(
-            status,
-            Some(web_transport_quinn::http::StatusCode::UNAUTHORIZED)
-        );
-    }
-
-    #[test]
-    fn parse_connect_error_status_parses_403_from_http_error_prefix() {
-        let status = parse_connect_error_status("http error status: 403 Forbidden");
-        assert_eq!(
-            status,
-            Some(web_transport_quinn::http::StatusCode::FORBIDDEN)
-        );
-    }
-
-    #[test]
-    fn parse_connect_error_status_returns_none_without_http_error_prefix() {
-        let status = parse_connect_error_status("connection to 127.0.0.1:443 failed");
-        assert_eq!(status, None);
     }
 
     #[tokio::test]
@@ -3344,27 +3144,6 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[tokio::test]
-    async fn parse_remote_endpoint_supports_ipv6_literals() {
-        let bare_ipv6 = parse_remote_endpoint("::1")
-            .await
-            .expect("bare ipv6 should parse");
-        assert_eq!(bare_ipv6.host, "::1");
-        assert_eq!(bare_ipv6.port, 4443);
-
-        let bracketed = parse_remote_endpoint("[::1]:4443")
-            .await
-            .expect("bracketed ipv6 should parse");
-        assert_eq!(bracketed.host, "::1");
-        assert_eq!(bracketed.port, 4443);
-
-        let https_ipv6 = parse_remote_endpoint("https://[::1]:4443")
-            .await
-            .expect("https ipv6 should parse");
-        assert_eq!(https_ipv6.host, "::1");
-        assert_eq!(https_ipv6.port, 4443);
-    }
-
     #[test]
     fn command_start_envelope_uses_same_request_id_for_header_and_payload() {
         let request_id = Uuid::new_v4();
@@ -3437,37 +3216,29 @@ mod tests {
 
     #[test]
     fn stdio_response_message_growth_enforces_frame_and_total_limits() {
-        let oversized_frame = ensure_stdio_response_frame_len(MAX_STREAM_BYTES + 1)
-            .expect_err("frame larger than limit should be rejected");
+        let oversized_frame =
+            ensure_stdio_response_frame_len_with_label(MAX_STREAM_BYTES + 1, "test transport")
+                .expect_err("frame larger than limit should be rejected");
         assert!(
             oversized_frame
                 .to_string()
                 .contains("frame exceeds max size")
         );
 
-        ensure_stdio_response_message_growth(0, MAX_STREAM_BYTES - 4)
+        ensure_stdio_response_message_growth_with_label(0, MAX_STREAM_BYTES - 4, "test transport")
             .expect("a single framed response at the exact limit should be accepted");
 
-        let oversized_total = ensure_stdio_response_message_growth(MAX_STREAM_BYTES - 4, 1)
-            .expect_err("cumulative framed bytes above the limit should be rejected");
+        let oversized_total = ensure_stdio_response_message_growth_with_label(
+            MAX_STREAM_BYTES - 4,
+            1,
+            "test transport",
+        )
+        .expect_err("cumulative framed bytes above the limit should be rejected");
         assert!(
             oversized_total
                 .to_string()
                 .contains("response exceeds max size")
         );
-    }
-
-    #[tokio::test]
-    async fn read_next_length_prefixed_frame_rejects_oversized_frame_length() {
-        let header = u32::try_from(MAX_STREAM_BYTES + 1)
-            .expect("limit should fit in u32")
-            .to_be_bytes();
-        let mut reader = &header[..];
-
-        let err = read_next_length_prefixed_frame(&mut reader)
-            .await
-            .expect_err("oversized frame length should be rejected before allocation");
-        assert!(err.to_string().contains("frame exceeds max size"));
     }
 
     #[tokio::test]
@@ -3477,7 +3248,7 @@ mod tests {
             .to_be_bytes();
         let mut reader = &header[..];
 
-        let err = read_stdio_response_message(&mut reader)
+        let err = read_stdio_response_message_with_label(&mut reader, "test transport")
             .await
             .expect_err("oversized frame length should be rejected before allocation");
         assert!(err.to_string().contains("frame exceeds max size"));
@@ -3490,7 +3261,7 @@ mod tests {
             .to_be_bytes();
         let mut reader = &header[..];
 
-        let err = read_next_stdio_response_frame(&mut reader)
+        let err = read_next_stdio_response_frame_with_label(&mut reader, "test transport")
             .await
             .expect_err("oversized frame length should be rejected before allocation");
         assert!(err.to_string().contains("frame exceeds max size"));
@@ -3501,7 +3272,7 @@ mod tests {
         let header = 0u32.to_be_bytes();
         let mut reader = &header[..];
 
-        let frame = read_next_stdio_response_frame(&mut reader)
+        let frame = read_next_stdio_response_frame_with_label(&mut reader, "test transport")
             .await
             .expect("zero-length frame should terminate the stream");
         assert!(
@@ -3621,19 +3392,6 @@ mod tests {
     }
 
     #[test]
-    fn client_bind_candidates_include_ipv6_then_ipv4_fallback() {
-        let candidates = client_bind_candidates();
-        assert_eq!(
-            candidates[0],
-            "[::]:0".parse::<SocketAddr>().expect("valid address")
-        );
-        assert_eq!(
-            candidates[1],
-            "0.0.0.0:0".parse::<SocketAddr>().expect("valid address")
-        );
-    }
-
-    #[test]
     fn upload_ranges_for_partial_requires_missing_ranges() {
         let err = upload_ranges_for_prepare(ArtifactStatus::Partial, &[], 1024)
             .expect_err("partial without missing_ranges must fail");
@@ -3669,10 +3427,10 @@ mod tests {
 
     #[test]
     fn idempotency_key_is_stable_for_same_payload() {
-        let target = BTreeMap::from([
-            ("remote".to_string(), "127.0.0.1:4443".to_string()),
-            ("server_name".to_string(), "imagod.local".to_string()),
-        ]);
+        let target = BTreeMap::from([(
+            "remote".to_string(),
+            "ssh://imagod.local?socket=/run/imago/imagod.sock".to_string(),
+        )]);
         let policy = BTreeMap::from([("rollout".to_string(), "safe".to_string())]);
 
         let first = build_idempotency_key(
@@ -3704,7 +3462,10 @@ mod tests {
         let key_a = build_idempotency_key(
             "svc",
             "cli",
-            &BTreeMap::from([("remote".to_string(), "127.0.0.1:4443".to_string())]),
+            &BTreeMap::from([(
+                "remote".to_string(),
+                "ssh://imagod-a?socket=/run/imago/imagod.sock".to_string(),
+            )]),
             &BTreeMap::new(),
             "digest-a",
             1024,
@@ -3713,7 +3474,10 @@ mod tests {
         let key_b = build_idempotency_key(
             "svc",
             "cli",
-            &BTreeMap::from([("remote".to_string(), "127.0.0.1:5555".to_string())]),
+            &BTreeMap::from([(
+                "remote".to_string(),
+                "ssh://imagod-b?socket=/run/imago/imagod.sock".to_string(),
+            )]),
             &BTreeMap::new(),
             "digest-a",
             1024,
@@ -3993,9 +3757,13 @@ mod tests {
     #[test]
     fn build_connected_target_metadata_carries_expected_fields() {
         let target = build::DeployTargetConfig {
-            remote: "127.0.0.1:4443".to_string(),
-            server_name: Some("imagod.local".to_string()),
-            client_key: Some(PathBuf::from("/tmp/client.key")),
+            remote: "ssh://root@imagod.local:2222?socket=/tmp/imagod.sock".to_string(),
+            ssh_remote: build::SshTargetRemote {
+                user: Some("root".to_string()),
+                host: "imagod.local".to_string(),
+                port: Some(2222),
+                socket_path: Some("/tmp/imagod.sock".to_string()),
+            },
         };
         let metadata = build_connected_target_metadata(
             &target,
@@ -4007,7 +3775,10 @@ mod tests {
         assert_eq!(metadata.authority, "imagod.local:4443");
         assert_eq!(metadata.resolved_addr.to_string(), "127.0.0.1:4443");
         assert_eq!(metadata.configured_host, "imagod.local");
-        assert_eq!(metadata.remote_input, "127.0.0.1:4443");
+        assert_eq!(
+            metadata.remote_input,
+            "ssh://root@imagod.local:2222?socket=/tmp/imagod.sock"
+        );
     }
 
     #[test]
@@ -4046,67 +3817,6 @@ mod tests {
                 .map(String::as_str),
             Some("20")
         );
-    }
-
-    #[test]
-    fn extracts_ed25519_raw_public_key_from_spki() {
-        let mut spki = ED25519_SPKI_PREFIX.to_vec();
-        spki.extend_from_slice(&[0x11; 32]);
-        let key =
-            extract_ed25519_raw_public_key_from_spki(&spki).expect("ed25519 spki should parse");
-        assert_eq!(key, [0x11; 32]);
-    }
-
-    #[test]
-    fn tofu_verifier_supports_only_ed25519_verify_scheme() {
-        let verifier =
-            TofuServerCertVerifier::new(web_transport_quinn::crypto::default_provider(), None);
-        let schemes =
-            rustls::client::danger::ServerCertVerifier::supported_verify_schemes(&verifier);
-        assert_eq!(schemes, vec![SignatureScheme::ED25519]);
-    }
-
-    #[test]
-    fn rejects_non_ed25519_spki() {
-        let mut spki = ED25519_SPKI_PREFIX.to_vec();
-        spki.extend_from_slice(&[0x11; 32]);
-        spki[0] = 0x31;
-        let err =
-            extract_ed25519_raw_public_key_from_spki(&spki).expect_err("invalid spki should fail");
-        assert!(err.to_string().contains("ed25519"));
-    }
-
-    #[test]
-    fn format_authority_brackets_ipv6_and_lowercases() {
-        assert_eq!(
-            format_authority("EXAMPLE.COM", 4443),
-            "example.com:4443".to_string()
-        );
-        assert_eq!(format_authority("::1", 4443), "[::1]:4443".to_string());
-    }
-
-    #[test]
-    fn known_hosts_round_trip_and_conflict_detection() {
-        let root = new_temp_dir("known-hosts");
-        let path = root.join("known_hosts");
-        let authority = "example.com:4443";
-        let key_hex_upper = "AA".repeat(32);
-
-        save_known_host_entry(&path, authority, &key_hex_upper).expect("entry should be written");
-        let entries = load_known_hosts_entries(&path).expect("entries should load");
-        assert_eq!(
-            entries.get(authority),
-            Some(&"aa".repeat(32)),
-            "stored key should be normalized to lowercase"
-        );
-
-        save_known_host_entry(&path, authority, &"aa".repeat(32))
-            .expect("same key should be idempotent");
-        let err = save_known_host_entry(&path, authority, &"bb".repeat(32))
-            .expect_err("conflicting key must be rejected");
-        assert!(err.to_string().contains("refusing to overwrite"));
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -86,7 +86,7 @@ type = "http"
 restart = "always"
 ```
 
-- Validation error notes: any other value fails validation. Legacy `runtime.restart_policy` is rejected; use top-level `restart`.
+- Validation error notes: any other value fails validation.
 
 <a id="the-build-section"></a>
 ## The [build] section
@@ -118,8 +118,8 @@ This section configures remote deployment targets.
 - Type: `string`
 - Required/Optional: Required for the selected target.
 - Accepted values / Constraints:
-  - direct target: `host:port`
-  - SSH target: `ssh://root@host` or `ssh://root@host:2222?socket=/path/to/imagod.sock`
+  - SSH target only: `ssh://[user@]host[:port][?socket=/absolute/path/to/imagod.sock]`
+  - `user@` is optional. When omitted, the system `ssh` command uses its default user resolution.
   - SSH query parameters are validated strictly; only `socket=` is accepted.
   - SSH targets must not include a password, path, or fragment.
 - Default: none.
@@ -127,7 +127,7 @@ This section configures remote deployment targets.
 
 ```toml
 [target.default]
-remote = "127.0.0.1:4443"
+remote = "ssh://localhost?socket=/run/imago/imagod.sock"
 ```
 
 ```toml
@@ -135,42 +135,12 @@ remote = "127.0.0.1:4443"
 remote = "ssh://root@edge-box?socket=/run/imago/imagod.sock"
 ```
 
-- Validation error notes: missing selected target, invalid direct endpoint, invalid SSH URI, or unsupported SSH query parameters cause validation/deploy failure.
+- Validation error notes: missing selected target, non-SSH endpoints such as `host:port`, invalid SSH URIs, or unsupported SSH query parameters cause validation/deploy failure.
 
 When an SSH target uses `?socket=...`, that path must match the remote daemon's `control_socket_path`.
-
-### The `server_name` field
-
-- Type: `string`
-- Required/Optional: Optional.
-- Accepted values / Constraints: must be a string; used as authority for direct-target TOFU matching in `~/.imago/known_hosts`.
-- Default: none.
-- Example:
-
-```toml
-[target.default]
-server_name = "node-a.example.com"
-```
-
-- Validation error notes: non-string values fail validation. SSH targets must not set `server_name`.
-
-### The `client_key` field
-
-- Type: `string` (path)
-- Required/Optional: Optional for `imago artifact build`; required for direct-target service deploy/start/stop/logs/ls paths.
-- Accepted values / Constraints: non-empty; no path traversal; no backslashes; no Windows drive prefix; relative paths resolve from project root; absolute paths are allowed.
-- Default: none.
-- Example:
-
-```toml
-[target.default]
-client_key = "certs/client.key"
-```
-
-- Validation error notes: invalid paths fail validation; missing key in direct-target deploy paths fails the command. SSH targets must not set `client_key` and instead rely on the system `ssh` command for authentication.
-
-For direct targets, host verification uses `server_name`/`remote` together with `~/.imago/known_hosts`.
-For SSH targets, host verification and authentication are delegated to OpenSSH, and `~/.imago/known_hosts` is not used.
+CLI admin commands (`service deploy`, `service stop`, `service logs`, `service ls`, `trust cert ...`) always use SSH plus `imagod proxy-stdio`.
+Host verification and authentication are delegated to OpenSSH; `~/.imago/known_hosts` is not used.
+Node-to-node RPC authorities remain separate from target remotes and are written as `rpc://host:port` in `trust cert upload` / `trust cert replicate`.
 
 <a id="the-assets-section"></a>
 ## The [[assets]] section
@@ -696,45 +666,6 @@ wasi = "wasi.dev"
 ```
 
 - Validation error notes: values must be strings. This table applies only when a `wit = "<namespace>:<pkg>"` source omits its registry.
-
-<a id="legacy-sections"></a>
-## Legacy sections
-
-These sections are still accepted for compatibility but are ignored by manifest output.
-
-### The `[vars]` section
-
-#### The `<KEY>` field
-
-- Type: `string` value in a table
-- Required/Optional: Optional.
-- Accepted values / Constraints: string values only.
-- Default: empty table.
-- Example:
-
-```toml
-[vars]
-APP_MODE = "prod"
-```
-
-- Validation error notes: non-string values fail validation.
-
-### The `[secrets]` section
-
-#### The `<KEY>` field
-
-- Type: `string` value in a table
-- Required/Optional: Optional.
-- Accepted values / Constraints: string values only.
-- Default: empty table.
-- Example:
-
-```toml
-[secrets]
-SECRET_TOKEN = "change-me"
-```
-
-- Validation error notes: non-string values fail validation.
 
 ## Related source modules
 

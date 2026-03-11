@@ -8,6 +8,10 @@ This example demonstrates deploying a Python app as a Wasm Component with compon
 
 - Python and `uv`
 - Rust toolchain for running `imago-cli` and `imagod`
+- OpenSSH client/server, with `ssh localhost true` succeeding non-interactively
+
+`imago service deploy` now reaches local `imagod` via `ssh://localhost?...` and `imagod proxy-stdio`.
+Make sure the SSH login shell can execute `imagod` from `PATH`.
 
 Install the Python dev dependencies:
 
@@ -77,6 +81,10 @@ uv run componentize-py -d wit -w wasi:cli/command@0.2.0 componentize main -o cli
 2. Check `imagod` logs (terminal A) for errors that occur before the runner reaches ready state.
 3. Increase `runner_ready_timeout_secs` in `imagod.toml` and retry. This helps separate slow startup from a hard failure.
 
-### `certificate mismatch` or known_hosts errors
+### SSH localhost errors during `service deploy`
 
-If TLS pinning fails, remove only stale `localhost:4443` / `127.0.0.1:4443` entries from `~/.imago/known_hosts`, then retry deploy.
+Check these points before retrying:
+
+1. `ssh localhost true` succeeds without an interactive prompt.
+2. `imagod proxy-stdio --socket /tmp/imagod-componentize-py.sock` is available from the SSH login shell.
+3. `imago.toml` and `imagod.toml` agree on the socket path.

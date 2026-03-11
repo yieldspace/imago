@@ -26,14 +26,15 @@ pub use error::{ErrorCode, StructuredError};
 /// Message payload types and routing tags.
 pub use messages::{
     ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushChunkHeader,
-    ArtifactPushRequest, ArtifactStatus, BindingsCertUploadRequest, BindingsCertUploadResponse,
-    ByteRange, CommandCancelRequest, CommandCancelResponse, CommandEvent, CommandEventType,
-    CommandPayload, CommandStartRequest, CommandStartResponse, CommandState, CommandType,
-    DeployCommandPayload, DeployPrepareRequest, DeployPrepareResponse, HelloNegotiateRequest,
-    HelloNegotiateResponse, LogChunk, LogEnd, LogError, LogErrorCode, LogRequest, LogStreamKind,
-    MessageType, RpcInvokeError, RpcInvokeRequest, RpcInvokeResponse, RpcInvokeTargetService,
-    RunCommandPayload, ServiceListRequest, ServiceListResponse, ServiceState, ServiceStatusEntry,
-    StateRequest, StateResponse, StopCommandPayload,
+    ArtifactPushRequest, ArtifactStatus, BindingsCertInspectRequest, BindingsCertInspectResponse,
+    BindingsCertUploadRequest, BindingsCertUploadResponse, ByteRange, CommandCancelRequest,
+    CommandCancelResponse, CommandEvent, CommandEventType, CommandPayload, CommandStartRequest,
+    CommandStartResponse, CommandState, CommandType, DeployCommandPayload, DeployPrepareRequest,
+    DeployPrepareResponse, HelloNegotiateRequest, HelloNegotiateResponse, LogChunk, LogEnd,
+    LogError, LogErrorCode, LogRequest, LogStreamKind, MessageType, RpcInvokeError,
+    RpcInvokeRequest, RpcInvokeResponse, RpcInvokeTargetService, RunCommandPayload,
+    ServiceListRequest, ServiceListResponse, ServiceState, ServiceStatusEntry, StateRequest,
+    StateResponse, StopCommandPayload,
 };
 /// Validation trait and reusable validation error type.
 pub use validate::{Validate, ValidationError};

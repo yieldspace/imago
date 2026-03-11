@@ -1,7 +1,6 @@
 #[path = "e2e_helper/mod.rs"]
 mod e2e_helper;
 
-use e2e_helper::certs::{generate_key_material, write_known_hosts};
 use e2e_helper::cli::{CmdOutput, run_imago_cli};
 use e2e_helper::wait::poll_until;
 use e2e_helper::{Cluster, TargetSpec, TestResult, WasmArtifact, wasm_file_name, wasm_path};
@@ -20,18 +19,9 @@ fn e2e_rpc_single_node_local_flow() -> TestResult {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp = TempDirBuilder::new().prefix("ierpcl").tempdir()?;
 
-    let control_keys = generate_key_material(&temp.path().join("control"))?;
-    let control_home = temp.path().join("h");
-    fs::create_dir_all(&control_home)?;
-
-    let mut cluster = Cluster::new(
-        workspace_root.clone(),
-        temp.path().join("n"),
-        control_keys.admin_public_hex.clone(),
-    )?;
+    let mut cluster = Cluster::new(workspace_root.clone(), temp.path().join("n"))?;
     let _default = cluster.add_node("default")?;
     cluster.start_all()?;
-    write_known_hosts(&control_home, &cluster.known_hosts_entries())?;
 
     let services_root = temp.path().join("s");
     let greeter_dir = services_root.join("g");
@@ -39,8 +29,6 @@ fn e2e_rpc_single_node_local_flow() -> TestResult {
     prepare_project_dir(&greeter_dir)?;
     prepare_project_dir(&client_dir)?;
 
-    install_control_key(&greeter_dir, &control_keys.admin_key_path)?;
-    install_control_key(&client_dir, &control_keys.admin_key_path)?;
     install_wasm(&greeter_dir, WasmArtifact::RpcCallee)?;
     install_wasm(&client_dir, WasmArtifact::RpcCaller)?;
 
@@ -61,24 +49,20 @@ fn e2e_rpc_single_node_local_flow() -> TestResult {
     let deploy_greeter = run_imago_cli(
         &workspace_root,
         &greeter_dir,
-        &control_home,
+        "imagod",
         &["service", "deploy", "--target", "default", "--detach"],
     )?;
     ensure_success("rpc-greeter deploy", &deploy_greeter)?;
     assert_command_completed("rpc-greeter deploy", &deploy_greeter)?;
 
-    let deps_sync_client = run_imago_cli(
-        &workspace_root,
-        &client_dir,
-        &control_home,
-        &["deps", "sync"],
-    )?;
+    let deps_sync_client =
+        run_imago_cli(&workspace_root, &client_dir, "imagod", &["deps", "sync"])?;
     ensure_success("rpc-caller deps sync", &deps_sync_client)?;
 
     let deploy_client = run_imago_cli(
         &workspace_root,
         &client_dir,
-        &control_home,
+        "imagod",
         &["service", "deploy", "--target", "default", "--detach"],
     )?;
     ensure_success("rpc-caller deploy", &deploy_client)?;
@@ -87,7 +71,7 @@ fn e2e_rpc_single_node_local_flow() -> TestResult {
     let success_logs = wait_logs_with_marker(
         &workspace_root,
         &client_dir,
-        &control_home,
+        "imagod",
         SUCCESS_MARKER,
         LOG_WAIT_TIMEOUT,
     )?;
@@ -100,13 +84,13 @@ fn e2e_rpc_single_node_local_flow() -> TestResult {
     let _ = run_imago_cli(
         &workspace_root,
         &client_dir,
-        &control_home,
+        "imagod",
         &["service", "stop", "rpc-caller", "--target", "default"],
     );
     let _ = run_imago_cli(
         &workspace_root,
         &greeter_dir,
-        &control_home,
+        "imagod",
         &["service", "stop", "rpc-greeter", "--target", "default"],
     );
 
@@ -116,21 +100,21 @@ fn e2e_rpc_single_node_local_flow() -> TestResult {
 fn wait_logs(
     workspace_root: &Path,
     project_dir: &Path,
-    home: &Path,
+    daemon_package: &str,
     timeout: Duration,
 ) -> TestResult<String> {
     poll_until(
         "collecting rpc-caller logs",
         timeout,
         LOG_POLL_INTERVAL,
-        || fetch_logs_once(workspace_root, project_dir, home),
+        || fetch_logs_once(workspace_root, project_dir, daemon_package),
     )
 }
 
 fn wait_logs_with_marker(
     workspace_root: &Path,
     project_dir: &Path,
-    home: &Path,
+    daemon_package: &str,
     marker: &str,
     timeout: Duration,
 ) -> TestResult<String> {
@@ -140,7 +124,7 @@ fn wait_logs_with_marker(
         timeout,
         LOG_POLL_INTERVAL,
         || {
-            let Some(logs) = fetch_logs_once(workspace_root, project_dir, home)? else {
+            let Some(logs) = fetch_logs_once(workspace_root, project_dir, daemon_package)? else {
                 return Ok(None);
             };
             last_logs = logs.clone();
@@ -156,12 +140,12 @@ fn wait_logs_with_marker(
 fn fetch_logs_once(
     workspace_root: &Path,
     project_dir: &Path,
-    home: &Path,
+    daemon_package: &str,
 ) -> TestResult<Option<String>> {
     let logs = run_imago_cli(
         workspace_root,
         project_dir,
-        home,
+        daemon_package,
         &["service", "logs", "rpc-caller", "--tail", "200"],
     )?;
     if !logs.success {
@@ -210,14 +194,6 @@ fn assert_command_completed(label: &str, output: &CmdOutput) -> TestResult {
 
 fn prepare_project_dir(project_dir: &Path) -> TestResult {
     fs::create_dir_all(project_dir.join("components"))?;
-    fs::create_dir_all(project_dir.join("certs"))?;
-    Ok(())
-}
-
-fn install_control_key(project_dir: &Path, control_key_path: &Path) -> TestResult {
-    let cert_dir = project_dir.join("certs");
-    fs::create_dir_all(&cert_dir)?;
-    fs::copy(control_key_path, cert_dir.join("control.key"))?;
     Ok(())
 }
 
@@ -236,11 +212,9 @@ fn write_rpc_greeter_imago_toml(
     main_wasm_file: &str,
 ) -> TestResult {
     let body = format!(
-        "name = \"rpc-greeter\"\nmain = \"components/{}\"\ntype = \"rpc\"\n\n[capabilities]\nprivileged = false\nwasi = true\n\n[target.default]\nremote = \"{}\"\nserver_name = \"{}\"\nclient_key = \"{}\"\n",
+        "name = \"rpc-greeter\"\nmain = \"components/{}\"\ntype = \"rpc\"\n\n[capabilities]\nprivileged = false\nwasi = true\n\n[target.default]\nremote = \"{}\"\n",
         toml_escape(main_wasm_file),
         toml_escape(&target.remote),
-        toml_escape(&target.server_name),
-        toml_escape(&target.client_key_rel),
     );
     fs::write(project_dir.join("imago.toml"), body)?;
     Ok(())
@@ -259,13 +233,11 @@ fn write_cli_client_imago_toml(
     let rpc_greeter_wit_dir = workspace_root.join("e2e").join("wit").join("rpc-greeter");
 
     let body = format!(
-        "name = \"rpc-caller\"\nmain = \"components/{}\"\ntype = \"cli\"\n\n[[dependencies]]\nversion = \"0.1.0\"\nkind = \"native\"\npath = \"{}\"\n\n[capabilities]\nprivileged = false\nwasi = true\n\n[capabilities.deps]\n\"acme:clock\" = [\"*\"]\n\"imago:node\" = [\"*\"]\n\n[[bindings]]\nname = \"rpc-greeter\"\nversion = \"0.1.0\"\npath = \"{}\"\n\n[target.default]\nremote = \"{}\"\nserver_name = \"{}\"\nclient_key = \"{}\"\n",
+        "name = \"rpc-caller\"\nmain = \"components/{}\"\ntype = \"cli\"\n\n[[dependencies]]\nversion = \"0.1.0\"\nkind = \"native\"\npath = \"{}\"\n\n[capabilities]\nprivileged = false\nwasi = true\n\n[capabilities.deps]\n\"acme:clock\" = [\"*\"]\n\"imago:node\" = [\"*\"]\n\n[[bindings]]\nname = \"rpc-greeter\"\nversion = \"0.1.0\"\npath = \"{}\"\n\n[target.default]\nremote = \"{}\"\n",
         toml_escape(main_wasm_file),
         toml_escape(imago_node_wit.to_string_lossy().as_ref()),
         toml_escape(rpc_greeter_wit_dir.to_string_lossy().as_ref()),
         toml_escape(&target.remote),
-        toml_escape(&target.server_name),
-        toml_escape(&target.client_key_rel),
     );
     fs::write(project_dir.join("imago.toml"), body)?;
     Ok(())

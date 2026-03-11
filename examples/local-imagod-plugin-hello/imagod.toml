@@ -1,10 +1,10 @@
 listen_addr = "127.0.0.1:4443"
+control_socket_path = "/tmp/imagod-local-plugin-hello.sock"
 storage_root = ".imagod-data"
 server_version = "imagod/local-plugin-hello-example"
 
 [tls]
 server_key = "certs/server.key"
-admin_public_keys = ["ab5bd390075f66f09862e65a75bb5ebe8a60c7bc138dd0dd21891d91996079e8"]
 client_public_keys = ["49674d82fb2758a5ddbb415be1565c0a528462ef51442d77dcdb3bf92b7c2c07"]
 
 [runtime]

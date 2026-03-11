@@ -1,19 +1,9 @@
-use std::{
-    borrow::Cow,
-    io::{self, Write},
-    path::Path,
-    time::Duration,
-    time::Instant,
-};
+use std::{borrow::Cow, path::Path, time::Duration, time::Instant};
 
 use anyhow::{Context, anyhow};
 use chrono::{DateTime, Local, Utc};
-use imago_protocol::{
-    LogChunk, LogEnd, LogRequest, LogStreamKind, MessageType, ProtocolEnvelope, StructuredError,
-    from_cbor,
-};
+use imago_protocol::{LogChunk, LogEnd, LogRequest, LogStreamKind, MessageType};
 use serde::Deserialize;
-use tokio::time;
 use uuid::Uuid;
 
 use crate::{
@@ -27,10 +17,10 @@ use crate::{
         error_diagnostics::{format_command_error, summarize_command_failure},
         ui,
     },
+    runtime,
 };
 
 const NON_FOLLOW_IDLE_TIMEOUT_SECS: u64 = 2;
-const POST_END_DRAIN_TIMEOUT_MS: u64 = 200;
 const LOGS_STREAM_FEATURE: &str = "logs.stream";
 const LOGS_HELLO_REQUIRED_FEATURES: [&str; 2] = ["logs.request", LOGS_STREAM_FEATURE];
 const LOGS_HELLO_REQUIRED_FEATURES_WITH_TIMESTAMP: [&str; 3] =
@@ -130,21 +120,6 @@ struct LogsRequestAck {
     follow: bool,
 }
 
-#[derive(Debug, Deserialize)]
-struct LogsDatagramHeader {
-    #[serde(rename = "type")]
-    message_type: MessageType,
-    request_id: Uuid,
-    #[serde(default)]
-    error: Option<StructuredError>,
-}
-
-#[derive(Debug)]
-enum LogsDatagram {
-    Chunk(LogChunk),
-    End(LogEnd),
-}
-
 pub async fn run(args: LogsArgs) -> CommandResult {
     run_with_project_root(args, Path::new(".")).await
 }
@@ -237,16 +212,12 @@ async fn run_async_with_target_override(
     .context("target settings are invalid for service logs")?;
     ui::command_info(
         "service.logs",
-        &format_local_context_line(
-            project_root,
-            service_name,
-            &target_name,
-            &target.remote,
-            target.server_name.as_deref(),
-        ),
+        &format_local_context_line(project_root, service_name, &target_name, &target.remote),
     );
     ui::command_stage("service.logs", "connect", "connecting target");
-    let connected = deploy::connect_target(&target).await?;
+    let connected = runtime::connect_target(&target).await?;
+    let _session_close_guard =
+        deploy::ConnectedSessionCloseGuard::new(&connected, b"service.logs complete");
     ui::command_stage("service.logs", "hello", "negotiating hello");
     let required_features = if with_timestamp {
         LOGS_HELLO_REQUIRED_FEATURES_WITH_TIMESTAMP.as_slice()
@@ -273,116 +244,86 @@ async fn run_async_with_target_override(
             with_timestamp,
         },
     )?;
-    let use_stream_logs = hello
+    if !hello
         .features
         .iter()
-        .any(|feature| feature == LOGS_STREAM_FEATURE);
-    let termination = if use_stream_logs {
-        let mut ack: Option<LogsRequestAck> = None;
-        let mut saw_end = false;
-        let mut expected_seq: Option<u64> = None;
-        let mut truncated_warned = false;
-        let mut prefix_state = PrefixRenderState::default();
-        let stream_termination = deploy::request_streamed_events(
-            &connected,
-            &request,
-            deploy::resolve_deploy_stream_timeout(),
-            (!follow).then_some(Duration::from_secs(NON_FOLLOW_IDLE_TIMEOUT_SECS)),
-            follow,
-            |envelope| match envelope.message_type {
-                MessageType::LogsRequest => {
-                    let response: LogsRequestAck = deploy::response_payload(envelope)?;
-                    if !response.accepted {
-                        return Err(anyhow!("logs.request was not accepted"));
-                    }
-                    if response.names.is_empty() {
-                        return Err(anyhow!("logs.request returned no target service"));
-                    }
-                    prefix_state = PrefixRenderState::with_initial_name_width(
-                        max_name_width_from_ack_names(&response.names),
-                    );
-                    ack = Some(response);
-                    ui::command_clear("service.logs");
-                    Ok(false)
+        .any(|feature| feature == LOGS_STREAM_FEATURE)
+    {
+        return Err(anyhow!(
+            "target does not advertise required feature: logs.stream"
+        ));
+    }
+    let mut ack: Option<LogsRequestAck> = None;
+    let mut saw_end = false;
+    let mut expected_seq: Option<u64> = None;
+    let mut truncated_warned = false;
+    let mut prefix_state = PrefixRenderState::default();
+    let stream_termination = deploy::request_streamed_events(
+        &connected,
+        &request,
+        deploy::resolve_deploy_stream_timeout(),
+        (!follow).then_some(Duration::from_secs(NON_FOLLOW_IDLE_TIMEOUT_SECS)),
+        follow,
+        |envelope| match envelope.message_type {
+            MessageType::LogsRequest => {
+                let response: LogsRequestAck = deploy::response_payload(envelope)?;
+                if !response.accepted {
+                    return Err(anyhow!("logs.request was not accepted"));
                 }
-                MessageType::LogsChunk => {
-                    if ack.is_none() {
-                        return Err(anyhow!("logs.chunk arrived before logs.request ack"));
-                    }
-                    let chunk: LogChunk = deploy::response_payload(envelope)?;
-                    if request_id != chunk.request_id {
-                        return Ok(false);
-                    }
-                    warn_if_seq_gap(&mut expected_seq, chunk.seq, &mut truncated_warned);
-                    render_chunk(&chunk, name.is_none(), with_timestamp, &mut prefix_state)?;
-                    Ok(false)
+                if response.names.is_empty() {
+                    return Err(anyhow!("logs.request returned no target service"));
                 }
-                MessageType::LogsEnd => {
-                    if ack.is_none() {
-                        return Err(anyhow!("logs.end arrived before logs.request ack"));
-                    }
-                    let end: LogEnd = deploy::response_payload(envelope)?;
-                    if request_id != end.request_id {
-                        return Ok(false);
-                    }
-                    if let Some(error) = end.error {
-                        return Err(anyhow!(
-                            "logs stream ended with error: {} ({:?})",
-                            error.message,
-                            error.code
-                        ));
-                    }
-                    apply_end_seq_after_drain(
-                        &mut expected_seq,
-                        end.seq,
-                        &[],
-                        &mut truncated_warned,
-                    );
-                    saw_end = true;
-                    Ok(true)
+                prefix_state = PrefixRenderState::with_initial_name_width(
+                    max_name_width_from_ack_names(&response.names),
+                );
+                ack = Some(response);
+                ui::command_clear("service.logs");
+                Ok(false)
+            }
+            MessageType::LogsChunk => {
+                if ack.is_none() {
+                    return Err(anyhow!("logs.chunk arrived before logs.request ack"));
                 }
-                _ => Ok(false),
-            },
-        )
-        .await?;
-        if ack.is_none() {
-            return Err(anyhow!("logs.request returned empty response stream"));
-        }
-        if stream_termination == deploy::StreamRequestTermination::Completed && !saw_end {
-            return Err(anyhow!("logs stream ended without logs.end"));
-        }
-        match stream_termination {
-            deploy::StreamRequestTermination::Completed => LogsTermination::Completed,
-            deploy::StreamRequestTermination::Interrupted => LogsTermination::Interrupted,
-        }
-    } else {
-        if connected.uses_ssh_transport() {
-            return Err(anyhow!(
-                "ssh target requires server support for logs.stream"
-            ));
-        }
-        let ack: LogsRequestAck =
-            deploy::response_payload(deploy::request_response(&connected, &request).await?)?;
-        if !ack.accepted {
-            return Err(anyhow!("logs.request was not accepted"));
-        }
-        if ack.names.is_empty() {
-            return Err(anyhow!("logs.request returned no target service"));
-        }
-        ui::command_clear("service.logs");
-
-        let initial_name_width_chars = max_name_width_from_ack_names(&ack.names);
-        receive_logs_datagrams(
-            connected
-                .as_quinn_session()
-                .ok_or_else(|| anyhow!("logs datagram fallback requires direct target"))?,
-            request_id,
-            follow,
-            name.is_none(),
-            with_timestamp,
-            initial_name_width_chars,
-        )
-        .await?
+                let chunk: LogChunk = deploy::response_payload(envelope)?;
+                if request_id != chunk.request_id {
+                    return Ok(false);
+                }
+                warn_if_seq_gap(&mut expected_seq, chunk.seq, &mut truncated_warned);
+                render_chunk(&chunk, name.is_none(), with_timestamp, &mut prefix_state)?;
+                Ok(false)
+            }
+            MessageType::LogsEnd => {
+                if ack.is_none() {
+                    return Err(anyhow!("logs.end arrived before logs.request ack"));
+                }
+                let end: LogEnd = deploy::response_payload(envelope)?;
+                if request_id != end.request_id {
+                    return Ok(false);
+                }
+                if let Some(error) = end.error {
+                    return Err(anyhow!(
+                        "logs stream ended with error: {} ({:?})",
+                        error.message,
+                        error.code
+                    ));
+                }
+                apply_end_seq_after_drain(&mut expected_seq, end.seq, &[], &mut truncated_warned);
+                saw_end = true;
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+    )
+    .await?;
+    if ack.is_none() {
+        return Err(anyhow!("logs.request returned empty response stream"));
+    }
+    if stream_termination == deploy::StreamRequestTermination::Completed && !saw_end {
+        return Err(anyhow!("logs stream ended without logs.end"));
+    }
+    let termination = match stream_termination {
+        deploy::StreamRequestTermination::Completed => LogsTermination::Completed,
+        deploy::StreamRequestTermination::Interrupted => LogsTermination::Interrupted,
     };
     Ok(LogsSummary {
         name: name.unwrap_or_else(|| "<all-running>".to_string()),
@@ -392,175 +333,6 @@ async fn run_async_with_target_override(
         with_timestamp,
         termination,
     })
-}
-
-async fn receive_logs_datagrams(
-    session: &web_transport_quinn::Session,
-    request_id: Uuid,
-    follow: bool,
-    all_processes: bool,
-    with_timestamp: bool,
-    initial_name_width_chars: usize,
-) -> anyhow::Result<LogsTermination> {
-    let mut expected_seq: Option<u64> = None;
-    let mut truncated_warned = false;
-    let mut prefix_state = PrefixRenderState::with_initial_name_width(initial_name_width_chars);
-
-    'stream: loop {
-        let datagram_result = if follow {
-            tokio::select! {
-                result = session.read_datagram() => Some(result.context("failed to read log datagram")),
-                _ = tokio::signal::ctrl_c() => None,
-            }
-        } else {
-            match time::timeout(
-                Duration::from_secs(NON_FOLLOW_IDLE_TIMEOUT_SECS),
-                session.read_datagram(),
-            )
-            .await
-            {
-                Ok(result) => Some(result.context("failed to read log datagram")),
-                Err(_) => {
-                    break 'stream Err(anyhow!(
-                        "timed out waiting for logs.end after {}s",
-                        NON_FOLLOW_IDLE_TIMEOUT_SECS
-                    ));
-                }
-            }
-        };
-
-        let Some(datagram_result) = datagram_result else {
-            break 'stream Ok(LogsTermination::Interrupted);
-        };
-        let datagram = match datagram_result {
-            Ok(datagram) => datagram,
-            Err(err) => break 'stream Err(err),
-        };
-
-        let message = match decode_logs_datagram(&datagram, request_id) {
-            Ok(Some(message)) => message,
-            Ok(None) => continue,
-            Err(err) => break 'stream Err(err),
-        };
-        match message {
-            LogsDatagram::Chunk(chunk) => {
-                if request_id != chunk.request_id {
-                    continue;
-                }
-                warn_if_seq_gap(&mut expected_seq, chunk.seq, &mut truncated_warned);
-                if let Err(err) =
-                    render_chunk(&chunk, all_processes, with_timestamp, &mut prefix_state)
-                {
-                    break 'stream Err(err);
-                }
-            }
-            LogsDatagram::End(end) => {
-                if request_id != end.request_id {
-                    continue;
-                }
-                if let Some(error) = end.error {
-                    break 'stream Err(anyhow!(
-                        "logs stream ended with error: {} ({:?})",
-                        error.message,
-                        error.code
-                    ));
-                }
-                let delayed_chunk_seqs = match drain_post_end_chunks(
-                    session,
-                    request_id,
-                    all_processes,
-                    with_timestamp,
-                    &mut prefix_state,
-                    end.seq,
-                )
-                .await
-                {
-                    Ok(seqs) => seqs,
-                    Err(err) => break 'stream Err(err),
-                };
-                apply_end_seq_after_drain(
-                    &mut expected_seq,
-                    end.seq,
-                    &delayed_chunk_seqs,
-                    &mut truncated_warned,
-                );
-                break 'stream Ok(LogsTermination::Completed);
-            }
-        }
-    }
-}
-
-async fn drain_post_end_chunks(
-    session: &web_transport_quinn::Session,
-    request_id: Uuid,
-    all_processes: bool,
-    with_timestamp: bool,
-    prefix_state: &mut PrefixRenderState,
-    end_seq: u64,
-) -> anyhow::Result<Vec<u64>> {
-    let deadline = time::Instant::now() + Duration::from_millis(POST_END_DRAIN_TIMEOUT_MS);
-    let mut delayed_chunk_seqs = Vec::new();
-
-    loop {
-        let now = time::Instant::now();
-        if now >= deadline {
-            break;
-        }
-        let wait_for = deadline.saturating_duration_since(now);
-        let datagram = match time::timeout(wait_for, session.read_datagram()).await {
-            Ok(result) => result.context("failed to read post-end log datagram")?,
-            Err(_) => break,
-        };
-        let Some(message) = decode_logs_datagram(&datagram, request_id)? else {
-            continue;
-        };
-        let LogsDatagram::Chunk(chunk) = message else {
-            continue;
-        };
-        if chunk.seq >= end_seq {
-            continue;
-        }
-        render_chunk(&chunk, all_processes, with_timestamp, prefix_state)?;
-        delayed_chunk_seqs.push(chunk.seq);
-    }
-
-    Ok(delayed_chunk_seqs)
-}
-
-fn decode_logs_datagram(datagram: &[u8], request_id: Uuid) -> anyhow::Result<Option<LogsDatagram>> {
-    let header: LogsDatagramHeader =
-        from_cbor(datagram).context("failed to decode log datagram header")?;
-    if let Some(err) = header.error {
-        return Err(anyhow!(
-            "server error: {} ({:?}) at {}",
-            err.message,
-            err.code,
-            err.stage
-        ));
-    }
-    if header.request_id != request_id {
-        return Ok(None);
-    }
-
-    match header.message_type {
-        MessageType::LogsChunk => {
-            let envelope: ProtocolEnvelope<LogChunk> =
-                from_cbor(datagram).context("failed to decode logs.chunk datagram")?;
-            if envelope.payload.request_id != request_id {
-                return Ok(None);
-            }
-            Ok(Some(LogsDatagram::Chunk(envelope.payload)))
-        }
-        MessageType::LogsEnd => {
-            let envelope: ProtocolEnvelope<LogEnd> =
-                from_cbor(datagram).context("failed to decode logs.end datagram")?;
-            if envelope.payload.request_id != request_id {
-                return Ok(None);
-            }
-            Ok(Some(LogsDatagram::End(envelope.payload)))
-        }
-        _ => Ok(None),
-    }
 }
 
 fn detect_seq_gap(expected_seq: &mut Option<u64>, actual: u64) -> bool {
@@ -613,15 +385,9 @@ fn render_text_chunk(
     let timestamp = format_chunk_timestamp(chunk, with_timestamp)?;
     let rendered = renderable_chunk_bytes(chunk, all_processes, timestamp.as_deref(), prefix_state);
     if should_write_text_chunk_to_stderr(chunk, all_processes) {
-        let mut stderr = io::stderr().lock();
-        stderr
-            .write_all(rendered.as_ref())
-            .context("failed to write log chunk to stderr")?;
+        runtime::write_stderr(rendered.as_ref()).context("failed to write log chunk to stderr")?;
     } else {
-        let mut stdout = io::stdout().lock();
-        stdout
-            .write_all(rendered.as_ref())
-            .context("failed to write log chunk to stdout")?;
+        runtime::write_stdout(rendered.as_ref()).context("failed to write log chunk to stdout")?;
     }
 
     Ok(())
@@ -717,7 +483,6 @@ fn format_timestamp_rfc3339_local(timestamp_unix_ms: u64) -> anyhow::Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imago_protocol::to_cbor;
 
     #[test]
     fn detect_seq_gap_reports_mismatch() {
@@ -916,35 +681,6 @@ mod tests {
             "db".to_string(),
         ]);
         assert_eq!(width, "service-long-name".chars().count());
-    }
-
-    #[test]
-    fn decode_logs_datagram_decodes_typed_chunk_payload() {
-        let request_id = Uuid::new_v4();
-        let envelope = ProtocolEnvelope::new(
-            MessageType::LogsChunk,
-            request_id,
-            Uuid::new_v4(),
-            LogChunk {
-                request_id,
-                seq: 3,
-                name: "svc-a".to_string(),
-                stream_kind: LogStreamKind::Stdout,
-                bytes: b"hello".to_vec(),
-                is_last: false,
-                timestamp_unix_ms: None,
-            },
-        );
-        let datagram = to_cbor(&envelope).expect("encoding should succeed");
-
-        let decoded = decode_logs_datagram(&datagram, request_id).expect("decode should succeed");
-        match decoded {
-            Some(LogsDatagram::Chunk(chunk)) => {
-                assert_eq!(chunk.seq, 3);
-                assert_eq!(chunk.bytes, b"hello".to_vec());
-            }
-            _ => panic!("expected chunk datagram"),
-        }
     }
 
     #[test]

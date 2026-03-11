@@ -207,14 +207,6 @@
     "TlsConfig": {
       "description": "TLS material locations for raw public key mTLS server startup.",
       "properties": {
-        "admin_public_keys": {
-          "default": [],
-          "description": "Allowlist of admin Ed25519 raw public keys (32-byte hex).",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
         "client_public_keys": {
           "description": "Allowlist of client Ed25519 raw public keys (32-byte hex).",
           "items": {

@@ -61,7 +61,6 @@ mod tests {
             control_socket_path: PathBuf::from(DEFAULT_CONTROL_SOCKET_PATH),
             tls: TlsConfig {
                 server_key: test_server_key_path(),
-                admin_public_keys: Vec::new(),
                 client_public_keys: Vec::new(),
                 known_public_keys: std::collections::BTreeMap::new(),
             },

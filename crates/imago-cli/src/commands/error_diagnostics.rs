@@ -1,13 +1,14 @@
 use anyhow::Error;
 use std::borrow::Cow;
 
-const HINT_UNAUTHORIZED: &str = "For direct targets, verify target.client_key, ~/.imago/known_hosts, and server_name/remote. For ssh targets, verify remote and SSH access, then retry.";
+const HINT_UNAUTHORIZED: &str =
+    "Verify the ssh:// target, SSH access, and target-side admin authorization, then retry.";
 const HINT_BUILD_FAILED: &str =
     "Run `imago artifact build` first and fix build.command errors before retrying service deploy.";
-const HINT_TARGET_CONFIG: &str = "Check `imago.toml` target settings. Direct targets use remote/server_name/client_key; ssh targets use only remote.";
-const HINT_REMOTE_PARSE: &str = "Fix the target remote format. Use host:port for direct targets or ssh://user@host[?socket=/path] for SSH targets.";
-const HINT_TRANSPORT_CONNECT: &str =
-    "Check target reachability/TLS settings, then retry the QUIC/WebTransport connection.";
+const HINT_TARGET_CONFIG: &str = "Check `imago.toml` target settings. Targets must use only remote=ssh://[user@]host[:port][?socket=/abs/path].";
+const HINT_REMOTE_PARSE: &str =
+    "Fix the target remote format. Use ssh://[user@]host[:port][?socket=/abs/path].";
+const HINT_TRANSPORT_CONNECT: &str = "Check SSH reachability, ssh configuration, and remote imagod proxy-stdio availability, then retry.";
 const HINT_BUSY: &str = "The target is busy. Wait for in-flight operations to finish and retry.";
 const HINT_COMMAND_START_STREAM_INTERRUPTED: &str = "The command.start stream was interrupted. The command may still be running on target; inspect target state/logs before retrying service deploy/service start/service stop.";
 const HINT_STORAGE_QUOTA: &str =
@@ -87,9 +88,8 @@ pub fn summarize_command_failure(_command: &str, err: &Error) -> String {
         return "load-config stage failed".to_string();
     }
 
-    if combined_lower.contains("failed to establish quic")
-        || combined_lower.contains("failed to start quic")
-        || combined_lower.contains("failed to establish webtransport")
+    if combined_lower.contains("failed to spawn ssh transport")
+        || combined_lower.contains("ssh transport")
         || combined_lower.contains("connect failed")
     {
         return "connect stage failed".to_string();
@@ -145,15 +145,14 @@ fn append_hints(err: &Error, hints: &mut Vec<String>) {
             || combined_lower.contains("invalid")
             || combined_lower.contains("socket")))
         || combined_lower.contains("invalid socket address")
-        || combined_lower.contains("relative url without a base")
-        || combined_lower.contains("empty host");
+        || combined_lower.contains("empty host")
+        || combined_lower.contains("ssh:// scheme");
     if looks_like_remote_parse_error {
         push_unique(hints, HINT_REMOTE_PARSE);
     }
 
-    if combined_lower.contains("failed to establish quic")
-        || combined_lower.contains("failed to start quic")
-        || combined_lower.contains("failed to establish webtransport")
+    if combined_lower.contains("failed to spawn ssh transport")
+        || combined_lower.contains("ssh transport")
     {
         push_unique(hints, HINT_TRANSPORT_CONNECT);
     }
@@ -236,8 +235,8 @@ mod tests {
         let err = anyhow!("server error: auth failed (E_UNAUTHORIZED) at transport.connect");
 
         let formatted = format_command_error("service.start", &err);
-        assert!(formatted.contains("target.client_key"));
-        assert!(formatted.contains("known_hosts"));
+        assert!(formatted.contains("ssh://"));
+        assert!(formatted.contains("SSH access"));
     }
 
     #[test]
@@ -245,8 +244,8 @@ mod tests {
         let err = anyhow!("request rejected: Unauthorized at transport.connect");
 
         let formatted = format_command_error("service.start", &err);
-        assert!(formatted.contains("target.client_key"));
-        assert!(formatted.contains("known_hosts"));
+        assert!(formatted.contains("ssh://"));
+        assert!(formatted.contains("SSH access"));
     }
 
     #[test]

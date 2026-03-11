@@ -159,6 +159,11 @@ mod tests {
             .and_then(|entry| entry.get("properties"))
             .and_then(JsonValue::as_object)
             .expect("imagod RuntimeConfig.properties should be object");
+        let imagod_tls_props = imagod_defs
+            .get("TlsConfig")
+            .and_then(|entry| entry.get("properties"))
+            .and_then(JsonValue::as_object)
+            .expect("imagod TlsConfig.properties should be object");
         let features_any_of = imagod_runtime_props
             .get("features")
             .and_then(|entry| entry.get("anyOf"))
@@ -193,6 +198,14 @@ mod tests {
             "legacy target.known_hosts must not be exposed in schema properties"
         );
         assert!(
+            !target_props.contains_key("server_name"),
+            "legacy target.server_name must not be exposed in schema properties"
+        );
+        assert!(
+            !target_props.contains_key("client_key"),
+            "legacy target.client_key must not be exposed in schema properties"
+        );
+        assert!(
             target_required
                 .iter()
                 .any(|value| value.as_str() == Some("remote")),
@@ -217,6 +230,10 @@ mod tests {
         assert!(
             !dependency_component_props.contains_key("source"),
             "legacy dependencies[].component.source must not be exposed in schema properties"
+        );
+        assert!(
+            !imagod_tls_props.contains_key("admin_public_keys"),
+            "legacy imagod tls.admin_public_keys must not be exposed in schema properties"
         );
         assert!(
             !binding_props.contains_key("target"),

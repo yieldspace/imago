@@ -15,6 +15,4 @@ command = "CARGO_TARGET_DIR=target cargo build --target wasm32-wasip2 --release"
 wasi = true
 
 [target.default]
-remote = "127.0.0.1:4443"
-server_name = "localhost"
-client_key = "certs/client.key"
+remote = "ssh://localhost?socket=/tmp/imagod-local-socket.sock"

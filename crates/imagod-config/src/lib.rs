@@ -70,9 +70,6 @@ pub struct ImagodConfig {
 pub struct TlsConfig {
     /// Server private key in PEM format.
     pub server_key: PathBuf,
-    #[serde(default)]
-    /// Allowlist of admin Ed25519 raw public keys (32-byte hex).
-    pub admin_public_keys: Vec<String>,
     /// Allowlist of client Ed25519 raw public keys (32-byte hex).
     pub client_public_keys: Vec<String>,
     #[serde(default)]
@@ -312,7 +309,6 @@ impl ImagodConfig {
     pub fn load(path: &Path) -> Result<Self, ImagodError> {
         let content = load::io::read_to_string(path)?;
         let raw = load::parsing::parse(path, &content)?;
-        load::validation::reject_legacy_keys(path, &raw)?;
         let config = load::parsing::decode(path, raw)?;
         load::validation::validate(&config)?;
         Ok(config)
@@ -1332,99 +1328,6 @@ features = ["imago:unknown"]
     }
 
     #[test]
-    fn rejects_legacy_protocol_draft_key() {
-        let path = write_temp_config(
-            "rejects_legacy_protocol_draft_key",
-            r#"
-listen_addr = "127.0.0.1:4443"
-storage_root = "/tmp/imago"
-server_version = "imagod/test"
-protocol_draft = "imago-mvp-v1"
-
-[tls]
-server_key = "server.key"
-client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
-"#,
-        );
-
-        let err = ImagodConfig::load(&path).expect_err("config should reject legacy key");
-        let message = err.to_string();
-        assert!(message.contains("protocol_draft"));
-        assert!(message.contains("client_version"));
-
-        cleanup_temp_path(path);
-    }
-
-    #[test]
-    fn rejects_legacy_compatibility_date_key() {
-        let path = write_temp_config(
-            "rejects_legacy_compatibility_date_key",
-            r#"
-listen_addr = "127.0.0.1:4443"
-storage_root = "/tmp/imago"
-server_version = "imagod/test"
-compatibility_date = "2026-02-10"
-
-[tls]
-server_key = "server.key"
-client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
-"#,
-        );
-
-        let err = ImagodConfig::load(&path)
-            .expect_err("config should reject legacy compatibility_date key");
-        let message = err.to_string();
-        assert!(message.contains("compatibility_date"));
-        assert!(message.contains("client_version"));
-
-        cleanup_temp_path(path);
-    }
-
-    #[test]
-    fn rejects_legacy_tls_server_cert_key() {
-        let path = write_temp_config(
-            "rejects_legacy_tls_server_cert_key",
-            r#"
-listen_addr = "127.0.0.1:4443"
-storage_root = "/tmp/imago"
-server_version = "imagod/test"
-
-[tls]
-server_key = "server.key"
-client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
-server_cert = "server.crt"
-"#,
-        );
-
-        let err = ImagodConfig::load(&path).expect_err("config should reject tls.server_cert");
-        assert!(err.to_string().contains("tls.server_cert"));
-
-        cleanup_temp_path(path);
-    }
-
-    #[test]
-    fn rejects_legacy_tls_client_ca_cert_key() {
-        let path = write_temp_config(
-            "rejects_legacy_tls_client_ca_cert_key",
-            r#"
-listen_addr = "127.0.0.1:4443"
-storage_root = "/tmp/imago"
-server_version = "imagod/test"
-
-[tls]
-server_key = "server.key"
-client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
-client_ca_cert = "ca.crt"
-"#,
-        );
-
-        let err = ImagodConfig::load(&path).expect_err("config should reject tls.client_ca_cert");
-        assert!(err.to_string().contains("tls.client_ca_cert"));
-
-        cleanup_temp_path(path);
-    }
-
-    #[test]
     fn accepts_empty_client_public_keys() {
         let path = write_temp_config(
             "accepts_empty_client_public_keys",
@@ -1512,9 +1415,9 @@ client_public_keys = ["111111111111111111111111111111111111111111111111111111111
     }
 
     #[test]
-    fn accepts_admin_and_known_public_keys() {
+    fn accepts_known_public_keys() {
         let path = write_temp_config(
-            "accepts_admin_and_known_public_keys",
+            "accepts_known_public_keys",
             r#"
 listen_addr = "127.0.0.1:4443"
 storage_root = "/tmp/imago"
@@ -1523,62 +1426,12 @@ server_version = "imagod/test"
 [tls]
 server_key = "server.key"
 client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
-admin_public_keys = ["2222222222222222222222222222222222222222222222222222222222222222"]
 known_public_keys = { "rpc://node-a:4443" = "1111111111111111111111111111111111111111111111111111111111111111", "rpc://node-b:4443" = "2222222222222222222222222222222222222222222222222222222222222222" }
 "#,
         );
 
         let config = ImagodConfig::load(&path).expect("config should load");
-        assert_eq!(config.tls.admin_public_keys.len(), 1);
         assert_eq!(config.tls.known_public_keys.len(), 2);
-
-        cleanup_temp_path(path);
-    }
-
-    #[test]
-    fn rejects_duplicate_admin_public_keys() {
-        let path = write_temp_config(
-            "rejects_duplicate_admin_public_keys",
-            r#"
-listen_addr = "127.0.0.1:4443"
-storage_root = "/tmp/imago"
-server_version = "imagod/test"
-
-[tls]
-server_key = "server.key"
-client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
-admin_public_keys = [
-  "2222222222222222222222222222222222222222222222222222222222222222",
-  "2222222222222222222222222222222222222222222222222222222222222222",
-]
-"#,
-        );
-
-        let err = ImagodConfig::load(&path).expect_err("config should reject duplicated admin key");
-        assert!(err.to_string().contains("tls.admin_public_keys"));
-        assert!(err.to_string().contains("duplicated"));
-
-        cleanup_temp_path(path);
-    }
-
-    #[test]
-    fn rejects_admin_client_key_overlap() {
-        let path = write_temp_config(
-            "rejects_admin_client_key_overlap",
-            r#"
-listen_addr = "127.0.0.1:4443"
-storage_root = "/tmp/imago"
-server_version = "imagod/test"
-
-[tls]
-server_key = "server.key"
-client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
-admin_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
-"#,
-        );
-
-        let err = ImagodConfig::load(&path).expect_err("config should reject overlap");
-        assert!(err.to_string().contains("overlaps"));
 
         cleanup_temp_path(path);
     }
@@ -1595,7 +1448,6 @@ server_version = "imagod/test"
 [tls]
 server_key = "server.key"
 client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
-admin_public_keys = ["2222222222222222222222222222222222222222222222222222222222222222"]
 known_public_keys = { "" = "2222222222222222222222222222222222222222222222222222222222222222" }
 "#,
         );

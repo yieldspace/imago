@@ -3,9 +3,6 @@ use super::*;
 pub(in crate::commands::build) fn parse_root_capabilities(
     root: &toml::Table,
 ) -> anyhow::Result<ManifestCapabilityPolicy> {
-    if root.contains_key("capabilirties") {
-        return Err(anyhow!("unknown key 'capabilirties'; use 'capabilities'"));
-    }
     parse_capability_policy(root.get("capabilities"), "capabilities")
 }
 
@@ -147,25 +144,8 @@ mod tests {
     use toml::Value as TomlValue;
 
     use super::{
-        parse_capability_rule_list, parse_deps_capability_rules, parse_root_capabilities,
-        parse_wasi_capability_rules,
+        parse_capability_rule_list, parse_deps_capability_rules, parse_wasi_capability_rules,
     };
-
-    fn parse_table(raw: &str) -> toml::Table {
-        toml::from_str::<TomlValue>(raw)
-            .expect("toml should parse")
-            .as_table()
-            .expect("value should be table")
-            .clone()
-    }
-
-    #[test]
-    fn parse_root_capabilities_rejects_typo_key() {
-        let root = parse_table(r#"capabilirties = { privileged = true }"#);
-        let err =
-            parse_root_capabilities(&root).expect_err("capabilirties typo should be rejected");
-        assert!(err.to_string().contains("unknown key 'capabilirties'"));
-    }
 
     #[test]
     fn parse_deps_capability_rules_accepts_allow_all() {

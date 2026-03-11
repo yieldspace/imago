@@ -13,10 +13,13 @@ e2e = []
 
 [dev-dependencies]
 anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
 hex = { workspace = true }
+imago-cli = { workspace = true }
 rcgen = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [build-dependencies]
 imago-schema-gen = { workspace = true }
@@ -112,6 +115,7 @@ imago-plugin-imago-experimental-gpio = { path = "plugins/imago-experimental-gpio
 imago-plugin-imago-experimental-i2c = { path = "plugins/imago-experimental-i2c", version = "0.3.1" }
 imago-plugin-imago-node = { path = "plugins/imago-node", version = "0.3.1" }
 imago-plugin-imago-usb = { path = "plugins/imago-usb", version = "0.3.1" }
+imago-cli = { path = "crates/imago-cli", version = "0.3.0" }
 imago-plugin-macros = { path = "crates/imago-plugin-macros", version = "0.3.1" }
 imago-project-config = { path = "crates/imago-project-config", version = "0.3.1" }
 imago-protocol = { path = "crates/imago-protocol", version = "0.3.1" }

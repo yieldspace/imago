@@ -1,8 +1,4 @@
-use std::{
-    io::{self, Write},
-    path::Path,
-    time::Instant,
-};
+use std::{path::Path, time::Instant};
 
 use anyhow::Context;
 use chrono::{DateTime, Local, Utc};
@@ -23,6 +19,7 @@ use crate::{
         error_diagnostics::{format_command_error, summarize_command_failure},
         ui,
     },
+    runtime,
 };
 
 const PS_HELLO_REQUIRED_FEATURES: [&str; 1] = ["services.list"];
@@ -93,17 +90,13 @@ async fn run_async_with_target_override(
     let service_context = ps_service_context(names_filter.as_deref());
     ui::command_info(
         "service.ls",
-        &format_local_context_line(
-            project_root,
-            &service_context,
-            &target_name,
-            &target.remote,
-            target.server_name.as_deref(),
-        ),
+        &format_local_context_line(project_root, &service_context, &target_name, &target.remote),
     );
 
     ui::command_stage("service.ls", "connect", "connecting target");
-    let connected = deploy::connect_target(&target).await?;
+    let connected = runtime::connect_target(&target).await?;
+    let _session_close_guard =
+        deploy::ConnectedSessionCloseGuard::new(&connected, b"service.ls complete");
 
     let correlation_id = Uuid::new_v4();
     ui::command_stage("service.ls", "hello", "negotiating hello");
@@ -163,18 +156,17 @@ fn render_services(services: &[ServiceStatusEntry]) -> anyhow::Result<()> {
 }
 
 fn render_services_table(services: &[ServiceStatusEntry]) -> anyhow::Result<()> {
-    let mut stdout = io::stdout().lock();
-    writeln!(stdout, "NAME STATE RELEASE STARTED_AT").context("failed to write ps table header")?;
+    runtime::write_stdout_line("NAME STATE RELEASE STARTED_AT")
+        .context("failed to write ps table header")?;
     for service in services {
         let started_at = format_service_started_at(service);
-        writeln!(
-            stdout,
+        runtime::write_stdout_line(&format!(
             "{} {} {} {}",
             service.name,
             service_state_text(service.state),
             service.release_hash,
             started_at,
-        )
+        ))
         .context("failed to write ps table row")?;
     }
     Ok(())
@@ -209,6 +201,32 @@ fn format_started_at_local(started_at: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{path::Path, sync::Arc};
+
+    use crate::runtime::{self, BufferedOutputSink, CliRuntime, OutputSink, SshTargetConnector};
+
+    fn plain_runtime(output_sink: Arc<dyn OutputSink>) -> Arc<CliRuntime> {
+        Arc::new(CliRuntime::plain(
+            Path::new("."),
+            Arc::new(SshTargetConnector),
+            output_sink,
+        ))
+    }
+
+    fn capture_output(
+        action: impl std::future::Future<Output = anyhow::Result<()>>,
+    ) -> runtime::BufferedOutput {
+        let output_sink = Arc::new(BufferedOutputSink::default());
+        let runtime = plain_runtime(output_sink.clone());
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime should build")
+            .block_on(runtime::scope(runtime, async move {
+                action.await.expect("ps output should render");
+            }));
+        output_sink.snapshot()
+    }
 
     #[test]
     fn ps_service_context_uses_expected_labels() {
@@ -272,5 +290,23 @@ mod tests {
 
         assert_eq!(format_service_started_at(&stopped_empty), "-");
         assert_eq!(format_service_started_at(&stopped_zero), "-");
+    }
+
+    #[test]
+    fn render_services_table_writes_to_runtime_stdout() {
+        let services = vec![ServiceStatusEntry {
+            name: "svc-a".to_string(),
+            release_hash: "sha256:abc".to_string(),
+            started_at: "".to_string(),
+            state: ProtocolServiceState::Stopped,
+        }];
+
+        let output = capture_output(async move { render_services_table(&services) });
+
+        assert_eq!(
+            output.stdout,
+            "NAME STATE RELEASE STARTED_AT\nsvc-a stopped sha256:abc -\n"
+        );
+        assert_eq!(output.stderr, "");
     }
 }

@@ -1,12 +1,13 @@
 use std::{
-    collections::BTreeMap,
-    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     time::Instant,
 };
 
 use anyhow::{Context, anyhow};
-use imago_protocol::{BindingsCertUploadRequest, BindingsCertUploadResponse, MessageType};
+use imago_protocol::{
+    BindingsCertInspectRequest, BindingsCertInspectResponse, BindingsCertUploadRequest,
+    BindingsCertUploadResponse, MessageType,
+};
 use rcgen::{KeyPair, PKCS_ED25519};
 use url::Url;
 use uuid::Uuid;
@@ -16,22 +17,23 @@ use crate::{
     commands::{
         build,
         command_common::{
-            format_local_context_line, format_peer_context_line, negotiate_hello_with_features,
+            HelloSummary, format_local_context_line, format_peer_context_basic_line,
+            negotiate_hello_with_features,
         },
         deploy,
         error_diagnostics::{format_command_error, summarize_command_failure},
         ui,
     },
+    runtime,
 };
 
 use super::CommandResult;
 
 const GITIGNORE_CONTENT: &str = "*\n!.gitignore\n";
+const BINDINGS_CERT_INSPECT_FEATURE: &str = "bindings.cert.inspect";
 const BINDINGS_CERT_UPLOAD_FEATURE: &str = "bindings.cert.upload";
+const BINDINGS_CERT_INSPECT_REQUIRED_FEATURES: [&str; 1] = [BINDINGS_CERT_INSPECT_FEATURE];
 const BINDINGS_CERT_UPLOAD_REQUIRED_FEATURES: [&str; 1] = [BINDINGS_CERT_UPLOAD_FEATURE];
-const BINDINGS_CERT_NO_REQUIRED_FEATURES: [&str; 0] = [];
-const IMAGO_DIR_NAME: &str = ".imago";
-const KNOWN_HOSTS_FILE_NAME: &str = "known_hosts";
 
 #[derive(Debug)]
 struct OutputPaths {
@@ -58,6 +60,16 @@ struct BindingsCertDeploySummary {
 }
 
 pub fn run_generate(args: CertsGenerateArgs) -> CommandResult {
+    run_generate_with_project_root(args, Path::new("."))
+}
+
+pub(crate) fn run_generate_with_project_root(
+    mut args: CertsGenerateArgs,
+    project_root: &Path,
+) -> CommandResult {
+    if args.out_dir.is_relative() {
+        args.out_dir = project_root.join(&args.out_dir);
+    }
     let started_at = Instant::now();
     ui::command_start("trust.client-key.generate", "starting");
     ui::command_stage(
@@ -67,14 +79,16 @@ pub fn run_generate(args: CertsGenerateArgs) -> CommandResult {
     );
     match run_generate_inner(args) {
         Ok(output) => {
-            println!("generated key material:");
-            println!("  {}", output.paths.client_key.display());
-            println!("  {}", output.paths.gitignore.display());
-            println!(
+            let _ = runtime::write_stdout_line("generated key material:");
+            let _ = runtime::write_stdout_line(&format!("  {}", output.paths.client_key.display()));
+            let _ = runtime::write_stdout_line(&format!("  {}", output.paths.gitignore.display()));
+            let _ = runtime::write_stdout_line(&format!(
                 "  client_public_key_hex={}",
                 output.client_public_key_hex.as_str()
+            ));
+            let _ = runtime::write_stdout_line(
+                "private keys are sensitive. do not commit or share them.",
             );
-            println!("private keys are sensitive. do not commit or share them.");
 
             ui::command_finish("trust.client-key.generate", true, "");
             success_generate_result(started_at, output.client_public_key_hex)
@@ -158,16 +172,11 @@ async fn run_bindings_cert_upload_async(
     args: BindingsCertUploadArgs,
     project_root: &Path,
 ) -> anyhow::Result<BindingsCertUploadSummary> {
-    ui::command_stage(
-        "trust.cert.upload",
-        "load-config",
-        "loading target credentials",
-    );
+    ui::command_stage("trust.cert.upload", "validate", "validating inputs");
     let public_key_hex = normalize_ed25519_public_key_hex(&args.public_key)
         .context("invalid PUBLIC_KEY_HEX for trust cert upload")?;
-    let authority = normalize_known_hosts_authority(&args.to)
-        .with_context(|| format!("failed to normalize --to authority: {}", args.to))?;
-    let client_key = load_bindings_client_key(project_root)?;
+    let authority = normalize_rpc_authority(&args.authority)
+        .context("invalid --authority for trust cert upload")?;
     ui::command_info(
         "trust.cert.upload",
         &format_local_context_line(
@@ -175,19 +184,10 @@ async fn run_bindings_cert_upload_async(
             "trust.cert.upload",
             build::default_target_name(),
             &args.to,
-            None,
         ),
     );
 
-    upload_public_key_to_remote(
-        "trust.cert.upload",
-        &args.to,
-        &public_key_hex,
-        &authority,
-        &client_key,
-        &BINDINGS_CERT_UPLOAD_REQUIRED_FEATURES,
-    )
-    .await?;
+    upload_public_key_to_remote("trust.cert.upload", &args.to, &public_key_hex, &authority).await?;
     Ok(BindingsCertUploadSummary {
         authority,
         remote: args.to,
@@ -198,13 +198,12 @@ async fn run_bindings_cert_deploy_async(
     args: BindingsCertDeployArgs,
     project_root: &Path,
 ) -> anyhow::Result<BindingsCertDeploySummary> {
-    ui::command_stage(
-        "trust.cert.replicate",
-        "load-config",
-        "loading target credentials",
-    );
-    let client_key = load_bindings_client_key(project_root)?;
-    let mut from_failures = Vec::new();
+    ui::command_stage("trust.cert.replicate", "validate", "validating inputs");
+    let from_authority = normalize_rpc_authority(&args.from_authority)
+        .context("invalid --from-authority for trust cert replicate")?;
+    let to_authority = normalize_rpc_authority(&args.to_authority)
+        .context("invalid --to-authority for trust cert replicate")?;
+
     ui::command_info(
         "trust.cert.replicate",
         &format_local_context_line(
@@ -212,120 +211,69 @@ async fn run_bindings_cert_deploy_async(
             "trust.cert.replicate.from",
             build::default_target_name(),
             &args.from,
-            None,
         ),
     );
-
-    match connect_remote(&args.from, &client_key).await {
-        Ok(connected) => {
-            ui::command_stage("trust.cert.replicate", "hello", "negotiating hello (from)");
-            let correlation_id = Uuid::new_v4();
-            match negotiate_bindings_cert_hello(
-                &connected,
-                correlation_id,
-                &BINDINGS_CERT_NO_REQUIRED_FEATURES,
-            )
-            .await
-            {
-                Ok(hello) => {
-                    ui::command_info(
-                        "trust.cert.replicate",
-                        &format_peer_context_line(
-                            &connected.authority,
-                            &connected.resolved_addr,
-                            &hello,
-                        ),
-                    );
-                    connected.close(0, b"trust cert replicate from probe complete");
-                }
-                Err(err) => from_failures.push(format!("hello failed: {err}")),
-            }
-        }
-        Err(err) => from_failures.push(format!("connect failed: {err}")),
-    }
-
-    let from_authority = normalize_known_hosts_authority(&args.from)
-        .with_context(|| format!("failed to normalize --from authority: {}", args.from))?;
-    let to_authority = normalize_known_hosts_authority(&args.to)
-        .with_context(|| format!("failed to normalize --to authority: {}", args.to))?;
-    let known_hosts_path = resolve_known_hosts_path()?;
-
-    let from_public_key_hex = match read_known_host_public_key(&known_hosts_path, &from_authority) {
-        Ok(key) => Some(key),
-        Err(err) => {
-            from_failures.push(format!(
-                "public key lookup failed for authority '{from_authority}' in {}: {err}",
-                known_hosts_path.display()
-            ));
-            None
-        }
-    };
-
-    let to_error = if let Some(public_key_hex) = from_public_key_hex.as_deref() {
-        ui::command_info(
-            "trust.cert.replicate",
-            &format_local_context_line(
-                project_root,
-                "trust.cert.replicate.to",
-                build::default_target_name(),
-                &args.to,
-                None,
-            ),
-        );
-        upload_public_key_to_remote(
-            "trust.cert.replicate",
-            &args.to,
-            public_key_hex,
-            &from_authority,
-            &client_key,
-            &BINDINGS_CERT_UPLOAD_REQUIRED_FEATURES,
-        )
+    let public_key_hex = inspect_public_key_from_remote("trust.cert.replicate", &args.from)
         .await
-        .err()
-        .map(|err| format!("upload failed: {err}"))
-    } else {
-        Some("skipped because from public key is unavailable".to_string())
-    };
+        .context("failed to inspect source daemon public key")?;
 
-    let from_error = if from_failures.is_empty() {
-        None
-    } else {
-        Some(from_failures.join("; "))
-    };
+    ui::command_info(
+        "trust.cert.replicate",
+        &format_local_context_line(
+            project_root,
+            "trust.cert.replicate.to",
+            build::default_target_name(),
+            &args.to,
+        ),
+    );
+    upload_public_key_to_remote(
+        "trust.cert.replicate",
+        &args.to,
+        &public_key_hex,
+        &from_authority,
+    )
+    .await
+    .context("failed to upload source daemon public key to destination")?;
 
-    if from_error.is_none() && to_error.is_none() {
-        return Ok(BindingsCertDeploySummary {
-            from_authority,
-            to_authority,
-        });
-    }
-
-    Err(anyhow!(format_bindings_cert_deploy_result(
-        from_error.as_deref(),
-        to_error.as_deref()
-    )))
+    Ok(BindingsCertDeploySummary {
+        from_authority,
+        to_authority,
+    })
 }
 
-fn load_bindings_client_key(project_root: &Path) -> anyhow::Result<PathBuf> {
-    let target = build::load_target_config(build::default_target_name(), project_root)
-        .context("failed to load target configuration")?
-        .require_deploy_credentials()
-        .context("target settings are invalid for trust cert commands")?;
-    target
-        .client_key
-        .ok_or_else(|| anyhow!("target is missing required key: client_key"))
-}
-
-async fn connect_remote(
+async fn inspect_public_key_from_remote(
+    command_name: &str,
     remote: &str,
-    client_key: &Path,
-) -> anyhow::Result<deploy::ConnectedTargetSession> {
-    let target = build::DeployTargetConfig {
-        remote: remote.to_string(),
-        server_name: None,
-        client_key: Some(client_key.to_path_buf()),
-    };
-    deploy::connect_target(&target).await
+) -> anyhow::Result<String> {
+    ui::command_stage(command_name, "connect", "connecting source admin endpoint");
+    let connected = connect_remote(remote).await?;
+    let _session_close_guard =
+        deploy::ConnectedSessionCloseGuard::new(&connected, b"trust cert inspect complete");
+    let correlation_id = Uuid::new_v4();
+
+    ui::command_stage(command_name, "hello", "negotiating hello (source)");
+    let _hello = negotiate_bindings_cert_hello(
+        &connected,
+        correlation_id,
+        &BINDINGS_CERT_INSPECT_REQUIRED_FEATURES,
+    )
+    .await?;
+    ui::command_info(
+        command_name,
+        &format_peer_context_basic_line(&connected.authority, &connected.resolved_addr),
+    );
+
+    ui::command_stage(command_name, "inspect", "requesting bindings.cert.inspect");
+    let request = deploy::request_envelope(
+        MessageType::BindingsCertInspect,
+        Uuid::new_v4(),
+        correlation_id,
+        &BindingsCertInspectRequest {},
+    )?;
+    let response: BindingsCertInspectResponse =
+        deploy::response_payload(deploy::request_response(&connected, &request).await?)?;
+    normalize_ed25519_public_key_hex(&response.public_key_hex)
+        .context("bindings.cert.inspect returned invalid public key")
 }
 
 async fn upload_public_key_to_remote(
@@ -333,20 +281,29 @@ async fn upload_public_key_to_remote(
     remote: &str,
     public_key_hex: &str,
     authority: &str,
-    client_key: &Path,
-    required_features: &[&str],
 ) -> anyhow::Result<()> {
-    ui::command_stage(command_name, "connect", "connecting remote");
-    let connected = connect_remote(remote, client_key).await?;
+    ui::command_stage(
+        command_name,
+        "connect",
+        "connecting destination admin endpoint",
+    );
+    let connected = connect_remote(remote).await?;
+    let _session_close_guard =
+        deploy::ConnectedSessionCloseGuard::new(&connected, b"trust cert upload complete");
     let correlation_id = Uuid::new_v4();
 
-    ui::command_stage(command_name, "hello", "negotiating hello");
-    let hello =
-        negotiate_bindings_cert_hello(&connected, correlation_id, required_features).await?;
+    ui::command_stage(command_name, "hello", "negotiating hello (destination)");
+    let _hello = negotiate_bindings_cert_hello(
+        &connected,
+        correlation_id,
+        &BINDINGS_CERT_UPLOAD_REQUIRED_FEATURES,
+    )
+    .await?;
     ui::command_info(
         command_name,
-        &format_peer_context_line(&connected.authority, &connected.resolved_addr, &hello),
+        &format_peer_context_basic_line(&connected.authority, &connected.resolved_addr),
     );
+
     ui::command_stage(command_name, "upload", "uploading public key");
     send_bindings_cert_upload_request(
         command_name,
@@ -356,16 +313,27 @@ async fn upload_public_key_to_remote(
         authority,
     )
     .await?;
-    connected.close(0, b"trust cert upload complete");
-
     Ok(())
+}
+
+fn build_remote_target(remote: &str) -> anyhow::Result<build::DeployTargetConfig> {
+    Ok(build::DeployTargetConfig {
+        remote: remote.to_string(),
+        ssh_remote: build::parse_target_remote(remote)
+            .with_context(|| format!("invalid ssh target: {remote}"))?,
+    })
+}
+
+async fn connect_remote(remote: &str) -> anyhow::Result<deploy::ConnectedTargetSession> {
+    let target = build_remote_target(remote)?;
+    runtime::connect_target(&target).await
 }
 
 async fn negotiate_bindings_cert_hello(
     session: &deploy::ConnectedTargetSession,
     correlation_id: Uuid,
     required_features: &[&str],
-) -> anyhow::Result<crate::commands::command_common::HelloSummary> {
+) -> anyhow::Result<HelloSummary> {
     negotiate_hello_with_features(session, correlation_id, required_features).await
 }
 
@@ -393,113 +361,39 @@ async fn send_bindings_cert_upload_request(
     Ok(())
 }
 
-fn resolve_known_hosts_path() -> anyhow::Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("failed to resolve home directory for known_hosts"))?;
-    Ok(home.join(IMAGO_DIR_NAME).join(KNOWN_HOSTS_FILE_NAME))
-}
-
-fn read_known_host_public_key(path: &Path, authority: &str) -> anyhow::Result<String> {
-    let entries = load_known_hosts_entries(path)?;
-    entries
-        .get(authority)
-        .cloned()
-        .or_else(|| {
-            if let Some(without_scheme) = authority.strip_prefix("rpc://") {
-                entries
-                    .get(without_scheme)
-                    .cloned()
-                    .or_else(|| entries.get(&without_scheme.to_ascii_lowercase()).cloned())
-            } else {
-                let normalized = format!("rpc://{authority}");
-                entries
-                    .get(&normalized)
-                    .cloned()
-                    .or_else(|| entries.get(&normalized.to_ascii_lowercase()).cloned())
-            }
-        })
-        .ok_or_else(|| anyhow!("authority '{authority}' was not found in known_hosts"))
-}
-
-fn load_known_hosts_entries(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
-    if !path.exists() {
-        return Ok(BTreeMap::new());
+fn normalize_rpc_authority(raw: &str) -> anyhow::Result<String> {
+    let parsed = Url::parse(raw).with_context(|| format!("authority URL parse failed: {raw}"))?;
+    if parsed.scheme() != "rpc" {
+        return Err(anyhow!("authority must use rpc:// scheme: {raw}"));
+    }
+    if parsed.username() != "" || parsed.password().is_some() {
+        return Err(anyhow!(
+            "authority must not include user credentials: {raw}"
+        ));
+    }
+    if parsed.fragment().is_some() {
+        return Err(anyhow!("authority must not include a fragment: {raw}"));
+    }
+    if parsed.query().is_some() {
+        return Err(anyhow!(
+            "authority must not include query parameters: {raw}"
+        ));
+    }
+    if !parsed.path().is_empty() && parsed.path() != "/" {
+        return Err(anyhow!("authority must not include a path: {raw}"));
     }
 
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read known_hosts: {}", path.display()))?;
-    let mut entries = BTreeMap::new();
-    for (index, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        let (authority, key_hex) = trimmed.split_once('\t').ok_or_else(|| {
-            anyhow!(
-                "invalid known_hosts format at line {} in {}",
-                index + 1,
-                path.display()
-            )
-        })?;
-        let normalized_key = normalize_ed25519_public_key_hex(key_hex).with_context(|| {
-            format!(
-                "invalid key at line {} in known_hosts {}",
-                index + 1,
-                path.display()
-            )
-        })?;
-        if entries
-            .insert(authority.to_string(), normalized_key)
-            .is_some()
-        {
-            return Err(anyhow!(
-                "duplicate authority '{}' in known_hosts {}",
-                authority,
-                path.display()
-            ));
-        }
-    }
-
-    Ok(entries)
-}
-
-fn normalize_known_hosts_authority(remote: &str) -> anyhow::Result<String> {
-    let url = normalize_remote_to_url(remote)?;
-    let host = url
+    let host = parsed
         .host_str()
-        .ok_or_else(|| anyhow!("remote URL host is missing"))?
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_string();
-    let port = url.port().unwrap_or(4443);
+        .ok_or_else(|| anyhow!("authority host is missing: {raw}"))?;
+    let port = parsed
+        .port()
+        .ok_or_else(|| anyhow!("authority must include an explicit port: {raw}"))?;
     Ok(format!(
         "rpc://{}:{}",
-        format_host_for_url(&host).to_ascii_lowercase(),
+        format_host_for_url(host).to_ascii_lowercase(),
         port
     ))
-}
-
-fn normalize_remote_to_url(remote: &str) -> anyhow::Result<Url> {
-    if remote.contains("://") {
-        return Url::parse(remote).context("remote URL parse failed");
-    }
-
-    if let Ok(address) = remote.parse::<SocketAddr>() {
-        let host = format_host_for_url(&address.ip().to_string());
-        return Url::parse(&format!("https://{}:{}/", host, address.port()))
-            .context("remote socket address parse failed");
-    }
-
-    if let Ok(ip) = remote.parse::<IpAddr>() {
-        let host = format_host_for_url(&ip.to_string());
-        return Url::parse(&format!("https://{}:4443/", host))
-            .context("remote ip address parse failed");
-    }
-
-    Url::parse(&format!("https://{remote}")).context("remote URL parse failed")
 }
 
 fn format_host_for_url(host: &str) -> String {
@@ -520,19 +414,6 @@ fn normalize_ed25519_public_key_hex(value: &str) -> anyhow::Result<String> {
         ));
     }
     Ok(hex::encode(bytes))
-}
-
-fn format_bindings_cert_deploy_result(from_error: Option<&str>, to_error: Option<&str>) -> String {
-    let mut lines = vec!["trust cert replicate completed with errors:".to_string()];
-    lines.push(match from_error {
-        Some(err) => format!("from: {err}"),
-        None => "from: ok".to_string(),
-    });
-    lines.push(match to_error {
-        Some(err) => format!("to: {err}"),
-        None => "to: ok".to_string(),
-    });
-    lines.join("\n")
 }
 
 fn run_generate_inner(args: CertsGenerateArgs) -> anyhow::Result<GenerateOutput> {
@@ -611,9 +492,32 @@ fn write_private_key(path: &Path, contents: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::cli::BindingsCertUploadArgs;
+    use crate::runtime::{self, BufferedOutputSink, CliRuntime, OutputSink, SshTargetConnector};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use std::{path::Path, sync::Arc};
+
+    fn plain_runtime(output_sink: Arc<dyn OutputSink>) -> Arc<CliRuntime> {
+        Arc::new(CliRuntime::plain(
+            Path::new("."),
+            Arc::new(SshTargetConnector),
+            output_sink,
+        ))
+    }
+
+    fn capture_output(
+        action: impl std::future::Future<Output = CommandResult>,
+    ) -> (CommandResult, runtime::BufferedOutput) {
+        let output_sink = Arc::new(BufferedOutputSink::default());
+        let runtime = plain_runtime(output_sink.clone());
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime should build")
+            .block_on(runtime::scope(runtime, action));
+        (result, output_sink.snapshot())
+    }
 
     #[test]
     fn generates_client_key_and_public_key_hex() {
@@ -693,13 +597,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn run_generate_writes_generated_material_to_runtime_stdout() {
+        let dir = temp_dir("run_generate_writes_generated_material_to_runtime_stdout");
+        let args = CertsGenerateArgs {
+            out_dir: dir.clone(),
+            force: false,
+        };
+
+        let (result, output) = capture_output(async move { run_generate(args) });
+
+        assert_eq!(result.exit_code, 0);
+        assert!(output.stdout.contains("generated key material:\n"));
+        assert!(output.stdout.contains("client.key"));
+        assert!(output.stdout.contains("client_public_key_hex="));
+        assert!(
+            output
+                .stdout
+                .contains("private keys are sensitive. do not commit or share them.")
+        );
+        assert_eq!(output.stderr, "");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn run_generate_with_project_root_rebases_relative_out_dir() {
+        let dir = temp_dir("run_generate_with_project_root_rebases_relative_out_dir");
+        let args = CertsGenerateArgs {
+            out_dir: PathBuf::from("certs"),
+            force: false,
+        };
+
+        let result = run_generate_with_project_root(args, &dir);
+
+        assert_eq!(result.exit_code, 0);
+        assert!(dir.join("certs").join("client.key").exists());
+        assert!(dir.join("certs").join(".gitignore").exists());
+
+        cleanup(&dir);
+    }
+
     #[tokio::test]
     async fn bindings_cert_upload_rejects_invalid_public_key_hex() {
         let dir = temp_dir("bindings_cert_upload_rejects_invalid_public_key_hex");
         let result = run_bindings_cert_upload_with_project_root(
             BindingsCertUploadArgs {
                 public_key: "zz".to_string(),
-                to: "rpc://node-a:4443".to_string(),
+                to: "ssh://localhost".to_string(),
+                authority: "rpc://node-a:4443".to_string(),
             },
             &dir,
         )
@@ -718,74 +664,24 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_known_hosts_authority_from_rpc_url() {
+    fn normalize_rpc_authority_lowercases_host() {
         let authority =
-            normalize_known_hosts_authority("rpc://Node-A.Example.com:9443").expect("valid url");
+            normalize_rpc_authority("rpc://Node-A.Example.com:9443").expect("valid url");
         assert_eq!(authority, "rpc://node-a.example.com:9443");
     }
 
     #[test]
-    fn reads_known_host_public_key_from_file() {
-        let dir = temp_dir("reads_known_host_public_key_from_file");
-        let known_hosts_path = dir.join("known_hosts");
-        let key = "a".repeat(64);
-        let node_c_key = "b".repeat(64);
-        std::fs::write(
-            &known_hosts_path,
-            format!("# comment\nnode-b:4443\t{key}\nnode-c:4443\t{node_c_key}\n"),
-        )
-        .expect("known_hosts should be written");
-
-        let loaded = read_known_host_public_key(&known_hosts_path, "node-b:4443")
-            .expect("key should be loaded");
-        assert_eq!(loaded, key);
-
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn load_known_hosts_entries_rejects_34_byte_key() {
-        let dir = temp_dir("load_known_hosts_entries_rejects_34_byte_key");
-        let known_hosts_path = dir.join("known_hosts");
-        let key = "b".repeat(68);
-        std::fs::write(&known_hosts_path, format!("node-c:4443\t{key}\n"))
-            .expect("known_hosts should be written");
-
+    fn normalize_rpc_authority_rejects_missing_port() {
         let err =
-            load_known_hosts_entries(&known_hosts_path).expect_err("34-byte key must be rejected");
-        let message = format!("{err:#}");
-        assert!(
-            message.contains("key must be a 32-byte ed25519 raw key (got 34 bytes)"),
-            "unexpected error: {message}"
-        );
-
-        cleanup(&dir);
+            normalize_rpc_authority("rpc://node-a.example.com").expect_err("port must be required");
+        assert!(err.to_string().contains("explicit port"));
     }
 
     #[test]
-    fn reads_known_host_public_key_using_normalized_authority() {
-        let dir = temp_dir("reads_known_host_public_key_using_normalized_authority");
-        let known_hosts_path = dir.join("known_hosts");
-        let key = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        std::fs::write(
-            &known_hosts_path,
-            format!("#\n# comment\nrpc://node-b:4443\t{key}\n"),
-        )
-        .expect("known_hosts should be written");
-
-        let loaded = read_known_host_public_key(&known_hosts_path, "rpc://node-b:4443")
-            .expect("key should be loaded");
-        assert_eq!(loaded, key);
-
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn formats_bindings_cert_deploy_result_with_from_to_labels() {
-        let rendered =
-            format_bindings_cert_deploy_result(Some("connect failed"), Some("upload failed"));
-        assert!(rendered.contains("from: connect failed"));
-        assert!(rendered.contains("to: upload failed"));
+    fn build_remote_target_rejects_non_ssh_remote() {
+        let err =
+            build_remote_target("rpc://node-a:4443").expect_err("rpc target must be rejected");
+        assert!(err.to_string().contains("invalid ssh target"));
     }
 
     #[cfg(unix)]

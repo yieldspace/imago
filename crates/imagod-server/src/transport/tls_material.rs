@@ -82,8 +82,7 @@ impl rustls::server::danger::ClientCertVerifier for RawPublicKeyClientVerifier {
 
         if !is_tls_client_key_allowlisted(&client_key) {
             return Err(rustls::Error::General(
-                "client raw public key is not present in tls.client_public_keys/admin_public_keys"
-                    .to_string(),
+                "client raw public key is not present in tls.client_public_keys".to_string(),
             ));
         }
 
@@ -254,7 +253,6 @@ mod tests {
             control_socket_path: PathBuf::from(DEFAULT_CONTROL_SOCKET_PATH),
             tls: TlsConfig {
                 server_key: path,
-                admin_public_keys: Vec::new(),
                 client_public_keys: Vec::new(),
                 known_public_keys: BTreeMap::new(),
             },
@@ -287,7 +285,7 @@ mod tests {
     fn verifier_accepts_allowlisted_client_key() {
         let _guard = lock_dynamic_public_keys_for_tests();
         let key = [0x11u8; 32];
-        replace_dynamic_public_keys_for_tests(&[], &[key]);
+        replace_dynamic_public_keys_for_tests(&[key]);
 
         let verifier = RawPublicKeyClientVerifier::new(
             web_transport_quinn::crypto::default_provider().signature_verification_algorithms,
@@ -307,7 +305,7 @@ mod tests {
     #[test]
     fn verifier_rejects_non_allowlisted_client_key() {
         let _guard = lock_dynamic_public_keys_for_tests();
-        replace_dynamic_public_keys_for_tests(&[], &[[0x11u8; 32]]);
+        replace_dynamic_public_keys_for_tests(&[[0x11u8; 32]]);
 
         let verifier = RawPublicKeyClientVerifier::new(
             web_transport_quinn::crypto::default_provider().signature_verification_algorithms,
@@ -332,7 +330,7 @@ mod tests {
     #[test]
     fn verifier_reflects_dynamic_allowlist_update() {
         let _guard = lock_dynamic_public_keys_for_tests();
-        replace_dynamic_public_keys_for_tests(&[], &[]);
+        replace_dynamic_public_keys_for_tests(&[]);
 
         let verifier = RawPublicKeyClientVerifier::new(
             web_transport_quinn::crypto::default_provider().signature_verification_algorithms,
@@ -361,7 +359,7 @@ mod tests {
     #[test]
     fn verifier_rejects_non_ed25519_client_key() {
         let _guard = lock_dynamic_public_keys_for_tests();
-        replace_dynamic_public_keys_for_tests(&[], &[[0x11u8; 32]]);
+        replace_dynamic_public_keys_for_tests(&[[0x11u8; 32]]);
 
         let verifier = RawPublicKeyClientVerifier::new(
             web_transport_quinn::crypto::default_provider().signature_verification_algorithms,
@@ -389,7 +387,7 @@ mod tests {
     #[test]
     fn verifier_supports_only_ed25519_signature_scheme() {
         let _guard = lock_dynamic_public_keys_for_tests();
-        replace_dynamic_public_keys_for_tests(&[], &[[0x11u8; 32]]);
+        replace_dynamic_public_keys_for_tests(&[[0x11u8; 32]]);
 
         let verifier = RawPublicKeyClientVerifier::new(
             web_transport_quinn::crypto::default_provider().signature_verification_algorithms,
@@ -404,7 +402,7 @@ mod tests {
     fn given_intermediate_certs__when_verify_client_cert__then_rejected() {
         let _guard = lock_dynamic_public_keys_for_tests();
         let key = [0x11u8; 32];
-        replace_dynamic_public_keys_for_tests(&[], &[key]);
+        replace_dynamic_public_keys_for_tests(&[key]);
         let verifier = RawPublicKeyClientVerifier::new(
             web_transport_quinn::crypto::default_provider().signature_verification_algorithms,
         );

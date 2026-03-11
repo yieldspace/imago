@@ -1,4 +1,3 @@
-use super::certs::{generate_key_material, write_known_hosts};
 use super::cli::{CmdOutput, run_imago_cli};
 use super::cluster::Cluster;
 use super::http::wait_http_response;
@@ -61,8 +60,7 @@ impl ServiceHandle {
 pub struct Scenario {
     workspace_root: PathBuf,
     _temp_dir: TempDir,
-    control_home: PathBuf,
-    control_admin_key_path: PathBuf,
+    daemon_package: String,
     cluster: Cluster,
     projects_base_dir: PathBuf,
     services: BTreeMap<String, Service>,
@@ -80,17 +78,9 @@ impl Scenario {
         let temp_dir = TempDirBuilder::new().prefix(&prefix).tempdir()?;
         let root = temp_dir.path().to_path_buf();
 
-        let control_dir = root.join("c");
-        fs::create_dir_all(&control_dir)?;
-        let control_keys = generate_key_material(&control_dir)?;
-
-        let control_home = root.join("h");
-        fs::create_dir_all(&control_home)?;
-
         let cluster = Cluster::new_with_daemon_package(
             workspace_root.clone(),
             root.join("n"),
-            control_keys.admin_public_hex,
             daemon_package,
         )?;
         let projects_base_dir = root.join("p");
@@ -99,8 +89,7 @@ impl Scenario {
         Ok(Self {
             workspace_root,
             _temp_dir: temp_dir,
-            control_home,
-            control_admin_key_path: control_keys.admin_key_path,
+            daemon_package: daemon_package.to_string(),
             cluster,
             projects_base_dir,
             services: BTreeMap::new(),
@@ -132,7 +121,6 @@ impl Scenario {
 
         let service_index = self.services.len();
         let project = ProjectLayout::new(&self.projects_base_dir, &format!("s{service_index}"))?;
-        let _ = project.copy_control_key(&self.control_admin_key_path)?;
 
         let main_path = copy_wasm_to_project(&project, wasm)?;
 
@@ -143,8 +131,6 @@ impl Scenario {
             .cloned()
             .ok_or_else(|| anyhow!("unknown target '{target}'"))?;
         project.write_imago_toml(service_name, &main_path, app, &default_target, &targets)?;
-
-        write_known_hosts(&self.control_home, &self.cluster.known_hosts_entries())?;
 
         self.services.insert(
             service_name.to_string(),
@@ -207,18 +193,28 @@ impl Scenario {
 
     pub fn trust_cert_replicate(
         &self,
-        from: &str,
-        to: &str,
-        via_target: &str,
+        from_remote: &str,
+        from_authority: &str,
+        to_remote: &str,
+        to_authority: &str,
     ) -> TestResult<CmdOutput> {
         let service_name = self
             .current_service
             .as_deref()
             .ok_or_else(|| anyhow!("no current service"))?;
-        let service = self.service(service_name)?;
-        ensure_target_exists(service, via_target)?;
-
-        let args = ["trust", "cert", "replicate", "--from", from, "--to", to];
+        let args = [
+            "trust",
+            "cert",
+            "replicate",
+            "--from",
+            from_remote,
+            "--from-authority",
+            from_authority,
+            "--to",
+            to_remote,
+            "--to-authority",
+            to_authority,
+        ];
         let output = self.run_service_cli(service_name, &args)?;
         output.ensure_success(&args)?;
         Ok(output)
@@ -229,7 +225,7 @@ impl Scenario {
         run_imago_cli(
             &self.workspace_root,
             &service.project.project_dir,
-            &self.control_home,
+            &self.daemon_package,
             args,
         )
     }

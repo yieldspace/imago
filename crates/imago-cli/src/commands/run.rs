@@ -16,6 +16,7 @@ use crate::{
         error_diagnostics::{self, summarize_command_failure},
         logs, ui,
     },
+    runtime,
 };
 
 const AUTO_FOLLOW_TAIL_LINES: u32 = 200;
@@ -83,17 +84,13 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<RunSumm
         .context("failed to resolve service name for service start")?;
     ui::command_info(
         "service.start",
-        &format_local_context_line(
-            project_root,
-            &service_name,
-            &target_name,
-            &target.remote,
-            target.server_name.as_deref(),
-        ),
+        &format_local_context_line(project_root, &service_name, &target_name, &target.remote),
     );
 
     ui::command_stage("service.start", "connect", "connecting target");
-    let connected = deploy::connect_target(&target).await?;
+    let connected = runtime::connect_target(&target).await?;
+    let _session_close_guard =
+        deploy::ConnectedSessionCloseGuard::new(&connected, b"service.start complete");
     let correlation_id = Uuid::new_v4();
     ui::command_stage("service.start", "hello", "negotiating hello");
     let hello = negotiate_hello(&connected, correlation_id).await?;
@@ -101,6 +98,8 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<RunSumm
         "service.start",
         &format_peer_context_line(&connected.authority, &connected.resolved_addr, &hello),
     );
+    let mut session_close_guard =
+        deploy::ConnectedSessionCloseGuard::new(&connected, b"service.start complete");
     let command_stream_timeout =
         deploy::resolve_command_stream_timeout_from_hello_limits(&hello.limits);
 
@@ -121,6 +120,9 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<RunSumm
     .await?;
     handle_terminal_event("service.start", responses)?;
     if should_clear_start_spinner_before_follow(detach) {
+        session_close_guard.disarm();
+        connected.close(0, b"service.start command session complete");
+        drop(session_close_guard);
         ui::command_clear("service.start");
         follow_logs_after_run(project_root, &target_config, &service_name).await;
     }

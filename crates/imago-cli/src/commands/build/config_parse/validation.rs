@@ -243,76 +243,6 @@ pub(in crate::commands::build) fn validate_dependency_package_name(
     build_validation::validate_dependency_package_name(name)
 }
 
-pub(in crate::commands::build) fn normalize_target_credential_path(
-    raw: &str,
-    key: &str,
-) -> anyhow::Result<PathBuf> {
-    if raw.is_empty() {
-        return Err(anyhow!("target key '{}' must not be empty", key));
-    }
-
-    let path = Path::new(raw);
-    if raw.contains('\\') {
-        return Err(anyhow!(
-            "target key '{}' must not contain backslashes: {}",
-            key,
-            raw
-        ));
-    }
-
-    let raw_os = path.as_os_str().to_string_lossy();
-    if raw_os.len() >= 2 && raw_os.as_bytes()[1] == b':' {
-        return Err(anyhow!(
-            "target key '{}' must not be windows-prefixed: {}",
-            key,
-            raw
-        ));
-    }
-
-    let is_absolute = path.is_absolute();
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::Normal(segment) => normalized.push(segment),
-            Component::RootDir => {}
-            Component::ParentDir => {
-                return Err(anyhow!(
-                    "target key '{}' must not contain path traversal: {}",
-                    key,
-                    raw
-                ));
-            }
-            _ => {
-                return Err(anyhow!("target key '{}' is invalid: {}", key, raw));
-            }
-        }
-    }
-
-    if normalized.as_os_str().is_empty() {
-        return Err(anyhow!("target key '{}' must not be empty", key));
-    }
-
-    if is_absolute {
-        Ok(Path::new("/").join(normalized))
-    } else {
-        Ok(normalized)
-    }
-}
-
-pub(crate) fn resolve_target_credential_path(
-    raw: &str,
-    key: &str,
-    project_root: &Path,
-) -> anyhow::Result<PathBuf> {
-    let normalized = normalize_target_credential_path(raw, key)?;
-    if normalized.is_absolute() {
-        Ok(normalized)
-    } else {
-        Ok(project_root.join(normalized))
-    }
-}
-
 pub(in crate::commands::build) fn normalize_wasi_guest_path(
     raw: &str,
     field_name: &str,
@@ -370,12 +300,7 @@ pub(in crate::commands::build) fn normalize_wasi_guest_path(
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
-
-    use super::{
-        normalize_relative_path, normalize_target_credential_path, normalize_wasi_guest_path,
-        resolve_target_credential_path, validate_service_name,
-    };
+    use super::{normalize_relative_path, normalize_wasi_guest_path, validate_service_name};
 
     #[test]
     fn validate_service_name_rejects_unsupported_character() {
@@ -392,21 +317,6 @@ mod tests {
         let parent_err =
             normalize_relative_path("../file.wit", "field").expect_err("parent must fail");
         assert!(parent_err.to_string().contains("path traversal"));
-    }
-
-    #[test]
-    fn normalize_target_credential_path_preserves_absolute_path() {
-        let normalized = normalize_target_credential_path("/tmp/client.key", "client_key")
-            .expect("absolute path should normalize");
-        assert_eq!(normalized, PathBuf::from("/tmp/client.key"));
-    }
-
-    #[test]
-    fn resolve_target_credential_path_joins_project_root_for_relative_path() {
-        let root = Path::new("/tmp/imago-cli-config-parse-validation");
-        let resolved = resolve_target_credential_path("certs/client.key", "client_key", root)
-            .expect("relative target credential should resolve under root");
-        assert_eq!(resolved, root.join("certs/client.key"));
     }
 
     #[test]

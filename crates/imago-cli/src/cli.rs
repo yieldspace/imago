@@ -335,21 +335,33 @@ pub struct BindingsCertUploadArgs {
     #[arg(value_name = "PUBLIC_KEY_HEX")]
     pub public_key: String,
 
-    /// Destination remote authority (for example: rpc://node-a:4443).
-    #[arg(long, value_name = "REMOTE_AUTHORITY")]
+    /// Destination SSH admin endpoint (for example: ssh://node-a?socket=/run/imago/imagod.sock).
+    #[arg(long, value_name = "SSH_REMOTE")]
     pub to: String,
+
+    /// Authority represented by the uploaded public key (for example: rpc://node-a:4443).
+    #[arg(long, value_name = "RPC_AUTHORITY")]
+    pub authority: String,
 }
 
 /// Deploy binding trust from one authority to another.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct BindingsCertDeployArgs {
-    /// Destination remote authority.
-    #[arg(long, value_name = "REMOTE_AUTHORITY")]
+    /// Destination SSH admin endpoint.
+    #[arg(long, value_name = "SSH_REMOTE")]
     pub to: String,
 
-    /// Source remote authority.
-    #[arg(long, value_name = "REMOTE_AUTHORITY")]
+    /// Destination node authority.
+    #[arg(long, value_name = "RPC_AUTHORITY")]
+    pub to_authority: String,
+
+    /// Source SSH admin endpoint.
+    #[arg(long, value_name = "SSH_REMOTE")]
     pub from: String,
+
+    /// Source node authority.
+    #[arg(long, value_name = "RPC_AUTHORITY")]
+    pub from_authority: String,
 }
 
 /// Generate a local client key for imago-cli authentication.
@@ -551,6 +563,8 @@ mod tests {
             "upload",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "--to",
+            "ssh://node-a?socket=/run/imago/imagod.sock",
+            "--authority",
             "rpc://node-a:4443",
         ])
         .expect("parse should succeed");
@@ -563,7 +577,8 @@ mod tests {
                             public_key:
                                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                                     .to_string(),
-                            to: "rpc://node-a:4443".to_string(),
+                            to: "ssh://node-a?socket=/run/imago/imagod.sock".to_string(),
+                            authority: "rpc://node-a:4443".to_string(),
                         }),
                     }),
                 }),
@@ -576,8 +591,12 @@ mod tests {
             "cert",
             "replicate",
             "--to",
+            "ssh://node-a?socket=/run/imago/imagod.sock",
+            "--to-authority",
             "rpc://node-a:4443",
             "--from",
+            "ssh://node-b?socket=/run/imago/imagod.sock",
+            "--from-authority",
             "rpc://node-b:4443",
         ])
         .expect("parse should succeed");
@@ -587,8 +606,10 @@ mod tests {
                 command: Commands::Trust(TrustSubcommandArgs {
                     command: TrustCommands::Cert(TrustCertSubcommandArgs {
                         command: TrustCertCommands::Replicate(BindingsCertDeployArgs {
-                            to: "rpc://node-a:4443".to_string(),
-                            from: "rpc://node-b:4443".to_string(),
+                            to: "ssh://node-a?socket=/run/imago/imagod.sock".to_string(),
+                            to_authority: "rpc://node-a:4443".to_string(),
+                            from: "ssh://node-b?socket=/run/imago/imagod.sock".to_string(),
+                            from_authority: "rpc://node-b:4443".to_string(),
                         }),
                     }),
                 }),

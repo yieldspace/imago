@@ -7,8 +7,14 @@ RUN cargo build --release -p imagod
 FROM debian:bookworm-slim AS runtime
 
 WORKDIR /var/lib/imagod
-RUN mkdir -p /etc/imago/example
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-server \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /etc/imago/example /run/sshd
 COPY --from=builder /workspace/target/release/imagod /usr/local/bin/imagod
 COPY examples/imago-compose-bindings/docker /etc/imago/example
+COPY examples/imago-compose-bindings/docker/entrypoint-imagod.sh /usr/local/bin/entrypoint-imagod.sh
+RUN chmod 755 /usr/local/bin/entrypoint-imagod.sh
 EXPOSE 4443
-ENTRYPOINT ["/usr/local/bin/imagod"]
+EXPOSE 22
+ENTRYPOINT ["/usr/local/bin/entrypoint-imagod.sh"]

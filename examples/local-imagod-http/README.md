@@ -7,6 +7,8 @@
 ## 前提
 
 Rust toolchain と `wasm32-wasip2` target を用意します（未導入なら `rustup target add wasm32-wasip2`）。
+あわせて OpenSSH client/server を用意し、`ssh localhost true` が対話なしで成功する状態にしてください。
+`imago service deploy` は `ssh://localhost?...` 経由で `imagod proxy-stdio` を呼ぶため、SSH ログインシェルの `PATH` から `imagod` バイナリを実行できる必要があります。
 
 ## 実行
 
@@ -39,6 +41,10 @@ cd /path/to/imago
 
 ## Troubleshooting
 
-### known_hosts の古いエントリで service deploy が失敗する
+### SSH localhost 経由で service deploy が失敗する
 
-`certificate mismatch` などで `service deploy` が失敗する場合のみ、`~/.imago/known_hosts` から `localhost:4443` / `127.0.0.1:4443` の行を削除して再実行してください。
+以下を確認してください。
+
+- `ssh localhost true` がパスフレーズ入力や host key 確認なしで成功する
+- SSH ログインシェルで `imagod proxy-stdio --socket /tmp/imagod-local-http.sock` を実行できる
+- `imago.toml` の `remote = "ssh://localhost?socket=/tmp/imagod-local-http.sock"` と `imagod.toml` の `control_socket_path` が一致している

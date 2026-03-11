@@ -18,6 +18,4 @@ wasi = true
 "sizumita:ferris" = ["sizumita:ferris/says@0.1.0.say"]
 
 [target.default]
-remote = "127.0.0.1:4443"
-server_name = "localhost"
-client_key = "certs/client.key"
+remote = "ssh://localhost?socket=/tmp/imagod-local-plugin-hello.sock"

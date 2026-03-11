@@ -133,20 +133,14 @@ pub(crate) fn format_local_context_line(
     service: &str,
     target_name: &str,
     remote: &str,
-    server_name: Option<&str>,
 ) -> String {
-    let normalized_server_name = server_name
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .unwrap_or("-");
     format!(
-        "cli={} project={} service={} target={} remote={} server_name={}",
+        "cli={} project={} service={} target={} remote={}",
         env!("CARGO_PKG_VERSION"),
         absolute_project_path(project_root),
         service,
         target_name,
         remote,
-        normalized_server_name
     )
 }
 
@@ -179,6 +173,10 @@ pub(crate) fn format_peer_context_line(
         max_inflight,
         deploy_stream_timeout_secs
     )
+}
+
+pub(crate) fn format_peer_context_basic_line(authority: &str, resolved: &str) -> String {
+    format!("authority={} resolved={}", authority, resolved)
 }
 
 pub(crate) fn handle_terminal_event(
@@ -284,13 +282,12 @@ mod tests {
             Path::new("/tmp/imago"),
             "<all-running>",
             "default",
-            "127.0.0.1:4443",
-            None,
+            "ssh://localhost?socket=/run/imago/imagod.sock",
         );
         assert_eq!(
             line,
             format!(
-                "cli={} project=/tmp/imago service=<all-running> target=default remote=127.0.0.1:4443 server_name=-",
+                "cli={} project=/tmp/imago service=<all-running> target=default remote=ssh://localhost?socket=/run/imago/imagod.sock",
                 env!("CARGO_PKG_VERSION")
             )
         );

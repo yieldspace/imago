@@ -1,9 +1,33 @@
 use async_trait::async_trait;
+use std::{path::PathBuf, time::Duration};
 
 use crate::commands::build;
 
 #[async_trait]
-pub(crate) trait TargetConnector {
+#[doc(hidden)]
+pub trait AdminTransport: Send + Sync {
+    fn close(&self);
+
+    async fn request_response_bytes(
+        &self,
+        framed: &[u8],
+        open_write_timeout: Duration,
+        read_timeout: Option<Duration>,
+    ) -> anyhow::Result<Vec<u8>>;
+
+    async fn stream_response_frames(
+        &self,
+        framed: &[u8],
+        open_write_timeout: Duration,
+        read_idle_timeout: Option<Duration>,
+        follow: bool,
+        on_frame: &mut (dyn FnMut(Vec<u8>) -> anyhow::Result<bool> + Send),
+    ) -> anyhow::Result<super::StreamRequestTermination>;
+}
+
+#[async_trait]
+#[doc(hidden)]
+pub trait TargetConnector: Send + Sync {
     async fn connect(
         &self,
         target: &build::DeployTargetConfig,
@@ -11,10 +35,11 @@ pub(crate) trait TargetConnector {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct QuinnTargetConnector;
+#[doc(hidden)]
+pub struct SshTargetConnector;
 
 #[async_trait]
-impl TargetConnector for QuinnTargetConnector {
+impl TargetConnector for SshTargetConnector {
     async fn connect(
         &self,
         target: &build::DeployTargetConfig,
@@ -23,46 +48,65 @@ impl TargetConnector for QuinnTargetConnector {
     }
 }
 
+#[derive(Debug, Clone)]
+#[doc(hidden)]
+pub struct LocalProxyTargetConnector {
+    imagod_binary: PathBuf,
+}
+
+impl LocalProxyTargetConnector {
+    pub fn new(imagod_binary: PathBuf) -> Self {
+        Self { imagod_binary }
+    }
+}
+
+#[async_trait]
+impl TargetConnector for LocalProxyTargetConnector {
+    async fn connect(
+        &self,
+        target: &build::DeployTargetConfig,
+    ) -> anyhow::Result<super::ConnectedTargetSession> {
+        super::connect_local_proxy_target(target, &self.imagod_binary)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use super::LocalProxyTargetConnector;
+    use crate::commands::build;
+    use std::path::PathBuf;
 
-    use super::{QuinnTargetConnector, TargetConnector};
-    use crate::commands::build::DeployTargetConfig;
-
-    fn missing_client_key_path() -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "imago-cli-deploy-network-missing-key-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock should be after epoch")
-                .as_nanos()
-        ));
-        if path.exists() {
-            fs::remove_file(&path).expect("existing file should be removed");
-        }
-        path
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn quinn_connector_connect_delegates_error_path_to_connect_target() {
-        let target = DeployTargetConfig {
-            remote: "127.0.0.1:7443".to_string(),
-            server_name: None,
-            client_key: Some(missing_client_key_path()),
+    #[test]
+    fn ssh_proxy_command_args_match_proxy_stdio_contract() {
+        let remote = build::SshTargetRemote {
+            user: Some("root".to_string()),
+            host: "edge.example.com".to_string(),
+            port: Some(2222),
+            socket_path: Some("/tmp/imagod.sock".to_string()),
         };
 
-        let direct = super::super::connect_target(&target)
-            .await
-            .err()
-            .expect("direct connect_target should fail with missing key");
-        let delegated = QuinnTargetConnector
-            .connect(&target)
-            .await
-            .err()
-            .expect("delegated connect should fail with missing key");
+        let args = super::super::ssh_proxy_command_args(&remote);
 
-        assert_eq!(delegated.to_string(), direct.to_string());
+        assert_eq!(
+            args,
+            vec![
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                "-p",
+                "2222",
+                "root@edge.example.com",
+                "imagod",
+                "proxy-stdio",
+                "--socket",
+                "/tmp/imagod.sock",
+            ]
+        );
+    }
+
+    #[test]
+    fn local_proxy_connector_keeps_binary_path() {
+        let connector = LocalProxyTargetConnector::new(PathBuf::from("/tmp/imagod"));
+        assert_eq!(connector.imagod_binary, PathBuf::from("/tmp/imagod"));
     }
 }

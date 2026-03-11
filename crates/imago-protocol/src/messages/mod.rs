@@ -19,7 +19,10 @@ pub use artifact::{
     ArtifactCommitRequest, ArtifactCommitResponse, ArtifactPushAck, ArtifactPushChunkHeader,
     ArtifactPushRequest, ArtifactStatus, ByteRange, DeployPrepareRequest, DeployPrepareResponse,
 };
-pub use bindings::{BindingsCertUploadRequest, BindingsCertUploadResponse};
+pub use bindings::{
+    BindingsCertInspectRequest, BindingsCertInspectResponse, BindingsCertUploadRequest,
+    BindingsCertUploadResponse,
+};
 pub use command::{
     CommandCancelRequest, CommandCancelResponse, CommandEvent, CommandEventType, CommandPayload,
     CommandStartRequest, CommandStartResponse, CommandState, CommandType, DeployCommandPayload,
@@ -63,6 +66,8 @@ pub enum MessageType {
     LogsEnd,
     #[serde(rename = "rpc.invoke")]
     RpcInvoke,
+    #[serde(rename = "bindings.cert.inspect")]
+    BindingsCertInspect,
     #[serde(rename = "bindings.cert.upload")]
     BindingsCertUpload,
 }
