@@ -223,6 +223,32 @@ impl ConnectedTargetSession {
     }
 }
 
+pub(crate) struct ConnectedSessionCloseGuard<'a> {
+    session: Option<&'a ConnectedTargetSession>,
+    reason: &'static [u8],
+}
+
+impl<'a> ConnectedSessionCloseGuard<'a> {
+    pub(crate) fn new(session: &'a ConnectedTargetSession, reason: &'static [u8]) -> Self {
+        Self {
+            session: Some(session),
+            reason,
+        }
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.session = None;
+    }
+}
+
+impl Drop for ConnectedSessionCloseGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.take() {
+            session.close(0, self.reason);
+        }
+    }
+}
+
 impl SshTargetSession {
     fn close_process(&self) {
         if let Ok(mut inner) = self.inner.try_lock() {
@@ -683,6 +709,8 @@ async fn run_async_with_target_override(
         },
     )
     .await?;
+    let _session_close_guard =
+        ConnectedSessionCloseGuard::new(&upload_result.session, b"service.deploy complete");
 
     deploy_stage(
         DEPLOY_PHASE_COMMAND,
@@ -839,6 +867,8 @@ async fn run_upload_phase_once<C: network::TargetConnector + ?Sized>(
         "establishing transport session",
     );
     let connected = target_connector.connect(inputs.target).await?;
+    let mut session_close_guard =
+        ConnectedSessionCloseGuard::new(&connected, b"service.deploy upload phase complete");
 
     deploy_stage(DEPLOY_PHASE_HELLO, "hello", "negotiating upload features");
     let hello = request_envelope(
@@ -949,6 +979,8 @@ async fn run_upload_phase_once<C: network::TargetConnector + ?Sized>(
 
     let authority = connected.authority.clone();
     let resolved_addr = connected.resolved_addr.clone();
+    session_close_guard.disarm();
+    drop(session_close_guard);
     Ok(UploadPhaseResult {
         session: connected,
         deploy_id: prepare_response.deploy_id,
@@ -2548,6 +2580,11 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
@@ -2564,6 +2601,47 @@ mod tests {
             fs::create_dir_all(parent).expect("parent dir should be created");
         }
         fs::write(path, bytes).expect("file should be written");
+    }
+
+    struct CountingTransport {
+        close_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl network::AdminTransport for CountingTransport {
+        fn close(&self) {
+            self.close_count.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn request_response_bytes(
+            &self,
+            _framed: &[u8],
+            _open_write_timeout: Duration,
+            _read_timeout: Option<Duration>,
+        ) -> anyhow::Result<Vec<u8>> {
+            unreachable!("counting transport does not support requests")
+        }
+
+        async fn stream_response_frames(
+            &self,
+            _framed: &[u8],
+            _open_write_timeout: Duration,
+            _read_idle_timeout: Option<Duration>,
+            _follow: bool,
+            _on_frame: &mut (dyn FnMut(Vec<u8>) -> anyhow::Result<bool> + Send),
+        ) -> anyhow::Result<StreamRequestTermination> {
+            unreachable!("counting transport does not support streams")
+        }
+    }
+
+    fn counting_session(close_count: Arc<AtomicUsize>) -> ConnectedTargetSession {
+        ConnectedTargetSession {
+            transport: Arc::new(CountingTransport { close_count }),
+            authority: "authority".to_string(),
+            resolved_addr: "127.0.0.1:0".to_string(),
+            configured_host: "localhost".to_string(),
+            remote_input: "ssh://localhost".to_string(),
+        }
     }
 
     fn write_imago_lock(root: &Path, lock: &ImagoLock) {
@@ -2666,6 +2744,29 @@ mod tests {
                 capabilities: build::ManifestCapabilityPolicy::default(),
             }],
         }
+    }
+
+    #[test]
+    fn connected_session_close_guard_closes_session_on_drop() {
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let session = counting_session(close_count.clone());
+        {
+            let _guard = ConnectedSessionCloseGuard::new(&session, b"done");
+        }
+
+        assert_eq!(close_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn connected_session_close_guard_can_be_disarmed() {
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let session = counting_session(close_count.clone());
+        {
+            let mut guard = ConnectedSessionCloseGuard::new(&session, b"done");
+            guard.disarm();
+        }
+
+        assert_eq!(close_count.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -95,6 +95,8 @@ async fn run_async_with_target_override(
 
     ui::command_stage("service.ls", "connect", "connecting target");
     let connected = runtime::connect_target(&target).await?;
+    let _session_close_guard =
+        deploy::ConnectedSessionCloseGuard::new(&connected, b"service.ls complete");
 
     let correlation_id = Uuid::new_v4();
     ui::command_stage("service.ls", "hello", "negotiating hello");

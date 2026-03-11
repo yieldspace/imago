@@ -89,6 +89,8 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<RunSumm
 
     ui::command_stage("service.start", "connect", "connecting target");
     let connected = runtime::connect_target(&target).await?;
+    let _session_close_guard =
+        deploy::ConnectedSessionCloseGuard::new(&connected, b"service.start complete");
     let correlation_id = Uuid::new_v4();
     ui::command_stage("service.start", "hello", "negotiating hello");
     let hello = negotiate_hello(&connected, correlation_id).await?;

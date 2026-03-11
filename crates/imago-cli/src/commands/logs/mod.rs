@@ -216,131 +216,123 @@ async fn run_async_with_target_override(
     );
     ui::command_stage("service.logs", "connect", "connecting target");
     let connected = runtime::connect_target(&target).await?;
-    let result = async {
-        ui::command_stage("service.logs", "hello", "negotiating hello");
-        let required_features = if with_timestamp {
-            LOGS_HELLO_REQUIRED_FEATURES_WITH_TIMESTAMP.as_slice()
-        } else {
-            LOGS_HELLO_REQUIRED_FEATURES.as_slice()
-        };
-        let hello =
-            negotiate_hello_with_features(&connected, Uuid::new_v4(), required_features).await?;
-        ui::command_info(
-            "service.logs",
-            &format_peer_context_line(&connected.authority, &connected.resolved_addr, &hello),
-        );
+    let _session_close_guard =
+        deploy::ConnectedSessionCloseGuard::new(&connected, b"service.logs complete");
+    ui::command_stage("service.logs", "hello", "negotiating hello");
+    let required_features = if with_timestamp {
+        LOGS_HELLO_REQUIRED_FEATURES_WITH_TIMESTAMP.as_slice()
+    } else {
+        LOGS_HELLO_REQUIRED_FEATURES.as_slice()
+    };
+    let hello =
+        negotiate_hello_with_features(&connected, Uuid::new_v4(), required_features).await?;
+    ui::command_info(
+        "service.logs",
+        &format_peer_context_line(&connected.authority, &connected.resolved_addr, &hello),
+    );
 
-        let request_id = Uuid::new_v4();
-        let correlation_id = Uuid::new_v4();
-        let request = deploy::request_envelope(
-            MessageType::LogsRequest,
-            request_id,
-            correlation_id,
-            &LogRequest {
-                name: name.clone(),
-                follow,
-                tail_lines: tail,
-                with_timestamp,
-            },
-        )?;
-        if !hello
-            .features
-            .iter()
-            .any(|feature| feature == LOGS_STREAM_FEATURE)
-        {
-            return Err(anyhow!(
-                "target does not advertise required feature: logs.stream"
-            ));
-        }
-        let mut ack: Option<LogsRequestAck> = None;
-        let mut saw_end = false;
-        let mut expected_seq: Option<u64> = None;
-        let mut truncated_warned = false;
-        let mut prefix_state = PrefixRenderState::default();
-        let stream_termination = deploy::request_streamed_events(
-            &connected,
-            &request,
-            deploy::resolve_deploy_stream_timeout(),
-            (!follow).then_some(Duration::from_secs(NON_FOLLOW_IDLE_TIMEOUT_SECS)),
+    let request_id = Uuid::new_v4();
+    let correlation_id = Uuid::new_v4();
+    let request = deploy::request_envelope(
+        MessageType::LogsRequest,
+        request_id,
+        correlation_id,
+        &LogRequest {
+            name: name.clone(),
             follow,
-            |envelope| match envelope.message_type {
-                MessageType::LogsRequest => {
-                    let response: LogsRequestAck = deploy::response_payload(envelope)?;
-                    if !response.accepted {
-                        return Err(anyhow!("logs.request was not accepted"));
-                    }
-                    if response.names.is_empty() {
-                        return Err(anyhow!("logs.request returned no target service"));
-                    }
-                    prefix_state = PrefixRenderState::with_initial_name_width(
-                        max_name_width_from_ack_names(&response.names),
-                    );
-                    ack = Some(response);
-                    ui::command_clear("service.logs");
-                    Ok(false)
-                }
-                MessageType::LogsChunk => {
-                    if ack.is_none() {
-                        return Err(anyhow!("logs.chunk arrived before logs.request ack"));
-                    }
-                    let chunk: LogChunk = deploy::response_payload(envelope)?;
-                    if request_id != chunk.request_id {
-                        return Ok(false);
-                    }
-                    warn_if_seq_gap(&mut expected_seq, chunk.seq, &mut truncated_warned);
-                    render_chunk(&chunk, name.is_none(), with_timestamp, &mut prefix_state)?;
-                    Ok(false)
-                }
-                MessageType::LogsEnd => {
-                    if ack.is_none() {
-                        return Err(anyhow!("logs.end arrived before logs.request ack"));
-                    }
-                    let end: LogEnd = deploy::response_payload(envelope)?;
-                    if request_id != end.request_id {
-                        return Ok(false);
-                    }
-                    if let Some(error) = end.error {
-                        return Err(anyhow!(
-                            "logs stream ended with error: {} ({:?})",
-                            error.message,
-                            error.code
-                        ));
-                    }
-                    apply_end_seq_after_drain(
-                        &mut expected_seq,
-                        end.seq,
-                        &[],
-                        &mut truncated_warned,
-                    );
-                    saw_end = true;
-                    Ok(true)
-                }
-                _ => Ok(false),
-            },
-        )
-        .await?;
-        if ack.is_none() {
-            return Err(anyhow!("logs.request returned empty response stream"));
-        }
-        if stream_termination == deploy::StreamRequestTermination::Completed && !saw_end {
-            return Err(anyhow!("logs stream ended without logs.end"));
-        }
-        let termination = match stream_termination {
-            deploy::StreamRequestTermination::Completed => LogsTermination::Completed,
-            deploy::StreamRequestTermination::Interrupted => LogsTermination::Interrupted,
-        };
-        Ok(LogsSummary {
-            name: name.unwrap_or_else(|| "<all-running>".to_string()),
-            target_name,
-            follow,
-            tail,
+            tail_lines: tail,
             with_timestamp,
-            termination,
-        })
+        },
+    )?;
+    if !hello
+        .features
+        .iter()
+        .any(|feature| feature == LOGS_STREAM_FEATURE)
+    {
+        return Err(anyhow!(
+            "target does not advertise required feature: logs.stream"
+        ));
     }
-    .await;
-    connected.close(0, b"service.logs complete");
-    result
+    let mut ack: Option<LogsRequestAck> = None;
+    let mut saw_end = false;
+    let mut expected_seq: Option<u64> = None;
+    let mut truncated_warned = false;
+    let mut prefix_state = PrefixRenderState::default();
+    let stream_termination = deploy::request_streamed_events(
+        &connected,
+        &request,
+        deploy::resolve_deploy_stream_timeout(),
+        (!follow).then_some(Duration::from_secs(NON_FOLLOW_IDLE_TIMEOUT_SECS)),
+        follow,
+        |envelope| match envelope.message_type {
+            MessageType::LogsRequest => {
+                let response: LogsRequestAck = deploy::response_payload(envelope)?;
+                if !response.accepted {
+                    return Err(anyhow!("logs.request was not accepted"));
+                }
+                if response.names.is_empty() {
+                    return Err(anyhow!("logs.request returned no target service"));
+                }
+                prefix_state = PrefixRenderState::with_initial_name_width(
+                    max_name_width_from_ack_names(&response.names),
+                );
+                ack = Some(response);
+                ui::command_clear("service.logs");
+                Ok(false)
+            }
+            MessageType::LogsChunk => {
+                if ack.is_none() {
+                    return Err(anyhow!("logs.chunk arrived before logs.request ack"));
+                }
+                let chunk: LogChunk = deploy::response_payload(envelope)?;
+                if request_id != chunk.request_id {
+                    return Ok(false);
+                }
+                warn_if_seq_gap(&mut expected_seq, chunk.seq, &mut truncated_warned);
+                render_chunk(&chunk, name.is_none(), with_timestamp, &mut prefix_state)?;
+                Ok(false)
+            }
+            MessageType::LogsEnd => {
+                if ack.is_none() {
+                    return Err(anyhow!("logs.end arrived before logs.request ack"));
+                }
+                let end: LogEnd = deploy::response_payload(envelope)?;
+                if request_id != end.request_id {
+                    return Ok(false);
+                }
+                if let Some(error) = end.error {
+                    return Err(anyhow!(
+                        "logs stream ended with error: {} ({:?})",
+                        error.message,
+                        error.code
+                    ));
+                }
+                apply_end_seq_after_drain(&mut expected_seq, end.seq, &[], &mut truncated_warned);
+                saw_end = true;
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+    )
+    .await?;
+    if ack.is_none() {
+        return Err(anyhow!("logs.request returned empty response stream"));
+    }
+    if stream_termination == deploy::StreamRequestTermination::Completed && !saw_end {
+        return Err(anyhow!("logs stream ended without logs.end"));
+    }
+    let termination = match stream_termination {
+        deploy::StreamRequestTermination::Completed => LogsTermination::Completed,
+        deploy::StreamRequestTermination::Interrupted => LogsTermination::Interrupted,
+    };
+    Ok(LogsSummary {
+        name: name.unwrap_or_else(|| "<all-running>".to_string()),
+        target_name,
+        follow,
+        tail,
+        with_timestamp,
+        termination,
+    })
 }
 
 fn detect_seq_gap(expected_seq: &mut Option<u64>, actual: u64) -> bool {
