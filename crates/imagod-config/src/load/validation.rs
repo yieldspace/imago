@@ -4,7 +4,6 @@
 //! expressed by TOML type decoding alone.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
 
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
@@ -14,49 +13,6 @@ use crate::{
     ImagodConfig, MAX_CHUNK_SIZE_BYTES, MAX_HTTP_QUEUE_MEMORY_BUDGET_BYTES, RuntimeFeatures,
     parse_ed25519_raw_public_key_hex,
 };
-
-pub(crate) fn reject_legacy_keys(path: &Path, raw: &toml::Value) -> Result<(), ImagodError> {
-    if raw.get("protocol_draft").is_some() {
-        return Err(ImagodError::new(
-            ErrorCode::BadRequest,
-            "config.load",
-            "protocol_draft is no longer supported; protocol compatibility is negotiated by hello.negotiate client_version",
-        )
-        .with_detail("path", path.to_string_lossy())
-        .with_detail("legacy_key", "protocol_draft"));
-    }
-    if raw.get("compatibility_date").is_some() {
-        return Err(ImagodError::new(
-            ErrorCode::BadRequest,
-            "config.load",
-            "compatibility_date is no longer supported; protocol compatibility is negotiated by hello.negotiate client_version",
-        )
-        .with_detail("path", path.to_string_lossy())
-        .with_detail("legacy_key", "compatibility_date"));
-    }
-
-    if let Some(tls) = raw.get("tls").and_then(toml::Value::as_table) {
-        for legacy_key in ["server_cert", "client_ca_cert", "admin_public_keys"] {
-            if tls.contains_key(legacy_key) {
-                return Err(ImagodError::new(
-                    ErrorCode::BadRequest,
-                    "config.load",
-                    if legacy_key == "admin_public_keys" {
-                        "tls.admin_public_keys is no longer supported; local admin access is controlled by control_socket_path peer credentials and QUIC clients must use tls.client_public_keys".to_string()
-                    } else {
-                        format!(
-                            "tls.{legacy_key} is no longer supported; use tls.client_public_keys (ed25519 raw public key hex allowlist)"
-                        )
-                    },
-                )
-                .with_detail("path", path.to_string_lossy())
-                .with_detail("legacy_key", format!("tls.{legacy_key}")));
-            }
-        }
-    }
-
-    Ok(())
-}
 
 pub(crate) fn validate(config: &ImagodConfig) -> Result<(), ImagodError> {
     if config.control_socket_path.as_os_str().is_empty() {

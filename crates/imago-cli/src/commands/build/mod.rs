@@ -2065,8 +2065,9 @@ mod tests {
         write_file(&root.join("build/app.wasm"), b"wasm-a");
 
         let err = build_project("default", &root).expect_err("build must fail on bindings.target");
-        assert!(err.to_string().contains("bindings[0].target"));
-        assert!(err.to_string().contains("no longer supported"));
+        let details = format!("{err:#}");
+        assert!(details.contains("failed to decode imago.toml"));
+        assert!(details.contains("unknown field `target`"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2126,31 +2127,6 @@ mod tests {
             err.to_string()
                 .contains("must not use URL scheme; use plain package name")
         );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn build_rejects_capabilirties_typo_key() {
-        let root = new_temp_dir("capability-typo");
-        write_imago_toml(
-            &root,
-            r#"
-    name = "svc"
-    main = "build/app.wasm"
-    type = "cli"
-    
-    [capabilirties]
-    privileged = true
-    
-    [target.default]
-    remote = "127.0.0.1:4443"
-    "#,
-        );
-        write_file(&root.join("build/app.wasm"), b"wasm-a");
-
-        let err = build_project("default", &root).expect_err("typo key must be rejected");
-        assert!(err.to_string().contains("capabilirties"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3365,7 +3341,7 @@ mod tests {
     }
 
     #[test]
-    fn build_rejects_legacy_dependency_component_path_field() {
+    fn build_rejects_legacy_dependency_component_source_field() {
         let root = new_temp_dir("dependency-component-legacy-path");
         write_imago_toml(
             &root,
@@ -3388,17 +3364,12 @@ mod tests {
     "#,
         );
         write_file(&root.join("build/app.wasm"), b"wasm-a");
-        write_file(
-            &root.join("registry/example/package.wit"),
-            b"package test:example;\n",
-        );
 
         let err =
-            build_project("default", &root).expect_err("legacy component.path must be rejected");
-        assert!(
-            err.to_string()
-                .contains("dependencies[0].component.source is not supported")
-        );
+            build_project("default", &root).expect_err("legacy component.source must be rejected");
+        let details = format!("{err:#}");
+        assert!(details.contains("failed to decode imago.toml"));
+        assert!(details.contains("unknown field `source`"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -4022,75 +3993,6 @@ mod tests {
     }
 
     #[test]
-    fn target_rejects_deprecated_ca_cert_key() {
-        let root = new_temp_dir("target-rejects-ca-cert");
-        write_imago_toml(
-            &root,
-            r#"
-    name = "svc"
-    main = "build/app.wasm"
-    type = "cli"
-    
-    [target.default]
-    remote = "127.0.0.1:4443"
-    ca_cert = "certs/ca.crt"
-    "#,
-        );
-
-        let err = build_project("default", &root).expect_err("ca_cert should be rejected");
-        assert!(err.to_string().contains("ca_cert"));
-        assert!(err.to_string().contains("no longer supported"));
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn target_rejects_deprecated_client_cert_key() {
-        let root = new_temp_dir("target-rejects-client-cert");
-        write_imago_toml(
-            &root,
-            r#"
-    name = "svc"
-    main = "build/app.wasm"
-    type = "cli"
-    
-    [target.default]
-    remote = "127.0.0.1:4443"
-    client_cert = "certs/client.crt"
-    "#,
-        );
-
-        let err = build_project("default", &root).expect_err("client_cert should be rejected");
-        assert!(err.to_string().contains("client_cert"));
-        assert!(err.to_string().contains("no longer supported"));
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn target_rejects_deprecated_known_hosts_key() {
-        let root = new_temp_dir("target-rejects-known-hosts");
-        write_imago_toml(
-            &root,
-            r#"
-    name = "svc"
-    main = "build/app.wasm"
-    type = "cli"
-    
-    [target.default]
-    remote = "127.0.0.1:4443"
-    known_hosts = "certs/known_hosts"
-    "#,
-        );
-
-        let err = build_project("default", &root).expect_err("known_hosts should be rejected");
-        assert!(err.to_string().contains("known_hosts"));
-        assert!(err.to_string().contains("no longer supported"));
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn build_ignores_legacy_secrets_table() {
         let root = new_temp_dir("secrets-source");
         write_imago_toml(
@@ -4385,32 +4287,6 @@ mod tests {
     }
 
     #[test]
-    fn build_rejects_legacy_runtime_restart_policy() {
-        let root = new_temp_dir("runtime-restart-policy-legacy");
-        write_imago_toml(
-            &root,
-            r#"
-    name = "svc"
-    main = "build/app.wasm"
-    type = "cli"
-    
-    [runtime]
-    restart_policy = "never"
-    
-    [target.default]
-    remote = "127.0.0.1:4443"
-    "#,
-        );
-        write_file(&root.join("build/app.wasm"), b"wasm-a");
-
-        let err =
-            build_project("default", &root).expect_err("legacy runtime.restart_policy should fail");
-        assert!(err.to_string().contains("runtime.restart_policy"));
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn load_service_name_uses_top_level_name() {
         let root = new_temp_dir("load-service-name-top-level");
         write_imago_toml(
@@ -4446,10 +4322,11 @@ mod tests {
     type = "cli"
 
     [[dependencies]]
-    name = "missing-source"
+    version = "0.1.0"
+    kind = "native"
 
     [target.default]
-    remote = "127.0.0.1:4443"
+    remote = "ssh://localhost?socket=/run/imago/imagod.sock"
     "#,
         );
 
@@ -4472,10 +4349,11 @@ mod tests {
     type = "cli"
 
     [[dependencies]]
-    name = "missing-source"
+    version = "0.1.0"
+    kind = "native"
 
     [target.default]
-    remote = "127.0.0.1:4443"
+    remote = "ssh://localhost?socket=/run/imago/imagod.sock"
     "#,
         );
 

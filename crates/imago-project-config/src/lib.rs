@@ -42,16 +42,6 @@ pub struct ImagoTomlConfig {
     pub bindings: Option<Vec<BindingEntry>>,
     pub dependencies: Option<Vec<DependencyEntry>>,
     pub namespace_registries: Option<BTreeMap<String, String>>,
-    #[serde(default, rename = "runtime", skip_serializing_if = "Option::is_none")]
-    #[schemars(skip)]
-    pub legacy_runtime: Option<LegacyRuntimeSection>,
-    #[serde(
-        default,
-        rename = "capabilirties",
-        skip_serializing_if = "Option::is_none"
-    )]
-    #[schemars(skip)]
-    pub legacy_capabilirties: Option<JsonValue>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, JsonValue>,
 }
@@ -83,29 +73,6 @@ pub enum BuildCommand {
 pub struct TargetEntry {
     #[schemars(required)]
     pub remote: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(skip)]
-    pub server_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(skip)]
-    pub client_key: Option<String>,
-    #[serde(default, rename = "ca_cert", skip_serializing_if = "Option::is_none")]
-    #[schemars(skip)]
-    pub legacy_ca_cert: Option<String>,
-    #[serde(
-        default,
-        rename = "client_cert",
-        skip_serializing_if = "Option::is_none"
-    )]
-    #[schemars(skip)]
-    pub legacy_client_cert: Option<String>,
-    #[serde(
-        default,
-        rename = "known_hosts",
-        skip_serializing_if = "Option::is_none"
-    )]
-    #[schemars(skip)]
-    pub legacy_known_hosts: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, JsonValue>,
 }
@@ -215,17 +182,11 @@ pub struct BindingEntry {
     pub path: Option<String>,
     pub registry: Option<String>,
     pub sha256: Option<String>,
-    #[serde(default, rename = "target", skip_serializing_if = "Option::is_none")]
-    #[schemars(skip)]
-    pub legacy_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyEntry {
-    #[serde(default, rename = "name", skip_serializing_if = "Option::is_none")]
-    #[schemars(skip)]
-    pub legacy_name: Option<String>,
     #[schemars(required)]
     pub version: Option<String>,
     #[schemars(with = "Option<DependencyKind>", required)]
@@ -243,8 +204,6 @@ pub struct DependencyEntry {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyComponentEntry {
-    #[schemars(skip)]
-    pub source: Option<String>,
     pub wit: Option<String>,
     pub oci: Option<String>,
     pub path: Option<String>,
@@ -257,20 +216,6 @@ pub struct DependencyComponentEntry {
 pub enum DependencyKind {
     Native,
     Wasm,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct LegacyRuntimeSection {
-    #[serde(
-        default,
-        rename = "restart_policy",
-        skip_serializing_if = "Option::is_none"
-    )]
-    #[schemars(skip)]
-    pub restart_policy: Option<String>,
-    #[serde(flatten)]
-    #[schemars(skip)]
-    pub extra: BTreeMap<String, JsonValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -288,18 +233,6 @@ pub fn decode_document(content: &str) -> Result<ImagoTomlDocument, toml::de::Err
 
 pub fn validate_for_build(document: &ImagoTomlDocument) -> Result<()> {
     let config = &document.config;
-
-    if config.legacy_capabilirties.is_some() {
-        return Err(anyhow!("unknown key 'capabilirties'; use 'capabilities'"));
-    }
-
-    if let Some(runtime) = &config.legacy_runtime
-        && runtime.restart_policy.is_some()
-    {
-        return Err(anyhow!(
-            "runtime.restart_policy is no longer supported; use top-level restart"
-        ));
-    }
 
     if let Some(app_type) = &config.app_type {
         validate_allowed(
@@ -338,31 +271,6 @@ pub fn validate_for_build(document: &ImagoTomlDocument) -> Result<()> {
             if let Some(remote) = &target.remote {
                 validate_ssh_target_remote(remote)?;
             }
-            if target.server_name.is_some() {
-                return Err(anyhow!(
-                    "target key 'server_name' is no longer supported; CLI control traffic uses ssh:// targets"
-                ));
-            }
-            if target.client_key.is_some() {
-                return Err(anyhow!(
-                    "target key 'client_key' is no longer supported; CLI control traffic uses ssh:// targets"
-                ));
-            }
-            if target.legacy_ca_cert.is_some() {
-                return Err(anyhow!(
-                    "target key 'ca_cert' is no longer supported; CLI control traffic uses ssh:// targets"
-                ));
-            }
-            if target.legacy_client_cert.is_some() {
-                return Err(anyhow!(
-                    "target key 'client_cert' is no longer supported; CLI control traffic uses ssh:// targets"
-                ));
-            }
-            if target.legacy_known_hosts.is_some() {
-                return Err(anyhow!(
-                    "target key 'known_hosts' is no longer supported; CLI control traffic uses ssh:// targets"
-                ));
-            }
         }
     }
 
@@ -384,25 +292,18 @@ pub fn validate_for_build(document: &ImagoTomlDocument) -> Result<()> {
             )?;
 
             if let Some(component) = &dependency.component {
-                if component.source.is_some() {
-                    return Err(anyhow!(
-                        "dependencies[{index}].component.source is not supported"
-                    ));
-                }
                 ensure_exactly_one_source(
                     component.wit.as_ref(),
                     component.oci.as_ref(),
                     component.path.as_ref(),
                     &format!("dependencies[{index}].component"),
                 )?;
-            }
 
-            if matches!(dependency.kind.as_deref(), Some("native"))
-                && dependency.component.is_some()
-            {
-                return Err(anyhow!(
-                    "dependencies[{index}].component is only allowed when kind=\"wasm\""
-                ));
+                if matches!(dependency.kind.as_deref(), Some("native")) {
+                    return Err(anyhow!(
+                        "dependencies[{index}].component is only allowed when kind=\"wasm\""
+                    ));
+                }
             }
         }
     }
@@ -679,112 +580,6 @@ kind = "wasm"
     }
 
     #[test]
-    fn rejects_legacy_runtime_restart_policy() {
-        let result = decode_and_validate(
-            r#"
-name = "example-service"
-main = "build/example-service.wasm"
-type = "cli"
-
-[target.default]
-remote = "ssh://localhost?socket=/run/imago/imagod.sock"
-
-[runtime]
-restart_policy = "always"
-"#,
-        );
-        let err = result.expect_err("validation must fail");
-        assert!(
-            err.to_string().contains("runtime.restart_policy"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn accepts_legacy_dependency_name() {
-        let result = decode_and_validate(
-            r#"
-name = "example-service"
-main = "build/example-service.wasm"
-type = "cli"
-
-[target.default]
-remote = "ssh://localhost?socket=/run/imago/imagod.sock"
-
-[[dependencies]]
-name = "legacy-name"
-version = "1.0.0"
-kind = "native"
-path = "registry/example"
-"#,
-        );
-        assert!(result.is_ok(), "unexpected error: {result:?}");
-    }
-
-    #[test]
-    fn accepts_legacy_binding_target() {
-        let result = decode_and_validate(
-            r#"
-name = "example-service"
-main = "build/example-service.wasm"
-type = "cli"
-
-[target.default]
-remote = "ssh://localhost?socket=/run/imago/imagod.sock"
-
-[[bindings]]
-name = "svc-a"
-version = "1.0.0"
-path = "registry/acme-clock"
-target = "legacy"
-"#,
-        );
-        assert!(result.is_ok(), "unexpected error: {result:?}");
-    }
-
-    #[test]
-    fn rejects_legacy_capabilirties_key() {
-        let result = decode_and_validate(
-            r#"
-name = "example-service"
-main = "build/example-service.wasm"
-type = "cli"
-
-[capabilirties]
-privileged = true
-
-[target.default]
-remote = "ssh://localhost?socket=/run/imago/imagod.sock"
-"#,
-        );
-        let err = result.expect_err("validation must fail");
-        assert!(
-            err.to_string().contains("capabilirties"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn rejects_legacy_target_tls_keys() {
-        let result = decode_and_validate(
-            r#"
-name = "example-service"
-main = "build/example-service.wasm"
-type = "cli"
-
-[target.default]
-remote = "ssh://localhost?socket=/run/imago/imagod.sock"
-ca_cert = "certs/ca.crt"
-"#,
-        );
-        let err = result.expect_err("validation must fail");
-        assert!(
-            err.to_string().contains("target key 'ca_cert'"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
     fn rejects_invalid_restart_policy_enum_value() {
         let result = decode_and_validate(
             r#"
@@ -819,46 +614,6 @@ remote = "127.0.0.1:4443"
         let err = result.expect_err("validation must fail");
         assert!(
             err.to_string().contains("ssh://"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn rejects_server_name_for_ssh_target() {
-        let result = decode_and_validate(
-            r#"
-name = "example-service"
-main = "build/example-service.wasm"
-type = "cli"
-
-[target.default]
-remote = "ssh://localhost?socket=/run/imago/imagod.sock"
-server_name = "localhost"
-"#,
-        );
-        let err = result.expect_err("validation must fail");
-        assert!(
-            err.to_string().contains("server_name"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn rejects_client_key_for_ssh_target() {
-        let result = decode_and_validate(
-            r#"
-name = "example-service"
-main = "build/example-service.wasm"
-type = "cli"
-
-[target.default]
-remote = "ssh://localhost?socket=/run/imago/imagod.sock"
-client_key = "certs/client.key"
-"#,
-        );
-        let err = result.expect_err("validation must fail");
-        assert!(
-            err.to_string().contains("client_key"),
             "unexpected error: {err}"
         );
     }

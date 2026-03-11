@@ -23,31 +23,6 @@ pub(in crate::commands::build) fn parse_target(
         .ok_or_else(|| anyhow!("target '{}' is missing required key: remote", target_name))?
         .to_string();
 
-    if target_table.contains_key("ca_cert") {
-        return Err(anyhow!(
-            "target key 'ca_cert' is no longer supported; use ssh:// targets"
-        ));
-    }
-    if target_table.contains_key("client_cert") {
-        return Err(anyhow!(
-            "target key 'client_cert' is no longer supported; use ssh:// targets"
-        ));
-    }
-    if target_table.contains_key("known_hosts") {
-        return Err(anyhow!(
-            "target key 'known_hosts' is no longer supported; CLI control traffic uses ssh:// targets"
-        ));
-    }
-    if target_table.contains_key("server_name") {
-        return Err(anyhow!(
-            "target key 'server_name' is no longer supported; CLI control traffic uses ssh:// targets"
-        ));
-    }
-    if target_table.contains_key("client_key") {
-        return Err(anyhow!(
-            "target key 'client_key' is no longer supported; CLI control traffic uses ssh:// targets"
-        ));
-    }
     let _ = project_root;
     let _ = parse_target_remote(&remote)?;
 
@@ -85,48 +60,6 @@ remote = "ssh://example.local?socket=/run/imago/imagod.sock"
             target.remote,
             "ssh://example.local?socket=/run/imago/imagod.sock"
         );
-    }
-
-    #[test]
-    fn parse_target_rejects_removed_ca_cert_key() {
-        let root = parse_table(
-            r#"
-[target.default]
-remote = "127.0.0.1:7443"
-ca_cert = "ca.pem"
-"#,
-        );
-        let err = parse_target(&root, "default", Path::new("/tmp/project"))
-            .expect_err("ca_cert should be rejected");
-        assert!(err.to_string().contains("ca_cert"));
-    }
-
-    #[test]
-    fn parse_target_rejects_server_name() {
-        let root = parse_table(
-            r#"
-[target.default]
-remote = "ssh://example.com"
-server_name = "example.com"
-"#,
-        );
-        let err = parse_target(&root, "default", Path::new("/tmp/project"))
-            .expect_err("server_name should be rejected");
-        assert!(err.to_string().contains("server_name"));
-    }
-
-    #[test]
-    fn parse_target_rejects_client_key() {
-        let root = parse_table(
-            r#"
-[target.default]
-remote = "ssh://example.com"
-client_key = "certs/client.key"
-"#,
-        );
-        let err = parse_target(&root, "default", Path::new("/tmp/project"))
-            .expect_err("client_key should be rejected");
-        assert!(err.to_string().contains("client_key"));
     }
 
     #[test]

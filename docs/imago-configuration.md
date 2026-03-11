@@ -86,7 +86,7 @@ type = "http"
 restart = "always"
 ```
 
-- Validation error notes: any other value fails validation. Legacy `runtime.restart_policy` is rejected; use top-level `restart`.
+- Validation error notes: any other value fails validation.
 
 <a id="the-build-section"></a>
 ## The [build] section
@@ -140,7 +140,6 @@ remote = "ssh://root@edge-box?socket=/run/imago/imagod.sock"
 When an SSH target uses `?socket=...`, that path must match the remote daemon's `control_socket_path`.
 CLI admin commands (`service deploy`, `service stop`, `service logs`, `service ls`, `trust cert ...`) always use SSH plus `imagod proxy-stdio`.
 Host verification and authentication are delegated to OpenSSH; `~/.imago/known_hosts` is not used.
-Legacy target keys `server_name`, `client_key`, `known_hosts`, `ca_cert`, and `client_cert` are rejected.
 Node-to-node RPC authorities remain separate from target remotes and are written as `rpc://host:port` in `trust cert upload` / `trust cert replicate`.
 
 <a id="the-assets-section"></a>
@@ -667,45 +666,6 @@ wasi = "wasi.dev"
 ```
 
 - Validation error notes: values must be strings. This table applies only when a `wit = "<namespace>:<pkg>"` source omits its registry.
-
-<a id="legacy-sections"></a>
-## Legacy sections
-
-These sections are still accepted for compatibility but are ignored by manifest output.
-
-### The `[vars]` section
-
-#### The `<KEY>` field
-
-- Type: `string` value in a table
-- Required/Optional: Optional.
-- Accepted values / Constraints: string values only.
-- Default: empty table.
-- Example:
-
-```toml
-[vars]
-APP_MODE = "prod"
-```
-
-- Validation error notes: non-string values fail validation.
-
-### The `[secrets]` section
-
-#### The `<KEY>` field
-
-- Type: `string` value in a table
-- Required/Optional: Optional.
-- Accepted values / Constraints: string values only.
-- Default: empty table.
-- Example:
-
-```toml
-[secrets]
-SECRET_TOKEN = "change-me"
-```
-
-- Validation error notes: non-string values fail validation.
 
 ## Related source modules
 

@@ -82,7 +82,7 @@ storage_root = "/var/lib/imago"
 server_version = "imagod/0.1.0"
 ```
 
-- Validation error notes: non-string values fail validation. `compatibility_date` is a legacy key and now fails validation; protocol compatibility is negotiated via `hello.negotiate.client_version`.
+- Validation error notes: non-string values fail validation.
 
 <a id="the-tls-section"></a>
 ## The [tls] section
@@ -135,7 +135,6 @@ client_public_keys = []
 known_public_keys = { "rpc://node-a:4443" = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
 ```
 
-`tls.admin_public_keys` is no longer supported.
 Local admin access is granted by peer credentials on `control_socket_path`, and SSH endpoints should bridge to that socket with `imagod proxy-stdio`.
 
 - Validation error notes: empty authority names or invalid key values fail validation.
