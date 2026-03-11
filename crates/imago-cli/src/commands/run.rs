@@ -98,6 +98,8 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<RunSumm
         "service.start",
         &format_peer_context_line(&connected.authority, &connected.resolved_addr, &hello),
     );
+    let mut session_close_guard =
+        deploy::ConnectedSessionCloseGuard::new(&connected, b"service.start complete");
     let command_stream_timeout =
         deploy::resolve_command_stream_timeout_from_hello_limits(&hello.limits);
 
@@ -118,6 +120,9 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<RunSumm
     .await?;
     handle_terminal_event("service.start", responses)?;
     if should_clear_start_spinner_before_follow(detach) {
+        session_close_guard.disarm();
+        connected.close(0, b"service.start command session complete");
+        drop(session_close_guard);
         ui::command_clear("service.start");
         follow_logs_after_run(project_root, &target_config, &service_name).await;
     }
