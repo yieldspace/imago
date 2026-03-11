@@ -1,6 +1,7 @@
-use nirvash_core::{Fairness, Ltl, StatePredicate, StepPredicate, TransitionSystem};
+use nirvash_core::{BoolExpr, Fairness, Ltl, StepExpr, TransitionSystem};
 use nirvash_macros::{
-    ActionVocabulary, Signature as FormalSignature, fairness, invariant, property, subsystem_spec,
+    ActionVocabulary, Signature as FormalSignature, fairness, invariant, nirvash_expr,
+    nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
 use crate::bounds::ArtifactChunks;
@@ -22,7 +23,7 @@ pub enum ReleaseStage {
     RolledBack,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
 pub struct ArtifactDeployState {
     pub upload: UploadStage,
     pub release: ReleaseStage,
@@ -89,8 +90,8 @@ fn artifact_deploy_state_valid(state: &ArtifactDeployState) -> bool {
 }
 
 #[invariant(ArtifactDeploySpec)]
-fn prepared_release_requires_committed_upload() -> StatePredicate<ArtifactDeployState> {
-    StatePredicate::new("prepared_release_requires_committed_upload", |state| {
+fn prepared_release_requires_committed_upload() -> BoolExpr<ArtifactDeployState> {
+    nirvash_expr! { prepared_release_requires_committed_upload(state) =>
         !matches!(
             state.release,
             ReleaseStage::Prepared
@@ -98,32 +99,32 @@ fn prepared_release_requires_committed_upload() -> StatePredicate<ArtifactDeploy
                 | ReleaseStage::RollbackPending
                 | ReleaseStage::RolledBack
         ) || matches!(state.upload, UploadStage::Committed)
-    })
+    }
 }
 
 #[invariant(ArtifactDeploySpec)]
-fn prepared_release_requires_precondition() -> StatePredicate<ArtifactDeployState> {
-    StatePredicate::new("prepared_release_requires_precondition", |state| {
+fn prepared_release_requires_precondition() -> BoolExpr<ArtifactDeployState> {
+    nirvash_expr! { prepared_release_requires_precondition(state) =>
         matches!(state.release, ReleaseStage::None) || state.precondition_ok
-    })
+    }
 }
 
 #[invariant(ArtifactDeploySpec)]
-fn rollback_requires_auto_rollback_flag() -> StatePredicate<ArtifactDeployState> {
-    StatePredicate::new("rollback_requires_auto_rollback_flag", |state| {
+fn rollback_requires_auto_rollback_flag() -> BoolExpr<ArtifactDeployState> {
+    nirvash_expr! { rollback_requires_auto_rollback_flag(state) =>
         !matches!(state.release, ReleaseStage::RollbackPending) || state.auto_rollback
-    })
+    }
 }
 
 #[property(ArtifactDeploySpec)]
 fn partial_upload_leads_to_complete() -> Ltl<ArtifactDeployState, ArtifactDeployAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("partial_upload", |state| {
+        Ltl::pred(nirvash_expr! { partial_upload(state) =>
             matches!(state.upload, UploadStage::Partial)
-        })),
-        Ltl::pred(StatePredicate::new("upload_complete", |state| {
+        }),
+        Ltl::pred(nirvash_expr! { upload_complete(state) =>
             matches!(state.upload, UploadStage::Complete | UploadStage::Committed)
-        })),
+        }),
     )
 }
 
@@ -131,64 +132,52 @@ fn partial_upload_leads_to_complete() -> Ltl<ArtifactDeployState, ArtifactDeploy
 fn prepared_release_leads_to_promoted_or_rolled_back()
 -> Ltl<ArtifactDeployState, ArtifactDeployAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("prepared_release", |state| {
+        Ltl::pred(nirvash_expr! { prepared_release(state) =>
             matches!(state.release, ReleaseStage::Prepared)
-        })),
-        Ltl::pred(StatePredicate::new("promoted_or_rolled_back", |state| {
-            matches!(
-                state.release,
-                ReleaseStage::Promoted | ReleaseStage::RolledBack
-            )
-        })),
+        }),
+        Ltl::pred(nirvash_expr! { promoted_or_rolled_back(state) =>
+            matches!(state.release, ReleaseStage::Promoted | ReleaseStage::RolledBack)
+        }),
     )
 }
 
 #[property(ArtifactDeploySpec)]
 fn rollback_pending_leads_to_rolled_back() -> Ltl<ArtifactDeployState, ArtifactDeployAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("rollback_pending", |state| {
+        Ltl::pred(nirvash_expr! { rollback_pending(state) =>
             matches!(state.release, ReleaseStage::RollbackPending)
-        })),
-        Ltl::pred(StatePredicate::new("rolled_back", |state| {
+        }),
+        Ltl::pred(nirvash_expr! { rolled_back(state) =>
             matches!(state.release, ReleaseStage::RolledBack)
-        })),
+        }),
     )
 }
 
 #[fairness(ArtifactDeploySpec)]
 fn upload_progress_fairness() -> Fairness<ArtifactDeployState, ArtifactDeployAction> {
-    Fairness::weak(StepPredicate::new(
-        "complete_upload",
-        |prev, action, next| {
-            matches!(action, ArtifactDeployAction::CompleteUpload)
-                && matches!(prev.upload, UploadStage::Missing | UploadStage::Partial)
-                && matches!(next.upload, UploadStage::Complete)
-        },
-    ))
+    Fairness::weak(nirvash_step_expr! { complete_upload(prev, action, next) =>
+        matches!(action, ArtifactDeployAction::CompleteUpload)
+            && matches!(prev.upload, UploadStage::Missing | UploadStage::Partial)
+            && matches!(next.upload, UploadStage::Complete)
+    })
 }
 
 #[fairness(ArtifactDeploySpec)]
 fn promote_release_fairness() -> Fairness<ArtifactDeployState, ArtifactDeployAction> {
-    Fairness::weak(StepPredicate::new(
-        "promote_release",
-        |prev, action, next| {
-            matches!(action, ArtifactDeployAction::PromoteRelease)
-                && matches!(prev.release, ReleaseStage::Prepared)
-                && matches!(next.release, ReleaseStage::Promoted)
-        },
-    ))
+    Fairness::weak(nirvash_step_expr! { promote_release(prev, action, next) =>
+        matches!(action, ArtifactDeployAction::PromoteRelease)
+            && matches!(prev.release, ReleaseStage::Prepared)
+            && matches!(next.release, ReleaseStage::Promoted)
+    })
 }
 
 #[fairness(ArtifactDeploySpec)]
 fn rollback_finish_fairness() -> Fairness<ArtifactDeployState, ArtifactDeployAction> {
-    Fairness::weak(StepPredicate::new(
-        "finish_rollback",
-        |prev, action, next| {
-            matches!(action, ArtifactDeployAction::FinishRollback)
-                && matches!(prev.release, ReleaseStage::RollbackPending)
-                && matches!(next.release, ReleaseStage::RolledBack)
-        },
-    ))
+    Fairness::weak(nirvash_step_expr! { finish_rollback(prev, action, next) =>
+        matches!(action, ArtifactDeployAction::FinishRollback)
+            && matches!(prev.release, ReleaseStage::RollbackPending)
+            && matches!(next.release, ReleaseStage::RolledBack)
+    })
 }
 
 #[subsystem_spec]
@@ -208,8 +197,52 @@ impl TransitionSystem for ArtifactDeploySpec {
         <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
-    fn transition(&self, prev: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        transition_state(prev, action)
+    fn transition_program(
+        &self,
+    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule receive_chunk when matches!(action, ArtifactDeployAction::ReceiveChunk)
+                && !matches!(prev.upload, UploadStage::Committed)
+                && !prev.chunks.is_max() => {
+                set upload <= UploadStage::Partial;
+                set chunks <= prev.chunks.saturating_inc();
+            }
+
+            rule complete_upload when matches!(action, ArtifactDeployAction::CompleteUpload)
+                && matches!(prev.upload, UploadStage::Missing | UploadStage::Partial)
+                && !prev.chunks.is_zero() => {
+                set upload <= UploadStage::Complete;
+            }
+
+            rule commit_upload when matches!(action, ArtifactDeployAction::CommitUpload)
+                && matches!(prev.upload, UploadStage::Complete) => {
+                set upload <= UploadStage::Committed;
+            }
+
+            rule start_deploy_matched when matches!(action, ArtifactDeployAction::StartDeployMatched)
+                && matches!(prev.upload, UploadStage::Committed)
+                && matches!(prev.release, ReleaseStage::None | ReleaseStage::RolledBack) => {
+                set release <= ReleaseStage::Prepared;
+                set precondition_ok <= true;
+            }
+
+            rule promote_release when matches!(action, ArtifactDeployAction::PromoteRelease)
+                && matches!(prev.release, ReleaseStage::Prepared)
+                && prev.precondition_ok => {
+                set release <= ReleaseStage::Promoted;
+            }
+
+            rule trigger_rollback when matches!(action, ArtifactDeployAction::TriggerRollback)
+                && matches!(prev.release, ReleaseStage::Promoted)
+                && prev.auto_rollback => {
+                set release <= ReleaseStage::RollbackPending;
+            }
+
+            rule finish_rollback when matches!(action, ArtifactDeployAction::FinishRollback)
+                && matches!(prev.release, ReleaseStage::RollbackPending) => {
+                set release <= ReleaseStage::RolledBack;
+            }
+        })
     }
 }
 
@@ -277,6 +310,7 @@ fn transition_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nirvash_core::{ModelBackend, ModelCheckConfig, ModelChecker};
 
     #[test]
     fn prepared_release_can_promote() {
@@ -293,5 +327,69 @@ mod tests {
             ..prev
         };
         assert!(spec.contains_transition(&prev, &ArtifactDeployAction::PromoteRelease, &next,));
+    }
+
+    #[test]
+    fn transition_program_matches_transition_function() {
+        let spec = ArtifactDeploySpec::new();
+        let program = spec.transition_program().expect("transition program");
+        let initial = spec.initial_state();
+
+        assert_eq!(
+            program
+                .evaluate(&initial, &ArtifactDeployAction::ReceiveChunk)
+                .expect("evaluates"),
+            transition_state(&initial, &ArtifactDeployAction::ReceiveChunk)
+        );
+        assert_eq!(
+            program
+                .evaluate(&initial, &ArtifactDeployAction::PromoteRelease)
+                .expect("evaluates"),
+            transition_state(&initial, &ArtifactDeployAction::PromoteRelease)
+        );
+    }
+
+    #[test]
+    fn explicit_and_symbolic_backends_agree() {
+        let spec = ArtifactDeploySpec::new();
+        let explicit_snapshot = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Explicit),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .full_reachable_graph_snapshot()
+        .expect("explicit artifact_deploy snapshot");
+        let symbolic_snapshot = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .full_reachable_graph_snapshot()
+        .expect("symbolic artifact_deploy snapshot");
+        assert_eq!(symbolic_snapshot, explicit_snapshot);
+
+        let explicit_result = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Explicit),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .check_all()
+        .expect("explicit artifact_deploy result");
+        let symbolic_result = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .check_all()
+        .expect("symbolic artifact_deploy result");
+        assert_eq!(symbolic_result, explicit_result);
     }
 }

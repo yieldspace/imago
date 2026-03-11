@@ -6,9 +6,10 @@ use quote::{ToTokens, format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprRange, Field, Fields, Ident,
-    ImplItem, ItemConst, ItemFn, ItemImpl, Lit, LitStr, Pat, Path, RangeLimits, Token, Type,
-    parse_macro_input,
+    Attribute, BinOp, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprBinary, ExprCall,
+    ExprField, ExprLit, ExprMacro, ExprMethodCall, ExprParen, ExprRange, ExprUnary, Field, Fields,
+    Ident, ImplItem, ImplItemFn, ItemConst, ItemFn, ItemImpl, Lit, LitStr, Pat, Path, RangeLimits,
+    Token, Type, UnOp, parse_macro_input,
 };
 
 #[proc_macro_derive(Signature, attributes(signature, sig, signature_invariant, viz))]
@@ -135,6 +136,33 @@ pub fn nirvash_projection_model(input: TokenStream) -> TokenStream {
     }
 }
 
+#[proc_macro]
+pub fn nirvash_expr(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as NamedStateExprInput);
+    match expand_nirvash_expr(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[proc_macro]
+pub fn nirvash_step_expr(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as NamedStepExprInput);
+    match expand_nirvash_step_expr(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[proc_macro]
+pub fn nirvash_transition_program(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as TransitionProgramDsl);
+    match expand_nirvash_transition_program(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
 #[proc_macro_attribute]
 pub fn contract_case(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
@@ -183,6 +211,479 @@ pub fn action_constraint(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn symmetry(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand_registration_attr(attr, item, RegistrationKind::Symmetry)
+}
+
+mod nirvash_dsl_kw {
+    syn::custom_keyword!(rule);
+    syn::custom_keyword!(when);
+    syn::custom_keyword!(set);
+    syn::custom_keyword!(insert);
+    syn::custom_keyword!(remove);
+}
+
+struct NamedStateExprInput {
+    name: Ident,
+    state: Ident,
+    expr: Expr,
+}
+
+impl Parse for NamedStateExprInput {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let name: Ident = input.parse()?;
+        let content;
+        syn::parenthesized!(content in input);
+        let state: Ident = content.parse()?;
+        if !content.is_empty() {
+            return Err(content.error("expected a single state binding identifier"));
+        }
+        input.parse::<Token![=>]>()?;
+        let expr: Expr = input.parse()?;
+        if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+        }
+        if !input.is_empty() {
+            return Err(input.error("unexpected tokens after nirvash_expr! body"));
+        }
+        Ok(Self { name, state, expr })
+    }
+}
+
+struct NamedStepExprInput {
+    name: Ident,
+    prev: Ident,
+    action: Ident,
+    next: Ident,
+    expr: Expr,
+}
+
+impl Parse for NamedStepExprInput {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let name: Ident = input.parse()?;
+        let content;
+        syn::parenthesized!(content in input);
+        let prev: Ident = content.parse()?;
+        content.parse::<Token![,]>()?;
+        let action: Ident = content.parse()?;
+        content.parse::<Token![,]>()?;
+        let next: Ident = content.parse()?;
+        if !content.is_empty() {
+            return Err(content.error("expected exactly three step binding identifiers"));
+        }
+        input.parse::<Token![=>]>()?;
+        let expr: Expr = input.parse()?;
+        if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+        }
+        if !input.is_empty() {
+            return Err(input.error("unexpected tokens after nirvash_step_expr! body"));
+        }
+        Ok(Self {
+            name,
+            prev,
+            action,
+            next,
+            expr,
+        })
+    }
+}
+
+struct TransitionProgramDsl {
+    rules: Vec<TransitionRuleDsl>,
+}
+
+impl Parse for TransitionProgramDsl {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let mut rules = Vec::new();
+        while !input.is_empty() {
+            rules.push(input.parse()?);
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+        }
+        if rules.is_empty() {
+            return Err(input.error("nirvash_transition_program! requires at least one rule"));
+        }
+        Ok(Self { rules })
+    }
+}
+
+struct TransitionRuleDsl {
+    name: Ident,
+    guard: Expr,
+    updates: Vec<TransitionUpdateDsl>,
+}
+
+impl Parse for TransitionRuleDsl {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        input.parse::<nirvash_dsl_kw::rule>()?;
+        let name: Ident = input.parse()?;
+        input.parse::<nirvash_dsl_kw::when>()?;
+        let guard: Expr = input.parse()?;
+        input.parse::<Token![=>]>()?;
+        let body;
+        syn::braced!(body in input);
+        let mut updates = Vec::new();
+        while !body.is_empty() {
+            updates.push(body.parse()?);
+        }
+        Ok(Self {
+            name,
+            guard,
+            updates,
+        })
+    }
+}
+
+enum TransitionUpdateKind {
+    Set,
+    Insert,
+    Remove,
+}
+
+struct TransitionUpdateDsl {
+    kind: TransitionUpdateKind,
+    target: TransitionTargetPath,
+    value: Expr,
+}
+
+impl Parse for TransitionUpdateDsl {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let kind = if input.peek(nirvash_dsl_kw::set) {
+            input.parse::<nirvash_dsl_kw::set>()?;
+            TransitionUpdateKind::Set
+        } else if input.peek(nirvash_dsl_kw::insert) {
+            input.parse::<nirvash_dsl_kw::insert>()?;
+            TransitionUpdateKind::Insert
+        } else if input.peek(nirvash_dsl_kw::remove) {
+            input.parse::<nirvash_dsl_kw::remove>()?;
+            TransitionUpdateKind::Remove
+        } else {
+            return Err(input.error("expected `set`, `insert`, or `remove`"));
+        };
+        let target: TransitionTargetPath = input.parse()?;
+        input.parse::<Token![<=]>()?;
+        let value: Expr = input.parse()?;
+        input.parse::<Token![;]>()?;
+        Ok(Self {
+            kind,
+            target,
+            value,
+        })
+    }
+}
+
+struct TransitionTargetPath {
+    kind: TransitionTargetKind,
+    span: Span,
+}
+
+enum TransitionTargetKind {
+    WholeState,
+    FieldPath(Vec<Ident>),
+}
+
+impl TransitionTargetPath {
+    fn display(&self) -> String {
+        match &self.kind {
+            TransitionTargetKind::WholeState => "self".to_owned(),
+            TransitionTargetKind::FieldPath(segments) => segments
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("."),
+        }
+    }
+
+    fn access_tokens(&self) -> TokenStream2 {
+        match &self.kind {
+            TransitionTargetKind::WholeState => quote! { *state },
+            TransitionTargetKind::FieldPath(segments) => quote! { state #( . #segments )* },
+        }
+    }
+}
+
+impl Parse for TransitionTargetPath {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        if input.peek(Token![self]) {
+            let self_token: Token![self] = input.parse()?;
+            return Ok(Self {
+                kind: TransitionTargetKind::WholeState,
+                span: self_token.span,
+            });
+        }
+        let first: Ident = input.parse()?;
+        let span = first.span();
+        let mut segments = vec![first];
+        while input.peek(Token![.]) {
+            input.parse::<Token![.]>()?;
+            segments.push(input.parse()?);
+        }
+        Ok(Self {
+            kind: TransitionTargetKind::FieldPath(segments),
+            span,
+        })
+    }
+}
+
+struct MatchesMacroArgs {
+    value: Expr,
+    pattern: TokenStream2,
+}
+
+impl Parse for MatchesMacroArgs {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let value: Expr = input.parse()?;
+        input.parse::<Token![,]>()?;
+        let pattern: TokenStream2 = input.parse()?;
+        if pattern.is_empty() {
+            return Err(input.error("expected matches! pattern"));
+        }
+        Ok(Self { value, pattern })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BoolDslKind {
+    State,
+    Step,
+    Guard,
+}
+
+struct BoolDslContext {
+    kind: BoolDslKind,
+    binders: Vec<Ident>,
+}
+
+impl BoolDslContext {
+    fn builder_path(&self) -> TokenStream2 {
+        match self.kind {
+            BoolDslKind::State => quote!(::nirvash_core::BoolExpr),
+            BoolDslKind::Step => quote!(::nirvash_core::StepExpr),
+            BoolDslKind::Guard => quote!(::nirvash_core::GuardExpr),
+        }
+    }
+
+    fn closure_tokens(&self, expr: &Expr) -> TokenStream2 {
+        let binders = &self.binders;
+        quote! {
+            |#(#binders),*| {
+                #(let _ = &#binders;)*
+                #expr
+            }
+        }
+    }
+
+    fn matches_closure_tokens(&self, value: &Expr, pattern: &TokenStream2) -> TokenStream2 {
+        let binders = &self.binders;
+        quote! {
+            |#(#binders),*| {
+                #(let _ = &#binders;)*
+                matches!(#value, #pattern)
+            }
+        }
+    }
+
+    fn lower_expr(&self, expr: &Expr, explicit_name: Option<LitStr>) -> syn::Result<TokenStream2> {
+        match expr {
+            Expr::Paren(ExprParen { expr: inner, .. }) => self.lower_expr(inner, explicit_name),
+            Expr::Lit(ExprLit {
+                lit: Lit::Bool(value),
+                ..
+            }) => {
+                let builder = self.builder_path();
+                let name = explicit_name.unwrap_or_else(|| expr_source_lit(expr));
+                let value = value.value;
+                Ok(quote! { #builder::literal(#name, #value) })
+            }
+            Expr::Unary(ExprUnary {
+                op: UnOp::Not(_),
+                expr: inner,
+                ..
+            }) => {
+                let builder = self.builder_path();
+                let name = explicit_name.unwrap_or_else(|| expr_source_lit(expr));
+                let inner = self.lower_expr(inner, None)?;
+                Ok(quote! { #builder::not(#name, #inner) })
+            }
+            Expr::Binary(binary) => self.lower_binary(expr, binary, explicit_name),
+            Expr::Macro(expr_macro) if expr_macro.mac.path.is_ident("matches") => {
+                self.lower_matches(expr, expr_macro, explicit_name)
+            }
+            Expr::Field(ExprField { .. }) => {
+                let builder = self.builder_path();
+                let name = explicit_name.unwrap_or_else(|| expr_source_lit(expr));
+                let path = expr_source_lit(expr);
+                let eval = self.closure_tokens(expr);
+                Ok(quote! { #builder::field(#name, #path, #eval) })
+            }
+            Expr::Call(ExprCall { .. }) | Expr::MethodCall(ExprMethodCall { .. }) => {
+                let builder = self.builder_path();
+                let name = explicit_name.unwrap_or_else(|| expr_source_lit(expr));
+                let eval = self.closure_tokens(expr);
+                Ok(quote! { #builder::pure_call(#name, #eval) })
+            }
+            _ => Err(unsupported_nirvash_expr(expr)),
+        }
+    }
+
+    fn lower_binary(
+        &self,
+        whole_expr: &Expr,
+        binary: &ExprBinary,
+        explicit_name: Option<LitStr>,
+    ) -> syn::Result<TokenStream2> {
+        let builder = self.builder_path();
+        let name = explicit_name.unwrap_or_else(|| expr_source_lit(whole_expr));
+        match &binary.op {
+            BinOp::And(_) => {
+                let lhs = self.lower_expr(&binary.left, None)?;
+                let rhs = self.lower_expr(&binary.right, None)?;
+                Ok(quote! { #builder::and(#name, vec![#lhs, #rhs]) })
+            }
+            BinOp::Or(_) => {
+                let lhs = self.lower_expr(&binary.left, None)?;
+                let rhs = self.lower_expr(&binary.right, None)?;
+                Ok(quote! { #builder::or(#name, vec![#lhs, #rhs]) })
+            }
+            BinOp::Eq(_) => self.lower_comparison("eq", name, &binary.left, &binary.right),
+            BinOp::Ne(_) => self.lower_comparison("ne", name, &binary.left, &binary.right),
+            BinOp::Lt(_) => self.lower_comparison("lt", name, &binary.left, &binary.right),
+            _ => Err(unsupported_nirvash_expr(whole_expr)),
+        }
+    }
+
+    fn lower_comparison(
+        &self,
+        method: &str,
+        name: LitStr,
+        lhs: &Expr,
+        rhs: &Expr,
+    ) -> syn::Result<TokenStream2> {
+        let builder = self.builder_path();
+        let method = format_ident!("{}", method);
+        let lhs_name = expr_source_lit(lhs);
+        let rhs_name = expr_source_lit(rhs);
+        let lhs_eval = self.closure_tokens(lhs);
+        let rhs_eval = self.closure_tokens(rhs);
+        Ok(quote! { #builder::#method(#name, #lhs_name, #lhs_eval, #rhs_name, #rhs_eval) })
+    }
+
+    fn lower_matches(
+        &self,
+        whole_expr: &Expr,
+        expr_macro: &ExprMacro,
+        explicit_name: Option<LitStr>,
+    ) -> syn::Result<TokenStream2> {
+        let builder = self.builder_path();
+        let name = explicit_name.unwrap_or_else(|| expr_source_lit(whole_expr));
+        let args: MatchesMacroArgs = syn::parse2(expr_macro.mac.tokens.clone())?;
+        let value = expr_source_lit(&args.value);
+        let pattern = token_stream_source_lit(&args.pattern, whole_expr.span());
+        let eval = self.matches_closure_tokens(&args.value, &args.pattern);
+        Ok(quote! { #builder::matches_variant(#name, #value, #pattern, #eval) })
+    }
+}
+
+fn expand_nirvash_expr(input: NamedStateExprInput) -> syn::Result<TokenStream2> {
+    let context = BoolDslContext {
+        kind: BoolDslKind::State,
+        binders: vec![input.state],
+    };
+    let name = LitStr::new(&input.name.to_string(), input.name.span());
+    context.lower_expr(&input.expr, Some(name))
+}
+
+fn expand_nirvash_step_expr(input: NamedStepExprInput) -> syn::Result<TokenStream2> {
+    let context = BoolDslContext {
+        kind: BoolDslKind::Step,
+        binders: vec![input.prev, input.action, input.next],
+    };
+    let name = LitStr::new(&input.name.to_string(), input.name.span());
+    context.lower_expr(&input.expr, Some(name))
+}
+
+fn expand_nirvash_transition_program(input: TransitionProgramDsl) -> syn::Result<TokenStream2> {
+    let guard_context = BoolDslContext {
+        kind: BoolDslKind::Guard,
+        binders: vec![
+            Ident::new("prev", Span::call_site()),
+            Ident::new("action", Span::call_site()),
+        ],
+    };
+    let rules = input
+        .rules
+        .into_iter()
+        .map(|rule| lower_transition_rule(rule, &guard_context))
+        .collect::<syn::Result<Vec<_>>>()?;
+    Ok(quote! {
+        ::nirvash_core::TransitionProgram::new(vec![#(#rules),*])
+    })
+}
+
+fn lower_transition_rule(
+    rule: TransitionRuleDsl,
+    guard_context: &BoolDslContext,
+) -> syn::Result<TokenStream2> {
+    let name = LitStr::new(&rule.name.to_string(), rule.name.span());
+    let guard = guard_context.lower_expr(&rule.guard, Some(name.clone()))?;
+    let ops = rule
+        .updates
+        .into_iter()
+        .map(lower_transition_update)
+        .collect::<syn::Result<Vec<_>>>()?;
+    Ok(quote! {
+        ::nirvash_core::TransitionRule::ast(
+            #name,
+            #guard,
+            ::nirvash_core::UpdateProgram::ast(#name, vec![#(#ops),*]),
+        )
+    })
+}
+
+fn lower_transition_update(update: TransitionUpdateDsl) -> syn::Result<TokenStream2> {
+    let target = LitStr::new(&update.target.display(), update.target.span);
+    let value = expr_source_lit(&update.value);
+    let access = update.target.access_tokens();
+    let rhs = &update.value;
+    let tokens = match update.kind {
+        TransitionUpdateKind::Set => quote! {
+            ::nirvash_core::UpdateOp::assign(#target, #value, |prev, state, action| {
+                let __nirvash_value = { #rhs };
+                let _ = (&prev, &action);
+                #access = __nirvash_value;
+            })
+        },
+        TransitionUpdateKind::Insert => quote! {
+            ::nirvash_core::UpdateOp::set_insert(#target, #value, |prev, state, action| {
+                let __nirvash_item = { #rhs };
+                let _ = (&prev, &action);
+                #access.insert(__nirvash_item);
+            })
+        },
+        TransitionUpdateKind::Remove => quote! {
+            ::nirvash_core::UpdateOp::set_remove(#target, #value, |prev, state, action| {
+                let __nirvash_item = { #rhs };
+                let _ = (&prev, &action);
+                #access.remove(&__nirvash_item);
+            })
+        },
+    };
+    Ok(tokens)
+}
+
+fn expr_source_lit(expr: &Expr) -> LitStr {
+    LitStr::new(&expr.to_token_stream().to_string(), expr.span())
+}
+
+fn token_stream_source_lit(tokens: &TokenStream2, span: Span) -> LitStr {
+    LitStr::new(&tokens.to_string(), span)
+}
+
+fn unsupported_nirvash_expr(expr: &Expr) -> syn::Error {
+    syn::Error::new_spanned(
+        expr,
+        "unsupported nirvash expression; supported forms are `!`, `&&`, `||`, `==`, `!=`, `<`, `matches!(..)`, field reads, function/method calls, and parentheses",
+    )
 }
 
 #[derive(Default)]
@@ -1136,7 +1637,7 @@ impl RegistrationKind {
     fn expected_type(self, spec: &Path) -> proc_macro2::TokenStream {
         match self {
             Self::Invariant => {
-                quote! { ::nirvash_core::StatePredicate<<#spec as ::nirvash_core::TransitionSystem>::State> }
+                quote! { ::nirvash_core::BoolExpr<<#spec as ::nirvash_core::TransitionSystem>::State> }
             }
             Self::Property => {
                 quote! { ::nirvash_core::Ltl<<#spec as ::nirvash_core::TransitionSystem>::State, <#spec as ::nirvash_core::TransitionSystem>::Action> }
@@ -1145,10 +1646,10 @@ impl RegistrationKind {
                 quote! { ::nirvash_core::Fairness<<#spec as ::nirvash_core::TransitionSystem>::State, <#spec as ::nirvash_core::TransitionSystem>::Action> }
             }
             Self::StateConstraint => {
-                quote! { ::nirvash_core::StateConstraint<<#spec as ::nirvash_core::TransitionSystem>::State> }
+                quote! { ::nirvash_core::BoolExpr<<#spec as ::nirvash_core::TransitionSystem>::State> }
             }
             Self::ActionConstraint => {
-                quote! { ::nirvash_core::ActionConstraint<<#spec as ::nirvash_core::TransitionSystem>::State, <#spec as ::nirvash_core::TransitionSystem>::Action> }
+                quote! { ::nirvash_core::StepExpr<<#spec as ::nirvash_core::TransitionSystem>::State, <#spec as ::nirvash_core::TransitionSystem>::Action> }
             }
             Self::Symmetry => {
                 quote! { ::nirvash_core::SymmetryReducer<<#spec as ::nirvash_core::TransitionSystem>::State> }
@@ -1196,6 +1697,10 @@ fn expand_registration(
         ));
     }
 
+    if let Some(message) = legacy_registration_builder_error(kind, &item) {
+        return Err(syn::Error::new(item.block.span(), message));
+    }
+
     let fn_ident = item.sig.ident.clone();
     let RegistrationArgs { spec, case_labels } = args;
     if case_labels.is_some()
@@ -1215,6 +1720,23 @@ fn expand_registration(
     let build_ident = format_ident!("__nirvash_{}_build_{}", label, fn_ident);
     let spec_id_ident = format_ident!("__nirvash_{}_spec_type_id_{}", label, fn_ident);
     let case_labels_item_ident = format_ident!("__nirvash_{}_case_labels_{}", label, fn_ident);
+    let ast_native_message = match kind {
+        RegistrationKind::Invariant | RegistrationKind::StateConstraint => {
+            format!(
+                "registered {label} `{{}}` for spec `{{}}` must be AST-native; use nirvash_expr! instead of BoolExpr::new(...)"
+            )
+        }
+        RegistrationKind::ActionConstraint | RegistrationKind::Fairness => {
+            format!(
+                "registered {label} `{{}}` for spec `{{}}` must be AST-native; use nirvash_step_expr! instead of StepExpr::new(...)"
+            )
+        }
+        RegistrationKind::Property => format!(
+            "registered {label} `{{}}` for spec `{{}}` must be built from AST-native nirvash_expr!/nirvash_step_expr! nodes"
+        ),
+        RegistrationKind::Symmetry => String::new(),
+    };
+    let ast_native_message = LitStr::new(&ast_native_message, Span::call_site());
     let case_labels_tokens = if matches!(
         kind,
         RegistrationKind::StateConstraint | RegistrationKind::ActionConstraint
@@ -1243,13 +1765,50 @@ fn expand_registration(
     } else {
         quote! {}
     };
+    let ast_native_assert = match kind {
+        RegistrationKind::Invariant | RegistrationKind::StateConstraint => quote! {
+            assert!(
+                value.is_ast_native(),
+                #ast_native_message,
+                stringify!(#fn_ident),
+                ::std::any::type_name::<#spec>(),
+            );
+        },
+        RegistrationKind::ActionConstraint => quote! {
+            assert!(
+                value.is_ast_native(),
+                #ast_native_message,
+                stringify!(#fn_ident),
+                ::std::any::type_name::<#spec>(),
+            );
+        },
+        RegistrationKind::Property => quote! {
+            assert!(
+                value.is_ast_native(),
+                #ast_native_message,
+                stringify!(#fn_ident),
+                ::std::any::type_name::<#spec>(),
+            );
+        },
+        RegistrationKind::Fairness => quote! {
+            assert!(
+                value.is_ast_native(),
+                #ast_native_message,
+                stringify!(#fn_ident),
+                ::std::any::type_name::<#spec>(),
+            );
+        },
+        RegistrationKind::Symmetry => quote! {},
+    };
 
     Ok(quote! {
         #item
 
         #[doc(hidden)]
         fn #build_ident() -> ::std::boxed::Box<dyn ::std::any::Any> {
-            ::std::boxed::Box::new(#fn_ident())
+            let value = #fn_ident();
+            #ast_native_assert
+            ::std::boxed::Box::new(value)
         }
 
         #[doc(hidden)]
@@ -1271,6 +1830,28 @@ fn expand_registration(
             }
         }
     })
+}
+
+fn legacy_registration_builder_error(
+    kind: RegistrationKind,
+    item: &ItemFn,
+) -> Option<&'static str> {
+    let body = item.block.to_token_stream().to_string();
+    let contains = |needle: &str| body.contains(needle);
+    let uses_bool_new = contains("BoolExpr :: new") || contains("BoolExpr::new");
+    let uses_step_new = contains("StepExpr :: new") || contains("StepExpr::new");
+    match kind {
+        RegistrationKind::Invariant | RegistrationKind::StateConstraint => uses_bool_new.then_some(
+            "registered state predicates must be AST-native; use nirvash_expr! instead of BoolExpr::new(...)",
+        ),
+        RegistrationKind::ActionConstraint | RegistrationKind::Fairness => uses_step_new.then_some(
+            "registered step predicates must be AST-native; use nirvash_step_expr! instead of StepExpr::new(...)",
+        ),
+        RegistrationKind::Property => (uses_bool_new || uses_step_new).then_some(
+            "registered properties must be built from AST-native nirvash_expr!/nirvash_step_expr! nodes",
+        ),
+        RegistrationKind::Symmetry => None,
+    }
 }
 
 fn expand_signature_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
@@ -2490,6 +3071,21 @@ fn expand_temporal_spec(
     let doc_attrs = doc_fragment_attrs(&self_ty)?;
     let state_ty = associated_type(&item, "State")?;
     let action_ty = associated_type(&item, "Action")?;
+    if let Some(transition_fn) = impl_method(&item, "transition") {
+        return Err(syn::Error::new(
+            transition_fn.sig.ident.span(),
+            "#[system_spec]/#[subsystem_spec] does not allow user-defined fn transition(...); implement transition_program() instead",
+        ));
+    }
+    let Some(transition_program_fn) = impl_method(&item, "transition_program") else {
+        return Err(syn::Error::new(
+            self_ty.span(),
+            "#[system_spec]/#[subsystem_spec] requires fn transition_program(&self) -> Option<TransitionProgram<...>>",
+        ));
+    };
+    if let Some(message) = legacy_transition_program_builder_error(transition_program_fn) {
+        return Err(syn::Error::new(transition_program_fn.block.span(), message));
+    }
 
     let model_cases = args.model_cases;
     let subsystems = args.subsystems;
@@ -2575,7 +3171,7 @@ fn expand_temporal_spec(
         #item
 
         impl ::nirvash_core::TemporalSpec for #self_ty {
-            fn invariants(&self) -> Vec<::nirvash_core::StatePredicate<Self::State>> {
+            fn invariants(&self) -> Vec<::nirvash_core::BoolExpr<Self::State>> {
                 ::nirvash_core::registry::collect_invariants::<Self>()
             }
 
@@ -2596,6 +3192,16 @@ fn expand_temporal_spec(
                 }
                 ::nirvash_core::registry::apply_registered_model_case_metadata::<Self>(&mut model_cases);
                 model_cases
+            }
+
+            fn default_model_backend(&self) -> ::std::option::Option<::nirvash_core::ModelBackend> {
+                ::std::option::Option::Some(
+                    if #emit_composition {
+                        ::nirvash_core::ModelBackend::Explicit
+                    } else {
+                        ::nirvash_core::ModelBackend::Symbolic
+                    }
+                )
             }
         }
 
@@ -2641,6 +3247,26 @@ fn expand_temporal_spec(
         }
 
         #composition_impl
+    })
+}
+
+fn legacy_transition_program_builder_error(item: &ImplItemFn) -> Option<&'static str> {
+    let body = item.block.to_token_stream().to_string();
+    let contains = |needle: &str| body.contains(needle);
+    let uses_transition_rule_new =
+        contains("TransitionRule :: new") || contains("TransitionRule::new");
+    let uses_update_program_new =
+        contains("UpdateProgram :: new") || contains("UpdateProgram::new");
+    let uses_guard_expr_new = contains("GuardExpr :: new") || contains("GuardExpr::new");
+    (uses_transition_rule_new || uses_update_program_new || uses_guard_expr_new).then_some(
+        "#[system_spec]/#[subsystem_spec] transition_program() must be AST-native; use nirvash_transition_program! instead of TransitionRule::new/UpdateProgram::new",
+    )
+}
+
+fn impl_method<'a>(item: &'a ItemImpl, name: &str) -> Option<&'a syn::ImplItemFn> {
+    item.items.iter().find_map(|impl_item| match impl_item {
+        ImplItem::Fn(method) if method.sig.ident == name => Some(method),
+        _ => None,
     })
 }
 
@@ -2762,7 +3388,9 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                                     (true, false) => format!("case-{index}"),
                                     (true, true) => format!("case-{index}/{}", model_case.label()),
                                 };
-                                let snapshot = ::nirvash_core::ModelChecker::for_case(&spec, model_case.clone())
+                                let checker = ::nirvash_core::ModelChecker::for_case(&spec, model_case.clone());
+                                let backend = checker.doc_backend();
+                                let snapshot = checker
                                     .reachable_graph_snapshot()
                                     .expect("reachable graph snapshot should build for docs");
                                 let states = snapshot.states;
@@ -2805,6 +3433,7 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                                     .collect::<::std::vec::Vec<_>>();
                                 ::nirvash_core::DocGraphCase {
                                     label,
+                                    backend,
                                     graph: ::nirvash_core::DocGraphSnapshot {
                                         states: states
                                             .into_iter()

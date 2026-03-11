@@ -4,8 +4,8 @@ use imagod_spec::{
     RuntimeOutputSummary, RuntimeProbeOutput, RuntimeProbeState, RuntimeStateSummary,
 };
 use nirvash_core::{
-    ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
-    concurrent::ConcurrentAction, conformance::ProtocolConformanceSpec,
+    BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
+    conformance::ProtocolConformanceSpec,
 };
 use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_model};
 
@@ -64,8 +64,7 @@ impl RuntimeProjectionSpec {
     }
 
     fn apply_atomic(self, state: &SystemState, action: SystemAtomicAction) -> Option<SystemState> {
-        self.system()
-            .transition(state, &ConcurrentAction::from_atomic(action))
+        self.system().transition(state, &action)
     }
 
     fn apply_many(
@@ -384,7 +383,7 @@ impl TransitionSystem for RuntimeProjectionSpec {
 }
 
 impl TemporalSpec for RuntimeProjectionSpec {
-    fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
+    fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
         self.system().invariants()
     }
 }

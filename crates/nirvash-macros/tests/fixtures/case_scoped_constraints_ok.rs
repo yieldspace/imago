@@ -1,12 +1,14 @@
 use nirvash_core::{
-    ActionConstraint, ModelCase, ModelCaseSource as _, StateConstraint, TransitionSystem,
+    StepExpr, ModelCase, ModelCaseSource as _, BoolExpr, TransitionSystem,
 };
-use nirvash_macros::{Signature as FormalSignature, action_constraint, state_constraint, subsystem_spec};
+use nirvash_macros::{
+    Signature as FormalSignature, action_constraint, nirvash_expr, nirvash_step_expr,
+    nirvash_transition_program, state_constraint, subsystem_spec,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
-enum State {
-    Idle,
-    Busy,
+struct State {
+    busy: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
@@ -23,35 +25,39 @@ impl TransitionSystem for Spec {
     type Action = Action;
 
     fn initial_states(&self) -> Vec<Self::State> {
-        vec![State::Idle]
+        vec![State { busy: false }]
     }
 
     fn actions(&self) -> Vec<Self::Action> {
         vec![Action::Start, Action::Stop]
     }
 
-    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        match (state, action) {
-            (State::Idle, Action::Start) => Some(State::Busy),
-            (State::Busy, Action::Stop) => Some(State::Idle),
-            _ => None,
-        }
+    fn transition_program(&self) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule start when matches!(action, Action::Start) && !prev.busy => {
+                set busy <= true;
+            }
+
+            rule stop when matches!(action, Action::Stop) && prev.busy => {
+                set busy <= false;
+            }
+        })
     }
 }
 
 #[state_constraint(Spec)]
-fn global_state_constraint() -> StateConstraint<State> {
-    StateConstraint::new("global_state_constraint", |_| true)
+fn global_state_constraint() -> BoolExpr<State> {
+    nirvash_expr! { global_state_constraint(_state) => true }
 }
 
 #[state_constraint(Spec, cases("case_a"))]
-fn only_case_a_state_constraint() -> StateConstraint<State> {
-    StateConstraint::new("only_case_a_state_constraint", |_| true)
+fn only_case_a_state_constraint() -> BoolExpr<State> {
+    nirvash_expr! { only_case_a_state_constraint(_state) => true }
 }
 
 #[action_constraint(Spec, cases("case_b"))]
-fn only_case_b_action_constraint() -> ActionConstraint<State, Action> {
-    ActionConstraint::new("only_case_b_action_constraint", |_, _, _| true)
+fn only_case_b_action_constraint() -> StepExpr<State, Action> {
+    nirvash_step_expr! { only_case_b_action_constraint(_prev, _action, _next) => true }
 }
 
 fn spec_model_cases() -> Vec<ModelCase<State, Action>> {

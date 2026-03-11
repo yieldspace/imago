@@ -3,3 +3,11 @@ error: duplicate case label `case_a`
    |
 34 | #[action_constraint(Spec, cases("case_a", "case_a"))]
    |                                           ^^^^^^^^
+
+warning: unused import: `StepExpr`
+ --> tests/fixtures/case_scoped_constraints_duplicate_labels.rs:1:31
+  |
+1 | use nirvash_core::{ModelCase, StepExpr, TransitionSystem};
+  |                               ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

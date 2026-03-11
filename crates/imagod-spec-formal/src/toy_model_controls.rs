@@ -1,20 +1,21 @@
 use nirvash_core::OpaqueModelValue;
 use nirvash_core::TransitionSystem;
 use nirvash_macros::{
-    ActionVocabulary, Signature, action_constraint, fairness, formal_tests, invariant, property,
-    state_constraint, subsystem_spec,
+    ActionVocabulary, Signature, action_constraint, fairness, formal_tests, invariant,
+    nirvash_expr, nirvash_step_expr, nirvash_transition_program, property, state_constraint,
+    subsystem_spec,
 };
 
 struct WorkerTag;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
 enum ToyPhase {
     Idle,
     Busy,
     Blocked,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
 struct ToyState {
     worker: OpaqueModelValue<WorkerTag, 2>,
     phase: ToyPhase,
@@ -80,49 +81,45 @@ fn model_cases() -> Vec<ToyModelControlSpec> {
 }
 
 #[invariant(ToyModelControlSpec)]
-fn blocked_states_remain_excluded() -> nirvash_core::StatePredicate<ToyState> {
-    nirvash_core::StatePredicate::new("blocked_states_remain_excluded", |state| {
+fn blocked_states_remain_excluded() -> nirvash_core::BoolExpr<ToyState> {
+    nirvash_expr! { blocked_states_remain_excluded(state) =>
         !matches!(state.phase, ToyPhase::Blocked)
-    })
+    }
 }
 
 #[state_constraint(ToyModelControlSpec)]
-fn exclude_blocked_states() -> nirvash_core::StateConstraint<ToyState> {
-    nirvash_core::StateConstraint::new("exclude_blocked_states", |state| {
+fn exclude_blocked_states() -> nirvash_core::BoolExpr<ToyState> {
+    nirvash_expr! { exclude_blocked_states(state) =>
         !matches!(state.phase, ToyPhase::Blocked)
-    })
+    }
 }
 
 #[action_constraint(ToyModelControlSpec)]
-fn disallow_block_transitions() -> nirvash_core::ActionConstraint<ToyState, ToyAction> {
-    nirvash_core::ActionConstraint::new("disallow_block_transitions", |prev, action, next| {
-        let _ = (prev, next);
+fn disallow_block_transitions() -> nirvash_core::StepExpr<ToyState, ToyAction> {
+    nirvash_step_expr! { disallow_block_transitions(_prev, action, _next) =>
         !matches!(action, ToyAction::Block)
-    })
+    }
 }
 
 #[property(ToyModelControlSpec)]
 fn busy_leads_back_to_idle() -> nirvash_core::Ltl<ToyState, ToyAction> {
     nirvash_core::Ltl::leads_to(
-        nirvash_core::Ltl::pred(nirvash_core::StatePredicate::new("busy", |state| {
+        nirvash_core::Ltl::pred(nirvash_expr! { busy(state) =>
             matches!(state.phase, ToyPhase::Busy)
-        })),
-        nirvash_core::Ltl::pred(nirvash_core::StatePredicate::new("idle", |state| {
+        }),
+        nirvash_core::Ltl::pred(nirvash_expr! { idle(state) =>
             matches!(state.phase, ToyPhase::Idle)
-        })),
+        }),
     )
 }
 
 #[fairness(ToyModelControlSpec)]
 fn finish_progress() -> nirvash_core::Fairness<ToyState, ToyAction> {
-    nirvash_core::Fairness::weak(nirvash_core::StepPredicate::new(
-        "finish_progress",
-        |prev, action, next| {
-            matches!(prev.phase, ToyPhase::Busy)
-                && matches!(action, ToyAction::Finish)
-                && matches!(next.phase, ToyPhase::Idle)
-        },
-    ))
+    nirvash_core::Fairness::weak(nirvash_step_expr! { finish_progress(prev, action, next) =>
+        matches!(prev.phase, ToyPhase::Busy)
+            && matches!(action, ToyAction::Finish)
+            && matches!(next.phase, ToyPhase::Idle)
+    })
 }
 
 #[subsystem_spec]
@@ -142,8 +139,20 @@ impl TransitionSystem for ToyModelControlSpec {
         <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
-    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        self.transition_state(state, action)
+    fn transition_program(
+        &self,
+    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule start when matches!(action, ToyAction::Start)
+                && matches!(prev.phase, ToyPhase::Idle) => {
+                set phase <= ToyPhase::Busy;
+            }
+
+            rule finish when matches!(action, ToyAction::Finish)
+                && matches!(prev.phase, ToyPhase::Busy) => {
+                set phase <= ToyPhase::Idle;
+            }
+        })
     }
 }
 

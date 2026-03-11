@@ -12,3 +12,4 @@ path = "src/lib.rs"
 [dependencies]
 inventory = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+z3 = { workspace = true }

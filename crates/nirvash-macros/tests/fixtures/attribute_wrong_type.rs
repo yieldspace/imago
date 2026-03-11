@@ -1,5 +1,5 @@
-use nirvash_core::StatePredicate;
-use nirvash_macros::{Signature as FormalSignature, invariant};
+use nirvash_core::BoolExpr;
+use nirvash_macros::{Signature as FormalSignature, invariant, nirvash_expr};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
 enum State {
@@ -36,8 +36,8 @@ impl nirvash_core::TransitionSystem for Spec {
 }
 
 #[invariant(Spec)]
-fn wrong_state_type() -> StatePredicate<OtherState> {
-    StatePredicate::new("wrong_state_type", |_| true)
+fn wrong_state_type() -> BoolExpr<OtherState> {
+    nirvash_expr! { wrong_state_type(_state) => true }
 }
 
 fn main() {}

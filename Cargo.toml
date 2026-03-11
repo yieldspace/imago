@@ -107,6 +107,7 @@ web-transport-quinn = "0.11.6"
 syn = "2.0.117"
 toml_edit = "0.23.7"
 trybuild = "1.0.114"
+z3 = { version = "0.19.13", features = ["bundled"] }
 
 imago-plugin-imago-admin = { path = "plugins/imago-admin", version = "0.2.0" }
 imago-plugin-imago-experimental-gpio = { path = "plugins/imago-experimental-gpio", version = "0.2.0" }

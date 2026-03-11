@@ -1,0 +1,5 @@
+error: expected `set`, `insert`, or `remove`
+  --> tests/fixtures/function_like_transition_program_invalid.rs:18:13
+   |
+18 |             effect items <= 1;
+   |             ^^^^^^

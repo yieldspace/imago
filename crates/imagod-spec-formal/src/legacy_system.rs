@@ -1,9 +1,10 @@
 use nirvash_core::{
-    ActionConstraint, ModelCase, ModelCaseSource, ModelCheckConfig, StatePredicate, TemporalSpec,
+    BoolExpr, ModelCase, ModelCaseSource, ModelCheckConfig, StepExpr, TemporalSpec,
     TransitionSystem,
 };
 use nirvash_macros::{
-    ActionVocabulary, Signature as FormalSignature, action_constraint, invariant, system_spec,
+    ActionVocabulary, Signature as FormalSignature, action_constraint, invariant, nirvash_expr,
+    nirvash_step_expr, nirvash_transition_program, system_spec,
 };
 
 use crate::{
@@ -28,7 +29,7 @@ use crate::{
     shutdown_flow::{ShutdownFlowAction, ShutdownFlowSpec, ShutdownFlowState, ShutdownPhase},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, FormalSignature)]
 pub struct ImagodSystemState {
     pub manager: ManagerRuntimeState,
     pub transport: SessionTransportState,
@@ -314,6 +315,7 @@ fn system_checker_config() -> ModelCheckConfig {
 
 fn system_doc_checker_config() -> ModelCheckConfig {
     ModelCheckConfig {
+        backend: None,
         exploration: nirvash_core::ExplorationMode::ReachableGraph,
         bounded_depth: None,
         max_states: Some(128),
@@ -324,54 +326,52 @@ fn system_doc_checker_config() -> ModelCheckConfig {
 }
 
 #[action_constraint(ImagodSystemSpec, cases("startup_command"))]
-fn startup_command_action_constraint() -> ActionConstraint<ImagodSystemState, ImagodSystemAction> {
-    ActionConstraint::new("startup_command_actions", |prev, action, _| {
+fn startup_command_action_constraint() -> StepExpr<ImagodSystemState, ImagodSystemAction> {
+    nirvash_step_expr! { startup_command_actions(prev, action, _next) =>
         startup_command_session_progress_allowed(prev, action)
             || startup_command_non_session_action_allowed(action)
-    })
+    }
 }
 
 #[action_constraint(ImagodSystemSpec, cases("deploy_runtime_serving"))]
-fn deploy_runtime_serving_action_constraint()
--> ActionConstraint<ImagodSystemState, ImagodSystemAction> {
-    ActionConstraint::new("deploy_runtime_serving_actions", |prev, action, _| {
+fn deploy_runtime_serving_action_constraint() -> StepExpr<ImagodSystemState, ImagodSystemAction> {
+    nirvash_step_expr! { deploy_runtime_serving_actions(prev, action, _next) =>
         deterministic_session_cycle_allowed(prev, action)
             || deploy_runtime_serving_non_session_action_allowed(action)
-    })
+    }
 }
 
 #[action_constraint(ImagodSystemSpec, cases("deploy_rollback"))]
-fn deploy_rollback_action_constraint() -> ActionConstraint<ImagodSystemState, ImagodSystemAction> {
-    ActionConstraint::new("deploy_rollback_actions", |prev, action, _| {
+fn deploy_rollback_action_constraint() -> StepExpr<ImagodSystemState, ImagodSystemAction> {
+    nirvash_step_expr! { deploy_rollback_actions(prev, action, _next) =>
         deterministic_session_cycle_allowed(prev, action)
             || deploy_rollback_non_session_action_allowed(action)
-    })
+    }
 }
 
 #[action_constraint(ImagodSystemSpec, cases("bootstrap_runtime_failure"))]
-fn bootstrap_runtime_failure_action_constraint()
--> ActionConstraint<ImagodSystemState, ImagodSystemAction> {
-    ActionConstraint::new("bootstrap_runtime_failure_actions", |prev, action, _| {
+fn bootstrap_runtime_failure_action_constraint() -> StepExpr<ImagodSystemState, ImagodSystemAction>
+{
+    nirvash_step_expr! { bootstrap_runtime_failure_actions(prev, action, _next) =>
         deterministic_session_cycle_allowed(prev, action)
             || bootstrap_runtime_failure_non_session_action_allowed(action)
-    })
+    }
 }
 
 #[action_constraint(ImagodSystemSpec, cases("plugin_dependency"))]
-fn plugin_dependency_action_constraint() -> ActionConstraint<ImagodSystemState, ImagodSystemAction>
-{
-    ActionConstraint::new("plugin_dependency_actions", |prev, action, _| {
+fn plugin_dependency_action_constraint() -> StepExpr<ImagodSystemState, ImagodSystemAction> {
+    nirvash_step_expr! { plugin_dependency_actions(prev, action, _next) =>
         deterministic_session_cycle_allowed(prev, action)
             || plugin_dependency_non_session_action_allowed(action)
-    })
+    }
 }
 
 #[action_constraint(ImagodSystemSpec, cases("shutdown"))]
-fn shutdown_action_constraint() -> ActionConstraint<ImagodSystemState, ImagodSystemAction> {
-    ActionConstraint::new("shutdown_actions", |prev, action, _| {
+fn shutdown_action_constraint() -> StepExpr<ImagodSystemState, ImagodSystemAction> {
+    nirvash_step_expr! { shutdown_actions(prev, action, _next) =>
         shutdown_session_progress_allowed(prev, action)
             || shutdown_non_session_action_allowed(action)
-    })
+    }
 }
 
 fn deterministic_session_cycle_allowed(
@@ -557,11 +557,6 @@ where
     spec.invariants()
         .iter()
         .all(|predicate| predicate.eval(state))
-        && spec
-            .model_cases()
-            .iter()
-            .flat_map(|model_case| model_case.state_constraints().iter())
-            .all(|constraint| constraint.eval(state))
 }
 
 fn system_state_valid(state: &ImagodSystemState) -> bool {
@@ -578,64 +573,57 @@ fn system_state_valid(state: &ImagodSystemState) -> bool {
 }
 
 #[invariant(ImagodSystemSpec)]
-fn runtime_serving_requires_ready_and_promoted_release() -> StatePredicate<ImagodSystemState> {
-    StatePredicate::new(
-        "runtime_serving_requires_ready_and_promoted_release",
-        |state| {
-            !matches!(state.runtime.phase, RuntimePhase::Serving)
-                || (state.bootstrap.ready
-                    && state.supervision.has_ready_service()
-                    && matches!(state.deploy.release, ReleaseStage::Promoted))
-        },
-    )
+fn runtime_serving_requires_ready_and_promoted_release() -> BoolExpr<ImagodSystemState> {
+    nirvash_expr! { runtime_serving_requires_ready_and_promoted_release(state) =>
+        !matches!(state.runtime.phase, RuntimePhase::Serving)
+            || (state.bootstrap.ready
+                && state.supervision.has_ready_service()
+                && matches!(state.deploy.release, ReleaseStage::Promoted))
+    }
 }
 
 #[invariant(ImagodSystemSpec)]
-fn shutdown_requires_transport_gate_and_manager_shutdown() -> StatePredicate<ImagodSystemState> {
-    StatePredicate::new(
-        "shutdown_requires_transport_gate_and_manager_shutdown",
-        |state| {
-            matches!(state.shutdown.phase, ShutdownPhase::Idle)
-                || (state.transport.shutdown_requested
-                    && matches!(
-                        state.manager.phase,
-                        ManagerRuntimePhase::ShutdownRequested | ManagerRuntimePhase::Stopped
-                    ))
-        },
-    )
+fn shutdown_requires_transport_gate_and_manager_shutdown() -> BoolExpr<ImagodSystemState> {
+    nirvash_expr! { shutdown_requires_transport_gate_and_manager_shutdown(state) =>
+        matches!(state.shutdown.phase, ShutdownPhase::Idle)
+            || (state.transport.shutdown_requested
+                && matches!(
+                    state.manager.phase,
+                    ManagerRuntimePhase::ShutdownRequested | ManagerRuntimePhase::Stopped
+                ))
+    }
 }
 
 #[invariant(ImagodSystemSpec)]
-fn ready_runner_requires_running_supervision() -> StatePredicate<ImagodSystemState> {
-    StatePredicate::new("ready_runner_requires_running_supervision", |state| {
+fn ready_runner_requires_running_supervision() -> BoolExpr<ImagodSystemState> {
+    nirvash_expr! { ready_runner_requires_running_supervision(state) =>
         !state.bootstrap.ready || state.supervision.has_ready_service()
-    })
+    }
 }
 
 #[invariant(ImagodSystemSpec)]
-fn active_command_requires_listening_manager() -> StatePredicate<ImagodSystemState> {
-    StatePredicate::new("active_command_requires_listening_manager", |state| {
+fn active_command_requires_listening_manager() -> BoolExpr<ImagodSystemState> {
+    nirvash_expr! { active_command_requires_listening_manager(state) =>
         !matches!(
             state.command.lifecycle_state,
             Some(CommandLifecycleState::Accepted | CommandLifecycleState::Running)
         ) || matches!(state.manager.phase, ManagerRuntimePhase::Listening)
-    })
+    }
 }
 
 #[invariant(ImagodSystemSpec)]
-fn stopped_manager_requires_completed_shutdown() -> StatePredicate<ImagodSystemState> {
-    StatePredicate::new("stopped_manager_requires_completed_shutdown", |state| {
+fn stopped_manager_requires_completed_shutdown() -> BoolExpr<ImagodSystemState> {
+    nirvash_expr! { stopped_manager_requires_completed_shutdown(state) =>
         !matches!(state.manager.phase, ManagerRuntimePhase::Stopped)
             || matches!(state.shutdown.phase, ShutdownPhase::Completed)
-    })
+    }
 }
 
 #[invariant(ImagodSystemSpec)]
-fn dependency_provider_requires_acyclic_plugin_graph() -> StatePredicate<ImagodSystemState> {
-    StatePredicate::new(
-        "dependency_provider_requires_acyclic_plugin_graph",
-        |state| !state.plugin.provider_is_dependency() || state.plugin.graph_is_acyclic(),
-    )
+fn dependency_provider_requires_acyclic_plugin_graph() -> BoolExpr<ImagodSystemState> {
+    nirvash_expr! { dependency_provider_requires_acyclic_plugin_graph(state) =>
+        !state.plugin.provider_is_dependency() || state.plugin.graph_is_acyclic()
+    }
 }
 
 #[system_spec(
@@ -668,9 +656,23 @@ impl TransitionSystem for ImagodSystemSpec {
         <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
-    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        self.transition_state(state, action)
+    fn transition_program(
+        &self,
+    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule imagod_system_transition when imagod_system_transition(prev, action).is_some() => {
+                set self <= imagod_system_transition(prev, action)
+                    .expect("imagod_system_transition guard matched");
+            }
+        })
     }
+}
+
+fn imagod_system_transition(
+    prev: &ImagodSystemState,
+    action: &ImagodSystemAction,
+) -> Option<ImagodSystemState> {
+    ImagodSystemSpec::new().transition_state(prev, action)
 }
 
 fn cross_links_hold(state: &ImagodSystemState) -> bool {

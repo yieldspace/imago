@@ -1,5 +1,8 @@
-use nirvash_core::{Fairness, Ltl, ModelCase, StatePredicate, StepPredicate, TransitionSystem};
-use nirvash_macros::{ActionVocabulary, Signature, fairness, invariant, property, subsystem_spec};
+use nirvash_core::{BoolExpr, Fairness, Ltl, ModelCase, StepExpr, TransitionSystem};
+use nirvash_macros::{
+    ActionVocabulary, Signature, fairness, invariant, nirvash_expr, nirvash_step_expr,
+    nirvash_transition_program, property, subsystem_spec,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
 pub enum ShutdownPhase {
@@ -11,7 +14,7 @@ pub enum ShutdownPhase {
     Completed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
 pub struct ShutdownFlowState {
     pub phase: ShutdownPhase,
     pub accepts_stopped: bool,
@@ -134,86 +137,80 @@ fn shutdown_model_cases() -> Vec<ModelCase<ShutdownFlowState, ShutdownFlowAction
 }
 
 #[invariant(ShutdownFlowSpec)]
-fn completed_requires_all_shutdown_steps() -> StatePredicate<ShutdownFlowState> {
-    StatePredicate::new("completed_requires_all_shutdown_steps", |state| {
+fn completed_requires_all_shutdown_steps() -> BoolExpr<ShutdownFlowState> {
+    nirvash_expr! { completed_requires_all_shutdown_steps(state) =>
         !matches!(state.phase, ShutdownPhase::Completed)
             || (state.accepts_stopped
                 && state.sessions_drained
                 && state.services_stopped
                 && state.maintenance_stopped)
-    })
+    }
 }
 
 #[invariant(ShutdownFlowSpec)]
-fn maintenance_stops_after_services() -> StatePredicate<ShutdownFlowState> {
-    StatePredicate::new("maintenance_stops_after_services", |state| {
+fn maintenance_stops_after_services() -> BoolExpr<ShutdownFlowState> {
+    nirvash_expr! { maintenance_stops_after_services(state) =>
         !state.maintenance_stopped || state.services_stopped
-    })
+    }
 }
 
 #[invariant(ShutdownFlowSpec)]
-fn services_stop_after_session_drain() -> StatePredicate<ShutdownFlowState> {
-    StatePredicate::new("services_stop_after_session_drain", |state| {
+fn services_stop_after_session_drain() -> BoolExpr<ShutdownFlowState> {
+    nirvash_expr! { services_stop_after_session_drain(state) =>
         !state.services_stopped || state.sessions_drained
-    })
+    }
 }
 
 #[property(ShutdownFlowSpec)]
 fn signal_received_leads_to_accepts_stopped() -> Ltl<ShutdownFlowState, ShutdownFlowAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("signal_received", |state| {
+        Ltl::pred(nirvash_expr! { signal_received(state) =>
             !matches!(state.phase, ShutdownPhase::Idle)
-        })),
-        Ltl::pred(StatePredicate::new("accepts_stopped", |state| {
-            state.accepts_stopped
-        })),
+        }),
+        Ltl::pred(nirvash_expr! { accepts_stopped(state) => state.accepts_stopped }),
     )
 }
 
 #[property(ShutdownFlowSpec)]
 fn draining_leads_to_services_stopped() -> Ltl<ShutdownFlowState, ShutdownFlowAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("sessions_draining", |state| {
+        Ltl::pred(nirvash_expr! { sessions_draining(state) =>
             matches!(state.phase, ShutdownPhase::DrainingSessions)
-        })),
-        Ltl::pred(StatePredicate::new("services_stopped", |state| {
-            state.services_stopped
-        })),
+        }),
+        Ltl::pred(nirvash_expr! { services_stopped(state) => state.services_stopped }),
     )
 }
 
 #[property(ShutdownFlowSpec)]
 fn maintenance_stopping_leads_to_completed() -> Ltl<ShutdownFlowState, ShutdownFlowAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("maintenance_stopping", |state| {
+        Ltl::pred(nirvash_expr! { maintenance_stopping(state) =>
             matches!(
                 state.phase,
                 ShutdownPhase::StoppingMaintenance | ShutdownPhase::Completed
             )
-        })),
-        Ltl::pred(StatePredicate::new("completed", |state| {
+        }),
+        Ltl::pred(nirvash_expr! { completed(state) =>
             matches!(state.phase, ShutdownPhase::Completed)
-        })),
+        }),
     )
 }
 
 #[fairness(ShutdownFlowSpec)]
 fn accept_stop_progress() -> Fairness<ShutdownFlowState, ShutdownFlowAction> {
-    Fairness::weak(StepPredicate::new(
-        "accept_stop_progress",
-        |prev, action, next| {
+    Fairness::weak(
+        nirvash_step_expr! { accept_stop_progress(prev, action, next) =>
             matches!(prev.phase, ShutdownPhase::SignalReceived)
                 && matches!(action, ShutdownFlowAction::StopAccepting)
                 && next.accepts_stopped
         },
-    ))
+    )
 }
 
 #[fairness(ShutdownFlowSpec)]
 fn service_stop_progress() -> Fairness<ShutdownFlowState, ShutdownFlowAction> {
-    Fairness::weak(StepPredicate::new(
-        "service_stop_progress",
-        |prev, action, next| {
+    Fairness::weak(
+        nirvash_step_expr! { service_stop_progress(prev, action, next) =>
             matches!(
                 prev.phase,
                 ShutdownPhase::DrainingSessions | ShutdownPhase::StoppingServices
@@ -224,33 +221,31 @@ fn service_stop_progress() -> Fairness<ShutdownFlowState, ShutdownFlowAction> {
                     | ShutdownFlowAction::StopServicesForced
             ) && (next.sessions_drained || next.services_stopped)
         },
-    ))
+    )
 }
 
 #[fairness(ShutdownFlowSpec)]
 fn maintenance_stop_progress() -> Fairness<ShutdownFlowState, ShutdownFlowAction> {
-    Fairness::weak(StepPredicate::new(
-        "maintenance_stop_progress",
-        |prev, action, next| {
+    Fairness::weak(
+        nirvash_step_expr! { maintenance_stop_progress(prev, action, next) =>
             matches!(prev.phase, ShutdownPhase::StoppingMaintenance)
                 && !prev.maintenance_stopped
                 && matches!(action, ShutdownFlowAction::StopMaintenance)
                 && next.maintenance_stopped
         },
-    ))
+    )
 }
 
 #[fairness(ShutdownFlowSpec)]
 fn finalize_progress() -> Fairness<ShutdownFlowState, ShutdownFlowAction> {
-    Fairness::weak(StepPredicate::new(
-        "finalize_progress",
-        |prev, action, next| {
+    Fairness::weak(
+        nirvash_step_expr! { finalize_progress(prev, action, next) =>
             matches!(prev.phase, ShutdownPhase::StoppingMaintenance)
                 && prev.maintenance_stopped
                 && matches!(action, ShutdownFlowAction::Finalize)
                 && matches!(next.phase, ShutdownPhase::Completed)
         },
-    ))
+    )
 }
 
 #[subsystem_spec(model_cases(shutdown_model_cases))]
@@ -270,8 +265,51 @@ impl TransitionSystem for ShutdownFlowSpec {
         <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
-    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        self.transition_state(state, action)
+    fn transition_program(
+        &self,
+    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule receive_signal when matches!(action, ShutdownFlowAction::ReceiveSignal)
+                && matches!(prev.phase, ShutdownPhase::Idle) => {
+                set phase <= ShutdownPhase::SignalReceived;
+            }
+
+            rule stop_accepting when matches!(action, ShutdownFlowAction::StopAccepting)
+                && matches!(prev.phase, ShutdownPhase::SignalReceived) => {
+                set phase <= ShutdownPhase::DrainingSessions;
+                set accepts_stopped <= true;
+            }
+
+            rule drain_sessions when matches!(action, ShutdownFlowAction::DrainSessions)
+                && matches!(prev.phase, ShutdownPhase::DrainingSessions) => {
+                set phase <= ShutdownPhase::StoppingServices;
+                set sessions_drained <= true;
+            }
+
+            rule stop_services_graceful when matches!(action, ShutdownFlowAction::StopServicesGraceful)
+                && matches!(prev.phase, ShutdownPhase::StoppingServices) => {
+                set phase <= ShutdownPhase::StoppingMaintenance;
+                set services_stopped <= true;
+            }
+
+            rule stop_services_forced when matches!(action, ShutdownFlowAction::StopServicesForced)
+                && matches!(prev.phase, ShutdownPhase::StoppingServices) => {
+                set phase <= ShutdownPhase::StoppingMaintenance;
+                set services_stopped <= true;
+                set forced_stop_attempted <= true;
+            }
+
+            rule stop_maintenance when matches!(action, ShutdownFlowAction::StopMaintenance)
+                && matches!(prev.phase, ShutdownPhase::StoppingMaintenance) => {
+                set maintenance_stopped <= true;
+            }
+
+            rule finalize when matches!(action, ShutdownFlowAction::Finalize)
+                && matches!(prev.phase, ShutdownPhase::StoppingMaintenance)
+                && prev.maintenance_stopped => {
+                set phase <= ShutdownPhase::Completed;
+            }
+        })
     }
 }
 

@@ -1,9 +1,10 @@
 use nirvash_core::{
-    ActionConstraint, Fairness, Ltl, ModelCase, ModelCheckConfig, RelSet, Relation2,
-    StatePredicate, StepPredicate, TransitionSystem,
+    BoolExpr, Fairness, Ltl, ModelBackend, ModelCase, ModelCheckConfig, RelSet, Relation2,
+    StepExpr, TransitionSystem,
 };
 use nirvash_macros::{
-    ActionVocabulary, RelationalState, action_constraint, fairness, property, subsystem_spec,
+    ActionVocabulary, RelationalState, Signature as FormalSignature, action_constraint, fairness,
+    nirvash_expr, nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
 use crate::atoms::{
@@ -11,7 +12,8 @@ use crate::atoms::{
 };
 use crate::summary_mapping::session_role_atom;
 
-#[derive(Debug, Clone, PartialEq, Eq, RelationalState)]
+#[derive(Debug, Clone, PartialEq, Eq, FormalSignature, RelationalState)]
+#[signature(custom)]
 pub struct SessionAuthState {
     accepted_sessions: RelSet<SessionAtom>,
     authenticated_roles: Relation2<SessionAtom, SessionRoleAtom>,
@@ -164,11 +166,17 @@ impl SessionAuthSpec {
     }
 }
 
+nirvash_core::signature_spec!(
+    SessionAuthStateSignatureSpec for SessionAuthState,
+    representatives = crate::state_domain::reachable_state_domain(&SessionAuthSpec::new())
+);
+
 fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthAction>> {
     vec![
         ModelCase::default()
             .with_label("client_rpc_surface")
             .with_checker_config(ModelCheckConfig {
+                backend: Some(ModelBackend::Explicit),
                 exploration: nirvash_core::ExplorationMode::ReachableGraph,
                 bounded_depth: None,
                 max_states: Some(1024),
@@ -177,6 +185,7 @@ fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthActi
                 stop_on_first_violation: false,
             })
             .with_doc_checker_config(ModelCheckConfig {
+                backend: Some(ModelBackend::Explicit),
                 exploration: nirvash_core::ExplorationMode::ReachableGraph,
                 bounded_depth: None,
                 max_states: Some(128),
@@ -187,6 +196,7 @@ fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthActi
             .with_check_deadlocks(false),
         ModelCase::new("timeout_and_reject_surface")
             .with_checker_config(ModelCheckConfig {
+                backend: Some(ModelBackend::Explicit),
                 exploration: nirvash_core::ExplorationMode::ReachableGraph,
                 bounded_depth: None,
                 max_states: Some(1024),
@@ -195,6 +205,7 @@ fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthActi
                 stop_on_first_violation: false,
             })
             .with_doc_checker_config(ModelCheckConfig {
+                backend: Some(ModelBackend::Explicit),
                 exploration: nirvash_core::ExplorationMode::ReachableGraph,
                 bounded_depth: None,
                 max_states: Some(128),
@@ -207,8 +218,8 @@ fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthActi
 }
 
 #[action_constraint(SessionAuthSpec, cases("client_rpc_surface"))]
-fn client_rpc_surface_actions() -> ActionConstraint<SessionAuthState, SessionAuthAction> {
-    ActionConstraint::new("client_rpc_surface_actions", |_, action, _| {
+fn client_rpc_surface_actions() -> StepExpr<SessionAuthState, SessionAuthAction> {
+    nirvash_step_expr! { client_rpc_surface_actions(_prev, action, _next) =>
         matches!(
             action,
             SessionAuthAction::AcceptSession(SessionAtom::Session0)
@@ -223,30 +234,21 @@ fn client_rpc_surface_actions() -> ActionConstraint<SessionAuthState, SessionAut
                     RequestKindAtom::RpcInvoke,
                 )
         )
-    })
+    }
 }
 
 #[action_constraint(SessionAuthSpec, cases("timeout_and_reject_surface"))]
-fn session0_only() -> ActionConstraint<SessionAuthState, SessionAuthAction> {
-    ActionConstraint::new("session0_only", |_, action, _| {
+fn session0_only() -> StepExpr<SessionAuthState, SessionAuthAction> {
+    nirvash_step_expr! { session0_only(_prev, action, _next) =>
         session_for_action(*action).is_none_or(|session| session == SessionAtom::Session0)
-    })
+    }
 }
 
 #[action_constraint(SessionAuthSpec, cases("timeout_and_reject_surface"))]
-fn timeout_reject_surface() -> ActionConstraint<SessionAuthState, SessionAuthAction> {
-    ActionConstraint::new("timeout_reject_surface", |_, action, _| match action {
-        SessionAuthAction::AuthorizeAdmin(stream, kind)
-        | SessionAuthAction::RejectUnauthorized(stream, kind) => {
-            *stream == StreamAtom::Stream0 && *kind == RequestKindAtom::ServicesList
-        }
-        SessionAuthAction::ReadTimeout(stream) | SessionAuthAction::CloseStream(stream) => {
-            *stream == StreamAtom::Stream0
-        }
-        SessionAuthAction::AcceptSession(SessionAtom::Session0)
-        | SessionAuthAction::AuthenticateAdmin(SessionAtom::Session0) => true,
-        _ => false,
-    })
+fn timeout_reject_surface() -> StepExpr<SessionAuthState, SessionAuthAction> {
+    nirvash_step_expr! { timeout_reject_surface(_prev, action, _next) =>
+        timeout_reject_surface_action(*action)
+    }
 }
 
 fn session_for_action(action: SessionAuthAction) -> Option<SessionAtom> {
@@ -267,20 +269,17 @@ fn session_for_action(action: SessionAuthAction) -> Option<SessionAtom> {
 #[property(SessionAuthSpec)]
 fn accepted_session_leads_to_authentication() -> Ltl<SessionAuthState, SessionAuthAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("accepted_session", |state| {
-            state.accepted_sessions.some()
-        })),
-        Ltl::pred(StatePredicate::new("authenticated_session", |state| {
+        Ltl::pred(nirvash_expr! { accepted_session(state) => state.accepted_sessions.some() }),
+        Ltl::pred(nirvash_expr! { authenticated_session(state) =>
             state.authenticated_roles.some()
-        })),
+        }),
     )
 }
 
 #[fairness(SessionAuthSpec)]
 fn authentication_progress_fairness() -> Fairness<SessionAuthState, SessionAuthAction> {
-    Fairness::weak(StepPredicate::new(
-        "authenticate_session",
-        |_, action, next| {
+    Fairness::weak(
+        nirvash_step_expr! { authenticate_session(_prev, action, next) =>
             matches!(
                 action,
                 SessionAuthAction::AuthenticateAdmin(_)
@@ -288,7 +287,7 @@ fn authentication_progress_fairness() -> Fairness<SessionAuthState, SessionAuthA
                     | SessionAuthAction::AuthenticateUnknown(_)
             ) && next.authenticated_roles.some()
         },
-    ))
+    )
 }
 
 #[subsystem_spec(model_cases(session_auth_model_cases))]
@@ -308,8 +307,73 @@ impl TransitionSystem for SessionAuthSpec {
         <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
-    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        transition_session_auth(state, action)
+    fn transition_program(
+        &self,
+    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule accept_session when accept_session_from_action(action).is_some()
+                && !prev.accepted_sessions.contains(&accept_session_from_action(action)
+                    .expect("accept_session guard ensures a session")) => {
+                insert accepted_sessions <= accept_session_from_action(action)
+                    .expect("accept_session guard ensures a session");
+            }
+
+            rule authenticate_admin when authenticate_admin_session(action).is_some()
+                && prev.accepted_sessions.contains(&authenticate_admin_session(action)
+                    .expect("authenticate_admin guard ensures a session"))
+                && !prev.authenticated_roles.domain().contains(&authenticate_admin_session(action)
+                    .expect("authenticate_admin guard ensures a session")) => {
+                set authenticated_roles <= authenticate_admin_roles(prev, action);
+            }
+
+            rule authenticate_client when authenticate_client_session(action).is_some()
+                && prev.accepted_sessions.contains(&authenticate_client_session(action)
+                    .expect("authenticate_client guard ensures a session"))
+                && !prev.authenticated_roles.domain().contains(&authenticate_client_session(action)
+                    .expect("authenticate_client guard ensures a session")) => {
+                set authenticated_roles <= authenticate_client_roles(prev, action);
+            }
+
+            rule authenticate_unknown when authenticate_unknown_session(action).is_some()
+                && prev.accepted_sessions.contains(&authenticate_unknown_session(action)
+                    .expect("authenticate_unknown guard ensures a session"))
+                && !prev.authenticated_roles.domain().contains(&authenticate_unknown_session(action)
+                    .expect("authenticate_unknown guard ensures a session")) => {
+                set authenticated_roles <= authenticate_unknown_roles(prev, action);
+            }
+
+            rule authorize_admin when authorize_admin_allowed(prev, action) => {
+            }
+
+            rule authorize_client when authorize_client_allowed(prev, action) => {
+            }
+
+            rule reject_unauthorized when reject_unauthorized_required(prev, action) => {
+            }
+
+            rule read_timeout when read_timeout_stream(action).is_some()
+                && !prev.timed_out_streams.contains(&read_timeout_stream(action)
+                    .expect("read_timeout guard ensures a stream"))
+                && !prev.closed_streams.contains(&read_timeout_stream(action)
+                    .expect("read_timeout guard ensures a stream")) => {
+                insert timed_out_streams <= read_timeout_stream(action)
+                    .expect("read_timeout guard ensures a stream");
+            }
+
+            rule close_stream when close_stream_from_action(action).is_some()
+                && !prev.closed_streams.contains(&close_stream_from_action(action)
+                    .expect("close_stream guard ensures a stream")) => {
+                insert closed_streams <= close_stream_from_action(action)
+                    .expect("close_stream guard ensures a stream");
+            }
+
+            rule upload_client_authority when upload_client_authority_from_action(action).is_some()
+                && !prev.uploaded_authorities.contains(&upload_client_authority_from_action(action)
+                    .expect("upload_client_authority guard ensures an authority")) => {
+                insert uploaded_authorities <= upload_client_authority_from_action(action)
+                    .expect("upload_client_authority guard ensures an authority");
+            }
+        })
     }
 }
 
@@ -391,6 +455,130 @@ fn transition_session_auth(
     allowed.then_some(candidate)
 }
 
+fn timeout_reject_surface_action(action: SessionAuthAction) -> bool {
+    match action {
+        SessionAuthAction::AuthorizeAdmin(stream, kind)
+        | SessionAuthAction::RejectUnauthorized(stream, kind) => {
+            stream == StreamAtom::Stream0 && kind == RequestKindAtom::ServicesList
+        }
+        SessionAuthAction::ReadTimeout(stream) | SessionAuthAction::CloseStream(stream) => {
+            stream == StreamAtom::Stream0
+        }
+        SessionAuthAction::AcceptSession(SessionAtom::Session0)
+        | SessionAuthAction::AuthenticateAdmin(SessionAtom::Session0) => true,
+        _ => false,
+    }
+}
+
+fn accept_session_from_action(action: &SessionAuthAction) -> Option<SessionAtom> {
+    match action {
+        SessionAuthAction::AcceptSession(session) => Some(*session),
+        _ => None,
+    }
+}
+
+fn authenticate_admin_session(action: &SessionAuthAction) -> Option<SessionAtom> {
+    match action {
+        SessionAuthAction::AuthenticateAdmin(session) => Some(*session),
+        _ => None,
+    }
+}
+
+fn authenticate_client_session(action: &SessionAuthAction) -> Option<SessionAtom> {
+    match action {
+        SessionAuthAction::AuthenticateClient(session) => Some(*session),
+        _ => None,
+    }
+}
+
+fn authenticate_unknown_session(action: &SessionAuthAction) -> Option<SessionAtom> {
+    match action {
+        SessionAuthAction::AuthenticateUnknown(session) => Some(*session),
+        _ => None,
+    }
+}
+
+fn read_timeout_stream(action: &SessionAuthAction) -> Option<StreamAtom> {
+    match action {
+        SessionAuthAction::ReadTimeout(stream) => Some(*stream),
+        _ => None,
+    }
+}
+
+fn close_stream_from_action(action: &SessionAuthAction) -> Option<StreamAtom> {
+    match action {
+        SessionAuthAction::CloseStream(stream) => Some(*stream),
+        _ => None,
+    }
+}
+
+fn upload_client_authority_from_action(action: &SessionAuthAction) -> Option<RemoteAuthorityAtom> {
+    match action {
+        SessionAuthAction::UploadClientAuthority(authority) => Some(*authority),
+        _ => None,
+    }
+}
+
+fn authorize_admin_allowed(prev: &SessionAuthState, action: &SessionAuthAction) -> bool {
+    match action {
+        SessionAuthAction::AuthorizeAdmin(stream, kind) => prev.stream_authorized(*stream, *kind),
+        _ => false,
+    }
+}
+
+fn authorize_client_allowed(prev: &SessionAuthState, action: &SessionAuthAction) -> bool {
+    match action {
+        SessionAuthAction::AuthorizeClient(stream, kind) => prev.stream_authorized(*stream, *kind),
+        _ => false,
+    }
+}
+
+fn reject_unauthorized_required(prev: &SessionAuthState, action: &SessionAuthAction) -> bool {
+    match action {
+        SessionAuthAction::RejectUnauthorized(stream, kind) => {
+            !prev.stream_authorized(*stream, *kind)
+        }
+        _ => false,
+    }
+}
+
+fn authenticated_roles_with(
+    prev: &SessionAuthState,
+    session: SessionAtom,
+    role: SessionRoleAtom,
+) -> Relation2<SessionAtom, SessionRoleAtom> {
+    let mut roles = prev.authenticated_roles.clone();
+    roles.insert(session, role);
+    roles
+}
+
+fn authenticate_admin_roles(
+    prev: &SessionAuthState,
+    action: &SessionAuthAction,
+) -> Relation2<SessionAtom, SessionRoleAtom> {
+    let session = authenticate_admin_session(action)
+        .expect("authenticate_admin_roles requires AuthenticateAdmin action");
+    authenticated_roles_with(prev, session, SessionRoleAtom::Admin)
+}
+
+fn authenticate_client_roles(
+    prev: &SessionAuthState,
+    action: &SessionAuthAction,
+) -> Relation2<SessionAtom, SessionRoleAtom> {
+    let session = authenticate_client_session(action)
+        .expect("authenticate_client_roles requires AuthenticateClient action");
+    authenticated_roles_with(prev, session, SessionRoleAtom::Client)
+}
+
+fn authenticate_unknown_roles(
+    prev: &SessionAuthState,
+    action: &SessionAuthAction,
+) -> Relation2<SessionAtom, SessionRoleAtom> {
+    let session = authenticate_unknown_session(action)
+        .expect("authenticate_unknown_roles requires AuthenticateUnknown action");
+    authenticated_roles_with(prev, session, SessionRoleAtom::Unknown)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,6 +624,44 @@ mod tests {
                 ),
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn transition_program_matches_transition_function() {
+        let spec = SessionAuthSpec::new();
+        let program = spec.transition_program().expect("transition program");
+        let initial = spec.initial_state();
+
+        assert_eq!(
+            program
+                .evaluate(
+                    &initial,
+                    &SessionAuthAction::AcceptSession(SessionAtom::Session0),
+                )
+                .expect("evaluates"),
+            transition_session_auth(
+                &initial,
+                &SessionAuthAction::AcceptSession(SessionAtom::Session0),
+            )
+        );
+        assert_eq!(
+            program
+                .evaluate(
+                    &initial,
+                    &SessionAuthAction::AuthorizeClient(
+                        StreamAtom::Stream0,
+                        RequestKindAtom::HelloNegotiate,
+                    ),
+                )
+                .expect("evaluates"),
+            transition_session_auth(
+                &initial,
+                &SessionAuthAction::AuthorizeClient(
+                    StreamAtom::Stream0,
+                    RequestKindAtom::HelloNegotiate,
+                ),
+            )
         );
     }
 }

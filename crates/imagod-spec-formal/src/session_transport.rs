@@ -1,10 +1,10 @@
 use nirvash_core::{
-    Fairness, Ltl, RelAtom as _, RelSet, Signature as _, StatePredicate, StepPredicate,
+    BoolExpr, Fairness, Ltl, RelAtom as _, RelSet, Signature as _, StepExpr, TransitionProgram,
     TransitionSystem,
 };
 use nirvash_macros::{
-    ActionVocabulary, RelAtom, RelationalState, Signature, fairness, invariant, property,
-    subsystem_spec,
+    ActionVocabulary, RelAtom, RelationalState, Signature, fairness, invariant, nirvash_expr,
+    nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, RelAtom)]
@@ -21,7 +21,8 @@ pub enum SessionOutcome {
     Joined,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, RelationalState)]
+#[derive(Debug, Clone, PartialEq, Eq, Signature, RelationalState)]
+#[signature(custom)]
 pub struct SessionTransportState {
     active_sessions: RelSet<SessionAtom>,
     pub shutdown_requested: bool,
@@ -75,6 +76,11 @@ impl SessionTransportSpec {
     }
 }
 
+nirvash_core::signature_spec!(
+    SessionTransportStateSignatureSpec for SessionTransportState,
+    representatives = crate::state_domain::reachable_state_domain(&SessionTransportSpec::new())
+);
+
 impl SessionTransportState {
     pub fn from_summary(active_session: bool, shutdown_requested: bool) -> Self {
         let mut state = SessionTransportSpec::new().initial_state();
@@ -88,38 +94,34 @@ impl SessionTransportState {
 }
 
 #[invariant(SessionTransportSpec)]
-fn shutdown_blocks_accept() -> StatePredicate<SessionTransportState> {
-    StatePredicate::new("shutdown_blocks_accept", |state| {
+fn shutdown_blocks_accept() -> BoolExpr<SessionTransportState> {
+    nirvash_expr! { shutdown_blocks_accept(state) =>
         !state.shutdown_requested || !matches!(state.last_outcome, SessionOutcome::Accepted)
-    })
+    }
 }
 
 #[invariant(SessionTransportSpec)]
-fn too_many_means_full_or_stopping() -> StatePredicate<SessionTransportState> {
-    StatePredicate::new("too_many_means_full_or_stopping", |state| {
+fn too_many_means_full_or_stopping() -> BoolExpr<SessionTransportState> {
+    nirvash_expr! { too_many_means_full_or_stopping(state) =>
         !matches!(state.last_outcome, SessionOutcome::RejectedTooMany)
             || state.shutdown_requested
             || state.at_capacity()
-    })
+    }
 }
 
 #[invariant(SessionTransportSpec)]
-fn joined_implies_capacity_reduced() -> StatePredicate<SessionTransportState> {
-    StatePredicate::new("joined_implies_capacity_reduced", |state| {
+fn joined_implies_capacity_reduced() -> BoolExpr<SessionTransportState> {
+    nirvash_expr! { joined_implies_capacity_reduced(state) =>
         !matches!(state.last_outcome, SessionOutcome::Joined) || !state.at_capacity()
-    })
+    }
 }
 
 #[property(SessionTransportSpec)]
 fn shutdown_requested_leads_to_idle_sessions() -> Ltl<SessionTransportState, SessionTransportAction>
 {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("shutdown_requested", |state| {
-            state.shutdown_requested
-        })),
-        Ltl::pred(StatePredicate::new("idle_sessions", |state| {
-            state.sessions_idle()
-        })),
+        Ltl::pred(nirvash_expr! { shutdown_requested(state) => state.shutdown_requested }),
+        Ltl::pred(nirvash_expr! { idle_sessions(state) => state.sessions_idle() }),
     )
 }
 
@@ -127,12 +129,12 @@ fn shutdown_requested_leads_to_idle_sessions() -> Ltl<SessionTransportState, Ses
 fn full_capacity_leads_to_resolution() -> Ltl<SessionTransportState, SessionTransportAction> {
     Ltl::always(Ltl::implies(
         Ltl::enabled(resolve_capacity_pressure()),
-        Ltl::eventually(Ltl::pred(StatePredicate::new("join_or_reject", |state| {
+        Ltl::eventually(Ltl::pred(nirvash_expr! { join_or_reject(state) =>
             matches!(
                 state.last_outcome,
                 SessionOutcome::RejectedTooMany | SessionOutcome::Joined
             )
-        }))),
+        })),
     ))
 }
 
@@ -140,28 +142,27 @@ fn full_capacity_leads_to_resolution() -> Ltl<SessionTransportState, SessionTran
 fn accepted_session_leads_to_join_or_shutdown_drain()
 -> Ltl<SessionTransportState, SessionTransportAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("accepted_session", |state| {
+        Ltl::pred(nirvash_expr! { accepted_session(state) =>
             matches!(state.last_outcome, SessionOutcome::Accepted)
-        })),
-        Ltl::pred(StatePredicate::new("joined_or_resolved", |state| {
+        }),
+        Ltl::pred(nirvash_expr! { joined_or_resolved(state) =>
             matches!(state.last_outcome, SessionOutcome::Joined)
                 || matches!(state.last_outcome, SessionOutcome::RejectedTooMany)
                 || (state.shutdown_requested && state.sessions_idle())
-        })),
+        }),
     )
 }
 
 #[fairness(SessionTransportSpec)]
 fn shutdown_drain_progress() -> Fairness<SessionTransportState, SessionTransportAction> {
-    Fairness::weak(StepPredicate::new(
-        "shutdown_drain_progress",
-        |prev, action, next| {
+    Fairness::weak(
+        nirvash_step_expr! { shutdown_drain_progress(prev, action, next) =>
             prev.shutdown_requested
                 && prev.has_active_sessions()
                 && matches!(action, SessionTransportAction::JoinSession)
                 && next.active_session_count() < prev.active_session_count()
         },
-    ))
+    )
 }
 
 #[fairness(SessionTransportSpec)]
@@ -171,16 +172,15 @@ fn capacity_resolution_progress() -> Fairness<SessionTransportState, SessionTran
 
 #[fairness(SessionTransportSpec)]
 fn accepted_session_progress() -> Fairness<SessionTransportState, SessionTransportAction> {
-    Fairness::weak(StepPredicate::new(
-        "accepted_session_progress",
-        |prev, action, next| {
+    Fairness::weak(
+        nirvash_step_expr! { accepted_session_progress(prev, action, next) =>
             !prev.shutdown_requested
                 && prev.has_active_sessions()
                 && matches!(prev.last_outcome, SessionOutcome::Accepted)
                 && matches!(action, SessionTransportAction::JoinSession)
                 && next.active_session_count() < prev.active_session_count()
         },
-    ))
+    )
 }
 
 #[subsystem_spec]
@@ -200,13 +200,40 @@ impl TransitionSystem for SessionTransportSpec {
         <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
-    fn transition(&self, prev: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        transition_state(prev, action)
+    fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule accept_session when matches!(action, SessionTransportAction::AcceptSession)
+                && !prev.shutdown_requested
+                && !prev.at_capacity()
+                && next_free_session(prev).is_some() => {
+                insert active_sessions <= next_free_session(prev)
+                    .expect("accept_session guard ensures a free session");
+                set last_outcome <= SessionOutcome::Accepted;
+            }
+
+            rule reject_too_many when matches!(action, SessionTransportAction::RejectTooMany)
+                && (prev.shutdown_requested || prev.at_capacity()) => {
+                set last_outcome <= SessionOutcome::RejectedTooMany;
+            }
+
+            rule join_session when matches!(action, SessionTransportAction::JoinSession)
+                && prev.has_active_sessions()
+                && first_active_session(prev).is_some() => {
+                remove active_sessions <= first_active_session(prev)
+                    .expect("join_session guard ensures an active session");
+                set last_outcome <= SessionOutcome::Joined;
+            }
+
+            rule begin_shutdown when matches!(action, SessionTransportAction::BeginShutdown) => {
+                set shutdown_requested <= true;
+                set last_outcome <= SessionOutcome::None;
+            }
+        })
     }
 }
 
-fn resolve_capacity_pressure() -> StepPredicate<SessionTransportState, SessionTransportAction> {
-    StepPredicate::new("resolve_capacity_pressure", |prev, action, next| {
+fn resolve_capacity_pressure() -> StepExpr<SessionTransportState, SessionTransportAction> {
+    nirvash_step_expr! { resolve_capacity_pressure(prev, action, next) =>
         (prev.at_capacity() || prev.shutdown_requested)
             && matches!(
                 action,
@@ -216,7 +243,7 @@ fn resolve_capacity_pressure() -> StepPredicate<SessionTransportState, SessionTr
                 next.last_outcome,
                 SessionOutcome::RejectedTooMany | SessionOutcome::Joined
             )
-    })
+    }
 }
 
 #[nirvash_macros::formal_tests(spec = SessionTransportSpec)]
@@ -233,42 +260,10 @@ fn first_active_session(state: &SessionTransportState) -> Option<SessionAtom> {
     state.active_sessions.items().into_iter().next()
 }
 
-fn transition_state(
-    prev: &SessionTransportState,
-    action: &SessionTransportAction,
-) -> Option<SessionTransportState> {
-    let mut candidate = prev.clone();
-    match action {
-        SessionTransportAction::AcceptSession
-            if !prev.shutdown_requested && !prev.at_capacity() =>
-        {
-            let next_session = next_free_session(prev)?;
-            candidate.active_sessions.insert(next_session);
-            candidate.last_outcome = SessionOutcome::Accepted;
-            Some(candidate)
-        }
-        SessionTransportAction::RejectTooMany if prev.shutdown_requested || prev.at_capacity() => {
-            candidate.last_outcome = SessionOutcome::RejectedTooMany;
-            Some(candidate)
-        }
-        SessionTransportAction::JoinSession if prev.has_active_sessions() => {
-            let session = first_active_session(prev)?;
-            candidate.active_sessions.remove(&session);
-            candidate.last_outcome = SessionOutcome::Joined;
-            Some(candidate)
-        }
-        SessionTransportAction::BeginShutdown => {
-            candidate.shutdown_requested = true;
-            candidate.last_outcome = SessionOutcome::None;
-            Some(candidate)
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nirvash_core::{ModelBackend, ModelCheckConfig, ModelChecker};
 
     #[test]
     fn accept_and_join_use_deterministic_session_atoms() {
@@ -295,5 +290,49 @@ mod tests {
             vec![SessionAtom::Session0, SessionAtom::Session1]
         );
         assert_eq!(joined.active_sessions.items(), vec![SessionAtom::Session1]);
+    }
+
+    #[test]
+    fn explicit_and_symbolic_backends_agree() {
+        let spec = SessionTransportSpec::new();
+        let explicit_snapshot = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Explicit),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .full_reachable_graph_snapshot()
+        .expect("explicit session_transport snapshot");
+        let symbolic_snapshot = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .full_reachable_graph_snapshot()
+        .expect("symbolic session_transport snapshot");
+        assert_eq!(symbolic_snapshot, explicit_snapshot);
+
+        let explicit_result = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Explicit),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .check_all()
+        .expect("explicit session_transport result");
+        let symbolic_result = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .check_all()
+        .expect("symbolic session_transport result");
+        assert_eq!(symbolic_result, explicit_result);
     }
 }

@@ -1,7 +1,6 @@
 use crate::{
-    ActionConstraint, DocGraphPolicy, Fairness, Ltl, ModelCheckConfig, StateConstraint,
-    StatePredicate, SymmetryReducer,
-    VizPolicy,
+    BoolExpr, DocGraphPolicy, Fairness, Ltl, ModelBackend, ModelCheckConfig, StepExpr,
+    SymmetryReducer, TransitionProgram, VizPolicy,
 };
 
 pub trait ActionVocabulary: Sized {
@@ -20,7 +19,31 @@ pub trait TransitionSystem {
 
     fn actions(&self) -> Vec<Self::Action>;
 
-    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State>;
+    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+        match self.transition_program() {
+            Some(program) => {
+                assert!(
+                    program.is_ast_native(),
+                    "transition program `{}` for spec `{}` must be AST-native; use nirvash_transition_program! instead of TransitionRule::new/UpdateProgram::new",
+                    program.name(),
+                    self.name()
+                );
+                match program.evaluate(state, action) {
+                    Ok(next) => next,
+                    Err(error) => panic!(
+                        "transition program `{}` is ambiguous: {:?}",
+                        program.name(),
+                        error
+                    ),
+                }
+            }
+            None => None,
+        }
+    }
+
+    fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+        None
+    }
 
     fn successors(&self, state: &Self::State) -> Vec<(Self::Action, Self::State)> {
         self.actions()
@@ -66,7 +89,7 @@ pub trait TransitionSystem {
 }
 
 pub trait TemporalSpec: TransitionSystem {
-    fn invariants(&self) -> Vec<StatePredicate<Self::State>>;
+    fn invariants(&self) -> Vec<BoolExpr<Self::State>>;
 
     fn properties(&self) -> Vec<Ltl<Self::State, Self::Action>> {
         Vec::new()
@@ -81,13 +104,17 @@ pub trait ModelCaseSource: TransitionSystem {
     fn model_cases(&self) -> Vec<ModelCase<Self::State, Self::Action>> {
         vec![ModelCase::default()]
     }
+
+    fn default_model_backend(&self) -> Option<ModelBackend> {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ModelCase<S, A> {
     label: &'static str,
-    state_constraints: Vec<StateConstraint<S>>,
-    action_constraints: Vec<ActionConstraint<S, A>>,
+    state_constraints: Vec<BoolExpr<S>>,
+    action_constraints: Vec<StepExpr<S, A>>,
     symmetry: Option<SymmetryReducer<S>>,
     checker_config: ModelCheckConfig,
     check_deadlocks: bool,
@@ -120,12 +147,12 @@ impl<S, A> ModelCase<S, A> {
         self
     }
 
-    pub fn with_state_constraint(mut self, constraint: StateConstraint<S>) -> Self {
+    pub fn with_state_constraint(mut self, constraint: BoolExpr<S>) -> Self {
         self.state_constraints.push(constraint);
         self
     }
 
-    pub fn with_action_constraint(mut self, constraint: ActionConstraint<S, A>) -> Self {
+    pub fn with_action_constraint(mut self, constraint: StepExpr<S, A>) -> Self {
         self.action_constraints.push(constraint);
         self
     }
@@ -160,11 +187,20 @@ impl<S, A> ModelCase<S, A> {
         self
     }
 
-    pub fn state_constraints(&self) -> &[StateConstraint<S>] {
+    pub fn with_resolved_backend(mut self, default_backend: ModelBackend) -> Self {
+        self.checker_config.backend = self.checker_config.backend.or(Some(default_backend));
+        if let Some(mut doc_checker_config) = self.doc_checker_config {
+            doc_checker_config.backend = doc_checker_config.backend.or(self.checker_config.backend);
+            self.doc_checker_config = Some(doc_checker_config);
+        }
+        self
+    }
+
+    pub fn state_constraints(&self) -> &[BoolExpr<S>] {
         &self.state_constraints
     }
 
-    pub fn action_constraints(&self) -> &[ActionConstraint<S, A>] {
+    pub fn action_constraints(&self) -> &[StepExpr<S, A>] {
         &self.action_constraints
     }
 
@@ -226,7 +262,7 @@ pub trait StateObserver {
 pub struct SystemComposition<S, A> {
     name: &'static str,
     subsystems: Vec<&'static str>,
-    invariants: Vec<StatePredicate<S>>,
+    invariants: Vec<BoolExpr<S>>,
     properties: Vec<Ltl<S, A>>,
     fairness: Vec<Fairness<S, A>>,
     model_cases: Vec<ModelCase<S, A>>,
@@ -249,7 +285,7 @@ impl<S, A> SystemComposition<S, A> {
         self
     }
 
-    pub fn with_invariant(mut self, invariant: StatePredicate<S>) -> Self {
+    pub fn with_invariant(mut self, invariant: BoolExpr<S>) -> Self {
         self.invariants.push(invariant);
         self
     }
@@ -277,7 +313,7 @@ impl<S, A> SystemComposition<S, A> {
         &self.subsystems
     }
 
-    pub fn invariants(&self) -> &[StatePredicate<S>] {
+    pub fn invariants(&self) -> &[BoolExpr<S>] {
         &self.invariants
     }
 

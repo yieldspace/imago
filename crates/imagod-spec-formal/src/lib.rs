@@ -19,6 +19,7 @@ pub mod session_auth;
 pub mod session_auth_projection;
 pub mod session_transport;
 pub mod shutdown_flow;
+mod state_domain;
 mod summary_mapping;
 pub mod supervision;
 pub mod system;

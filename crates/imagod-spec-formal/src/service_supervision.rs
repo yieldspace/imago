@@ -1,9 +1,7 @@
-use nirvash_core::{
-    Fairness, Ltl, RelSet, Signature as _, StatePredicate, StepPredicate, TransitionSystem,
-};
+use nirvash_core::{BoolExpr, Fairness, Ltl, RelSet, Signature as _, StepExpr, TransitionSystem};
 use nirvash_macros::{
-    ActionVocabulary, RelAtom, RelationalState, Signature, fairness, invariant, property,
-    subsystem_spec,
+    ActionVocabulary, RelAtom, RelationalState, Signature, fairness, invariant, nirvash_expr,
+    nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, RelAtom)]
@@ -23,7 +21,8 @@ pub enum ServicePhase {
     Reaped,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, RelationalState)]
+#[derive(Debug, Clone, PartialEq, Eq, Signature, RelationalState)]
+#[signature(custom)]
 pub struct ServiceSupervisionState {
     active_services: RelSet<ServiceAtom>,
     ready_services: RelSet<ServiceAtom>,
@@ -87,6 +86,11 @@ impl ServiceSupervisionSpec {
     }
 }
 
+nirvash_core::signature_spec!(
+    ServiceSupervisionStateSignatureSpec for ServiceSupervisionState,
+    representatives = crate::state_domain::reachable_state_domain(&ServiceSupervisionSpec::new())
+);
+
 fn service_supervision_state_valid(state: &ServiceSupervisionState) -> bool {
     let active_matches_phase = match state.phase {
         ServicePhase::Idle | ServicePhase::Reaped => state.active_services.no(),
@@ -114,8 +118,8 @@ fn service_supervision_state_valid(state: &ServiceSupervisionState) -> bool {
 }
 
 #[invariant(ServiceSupervisionSpec)]
-fn running_requires_active_service() -> StatePredicate<ServiceSupervisionState> {
-    StatePredicate::new("running_requires_active_service", |state| {
+fn running_requires_active_service() -> BoolExpr<ServiceSupervisionState> {
+    nirvash_expr! { running_requires_active_service(state) =>
         !matches!(
             state.phase,
             ServicePhase::Starting
@@ -124,88 +128,79 @@ fn running_requires_active_service() -> StatePredicate<ServiceSupervisionState> 
                 | ServicePhase::Stopping
                 | ServicePhase::ForcedStop
         ) || state.has_active_service()
-    })
+    }
 }
 
 #[invariant(ServiceSupervisionSpec)]
-fn reaped_clears_active_service_count() -> StatePredicate<ServiceSupervisionState> {
-    StatePredicate::new("reaped_clears_active_service_count", |state| {
+fn reaped_clears_active_service_count() -> BoolExpr<ServiceSupervisionState> {
+    nirvash_expr! { reaped_clears_active_service_count(state) =>
         !matches!(state.phase, ServicePhase::Reaped) || !state.has_active_service()
-    })
+    }
 }
 
 #[invariant(ServiceSupervisionSpec)]
-fn logs_are_only_retained_after_reap() -> StatePredicate<ServiceSupervisionState> {
-    StatePredicate::new("logs_are_only_retained_after_reap", |state| {
+fn logs_are_only_retained_after_reap() -> BoolExpr<ServiceSupervisionState> {
+    nirvash_expr! { logs_are_only_retained_after_reap(state) =>
         !state.has_retained_logs() || matches!(state.phase, ServicePhase::Reaped)
-    })
+    }
 }
 
 #[property(ServiceSupervisionSpec)]
 fn starting_leads_to_ready_or_running() -> Ltl<ServiceSupervisionState, ServiceSupervisionAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("starting", |state| {
+        Ltl::pred(nirvash_expr! { starting(state) =>
             matches!(state.phase, ServicePhase::Starting)
-        })),
-        Ltl::pred(StatePredicate::new("waiting_ready_or_running", |state| {
-            matches!(
-                state.phase,
-                ServicePhase::WaitingReady | ServicePhase::Running
-            )
-        })),
+        }),
+        Ltl::pred(nirvash_expr! { waiting_ready_or_running(state) =>
+            matches!(state.phase, ServicePhase::WaitingReady | ServicePhase::Running)
+        }),
     )
 }
 
 #[property(ServiceSupervisionSpec)]
 fn running_leads_to_stopping_or_reaped() -> Ltl<ServiceSupervisionState, ServiceSupervisionAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("running", |state| {
+        Ltl::pred(nirvash_expr! { running(state) =>
             matches!(state.phase, ServicePhase::Running)
-        })),
-        Ltl::pred(StatePredicate::new("stopping_or_reaped", |state| {
+        }),
+        Ltl::pred(nirvash_expr! { stopping_or_reaped(state) =>
             matches!(
                 state.phase,
                 ServicePhase::Stopping | ServicePhase::ForcedStop | ServicePhase::Reaped
             )
-        })),
+        }),
     )
 }
 
 #[property(ServiceSupervisionSpec)]
 fn retained_logs_eventually_clear() -> Ltl<ServiceSupervisionState, ServiceSupervisionAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("retained_logs", |state| {
-            state.has_retained_logs()
-        })),
-        Ltl::pred(StatePredicate::new("retained_logs_cleared", |state| {
-            !state.has_retained_logs()
-        })),
+        Ltl::pred(nirvash_expr! { retained_logs(state) => state.has_retained_logs() }),
+        Ltl::pred(nirvash_expr! { retained_logs_cleared(state) => !state.has_retained_logs() }),
     )
 }
 
 #[fairness(ServiceSupervisionSpec)]
 fn bootstrap_progress() -> Fairness<ServiceSupervisionState, ServiceSupervisionAction> {
-    Fairness::weak(StepPredicate::new(
-        "bootstrap_progress",
-        |prev, action, next| {
+    Fairness::weak(
+        nirvash_step_expr! { bootstrap_progress(prev, action, next) =>
             matches!(
                 prev.phase,
                 ServicePhase::Starting | ServicePhase::WaitingReady
             ) && matches!(
                 action,
-                ServiceSupervisionAction::RegisterRunner
-                    | ServiceSupervisionAction::MarkRunnerReady
+                ServiceSupervisionAction::RegisterRunner | ServiceSupervisionAction::MarkRunnerReady
             ) && matches!(
                 next.phase,
                 ServicePhase::WaitingReady | ServicePhase::Running
             )
         },
-    ))
+    )
 }
 
 #[fairness(ServiceSupervisionSpec)]
 fn stop_progress() -> Fairness<ServiceSupervisionState, ServiceSupervisionAction> {
-    Fairness::weak(StepPredicate::new("stop_progress", |prev, action, next| {
+    Fairness::weak(nirvash_step_expr! { stop_progress(prev, action, next) =>
         matches!(prev.phase, ServicePhase::Running | ServicePhase::Stopping)
             && matches!(
                 action,
@@ -217,20 +212,19 @@ fn stop_progress() -> Fairness<ServiceSupervisionState, ServiceSupervisionAction
                 next.phase,
                 ServicePhase::Stopping | ServicePhase::ForcedStop | ServicePhase::Reaped
             )
-    }))
+    })
 }
 
 #[fairness(ServiceSupervisionSpec)]
 fn log_cleanup_progress() -> Fairness<ServiceSupervisionState, ServiceSupervisionAction> {
-    Fairness::weak(StepPredicate::new(
-        "log_cleanup_progress",
-        |prev, action, next| {
+    Fairness::weak(
+        nirvash_step_expr! { log_cleanup_progress(prev, action, next) =>
             matches!(prev.phase, ServicePhase::Reaped)
                 && prev.has_retained_logs()
                 && matches!(action, ServiceSupervisionAction::ClearRetainedLogs)
                 && matches!(next.phase, ServicePhase::Idle)
         },
-    ))
+    )
 }
 
 #[subsystem_spec]
@@ -250,8 +244,66 @@ impl TransitionSystem for ServiceSupervisionSpec {
         <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
-    fn transition(&self, prev: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        transition_state(prev, action)
+    fn transition_program(
+        &self,
+    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule start_service when matches!(action, ServiceSupervisionAction::StartService)
+                && matches!(prev.phase, ServicePhase::Idle | ServicePhase::Reaped)
+                && !prev.has_active_service()
+                && next_free_service(prev).is_some() => {
+                insert active_services <= next_free_service(prev)
+                    .expect("start_service guard ensures a free service atom");
+                set ready_services <= RelSet::empty();
+                set retained_logs <= RelSet::empty();
+                set phase <= ServicePhase::Starting;
+            }
+
+            rule register_runner when matches!(action, ServiceSupervisionAction::RegisterRunner)
+                && matches!(prev.phase, ServicePhase::Starting) => {
+                set phase <= ServicePhase::WaitingReady;
+            }
+
+            rule mark_runner_ready when matches!(action, ServiceSupervisionAction::MarkRunnerReady)
+                && matches!(prev.phase, ServicePhase::WaitingReady)
+                && first_active_service(prev).is_some() => {
+                insert ready_services <= first_active_service(prev)
+                    .expect("mark_runner_ready guard ensures an active service");
+                set phase <= ServicePhase::Running;
+            }
+
+            rule request_stop when matches!(action, ServiceSupervisionAction::RequestStop)
+                && matches!(prev.phase, ServicePhase::Running) => {
+                set phase <= ServicePhase::Stopping;
+            }
+
+            rule force_stop when matches!(action, ServiceSupervisionAction::ForceStop)
+                && matches!(prev.phase, ServicePhase::Running | ServicePhase::Stopping) => {
+                set phase <= ServicePhase::ForcedStop;
+            }
+
+            rule reap_service when matches!(action, ServiceSupervisionAction::ReapService)
+                && matches!(prev.phase, ServicePhase::Stopping | ServicePhase::ForcedStop) => {
+                set phase <= ServicePhase::Reaped;
+                set active_services <= RelSet::empty();
+                set retained_logs <= RelSet::empty();
+            }
+
+            rule retain_logs when matches!(action, ServiceSupervisionAction::RetainLogs)
+                && matches!(prev.phase, ServicePhase::Reaped)
+                && prev.ready_services.some()
+                && prev.retained_logs.no() => {
+                set retained_logs <= prev.ready_services.clone();
+            }
+
+            rule clear_retained_logs when matches!(action, ServiceSupervisionAction::ClearRetainedLogs)
+                && matches!(prev.phase, ServicePhase::Reaped)
+                && prev.has_retained_logs() => {
+                set phase <= ServicePhase::Idle;
+                set ready_services <= RelSet::empty();
+                set retained_logs <= RelSet::empty();
+            }
+        })
     }
 }
 
@@ -378,5 +430,25 @@ mod tests {
         assert!(reaped.active_services.no());
         assert_eq!(reaped.ready_services.items(), vec![ServiceAtom::Service0]);
         assert_eq!(retained.retained_logs.items(), vec![ServiceAtom::Service0]);
+    }
+
+    #[test]
+    fn transition_program_matches_transition_function() {
+        let spec = ServiceSupervisionSpec::new();
+        let program = spec.transition_program().expect("transition program");
+        let initial = spec.initial_state();
+
+        assert_eq!(
+            program
+                .evaluate(&initial, &ServiceSupervisionAction::StartService)
+                .expect("evaluates"),
+            transition_state(&initial, &ServiceSupervisionAction::StartService)
+        );
+        assert_eq!(
+            program
+                .evaluate(&initial, &ServiceSupervisionAction::ClearRetainedLogs)
+                .expect("evaluates"),
+            transition_state(&initial, &ServiceSupervisionAction::ClearRetainedLogs)
+        );
     }
 }

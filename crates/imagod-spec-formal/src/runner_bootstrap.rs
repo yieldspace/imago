@@ -1,7 +1,10 @@
 use imagod_spec::RunnerBootstrap;
-use nirvash_core::{Fairness, Ltl, StatePredicate, StepPredicate, TransitionSystem};
+use nirvash_core::{
+    BoolExpr, Fairness, Ltl, ModelBackend, ModelCase, ModelCheckConfig, StepExpr, TransitionSystem,
+};
 use nirvash_macros::{
-    ActionVocabulary, Signature as FormalSignature, fairness, invariant, property, subsystem_spec,
+    ActionVocabulary, Signature as FormalSignature, fairness, invariant, nirvash_expr,
+    nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
 use crate::RunnerAppType;
@@ -52,7 +55,7 @@ pub fn classify_bootstrap(bootstrap: &RunnerBootstrap) -> RunnerBootstrapContrac
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
 pub struct RunnerBootstrapState {
     pub size: BootstrapSizeClass,
     pub decoded: bool,
@@ -157,6 +160,13 @@ impl RunnerBootstrapSpec {
     }
 }
 
+fn runner_bootstrap_model_cases() -> Vec<ModelCase<RunnerBootstrapState, RunnerBootstrapAction>> {
+    vec![ModelCase::default().with_checker_config(ModelCheckConfig {
+        backend: Some(ModelBackend::Explicit),
+        ..ModelCheckConfig::reachable_graph()
+    })]
+}
+
 fn runner_bootstrap_state_valid(state: &RunnerBootstrapState) -> bool {
     let ready_requires_registration =
         !state.ready || (state.registered && matches!(state.auth, AuthProofState::Verified));
@@ -169,93 +179,87 @@ fn runner_bootstrap_state_valid(state: &RunnerBootstrapState) -> bool {
 }
 
 #[invariant(RunnerBootstrapSpec)]
-fn ready_requires_verified_registration() -> StatePredicate<RunnerBootstrapState> {
-    StatePredicate::new("ready_requires_verified_registration", |state| {
+fn ready_requires_verified_registration() -> BoolExpr<RunnerBootstrapState> {
+    nirvash_expr! { ready_requires_verified_registration(state) =>
         !state.ready || (state.registered && matches!(state.auth, AuthProofState::Verified))
-    })
+    }
 }
 
 #[invariant(RunnerBootstrapSpec)]
-fn registration_requires_prepared_endpoint() -> StatePredicate<RunnerBootstrapState> {
-    StatePredicate::new("registration_requires_prepared_endpoint", |state| {
+fn registration_requires_prepared_endpoint() -> BoolExpr<RunnerBootstrapState> {
+    nirvash_expr! { registration_requires_prepared_endpoint(state) =>
         !state.registered || (state.decoded && matches!(state.endpoint, EndpointState::Prepared))
-    })
+    }
 }
 
 #[invariant(RunnerBootstrapSpec)]
-fn rejected_auth_cannot_be_ready() -> StatePredicate<RunnerBootstrapState> {
-    StatePredicate::new("rejected_auth_cannot_be_ready", |state| {
+fn rejected_auth_cannot_be_ready() -> BoolExpr<RunnerBootstrapState> {
+    nirvash_expr! { rejected_auth_cannot_be_ready(state) =>
         !matches!(state.auth, AuthProofState::Rejected) || !state.ready
-    })
+    }
 }
 
 #[property(RunnerBootstrapSpec)]
 fn decoded_leads_to_endpoint_prepared() -> Ltl<RunnerBootstrapState, RunnerBootstrapAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("decoded", |state| state.decoded)),
-        Ltl::pred(StatePredicate::new("endpoint_prepared", |state| {
+        Ltl::pred(nirvash_expr! { decoded(state) => state.decoded }),
+        Ltl::pred(nirvash_expr! { endpoint_prepared(state) =>
             matches!(state.endpoint, EndpointState::Prepared)
-        })),
+        }),
     )
 }
 
 #[property(RunnerBootstrapSpec)]
 fn registered_leads_to_ready() -> Ltl<RunnerBootstrapState, RunnerBootstrapAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("registered", |state| state.registered)),
-        Ltl::pred(StatePredicate::new("ready", |state| state.ready)),
+        Ltl::pred(nirvash_expr! { registered(state) => state.registered }),
+        Ltl::pred(nirvash_expr! { ready(state) => state.ready }),
     )
 }
 
 #[property(RunnerBootstrapSpec)]
 fn oversized_implies_next_auth_rejected() -> Ltl<RunnerBootstrapState, RunnerBootstrapAction> {
     Ltl::always(Ltl::implies(
-        Ltl::pred(StatePredicate::new("oversized", |state| {
+        Ltl::pred(nirvash_expr! { oversized(state) =>
             matches!(state.size, BootstrapSizeClass::Oversized)
-        })),
-        Ltl::next(Ltl::pred(StatePredicate::new("auth_rejected", |state| {
+        }),
+        Ltl::next(Ltl::pred(nirvash_expr! { auth_rejected(state) =>
             matches!(state.auth, AuthProofState::Rejected)
-        }))),
+        })),
     ))
 }
 
 #[fairness(RunnerBootstrapSpec)]
 fn endpoint_preparation_fairness() -> Fairness<RunnerBootstrapState, RunnerBootstrapAction> {
-    Fairness::weak(StepPredicate::new(
-        "prepare_endpoint",
-        |prev, action, next| {
-            matches!(action, RunnerBootstrapAction::PrepareEndpoint)
-                && prev.decoded
-                && matches!(next.endpoint, EndpointState::Prepared)
-        },
-    ))
+    Fairness::weak(nirvash_step_expr! { prepare_endpoint(prev, action, next) =>
+        matches!(action, RunnerBootstrapAction::PrepareEndpoint)
+            && prev.decoded
+            && matches!(next.endpoint, EndpointState::Prepared)
+    })
 }
 
 #[fairness(RunnerBootstrapSpec)]
 fn registration_fairness() -> Fairness<RunnerBootstrapState, RunnerBootstrapAction> {
-    Fairness::weak(StepPredicate::new(
-        "register_runner",
-        |prev, action, next| {
-            matches!(action, RunnerBootstrapAction::RegisterRunner)
-                && prev.decoded
-                && matches!(prev.endpoint, EndpointState::Prepared)
-                && next.registered
-                && matches!(next.auth, AuthProofState::Verified)
-        },
-    ))
+    Fairness::weak(nirvash_step_expr! { register_runner(prev, action, next) =>
+        matches!(action, RunnerBootstrapAction::RegisterRunner)
+            && prev.decoded
+            && matches!(prev.endpoint, EndpointState::Prepared)
+            && next.registered
+            && matches!(next.auth, AuthProofState::Verified)
+    })
 }
 
 #[fairness(RunnerBootstrapSpec)]
 fn ready_fairness() -> Fairness<RunnerBootstrapState, RunnerBootstrapAction> {
-    Fairness::weak(StepPredicate::new("mark_ready", |prev, action, next| {
+    Fairness::weak(nirvash_step_expr! { mark_ready(prev, action, next) =>
         matches!(action, RunnerBootstrapAction::MarkReady)
             && prev.registered
             && matches!(prev.auth, AuthProofState::Verified)
             && next.ready
-    }))
+    })
 }
 
-#[subsystem_spec]
+#[subsystem_spec(model_cases(runner_bootstrap_model_cases))]
 impl TransitionSystem for RunnerBootstrapSpec {
     type State = RunnerBootstrapState;
     type Action = RunnerBootstrapAction;
@@ -272,13 +276,66 @@ impl TransitionSystem for RunnerBootstrapSpec {
         <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
-    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        self.transition_state(state, action)
+    fn transition_program(
+        &self,
+    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule read_within_bounds when matches!(action, RunnerBootstrapAction::ReadWithinBounds)
+                && !prev.decoded => {
+                set size <= BootstrapSizeClass::WithinBounds;
+            }
+
+            rule read_oversized when matches!(action, RunnerBootstrapAction::ReadOversized)
+                && !prev.decoded => {
+                set size <= BootstrapSizeClass::Oversized;
+                set auth <= AuthProofState::Rejected;
+            }
+
+            rule decode_bootstrap when decode_bootstrap_app_type(action).is_some()
+                && matches!(prev.size, BootstrapSizeClass::WithinBounds)
+                && !prev.decoded => {
+                set decoded <= true;
+                set app_type <= decode_bootstrap_app_type(action);
+            }
+
+            rule prepare_endpoint when matches!(action, RunnerBootstrapAction::PrepareEndpoint)
+                && prev.decoded => {
+                set endpoint <= EndpointState::Prepared;
+            }
+
+            rule register_runner when matches!(action, RunnerBootstrapAction::RegisterRunner)
+                && prev.decoded
+                && matches!(prev.endpoint, EndpointState::Prepared)
+                && matches!(prev.auth, AuthProofState::Pending) => {
+                set registered <= true;
+                set auth <= AuthProofState::Verified;
+            }
+
+            rule reject_auth_proof when matches!(action, RunnerBootstrapAction::RejectAuthProof)
+                && prev.decoded
+                && matches!(prev.endpoint, EndpointState::Prepared)
+                && !prev.registered => {
+                set auth <= AuthProofState::Rejected;
+            }
+
+            rule mark_ready when matches!(action, RunnerBootstrapAction::MarkReady)
+                && prev.registered
+                && matches!(prev.auth, AuthProofState::Verified) => {
+                set ready <= true;
+            }
+        })
     }
 }
 
 #[nirvash_macros::formal_tests(spec = RunnerBootstrapSpec)]
 const _: () = ();
+
+fn decode_bootstrap_app_type(action: &RunnerBootstrapAction) -> Option<RunnerAppType> {
+    match action {
+        RunnerBootstrapAction::DecodeBootstrap(app_type) => Some(*app_type),
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 mod tests {

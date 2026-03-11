@@ -1,5 +1,5 @@
 use nirvash_core::{
-    ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
+    ModelCase, ModelCaseSource, BoolExpr, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };
 use nirvash_macros::{Signature as FormalSignature, nirvash_projection_contract};
@@ -60,7 +60,7 @@ impl TransitionSystem for Spec {
 }
 
 impl TemporalSpec for Spec {
-    fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
+    fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
         Vec::new()
     }
 }

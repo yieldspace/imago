@@ -1,4 +1,4 @@
-use nirvash_core::StatePredicate;
+use nirvash_core::BoolExpr;
 use nirvash_macros::{Signature as FormalSignature, invariant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
@@ -31,8 +31,8 @@ impl nirvash_core::TransitionSystem for Spec {
 }
 
 #[invariant]
-fn missing_target() -> StatePredicate<State> {
-    StatePredicate::new("missing_target", |_| true)
+fn missing_target() -> BoolExpr<State> {
+    BoolExpr::new("missing_target", |_| true)
 }
 
 fn main() {}

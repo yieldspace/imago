@@ -1,5 +1,8 @@
+extern crate self as nirvash_core;
+
 mod checker;
-pub mod concurrent;
+#[allow(dead_code)]
+mod concurrent;
 pub mod conformance;
 mod doc_graph;
 mod domain;
@@ -9,15 +12,15 @@ mod ltl;
 mod predicate;
 pub mod registry;
 mod relation;
+mod symbolic;
 mod symmetry;
 mod system;
 mod trace;
 
 pub use checker::{
-    Counterexample, CounterexampleKind, ExplorationMode, ModelCheckConfig, ModelCheckError,
-    ModelCheckResult, ModelChecker,
+    Counterexample, CounterexampleKind, ExplorationMode, ModelBackend, ModelCheckConfig,
+    ModelCheckError, ModelCheckResult, ModelChecker,
 };
-pub use concurrent::{ConcurrentAction, ConcurrentTransitionSystem};
 pub use conformance::{
     DynamicTestCase, NegativeWitness, PositiveWitness, ProtocolConformanceSpec,
     ProtocolInputWitnessBinding, ProtocolInputWitnessCodec, ProtocolRuntimeBinding,
@@ -29,12 +32,11 @@ pub use doc_graph::{
     DocGraphPolicy, DocGraphProcessKind, DocGraphProcessStep, DocGraphProvider,
     DocGraphReductionMode, DocGraphSnapshot, DocGraphSpec, DocGraphState, ReachableGraphEdge,
     ReachableGraphSnapshot, ReducedDocGraph, ReducedDocGraphEdge, ReducedDocGraphNode,
-    RegisteredDocGraphProvider, RegisteredSpecVizProvider, SpecVizActionDescriptor,
-    SpecVizBundle, SpecVizCase, SpecVizCaseStats, SpecVizKind, SpecVizMetadata,
-    SpecVizProvider, SpecVizRegistrationSet, VizPolicy, VizScenario, VizScenarioKind,
-    VizScenarioStep, collect_doc_graph_specs, collect_spec_viz_bundles,
-    describe_doc_graph_action, format_doc_graph_action, reduce_doc_graph,
-    summarize_doc_graph_state, summarize_doc_graph_text,
+    RegisteredDocGraphProvider, RegisteredSpecVizProvider, SpecVizActionDescriptor, SpecVizBundle,
+    SpecVizCase, SpecVizCaseStats, SpecVizKind, SpecVizMetadata, SpecVizProvider,
+    SpecVizRegistrationSet, VizPolicy, VizScenario, VizScenarioKind, VizScenarioStep,
+    collect_doc_graph_specs, collect_spec_viz_bundles, describe_doc_graph_action,
+    format_doc_graph_action, reduce_doc_graph, summarize_doc_graph_state, summarize_doc_graph_text,
 };
 pub use domain::{
     BoundedDomain, IntoBoundedDomain, OpaqueModelValue, Signature, bounded_vec_domain,
@@ -43,7 +45,11 @@ pub use domain::{
 pub use fairness::Fairness;
 pub use inventory;
 pub use ltl::Ltl;
-pub use predicate::{ActionConstraint, StateConstraint, StatePredicate, StepPredicate};
+pub use predicate::{
+    BoolExpr, BoolExprAst, GuardAst, GuardExpr, QuantifierKind, StateExpr, StateExprAst, StepExpr,
+    StepExprAst, TransitionProgram, TransitionProgramError, TransitionRule, UpdateAst, UpdateOp,
+    UpdateProgram,
+};
 pub use registry::{RegisteredActionDocLabel, RegisteredActionDocPresentation};
 pub use relation::{
     RegisteredRelationalState, RelAtom, RelSet, Relation2, RelationError, RelationField,
@@ -92,14 +98,76 @@ mod tests {
         }
     }
 
-    fn is_idle(state: &TestState) -> bool {
-        matches!(state, TestState::Idle)
+    fn idle_predicate() -> BoolExpr<TestState> {
+        crate::pred!(idle(state) => matches!(state, TestState::Idle))
     }
 
-    fn starts_work(prev: &TestState, action: &TestAction, next: &TestState) -> bool {
-        matches!(
+    fn busy_predicate() -> BoolExpr<TestState> {
+        crate::pred!(busy(state) => matches!(state, TestState::Busy))
+    }
+
+    fn idle_again_predicate() -> BoolExpr<TestState> {
+        crate::pred!(idle_again(state) => matches!(state, TestState::Idle))
+    }
+
+    fn start_step_predicate() -> StepExpr<TestState, TestAction> {
+        crate::step!(start(prev, action, next) => matches!(
             (prev, action, next),
             (TestState::Idle, TestAction::Start, TestState::Busy)
+        ))
+    }
+
+    fn stop_step_predicate() -> StepExpr<TestState, TestAction> {
+        crate::step!(stop(prev, action, next) => matches!(
+            (prev, action, next),
+            (TestState::Busy, TestAction::Stop, TestState::Idle)
+        ))
+    }
+
+    fn can_stop_step_predicate() -> StepExpr<TestState, TestAction> {
+        crate::step!(can_stop(prev, action, next) => matches!(
+            (prev, action, next),
+            (TestState::Busy, TestAction::Stop, TestState::Idle)
+        ))
+    }
+
+    fn test_transition_program() -> TransitionProgram<TestState, TestAction> {
+        TransitionProgram::named(
+            "test_spec",
+            vec![
+                TransitionRule::ast(
+                    "start",
+                    GuardExpr::pure_call("start", |state, action| {
+                        matches!((state, action), (TestState::Idle, TestAction::Start))
+                    }),
+                    UpdateProgram::ast(
+                        "start",
+                        vec![UpdateOp::assign(
+                            "self",
+                            "TestState::Busy",
+                            |_prev: &TestState, state: &mut TestState, _action: &TestAction| {
+                                *state = TestState::Busy;
+                            },
+                        )],
+                    ),
+                ),
+                TransitionRule::ast(
+                    "stop",
+                    GuardExpr::pure_call("stop", |state, action| {
+                        matches!((state, action), (TestState::Busy, TestAction::Stop))
+                    }),
+                    UpdateProgram::ast(
+                        "stop",
+                        vec![UpdateOp::assign(
+                            "self",
+                            "TestState::Idle",
+                            |_prev: &TestState, state: &mut TestState, _action: &TestAction| {
+                                *state = TestState::Idle;
+                            },
+                        )],
+                    ),
+                ),
+            ],
         )
     }
 
@@ -179,54 +247,28 @@ mod tests {
             vec![TestAction::Start, TestAction::Stop]
         }
 
-        fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-            match (state, action) {
-                (TestState::Idle, TestAction::Start) => Some(TestState::Busy),
-                (TestState::Busy, TestAction::Stop) => Some(TestState::Idle),
-                _ => None,
-            }
+        fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+            Some(test_transition_program())
         }
     }
 
     impl TemporalSpec for TestSpec {
-        fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
-            vec![StatePredicate::new("known_state", |_| true)]
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
+            vec![crate::pred!(known_state(_state) => true)]
         }
 
         fn properties(&self) -> Vec<Ltl<Self::State, Self::Action>> {
             vec![
-                Ltl::leads_to(
-                    Ltl::pred(StatePredicate::new("busy", |state| {
-                        matches!(state, TestState::Busy)
-                    })),
-                    Ltl::pred(StatePredicate::new("idle", |state| {
-                        matches!(state, TestState::Idle)
-                    })),
-                ),
+                Ltl::leads_to(Ltl::pred(busy_predicate()), Ltl::pred(idle_predicate())),
                 Ltl::always(Ltl::implies(
-                    Ltl::enabled(StepPredicate::new("can_stop", |prev, action, next| {
-                        matches!(
-                            (prev, action, next),
-                            (TestState::Busy, TestAction::Stop, TestState::Idle)
-                        )
-                    })),
-                    Ltl::eventually(Ltl::pred(StatePredicate::new("idle_again", |state| {
-                        matches!(state, TestState::Idle)
-                    }))),
+                    Ltl::enabled(can_stop_step_predicate()),
+                    Ltl::eventually(Ltl::pred(idle_again_predicate())),
                 )),
             ]
         }
 
         fn fairness(&self) -> Vec<Fairness<Self::State, Self::Action>> {
-            vec![Fairness::strong(StepPredicate::new(
-                "stop",
-                |prev, action, next| {
-                    matches!(
-                        (prev, action, next),
-                        (TestState::Busy, TestAction::Stop, TestState::Idle)
-                    )
-                },
-            ))]
+            vec![Fairness::strong(stop_step_predicate())]
         }
     }
 
@@ -238,9 +280,21 @@ mod tests {
         Busy,
     }
 
+    impl Signature for DeadlockState {
+        fn bounded_domain() -> BoundedDomain<Self> {
+            BoundedDomain::new(vec![Self::Idle, Self::Busy])
+        }
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum DeadlockAction {
         Start,
+    }
+
+    impl Signature for DeadlockAction {
+        fn bounded_domain() -> BoundedDomain<Self> {
+            BoundedDomain::new(vec![Self::Start])
+        }
     }
 
     #[derive(Debug, Clone, Copy, Default)]
@@ -267,7 +321,7 @@ mod tests {
     }
 
     impl TemporalSpec for DeadlockSpec {
-        fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
             Vec::new()
         }
     }
@@ -280,9 +334,21 @@ mod tests {
         Warm,
     }
 
+    impl Signature for StutterState {
+        fn bounded_domain() -> BoundedDomain<Self> {
+            BoundedDomain::new(vec![Self::Cold, Self::Warm])
+        }
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum StutterAction {
         Tick,
+    }
+
+    impl Signature for StutterAction {
+        fn bounded_domain() -> BoundedDomain<Self> {
+            BoundedDomain::new(vec![Self::Tick])
+        }
     }
 
     #[derive(Debug, Clone, Copy, Default)]
@@ -300,8 +366,8 @@ mod tests {
             vec![StutterAction::Tick]
         }
 
-        fn transition(&self, _state: &Self::State, _action: &Self::Action) -> Option<Self::State> {
-            None
+        fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+            Some(TransitionProgram::named("stutter", Vec::new()))
         }
 
         fn stutter_state(&self, state: &Self::State) -> Self::State {
@@ -313,14 +379,13 @@ mod tests {
     }
 
     impl TemporalSpec for StutterSpec {
-        fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
             Vec::new()
         }
 
         fn properties(&self) -> Vec<Ltl<Self::State, Self::Action>> {
-            vec![Ltl::eventually(Ltl::pred(StatePredicate::new(
-                "warm",
-                |state| matches!(state, StutterState::Warm),
+            vec![Ltl::eventually(Ltl::pred(crate::pred!(
+                warm(state) => matches!(state, StutterState::Warm)
             )))]
         }
     }
@@ -332,6 +397,12 @@ mod tests {
         Idle,
         Busy,
         Blocked,
+    }
+
+    impl Signature for ControlState {
+        fn bounded_domain() -> BoundedDomain<Self> {
+            BoundedDomain::new(vec![Self::Idle, Self::Busy, Self::Blocked])
+        }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,30 +445,27 @@ mod tests {
     }
 
     impl TemporalSpec for ConstraintSpec {
-        fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
             Vec::new()
         }
 
         fn properties(&self) -> Vec<Ltl<Self::State, Self::Action>> {
             vec![Ltl::leads_to(
-                Ltl::pred(StatePredicate::new("busy", |state| {
-                    matches!(state, ControlState::Busy)
-                })),
-                Ltl::pred(StatePredicate::new("idle", |state| {
-                    matches!(state, ControlState::Idle)
-                })),
+                Ltl::pred(crate::pred!(
+                    busy(state) => matches!(state, ControlState::Busy)
+                )),
+                Ltl::pred(crate::pred!(
+                    idle(state) => matches!(state, ControlState::Idle)
+                )),
             )]
         }
 
         fn fairness(&self) -> Vec<Fairness<Self::State, Self::Action>> {
-            vec![Fairness::weak(StepPredicate::new(
-                "stop_progress",
-                |prev, action, next| {
-                    matches!(
-                        (prev, action, next),
-                        (ControlState::Busy, ControlAction::Stop, ControlState::Idle)
-                    )
-                },
+            vec![Fairness::weak(crate::step!(
+                stop_progress(prev, action, next) => matches!(
+                    (prev, action, next),
+                    (ControlState::Busy, ControlAction::Stop, ControlState::Idle)
+                )
             ))]
         }
     }
@@ -407,12 +475,12 @@ mod tests {
             if self.constrained {
                 vec![
                     ModelCase::default()
-                        .with_state_constraint(StateConstraint::new("exclude_blocked", |state| {
-                            !matches!(state, ControlState::Blocked)
-                        }))
-                        .with_action_constraint(ActionConstraint::new(
-                            "disallow_block",
-                            |_, action, _| !matches!(action, ControlAction::Block),
+                        .with_state_constraint(crate::pred!(
+                            exclude_blocked(state) => !matches!(state, ControlState::Blocked)
+                        ))
+                        .with_action_constraint(crate::step!(
+                            disallow_block(_prev, action, _next) =>
+                                !matches!(action, ControlAction::Block)
                         ))
                         .with_check_deadlocks(false),
                 ]
@@ -426,6 +494,12 @@ mod tests {
     enum FilteredGraphState {
         Idle,
         Busy,
+    }
+
+    impl Signature for FilteredGraphState {
+        fn bounded_domain() -> BoundedDomain<Self> {
+            BoundedDomain::new(vec![Self::Idle, Self::Busy])
+        }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -481,19 +555,17 @@ mod tests {
     }
 
     impl TemporalSpec for FilteredGraphSpec {
-        fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
             Vec::new()
         }
     }
 
     impl ModelCaseSource for FilteredGraphSpec {
         fn model_cases(&self) -> Vec<ModelCase<Self::State, Self::Action>> {
-            vec![
-                ModelCase::default().with_action_constraint(ActionConstraint::new(
-                    "disallow_block",
-                    |_, action, _| !matches!(action, FilteredGraphAction::Block),
-                )),
-            ]
+            vec![ModelCase::default().with_action_constraint(crate::step!(
+                disallow_block(_prev, action, _next) =>
+                    !matches!(action, FilteredGraphAction::Block)
+            ))]
         }
     }
 
@@ -501,6 +573,12 @@ mod tests {
     enum SymmetryState {
         Left,
         Right,
+    }
+
+    impl Signature for SymmetryState {
+        fn bounded_domain() -> BoundedDomain<Self> {
+            BoundedDomain::new(vec![Self::Left, Self::Right])
+        }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -532,14 +610,13 @@ mod tests {
     }
 
     impl TemporalSpec for SymmetrySpec {
-        fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
             Vec::new()
         }
 
         fn properties(&self) -> Vec<Ltl<Self::State, Self::Action>> {
-            vec![Ltl::eventually(Ltl::pred(StatePredicate::new(
-                "left",
-                |state| matches!(state, SymmetryState::Left),
+            vec![Ltl::eventually(Ltl::pred(crate::pred!(
+                left(state) => matches!(state, SymmetryState::Left)
             )))]
         }
     }
@@ -554,14 +631,151 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, Copy, Default)]
+    struct LegacyConstraintSpec;
+
+    impl TransitionSystem for LegacyConstraintSpec {
+        type State = TestState;
+        type Action = TestAction;
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![TestState::Idle]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![TestAction::Start, TestAction::Stop]
+        }
+
+        fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+            Some(test_transition_program())
+        }
+    }
+
+    impl TemporalSpec for LegacyConstraintSpec {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
+            Vec::new()
+        }
+    }
+
+    impl ModelCaseSource for LegacyConstraintSpec {
+        fn model_cases(&self) -> Vec<ModelCase<Self::State, Self::Action>> {
+            vec![
+                ModelCase::default().with_action_constraint(crate::predicate::legacy_step_expr(
+                    "legacy_action_constraint",
+                    |_, action, _| !matches!(action, TestAction::Stop),
+                )),
+            ]
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct LegacyPropertySpec;
+
+    impl TransitionSystem for LegacyPropertySpec {
+        type State = TestState;
+        type Action = TestAction;
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![TestState::Idle]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![TestAction::Start, TestAction::Stop]
+        }
+
+        fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+            Some(test_transition_program())
+        }
+    }
+
+    impl TemporalSpec for LegacyPropertySpec {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
+            Vec::new()
+        }
+
+        fn properties(&self) -> Vec<Ltl<Self::State, Self::Action>> {
+            vec![Ltl::eventually(Ltl::pred(
+                crate::predicate::legacy_bool_expr("legacy_busy", |state| {
+                    matches!(state, TestState::Busy)
+                }),
+            ))]
+        }
+    }
+
+    impl ModelCaseSource for LegacyPropertySpec {}
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct AmbiguousTransitionSpec;
+
+    impl TransitionSystem for AmbiguousTransitionSpec {
+        type State = TestState;
+        type Action = TestAction;
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![TestState::Idle]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![TestAction::Start]
+        }
+
+        fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+            Some(TransitionProgram::named(
+                "ambiguous_symbolic",
+                vec![
+                    TransitionRule::ast(
+                        "start_a",
+                        GuardExpr::pure_call("start_a", |state, action| {
+                            matches!((state, action), (TestState::Idle, TestAction::Start))
+                        }),
+                        UpdateProgram::ast(
+                            "start_a",
+                            vec![UpdateOp::assign(
+                                "self",
+                                "TestState::Busy",
+                                |_prev: &TestState, state: &mut TestState, _action: &TestAction| {
+                                    *state = TestState::Busy;
+                                },
+                            )],
+                        ),
+                    ),
+                    TransitionRule::ast(
+                        "start_b",
+                        GuardExpr::pure_call("start_b", |state, action| {
+                            matches!((state, action), (TestState::Idle, TestAction::Start))
+                        }),
+                        UpdateProgram::ast(
+                            "start_b",
+                            vec![UpdateOp::assign(
+                                "self",
+                                "TestState::Busy",
+                                |_prev: &TestState, state: &mut TestState, _action: &TestAction| {
+                                    *state = TestState::Busy;
+                                },
+                            )],
+                        ),
+                    ),
+                ],
+            ))
+        }
+    }
+
+    impl TemporalSpec for AmbiguousTransitionSpec {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
+            Vec::new()
+        }
+    }
+
+    impl ModelCaseSource for AmbiguousTransitionSpec {}
+
     #[test]
     fn ltl_ast_builders_preserve_formula_shape() {
-        let idle = StatePredicate::new("idle", is_idle);
-        let start = StepPredicate::new("start", starts_work);
+        let idle = idle_predicate();
+        let start = start_step_predicate();
 
         let formula = Ltl::always(Ltl::until(
             Ltl::pred(idle),
-            Ltl::and(Ltl::step(start), Ltl::enabled(start)),
+            Ltl::and(Ltl::step(start.clone()), Ltl::enabled(start)),
         ));
         match formula {
             Ltl::Always(inner) => match *inner {
@@ -577,8 +791,8 @@ mod tests {
 
     #[test]
     fn predicates_evaluate_against_state_and_transition() {
-        let idle = StatePredicate::new("idle", is_idle);
-        let start = StepPredicate::new("start", starts_work);
+        let idle = idle_predicate();
+        let start = start_step_predicate();
 
         assert!(idle.eval(&TestState::Idle));
         assert!(!idle.eval(&TestState::Busy));
@@ -593,11 +807,9 @@ mod tests {
         let composition = SystemComposition::new("test-system")
             .with_subsystem("manager")
             .with_subsystem("runtime")
-            .with_invariant(StatePredicate::new("idle", is_idle))
-            .with_property(Ltl::eventually(Ltl::pred(StatePredicate::new(
-                "idle", is_idle,
-            ))))
-            .with_fairness(Fairness::weak(StepPredicate::new("start", starts_work)))
+            .with_invariant(idle_predicate())
+            .with_property(Ltl::eventually(Ltl::pred(idle_predicate())))
+            .with_fairness(Fairness::weak(start_step_predicate()))
             .with_model_case(model_case.clone());
 
         assert_eq!(composition.name(), "test-system");
@@ -618,9 +830,7 @@ mod tests {
     fn quantified_builders_expand_over_signature_domains() {
         let formula =
             Ltl::<TestState, TestAction>::forall::<TestAction, _>(|action| match action {
-                TestAction::Start | TestAction::Stop => {
-                    Ltl::pred(StatePredicate::new("idle", is_idle))
-                }
+                TestAction::Start | TestAction::Stop => Ltl::pred(idle_predicate()),
             });
 
         assert!(formula.describe().contains("/\\"));
@@ -714,6 +924,7 @@ mod tests {
     #[test]
     fn full_reachable_graph_snapshot_ignores_doc_only_limits() {
         let model_case = ModelCase::default().with_doc_checker_config(ModelCheckConfig {
+            backend: None,
             exploration: ExplorationMode::ReachableGraph,
             bounded_depth: None,
             max_states: Some(1),
@@ -876,22 +1087,10 @@ mod tests {
         )));
 
         let expected: Ltl<TestState, TestAction> = Ltl::always(Ltl::until(
-            Ltl::pred(StatePredicate::new("idle", |state| {
-                matches!(state, TestState::Idle)
-            })),
+            Ltl::pred(idle_predicate()),
             Ltl::and(
-                Ltl::step(StepPredicate::new("start", |prev, action, next| {
-                    matches!(
-                        (prev, action, next),
-                        (TestState::Idle, TestAction::Start, TestState::Busy)
-                    )
-                })),
-                Ltl::enabled(StepPredicate::new("stop", |prev, action, next| {
-                    matches!(
-                        (prev, action, next),
-                        (TestState::Busy, TestAction::Stop, TestState::Idle)
-                    )
-                })),
+                Ltl::step(start_step_predicate()),
+                Ltl::enabled(stop_step_predicate()),
             ),
         ));
 
@@ -906,12 +1105,8 @@ mod tests {
         ));
 
         let expected: Ltl<TestState, TestAction> = Ltl::always(Ltl::implies(
-            Ltl::negate(Ltl::pred(StatePredicate::new("idle", |state| {
-                matches!(state, TestState::Idle)
-            }))),
-            Ltl::eventually(Ltl::pred(StatePredicate::new("busy", |state| {
-                matches!(state, TestState::Busy)
-            }))),
+            Ltl::negate(Ltl::pred(idle_predicate())),
+            Ltl::eventually(Ltl::pred(busy_predicate())),
         ));
 
         assert_eq!(formula.describe(), expected.describe());
@@ -1000,5 +1195,129 @@ mod tests {
         assert_eq!(stop_output, TestOutput::Ack);
         let idle = block_on_ready(<TestRuntime as StateObserver>::observe_state(&runtime, &()));
         assert_eq!(idle, TestState::Idle);
+    }
+
+    #[test]
+    fn symbolic_checker_matches_explicit_snapshot_and_results() {
+        let explicit_snapshot = ModelChecker::new(&TestSpec)
+            .full_reachable_graph_snapshot()
+            .expect("explicit snapshot should build");
+        let symbolic_snapshot = ModelChecker::with_config(
+            &TestSpec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .full_reachable_graph_snapshot()
+        .expect("symbolic snapshot should build");
+        assert_eq!(symbolic_snapshot, explicit_snapshot);
+
+        let explicit_result = ModelChecker::new(&TestSpec)
+            .check_all()
+            .expect("explicit checker should run");
+        let symbolic_result = ModelChecker::with_config(
+            &TestSpec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .check_all()
+        .expect("symbolic checker should run");
+        assert_eq!(symbolic_result, explicit_result);
+    }
+
+    #[test]
+    fn symbolic_checker_reaches_stutter_only_states() {
+        let snapshot = ModelChecker::with_config(
+            &StutterSpec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .full_reachable_graph_snapshot()
+        .expect("symbolic snapshot should build");
+
+        assert_eq!(
+            snapshot.states,
+            vec![StutterState::Cold, StutterState::Warm]
+        );
+        assert!(snapshot.edges.iter().all(Vec::is_empty));
+        assert_eq!(snapshot.deadlocks, vec![0, 1]);
+    }
+
+    #[test]
+    fn symbolic_checker_rejects_specs_without_transition_program() {
+        let err = ModelChecker::with_config(
+            &FilteredGraphSpec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .full_reachable_graph_snapshot()
+        .unwrap_err();
+        assert!(matches!(err, ModelCheckError::UnsupportedConfiguration(_)));
+    }
+
+    #[test]
+    fn symbolic_checker_rejects_legacy_constraints_and_properties() {
+        let legacy_constraint_err = ModelChecker::with_config(
+            &LegacyConstraintSpec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .full_reachable_graph_snapshot()
+        .unwrap_err();
+        assert!(matches!(
+            legacy_constraint_err,
+            ModelCheckError::UnsupportedConfiguration(_)
+        ));
+
+        let legacy_property_err = ModelChecker::with_config(
+            &LegacyPropertySpec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .check_properties()
+        .unwrap_err();
+        assert!(matches!(
+            legacy_property_err,
+            ModelCheckError::UnsupportedConfiguration(_)
+        ));
+    }
+
+    #[test]
+    fn symbolic_checker_rejects_ambiguous_ast_transition_programs() {
+        let err = ModelChecker::with_config(
+            &AmbiguousTransitionSpec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .full_reachable_graph_snapshot()
+        .unwrap_err();
+        assert!(matches!(err, ModelCheckError::UnsupportedConfiguration(_)));
+    }
+
+    #[test]
+    fn symbolic_checker_rejects_bounded_lasso_mode() {
+        let err = ModelChecker::with_config(
+            &TestSpec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::bounded_lasso(3)
+            },
+        )
+        .check_all()
+        .unwrap_err();
+        assert!(matches!(err, ModelCheckError::UnsupportedConfiguration(_)));
     }
 }

@@ -1,9 +1,10 @@
 use nirvash_core::{
-    ActionConstraint, Fairness, Ltl, ModelCase, RelSet, Relation2, Signature as _, StatePredicate,
-    StepPredicate, TransitionSystem,
+    BoolExpr, Fairness, Ltl, ModelCase, RelSet, Relation2, Signature as _, StepExpr,
+    TransitionSystem,
 };
 use nirvash_macros::{
-    ActionVocabulary, RelationalState, action_constraint, fairness, invariant, property,
+    ActionVocabulary, RelationalState, Signature as FormalSignature, action_constraint, fairness,
+    invariant, nirvash_expr, nirvash_step_expr, nirvash_transition_program, property,
     subsystem_spec,
 };
 
@@ -12,7 +13,8 @@ use crate::atoms::{
     binding_target_for,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, RelationalState)]
+#[derive(Debug, Clone, PartialEq, Eq, FormalSignature, RelationalState)]
+#[signature(custom)]
 pub struct RpcState {
     bindings: Relation2<ServiceAtom, BindingTargetAtom>,
     local_call_owners: Relation2<RpcCallAtom, ServiceAtom>,
@@ -141,109 +143,166 @@ impl RpcSpec {
     }
 }
 
+nirvash_core::signature_spec!(
+    RpcStateSignatureSpec for RpcState,
+    representatives = rpc_state_representatives()
+);
+
 fn rpc_model_cases() -> Vec<ModelCase<RpcState, RpcAction>> {
     vec![local_rpc_model_case(), remote_rpc_model_case()]
 }
 
 fn local_rpc_model_case() -> ModelCase<RpcState, RpcAction> {
-    ModelCase::new("local_service0_only").with_check_deadlocks(false)
+    ModelCase::new("local_service0_only")
+        .with_check_deadlocks(false)
+        .with_state_constraint(local_service0_only_state())
 }
 
 fn remote_rpc_model_case() -> ModelCase<RpcState, RpcAction> {
-    ModelCase::new("remote_service0_only").with_check_deadlocks(false)
+    ModelCase::new("remote_service0_only")
+        .with_check_deadlocks(false)
+        .with_state_constraint(remote_service0_only_state())
 }
 
 #[action_constraint(RpcSpec, cases("local_service0_only"))]
-fn local_service0_only() -> ActionConstraint<RpcState, RpcAction> {
-    ActionConstraint::new("local_service0_only", |_, action, _| {
-        matches!(
-            action,
-            RpcAction::GrantBinding(ServiceAtom::Service0)
-                | RpcAction::ResolveLocal(ServiceAtom::Service0)
-                | RpcAction::RejectLocal(ServiceAtom::Service0)
-        )
-    })
+fn local_service0_only() -> StepExpr<RpcState, RpcAction> {
+    nirvash_step_expr! { local_service0_only(_prev, action, _next) =>
+        is_local_service0_action(*action)
+    }
 }
 
 #[action_constraint(RpcSpec, cases("remote_service0_only"))]
-fn remote_service0_only() -> ActionConstraint<RpcState, RpcAction> {
-    ActionConstraint::new("remote_service0_only", |_, action, _| {
-        matches!(
-            action,
-            RpcAction::GrantBinding(ServiceAtom::Service0)
-                | RpcAction::ConnectRemote(ServiceAtom::Service0)
-                | RpcAction::InvokeRemote(ServiceAtom::Service0)
-                | RpcAction::RejectRemoteInvoke(ServiceAtom::Service0)
-                | RpcAction::CompleteRemoteCall(ServiceAtom::Service0)
-                | RpcAction::DisconnectRemote(ServiceAtom::Service0)
-        )
-    })
+fn remote_service0_only() -> StepExpr<RpcState, RpcAction> {
+    nirvash_step_expr! { remote_service0_only(_prev, action, _next) =>
+        is_remote_service0_action(*action)
+    }
+}
+
+fn local_service0_only_state() -> BoolExpr<RpcState> {
+    nirvash_expr! { local_service0_only_state(state) =>
+        state.remote_connection_owners.no()
+            && state.remote_connection_authorities.no()
+            && state.remote_call_owners.no()
+            && state.remote_call_targets.no()
+            && state.remote_inflight_calls.no()
+            && state.completed_remote_calls.no()
+            && state.denied_remote_calls.no()
+    }
+}
+
+fn remote_service0_only_state() -> BoolExpr<RpcState> {
+    nirvash_expr! { remote_service0_only_state(state) =>
+        state.local_call_owners.no()
+            && state.local_call_targets.no()
+            && state.denied_local_calls.no()
+    }
+}
+
+fn rpc_state_representatives() -> nirvash_core::BoundedDomain<RpcState> {
+    let spec = RpcSpec::new();
+    let mut states = Vec::new();
+
+    for domain in [
+        crate::state_domain::reachable_state_domain_with_action_filter(&spec, &|_, action, _| {
+            is_local_service0_action(*action)
+        }),
+        crate::state_domain::reachable_state_domain_with_action_filter(&spec, &|_, action, _| {
+            is_remote_service0_action(*action)
+        }),
+    ] {
+        for state in domain.into_vec() {
+            if !states.contains(&state) {
+                states.push(state);
+            }
+        }
+    }
+
+    nirvash_core::BoundedDomain::new(states)
+}
+
+fn is_local_service0_action(action: RpcAction) -> bool {
+    matches!(
+        action,
+        RpcAction::GrantBinding(ServiceAtom::Service0)
+            | RpcAction::ResolveLocal(ServiceAtom::Service0)
+            | RpcAction::RejectLocal(ServiceAtom::Service0)
+    )
+}
+
+fn is_remote_service0_action(action: RpcAction) -> bool {
+    matches!(
+        action,
+        RpcAction::GrantBinding(ServiceAtom::Service0)
+            | RpcAction::ConnectRemote(ServiceAtom::Service0)
+            | RpcAction::InvokeRemote(ServiceAtom::Service0)
+            | RpcAction::RejectRemoteInvoke(ServiceAtom::Service0)
+            | RpcAction::CompleteRemoteCall(ServiceAtom::Service0)
+            | RpcAction::DisconnectRemote(ServiceAtom::Service0)
+    )
 }
 
 #[invariant(RpcSpec)]
-fn remote_inflight_requires_owner_and_target() -> StatePredicate<RpcState> {
-    StatePredicate::new("remote_inflight_requires_owner_and_target", |state| {
+fn remote_inflight_requires_owner_and_target() -> BoolExpr<RpcState> {
+    nirvash_expr! { remote_inflight_requires_owner_and_target(state) =>
         state.remote_inflight_calls.pairs().iter().all(|(call, _)| {
             state.remote_call_owners.domain().contains(call)
                 && state.remote_call_targets.domain().contains(call)
         })
-    })
+    }
 }
 
 #[invariant(RpcSpec)]
-fn denied_and_completed_remote_calls_are_disjoint() -> StatePredicate<RpcState> {
-    StatePredicate::new("denied_and_completed_remote_calls_are_disjoint", |state| {
+fn denied_and_completed_remote_calls_are_disjoint() -> BoolExpr<RpcState> {
+    nirvash_expr! { denied_and_completed_remote_calls_are_disjoint(state) =>
         state
             .denied_remote_calls
             .pairs()
             .iter()
             .all(|(call, _)| !state.completed_remote_calls.contains(call))
-    })
+    }
 }
 
 #[invariant(RpcSpec)]
-fn bindings_match_default_target_pairs() -> StatePredicate<RpcState> {
-    StatePredicate::new("bindings_match_default_target_pairs", |state| {
+fn bindings_match_default_target_pairs() -> BoolExpr<RpcState> {
+    nirvash_expr! { bindings_match_default_target_pairs(state) =>
         state
             .bindings
             .pairs()
             .iter()
             .all(|(source, target)| *target == binding_target_for(*source))
-    })
+    }
 }
 
 #[property(RpcSpec)]
 fn local_resolution_eventually_happens_or_is_rejected() -> Ltl<RpcState, RpcAction> {
     Ltl::always(Ltl::implies(
         Ltl::enabled(resolve_or_reject_local_step()),
-        Ltl::eventually(Ltl::pred(StatePredicate::new(
-            "local_outcome_observed",
-            |state| state.local_call_owners.some() || state.denied_local_calls.some(),
-        ))),
+        Ltl::eventually(Ltl::pred(nirvash_expr! { local_outcome_observed(state) =>
+            state.local_call_owners.some() || state.denied_local_calls.some()
+        })),
     ))
 }
 
 #[property(RpcSpec)]
 fn remote_invoke_leads_to_completion_or_rejection() -> Ltl<RpcState, RpcAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("remote_connection_exists", |state| {
+        Ltl::pred(nirvash_expr! { remote_connection_exists(state) =>
             state.remote_connection_owners.some()
-        })),
-        Ltl::pred(StatePredicate::new("remote_outcome_exists", |state| {
+        }),
+        Ltl::pred(nirvash_expr! { remote_outcome_exists(state) =>
             state.completed_remote_calls.some() || state.denied_remote_calls.some()
-        })),
+        }),
     )
 }
 
 #[fairness(RpcSpec)]
 fn remote_completion_fairness() -> Fairness<RpcState, RpcAction> {
-    Fairness::weak(StepPredicate::new(
-        "remote_completion",
-        |prev, action, next| {
+    Fairness::weak(
+        nirvash_step_expr! { remote_completion(prev, action, next) =>
             matches!(action, RpcAction::CompleteRemoteCall(_))
-                && prev.completed_remote_calls != next.completed_remote_calls
+                && rel_set_changed(&prev.completed_remote_calls, &next.completed_remote_calls)
         },
-    ))
+    )
 }
 
 #[fairness(RpcSpec)]
@@ -258,13 +317,15 @@ fn remote_resolution_fairness() -> Fairness<RpcState, RpcAction> {
 
 #[fairness(RpcSpec)]
 fn remote_disconnect_fairness() -> Fairness<RpcState, RpcAction> {
-    Fairness::weak(StepPredicate::new(
-        "remote_disconnect",
-        |prev, action, next| {
+    Fairness::weak(
+        nirvash_step_expr! { remote_disconnect(prev, action, next) =>
             matches!(action, RpcAction::DisconnectRemote(_))
-                && prev.remote_connection_owners != next.remote_connection_owners
+                && relation_changed(
+                    &prev.remote_connection_owners,
+                    &next.remote_connection_owners,
+                )
         },
-    ))
+    )
 }
 
 #[subsystem_spec(model_cases(rpc_model_cases))]
@@ -284,8 +345,15 @@ impl TransitionSystem for RpcSpec {
         <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
-    fn transition(&self, prev: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        transition_state(prev, action)
+    fn transition_program(
+        &self,
+    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule rpc_transition when transition_state(prev, action).is_some() => {
+                set self <= transition_state(prev, action)
+                    .expect("rpc_transition guard matched");
+            }
+        })
     }
 }
 
@@ -389,24 +457,24 @@ fn rpc_valid(state: &RpcState) -> bool {
         && bindings_match_default_target_pairs().eval(state)
 }
 
-fn resolve_or_reject_local_step() -> StepPredicate<RpcState, RpcAction> {
-    StepPredicate::new("resolve_or_reject_local", |prev, action, next| {
+fn resolve_or_reject_local_step() -> StepExpr<RpcState, RpcAction> {
+    nirvash_step_expr! { resolve_or_reject_local(prev, action, next) =>
         matches!(
             action,
             RpcAction::ResolveLocal(_) | RpcAction::RejectLocal(_)
-        ) && (prev.local_call_owners != next.local_call_owners
-            || prev.denied_local_calls != next.denied_local_calls)
-    })
+        ) && (relation_changed(&prev.local_call_owners, &next.local_call_owners)
+            || relation_changed(&prev.denied_local_calls, &next.denied_local_calls))
+    }
 }
 
-fn resolve_or_reject_remote_step() -> StepPredicate<RpcState, RpcAction> {
-    StepPredicate::new("resolve_or_reject_remote", |prev, action, next| {
+fn resolve_or_reject_remote_step() -> StepExpr<RpcState, RpcAction> {
+    nirvash_step_expr! { resolve_or_reject_remote(prev, action, next) =>
         matches!(
             action,
             RpcAction::InvokeRemote(_) | RpcAction::RejectRemoteInvoke(_)
-        ) && (prev.remote_inflight_calls != next.remote_inflight_calls
-            || prev.denied_remote_calls != next.denied_remote_calls)
-    })
+        ) && (relation_changed(&prev.remote_inflight_calls, &next.remote_inflight_calls)
+            || relation_changed(&prev.denied_remote_calls, &next.denied_remote_calls))
+    }
 }
 
 fn call_is_taken(state: &RpcState, call: RpcCallAtom) -> bool {
@@ -472,6 +540,21 @@ fn authority_for(source: ServiceAtom) -> RemoteAuthorityAtom {
     }
 }
 
+fn rel_set_changed<T>(left: &RelSet<T>, right: &RelSet<T>) -> bool
+where
+    T: nirvash_core::RelAtom + Clone + Eq + std::fmt::Debug + 'static,
+{
+    left.items() != right.items()
+}
+
+fn relation_changed<L, R>(left: &Relation2<L, R>, right: &Relation2<L, R>) -> bool
+where
+    L: nirvash_core::RelAtom + Clone + Eq + std::fmt::Debug + 'static,
+    R: nirvash_core::RelAtom + Clone + Eq + std::fmt::Debug + 'static,
+{
+    left.pairs() != right.pairs()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +589,31 @@ mod tests {
 
         assert!(completed.has_completed_remote_call_for(ServiceAtom::Service0));
         assert!(!disconnected.has_remote_connection_for(ServiceAtom::Service0));
+    }
+
+    #[test]
+    fn transition_program_matches_transition_function() {
+        let spec = RpcSpec::new();
+        let program = spec.transition_program().expect("transition program");
+        let initial = spec.initial_state();
+
+        assert_eq!(
+            program
+                .evaluate(&initial, &RpcAction::GrantBinding(ServiceAtom::Service0))
+                .expect("evaluates"),
+            transition_state(&initial, &RpcAction::GrantBinding(ServiceAtom::Service0))
+        );
+        assert_eq!(
+            program
+                .evaluate(
+                    &initial,
+                    &RpcAction::CompleteRemoteCall(ServiceAtom::Service0)
+                )
+                .expect("evaluates"),
+            transition_state(
+                &initial,
+                &RpcAction::CompleteRemoteCall(ServiceAtom::Service0)
+            )
+        );
     }
 }

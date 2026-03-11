@@ -73,10 +73,10 @@ flowchart TD
 
 ### 重要な設計点
 
-- 通常 spec の正本は `TransitionSystem::initial_states()`、`TransitionSystem::actions()`、`TransitionSystem::transition()` です。`system` のような並行 spec は `ConcurrentTransitionSystem::{initial_states, atomic_actions, atomic_transition, footprint_reads, footprint_writes}` を atomic 正本にし、`TransitionSystem::Action = ConcurrentAction<_>` と `successors()` で synthesized parallel step を返します。
+- 通常 spec の正本は `TransitionSystem::initial_states()`、`TransitionSystem::actions()`、`TransitionSystem::transition()` です。`system` のような並行 spec も top-level action を atomic に保った interleaving を正本にし、reachable graph 上の individual edge をそのまま検証します。
 - `Signature` は helper enum/newtype や projection 型の bounded domain 付与にだけ使います。
 - `imagod-spec-formal` では構造を持つ subsystem を relation-first で書くのを既定にし、atom を `RelAtom`、state field を `RelSet` / `Relation2` で持ちます。phase progression や terminal status のような線形 gate だけ scalar を残し、doc graph 側は relation schema と Alloy 風 notation を追加表示します。
-- concurrent edge の doc label は `parallel(a, b, c)` 形式で表示され、resource footprint に衝突しない atomic action だけが自動合成されます。
+- system-level の doc edge は atomic action をそのまま表示し、parallel 合成専用ラベルには依存しません。
 - `nirvash-docgen` は `SpecVizBundle` を正本にして `Overview / Reachability / Scenario Traces / Process View / Data Model` を生成します。`Reachability` は reduced reachable graph を基本とし、大きい case では selected trace 由来の focus graph に自動フォールバックします。`Scenario Traces` は full reachable graph をそのまま線形化せず、`deadlock shortest path` / `focus predicate shortest path` / `cycle witness` / `happy path` を最大 4 本まで deterministic に選び、2 actor 以上なら Mermaid sequence、そうでなければ step table で描きます。`Process View` は actor/process metadata から loop block つきの疑似コードを出し、`Data Model` は relation schema / action vocabulary / 登録 constraint 群を 1 セクションへ集約します。Mermaid は state graph と selected trace sequence に限定し、全体モデルは text/table を正本にします。
 - `formal_tests` は spec 単体を検査します。
 - `code_tests` は `nirvash_core::conformance::ProtocolConformanceSpec` と `ProtocolRuntimeBinding` を使って grouped な runtime conformance を生成し、`ActionApplier` / `StateObserver` 経由で `before_probe -> summarize_state -> abstract_state`、`output_probe -> summarize_output -> abstract_output`、`after_probe -> summarize_state -> abstract_state` を比較します。runtime contract macro も同じ probe-first の流れを生成し、runtime 側には `observe_state(...) -> ProbeState` と `observe_output(...) -> ProbeOutput` だけを要求します。

@@ -1,0 +1,8 @@
+error: registered properties must be built from AST-native nirvash_expr!/nirvash_step_expr! nodes
+  --> tests/fixtures/registered_property_closure_reject.rs:37:57
+   |
+37 |   fn bad_property() -> ::nirvash_core::Ltl<State, Action> {
+   |  _________________________________________________________^
+38 | |     ::nirvash_core::Ltl::pred(::nirvash_core::BoolExpr::new("bad_property", |_| true))
+39 | | }
+   | |_^

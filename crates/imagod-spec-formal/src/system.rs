@@ -1,13 +1,14 @@
 use std::any::{Any, TypeId};
 
 use imagod_spec::MessageType;
-use nirvash_core::concurrent::{ConcurrentAction, ConcurrentTransitionSystem};
 use nirvash_core::{
-    ActionConstraint, ModelCase, ModelCaseSource, ModelCheckConfig, Signature as _,
-    StateConstraint, StatePredicate, TemporalSpec, TransitionSystem,
-    conformance::ProtocolConformanceSpec,
+    BoolExpr, ModelCase, ModelCaseSource, ModelCheckConfig, Signature as _, StepExpr, TemporalSpec,
+    TransitionSystem, conformance::ProtocolConformanceSpec,
 };
-use nirvash_macros::{action_constraint, invariant, state_constraint, system_spec};
+use nirvash_macros::{
+    Signature as FormalSignature, action_constraint, invariant, nirvash_expr, nirvash_step_expr,
+    nirvash_transition_program, state_constraint, system_spec,
+};
 
 use crate::{
     CommandKind, CommandLifecycleState, CommandProtocolAction, OperationPhase, PluginKind,
@@ -30,7 +31,7 @@ use crate::{
     wire_protocol::{WireProtocolAction, WireProtocolSpec, WireProtocolState},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, FormalSignature)]
 pub struct SystemState {
     pub manager: ManagerRuntimeState,
     pub session: SessionTransportState,
@@ -74,7 +75,7 @@ pub enum SystemResourceKey {
     RpcCall(RpcCallAtom),
 }
 
-pub type SystemAction = ConcurrentAction<SystemAtomicAction>;
+pub type SystemAction = SystemAtomicAction;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SystemEffect {
@@ -84,10 +85,6 @@ pub enum SystemEffect {
     LogsEnd(StreamAtom),
     AuthorizationRejected(StreamAtom, RequestKindAtom),
     ShutdownComplete,
-}
-
-fn system_atomic_action_type_id() -> TypeId {
-    TypeId::of::<SystemAtomicAction>()
 }
 
 fn system_action_type_id() -> TypeId {
@@ -648,56 +645,13 @@ fn system_atomic_action_presentation(
     presentation
 }
 
-fn system_atomic_action_doc_presentation(
-    value: &dyn Any,
-) -> Option<nirvash_core::DocGraphActionPresentation> {
-    let action = value
-        .downcast_ref::<SystemAtomicAction>()
-        .expect("registered system atomic action downcast");
-    Some(system_atomic_action_presentation(action))
-}
-
 fn system_action_doc_presentation(
     value: &dyn Any,
 ) -> Option<nirvash_core::DocGraphActionPresentation> {
     let action = value
         .downcast_ref::<SystemAction>()
         .expect("registered system action downcast");
-    let atoms = action
-        .atoms()
-        .iter()
-        .map(system_atomic_action_presentation)
-        .collect::<Vec<_>>();
-    let label = if atoms.len() == 1 {
-        atoms[0].label.clone()
-    } else {
-        format!(
-            "parallel({})",
-            atoms
-                .iter()
-                .map(|step| step.label.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    let mut interaction_steps = Vec::new();
-    let mut process_steps = Vec::new();
-    for presentation in atoms {
-        interaction_steps.extend(presentation.interaction_steps);
-        process_steps.extend(presentation.process_steps);
-    }
-    Some(nirvash_core::DocGraphActionPresentation::with_steps(
-        label,
-        interaction_steps,
-        process_steps,
-    ))
-}
-
-nirvash_core::inventory::submit! {
-    nirvash_core::RegisteredActionDocPresentation {
-        value_type_id: system_atomic_action_type_id,
-        format: system_atomic_action_doc_presentation,
-    }
+    Some(system_atomic_action_presentation(action))
 }
 
 nirvash_core::inventory::submit! {
@@ -785,16 +739,12 @@ impl SystemSpec {
     }
 }
 
-impl ConcurrentTransitionSystem for SystemSpec {
-    type State = SystemState;
-    type AtomicAction = SystemAtomicAction;
-    type ResourceKey = SystemResourceKey;
-
-    fn initial_states(&self) -> Vec<Self::State> {
+impl SystemSpec {
+    fn boot_states(&self) -> Vec<SystemState> {
         vec![self.boot_state()]
     }
 
-    fn atomic_actions(&self) -> Vec<Self::AtomicAction> {
+    fn atomic_actions(&self) -> Vec<SystemAtomicAction> {
         let mut actions = Vec::new();
         actions.extend(
             <ManagerRuntimeAction as nirvash_core::ActionVocabulary>::action_vocabulary()
@@ -849,7 +799,7 @@ impl ConcurrentTransitionSystem for SystemSpec {
         actions
     }
 
-    fn enabled_atomic_actions(&self, state: &Self::State) -> Vec<Self::AtomicAction> {
+    fn enabled_atomic_actions(&self, state: &SystemState) -> Vec<SystemAtomicAction> {
         system_atomic_candidates(state)
             .into_iter()
             .filter(|action| self.atomic_transition(state, action).is_some())
@@ -858,9 +808,9 @@ impl ConcurrentTransitionSystem for SystemSpec {
 
     fn atomic_transition(
         &self,
-        prev: &Self::State,
-        action: &Self::AtomicAction,
-    ) -> Option<Self::State> {
+        prev: &SystemState,
+        action: &SystemAtomicAction,
+    ) -> Option<SystemState> {
         let manager_spec = ManagerRuntimeSpec::new();
         let session_spec = SessionTransportSpec::new();
         let session_auth_spec = SessionAuthSpec::new();
@@ -948,10 +898,11 @@ impl ConcurrentTransitionSystem for SystemSpec {
         multi_service_state_valid(&candidate).then_some(candidate)
     }
 
+    #[allow(dead_code)]
     fn footprint_reads(
         &self,
-        action: &Self::AtomicAction,
-    ) -> std::collections::BTreeSet<Self::ResourceKey> {
+        action: &SystemAtomicAction,
+    ) -> std::collections::BTreeSet<SystemResourceKey> {
         match action {
             SystemAtomicAction::Manager(manager_action) => manager_read_resources(*manager_action),
             SystemAtomicAction::Session(session_action) => session_read_resources(*session_action),
@@ -972,10 +923,11 @@ impl ConcurrentTransitionSystem for SystemSpec {
         }
     }
 
+    #[allow(dead_code)]
     fn footprint_writes(
         &self,
-        action: &Self::AtomicAction,
-    ) -> std::collections::BTreeSet<Self::ResourceKey> {
+        action: &SystemAtomicAction,
+    ) -> std::collections::BTreeSet<SystemResourceKey> {
         match action {
             SystemAtomicAction::Manager(manager_action) => manager_write_resources(*manager_action),
             SystemAtomicAction::Session(session_action) => session_write_resources(*session_action),
@@ -995,9 +947,20 @@ impl ConcurrentTransitionSystem for SystemSpec {
             }
         }
     }
+
+    #[cfg(test)]
+    fn actions_conflict(&self, left: &SystemAtomicAction, right: &SystemAtomicAction) -> bool {
+        let left_reads = self.footprint_reads(left);
+        let left_writes = self.footprint_writes(left);
+        let right_reads = self.footprint_reads(right);
+        let right_writes = self.footprint_writes(right);
+        !left_reads.is_disjoint(&right_writes)
+            || !left_writes.is_disjoint(&right_reads)
+            || !left_writes.is_disjoint(&right_writes)
+    }
 }
 
-fn system_model_cases() -> Vec<ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>>> {
+fn system_model_cases() -> Vec<ModelCase<SystemState, SystemAtomicAction>> {
     vec![
         boot_gc_and_restore_case(),
         session_auth_and_authorize_case(),
@@ -1021,6 +984,7 @@ fn system_model_cases() -> Vec<ModelCase<SystemState, ConcurrentAction<SystemAto
 
 fn system_checker_config() -> ModelCheckConfig {
     ModelCheckConfig {
+        backend: None,
         exploration: nirvash_core::ExplorationMode::ReachableGraph,
         bounded_depth: Some(12),
         max_states: Some(2048),
@@ -1032,6 +996,7 @@ fn system_checker_config() -> ModelCheckConfig {
 
 fn system_doc_checker_config() -> ModelCheckConfig {
     ModelCheckConfig {
+        backend: None,
         exploration: nirvash_core::ExplorationMode::ReachableGraph,
         bounded_depth: Some(10),
         max_states: Some(192),
@@ -1043,6 +1008,7 @@ fn system_doc_checker_config() -> ModelCheckConfig {
 
 fn focused_system_checker_config() -> ModelCheckConfig {
     ModelCheckConfig {
+        backend: None,
         exploration: nirvash_core::ExplorationMode::ReachableGraph,
         bounded_depth: Some(8),
         max_states: Some(512),
@@ -1054,6 +1020,7 @@ fn focused_system_checker_config() -> ModelCheckConfig {
 
 fn focused_system_doc_checker_config() -> ModelCheckConfig {
     ModelCheckConfig {
+        backend: None,
         exploration: nirvash_core::ExplorationMode::ReachableGraph,
         bounded_depth: Some(8),
         max_states: Some(96),
@@ -1065,6 +1032,7 @@ fn focused_system_doc_checker_config() -> ModelCheckConfig {
 
 fn shutdown_system_checker_config() -> ModelCheckConfig {
     ModelCheckConfig {
+        backend: None,
         exploration: nirvash_core::ExplorationMode::ReachableGraph,
         bounded_depth: Some(10),
         max_states: Some(2048),
@@ -1444,59 +1412,56 @@ fn system_atomic_candidates(state: &SystemState) -> Vec<SystemAtomicAction> {
     actions
 }
 
-fn boot_gc_and_restore_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
+fn boot_gc_and_restore_case() -> ModelCase<SystemState, SystemAtomicAction> {
     ModelCase::new("boot_gc_and_restore")
         .with_checker_config(system_checker_config())
         .with_doc_checker_config(system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn session_auth_and_authorize_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>>
-{
+fn session_auth_and_authorize_case() -> ModelCase<SystemState, SystemAtomicAction> {
     ModelCase::new("session_auth_and_authorize")
         .with_checker_config(system_checker_config())
         .with_doc_checker_config(system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn hello_negotiation_and_limits_case()
--> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
+fn hello_negotiation_and_limits_case() -> ModelCase<SystemState, SystemAtomicAction> {
     ModelCase::new("hello_negotiation_and_limits")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn deploy_upload_and_commit_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
+fn deploy_upload_and_commit_case() -> ModelCase<SystemState, SystemAtomicAction> {
     ModelCase::new("deploy_upload_and_commit")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn command_start_event_flow_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
+fn command_start_event_flow_case() -> ModelCase<SystemState, SystemAtomicAction> {
     ModelCase::new("command_start_event_flow")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn state_request_and_cancel_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
+fn state_request_and_cancel_case() -> ModelCase<SystemState, SystemAtomicAction> {
     ModelCase::new("state_request_and_cancel")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn services_list_merge_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
+fn services_list_merge_case() -> ModelCase<SystemState, SystemAtomicAction> {
     ModelCase::new("services_list_merge")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn logs_request_snapshot_and_follow_case()
--> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
+fn logs_request_snapshot_and_follow_case() -> ModelCase<SystemState, SystemAtomicAction> {
     ModelCase::new("logs_request_snapshot_and_follow")
         .with_checker_config(system_checker_config())
         .with_doc_checker_config(system_doc_checker_config())
@@ -1504,8 +1469,7 @@ fn logs_request_snapshot_and_follow_case()
 }
 
 #[allow(dead_code)]
-fn bindings_cert_upload_updates_authorization_case()
--> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
+fn bindings_cert_upload_updates_authorization_case() -> ModelCase<SystemState, SystemAtomicAction> {
     ModelCase::new("bindings_cert_upload_updates_authorization")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
@@ -1513,8 +1477,7 @@ fn bindings_cert_upload_updates_authorization_case()
 }
 
 #[allow(dead_code)]
-fn parallel_deploy_and_start_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>>
-{
+fn parallel_deploy_and_start_case() -> ModelCase<SystemState, SystemAtomicAction> {
     ModelCase::new("parallel_deploy_and_start")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
@@ -1522,7 +1485,7 @@ fn parallel_deploy_and_start_case() -> ModelCase<SystemState, ConcurrentAction<S
 }
 
 #[allow(dead_code)]
-fn service_scoped_rollback_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
+fn service_scoped_rollback_case() -> ModelCase<SystemState, SystemAtomicAction> {
     ModelCase::new("service_scoped_rollback")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
@@ -1530,7 +1493,7 @@ fn service_scoped_rollback_case() -> ModelCase<SystemState, ConcurrentAction<Sys
 }
 
 #[allow(dead_code)]
-fn local_rpc_happy_path_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
+fn local_rpc_happy_path_case() -> ModelCase<SystemState, SystemAtomicAction> {
     ModelCase::new("local_rpc_happy_path")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
@@ -1538,7 +1501,7 @@ fn local_rpc_happy_path_case() -> ModelCase<SystemState, ConcurrentAction<System
 }
 
 #[allow(dead_code)]
-fn local_rpc_denied_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
+fn local_rpc_denied_case() -> ModelCase<SystemState, SystemAtomicAction> {
     ModelCase::new("local_rpc_denied_or_target_missing")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
@@ -1546,8 +1509,7 @@ fn local_rpc_denied_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtom
 }
 
 #[allow(dead_code)]
-fn remote_rpc_connection_lifecycle_case()
--> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
+fn remote_rpc_connection_lifecycle_case() -> ModelCase<SystemState, SystemAtomicAction> {
     ModelCase::new("remote_rpc_connection_lifecycle")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
@@ -1555,23 +1517,21 @@ fn remote_rpc_connection_lifecycle_case()
 }
 
 #[allow(dead_code)]
-fn shutdown_blocks_new_rpc_case() -> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
+fn shutdown_blocks_new_rpc_case() -> ModelCase<SystemState, SystemAtomicAction> {
     ModelCase::new("shutdown_blocks_new_rpc_and_drains_services")
         .with_checker_config(shutdown_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn graceful_shutdown_and_force_fallback_case()
--> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
+fn graceful_shutdown_and_force_fallback_case() -> ModelCase<SystemState, SystemAtomicAction> {
     ModelCase::new("graceful_shutdown_and_force_fallback")
         .with_checker_config(shutdown_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn maintenance_reap_and_idle_tick_case()
--> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
+fn maintenance_reap_and_idle_tick_case() -> ModelCase<SystemState, SystemAtomicAction> {
     ModelCase::new("maintenance_reap_and_idle_tick")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
@@ -1579,216 +1539,139 @@ fn maintenance_reap_and_idle_tick_case()
 }
 
 #[action_constraint(SystemSpec, cases("boot_gc_and_restore"))]
-fn boot_gc_and_restore_actions()
--> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
-    ActionConstraint::new("boot_gc_and_restore_actions", |_, action, _| {
-        action.arity() == 1 && action.atoms().iter().all(boot_to_listening_atom_allowed)
-    })
+fn boot_gc_and_restore_actions() -> StepExpr<SystemState, SystemAtomicAction> {
+    nirvash_step_expr! { boot_gc_and_restore_actions(_prev, action, _next) =>
+        boot_to_listening_atom_allowed(action)
+    }
 }
 
 #[action_constraint(SystemSpec, cases("session_auth_and_authorize"))]
-fn session_auth_and_authorize_actions()
--> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
-    ActionConstraint::new("session_auth_and_authorize_actions", |_, action, _| {
-        action.arity() == 1
-            && action
-                .atoms()
-                .iter()
-                .all(session_auth_and_authorize_atom_allowed)
-    })
+fn session_auth_and_authorize_actions() -> StepExpr<SystemState, SystemAtomicAction> {
+    nirvash_step_expr! { session_auth_and_authorize_actions(_prev, action, _next) =>
+        session_auth_and_authorize_atom_allowed(action)
+    }
 }
 
 #[action_constraint(SystemSpec, cases("hello_negotiation_and_limits"))]
-fn hello_negotiation_and_limits_actions()
--> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
-    ActionConstraint::new("hello_negotiation_and_limits_actions", |_, action, _| {
-        action.arity() == 1
-            && action
-                .atoms()
-                .iter()
-                .all(hello_negotiation_and_limits_atom_allowed)
-    })
+fn hello_negotiation_and_limits_actions() -> StepExpr<SystemState, SystemAtomicAction> {
+    nirvash_step_expr! { hello_negotiation_and_limits_actions(_prev, action, _next) =>
+        hello_negotiation_and_limits_atom_allowed(action)
+    }
 }
 
 #[action_constraint(SystemSpec, cases("deploy_upload_and_commit"))]
-fn deploy_upload_and_commit_actions()
--> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
-    ActionConstraint::new("deploy_upload_and_commit_actions", |_, action, _| {
-        action.arity() == 1
-            && action
-                .atoms()
-                .iter()
-                .all(deploy_upload_and_commit_atom_allowed)
-    })
+fn deploy_upload_and_commit_actions() -> StepExpr<SystemState, SystemAtomicAction> {
+    nirvash_step_expr! { deploy_upload_and_commit_actions(_prev, action, _next) =>
+        deploy_upload_and_commit_atom_allowed(action)
+    }
 }
 
 #[action_constraint(SystemSpec, cases("command_start_event_flow"))]
-fn command_start_event_flow_actions()
--> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
-    ActionConstraint::new("command_start_event_flow_actions", |_, action, _| {
-        action.arity() == 1
-            && action
-                .atoms()
-                .iter()
-                .all(command_start_event_flow_atom_allowed)
-    })
+fn command_start_event_flow_actions() -> StepExpr<SystemState, SystemAtomicAction> {
+    nirvash_step_expr! { command_start_event_flow_actions(_prev, action, _next) =>
+        command_start_event_flow_atom_allowed(action)
+    }
 }
 
 #[action_constraint(SystemSpec, cases("state_request_and_cancel"))]
-fn state_request_and_cancel_actions()
--> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
-    ActionConstraint::new("state_request_and_cancel_actions", |_, action, _| {
-        action.arity() == 1
-            && action
-                .atoms()
-                .iter()
-                .all(state_request_and_cancel_atom_allowed)
-    })
+fn state_request_and_cancel_actions() -> StepExpr<SystemState, SystemAtomicAction> {
+    nirvash_step_expr! { state_request_and_cancel_actions(_prev, action, _next) =>
+        state_request_and_cancel_atom_allowed(action)
+    }
 }
 
 #[action_constraint(SystemSpec, cases("services_list_merge"))]
-fn services_list_merge_actions()
--> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
-    ActionConstraint::new("services_list_merge_actions", |_, action, _| {
-        action.arity() <= 2 && action.atoms().iter().all(services_list_merge_atom_allowed)
-    })
+fn services_list_merge_actions() -> StepExpr<SystemState, SystemAtomicAction> {
+    nirvash_step_expr! { services_list_merge_actions(_prev, action, _next) =>
+        services_list_merge_atom_allowed(action)
+    }
 }
 
 #[action_constraint(SystemSpec, cases("logs_request_snapshot_and_follow"))]
-fn logs_request_snapshot_and_follow_actions()
--> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
-    ActionConstraint::new(
-        "logs_request_snapshot_and_follow_actions",
-        |_, action, _| {
-            action.arity() <= 2
-                && action
-                    .atoms()
-                    .iter()
-                    .all(logs_request_snapshot_and_follow_atom_allowed)
-        },
-    )
+fn logs_request_snapshot_and_follow_actions() -> StepExpr<SystemState, SystemAtomicAction> {
+    nirvash_step_expr! { logs_request_snapshot_and_follow_actions(_prev, action, _next) =>
+        logs_request_snapshot_and_follow_atom_allowed(action)
+    }
 }
 
 #[action_constraint(SystemSpec, cases("bindings_cert_upload_updates_authorization"))]
-fn bindings_cert_upload_updates_authorization_actions()
--> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
-    ActionConstraint::new(
-        "bindings_cert_upload_updates_authorization_actions",
-        |_, action, _| {
-            action.arity() == 1
-                && action
-                    .atoms()
-                    .iter()
-                    .all(bindings_cert_upload_updates_authorization_atom_allowed)
-        },
-    )
+fn bindings_cert_upload_updates_authorization_actions() -> StepExpr<SystemState, SystemAtomicAction>
+{
+    nirvash_step_expr! { bindings_cert_upload_updates_authorization_actions(_prev, action, _next) =>
+        bindings_cert_upload_updates_authorization_atom_allowed(action)
+    }
 }
 
 #[action_constraint(SystemSpec, cases("parallel_deploy_and_start"))]
-fn parallel_deploy_and_start_actions()
--> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
-    ActionConstraint::new("parallel_deploy_and_start_actions", |_, action, _| {
-        action.arity() <= 2
-            && action
-                .atoms()
-                .iter()
-                .all(parallel_deploy_and_start_atom_allowed)
-    })
+fn parallel_deploy_and_start_actions() -> StepExpr<SystemState, SystemAtomicAction> {
+    nirvash_step_expr! { parallel_deploy_and_start_actions(_prev, action, _next) =>
+        parallel_deploy_and_start_atom_allowed(action)
+    }
 }
 
 #[action_constraint(SystemSpec, cases("service_scoped_rollback"))]
-fn service_scoped_rollback_actions()
--> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
-    ActionConstraint::new("service_scoped_rollback_actions", |_, action, _| {
-        action.arity() == 1
-            && action
-                .atoms()
-                .iter()
-                .all(service_scoped_rollback_atom_allowed)
-    })
+fn service_scoped_rollback_actions() -> StepExpr<SystemState, SystemAtomicAction> {
+    nirvash_step_expr! { service_scoped_rollback_actions(_prev, action, _next) =>
+        service_scoped_rollback_atom_allowed(action)
+    }
 }
 
 #[action_constraint(SystemSpec, cases("local_rpc_happy_path"))]
-fn local_rpc_happy_path_actions()
--> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
-    ActionConstraint::new("local_rpc_happy_path_actions", |_, action, _| {
-        action.arity() == 1 && action.atoms().iter().all(local_rpc_happy_atom_allowed)
-    })
+fn local_rpc_happy_path_actions() -> StepExpr<SystemState, SystemAtomicAction> {
+    nirvash_step_expr! { local_rpc_happy_path_actions(_prev, action, _next) =>
+        local_rpc_happy_atom_allowed(action)
+    }
 }
 
 #[action_constraint(SystemSpec, cases("local_rpc_denied_or_target_missing"))]
-fn local_rpc_denied_actions() -> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>>
-{
-    ActionConstraint::new("local_rpc_denied_actions", |_, action, _| {
-        action.arity() == 1 && action.atoms().iter().all(local_rpc_denied_atom_allowed)
-    })
+fn local_rpc_denied_actions() -> StepExpr<SystemState, SystemAtomicAction> {
+    nirvash_step_expr! { local_rpc_denied_actions(_prev, action, _next) =>
+        local_rpc_denied_atom_allowed(action)
+    }
 }
 
 #[action_constraint(SystemSpec, cases("remote_rpc_connection_lifecycle"))]
-fn remote_rpc_connection_lifecycle_actions()
--> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
-    ActionConstraint::new("remote_rpc_connection_lifecycle_actions", |_, action, _| {
-        action.arity() == 1
-            && action
-                .atoms()
-                .iter()
-                .all(remote_rpc_connection_atom_allowed)
-    })
+fn remote_rpc_connection_lifecycle_actions() -> StepExpr<SystemState, SystemAtomicAction> {
+    nirvash_step_expr! { remote_rpc_connection_lifecycle_actions(_prev, action, _next) =>
+        remote_rpc_connection_atom_allowed(action)
+    }
 }
 
 #[state_constraint(SystemSpec, cases("shutdown_blocks_new_rpc_and_drains_services"))]
-fn shutdown_service1_quiescent() -> StateConstraint<SystemState> {
-    StateConstraint::new("shutdown_service1_quiescent", |state: &SystemState| {
+fn shutdown_service1_quiescent() -> BoolExpr<SystemState> {
+    nirvash_expr! { shutdown_service1_quiescent(state) =>
         state.deploy.service_is_quiescent(ServiceAtom::Service1)
             && state
                 .supervision
                 .service_is_quiescent(ServiceAtom::Service1)
             && state.rpc.service_is_quiescent(ServiceAtom::Service1)
-    })
+    }
 }
 
 #[action_constraint(SystemSpec, cases("shutdown_blocks_new_rpc_and_drains_services"))]
-fn shutdown_blocks_new_rpc_actions()
--> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
-    ActionConstraint::new("shutdown_blocks_new_rpc_actions", |_, action, _| {
-        action.arity() == 1
-            && action
-                .atoms()
-                .iter()
-                .all(shutdown_blocks_new_rpc_atom_allowed)
-    })
+fn shutdown_blocks_new_rpc_actions() -> StepExpr<SystemState, SystemAtomicAction> {
+    nirvash_step_expr! { shutdown_blocks_new_rpc_actions(_prev, action, _next) =>
+        shutdown_blocks_new_rpc_atom_allowed(action)
+    }
 }
 
 #[action_constraint(SystemSpec, cases("graceful_shutdown_and_force_fallback"))]
-fn graceful_shutdown_and_force_fallback_actions()
--> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
-    ActionConstraint::new(
-        "graceful_shutdown_and_force_fallback_actions",
-        |_, action, _| {
-            action.arity() == 1
-                && action
-                    .atoms()
-                    .iter()
-                    .all(graceful_shutdown_and_force_fallback_atom_allowed)
-        },
-    )
+fn graceful_shutdown_and_force_fallback_actions() -> StepExpr<SystemState, SystemAtomicAction> {
+    nirvash_step_expr! { graceful_shutdown_and_force_fallback_actions(_prev, action, _next) =>
+        graceful_shutdown_and_force_fallback_atom_allowed(action)
+    }
 }
 
 #[action_constraint(SystemSpec, cases("maintenance_reap_and_idle_tick"))]
-fn maintenance_reap_and_idle_tick_actions()
--> ActionConstraint<SystemState, ConcurrentAction<SystemAtomicAction>> {
-    ActionConstraint::new("maintenance_reap_and_idle_tick_actions", |_, action, _| {
-        action.arity() == 1
-            && action
-                .atoms()
-                .iter()
-                .all(maintenance_reap_and_idle_tick_atom_allowed)
-    })
+fn maintenance_reap_and_idle_tick_actions() -> StepExpr<SystemState, SystemAtomicAction> {
+    nirvash_step_expr! { maintenance_reap_and_idle_tick_actions(_prev, action, _next) =>
+        maintenance_reap_and_idle_tick_atom_allowed(action)
+    }
 }
 
 #[invariant(SystemSpec)]
-fn running_services_require_promoted_release() -> StatePredicate<SystemState> {
-    StatePredicate::new("running_services_require_promoted_release", |state| {
+fn running_services_require_promoted_release() -> BoolExpr<SystemState> {
+    nirvash_expr! { running_services_require_promoted_release(state) =>
         ServiceAtom::bounded_domain()
             .into_vec()
             .into_iter()
@@ -1798,12 +1681,12 @@ fn running_services_require_promoted_release() -> StatePredicate<SystemState> {
                     && !state.supervision.service_is_stopping(service))
                     || state.deploy.release_promoted(service)
             })
-    })
+    }
 }
 
 #[invariant(SystemSpec)]
-fn local_rpc_resolution_requires_ready_target() -> StatePredicate<SystemState> {
-    StatePredicate::new("local_rpc_resolution_requires_ready_target", |state| {
+fn local_rpc_resolution_requires_ready_target() -> BoolExpr<SystemState> {
+    nirvash_expr! { local_rpc_resolution_requires_ready_target(state) =>
         ServiceAtom::bounded_domain()
             .into_vec()
             .into_iter()
@@ -1815,12 +1698,12 @@ fn local_rpc_resolution_requires_ready_target() -> StatePredicate<SystemState> {
                         && state.supervision.service_is_running(target)
                 }
             })
-    })
+    }
 }
 
 #[invariant(SystemSpec)]
-fn remote_rpc_connections_require_running_owner() -> StatePredicate<SystemState> {
-    StatePredicate::new("remote_rpc_connections_require_running_owner", |state| {
+fn remote_rpc_connections_require_running_owner() -> BoolExpr<SystemState> {
+    nirvash_expr! { remote_rpc_connections_require_running_owner(state) =>
         ServiceAtom::bounded_domain()
             .into_vec()
             .into_iter()
@@ -1828,69 +1711,62 @@ fn remote_rpc_connections_require_running_owner() -> StatePredicate<SystemState>
                 !state.rpc.has_remote_connection_for(source)
                     || state.supervision.service_is_running(source)
             })
-    })
+    }
 }
 
 #[invariant(SystemSpec)]
-fn shutdown_requires_session_gate_and_manager_shutdown() -> StatePredicate<SystemState> {
-    StatePredicate::new(
-        "shutdown_requires_session_gate_and_manager_shutdown",
-        |state| {
-            matches!(
-                state.shutdown.phase,
-                ShutdownPhase::Idle | ShutdownPhase::SignalReceived
-            ) || (state.session.shutdown_requested
-                && matches!(
-                    state.manager.phase,
-                    ManagerRuntimePhase::ShutdownRequested | ManagerRuntimePhase::Stopped
-                ))
-        },
-    )
+fn shutdown_requires_session_gate_and_manager_shutdown() -> BoolExpr<SystemState> {
+    nirvash_expr! { shutdown_requires_session_gate_and_manager_shutdown(state) =>
+        matches!(
+            state.shutdown.phase,
+            ShutdownPhase::Idle | ShutdownPhase::SignalReceived
+        ) || (state.session.shutdown_requested
+            && matches!(
+                state.manager.phase,
+                ManagerRuntimePhase::ShutdownRequested | ManagerRuntimePhase::Stopped
+            ))
+    }
 }
 
 #[invariant(SystemSpec)]
-fn active_command_requires_listening_manager() -> StatePredicate<SystemState> {
-    StatePredicate::new("active_command_requires_listening_manager", |state| {
+fn active_command_requires_listening_manager() -> BoolExpr<SystemState> {
+    nirvash_expr! { active_command_requires_listening_manager(state) =>
         !matches!(
             state.command.lifecycle_state,
             Some(CommandLifecycleState::Accepted | CommandLifecycleState::Running)
         ) || matches!(state.manager.phase, ManagerRuntimePhase::Listening)
-    })
+    }
 }
 
 #[invariant(SystemSpec)]
-fn dependency_provider_requires_acyclic_plugin_graph() -> StatePredicate<SystemState> {
-    StatePredicate::new(
-        "dependency_provider_requires_acyclic_plugin_graph",
-        |state| !state.plugin.provider_is_dependency() || state.plugin.graph_is_acyclic(),
-    )
+fn dependency_provider_requires_acyclic_plugin_graph() -> BoolExpr<SystemState> {
+    nirvash_expr! { dependency_provider_requires_acyclic_plugin_graph(state) =>
+        !state.plugin.provider_is_dependency() || state.plugin.graph_is_acyclic()
+    }
 }
 
 #[invariant(SystemSpec)]
-fn non_hello_wire_requests_require_authorized_streams() -> StatePredicate<SystemState> {
-    StatePredicate::new(
-        "non_hello_wire_requests_require_authorized_streams",
-        |state| {
-            StreamAtom::bounded_domain()
-                .into_vec()
-                .into_iter()
-                .all(|stream| {
-                    RequestKindAtom::bounded_domain()
-                        .into_vec()
-                        .into_iter()
-                        .all(|kind| {
-                            !state.wire.saw_request(stream, kind)
-                                || !request_kind_requires_authorization(kind)
-                                || state.session_auth.stream_authorized(stream, kind)
-                        })
-                })
-        },
-    )
+fn non_hello_wire_requests_require_authorized_streams() -> BoolExpr<SystemState> {
+    nirvash_expr! { non_hello_wire_requests_require_authorized_streams(state) =>
+        StreamAtom::bounded_domain()
+            .into_vec()
+            .into_iter()
+            .all(|stream| {
+                RequestKindAtom::bounded_domain()
+                    .into_vec()
+                    .into_iter()
+                    .all(|kind| {
+                        !state.wire.saw_request(stream, kind)
+                            || !request_kind_requires_authorization(kind)
+                            || state.session_auth.stream_authorized(stream, kind)
+                    })
+            })
+    }
 }
 
 #[invariant(SystemSpec)]
-fn cert_upload_updates_dynamic_authority() -> StatePredicate<SystemState> {
-    StatePredicate::new("cert_upload_updates_dynamic_authority", |state| {
+fn cert_upload_updates_dynamic_authority() -> BoolExpr<SystemState> {
+    nirvash_expr! { cert_upload_updates_dynamic_authority(state) =>
         StreamAtom::bounded_domain()
             .into_vec()
             .into_iter()
@@ -1898,11 +1774,11 @@ fn cert_upload_updates_dynamic_authority() -> StatePredicate<SystemState> {
                 !state
                     .wire
                     .saw_request(stream, RequestKindAtom::BindingsCertUpload)
-                    || state
-                        .session_auth
-                        .authority_uploaded(stream_authority(stream))
+                || state
+                    .session_auth
+                    .authority_uploaded(stream_authority(stream))
             })
-    })
+    }
 }
 
 #[system_spec(
@@ -1922,29 +1798,40 @@ fn cert_upload_updates_dynamic_authority() -> StatePredicate<SystemState> {
 )]
 impl TransitionSystem for SystemSpec {
     type State = SystemState;
-    type Action = ConcurrentAction<SystemAtomicAction>;
+    type Action = SystemAtomicAction;
 
     fn name(&self) -> &'static str {
         "system"
     }
 
     fn initial_states(&self) -> Vec<Self::State> {
-        <Self as ConcurrentTransitionSystem>::initial_states(self)
+        self.boot_states()
     }
 
     fn actions(&self) -> Vec<Self::Action> {
         self.atomic_actions()
-            .into_iter()
-            .map(ConcurrentAction::from_atomic)
-            .collect()
     }
 
-    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        self.synthesized_transition(state, action)
+    fn transition_program(
+        &self,
+    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule system_transition when SystemSpec::new().atomic_transition(prev, action).is_some() => {
+                set self <= SystemSpec::new()
+                    .atomic_transition(prev, action)
+                    .expect("system_transition guard matched");
+            }
+        })
     }
 
     fn successors(&self, state: &Self::State) -> Vec<(Self::Action, Self::State)> {
-        self.synthesized_successors(state)
+        self.enabled_atomic_actions(state)
+            .into_iter()
+            .filter_map(|action| {
+                self.atomic_transition(state, &action)
+                    .map(|next| (action, next))
+            })
+            .collect()
     }
 
     fn successors_constrained(
@@ -1952,7 +1839,10 @@ impl TransitionSystem for SystemSpec {
         state: &Self::State,
         action_allowed: &dyn Fn(&Self::Action, &Self::State) -> bool,
     ) -> Vec<(Self::Action, Self::State)> {
-        self.synthesized_successors_filtered(state, action_allowed)
+        self.successors(state)
+            .into_iter()
+            .filter(|(action, next)| action_allowed(action, next))
+            .collect()
     }
 }
 
@@ -1970,13 +1860,7 @@ impl ProtocolConformanceSpec for SystemSpec {
         next: Option<&Self::State>,
     ) -> Self::ExpectedOutput {
         let mut effects = next
-            .map(|next_state| {
-                action
-                    .atoms()
-                    .iter()
-                    .flat_map(|atom| expected_effects_for_atomic(prev, atom, next_state))
-                    .collect::<Vec<_>>()
-            })
+            .map(|next_state| expected_effects_for_atomic(prev, action, next_state))
             .unwrap_or_default();
         if next.is_some_and(|state| {
             !matches!(prev.shutdown.phase, ShutdownPhase::Completed)
@@ -2348,11 +2232,6 @@ where
     spec.invariants()
         .iter()
         .all(|predicate| predicate.eval(state))
-        && spec
-            .model_cases()
-            .iter()
-            .flat_map(|model_case| model_case.state_constraints().iter())
-            .all(|constraint| constraint.eval(state))
 }
 
 fn manager_read_resources(
@@ -3179,10 +3058,7 @@ mod tests {
 
     use super::*;
 
-    fn model_case(
-        spec: &SystemSpec,
-        label: &str,
-    ) -> ModelCase<SystemState, ConcurrentAction<SystemAtomicAction>> {
+    fn model_case(spec: &SystemSpec, label: &str) -> ModelCase<SystemState, SystemAtomicAction> {
         spec.model_cases()
             .into_iter()
             .find(|model_case| model_case.label() == label)
@@ -3192,8 +3068,7 @@ mod tests {
     fn reachable_snapshot_for_case(
         spec: &SystemSpec,
         label: &str,
-    ) -> nirvash_core::ReachableGraphSnapshot<SystemState, ConcurrentAction<SystemAtomicAction>>
-    {
+    ) -> nirvash_core::ReachableGraphSnapshot<SystemState, SystemAtomicAction> {
         ModelChecker::for_case(spec, model_case(spec, label))
             .full_reachable_graph_snapshot()
             .expect("snapshot should build")
@@ -3201,6 +3076,17 @@ mod tests {
 
     fn listening_state(spec: &SystemSpec) -> SystemState {
         spec.initial_state()
+    }
+
+    fn edge_target(
+        snapshot: &nirvash_core::ReachableGraphSnapshot<SystemState, SystemAtomicAction>,
+        source: usize,
+        action: &SystemAtomicAction,
+    ) -> Option<usize> {
+        snapshot.edges[source]
+            .iter()
+            .find(|edge| edge.action == *action)
+            .map(|edge| edge.target)
     }
 
     fn step(spec: &SystemSpec, state: &SystemState, action: SystemAtomicAction) -> SystemState {
@@ -3313,9 +3199,8 @@ mod tests {
             &listening_state(&spec),
             SystemAtomicAction::Session(SessionTransportAction::AcceptSession),
         );
-        let action = ConcurrentAction::from_atomic(SystemAtomicAction::Wire(
-            WireProtocolAction::HelloNegotiate(StreamAtom::Stream0),
-        ));
+        let action =
+            SystemAtomicAction::Wire(WireProtocolAction::HelloNegotiate(StreamAtom::Stream0));
         let next = spec
             .transition(&state, &action)
             .expect("hello.negotiate should be accepted on an active session");
@@ -3690,21 +3575,42 @@ mod tests {
     }
 
     #[test]
-    fn parallel_deploy_and_start_case_contains_parallel_steps() {
+    fn parallel_deploy_and_start_case_allows_both_interleavings() {
         let spec = SystemSpec::new();
-        let state = listening_state(&spec);
-        let parallel_upload = ConcurrentAction::new(vec![
-            SystemAtomicAction::Deploy(DeployAction::AdvanceUpload(ServiceAtom::Service0)),
-            SystemAtomicAction::Deploy(DeployAction::AdvanceUpload(ServiceAtom::Service1)),
-        ])
-        .expect("parallel action should build");
+        let snapshot = reachable_snapshot_for_case(&spec, "parallel_deploy_and_start");
+        let shared_upload_state = snapshot
+            .states
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                let upload_service0 =
+                    SystemAtomicAction::Deploy(DeployAction::AdvanceUpload(ServiceAtom::Service0));
+                let upload_service1 =
+                    SystemAtomicAction::Deploy(DeployAction::AdvanceUpload(ServiceAtom::Service1));
+                (edge_target(&snapshot, index, &upload_service0).is_some()
+                    && edge_target(&snapshot, index, &upload_service1).is_some())
+                .then_some(index)
+            })
+            .expect("parallel case should reach a state where both uploads are enabled");
+        let upload_service0 =
+            SystemAtomicAction::Deploy(DeployAction::AdvanceUpload(ServiceAtom::Service0));
+        let upload_service1 =
+            SystemAtomicAction::Deploy(DeployAction::AdvanceUpload(ServiceAtom::Service1));
+        let after_service0 = edge_target(&snapshot, shared_upload_state, &upload_service0)
+            .expect("service0 upload should be enabled from the shared upload state");
+        let after_service1 = edge_target(&snapshot, shared_upload_state, &upload_service1)
+            .expect("service1 upload should be enabled from the shared upload state");
 
         assert!(
-            spec.synthesized_transition(&state, &parallel_upload)
-                .is_some()
+            edge_target(&snapshot, after_service0, &upload_service1).is_some(),
+            "service1 upload should remain reachable after service0 upload"
+        );
+        assert!(
+            edge_target(&snapshot, after_service1, &upload_service0).is_some(),
+            "service0 upload should remain reachable after service1 upload"
         );
 
-        let state = deploy_and_start_service(&spec, &state, ServiceAtom::Service0);
+        let state = deploy_and_start_service(&spec, &listening_state(&spec), ServiceAtom::Service0);
         let state = deploy_and_start_service(&spec, &state, ServiceAtom::Service1);
 
         assert!(state.deploy.release_promoted(ServiceAtom::Service0));
@@ -4106,6 +4012,78 @@ mod tests {
 
         assert!(!state.supervision.service_is_running(ServiceAtom::Service0));
         assert!(!state.supervision.service_is_stopping(ServiceAtom::Service0));
+    }
+
+    #[test]
+    fn rpc_atomic_actions_preserve_system_invariants() {
+        let spec = SystemSpec::new();
+
+        let denied_state =
+            deploy_and_start_service(&spec, &listening_state(&spec), ServiceAtom::Service0);
+        let denied_action = RpcAction::RejectLocal(ServiceAtom::Service0);
+        assert!(rpc_action_allowed(&denied_state, &denied_action));
+        let denied_next = RpcSpec::new()
+            .transition(&denied_state.rpc, &denied_action)
+            .expect("reject local should be allowed by rpc spec");
+        let denied_candidate = SystemState {
+            rpc: denied_next,
+            ..denied_state.clone()
+        };
+        assert!(multi_service_state_valid(&denied_candidate));
+        assert!(
+            spec.atomic_transition(&denied_state, &SystemAtomicAction::Rpc(denied_action))
+                .is_some()
+        );
+
+        let local_state = deploy_and_start_service(&spec, &denied_state, ServiceAtom::Service1);
+        let grant_action = RpcAction::GrantBinding(ServiceAtom::Service0);
+        let local_bound = SystemState {
+            rpc: RpcSpec::new()
+                .transition(&local_state.rpc, &grant_action)
+                .expect("grant binding should be allowed by rpc spec"),
+            ..local_state.clone()
+        };
+        let resolve_action = RpcAction::ResolveLocal(ServiceAtom::Service0);
+        assert!(rpc_action_allowed(&local_bound, &resolve_action));
+        let resolve_next = RpcSpec::new()
+            .transition(&local_bound.rpc, &resolve_action)
+            .expect("resolve local should be allowed by rpc spec");
+        let resolve_candidate = SystemState {
+            rpc: resolve_next,
+            ..local_bound.clone()
+        };
+        assert!(multi_service_state_valid(&resolve_candidate));
+        assert!(
+            spec.atomic_transition(&local_bound, &SystemAtomicAction::Rpc(resolve_action))
+                .is_some()
+        );
+
+        let remote_start =
+            deploy_and_start_service(&spec, &listening_state(&spec), ServiceAtom::Service0);
+        let remote_bound = SystemState {
+            rpc: RpcSpec::new()
+                .transition(&remote_start.rpc, &grant_action)
+                .expect("grant binding should be allowed by rpc spec"),
+            ..remote_start.clone()
+        };
+        let connect_action = RpcAction::ConnectRemote(ServiceAtom::Service0);
+        assert!(rpc_action_allowed(&remote_bound, &connect_action));
+        let connect_next = RpcSpec::new()
+            .transition(&remote_bound.rpc, &connect_action)
+            .expect("connect remote should be allowed by rpc spec");
+        let remote_bound_for_atomic = remote_bound.clone();
+        let connect_candidate = SystemState {
+            rpc: connect_next,
+            ..remote_bound
+        };
+        assert!(multi_service_state_valid(&connect_candidate));
+        assert!(
+            spec.atomic_transition(
+                &remote_bound_for_atomic,
+                &SystemAtomicAction::Rpc(connect_action)
+            )
+            .is_some()
+        );
     }
 
     #[test]

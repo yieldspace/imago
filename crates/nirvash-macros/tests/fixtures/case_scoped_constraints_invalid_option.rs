@@ -1,4 +1,4 @@
-use nirvash_core::{ModelCase, TransitionSystem};
+use nirvash_core::{BoolExpr, ModelCase, TransitionSystem};
 use nirvash_macros::{Signature as FormalSignature, state_constraint, subsystem_spec};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
@@ -26,14 +26,14 @@ impl TransitionSystem for Spec {
         vec![Action::Tick]
     }
 
-    fn transition(&self, _: &Self::State, _: &Self::Action) -> Option<Self::State> {
-        None
+    fn transition_program(&self) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(::nirvash_core::TransitionProgram::named("spec", vec![]))
     }
 }
 
 #[state_constraint(Spec, nope("case_a"))]
-fn invalid_option() -> StateConstraint<State> {
-    nirvash_core::StateConstraint::new("invalid_option", |_| true)
+fn invalid_option() -> BoolExpr<State> {
+    nirvash_core::BoolExpr::new("invalid_option", |_| true)
 }
 
 fn spec_model_cases() -> Vec<ModelCase<State, Action>> {

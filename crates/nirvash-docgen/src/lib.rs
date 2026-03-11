@@ -541,7 +541,8 @@ impl SourceCollector {
             .values()
             .map(|spec| spec.full_path.clone())
             .collect::<Vec<_>>();
-        let mut runtime_bundles = collect_runtime_graphs(manifest_dir, out_dir, &runtime_spec_paths)?;
+        let mut runtime_bundles =
+            collect_runtime_graphs(manifest_dir, out_dir, &runtime_spec_paths)?;
         for spec in by_path.values() {
             if runtime_bundles
                 .iter()
@@ -1203,6 +1204,13 @@ fn render_viz_fragment(bundle: &nirvash_core::SpecVizBundle) -> String {
     output
 }
 
+fn render_model_backend(backend: nirvash_core::ModelBackend) -> &'static str {
+    match backend {
+        nirvash_core::ModelBackend::Explicit => "explicit",
+        nirvash_core::ModelBackend::Symbolic => "symbolic",
+    }
+}
+
 fn render_overview_section(bundle: &nirvash_core::SpecVizBundle) -> String {
     let mut output = String::from("## Overview\n\n");
     let kind = match bundle.metadata.kind {
@@ -1232,12 +1240,13 @@ fn render_overview_section(bundle: &nirvash_core::SpecVizBundle) -> String {
     ));
 
     output.push_str("### Cases\n\n");
-    output.push_str("| case | full states | reduced states | traces | rendering |\n");
-    output.push_str("| --- | --- | --- | --- | --- |\n");
+    output.push_str("| case | backend | full states | reduced states | traces | rendering |\n");
+    output.push_str("| --- | --- | --- | --- | --- | --- |\n");
     for case in &bundle.cases {
         output.push_str(&format!(
-            "| `{}` | {} | {} | {} | {} |\n",
+            "| `{}` | `{}` | {} | {} | {} | {} |\n",
             case.label,
+            render_model_backend(case.backend),
             case.stats.full_state_count,
             case.stats.reduced_state_count,
             case.scenarios.len(),
@@ -1263,8 +1272,7 @@ fn render_reachability_section(bundle: &nirvash_core::SpecVizBundle) -> String {
         ));
         output.push_str(&format!(
             "- edges: full=`{}`, reduced=`{}`\n",
-            case.stats.full_edge_count,
-            case.stats.reduced_edge_count
+            case.stats.full_edge_count, case.stats.reduced_edge_count
         ));
         if case.stats.truncated {
             output.push_str("- checker note: truncated by checker limits\n");
@@ -1282,7 +1290,10 @@ fn render_reachability_section(bundle: &nirvash_core::SpecVizBundle) -> String {
         let graph = case.focus_graph.as_ref().unwrap_or(&case.reduced_graph);
         let visible_edges = visible_reduced_edges(graph);
         output.push_str(&render_mermaid_block(&render_viz_state_graph_mermaid(
-            bundle, case, graph, &visible_edges,
+            bundle,
+            case,
+            graph,
+            &visible_edges,
         )));
         output.push_str("\n\n<details><summary>State legend</summary>\n\n");
         for state in &graph.states {
@@ -1388,9 +1399,21 @@ fn render_data_model_section(bundle: &nirvash_core::SpecVizBundle) -> String {
     }
 
     output.push_str("### Constraints\n\n");
-    render_named_block(&mut output, "invariants", &bundle.metadata.registrations.invariants);
-    render_named_block(&mut output, "properties", &bundle.metadata.registrations.properties);
-    render_named_block(&mut output, "fairness", &bundle.metadata.registrations.fairness);
+    render_named_block(
+        &mut output,
+        "invariants",
+        &bundle.metadata.registrations.invariants,
+    );
+    render_named_block(
+        &mut output,
+        "properties",
+        &bundle.metadata.registrations.properties,
+    );
+    render_named_block(
+        &mut output,
+        "fairness",
+        &bundle.metadata.registrations.fairness,
+    );
     render_named_block(
         &mut output,
         "state_constraints",
@@ -3088,8 +3111,8 @@ pub mod child;
 pub mod system;
 
 mod inline_parent {
-    use nirvash_core::{Ltl, StatePredicate, TransitionSystem};
-    use nirvash_macros::{invariant, property, subsystem_spec};
+    use nirvash_core::{BoolExpr, Ltl, TransitionProgram, TransitionSystem};
+    use nirvash_macros::{invariant, nirvash_expr, nirvash_transition_program, property, subsystem_spec};
 
     pub struct InlineState;
     pub struct InlineAction;
@@ -3102,7 +3125,13 @@ mod inline_parent {
 
         fn initial_states(&self) -> Vec<Self::State> { vec![InlineState] }
         fn actions(&self) -> Vec<Self::Action> { vec![InlineAction] }
-        fn transition(&self, _: &Self::State, _: &Self::Action) -> Option<Self::State> { Some(InlineState) }
+        fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+            Some(nirvash_transition_program! {
+                rule inline_transition when true => {
+                    set self <= InlineState;
+                }
+            })
+        }
     }
 
     nirvash_core::invariant!(self::InlineSpec, inline_invariant(state) => {
@@ -3112,14 +3141,18 @@ mod inline_parent {
 
     mod nested {
         use super::{InlineAction, InlineState};
-        use nirvash_core::{Ltl, StatePredicate};
-        use nirvash_macros::{invariant, property};
+        use nirvash_core::{BoolExpr, Ltl};
+        use nirvash_macros::{invariant, nirvash_expr, property};
 
         #[invariant(super::InlineSpec)]
-        fn super_invariant() -> StatePredicate<InlineState> { todo!() }
+        fn super_invariant() -> BoolExpr<InlineState> {
+            nirvash_expr! { super_invariant(_state) => true }
+        }
 
         #[property(crate::inline_parent::InlineSpec)]
-        fn crate_property() -> Ltl<InlineState, InlineAction> { todo!() }
+        fn crate_property() -> Ltl<InlineState, InlineAction> {
+            Ltl::pred(nirvash_expr! { crate_property_state(_state) => true })
+        }
     }
 
     fn inline_model_cases() {}
@@ -3131,10 +3164,8 @@ mod inline_parent {
         fs::write(
             src_dir.join("child.rs"),
             r#"
-use nirvash_core::{
-    ActionConstraint, Fairness, Ltl, StateConstraint, StatePredicate, TransitionSystem,
-};
-use nirvash_macros::{invariant, property, subsystem_spec};
+use nirvash_core::{BoolExpr, Fairness, Ltl, StepExpr, TransitionProgram, TransitionSystem};
+use nirvash_macros::{invariant, nirvash_expr, nirvash_transition_program, property, subsystem_spec};
 
 pub struct ChildState;
 pub struct ChildAction;
@@ -3147,8 +3178,12 @@ impl TransitionSystem for ChildSpec {
 
     fn initial_states(&self) -> Vec<Self::State> { vec![ChildState] }
     fn actions(&self) -> Vec<Self::Action> { vec![ChildAction] }
-    fn transition(&self, _: &Self::State, _: &Self::Action) -> Option<Self::State> {
-        Some(ChildState)
+    fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule child_transition when true => {
+                set self <= ChildState;
+            }
+        })
     }
 }
 
@@ -3167,16 +3202,13 @@ nirvash_core::action_constraint!(ChildSpec, child_action_constraint(prev, action
     true
 });
 
-nirvash_core::property!(ChildSpec, child_property => leads_to(
-    (pred!(child_busy(state) => {
-        let _ = state;
-        true
-    })),
-    (pred!(child_idle(state) => {
-        let _ = state;
-        true
-    }))
-));
+#[property(ChildSpec)]
+fn child_property() -> Ltl<ChildState, ChildAction> {
+    Ltl::leads_to(
+        Ltl::pred(nirvash_expr! { child_busy(_state) => true }),
+        Ltl::pred(nirvash_expr! { child_idle(_state) => true }),
+    )
+}
 
 nirvash_core::fairness!(weak ChildSpec, child_fairness(prev, action, next) => {
     let _ = (prev, action, next);
@@ -3189,8 +3221,8 @@ nirvash_core::fairness!(weak ChildSpec, child_fairness(prev, action, next) => {
         fs::write(
             src_dir.join("system.rs"),
             r#"
-use nirvash_core::{Ltl, StatePredicate, TransitionSystem};
-use nirvash_macros::{invariant, property, system_spec};
+use nirvash_core::{BoolExpr, Ltl, TransitionProgram, TransitionSystem};
+use nirvash_macros::{invariant, nirvash_expr, nirvash_transition_program, property, system_spec};
 
 pub struct SystemState;
 pub struct SystemAction;
@@ -3202,16 +3234,25 @@ impl TransitionSystem for RootSystemSpec {
     type Action = SystemAction;
 
     fn initial_states(&self) -> Vec<Self::State> { vec![SystemState] }
-    fn successors(&self, _: &Self::State) -> Vec<(Self::Action, Self::State)> {
-        vec![(SystemAction, SystemState)]
+    fn actions(&self) -> Vec<Self::Action> { vec![SystemAction] }
+    fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule root_system_transition when true => {
+                set self <= SystemState;
+            }
+        })
     }
 }
 
 #[invariant(RootSystemSpec)]
-fn system_invariant() -> StatePredicate<SystemState> { todo!() }
+fn system_invariant() -> BoolExpr<SystemState> {
+    nirvash_expr! { system_invariant(_state) => true }
+}
 
 #[property(RootSystemSpec)]
-fn system_property() -> Ltl<SystemState, SystemAction> { todo!() }
+fn system_property() -> Ltl<SystemState, SystemAction> {
+    Ltl::pred(nirvash_expr! { system_property_state(_state) => true })
+}
 
 fn system_model_cases() {}
 "#,
@@ -3299,8 +3340,8 @@ fn system_model_cases() {}
             fs::write(
                 src_dir.join(format!("{module}.rs")),
                 r#"
-use nirvash_core::TransitionSystem;
-use nirvash_macros::subsystem_spec;
+use nirvash_core::{TransitionProgram, TransitionSystem};
+use nirvash_macros::{nirvash_transition_program, subsystem_spec};
 
 pub struct State;
 pub struct Action;
@@ -3312,8 +3353,13 @@ impl TransitionSystem for DuplicateSpec {
     type Action = Action;
 
     fn initial_states(&self) -> Vec<Self::State> { vec![State] }
-    fn successors(&self, _: &Self::State) -> Vec<(Self::Action, Self::State)> {
-        vec![(Action, State)]
+    fn actions(&self) -> Vec<Self::Action> { vec![Action] }
+    fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule duplicate_transition when true => {
+                set self <= State;
+            }
+        })
     }
 }
 "#,
@@ -3349,6 +3395,7 @@ impl TransitionSystem for DuplicateSpec {
             ]),
             doc_graphs: vec![nirvash_core::DocGraphCase {
                 label: "default".to_owned(),
+                backend: nirvash_core::ModelBackend::Explicit,
                 graph: nirvash_core::DocGraphSnapshot {
                     states: vec![
                         nirvash_core::DocGraphState {
@@ -3415,6 +3462,7 @@ impl TransitionSystem for DuplicateSpec {
             registrations: BTreeMap::new(),
             doc_graphs: vec![nirvash_core::DocGraphCase {
                 label: "default".to_owned(),
+                backend: nirvash_core::ModelBackend::Explicit,
                 graph: nirvash_core::DocGraphSnapshot {
                     states: vec![
                         nirvash_core::DocGraphState {
@@ -3887,6 +3935,7 @@ impl TransitionSystem for DuplicateSpec {
             registrations: BTreeMap::new(),
             doc_graphs: vec![nirvash_core::DocGraphCase {
                 label: "default".to_owned(),
+                backend: nirvash_core::ModelBackend::Explicit,
                 graph: nirvash_core::DocGraphSnapshot {
                     states: vec![
                         nirvash_core::DocGraphState {
@@ -3955,6 +4004,7 @@ impl TransitionSystem for DuplicateSpec {
             registrations: BTreeMap::new(),
             doc_graphs: vec![nirvash_core::DocGraphCase {
                 label: "large".to_owned(),
+                backend: nirvash_core::ModelBackend::Explicit,
                 graph: nirvash_core::DocGraphSnapshot {
                     states,
                     edges,
@@ -3987,6 +4037,7 @@ impl TransitionSystem for DuplicateSpec {
             registrations: BTreeMap::new(),
             doc_graphs: vec![nirvash_core::DocGraphCase {
                 label: "default".to_owned(),
+                backend: nirvash_core::ModelBackend::Explicit,
                 graph: nirvash_core::DocGraphSnapshot {
                     states: vec![
                         nirvash_core::DocGraphState {
@@ -4077,6 +4128,7 @@ impl TransitionSystem for DuplicateSpec {
             registrations: BTreeMap::new(),
             doc_graphs: vec![nirvash_core::DocGraphCase {
                 label: "all_paths".to_owned(),
+                backend: nirvash_core::ModelBackend::Explicit,
                 graph: nirvash_core::DocGraphSnapshot {
                     states: vec![
                         nirvash_core::DocGraphState {
@@ -4094,7 +4146,7 @@ impl TransitionSystem for DuplicateSpec {
                     ],
                     edges: vec![
                         vec![demo_parallel_edge(
-                            "parallel(manager: Load config, session_auth: Accept session)",
+                            "manager: Load config + session_auth: Accept session",
                             &[
                                 ("Manager", "Runner", "Load config"),
                                 ("Client", "Manager", "Accept session"),
@@ -4150,6 +4202,7 @@ impl TransitionSystem for DuplicateSpec {
             registrations: BTreeMap::new(),
             doc_graphs: vec![nirvash_core::DocGraphCase {
                 label: "shared_suffix".to_owned(),
+                backend: nirvash_core::ModelBackend::Explicit,
                 graph: nirvash_core::DocGraphSnapshot {
                     states: vec![
                         nirvash_core::DocGraphState {
@@ -4240,6 +4293,7 @@ impl TransitionSystem for DuplicateSpec {
             ]),
             doc_graphs: vec![nirvash_core::DocGraphCase {
                 label: "all_paths".to_owned(),
+                backend: nirvash_core::ModelBackend::Explicit,
                 graph: nirvash_core::DocGraphSnapshot {
                     states: vec![
                         nirvash_core::DocGraphState {

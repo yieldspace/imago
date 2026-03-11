@@ -1,5 +1,8 @@
 use nirvash_core::{ModelCase, TransitionSystem};
-use nirvash_macros::{ActionVocabulary, Signature, fairness, invariant, property, subsystem_spec};
+use nirvash_macros::{
+    ActionVocabulary, Signature, fairness, invariant, nirvash_expr, nirvash_step_expr,
+    nirvash_transition_program, property, subsystem_spec,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
 pub enum TaskState {
@@ -18,7 +21,7 @@ pub enum ManagerRuntimePhase {
     Stopped,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
 pub struct ManagerRuntimeState {
     pub phase: ManagerRuntimePhase,
     pub config_loaded: bool,
@@ -69,27 +72,26 @@ fn manager_runtime_model_cases() -> Vec<ModelCase<ManagerRuntimeState, ManagerRu
 }
 
 #[invariant(ManagerRuntimeSpec)]
-fn listening_requires_config() -> nirvash_core::StatePredicate<ManagerRuntimeState> {
-    nirvash_core::StatePredicate::new("listening_requires_config", |state| {
+fn listening_requires_config() -> nirvash_core::BoolExpr<ManagerRuntimeState> {
+    nirvash_expr! { listening_requires_config(state) =>
         !matches!(
             state.phase,
             ManagerRuntimePhase::Listening
                 | ManagerRuntimePhase::ShutdownRequested
                 | ManagerRuntimePhase::Stopped
         ) || state.config_loaded
-    })
+    }
 }
 
 #[property(ManagerRuntimeSpec)]
 fn booting_leads_to_config_ready() -> nirvash_core::Ltl<ManagerRuntimeState, ManagerRuntimeAction> {
     nirvash_core::Ltl::leads_to(
-        nirvash_core::Ltl::pred(nirvash_core::StatePredicate::new("booting", |state| {
+        nirvash_core::Ltl::pred(nirvash_expr! { booting(state) =>
             matches!(state.phase, ManagerRuntimePhase::Booting)
-        })),
-        nirvash_core::Ltl::pred(nirvash_core::StatePredicate::new(
-            "config_ready_or_beyond",
-            |state| !matches!(state.phase, ManagerRuntimePhase::Booting),
-        )),
+        }),
+        nirvash_core::Ltl::pred(nirvash_expr! { config_ready_or_beyond(state) =>
+            !matches!(state.phase, ManagerRuntimePhase::Booting)
+        }),
     )
 }
 
@@ -97,12 +99,12 @@ fn booting_leads_to_config_ready() -> nirvash_core::Ltl<ManagerRuntimeState, Man
 fn config_ready_leads_to_listening() -> nirvash_core::Ltl<ManagerRuntimeState, ManagerRuntimeAction>
 {
     nirvash_core::Ltl::leads_to(
-        nirvash_core::Ltl::pred(nirvash_core::StatePredicate::new("config_ready", |state| {
+        nirvash_core::Ltl::pred(nirvash_expr! { config_ready(state) =>
             matches!(state.phase, ManagerRuntimePhase::ConfigReady)
-        })),
-        nirvash_core::Ltl::pred(nirvash_core::StatePredicate::new("listening", |state| {
+        }),
+        nirvash_core::Ltl::pred(nirvash_expr! { listening(state) =>
             matches!(state.phase, ManagerRuntimePhase::Listening)
-        })),
+        }),
     )
 }
 
@@ -110,21 +112,19 @@ fn config_ready_leads_to_listening() -> nirvash_core::Ltl<ManagerRuntimeState, M
 fn shutdown_requested_leads_to_stopped()
 -> nirvash_core::Ltl<ManagerRuntimeState, ManagerRuntimeAction> {
     nirvash_core::Ltl::leads_to(
-        nirvash_core::Ltl::pred(nirvash_core::StatePredicate::new(
-            "shutdown_requested",
-            |state| matches!(state.phase, ManagerRuntimePhase::ShutdownRequested),
-        )),
-        nirvash_core::Ltl::pred(nirvash_core::StatePredicate::new("stopped", |state| {
+        nirvash_core::Ltl::pred(nirvash_expr! { shutdown_requested(state) =>
+            matches!(state.phase, ManagerRuntimePhase::ShutdownRequested)
+        }),
+        nirvash_core::Ltl::pred(nirvash_expr! { stopped(state) =>
             matches!(state.phase, ManagerRuntimePhase::Stopped)
-        })),
+        }),
     )
 }
 
 #[fairness(ManagerRuntimeSpec)]
 fn boot_config_progress() -> nirvash_core::Fairness<ManagerRuntimeState, ManagerRuntimeAction> {
-    nirvash_core::Fairness::weak(nirvash_core::StepPredicate::new(
-        "boot_config_progress",
-        |prev, action, next| {
+    nirvash_core::Fairness::weak(
+        nirvash_step_expr! { boot_config_progress(prev, action, next) =>
             matches!(prev.phase, ManagerRuntimePhase::Booting)
                 && matches!(
                     action,
@@ -133,14 +133,13 @@ fn boot_config_progress() -> nirvash_core::Fairness<ManagerRuntimeState, Manager
                 )
                 && matches!(next.phase, ManagerRuntimePhase::ConfigReady)
         },
-    ))
+    )
 }
 
 #[fairness(ManagerRuntimeSpec)]
 fn config_ready_progress() -> nirvash_core::Fairness<ManagerRuntimeState, ManagerRuntimeAction> {
-    nirvash_core::Fairness::weak(nirvash_core::StepPredicate::new(
-        "config_ready_progress",
-        |prev, action, next| {
+    nirvash_core::Fairness::weak(
+        nirvash_step_expr! { config_ready_progress(prev, action, next) =>
             matches!(prev.phase, ManagerRuntimePhase::ConfigReady)
                 && matches!(
                     action,
@@ -153,36 +152,32 @@ fn config_ready_progress() -> nirvash_core::Fairness<ManagerRuntimeState, Manage
                     ManagerRuntimePhase::Restoring | ManagerRuntimePhase::Listening
                 )
         },
-    ))
+    )
 }
 
 #[fairness(ManagerRuntimeSpec)]
 fn shutdown_completion_progress()
 -> nirvash_core::Fairness<ManagerRuntimeState, ManagerRuntimeAction> {
-    nirvash_core::Fairness::weak(nirvash_core::StepPredicate::new(
-        "shutdown_completion_progress",
-        |prev, action, next| {
+    nirvash_core::Fairness::weak(
+        nirvash_step_expr! { shutdown_completion_progress(prev, action, next) =>
             matches!(prev.phase, ManagerRuntimePhase::ShutdownRequested)
                 && matches!(action, ManagerRuntimeAction::FinishShutdown)
                 && matches!(next.phase, ManagerRuntimePhase::Stopped)
         },
-    ))
+    )
 }
 
 #[fairness(ManagerRuntimeSpec)]
 fn restore_progress() -> nirvash_core::Fairness<ManagerRuntimeState, ManagerRuntimeAction> {
-    nirvash_core::Fairness::weak(nirvash_core::StepPredicate::new(
-        "restore_progress",
-        |prev, action, next| {
-            matches!(prev.phase, ManagerRuntimePhase::Restoring)
-                && matches!(
-                    action,
-                    ManagerRuntimeAction::RunBootRestoreSucceeded
-                        | ManagerRuntimeAction::RunBootRestoreFailed
-                )
-                && matches!(next.phase, ManagerRuntimePhase::Listening)
-        },
-    ))
+    nirvash_core::Fairness::weak(nirvash_step_expr! { restore_progress(prev, action, next) =>
+        matches!(prev.phase, ManagerRuntimePhase::Restoring)
+            && matches!(
+                action,
+                ManagerRuntimeAction::RunBootRestoreSucceeded
+                    | ManagerRuntimeAction::RunBootRestoreFailed
+            )
+            && matches!(next.phase, ManagerRuntimePhase::Listening)
+    })
 }
 
 #[subsystem_spec(model_cases(manager_runtime_model_cases))]
@@ -202,8 +197,59 @@ impl TransitionSystem for ManagerRuntimeSpec {
         <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
-    fn transition(&self, prev: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        transition_state(prev, action)
+    fn transition_program(
+        &self,
+    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule load_existing_config when matches!(action, ManagerRuntimeAction::LoadExistingConfig)
+                && matches!(prev.phase, ManagerRuntimePhase::Booting) => {
+                set phase <= ManagerRuntimePhase::ConfigReady;
+                set config_loaded <= true;
+                set created_default <= false;
+            }
+
+            rule create_default_config when matches!(action, ManagerRuntimeAction::CreateDefaultConfig)
+                && matches!(prev.phase, ManagerRuntimePhase::Booting) => {
+                set phase <= ManagerRuntimePhase::ConfigReady;
+                set config_loaded <= true;
+                set created_default <= true;
+            }
+
+            rule run_plugin_gc_succeeded when matches!(action, ManagerRuntimeAction::RunPluginGcSucceeded)
+                && matches!(prev.phase, ManagerRuntimePhase::ConfigReady) => {
+                set phase <= ManagerRuntimePhase::Restoring;
+            }
+
+            rule run_plugin_gc_failed when matches!(action, ManagerRuntimeAction::RunPluginGcFailed)
+                && matches!(prev.phase, ManagerRuntimePhase::ConfigReady) => {
+                set phase <= ManagerRuntimePhase::Restoring;
+            }
+
+            rule run_boot_restore_succeeded when matches!(action, ManagerRuntimeAction::RunBootRestoreSucceeded)
+                && matches!(prev.phase, ManagerRuntimePhase::Restoring) => {
+                set phase <= ManagerRuntimePhase::Listening;
+            }
+
+            rule run_boot_restore_failed when matches!(action, ManagerRuntimeAction::RunBootRestoreFailed)
+                && matches!(prev.phase, ManagerRuntimePhase::Restoring) => {
+                set phase <= ManagerRuntimePhase::Listening;
+            }
+
+            rule start_listening when matches!(action, ManagerRuntimeAction::StartListening)
+                && matches!(prev.phase, ManagerRuntimePhase::ConfigReady) => {
+                set phase <= ManagerRuntimePhase::Listening;
+            }
+
+            rule begin_shutdown when matches!(action, ManagerRuntimeAction::BeginShutdown)
+                && matches!(prev.phase, ManagerRuntimePhase::Listening) => {
+                set phase <= ManagerRuntimePhase::ShutdownRequested;
+            }
+
+            rule finish_shutdown when matches!(action, ManagerRuntimeAction::FinishShutdown)
+                && matches!(prev.phase, ManagerRuntimePhase::ShutdownRequested) => {
+                set phase <= ManagerRuntimePhase::Stopped;
+            }
+        })
     }
 }
 
@@ -275,5 +321,30 @@ fn transition_state(
             Some(candidate)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transition_program_matches_transition_function() {
+        let spec = ManagerRuntimeSpec::new();
+        let program = spec.transition_program().expect("transition program");
+        let initial = spec.initial_state();
+
+        assert_eq!(
+            program
+                .evaluate(&initial, &ManagerRuntimeAction::LoadExistingConfig)
+                .expect("evaluates"),
+            transition_state(&initial, &ManagerRuntimeAction::LoadExistingConfig)
+        );
+        assert_eq!(
+            program
+                .evaluate(&initial, &ManagerRuntimeAction::FinishShutdown)
+                .expect("evaluates"),
+            transition_state(&initial, &ManagerRuntimeAction::FinishShutdown)
+        );
     }
 }

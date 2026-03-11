@@ -3,10 +3,12 @@ use imagod_spec::{
     CommandStateSummary as RuntimeCommandStateSummary,
 };
 use nirvash_core::{
-    DocGraphPolicy, ModelCase, StatePredicate, TransitionSystem,
-    conformance::ProtocolConformanceSpec,
+    BoolExpr, DocGraphPolicy, ModelCase, TransitionSystem, conformance::ProtocolConformanceSpec,
 };
-use nirvash_macros::{invariant, subsystem_spec};
+use nirvash_macros::{
+    Signature as FormalSignature, invariant, nirvash_expr, nirvash_transition_program,
+    subsystem_spec,
+};
 
 use crate::{
     CommandErrorKind, CommandLifecycleState, CommandProtocolAction, CommandProtocolStageId,
@@ -64,7 +66,7 @@ pub fn classify_error_code(code: CommandErrorKind) -> ErrorCodeClass {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
 pub struct CommandProtocolState {
     pub tracked: bool,
     pub lifecycle_state: Option<CommandLifecycleState>,
@@ -304,69 +306,68 @@ impl CommandProtocolSpec {
 }
 
 #[invariant(CommandProtocolSpec)]
-fn tracked_requires_command_fields() -> StatePredicate<CommandProtocolState> {
-    StatePredicate::new("tracked_requires_command_fields", |state| {
+fn tracked_requires_command_fields() -> BoolExpr<CommandProtocolState> {
+    nirvash_expr! { tracked_requires_command_fields(state) =>
         state.tracked == state.lifecycle_state.is_some() && state.tracked == state.phase.is_some()
-    })
+    }
 }
 
 #[invariant(CommandProtocolSpec)]
-fn cancel_only_while_inflight() -> StatePredicate<CommandProtocolState> {
-    StatePredicate::new("cancel_only_while_inflight", |state| {
+fn cancel_only_while_inflight() -> BoolExpr<CommandProtocolState> {
+    nirvash_expr! { cancel_only_while_inflight(state) =>
         !state.cancel_requested
             || matches!(
                 state.lifecycle_state,
                 Some(CommandLifecycleState::Accepted | CommandLifecycleState::Running)
             )
-    })
+    }
 }
 
 #[invariant(CommandProtocolSpec)]
-fn spawned_phase_requires_running_or_terminal_lifecycle() -> StatePredicate<CommandProtocolState> {
-    StatePredicate::new(
-        "spawned_phase_requires_running_or_terminal_lifecycle",
-        |state| {
-            !matches!(state.phase, Some(OperationPhase::Spawned))
-                || matches!(
-                    state.lifecycle_state,
-                    Some(
-                        CommandLifecycleState::Running
-                            | CommandLifecycleState::Succeeded
-                            | CommandLifecycleState::Failed
-                            | CommandLifecycleState::Canceled
-                    )
+fn spawned_phase_requires_running_or_terminal_lifecycle() -> BoolExpr<CommandProtocolState> {
+    nirvash_expr! { spawned_phase_requires_running_or_terminal_lifecycle(state) =>
+        !matches!(state.phase, Some(OperationPhase::Spawned))
+            || matches!(
+                state.lifecycle_state,
+                Some(
+                    CommandLifecycleState::Running
+                        | CommandLifecycleState::Succeeded
+                        | CommandLifecycleState::Failed
+                        | CommandLifecycleState::Canceled
                 )
-        },
-    )
+            )
+    }
 }
 
 #[invariant(CommandProtocolSpec)]
-fn accepted_state_stays_in_starting_phase() -> StatePredicate<CommandProtocolState> {
-    StatePredicate::new("accepted_state_stays_in_starting_phase", |state| {
+fn accepted_state_stays_in_starting_phase() -> BoolExpr<CommandProtocolState> {
+    nirvash_expr! { accepted_state_stays_in_starting_phase(state) =>
         !matches!(state.lifecycle_state, Some(CommandLifecycleState::Accepted))
             || matches!(state.phase, Some(OperationPhase::Starting))
-    })
+    }
 }
 
 fn command_protocol_doc_graph_policy() -> DocGraphPolicy<CommandProtocolState> {
     DocGraphPolicy::boundary_paths()
-        .with_focus_state(StatePredicate::new(
-            "cancel_requested",
-            |state: &CommandProtocolState| state.cancel_requested,
-        ))
-        .with_focus_state(StatePredicate::new(
-            "terminal_lifecycle_state",
-            |state: &CommandProtocolState| {
-                matches!(
-                    state.lifecycle_state,
-                    Some(
-                        CommandLifecycleState::Succeeded
-                            | CommandLifecycleState::Failed
-                            | CommandLifecycleState::Canceled
-                    )
-                )
-            },
-        ))
+        .with_focus_state(cancel_requested_focus_state())
+        .with_focus_state(terminal_lifecycle_focus_state())
+}
+
+fn cancel_requested_focus_state() -> BoolExpr<CommandProtocolState> {
+    nirvash_expr! { cancel_requested(state) => state.cancel_requested }
+}
+
+fn terminal_lifecycle_focus_state() -> BoolExpr<CommandProtocolState> {
+    nirvash_expr! { terminal_lifecycle_state(state) =>
+        matches!(
+            state.lifecycle_state,
+            Some(
+                CommandLifecycleState::Succeeded
+                    | CommandLifecycleState::Failed
+                    | CommandLifecycleState::Canceled
+            )
+        )
+    }
 }
 
 fn command_protocol_model_cases() -> Vec<ModelCase<CommandProtocolState, CommandProtocolAction>> {
@@ -394,9 +395,94 @@ impl TransitionSystem for CommandProtocolSpec {
         <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
-    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        self.transition_state(state, action)
+    fn transition_program(
+        &self,
+    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule start when matches!(action, CommandProtocolAction::Start(_)) && !prev.tracked => {
+                set tracked <= true;
+                set lifecycle_state <= Some(CommandLifecycleState::Accepted);
+                set cancel_requested <= false;
+                set phase <= Some(OperationPhase::Starting);
+            }
+
+            rule set_running when matches!(action, CommandProtocolAction::SetRunning)
+                && prev.tracked
+                && matches!(prev.lifecycle_state, Some(CommandLifecycleState::Accepted))
+                && matches!(prev.phase, Some(OperationPhase::Starting)) => {
+                set lifecycle_state <= Some(CommandLifecycleState::Running);
+            }
+
+            rule request_cancel_spawned when matches!(action, CommandProtocolAction::RequestCancel)
+                && prev.tracked
+                && prev.is_inflight()
+                && prev.phase == Some(OperationPhase::Spawned) => {
+            }
+
+            rule request_cancel_pending when matches!(action, CommandProtocolAction::RequestCancel)
+                && prev.tracked
+                && prev.is_inflight()
+                && prev.phase != Some(OperationPhase::Spawned) => {
+                set cancel_requested <= true;
+            }
+
+            rule snapshot_running when matches!(action, CommandProtocolAction::SnapshotRunning)
+                && prev.tracked
+                && prev.is_inflight() => {
+            }
+
+            rule mark_spawned when matches!(action, CommandProtocolAction::MarkSpawned)
+                && prev.tracked
+                && matches!(prev.lifecycle_state, Some(CommandLifecycleState::Running))
+                && matches!(prev.phase, Some(OperationPhase::Starting)) => {
+                set phase <= Some(OperationPhase::Spawned);
+                set cancel_requested <= false;
+            }
+
+            rule finish_succeeded when matches!(action, CommandProtocolAction::FinishSucceeded)
+                && prev.tracked
+                && prev.is_inflight()
+                && matches!(prev.phase, Some(OperationPhase::Spawned)) => {
+                set lifecycle_state <= Some(CommandLifecycleState::Succeeded);
+                set cancel_requested <= false;
+                set phase <= Some(OperationPhase::Spawned);
+            }
+
+            rule finish_failed when matches!(action, CommandProtocolAction::FinishFailed(_))
+                && prev.tracked
+                && prev.is_inflight()
+                && matches!(prev.phase, Some(OperationPhase::Spawned)) => {
+                set lifecycle_state <= Some(CommandLifecycleState::Failed);
+                set cancel_requested <= false;
+                set phase <= Some(OperationPhase::Spawned);
+            }
+
+            rule finish_canceled when matches!(action, CommandProtocolAction::FinishCanceled)
+                && prev.tracked
+                && prev.is_inflight()
+                && matches!(prev.phase, Some(OperationPhase::Spawned)) => {
+                set lifecycle_state <= Some(CommandLifecycleState::Canceled);
+                set cancel_requested <= false;
+                set phase <= Some(OperationPhase::Spawned);
+            }
+
+            rule remove when matches!(action, CommandProtocolAction::Remove)
+                && prev.tracked
+                && prev.is_terminal() => {
+                set tracked <= false;
+                set lifecycle_state <= None;
+                set cancel_requested <= false;
+                set phase <= None;
+            }
+        })
     }
+}
+
+fn command_protocol_transition(
+    prev: &CommandProtocolState,
+    action: &CommandProtocolAction,
+) -> Option<CommandProtocolState> {
+    CommandProtocolSpec::new().transition_state(prev, action)
 }
 
 impl ProtocolConformanceSpec for CommandProtocolSpec {

@@ -5,8 +5,8 @@ use imagod_spec::{
     ManagerRuntimeStateSummary,
 };
 use nirvash_core::{
-    ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
-    concurrent::ConcurrentAction, conformance::ProtocolConformanceSpec,
+    BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
+    conformance::ProtocolConformanceSpec,
 };
 use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_model};
 
@@ -62,8 +62,7 @@ impl ManagerRuntimeProjectionSpec {
     }
 
     fn apply_atomic(self, state: &SystemState, action: SystemAtomicAction) -> Option<SystemState> {
-        self.system()
-            .transition(state, &ConcurrentAction::from_atomic(action))
+        self.system().transition(state, &action)
     }
 
     fn apply_begin_shutdown(self, state: &SystemState) -> Option<SystemState> {
@@ -246,7 +245,7 @@ impl TransitionSystem for ManagerRuntimeProjectionSpec {
 }
 
 impl TemporalSpec for ManagerRuntimeProjectionSpec {
-    fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
+    fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
         self.system().invariants()
     }
 }

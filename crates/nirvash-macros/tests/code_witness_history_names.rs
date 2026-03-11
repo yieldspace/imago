@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use nirvash_core::{
-    ActionConstraint, ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
+    BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
     conformance::{
         ActionApplier, NegativeWitness, PositiveWitness, ProtocolConformanceSpec,
         ProtocolInputWitnessBinding, ProtocolRuntimeBinding, RegisteredCodeWitnessTestProvider,
@@ -9,7 +9,7 @@ use nirvash_core::{
     },
 };
 use nirvash_macros::Signature as FormalSignature;
-use nirvash_macros::code_witness_tests;
+use nirvash_macros::{code_witness_tests, nirvash_step_expr};
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Spec;
@@ -82,20 +82,19 @@ impl TransitionSystem for Spec {
 impl ModelCaseSource for Spec {
     fn model_cases(&self) -> Vec<ModelCase<Self::State, Self::Action>> {
         vec![
-            ModelCase::new("fast_path")
-                .with_action_constraint(ActionConstraint::new("fast_path_only", |_, action, _| {
+            ModelCase::new("fast_path").with_action_constraint(nirvash_step_expr! {
+                fast_path_only(_prev, action, _next) =>
                     !matches!(action, Action::StartSlow | Action::FinishSlow)
-                })),
-            ModelCase::new("slow_path")
-                .with_action_constraint(ActionConstraint::new("slow_path_only", |_, action, _| {
-                    !matches!(action, Action::StartFast)
-                })),
+            }),
+            ModelCase::new("slow_path").with_action_constraint(nirvash_step_expr! {
+                slow_path_only(_prev, action, _next) => !matches!(action, Action::StartFast)
+            }),
         ]
     }
 }
 
 impl TemporalSpec for Spec {
-    fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
+    fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
         Vec::new()
     }
 }

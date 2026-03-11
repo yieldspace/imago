@@ -5,7 +5,7 @@ use imagod_spec::{
     SessionAuthStateSummary,
 };
 use nirvash_core::{
-    ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
+    BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };
 use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_model};
@@ -136,15 +136,13 @@ impl TransitionSystem for SessionAuthProjectionSpec {
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
         self.system().transition(
             state,
-            &nirvash_core::concurrent::ConcurrentAction::from_atomic(
-                SystemAtomicAction::SessionAuth(self.projected_action(*action)),
-            ),
+            &SystemAtomicAction::SessionAuth(self.projected_action(*action)),
         )
     }
 }
 
 impl TemporalSpec for SessionAuthProjectionSpec {
-    fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
+    fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
         self.system().invariants()
     }
 }
@@ -249,9 +247,7 @@ nirvash_projection_model! {
         ) -> Self::ExpectedOutput {
             self.system().expected_output(
                 prev,
-                &nirvash_core::concurrent::ConcurrentAction::from_atomic(
-                    SystemAtomicAction::SessionAuth(self.projected_action(*action)),
-                ),
+                &SystemAtomicAction::SessionAuth(self.projected_action(*action)),
                 next,
             )
         }

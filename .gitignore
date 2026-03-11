@@ -26,3 +26,4 @@ examples/**/build/
 
 *.log
 *.wasm
+.z3-trace

@@ -1,14 +1,16 @@
 use nirvash_core::{
-    ActionConstraint, Fairness, Ltl, ModelCase, ModelCheckConfig, RelSet, Relation2,
-    Signature as _, StatePredicate, StepPredicate, TransitionSystem,
+    BoolExpr, Fairness, Ltl, ModelBackend, ModelCase, ModelCheckConfig, RelSet, Relation2,
+    Signature as _, StepExpr, TransitionSystem,
 };
 use nirvash_macros::{
-    ActionVocabulary, RelationalState, action_constraint, fairness, invariant, property,
+    ActionVocabulary, RelationalState, Signature as FormalSignature, action_constraint, fairness,
+    invariant, nirvash_expr, nirvash_step_expr, nirvash_transition_program, property,
     subsystem_spec,
 };
 
 use crate::atoms::{CommandEventAtom, LogChunkAtom, RequestKindAtom, StreamAtom};
-#[derive(Debug, Clone, PartialEq, Eq, RelationalState)]
+#[derive(Debug, Clone, PartialEq, Eq, FormalSignature, RelationalState)]
+#[signature(custom)]
 pub struct WireProtocolState {
     requests: Relation2<StreamAtom, RequestKindAtom>,
     responses: Relation2<StreamAtom, RequestKindAtom>,
@@ -136,10 +138,16 @@ impl WireProtocolSpec {
     }
 }
 
+nirvash_core::signature_spec!(
+    WireProtocolStateSignatureSpec for WireProtocolState,
+    representatives = crate::state_domain::reachable_state_domain(&WireProtocolSpec::new())
+);
+
 fn wire_protocol_model_cases() -> Vec<ModelCase<WireProtocolState, WireProtocolAction>> {
     vec![
         ModelCase::default()
             .with_checker_config(ModelCheckConfig {
+                backend: Some(ModelBackend::Explicit),
                 exploration: nirvash_core::ExplorationMode::ReachableGraph,
                 bounded_depth: None,
                 max_states: Some(96),
@@ -148,6 +156,7 @@ fn wire_protocol_model_cases() -> Vec<ModelCase<WireProtocolState, WireProtocolA
                 stop_on_first_violation: false,
             })
             .with_doc_checker_config(ModelCheckConfig {
+                backend: Some(ModelBackend::Explicit),
                 exploration: nirvash_core::ExplorationMode::ReachableGraph,
                 bounded_depth: None,
                 max_states: Some(64),
@@ -179,10 +188,10 @@ fn stream_for_action(action: WireProtocolAction) -> StreamAtom {
 }
 
 #[action_constraint(WireProtocolSpec, cases("default"))]
-fn stream0_only() -> ActionConstraint<WireProtocolState, WireProtocolAction> {
-    ActionConstraint::new("stream0_only", |_, action, _| {
+fn stream0_only() -> StepExpr<WireProtocolState, WireProtocolAction> {
+    nirvash_step_expr! { stream0_only(_prev, action, _next) =>
         stream_for_action(*action) == StreamAtom::Stream0
-    })
+    }
 }
 
 fn request_kind_for_action(action: WireProtocolAction) -> Option<RequestKindAtom> {
@@ -205,8 +214,8 @@ fn request_kind_for_action(action: WireProtocolAction) -> Option<RequestKindAtom
 }
 
 #[invariant(WireProtocolSpec)]
-fn one_request_kind_per_stream() -> StatePredicate<WireProtocolState> {
-    StatePredicate::new("one_request_kind_per_stream", |state| {
+fn one_request_kind_per_stream() -> BoolExpr<WireProtocolState> {
+    nirvash_expr! { one_request_kind_per_stream(state) =>
         StreamAtom::bounded_domain()
             .into_vec()
             .into_iter()
@@ -218,12 +227,12 @@ fn one_request_kind_per_stream() -> StatePredicate<WireProtocolState> {
                     .count()
                     <= 1
             })
-    })
+    }
 }
 
 #[invariant(WireProtocolSpec)]
-fn logs_flow_requires_ack() -> StatePredicate<WireProtocolState> {
-    StatePredicate::new("logs_flow_requires_ack", |state| {
+fn logs_flow_requires_ack() -> BoolExpr<WireProtocolState> {
+    nirvash_expr! { logs_flow_requires_ack(state) =>
         StreamAtom::bounded_domain()
             .into_vec()
             .into_iter()
@@ -233,12 +242,12 @@ fn logs_flow_requires_ack() -> StatePredicate<WireProtocolState> {
                     && !state.log_ended.contains(&stream))
                     || state.logs_acknowledged(stream)
             })
-    })
+    }
 }
 
 #[invariant(WireProtocolSpec)]
-fn command_events_require_command_start() -> StatePredicate<WireProtocolState> {
-    StatePredicate::new("command_events_require_command_start", |state| {
+fn command_events_require_command_start() -> BoolExpr<WireProtocolState> {
+    nirvash_expr! { command_events_require_command_start(state) =>
         StreamAtom::bounded_domain()
             .into_vec()
             .into_iter()
@@ -246,32 +255,30 @@ fn command_events_require_command_start() -> StatePredicate<WireProtocolState> {
                 !state.command_events.domain().contains(&stream)
                     || state.saw_request(stream, RequestKindAtom::CommandStart)
             })
-    })
+    }
 }
 
 #[property(WireProtocolSpec)]
 fn logs_request_leads_to_logs_end() -> Ltl<WireProtocolState, WireProtocolAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("logs_acknowledged", |state| {
+        Ltl::pred(nirvash_expr! { logs_acknowledged(state) =>
             state
                 .responses
                 .range()
                 .contains(&RequestKindAtom::LogsRequest)
-        })),
-        Ltl::pred(StatePredicate::new("logs_follow_active", |state| {
-            state.log_follow_streams.some()
-        })),
+        }),
+        Ltl::pred(nirvash_expr! { logs_follow_active(state) => state.log_follow_streams.some() }),
     )
 }
 
 #[fairness(WireProtocolSpec)]
 fn logs_progress_fairness() -> Fairness<WireProtocolState, WireProtocolAction> {
-    Fairness::weak(StepPredicate::new("logs_progress", |_, action, next| {
+    Fairness::weak(nirvash_step_expr! { logs_progress(_prev, action, next) =>
         matches!(
             action,
             WireProtocolAction::LogsChunk(_, _) | WireProtocolAction::LogsEnd(_)
         ) && (next.log_chunks.some() || next.log_ended.some())
-    }))
+    })
 }
 
 #[subsystem_spec(model_cases(wire_protocol_model_cases))]
@@ -291,13 +298,154 @@ impl TransitionSystem for WireProtocolSpec {
         <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
-    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        transition_wire_protocol(state, action)
+    fn transition_program(
+        &self,
+    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule command_event when command_event_payload(action).is_some()
+                && prev.saw_request(
+                    command_event_stream(action)
+                        .expect("command_event guard ensures a stream"),
+                    RequestKindAtom::CommandStart,
+                ) => {
+                set command_events <= command_events_with_event(prev, action);
+            }
+
+            rule logs_chunk when logs_chunk_payload(action).is_some()
+                && prev.logs_acknowledged(logs_chunk_stream(action)
+                    .expect("logs_chunk guard ensures a stream"))
+                && !prev.log_ended.contains(&logs_chunk_stream(action)
+                    .expect("logs_chunk guard ensures a stream")) => {
+                set log_chunks <= log_chunks_with_chunk(prev, action);
+            }
+
+            rule logs_end when logs_end_stream(action).is_some()
+                && prev.logs_acknowledged(logs_end_stream(action)
+                    .expect("logs_end guard ensures a stream"))
+                && !prev.log_ended.contains(&logs_end_stream(action)
+                    .expect("logs_end guard ensures a stream")) => {
+                insert log_ended <= logs_end_stream(action)
+                    .expect("logs_end guard ensures a stream");
+            }
+
+            rule logs_request_ack when logs_request_stream(action).is_some()
+                && !prev.requests.domain().contains(&logs_request_stream(action)
+                    .expect("logs_request_ack guard ensures a stream")) => {
+                set requests <= request_trace_with_kind(prev, action);
+                set responses <= response_trace_with_kind(prev, action);
+                insert log_follow_streams <= logs_request_stream(action)
+                    .expect("logs_request_ack guard ensures a stream");
+            }
+
+            rule request_response when request_response_kind(action).is_some()
+                && !prev.requests.domain().contains(&stream_for_action(*action)) => {
+                set requests <= request_trace_with_kind(prev, action);
+                set responses <= response_trace_with_kind(prev, action);
+            }
+        })
     }
 }
 
 #[nirvash_macros::formal_tests(spec = WireProtocolSpec)]
 const _: () = ();
+
+fn request_response_kind(action: &WireProtocolAction) -> Option<RequestKindAtom> {
+    match action {
+        WireProtocolAction::CommandEvent(_, _)
+        | WireProtocolAction::LogsChunk(_, _)
+        | WireProtocolAction::LogsEnd(_)
+        | WireProtocolAction::LogsRequest(_) => None,
+        _ => request_kind_for_action(*action),
+    }
+}
+
+fn logs_request_stream(action: &WireProtocolAction) -> Option<StreamAtom> {
+    match action {
+        WireProtocolAction::LogsRequest(stream) => Some(*stream),
+        _ => None,
+    }
+}
+
+fn command_event_stream(action: &WireProtocolAction) -> Option<StreamAtom> {
+    match action {
+        WireProtocolAction::CommandEvent(stream, _) => Some(*stream),
+        _ => None,
+    }
+}
+
+fn command_event_payload(action: &WireProtocolAction) -> Option<CommandEventAtom> {
+    match action {
+        WireProtocolAction::CommandEvent(_, event) => Some(*event),
+        _ => None,
+    }
+}
+
+fn logs_chunk_stream(action: &WireProtocolAction) -> Option<StreamAtom> {
+    match action {
+        WireProtocolAction::LogsChunk(stream, _) => Some(*stream),
+        _ => None,
+    }
+}
+
+fn logs_chunk_payload(action: &WireProtocolAction) -> Option<LogChunkAtom> {
+    match action {
+        WireProtocolAction::LogsChunk(_, chunk) => Some(*chunk),
+        _ => None,
+    }
+}
+
+fn logs_end_stream(action: &WireProtocolAction) -> Option<StreamAtom> {
+    match action {
+        WireProtocolAction::LogsEnd(stream) => Some(*stream),
+        _ => None,
+    }
+}
+
+fn request_trace_with_kind(
+    prev: &WireProtocolState,
+    action: &WireProtocolAction,
+) -> Relation2<StreamAtom, RequestKindAtom> {
+    let kind = request_kind_for_action(*action)
+        .expect("request_trace_with_kind requires a request-carrying action");
+    let mut requests = prev.requests.clone();
+    requests.insert(stream_for_action(*action), kind);
+    requests
+}
+
+fn response_trace_with_kind(
+    prev: &WireProtocolState,
+    action: &WireProtocolAction,
+) -> Relation2<StreamAtom, RequestKindAtom> {
+    let kind = request_kind_for_action(*action)
+        .expect("response_trace_with_kind requires a request-carrying action");
+    let mut responses = prev.responses.clone();
+    responses.insert(stream_for_action(*action), kind);
+    responses
+}
+
+fn command_events_with_event(
+    prev: &WireProtocolState,
+    action: &WireProtocolAction,
+) -> Relation2<StreamAtom, CommandEventAtom> {
+    let stream = command_event_stream(action)
+        .expect("command_events_with_event requires CommandEvent action");
+    let event = command_event_payload(action)
+        .expect("command_events_with_event requires CommandEvent action");
+    let mut events = prev.command_events.clone();
+    events.insert(stream, event);
+    events
+}
+
+fn log_chunks_with_chunk(
+    prev: &WireProtocolState,
+    action: &WireProtocolAction,
+) -> Relation2<StreamAtom, LogChunkAtom> {
+    let stream = logs_chunk_stream(action).expect("log_chunks_with_chunk requires LogsChunk");
+    let chunk = logs_chunk_payload(action).expect("log_chunks_with_chunk requires LogsChunk");
+    let mut chunks = prev.log_chunks.clone();
+    chunks.insert(stream, chunk);
+    chunks
+}
 
 fn transition_wire_protocol(
     prev: &WireProtocolState,
@@ -373,6 +521,41 @@ mod tests {
                 &WireProtocolAction::LogsChunk(StreamAtom::Stream0, LogChunkAtom::Chunk0),
             )
             .is_some()
+        );
+    }
+
+    #[test]
+    fn transition_program_matches_transition_function() {
+        let spec = WireProtocolSpec::new();
+        let program = spec.transition_program().expect("transition program");
+        let initial = spec.initial_state();
+
+        assert_eq!(
+            program
+                .evaluate(
+                    &initial,
+                    &WireProtocolAction::LogsRequest(StreamAtom::Stream0)
+                )
+                .expect("evaluates"),
+            transition_wire_protocol(
+                &initial,
+                &WireProtocolAction::LogsRequest(StreamAtom::Stream0)
+            )
+        );
+        assert_eq!(
+            program
+                .evaluate(
+                    &initial,
+                    &WireProtocolAction::CommandEvent(
+                        StreamAtom::Stream0,
+                        CommandEventAtom::Accepted,
+                    ),
+                )
+                .expect("evaluates"),
+            transition_wire_protocol(
+                &initial,
+                &WireProtocolAction::CommandEvent(StreamAtom::Stream0, CommandEventAtom::Accepted,),
+            )
         );
     }
 }

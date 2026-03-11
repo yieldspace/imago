@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
 use crate::{
-    ActionConstraint, Fairness, ModelCase, ModelCaseSource, ReachableGraphEdge,
-    ReachableGraphSnapshot, StateConstraint, TemporalSpec, Trace, TraceStep,
+    BoolExpr, Fairness, ModelCase, ModelCaseSource, ReachableGraphEdge, ReachableGraphSnapshot,
+    Signature, StepExpr, TemporalSpec, Trace, TraceStep, symbolic::SymbolicModelChecker,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,8 +11,15 @@ pub enum ExplorationMode {
     BoundedLasso,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ModelBackend {
+    Explicit,
+    Symbolic,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelCheckConfig {
+    pub backend: Option<ModelBackend>,
     pub exploration: ExplorationMode,
     pub bounded_depth: Option<usize>,
     pub max_states: Option<usize>,
@@ -24,6 +31,7 @@ pub struct ModelCheckConfig {
 impl ModelCheckConfig {
     pub const fn reachable_graph() -> Self {
         Self {
+            backend: None,
             exploration: ExplorationMode::ReachableGraph,
             bounded_depth: None,
             max_states: None,
@@ -35,6 +43,7 @@ impl ModelCheckConfig {
 
     pub const fn bounded_lasso(depth: usize) -> Self {
         Self {
+            backend: None,
             exploration: ExplorationMode::BoundedLasso,
             bounded_depth: Some(depth),
             max_states: None,
@@ -153,19 +162,19 @@ pub struct ModelChecker<'a, T: TemporalSpec + ModelCaseSource> {
 impl<'a, T> ModelChecker<'a, T>
 where
     T: TemporalSpec + ModelCaseSource,
-    T::State: PartialEq,
+    T::State: PartialEq + Signature,
     T::Action: PartialEq,
 {
     pub fn new(spec: &'a T) -> Self {
         let model_case = spec.model_cases().into_iter().next().unwrap_or_default();
-        Self {
-            spec,
-            config: model_case.effective_checker_config(),
-            model_case,
-        }
+        Self::for_case(spec, model_case)
     }
 
     pub fn for_case(spec: &'a T, model_case: ModelCase<T::State, T::Action>) -> Self {
+        let model_case = model_case.with_resolved_backend(
+            spec.default_model_backend()
+                .unwrap_or(ModelBackend::Explicit),
+        );
         let config = model_case.effective_checker_config();
         Self {
             spec,
@@ -176,9 +185,16 @@ where
 
     pub fn with_config(spec: &'a T, config: ModelCheckConfig) -> Self {
         let check_deadlocks = config.check_deadlocks;
+        let backend = config
+            .backend
+            .or(spec.default_model_backend())
+            .unwrap_or(ModelBackend::Explicit);
         let mut model_case = spec.model_cases().into_iter().next().unwrap_or_default();
         model_case = model_case
-            .with_checker_config(config)
+            .with_checker_config(ModelCheckConfig {
+                backend: Some(backend),
+                ..config
+            })
             .with_check_deadlocks(check_deadlocks);
         Self::for_case(spec, model_case)
     }
@@ -186,24 +202,46 @@ where
     pub fn reachable_graph_snapshot(
         &self,
     ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
-        let graph = self.build_reachable_graph_for_docs()?;
-        Ok(self.snapshot_from_graph(&graph))
+        match self.resolved_doc_backend() {
+            ModelBackend::Explicit => {
+                let graph = self.build_reachable_graph_for_docs()?;
+                Ok(self.snapshot_from_graph(&graph))
+            }
+            ModelBackend::Symbolic => {
+                SymbolicModelChecker::for_case(self.spec, self.model_case.clone())
+                    .reachable_graph_snapshot()
+            }
+        }
     }
 
     pub fn full_reachable_graph_snapshot(
         &self,
     ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
-        let graph = self.build_reachable_graph()?;
-        self.ensure_untruncated(&graph)?;
-        Ok(self.snapshot_from_graph(&graph))
+        match self.resolved_backend() {
+            ModelBackend::Explicit => {
+                let graph = self.build_reachable_graph()?;
+                self.ensure_untruncated(&graph)?;
+                Ok(self.snapshot_from_graph(&graph))
+            }
+            ModelBackend::Symbolic => {
+                SymbolicModelChecker::for_case(self.spec, self.model_case.clone())
+                    .full_reachable_graph_snapshot()
+            }
+        }
     }
 
     pub fn check_invariants(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        match self.config.exploration {
-            ExplorationMode::ReachableGraph => self.check_invariants_graph(),
-            ExplorationMode::BoundedLasso => self.check_invariants_lasso(),
+        match self.resolved_backend() {
+            ModelBackend::Explicit => match self.config.exploration {
+                ExplorationMode::ReachableGraph => self.check_invariants_graph(),
+                ExplorationMode::BoundedLasso => self.check_invariants_lasso(),
+            },
+            ModelBackend::Symbolic => {
+                SymbolicModelChecker::for_case(self.spec, self.model_case.clone())
+                    .check_invariants()
+            }
         }
     }
 
@@ -214,9 +252,14 @@ where
             return Ok(ModelCheckResult::ok());
         }
 
-        match self.config.exploration {
-            ExplorationMode::ReachableGraph => self.check_deadlocks_graph(),
-            ExplorationMode::BoundedLasso => self.check_deadlocks_lasso(),
+        match self.resolved_backend() {
+            ModelBackend::Explicit => match self.config.exploration {
+                ExplorationMode::ReachableGraph => self.check_deadlocks_graph(),
+                ExplorationMode::BoundedLasso => self.check_deadlocks_lasso(),
+            },
+            ModelBackend::Symbolic => {
+                SymbolicModelChecker::for_case(self.spec, self.model_case.clone()).check_deadlocks()
+            }
         }
     }
 
@@ -227,34 +270,66 @@ where
             return Ok(ModelCheckResult::ok());
         }
 
-        match self.config.exploration {
-            ExplorationMode::ReachableGraph => self.check_properties_graph(),
-            ExplorationMode::BoundedLasso => self.check_properties_lasso(),
+        match self.resolved_backend() {
+            ModelBackend::Explicit => match self.config.exploration {
+                ExplorationMode::ReachableGraph => self.check_properties_graph(),
+                ExplorationMode::BoundedLasso => self.check_properties_lasso(),
+            },
+            ModelBackend::Symbolic => {
+                SymbolicModelChecker::for_case(self.spec, self.model_case.clone())
+                    .check_properties()
+            }
         }
     }
 
     pub fn check_all(&self) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let mut result = ModelCheckResult::ok();
+        match self.resolved_backend() {
+            ModelBackend::Explicit => {
+                let mut result = ModelCheckResult::ok();
 
-        let invariants = self.check_invariants()?;
-        if self.config.stop_on_first_violation && !invariants.is_ok() {
-            return Ok(invariants);
+                let invariants = self.check_invariants()?;
+                if self.config.stop_on_first_violation && !invariants.is_ok() {
+                    return Ok(invariants);
+                }
+                result.extend(invariants);
+
+                let deadlocks = self.check_deadlocks()?;
+                if self.config.stop_on_first_violation && !deadlocks.is_ok() {
+                    return Ok(deadlocks);
+                }
+                result.extend(deadlocks);
+
+                let properties = self.check_properties()?;
+                if self.config.stop_on_first_violation && !properties.is_ok() {
+                    return Ok(properties);
+                }
+                result.extend(properties);
+
+                Ok(result)
+            }
+            ModelBackend::Symbolic => {
+                SymbolicModelChecker::for_case(self.spec, self.model_case.clone()).check_all()
+            }
         }
-        result.extend(invariants);
+    }
 
-        let deadlocks = self.check_deadlocks()?;
-        if self.config.stop_on_first_violation && !deadlocks.is_ok() {
-            return Ok(deadlocks);
-        }
-        result.extend(deadlocks);
+    pub fn backend(&self) -> ModelBackend {
+        self.resolved_backend()
+    }
 
-        let properties = self.check_properties()?;
-        if self.config.stop_on_first_violation && !properties.is_ok() {
-            return Ok(properties);
-        }
-        result.extend(properties);
+    pub fn doc_backend(&self) -> ModelBackend {
+        self.resolved_doc_backend()
+    }
 
-        Ok(result)
+    fn resolved_backend(&self) -> ModelBackend {
+        self.config.backend.unwrap_or(ModelBackend::Explicit)
+    }
+
+    fn resolved_doc_backend(&self) -> ModelBackend {
+        self.model_case
+            .doc_checker_config()
+            .and_then(|config| config.backend)
+            .unwrap_or_else(|| self.resolved_backend())
     }
 
     fn check_invariants_graph(
@@ -586,7 +661,7 @@ where
         self.model_case
             .state_constraints()
             .iter()
-            .all(|constraint: &StateConstraint<T::State>| constraint.eval(state))
+            .all(|constraint: &BoolExpr<T::State>| constraint.eval(state))
     }
 
     fn action_constraints_allow(
@@ -595,11 +670,10 @@ where
         action: &T::Action,
         next: &T::State,
     ) -> bool {
-        self.model_case.action_constraints().iter().all(
-            |constraint: &ActionConstraint<T::State, T::Action>| {
-                constraint.eval(prev, action, next)
-            },
-        )
+        self.model_case
+            .action_constraints()
+            .iter()
+            .all(|constraint: &StepExpr<T::State, T::Action>| constraint.eval(prev, action, next))
     }
 
     fn constrained_successors(&self, state: &T::State) -> Vec<(TraceStep<T::Action>, T::State)> {

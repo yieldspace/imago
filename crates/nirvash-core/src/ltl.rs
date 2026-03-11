@@ -1,11 +1,11 @@
-use crate::{Signature, StatePredicate, StepPredicate};
+use crate::{BoolExpr, Signature, StepExpr};
 
 #[derive(Debug, Clone)]
 pub enum Ltl<S, A> {
     True,
     False,
-    Pred(StatePredicate<S>),
-    StepPred(StepPredicate<S, A>),
+    Pred(BoolExpr<S>),
+    StepPred(StepExpr<S, A>),
     Not(Box<Ltl<S, A>>),
     And(Box<Ltl<S, A>>, Box<Ltl<S, A>>),
     Or(Box<Ltl<S, A>>, Box<Ltl<S, A>>),
@@ -14,10 +14,10 @@ pub enum Ltl<S, A> {
     Always(Box<Ltl<S, A>>),
     Eventually(Box<Ltl<S, A>>),
     Until(Box<Ltl<S, A>>, Box<Ltl<S, A>>),
-    Enabled(StepPredicate<S, A>),
+    Enabled(StepExpr<S, A>),
 }
 
-impl<S, A> Ltl<S, A> {
+impl<S: 'static, A: 'static> Ltl<S, A> {
     pub const fn truth() -> Self {
         Self::True
     }
@@ -26,11 +26,11 @@ impl<S, A> Ltl<S, A> {
         Self::False
     }
 
-    pub fn pred(predicate: StatePredicate<S>) -> Self {
+    pub fn pred(predicate: BoolExpr<S>) -> Self {
         Self::Pred(predicate)
     }
 
-    pub fn step(predicate: StepPredicate<S, A>) -> Self {
+    pub fn step(predicate: StepExpr<S, A>) -> Self {
         Self::StepPred(predicate)
     }
 
@@ -66,7 +66,7 @@ impl<S, A> Ltl<S, A> {
         Self::Until(Box::new(lhs), Box::new(rhs))
     }
 
-    pub fn enabled(predicate: StepPredicate<S, A>) -> Self {
+    pub fn enabled(predicate: StepExpr<S, A>) -> Self {
         Self::Enabled(predicate)
     }
 
@@ -113,6 +113,22 @@ impl<S, A> Ltl<S, A> {
             Self::Eventually(inner) => format!("<>({})", inner.describe()),
             Self::Until(lhs, rhs) => format!("({}) U ({})", lhs.describe(), rhs.describe()),
             Self::Enabled(predicate) => format!("ENABLED({})", predicate.name()),
+        }
+    }
+
+    pub fn is_ast_native(&self) -> bool {
+        match self {
+            Self::True | Self::False => true,
+            Self::Pred(predicate) => predicate.is_ast_native(),
+            Self::StepPred(predicate) | Self::Enabled(predicate) => predicate.is_ast_native(),
+            Self::Not(inner)
+            | Self::Next(inner)
+            | Self::Always(inner)
+            | Self::Eventually(inner) => inner.is_ast_native(),
+            Self::And(lhs, rhs)
+            | Self::Or(lhs, rhs)
+            | Self::Implies(lhs, rhs)
+            | Self::Until(lhs, rhs) => lhs.is_ast_native() && rhs.is_ast_native(),
         }
     }
 }

@@ -2,7 +2,7 @@
 use imagod_spec::{ContractEffectSummary, SummaryLogChunk, SummaryRequestKind, SummaryStreamId};
 use imagod_spec::{LogsOutputSummary, LogsProbeOutput, LogsProbeState, LogsStateSummary};
 use nirvash_core::{
-    ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
+    BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };
 use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_model};
@@ -43,10 +43,7 @@ impl LogsProjectionSpec {
 
     fn apply_atomic(self, state: &SystemState, action: SystemAtomicAction) -> SystemState {
         self.system()
-            .transition(
-                state,
-                &nirvash_core::concurrent::ConcurrentAction::from_atomic(action),
-            )
+            .transition(state, &action)
             .expect("projection seed state should admit delegated action")
     }
 
@@ -161,12 +158,7 @@ impl TransitionSystem for LogsProjectionSpec {
             return None;
         }
         self.system()
-            .transition(
-                state,
-                &nirvash_core::concurrent::ConcurrentAction::from_atomic(SystemAtomicAction::Wire(
-                    self.wire_action(*action),
-                )),
-            )
+            .transition(state, &SystemAtomicAction::Wire(self.wire_action(*action)))
             .map(|next| {
                 let acknowledged = next.wire.logs_acknowledged(StreamAtom::Stream1);
                 let completed = next.wire.log_stream_ended(StreamAtom::Stream1);
@@ -190,7 +182,7 @@ impl TransitionSystem for LogsProjectionSpec {
 }
 
 impl TemporalSpec for LogsProjectionSpec {
-    fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
+    fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
         self.system().invariants()
     }
 }
@@ -290,9 +282,7 @@ nirvash_projection_model! {
         ) -> Self::ExpectedOutput {
             self.system().expected_output(
                 prev,
-                &nirvash_core::concurrent::ConcurrentAction::from_atomic(SystemAtomicAction::Wire(
-                    self.wire_action(*action),
-                )),
+                &SystemAtomicAction::Wire(self.wire_action(*action)),
                 next,
             )
         }

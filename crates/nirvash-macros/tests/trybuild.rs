@@ -27,6 +27,8 @@ fn signature_derive_behaves_for_supported_inputs() {
     t.pass("tests/fixtures/projection_model_ok.rs");
     t.pass("tests/fixtures/projection_model_exhaustive_ok.rs");
     t.pass("tests/fixtures/derive_protocol_input_witness_ok.rs");
+    t.pass("tests/fixtures/function_like_bool_macros_ok.rs");
+    t.pass("tests/fixtures/function_like_transition_program_ok.rs");
     t.compile_fail("tests/fixtures/attribute_missing_target.rs");
     t.compile_fail("tests/fixtures/attribute_wrong_type.rs");
     t.compile_fail("tests/fixtures/case_scoped_constraints_invalid_option.rs");
@@ -55,6 +57,11 @@ fn signature_derive_behaves_for_supported_inputs() {
     t.compile_fail("tests/fixtures/derive_protocol_input_witness_invalid.rs");
     t.compile_fail("tests/fixtures/derive_relational_state_invalid.rs");
     t.compile_fail("tests/fixtures/projection_model_invalid_pattern.rs");
+    t.compile_fail("tests/fixtures/function_like_bool_macros_invalid.rs");
+    t.compile_fail("tests/fixtures/function_like_transition_program_invalid.rs");
+    t.compile_fail("tests/fixtures/registered_invariant_closure_reject.rs");
+    t.compile_fail("tests/fixtures/registered_transition_program_closure_reject.rs");
+    t.compile_fail("tests/fixtures/registered_property_closure_reject.rs");
     unsafe {
         std::env::remove_var("NIRVASH_DOC_FRAGMENT_SPEC");
     }

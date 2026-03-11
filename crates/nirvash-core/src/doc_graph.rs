@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, collections::BTreeSet, fmt::Debug};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    RelationFieldSchema, RelationFieldSummary, StatePredicate, collect_relational_state_schema,
-    collect_relational_state_summary,
+    BoolExpr, ModelBackend, RelationFieldSchema, RelationFieldSummary,
+    collect_relational_state_schema, collect_relational_state_summary,
     registry::{lookup_action_doc_label, lookup_action_doc_presentation},
 };
 
@@ -282,6 +282,7 @@ pub struct SpecVizCaseStats {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpecVizCase {
     pub label: String,
+    pub backend: ModelBackend,
     pub graph: DocGraphSnapshot,
     pub reduced_graph: ReducedDocGraph,
     pub focus_graph: Option<ReducedDocGraph>,
@@ -303,7 +304,7 @@ pub struct SpecVizBundle {
 #[derive(Debug, Clone)]
 pub struct DocGraphPolicy<S> {
     pub reduction: DocGraphReductionMode,
-    pub focus_states: Vec<StatePredicate<S>>,
+    pub focus_states: Vec<BoolExpr<S>>,
     pub max_edge_actions_in_label: usize,
 }
 
@@ -320,7 +321,7 @@ impl<S> DocGraphPolicy<S> {
         Self::default()
     }
 
-    pub fn with_focus_state(mut self, predicate: StatePredicate<S>) -> Self {
+    pub fn with_focus_state(mut self, predicate: BoolExpr<S>) -> Self {
         self.focus_states.push(predicate);
         self
     }
@@ -357,6 +358,7 @@ pub struct DocGraphSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocGraphCase {
     pub label: String,
+    pub backend: ModelBackend,
     pub graph: DocGraphSnapshot,
 }
 
@@ -647,14 +649,19 @@ impl SpecVizBundle {
 
 impl SpecVizCase {
     fn from_doc_graph_case(policy: &VizPolicy, case: DocGraphCase) -> Self {
-        let reduced_graph = reduce_doc_graph(&case.graph);
-        let loop_groups = collect_loop_groups(&case.graph);
-        let scenarios = select_viz_scenarios(&case.graph, policy);
+        let DocGraphCase {
+            label,
+            backend,
+            graph,
+        } = case;
+        let reduced_graph = reduce_doc_graph(&graph);
+        let loop_groups = collect_loop_groups(&graph);
+        let scenarios = select_viz_scenarios(&graph, policy);
         let focus_graph = (reduced_graph.states.len() > policy.large_graph_threshold)
-            .then(|| build_focus_graph(&case.graph, &scenarios))
+            .then(|| build_focus_graph(&graph, &scenarios))
             .flatten();
-        let actors = collect_case_actors(&case.graph);
-        let full_edge_count = case.graph.edges.iter().map(Vec::len).sum();
+        let actors = collect_case_actors(&graph);
+        let full_edge_count = graph.edges.iter().map(Vec::len).sum();
         let reduced_edge_count = reduced_graph.edges.len();
         let focus_state_count = focus_graph
             .as_ref()
@@ -663,8 +670,9 @@ impl SpecVizCase {
         let large_graph_fallback = reduced_graph.states.len() > policy.large_graph_threshold;
 
         Self {
-            label: case.label,
-            graph: case.graph,
+            label,
+            backend,
+            graph,
             reduced_graph,
             focus_graph,
             scenarios,
@@ -709,7 +717,11 @@ fn collect_case_actors(graph: &DocGraphSnapshot) -> Vec<String> {
                     ordered.push(actor.clone());
                 }
             }
-            for actor in edge.process_steps.iter().filter_map(|step| step.actor.as_ref()) {
+            for actor in edge
+                .process_steps
+                .iter()
+                .filter_map(|step| step.actor.as_ref())
+            {
                 if seen.insert(actor.clone()) {
                     ordered.push(actor.clone());
                 }
@@ -798,7 +810,10 @@ fn push_viz_scenario(
     let mut steps = Vec::new();
     let mut actors = BTreeSet::new();
     for window in state_path.windows(2) {
-        let Some(edge) = graph.edges[window[0]].iter().find(|edge| edge.target == window[1]) else {
+        let Some(edge) = graph.edges[window[0]]
+            .iter()
+            .find(|edge| edge.target == window[1])
+        else {
             return;
         };
         for actor in edge
@@ -861,7 +876,8 @@ fn shortest_path_to_any(graph: &DocGraphSnapshot, targets: &[usize]) -> Option<V
             })
             .collect::<Vec<_>>();
         outgoing.sort_by(|left, right| {
-            right.0
+            right
+                .0
                 .cmp(&left.0)
                 .then(left.2.cmp(right.2))
                 .then(left.1.cmp(&right.1))
@@ -878,10 +894,7 @@ fn shortest_path_to_any(graph: &DocGraphSnapshot, targets: &[usize]) -> Option<V
     None
 }
 
-fn reconstruct_state_path(
-    mut current: usize,
-    parent: &BTreeMap<usize, usize>,
-) -> Vec<usize> {
+fn reconstruct_state_path(mut current: usize, parent: &BTreeMap<usize, usize>) -> Vec<usize> {
     let mut path = vec![current];
     while let Some(prev) = parent.get(&current).copied() {
         path.push(prev);
@@ -1050,7 +1063,8 @@ fn collect_loop_groups(graph: &DocGraphSnapshot) -> Vec<Vec<usize>> {
                     let low = self.lowlinks.get_mut(&state).expect("state lowlink exists");
                     *low = (*low).min(next_low);
                 } else if self.on_stack.contains(&edge.target) {
-                    let target_index = *self.indices.get(&edge.target).expect("target index exists");
+                    let target_index =
+                        *self.indices.get(&edge.target).expect("target index exists");
                     let low = self.lowlinks.get_mut(&state).expect("state lowlink exists");
                     *low = (*low).min(target_index);
                 }
@@ -1066,9 +1080,11 @@ fn collect_loop_groups(graph: &DocGraphSnapshot) -> Vec<Vec<usize>> {
                     }
                 }
                 let has_cycle = group.len() > 1
-                    || group
-                        .iter()
-                        .any(|member| self.graph.edges[*member].iter().any(|edge| edge.target == *member));
+                    || group.iter().any(|member| {
+                        self.graph.edges[*member]
+                            .iter()
+                            .any(|edge| edge.target == *member)
+                    });
                 if has_cycle {
                     group.sort_unstable();
                     self.groups.push(group);

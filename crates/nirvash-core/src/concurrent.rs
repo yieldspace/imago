@@ -37,14 +37,13 @@ where
         match self.atoms.as_slice() {
             [atom] => atom.fmt(f),
             atoms => {
-                write!(f, "parallel(")?;
                 for (index, atom) in atoms.iter().enumerate() {
                     if index > 0 {
-                        write!(f, ", ")?;
+                        write!(f, " + ")?;
                     }
                     write!(f, "{atom:?}")?;
                 }
-                write!(f, ")")
+                Ok(())
             }
         }
     }
@@ -444,14 +443,11 @@ mod tests {
         let label = if steps.len() == 1 {
             steps[0].label.clone()
         } else {
-            format!(
-                "parallel({})",
-                steps
-                    .iter()
-                    .map(|step| step.label.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+            steps
+                .iter()
+                .map(|step| step.label.as_str())
+                .collect::<Vec<_>>()
+                .join(" + ")
         };
         Some(DocGraphActionPresentation::with_steps(
             label,
@@ -518,13 +514,13 @@ mod tests {
                 "IncRight",
                 "ToggleGate",
                 "ResetLeft",
-                "parallel(IncLeft, IncRight)",
-                "parallel(IncLeft, ToggleGate)",
-                "parallel(IncRight, ToggleGate)",
-                "parallel(IncRight, ResetLeft)",
-                "parallel(ToggleGate, ResetLeft)",
-                "parallel(IncLeft, IncRight, ToggleGate)",
-                "parallel(IncRight, ToggleGate, ResetLeft)",
+                "IncLeft + IncRight",
+                "IncLeft + ToggleGate",
+                "IncRight + ToggleGate",
+                "IncRight + ResetLeft",
+                "ToggleGate + ResetLeft",
+                "IncLeft + IncRight + ToggleGate",
+                "IncRight + ToggleGate + ResetLeft",
             ]
         );
     }
@@ -537,8 +533,8 @@ mod tests {
             .map(|action| format!("{action:?}"))
             .collect::<Vec<_>>();
 
-        assert!(!actions.contains(&"parallel(IncLeft, ResetLeft)".to_string()));
-        assert!(!actions.contains(&"parallel(IncLeft, IncRight, ResetLeft)".to_string()));
+        assert!(!actions.contains(&"IncLeft + ResetLeft".to_string()));
+        assert!(!actions.contains(&"IncLeft + IncRight + ResetLeft".to_string()));
     }
 
     #[test]
@@ -587,7 +583,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(successors.contains(&(
-            "parallel(IncLeft, IncRight)".to_string(),
+            "IncLeft + IncRight".to_string(),
             CounterState {
                 left: true,
                 right: true,
@@ -595,7 +591,7 @@ mod tests {
             }
         )));
         assert!(successors.contains(&(
-            "parallel(IncLeft, IncRight, ToggleGate)".to_string(),
+            "IncLeft + IncRight + ToggleGate".to_string(),
             CounterState {
                 left: true,
                 right: true,
@@ -605,13 +601,13 @@ mod tests {
     }
 
     #[test]
-    fn doc_graph_formats_parallel_actions_with_parallel_prefix() {
+    fn doc_graph_formats_parallel_actions_with_composed_label() {
         let action = ConcurrentAction::new(vec![AtomicAction::IncLeft, AtomicAction::IncRight])
             .expect("non-empty");
 
         assert_eq!(
             format_doc_graph_action(&action),
-            "parallel(Increment left, Increment right)"
+            "Increment left + Increment right"
         );
         assert_eq!(
             format_doc_graph_action(&ConcurrentAction::from_atomic(AtomicAction::IncLeft)),

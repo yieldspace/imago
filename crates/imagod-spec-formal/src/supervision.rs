@@ -1,15 +1,17 @@
 use nirvash_core::{
-    ActionConstraint, Fairness, Ltl, ModelCase, RelSet, Relation2, Signature as _, StatePredicate,
-    StepPredicate, TransitionSystem,
+    BoolExpr, Fairness, Ltl, ModelCase, RelSet, Relation2, Signature as _, StepExpr,
+    TransitionSystem,
 };
 use nirvash_macros::{
-    ActionVocabulary, RelationalState, action_constraint, fairness, invariant, property,
+    ActionVocabulary, RelationalState, Signature as FormalSignature, action_constraint, fairness,
+    invariant, nirvash_expr, nirvash_step_expr, nirvash_transition_program, property,
     subsystem_spec,
 };
 
 use crate::atoms::{RunnerAtom, ServiceAppAtom, ServiceAtom, service_runner};
 
-#[derive(Debug, Clone, PartialEq, Eq, RelationalState)]
+#[derive(Debug, Clone, PartialEq, Eq, FormalSignature, RelationalState)]
+#[signature(custom)]
 pub struct SupervisionState {
     endpoint_prepared: RelSet<ServiceAtom>,
     registered_services: RelSet<ServiceAtom>,
@@ -116,6 +118,11 @@ impl SupervisionSpec {
     }
 }
 
+nirvash_core::signature_spec!(
+    SupervisionStateSignatureSpec for SupervisionState,
+    representatives = crate::state_domain::reachable_state_domain(&SupervisionSpec::new())
+);
+
 fn supervision_model_cases() -> Vec<ModelCase<SupervisionState, SupervisionAction>> {
     vec![ModelCase::default().with_check_deadlocks(false)]
 }
@@ -131,26 +138,26 @@ fn supervision_action_service(action: SupervisionAction) -> ServiceAtom {
 }
 
 #[action_constraint(SupervisionSpec, cases("default"))]
-fn service0_only() -> ActionConstraint<SupervisionState, SupervisionAction> {
-    ActionConstraint::new("service0_only", |_, action, _| {
+fn service0_only() -> StepExpr<SupervisionState, SupervisionAction> {
+    nirvash_step_expr! { service0_only(_prev, action, _next) =>
         supervision_action_service(*action) == ServiceAtom::Service0
-    })
+    }
 }
 
 #[invariant(SupervisionSpec)]
-fn running_requires_ready_and_registered() -> StatePredicate<SupervisionState> {
-    StatePredicate::new("running_requires_ready_and_registered", |state| {
+fn running_requires_ready_and_registered() -> BoolExpr<SupervisionState> {
+    nirvash_expr! { running_requires_ready_and_registered(state) =>
         state.running_services.subset_of(&state.ready_services)
             && state.ready_services.subset_of(&state.registered_services)
             && state
                 .registered_services
                 .subset_of(&state.endpoint_prepared)
-    })
+    }
 }
 
 #[invariant(SupervisionSpec)]
-fn reaped_services_clear_runtime_membership() -> StatePredicate<SupervisionState> {
-    StatePredicate::new("reaped_services_clear_runtime_membership", |state| {
+fn reaped_services_clear_runtime_membership() -> BoolExpr<SupervisionState> {
+    nirvash_expr! { reaped_services_clear_runtime_membership(state) =>
         state.reaped_services.items().iter().all(|service| {
             !state.endpoint_prepared.contains(service)
                 && !state.registered_services.contains(service)
@@ -159,12 +166,12 @@ fn reaped_services_clear_runtime_membership() -> StatePredicate<SupervisionState
                 && !state.stopping_services.contains(service)
                 && !state.service_runners.domain().contains(service)
         })
-    })
+    }
 }
 
 #[invariant(SupervisionSpec)]
-fn runners_are_unique_per_service() -> StatePredicate<SupervisionState> {
-    StatePredicate::new("runners_are_unique_per_service", |state| {
+fn runners_are_unique_per_service() -> BoolExpr<SupervisionState> {
+    nirvash_expr! { runners_are_unique_per_service(state) =>
         RunnerAtom::bounded_domain()
             .into_vec()
             .into_iter()
@@ -177,51 +184,46 @@ fn runners_are_unique_per_service() -> StatePredicate<SupervisionState> {
                     .count()
                     <= 1
             })
-    })
+    }
 }
 
 #[property(SupervisionSpec)]
 fn prepared_services_lead_to_ready() -> Ltl<SupervisionState, SupervisionAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("prepared_service_exists", |state| {
+        Ltl::pred(nirvash_expr! { prepared_service_exists(state) =>
             state.endpoint_prepared.some() && state.ready_services.no()
-        })),
-        Ltl::pred(StatePredicate::new("ready_service_exists", |state| {
-            state.ready_services.some()
-        })),
+        }),
+        Ltl::pred(nirvash_expr! { ready_service_exists(state) => state.ready_services.some() }),
     )
 }
 
 #[property(SupervisionSpec)]
 fn stopping_services_lead_to_reap() -> Ltl<SupervisionState, SupervisionAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("stopping_service_exists", |state| {
+        Ltl::pred(nirvash_expr! { stopping_service_exists(state) =>
             state.stopping_services.some()
-        })),
-        Ltl::pred(StatePredicate::new("reaped_service_exists", |state| {
-            state.reaped_services.some()
-        })),
+        }),
+        Ltl::pred(nirvash_expr! { reaped_service_exists(state) => state.reaped_services.some() }),
     )
 }
 
 #[fairness(SupervisionSpec)]
 fn bootstrap_progress_fairness() -> Fairness<SupervisionState, SupervisionAction> {
-    Fairness::weak(StepPredicate::new(
-        "bootstrap_progress",
-        |prev, action, next| {
+    Fairness::weak(
+        nirvash_step_expr! { bootstrap_progress(prev, action, next) =>
             matches!(action, SupervisionAction::AdvanceBootstrap(_))
-                && (prev.registered_services != next.registered_services
-                    || prev.ready_services != next.ready_services)
+                && (rel_set_changed(&prev.registered_services, &next.registered_services)
+                    || rel_set_changed(&prev.ready_services, &next.ready_services))
         },
-    ))
+    )
 }
 
 #[fairness(SupervisionSpec)]
 fn reap_progress_fairness() -> Fairness<SupervisionState, SupervisionAction> {
-    Fairness::weak(StepPredicate::new("reap_progress", |prev, action, next| {
+    Fairness::weak(nirvash_step_expr! { reap_progress(prev, action, next) =>
         matches!(action, SupervisionAction::ReapService(_))
-            && prev.reaped_services != next.reaped_services
-    }))
+            && rel_set_changed(&prev.reaped_services, &next.reaped_services)
+    })
 }
 
 #[subsystem_spec(model_cases(supervision_model_cases))]
@@ -241,13 +243,182 @@ impl TransitionSystem for SupervisionSpec {
         <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
-    fn transition(&self, prev: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        transition_state(prev, action)
+    fn transition_program(
+        &self,
+    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule prepare_endpoint when prepare_endpoint_target(action).is_some()
+                && !prev.endpoint_prepared.contains(&prepare_endpoint_target(action)
+                    .expect("prepare_endpoint guard ensures a service"))
+                && !prev.registered_services.contains(&prepare_endpoint_target(action)
+                    .expect("prepare_endpoint guard ensures a service"))
+                && !prev.ready_services.contains(&prepare_endpoint_target(action)
+                    .expect("prepare_endpoint guard ensures a service"))
+                && !prev.running_services.contains(&prepare_endpoint_target(action)
+                    .expect("prepare_endpoint guard ensures a service"))
+                && !prev.stopping_services.contains(&prepare_endpoint_target(action)
+                    .expect("prepare_endpoint guard ensures a service")) => {
+                insert endpoint_prepared <= prepare_endpoint_target(action)
+                    .expect("prepare_endpoint guard ensures a service");
+                remove reaped_services <= prepare_endpoint_target(action)
+                    .expect("prepare_endpoint guard ensures a service");
+                set service_runners <= prepared_service_runners(prev, action);
+                set service_apps <= prepared_service_apps(prev, action);
+            }
+
+            rule register_bootstrap when bootstrap_target(action).is_some()
+                && prev.endpoint_prepared.contains(&bootstrap_target(action)
+                    .expect("register_bootstrap guard ensures a service"))
+                && !prev.registered_services.contains(&bootstrap_target(action)
+                    .expect("register_bootstrap guard ensures a service"))
+                && !prev.ready_services.contains(&bootstrap_target(action)
+                    .expect("register_bootstrap guard ensures a service")) => {
+                insert registered_services <= bootstrap_target(action)
+                    .expect("register_bootstrap guard ensures a service");
+            }
+
+            rule mark_ready when bootstrap_target(action).is_some()
+                && prev.endpoint_prepared.contains(&bootstrap_target(action)
+                    .expect("mark_ready guard ensures a service"))
+                && prev.registered_services.contains(&bootstrap_target(action)
+                    .expect("mark_ready guard ensures a service"))
+                && !prev.ready_services.contains(&bootstrap_target(action)
+                    .expect("mark_ready guard ensures a service")) => {
+                insert ready_services <= bootstrap_target(action)
+                    .expect("mark_ready guard ensures a service");
+            }
+
+            rule start_serving when start_serving_target(action).is_some()
+                && prev.ready_services.contains(&start_serving_target(action)
+                    .expect("start_serving guard ensures a service"))
+                && !prev.running_services.contains(&start_serving_target(action)
+                    .expect("start_serving guard ensures a service"))
+                && !prev.stopping_services.contains(&start_serving_target(action)
+                    .expect("start_serving guard ensures a service")) => {
+                insert running_services <= start_serving_target(action)
+                    .expect("start_serving guard ensures a service");
+            }
+
+            rule request_stop when stop_target(action).is_some()
+                && prev.running_services.contains(&stop_target(action)
+                    .expect("request_stop guard ensures a service")) => {
+                remove running_services <= stop_target(action)
+                    .expect("request_stop guard ensures a service");
+                insert stopping_services <= stop_target(action)
+                    .expect("request_stop guard ensures a service");
+            }
+
+            rule reap_service when reap_target(action).is_some()
+                && prev.stopping_services.contains(&reap_target(action)
+                    .expect("reap_service guard ensures a service")) => {
+                remove endpoint_prepared <= reap_target(action)
+                    .expect("reap_service guard ensures a service");
+                remove registered_services <= reap_target(action)
+                    .expect("reap_service guard ensures a service");
+                remove ready_services <= reap_target(action)
+                    .expect("reap_service guard ensures a service");
+                remove stopping_services <= reap_target(action)
+                    .expect("reap_service guard ensures a service");
+                insert reaped_services <= reap_target(action)
+                    .expect("reap_service guard ensures a service");
+                set service_runners <= reaped_service_runners(prev, action);
+                set service_apps <= reaped_service_apps(prev, action);
+            }
+        })
     }
 }
 
 #[nirvash_macros::formal_tests(spec = SupervisionSpec)]
 const _: () = ();
+
+fn prepare_endpoint_target(action: &SupervisionAction) -> Option<ServiceAtom> {
+    match action {
+        SupervisionAction::PrepareEndpoint(service) => Some(*service),
+        _ => None,
+    }
+}
+
+fn bootstrap_target(action: &SupervisionAction) -> Option<ServiceAtom> {
+    match action {
+        SupervisionAction::AdvanceBootstrap(service) => Some(*service),
+        _ => None,
+    }
+}
+
+fn start_serving_target(action: &SupervisionAction) -> Option<ServiceAtom> {
+    match action {
+        SupervisionAction::StartServing(service) => Some(*service),
+        _ => None,
+    }
+}
+
+fn stop_target(action: &SupervisionAction) -> Option<ServiceAtom> {
+    match action {
+        SupervisionAction::RequestStop(service) => Some(*service),
+        _ => None,
+    }
+}
+
+fn reap_target(action: &SupervisionAction) -> Option<ServiceAtom> {
+    match action {
+        SupervisionAction::ReapService(service) => Some(*service),
+        _ => None,
+    }
+}
+
+fn prepared_service_runners(
+    prev: &SupervisionState,
+    action: &SupervisionAction,
+) -> Relation2<ServiceAtom, RunnerAtom> {
+    let service = prepare_endpoint_target(action)
+        .expect("prepared_service_runners requires PrepareEndpoint action");
+    let runner = service_runner(service);
+    let mut runners = prev.service_runners.clone();
+    runners.insert(service, runner);
+    runners
+}
+
+fn prepared_service_apps(
+    prev: &SupervisionState,
+    action: &SupervisionAction,
+) -> Relation2<ServiceAtom, ServiceAppAtom> {
+    let service = prepare_endpoint_target(action)
+        .expect("prepared_service_apps requires PrepareEndpoint action");
+    let mut apps = prev.service_apps.clone();
+    apps.insert(service, ServiceAppAtom::Rpc);
+    apps
+}
+
+fn reaped_service_runners(
+    prev: &SupervisionState,
+    action: &SupervisionAction,
+) -> Relation2<ServiceAtom, RunnerAtom> {
+    let service = reap_target(action).expect("reaped_service_runners requires ReapService action");
+    let mut runners = prev.service_runners.clone();
+    for runner in RunnerAtom::bounded_domain().into_vec() {
+        runners.remove(&service, &runner);
+    }
+    runners
+}
+
+fn reaped_service_apps(
+    prev: &SupervisionState,
+    action: &SupervisionAction,
+) -> Relation2<ServiceAtom, ServiceAppAtom> {
+    let service = reap_target(action).expect("reaped_service_apps requires ReapService action");
+    let mut apps = prev.service_apps.clone();
+    for app in ServiceAppAtom::bounded_domain().into_vec() {
+        apps.remove(&service, &app);
+    }
+    apps
+}
+
+fn rel_set_changed<T>(left: &RelSet<T>, right: &RelSet<T>) -> bool
+where
+    T: nirvash_core::RelAtom + Clone + Eq + std::fmt::Debug + 'static,
+{
+    left.items() != right.items()
+}
 
 fn transition_state(
     prev: &SupervisionState,
@@ -347,5 +518,37 @@ mod tests {
 
         assert!(ready.service_is_ready(ServiceAtom::Service0));
         assert!(!ready.service_is_ready(ServiceAtom::Service1));
+    }
+
+    #[test]
+    fn transition_program_matches_transition_function() {
+        let spec = SupervisionSpec::new();
+        let program = spec.transition_program().expect("transition program");
+        let initial = spec.initial_state();
+
+        assert_eq!(
+            program
+                .evaluate(
+                    &initial,
+                    &SupervisionAction::PrepareEndpoint(ServiceAtom::Service0),
+                )
+                .expect("evaluates"),
+            transition_state(
+                &initial,
+                &SupervisionAction::PrepareEndpoint(ServiceAtom::Service0),
+            )
+        );
+        assert_eq!(
+            program
+                .evaluate(
+                    &initial,
+                    &SupervisionAction::StartServing(ServiceAtom::Service0),
+                )
+                .expect("evaluates"),
+            transition_state(
+                &initial,
+                &SupervisionAction::StartServing(ServiceAtom::Service0),
+            )
+        );
     }
 }

@@ -2,7 +2,7 @@
 #[macro_export]
 macro_rules! pred {
     ($name:ident ($state:pat_param) => $expr:expr $(,)?) => {
-        $crate::StatePredicate::new(stringify!($name), |$state| $expr)
+        $crate::BoolExpr::pure_call(stringify!($name), |$state| $expr)
     };
 }
 
@@ -10,7 +10,7 @@ macro_rules! pred {
 #[macro_export]
 macro_rules! step {
     ($name:ident ($prev:pat_param, $action:pat_param, $next:pat_param) => $expr:expr $(,)?) => {
-        $crate::StepPredicate::new(stringify!($name), |$prev, $action, $next| $expr)
+        $crate::StepExpr::pure_call(stringify!($name), |$prev, $action, $next| $expr)
     };
 }
 
@@ -18,7 +18,7 @@ macro_rules! step {
 #[macro_export]
 macro_rules! __nirvash_state_constraint_pred {
     ($name:ident ($state:pat_param) => $expr:expr $(,)?) => {
-        $crate::StateConstraint::new(stringify!($name), |$state| $expr)
+        $crate::pred!($name($state) => $expr)
     };
 }
 
@@ -26,7 +26,7 @@ macro_rules! __nirvash_state_constraint_pred {
 #[macro_export]
 macro_rules! __nirvash_action_constraint_pred {
     ($name:ident ($prev:pat_param, $action:pat_param, $next:pat_param) => $expr:expr $(,)?) => {
-        $crate::ActionConstraint::new(stringify!($name), |$prev, $action, $next| $expr)
+        $crate::step!($name($prev, $action, $next) => $expr)
     };
 }
 
@@ -85,7 +85,7 @@ macro_rules! ltl {
 macro_rules! invariant {
     ($spec:path, $name:ident ($state:pat_param) => $expr:expr $(,)?) => {
         #[::nirvash_macros::invariant($spec)]
-        fn $name() -> $crate::StatePredicate<<$spec as $crate::TransitionSystem>::State> {
+        fn $name() -> $crate::BoolExpr<<$spec as $crate::TransitionSystem>::State> {
             $crate::pred!($name($state) => $expr)
         }
     };
@@ -96,7 +96,7 @@ macro_rules! invariant {
 macro_rules! state_constraint {
     ($spec:path, $name:ident ($state:pat_param) => $expr:expr $(,)?) => {
         #[::nirvash_macros::state_constraint($spec)]
-        fn $name() -> $crate::StateConstraint<<$spec as $crate::TransitionSystem>::State> {
+        fn $name() -> $crate::BoolExpr<<$spec as $crate::TransitionSystem>::State> {
             $crate::__nirvash_state_constraint_pred!($name($state) => $expr)
         }
     };
@@ -107,7 +107,7 @@ macro_rules! state_constraint {
 macro_rules! action_constraint {
     ($spec:path, $name:ident ($prev:pat_param, $action:pat_param, $next:pat_param) => $expr:expr $(,)?) => {
         #[::nirvash_macros::action_constraint($spec)]
-        fn $name() -> $crate::ActionConstraint<
+        fn $name() -> $crate::StepExpr<
             <$spec as $crate::TransitionSystem>::State,
             <$spec as $crate::TransitionSystem>::Action,
         > {

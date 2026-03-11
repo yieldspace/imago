@@ -21,8 +21,12 @@ impl nirvash_core::TransitionSystem for Spec {
         vec![State::Idle]
     }
 
-    fn successors(&self, _: &Self::State) -> Vec<(Self::Action, Self::State)> {
-        Vec::new()
+    fn actions(&self) -> Vec<Self::Action> {
+        vec![Action::Tick]
+    }
+
+    fn transition_program(&self) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(::nirvash_core::TransitionProgram::named("spec", vec![]))
     }
 }
 

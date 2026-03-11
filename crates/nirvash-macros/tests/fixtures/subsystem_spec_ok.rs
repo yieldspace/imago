@@ -1,16 +1,13 @@
-use nirvash_core::{
-    ActionConstraint, ModelCase, StateConstraint, StatePredicate, SymmetryReducer, TemporalSpec,
-    TransitionSystem,
-};
+use nirvash_core::{BoolExpr, ModelCase, StepExpr, SymmetryReducer, TemporalSpec, TransitionSystem};
 use nirvash_macros::{
-    Signature as FormalSignature, action_constraint, formal_tests, invariant, property,
-    state_constraint, subsystem_spec, symmetry,
+    Signature as FormalSignature, action_constraint, formal_tests, invariant, nirvash_expr,
+    nirvash_step_expr, nirvash_transition_program, property, state_constraint, subsystem_spec,
+    symmetry,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
-enum State {
-    Idle,
-    Busy,
+struct State {
+    busy: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
@@ -28,47 +25,47 @@ impl TransitionSystem for Spec {
     type Action = Action;
 
     fn initial_states(&self) -> Vec<Self::State> {
-        vec![State::Idle]
+        vec![State { busy: false }]
     }
 
     fn actions(&self) -> Vec<Self::Action> {
         vec![Action::Start, Action::Stop]
     }
 
-    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        match (state, action) {
-            (State::Idle, Action::Start) => Some(State::Busy),
-            (State::Busy, Action::Stop) => Some(State::Idle),
-            _ => None,
-        }
+    fn transition_program(&self) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule start when matches!(action, Action::Start) && !prev.busy => {
+                set busy <= true;
+            }
+
+            rule stop when matches!(action, Action::Stop) && prev.busy => {
+                set busy <= false;
+            }
+        })
     }
 }
 
 #[invariant(Spec)]
-fn idle_is_valid() -> StatePredicate<State> {
-    StatePredicate::new("idle_is_valid", |_| true)
+fn idle_is_valid() -> BoolExpr<State> {
+    nirvash_expr! { idle_is_valid(_state) => true }
 }
 
 #[property(Spec)]
 fn busy_leads_to_idle() -> nirvash_core::Ltl<State, Action> {
     nirvash_core::Ltl::leads_to(
-        nirvash_core::Ltl::pred(StatePredicate::new("busy", |state| {
-            matches!(state, State::Busy)
-        })),
-        nirvash_core::Ltl::pred(StatePredicate::new("idle", |state| {
-            matches!(state, State::Idle)
-        })),
+        nirvash_core::Ltl::pred(nirvash_expr! { busy(state) => state.busy }),
+        nirvash_core::Ltl::pred(nirvash_expr! { idle(state) => !state.busy }),
     )
 }
 
 #[state_constraint(Spec)]
-fn allow_declared_states() -> StateConstraint<State> {
-    StateConstraint::new("allow_declared_states", |_| true)
+fn allow_declared_states() -> BoolExpr<State> {
+    nirvash_expr! { allow_declared_states(_state) => true }
 }
 
 #[action_constraint(Spec)]
-fn allow_declared_edges() -> ActionConstraint<State, Action> {
-    ActionConstraint::new("allow_declared_edges", |_, _, _| true)
+fn allow_declared_edges() -> StepExpr<State, Action> {
+    nirvash_step_expr! { allow_declared_edges(_prev, _action, _next) => true }
 }
 
 #[symmetry(Spec)]

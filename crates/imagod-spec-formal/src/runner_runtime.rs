@@ -1,10 +1,10 @@
 use nirvash_core::{
-    Fairness, Ltl, ModelCase, RelAtom as _, RelSet, Signature as _, StatePredicate, StepPredicate,
+    BoolExpr, Fairness, Ltl, ModelCase, RelAtom as _, RelSet, Signature as _, StepExpr,
     TransitionSystem,
 };
 use nirvash_macros::{
     ActionVocabulary, RelAtom, RelationalState, Signature as FormalSignature, fairness, invariant,
-    property, subsystem_spec,
+    nirvash_expr, nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
 use crate::RunnerAppType;
@@ -60,7 +60,8 @@ pub enum WasmTuningClass {
     Invalid,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, RelationalState)]
+#[derive(Debug, Clone, PartialEq, Eq, FormalSignature, RelationalState)]
+#[signature(custom)]
 pub struct RunnerRuntimeState {
     listening_endpoints: RelSet<RuntimeEndpointAtom>,
     queued_http_requests: RelSet<HttpRequestAtom>,
@@ -227,114 +228,114 @@ impl RunnerRuntimeSpec {
     }
 }
 
+nirvash_core::signature_spec!(
+    RunnerRuntimeStateSignatureSpec for RunnerRuntimeState,
+    representatives = crate::state_domain::reachable_state_domain(&RunnerRuntimeSpec::new())
+);
+
 fn runner_runtime_model_cases() -> Vec<ModelCase<RunnerRuntimeState, RunnerRuntimeAction>> {
     vec![ModelCase::default().with_check_deadlocks(false)]
 }
 
 #[invariant(RunnerRuntimeSpec)]
-fn serving_requires_loadable_component() -> StatePredicate<RunnerRuntimeState> {
-    StatePredicate::new("serving_requires_loadable_component", |state| {
+fn serving_requires_loadable_component() -> BoolExpr<RunnerRuntimeState> {
+    nirvash_expr! { serving_requires_loadable_component(state) =>
         !matches!(state.phase, RuntimePhase::Serving)
             || matches!(state.component, ComponentLoadClass::Loadable)
-    })
+    }
 }
 
 #[invariant(RunnerRuntimeSpec)]
-fn http_queue_requires_http_mode() -> StatePredicate<RunnerRuntimeState> {
-    StatePredicate::new("http_queue_requires_http_mode", |state| {
+fn http_queue_requires_http_mode() -> BoolExpr<RunnerRuntimeState> {
+    nirvash_expr! { http_queue_requires_http_mode(state) =>
         !state.has_queued_http_requests()
             || (matches!(state.mode, Some(RunnerAppType::Http))
                 && matches!(state.phase, RuntimePhase::Serving)
                 && state.has_http_listener())
-    })
+    }
 }
 
 #[invariant(RunnerRuntimeSpec)]
-fn socket_listener_requires_socket_mode() -> StatePredicate<RunnerRuntimeState> {
-    StatePredicate::new("socket_listener_requires_socket_mode", |state| {
+fn socket_listener_requires_socket_mode() -> BoolExpr<RunnerRuntimeState> {
+    nirvash_expr! { socket_listener_requires_socket_mode(state) =>
         !state.has_socket_listener()
             || (matches!(state.mode, Some(RunnerAppType::Socket))
                 && matches!(state.phase, RuntimePhase::Serving))
-    })
+    }
 }
 
 #[invariant(RunnerRuntimeSpec)]
-fn invalid_tuning_cannot_serve() -> StatePredicate<RunnerRuntimeState> {
-    StatePredicate::new("invalid_tuning_cannot_serve", |state| {
+fn invalid_tuning_cannot_serve() -> BoolExpr<RunnerRuntimeState> {
+    nirvash_expr! { invalid_tuning_cannot_serve(state) =>
         !matches!(state.tuning, WasmTuningClass::Invalid)
             || !matches!(state.phase, RuntimePhase::Serving)
-    })
+    }
 }
 
 #[property(RunnerRuntimeSpec)]
 fn component_validated_leads_to_serving_or_failed() -> Ltl<RunnerRuntimeState, RunnerRuntimeAction>
 {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("component_validated", |state| {
+        Ltl::pred(nirvash_expr! { component_validated(state) =>
             matches!(state.phase, RuntimePhase::ComponentValidated)
-        })),
-        Ltl::pred(StatePredicate::new("serving_or_failed", |state| {
+        }),
+        Ltl::pred(nirvash_expr! { serving_or_failed(state) =>
             matches!(state.phase, RuntimePhase::Serving | RuntimePhase::Failed)
-        })),
+        }),
     )
 }
 
 #[property(RunnerRuntimeSpec)]
 fn http_queue_nonempty_leads_to_empty() -> Ltl<RunnerRuntimeState, RunnerRuntimeAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("http_queue_nonempty", |state| {
-            state.has_queued_http_requests()
-        })),
-        Ltl::pred(StatePredicate::new("http_queue_empty", |state| {
-            !state.has_queued_http_requests()
-        })),
+        Ltl::pred(nirvash_expr! { http_queue_nonempty(state) => state.has_queued_http_requests() }),
+        Ltl::pred(nirvash_expr! { http_queue_empty(state) => !state.has_queued_http_requests() }),
     )
 }
 
 #[property(RunnerRuntimeSpec)]
 fn invalid_tuning_leads_to_failure() -> Ltl<RunnerRuntimeState, RunnerRuntimeAction> {
     Ltl::leads_to(
-        Ltl::pred(StatePredicate::new("invalid_tuning", |state| {
+        Ltl::pred(nirvash_expr! { invalid_tuning(state) =>
             matches!(state.tuning, WasmTuningClass::Invalid)
-        })),
-        Ltl::pred(StatePredicate::new("runtime_failed", |state| {
+        }),
+        Ltl::pred(nirvash_expr! { runtime_failed(state) =>
             matches!(state.phase, RuntimePhase::Failed)
-        })),
+        }),
     )
 }
 
 #[fairness(RunnerRuntimeSpec)]
 fn serve_or_fail_fairness() -> Fairness<RunnerRuntimeState, RunnerRuntimeAction> {
-    Fairness::weak(StepPredicate::new("serve_or_fail", |prev, action, next| {
+    Fairness::weak(nirvash_step_expr! { serve_or_fail(prev, action, next) =>
         matches!(prev.phase, RuntimePhase::ComponentValidated)
             && matches!(
                 action,
                 RunnerRuntimeAction::StartServing | RunnerRuntimeAction::FailRuntime
             )
             && matches!(next.phase, RuntimePhase::Serving | RuntimePhase::Failed)
-    }))
+    })
 }
 
 #[fairness(RunnerRuntimeSpec)]
 fn http_drain_fairness() -> Fairness<RunnerRuntimeState, RunnerRuntimeAction> {
-    Fairness::weak(StepPredicate::new(
-        "drain_http_request",
-        |prev, action, next| {
+    Fairness::weak(
+        nirvash_step_expr! { drain_http_request(prev, action, next) =>
             matches!(action, RunnerRuntimeAction::DrainHttpRequest)
                 && matches!(prev.mode, Some(RunnerAppType::Http))
                 && matches!(prev.phase, RuntimePhase::Serving)
                 && prev.has_queued_http_requests()
                 && next.queued_http_request_count() < prev.queued_http_request_count()
         },
-    ))
+    )
 }
 
 #[fairness(RunnerRuntimeSpec)]
 fn failure_fairness() -> Fairness<RunnerRuntimeState, RunnerRuntimeAction> {
-    Fairness::weak(StepPredicate::new("fail_runtime", |_, action, next| {
+    Fairness::weak(nirvash_step_expr! { fail_runtime(_prev, action, next) =>
         matches!(action, RunnerRuntimeAction::FailRuntime)
             && matches!(next.phase, RuntimePhase::Failed)
-    }))
+    })
 }
 
 #[subsystem_spec(model_cases(runner_runtime_model_cases))]
@@ -354,13 +355,97 @@ impl TransitionSystem for RunnerRuntimeSpec {
         <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
     }
 
-    fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        self.transition_state(state, action)
+    fn transition_program(
+        &self,
+    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule select_mode when select_mode_value(action).is_some()
+                && prev.mode.is_none()
+                && matches!(prev.phase, RuntimePhase::Idle) => {
+                set mode <= select_mode_value(action);
+            }
+
+            rule apply_default_tuning when matches!(action, RunnerRuntimeAction::ApplyDefaultTuning)
+                && prev.mode.is_some()
+                && matches!(prev.phase, RuntimePhase::Idle) => {
+                set tuning <= WasmTuningClass::Default;
+            }
+
+            rule apply_custom_tuning when matches!(action, RunnerRuntimeAction::ApplyCustomTuning)
+                && prev.mode.is_some()
+                && matches!(prev.phase, RuntimePhase::Idle) => {
+                set tuning <= WasmTuningClass::CustomValid;
+            }
+
+            rule apply_invalid_tuning when matches!(action, RunnerRuntimeAction::ApplyInvalidTuning)
+                && prev.mode.is_some()
+                && matches!(prev.phase, RuntimePhase::Idle) => {
+                set tuning <= WasmTuningClass::Invalid;
+            }
+
+            rule validate_component_loadable when matches!(action, RunnerRuntimeAction::ValidateComponentLoadable)
+                && prev.mode.is_some()
+                && matches!(prev.phase, RuntimePhase::Idle)
+                && !matches!(prev.tuning, WasmTuningClass::Invalid) => {
+                set component <= ComponentLoadClass::Loadable;
+                set phase <= RuntimePhase::ComponentValidated;
+            }
+
+            rule validate_component_invalid when matches!(action, RunnerRuntimeAction::ValidateComponentInvalid)
+                && prev.mode.is_some()
+                && matches!(prev.phase, RuntimePhase::Idle) => {
+                set component <= ComponentLoadClass::Invalid;
+                set phase <= RuntimePhase::Failed;
+            }
+
+            rule start_serving when matches!(action, RunnerRuntimeAction::StartServing)
+                && matches!(prev.phase, RuntimePhase::ComponentValidated)
+                && matches!(prev.component, ComponentLoadClass::Loadable)
+                && !matches!(prev.tuning, WasmTuningClass::Invalid) => {
+                set phase <= RuntimePhase::Serving;
+                set listening_endpoints <= serving_endpoints(prev.mode);
+                set queued_http_requests <= RelSet::empty();
+            }
+
+            rule accept_http_request when matches!(action, RunnerRuntimeAction::AcceptHttpRequest)
+                && matches!(prev.mode, Some(RunnerAppType::Http))
+                && matches!(prev.phase, RuntimePhase::Serving)
+                && prev.has_http_listener()
+                && !prev.http_queue_full()
+                && next_free_http_request(prev).is_some() => {
+                insert queued_http_requests <= next_free_http_request(prev)
+                    .expect("accept_http_request guard ensures a free request atom");
+            }
+
+            rule drain_http_request when matches!(action, RunnerRuntimeAction::DrainHttpRequest)
+                && matches!(prev.mode, Some(RunnerAppType::Http))
+                && matches!(prev.phase, RuntimePhase::Serving)
+                && prev.has_queued_http_requests()
+                && first_queued_http_request(prev).is_some() => {
+                remove queued_http_requests <= first_queued_http_request(prev)
+                    .expect("drain_http_request guard ensures a queued request atom");
+            }
+
+            rule fail_runtime when matches!(action, RunnerRuntimeAction::FailRuntime)
+                && prev.mode.is_some()
+                && !matches!(prev.phase, RuntimePhase::Failed) => {
+                set phase <= RuntimePhase::Failed;
+                set listening_endpoints <= RelSet::empty();
+                set queued_http_requests <= RelSet::empty();
+            }
+        })
     }
 }
 
 #[nirvash_macros::formal_tests(spec = RunnerRuntimeSpec)]
 const _: () = ();
+
+fn select_mode_value(action: &RunnerRuntimeAction) -> Option<RunnerAppType> {
+    match action {
+        RunnerRuntimeAction::SelectMode(app_type) => Some(*app_type),
+        _ => None,
+    }
+}
 
 fn serving_endpoints(mode: Option<RunnerAppType>) -> RelSet<RuntimeEndpointAtom> {
     match mode {

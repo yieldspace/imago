@@ -3,10 +3,7 @@ use std::{
     collections::BTreeSet,
 };
 
-use crate::{
-    ActionConstraint, Fairness, Ltl, StateConstraint, StatePredicate, SymmetryReducer,
-    TransitionSystem,
-};
+use crate::{BoolExpr, Fairness, Ltl, StepExpr, SymmetryReducer, TransitionSystem};
 
 pub use inventory;
 
@@ -61,11 +58,11 @@ pub struct RegisteredActionDocPresentation {
 type ErasedBuilder = fn() -> Box<dyn Any>;
 type NamedBuilder = (&'static str, ErasedBuilder);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ScopedStateConstraint<S> {
     name: &'static str,
     case_labels: Option<&'static [&'static str]>,
-    constraint: StateConstraint<S>,
+    constraint: BoolExpr<S>,
 }
 
 impl<S> ScopedStateConstraint<S> {
@@ -77,8 +74,8 @@ impl<S> ScopedStateConstraint<S> {
         self.case_labels
     }
 
-    pub const fn constraint(&self) -> StateConstraint<S> {
-        self.constraint
+    pub fn constraint(&self) -> &BoolExpr<S> {
+        &self.constraint
     }
 
     pub fn applies_to(&self, case_label: &str) -> bool {
@@ -87,11 +84,11 @@ impl<S> ScopedStateConstraint<S> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ScopedActionConstraint<S, A> {
     name: &'static str,
     case_labels: Option<&'static [&'static str]>,
-    constraint: ActionConstraint<S, A>,
+    constraint: StepExpr<S, A>,
 }
 
 impl<S, A> ScopedActionConstraint<S, A> {
@@ -103,8 +100,8 @@ impl<S, A> ScopedActionConstraint<S, A> {
         self.case_labels
     }
 
-    pub const fn constraint(&self) -> ActionConstraint<S, A> {
-        self.constraint
+    pub fn constraint(&self) -> &StepExpr<S, A> {
+        &self.constraint
     }
 
     pub fn applies_to(&self, case_label: &str) -> bool {
@@ -201,7 +198,7 @@ impl_registry_entry!(RegisteredStateConstraint);
 impl_registry_entry!(RegisteredActionConstraint);
 impl_registry_entry!(RegisteredSymmetry);
 
-pub fn collect_invariants<T>() -> Vec<StatePredicate<T::State>>
+pub fn collect_invariants<T>() -> Vec<BoolExpr<T::State>>
 where
     T: TransitionSystem + 'static,
     T::State: 'static,
@@ -215,7 +212,7 @@ where
     )
     .into_iter()
     .map(|(name, build)| {
-        downcast_registered::<StatePredicate<T::State>>(build(), spec_name, "invariant", name)
+        downcast_registered::<BoolExpr<T::State>>(build(), spec_name, "invariant", name)
     })
     .collect()
 }
@@ -260,14 +257,14 @@ where
     .collect()
 }
 
-pub fn collect_state_constraints<T>() -> Vec<StateConstraint<T::State>>
+pub fn collect_state_constraints<T>() -> Vec<BoolExpr<T::State>>
 where
     T: TransitionSystem + 'static,
     T::State: 'static,
 {
     collect_scoped_state_constraints::<T>()
         .into_iter()
-        .map(|entry| entry.constraint())
+        .map(|entry| entry.constraint().clone())
         .collect()
 }
 
@@ -299,7 +296,7 @@ where
         .map(|entry| ScopedStateConstraint {
             name: entry.name,
             case_labels: entry.case_labels,
-            constraint: downcast_registered::<StateConstraint<T::State>>(
+            constraint: downcast_registered::<BoolExpr<T::State>>(
                 (entry.build)(),
                 spec_name,
                 "state constraint",
@@ -309,7 +306,7 @@ where
         .collect()
 }
 
-pub fn collect_action_constraints<T>() -> Vec<ActionConstraint<T::State, T::Action>>
+pub fn collect_action_constraints<T>() -> Vec<StepExpr<T::State, T::Action>>
 where
     T: TransitionSystem + 'static,
     T::State: 'static,
@@ -317,7 +314,7 @@ where
 {
     collect_scoped_action_constraints::<T>()
         .into_iter()
-        .map(|entry| entry.constraint())
+        .map(|entry| entry.constraint().clone())
         .collect()
 }
 
@@ -350,7 +347,7 @@ where
         .map(|entry| ScopedActionConstraint {
             name: entry.name,
             case_labels: entry.case_labels,
-            constraint: downcast_registered::<ActionConstraint<T::State, T::Action>>(
+            constraint: downcast_registered::<StepExpr<T::State, T::Action>>(
                 (entry.build)(),
                 spec_name,
                 "action constraint",
@@ -416,12 +413,14 @@ pub fn apply_registered_model_case_metadata<T>(
         let mut next_model_case = ::core::mem::take(model_case);
         for constraint in &state_constraints {
             if constraint.applies_to(next_model_case.label()) {
-                next_model_case = next_model_case.with_state_constraint(constraint.constraint());
+                next_model_case =
+                    next_model_case.with_state_constraint(constraint.constraint().clone());
             }
         }
         for constraint in &action_constraints {
             if constraint.applies_to(next_model_case.label()) {
-                next_model_case = next_model_case.with_action_constraint(constraint.constraint());
+                next_model_case =
+                    next_model_case.with_action_constraint(constraint.constraint().clone());
             }
         }
         if next_model_case.symmetry().is_none()
@@ -576,20 +575,20 @@ mod tests {
         TypeId::of::<DuplicateSpec>()
     }
 
-    fn alpha_invariant() -> StatePredicate<RegistryState> {
-        StatePredicate::new("alpha_invariant", |_| true)
+    fn alpha_invariant() -> BoolExpr<RegistryState> {
+        BoolExpr::literal("alpha_invariant", true)
     }
 
-    fn zeta_invariant() -> StatePredicate<RegistryState> {
-        StatePredicate::new("zeta_invariant", |_| true)
+    fn zeta_invariant() -> BoolExpr<RegistryState> {
+        BoolExpr::literal("zeta_invariant", true)
     }
 
-    fn duplicate_a() -> StatePredicate<RegistryState> {
-        StatePredicate::new("duplicate_name", |_| true)
+    fn duplicate_a() -> BoolExpr<RegistryState> {
+        BoolExpr::literal("duplicate_name", true)
     }
 
-    fn duplicate_b() -> StatePredicate<RegistryState> {
-        StatePredicate::new("duplicate_name", |_| true)
+    fn duplicate_b() -> BoolExpr<RegistryState> {
+        BoolExpr::literal("duplicate_name", true)
     }
 
     fn build_alpha_invariant() -> Box<dyn Any> {
@@ -656,20 +655,20 @@ mod tests {
         TypeId::of::<UnknownCaseSpec>()
     }
 
-    fn global_state_constraint() -> StateConstraint<RegistryState> {
-        StateConstraint::new("global_state_constraint", |_| true)
+    fn global_state_constraint() -> BoolExpr<RegistryState> {
+        BoolExpr::literal("global_state_constraint", true)
     }
 
-    fn only_case_a_state_constraint() -> StateConstraint<RegistryState> {
-        StateConstraint::new("only_case_a_state_constraint", |_| true)
+    fn only_case_a_state_constraint() -> BoolExpr<RegistryState> {
+        BoolExpr::literal("only_case_a_state_constraint", true)
     }
 
-    fn only_case_b_action_constraint() -> ActionConstraint<RegistryState, RegistryAction> {
-        ActionConstraint::new("only_case_b_action_constraint", |_, _, _| true)
+    fn only_case_b_action_constraint() -> StepExpr<RegistryState, RegistryAction> {
+        StepExpr::literal("only_case_b_action_constraint", true)
     }
 
-    fn unknown_case_state_constraint() -> StateConstraint<RegistryState> {
-        StateConstraint::new("unknown_case_state_constraint", |_| true)
+    fn unknown_case_state_constraint() -> BoolExpr<RegistryState> {
+        BoolExpr::literal("unknown_case_state_constraint", true)
     }
 
     fn build_global_state_constraint() -> Box<dyn Any> {

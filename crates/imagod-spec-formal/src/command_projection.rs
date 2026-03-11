@@ -4,8 +4,8 @@ use imagod_spec::{
     CommandStateSummary as RuntimeCommandStateSummary,
 };
 use nirvash_core::{
-    ActionVocabulary, ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
-    concurrent::ConcurrentAction, conformance::ProtocolConformanceSpec,
+    ActionVocabulary, BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
+    conformance::ProtocolConformanceSpec,
 };
 use nirvash_macros::nirvash_projection_contract;
 
@@ -86,15 +86,13 @@ impl TransitionSystem for CommandProjectionSpec {
     }
 
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-        self.system().transition(
-            state,
-            &ConcurrentAction::from_atomic(SystemAtomicAction::Command(action.clone())),
-        )
+        self.system()
+            .transition(state, &SystemAtomicAction::Command(action.clone()))
     }
 }
 
 impl TemporalSpec for CommandProjectionSpec {
-    fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
+    fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
         self.system().invariants()
     }
 }

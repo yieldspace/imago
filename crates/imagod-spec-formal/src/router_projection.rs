@@ -2,7 +2,7 @@
 use imagod_spec::{ContractEffectSummary, SummaryRequestKind, SummaryStreamId};
 use imagod_spec::{RouterOutputSummary, RouterProbeOutput, RouterProbeState, RouterStateSummary};
 use nirvash_core::{
-    ModelCase, ModelCaseSource, StatePredicate, TemporalSpec, TransitionSystem,
+    BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };
 use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_model};
@@ -54,10 +54,7 @@ impl RouterProjectionSpec {
 
     fn apply_atomic(self, state: &SystemState, action: SystemAtomicAction) -> SystemState {
         self.system()
-            .transition(
-                state,
-                &nirvash_core::concurrent::ConcurrentAction::from_atomic(action),
-            )
+            .transition(state, &action)
             .expect("projection seed state should admit delegated action")
     }
 
@@ -194,12 +191,7 @@ impl TransitionSystem for RouterProjectionSpec {
 
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
         self.system()
-            .transition(
-                state,
-                &nirvash_core::concurrent::ConcurrentAction::from_atomic(SystemAtomicAction::Wire(
-                    self.wire_action(*action),
-                )),
-            )
+            .transition(state, &SystemAtomicAction::Wire(self.wire_action(*action)))
             .map(|next| {
                 let role = if next
                     .session_auth
@@ -258,7 +250,7 @@ impl TransitionSystem for RouterProjectionSpec {
 }
 
 impl TemporalSpec for RouterProjectionSpec {
-    fn invariants(&self) -> Vec<StatePredicate<Self::State>> {
+    fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
         self.system().invariants()
     }
 }
@@ -367,9 +359,7 @@ nirvash_projection_model! {
         ) -> Self::ExpectedOutput {
             self.system().expected_output(
                 prev,
-                &nirvash_core::concurrent::ConcurrentAction::from_atomic(SystemAtomicAction::Wire(
-                    self.wire_action(*action),
-                )),
+                &SystemAtomicAction::Wire(self.wire_action(*action)),
                 next,
             )
         }
