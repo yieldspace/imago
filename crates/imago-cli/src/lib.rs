@@ -119,7 +119,13 @@ async fn dispatch_with_project_root_async(cli: Cli, project_root: &Path) -> Comm
                 }
             },
             TrustCommands::ClientKey(TrustClientKeySubcommandArgs { command }) => match command {
-                TrustClientKeyCommands::Generate(args) => commands::certs::run_generate(args),
+                TrustClientKeyCommands::Generate(args) => {
+                    if uses_default_project_root(project_root) {
+                        commands::certs::run_generate(args)
+                    } else {
+                        commands::certs::run_generate_with_project_root(args, project_root)
+                    }
+                }
             },
         },
     }

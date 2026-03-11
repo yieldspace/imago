@@ -60,6 +60,16 @@ struct BindingsCertDeploySummary {
 }
 
 pub fn run_generate(args: CertsGenerateArgs) -> CommandResult {
+    run_generate_with_project_root(args, Path::new("."))
+}
+
+pub(crate) fn run_generate_with_project_root(
+    mut args: CertsGenerateArgs,
+    project_root: &Path,
+) -> CommandResult {
+    if args.out_dir.is_relative() {
+        args.out_dir = project_root.join(&args.out_dir);
+    }
     let started_at = Instant::now();
     ui::command_start("trust.client-key.generate", "starting");
     ui::command_stage(
@@ -607,6 +617,23 @@ mod tests {
                 .contains("private keys are sensitive. do not commit or share them.")
         );
         assert_eq!(output.stderr, "");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn run_generate_with_project_root_rebases_relative_out_dir() {
+        let dir = temp_dir("run_generate_with_project_root_rebases_relative_out_dir");
+        let args = CertsGenerateArgs {
+            out_dir: PathBuf::from("certs"),
+            force: false,
+        };
+
+        let result = run_generate_with_project_root(args, &dir);
+
+        assert_eq!(result.exit_code, 0);
+        assert!(dir.join("certs").join("client.key").exists());
+        assert!(dir.join("certs").join(".gitignore").exists());
 
         cleanup(&dir);
     }
