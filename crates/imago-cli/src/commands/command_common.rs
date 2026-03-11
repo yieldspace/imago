@@ -175,6 +175,10 @@ pub(crate) fn format_peer_context_line(
     )
 }
 
+pub(crate) fn format_peer_context_basic_line(authority: &str, resolved: &str) -> String {
+    format!("authority={} resolved={}", authority, resolved)
+}
+
 pub(crate) fn handle_terminal_event(
     command_name: &str,
     responses: Vec<deploy::Envelope>,

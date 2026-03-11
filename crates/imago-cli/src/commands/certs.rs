@@ -17,7 +17,7 @@ use crate::{
     commands::{
         build,
         command_common::{
-            HelloSummary, format_local_context_line, format_peer_context_line,
+            HelloSummary, format_local_context_line, format_peer_context_basic_line,
             negotiate_hello_with_features,
         },
         deploy,
@@ -242,7 +242,7 @@ async fn inspect_public_key_from_remote(
     let correlation_id = Uuid::new_v4();
 
     ui::command_stage(command_name, "hello", "negotiating hello (source)");
-    let hello = negotiate_bindings_cert_hello(
+    let _hello = negotiate_bindings_cert_hello(
         &connected,
         correlation_id,
         &BINDINGS_CERT_INSPECT_REQUIRED_FEATURES,
@@ -250,7 +250,7 @@ async fn inspect_public_key_from_remote(
     .await?;
     ui::command_info(
         command_name,
-        &format_peer_context_line(&connected.authority, &connected.resolved_addr, &hello),
+        &format_peer_context_basic_line(&connected.authority, &connected.resolved_addr),
     );
 
     ui::command_stage(command_name, "inspect", "requesting bindings.cert.inspect");
@@ -283,7 +283,7 @@ async fn upload_public_key_to_remote(
     let correlation_id = Uuid::new_v4();
 
     ui::command_stage(command_name, "hello", "negotiating hello (destination)");
-    let hello = negotiate_bindings_cert_hello(
+    let _hello = negotiate_bindings_cert_hello(
         &connected,
         correlation_id,
         &BINDINGS_CERT_UPLOAD_REQUIRED_FEATURES,
@@ -291,7 +291,7 @@ async fn upload_public_key_to_remote(
     .await?;
     ui::command_info(
         command_name,
-        &format_peer_context_line(&connected.authority, &connected.resolved_addr, &hello),
+        &format_peer_context_basic_line(&connected.authority, &connected.resolved_addr),
     );
 
     ui::command_stage(command_name, "upload", "uploading public key");
