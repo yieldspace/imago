@@ -4,6 +4,8 @@ services:
     build:
       context: ../../..
       dockerfile: examples/imago-compose-bindings/docker/Dockerfile.imagod
+    depends_on:
+      - imago-deployer
     command:
       - --config
       - /etc/imago/example/imagod-alice.toml
@@ -11,12 +13,15 @@ services:
       - "4443:4443"
     volumes:
       - imagod-alice-data:/var/lib/imagod
+      - ssh-control:/ssh-control
 
   imagod-bob:
     container_name: imagod-bob
     build:
       context: ../../..
       dockerfile: examples/imago-compose-bindings/docker/Dockerfile.imagod
+    depends_on:
+      - imago-deployer
     command:
       - --config
       - /etc/imago/example/imagod-bob.toml
@@ -24,6 +29,7 @@ services:
       - "5443:4443"
     volumes:
       - imagod-bob-data:/var/lib/imagod
+      - ssh-control:/ssh-control
 
   imago-deployer:
     container_name: imago-deployer
@@ -33,10 +39,10 @@ services:
     command:
       - sleep
       - infinity
-    depends_on:
-      - imagod-alice
-      - imagod-bob
+    volumes:
+      - ssh-control:/ssh-control
 
 volumes:
   imagod-alice-data:
   imagod-bob-data:
+  ssh-control:

@@ -665,57 +665,59 @@ fn hello_features_for_auth_context(auth_context: &SessionAuthContext) -> Vec<Str
 fn load_server_public_key_hex(path: &Path) -> Result<String, ImagodError> {
     let provider = web_transport_quinn::crypto::default_provider();
     let file = std::fs::File::open(path).map_err(|err| {
-        ImagodError::new(
-            imago_protocol::ErrorCode::BadRequest,
-            "bindings.cert.inspect",
-            format!("failed to open key {}: {err}", path.display()),
-        )
+        bindings_cert_inspect_internal_error(format!(
+            "failed to open key {}: {err}",
+            path.display()
+        ))
     })?;
     let mut reader = BufReader::new(file);
     let private_key = rustls_pemfile::private_key(&mut reader)
         .map_err(|err| {
-            ImagodError::new(
-                imago_protocol::ErrorCode::BadRequest,
-                "bindings.cert.inspect",
-                format!("failed to parse key {}: {err}", path.display()),
-            )
+            bindings_cert_inspect_internal_error(format!(
+                "failed to parse key {}: {err}",
+                path.display()
+            ))
         })?
         .ok_or_else(|| {
-            ImagodError::new(
-                imago_protocol::ErrorCode::BadRequest,
-                "bindings.cert.inspect",
-                format!("private key is missing: {}", path.display()),
-            )
+            bindings_cert_inspect_internal_error(format!(
+                "private key is missing: {}",
+                path.display()
+            ))
         })?;
     let signing_key = provider
         .key_provider
         .load_private_key(private_key)
         .map_err(|err| {
-            ImagodError::new(
-                imago_protocol::ErrorCode::BadRequest,
-                "bindings.cert.inspect",
-                format!("failed to load key {}: {err}", path.display()),
-            )
+            bindings_cert_inspect_internal_error(format!(
+                "failed to load key {}: {err}",
+                path.display()
+            ))
         })?;
     let public_key = signing_key.public_key().ok_or_else(|| {
-        ImagodError::new(
-            imago_protocol::ErrorCode::BadRequest,
-            "bindings.cert.inspect",
-            format!("failed to derive public key from {}", path.display()),
-        )
+        bindings_cert_inspect_internal_error(format!(
+            "failed to derive public key from {}",
+            path.display()
+        ))
     })?;
     let bytes = public_key.as_ref();
     if bytes.len() != ED25519_SPKI_PREFIX.len() + 32 || !bytes.starts_with(&ED25519_SPKI_PREFIX) {
-        return Err(ImagodError::new(
-            imago_protocol::ErrorCode::BadRequest,
-            "bindings.cert.inspect",
-            format!("server key {} must be ed25519", path.display()),
-        ));
+        return Err(bindings_cert_inspect_internal_error(format!(
+            "server key {} must be ed25519",
+            path.display()
+        )));
     }
     Ok(bytes[ED25519_SPKI_PREFIX.len()..]
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect())
+}
+
+fn bindings_cert_inspect_internal_error(message: String) -> ImagodError {
+    ImagodError::new(
+        imago_protocol::ErrorCode::Internal,
+        "bindings.cert.inspect",
+        message,
+    )
 }
 
 pub(crate) fn protocol_compatibility_announcement(client_protocol_version: &str) -> Option<String> {
@@ -839,9 +841,9 @@ mod tests {
 
     use super::{
         ensure_command_start_allowed, ensure_command_start_request_id_match,
-        finalize_operation_after_terminal_event, protocol_compatibility_announcement,
-        resolve_logs_request_service_names, should_purge_deploy_session_after_terminal,
-        validate_push_payload,
+        finalize_operation_after_terminal_event, load_server_public_key_hex,
+        protocol_compatibility_announcement, resolve_logs_request_service_names,
+        should_purge_deploy_session_after_terminal, validate_push_payload,
     };
     use imago_protocol::ErrorCode;
 
@@ -931,6 +933,16 @@ mod tests {
         let err = validate_push_payload(&payload).expect_err("empty chunk should fail");
         assert_eq!(err.code, ErrorCode::BadRequest);
         assert_eq!(err.stage, "artifact.push");
+    }
+
+    #[test]
+    fn given_missing_server_key__when_load_server_public_key_hex__then_internal_error_is_returned()
+    {
+        let missing =
+            std::env::temp_dir().join(format!("imagod-server-missing-key-{}.pem", Uuid::new_v4()));
+        let err = load_server_public_key_hex(&missing).expect_err("missing file should fail");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert_eq!(err.stage, "bindings.cert.inspect");
     }
 
     #[test]

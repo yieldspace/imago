@@ -83,6 +83,8 @@ docker compose --project-name imago-compose-bindings-alice-bob-e2e \
 
 必要なら最後に `docker compose --project-name imago-compose-bindings-alice-bob-e2e down --remove-orphans` で停止できます。
 
+Docker compose 例の SSH 制御鍵と `known_hosts` は、起動時に compose の shared volume 上で自動生成されます。`imago-deployer` は `imagod-alice` / `imagod-bob` に限定した `known_hosts` を使い、`Host *` 無効化は行いません。
+
 ## 成功判定
 
 - ローカル 1 ノード: `stack logs ... --name cli-client` に `acme:clock/api.now =>` が含まれる。
