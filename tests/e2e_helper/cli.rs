@@ -1,11 +1,14 @@
 use super::binaries::resolve_imagod_binary;
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use clap::Parser;
 use imago_cli::{
     ParsedCli, dispatch_with_runtime,
     runtime::{BufferedOutputSink, CliRuntime, LocalProxyTargetConnector, OutputSink},
 };
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
+};
 
 #[derive(Debug, Clone)]
 pub struct CmdOutput {
@@ -243,6 +246,34 @@ fn looks_like_rfc3339_with_offset(token: &str) -> bool {
         && tz[4..6].bytes().all(|b| b.is_ascii_digit())
 }
 
+static CLI_CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct CwdGuard {
+    previous: PathBuf,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl CwdGuard {
+    fn change_to(path: &Path) -> Result<Self> {
+        let lock = CLI_CWD_LOCK.get_or_init(|| Mutex::new(()));
+        let guard = lock
+            .lock()
+            .map_err(|_| anyhow!("failed to lock e2e cli cwd guard"))?;
+        let previous = std::env::current_dir()?;
+        std::env::set_current_dir(path)?;
+        Ok(Self {
+            previous,
+            _lock: guard,
+        })
+    }
+}
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.previous);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -349,6 +380,7 @@ pub fn run_imago_cli(
     daemon_package: &str,
     args: &[&str],
 ) -> Result<CmdOutput> {
+    let _cwd_guard = CwdGuard::change_to(project_dir)?;
     let imagod_binary = resolve_imagod_binary(workspace_root, daemon_package)?;
     let output_sink = Arc::new(BufferedOutputSink::default());
     let cli_runtime = Arc::new(CliRuntime::plain(
@@ -393,4 +425,72 @@ pub fn run_imago_cli(
         stderr,
         combined,
     })
+}
+
+#[cfg(test)]
+mod run_imago_cli_tests {
+    use super::run_imago_cli;
+    use anyhow::Result;
+    use std::{
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn run_imago_cli_resolves_relative_outputs_from_project_dir() -> Result<()> {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let project_dir = temp_dir("run-imago-cli-cwd");
+        let relative_out_dir = "generated-certs";
+        let cwd_out_dir = workspace_root.join(relative_out_dir);
+        let _cleanup_project = CleanupPath(project_dir.clone());
+        let _cleanup_cwd = CleanupPath(cwd_out_dir.clone());
+
+        let output = run_imago_cli(
+            workspace_root,
+            &project_dir,
+            "imagod",
+            &[
+                "trust",
+                "client-key",
+                "generate",
+                "--out-dir",
+                relative_out_dir,
+            ],
+        )?;
+
+        assert!(
+            output.success,
+            "command should succeed: stdout={}, stderr={}",
+            output.stdout, output.stderr
+        );
+        assert!(
+            project_dir
+                .join(relative_out_dir)
+                .join("client.key")
+                .exists()
+        );
+        assert!(
+            !cwd_out_dir.join("client.key").exists(),
+            "relative output should not be created under current test runner cwd"
+        );
+        Ok(())
+    }
+
+    struct CleanupPath(PathBuf);
+
+    impl Drop for CleanupPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{ts}"));
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+        dir
+    }
 }
