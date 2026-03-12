@@ -2,14 +2,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2, TokenTree};
-use quote::{ToTokens, format_ident, quote};
+use quote::{format_ident, quote, ToTokens};
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, BinOp, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprBinary, ExprCall,
-    ExprField, ExprIf, ExprLit, ExprMacro, ExprMethodCall, ExprParen, ExprPath, ExprRange,
-    ExprReference, ExprUnary, Field, Fields, Ident, ImplItem, ImplItemFn, ItemConst, ItemFn,
-    ItemImpl, Lit, LitStr, Pat, Path, RangeLimits, Stmt, Token, Type, UnOp, parse_macro_input,
+    parse_macro_input, Attribute, BinOp, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprBinary,
+    ExprCall, ExprField, ExprIf, ExprLit, ExprMacro, ExprMethodCall, ExprParen, ExprPath,
+    ExprRange, ExprReference, ExprStruct, ExprUnary, Field, Fields, Ident, ImplItem, ImplItemFn,
+    ItemConst, ItemFn, ItemImpl, Lit, LitStr, Member, Pat, Path, RangeLimits, Stmt, Token, Type,
+    UnOp,
 };
 
 #[proc_macro_derive(Signature, attributes(signature, sig, signature_invariant, viz))]
@@ -590,6 +591,26 @@ fn unary_method_arg<'a>(
     Ok(arg)
 }
 
+fn ternary_call_args<'a>(
+    whole_expr: &Expr,
+    args: &'a syn::punctuated::Punctuated<Expr, Token![,]>,
+) -> syn::Result<(&'a Expr, &'a Expr, &'a Expr)> {
+    let mut args = args.iter();
+    let Some(first) = args.next() else {
+        return Err(unsupported_nirvash_expr(whole_expr));
+    };
+    let Some(second) = args.next() else {
+        return Err(unsupported_nirvash_expr(whole_expr));
+    };
+    let Some(third) = args.next() else {
+        return Err(unsupported_nirvash_expr(whole_expr));
+    };
+    if args.next().is_some() {
+        return Err(unsupported_nirvash_expr(whole_expr));
+    }
+    Ok((first, second, third))
+}
+
 struct BoolDslContext {
     kind: BoolDslKind,
     binders: Vec<Ident>,
@@ -1161,6 +1182,14 @@ fn collect_bound_update_field_paths(expr: &Expr, paths: &mut BTreeSet<String>) {
         Expr::Field(ExprField { base, .. }) => {
             collect_bound_update_field_paths(base, paths);
         }
+        Expr::Struct(ExprStruct { fields, rest, .. }) => {
+            for field in fields {
+                collect_bound_update_field_paths(&field.expr, paths);
+            }
+            if let Some(rest) = rest {
+                collect_bound_update_field_paths(rest, paths);
+            }
+        }
         Expr::If(expr_if) => {
             collect_bound_update_field_paths(&expr_if.cond, paths);
             if let Some(then_expr) = block_terminal_expr(&expr_if.then_branch) {
@@ -1239,6 +1268,7 @@ fn lower_update_value_expr(expr: &Expr) -> syn::Result<TokenStream2> {
                 Ok(quote! { ::nirvash::UpdateValueExprAst::opaque(#repr) })
             }
         }
+        Expr::Struct(expr_struct) => lower_struct_update_expr(expr, expr_struct),
         Expr::Binary(ExprBinary {
             op: BinOp::Add(_),
             left,
@@ -1326,6 +1356,9 @@ fn lower_update_value_expr(expr: &Expr) -> syn::Result<TokenStream2> {
             }
         }
         Expr::Call(ExprCall { .. }) => {
+            if let Some(lowered) = lower_builtin_update_call(expr) {
+                return lowered;
+            }
             let read_paths = update_pure_call_read_paths(expr);
             match pure_call_kind(expr) {
                 Some(PureCallKind::Builtin) => {
@@ -1354,6 +1387,75 @@ fn lower_update_value_expr(expr: &Expr) -> syn::Result<TokenStream2> {
         }
         _ => Err(unsupported_nirvash_expr(expr)),
     }
+}
+
+fn lower_struct_update_expr(
+    whole_expr: &Expr,
+    expr_struct: &ExprStruct,
+) -> syn::Result<TokenStream2> {
+    let Some(rest) = &expr_struct.rest else {
+        return Err(unsupported_nirvash_expr(whole_expr));
+    };
+    let mut lowered = lower_update_value_expr(rest)?;
+    for field in &expr_struct.fields {
+        let Member::Named(ident) = &field.member else {
+            return Err(unsupported_nirvash_expr(whole_expr));
+        };
+        let field_name = LitStr::new(&ident.to_string(), ident.span());
+        let value = lower_update_value_expr(&field.expr)?;
+        lowered = quote! {
+            ::nirvash::UpdateValueExprAst::record_update(#lowered, #field_name, #value)
+        };
+    }
+    Ok(lowered)
+}
+
+fn lower_builtin_update_call(whole_expr: &Expr) -> Option<syn::Result<TokenStream2>> {
+    let Expr::Call(ExprCall { func, args, .. }) = whole_expr else {
+        return None;
+    };
+    let Expr::Path(ExprPath { path, .. }) = strip_expr_wrappers(func) else {
+        return None;
+    };
+    let mut segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string());
+    let Some(root) = segments.next() else {
+        return None;
+    };
+    let Some(name) = segments.next() else {
+        return None;
+    };
+    if root != "nirvash" || segments.next().is_some() {
+        return None;
+    }
+    let (base, key, value) = match ternary_call_args(whole_expr, args) {
+        Ok(args) => args,
+        Err(err) => return Some(Err(err)),
+    };
+    let base = match lower_update_value_expr(base) {
+        Ok(base) => base,
+        Err(err) => return Some(Err(err)),
+    };
+    let key = match lower_update_value_expr(key) {
+        Ok(key) => key,
+        Err(err) => return Some(Err(err)),
+    };
+    let value = match lower_update_value_expr(value) {
+        Ok(value) => value,
+        Err(err) => return Some(Err(err)),
+    };
+    let lowered = match name.as_str() {
+        "sequence_update" => {
+            quote! { ::nirvash::UpdateValueExprAst::sequence_update(#base, #key, #value) }
+        }
+        "function_update" => {
+            quote! { ::nirvash::UpdateValueExprAst::function_update(#base, #key, #value) }
+        }
+        _ => return None,
+    };
+    Some(Ok(lowered))
 }
 
 fn lower_builtin_update_method(
@@ -1436,7 +1538,7 @@ fn strip_expr_wrappers(expr: &Expr) -> &Expr {
 fn unsupported_nirvash_expr(expr: &Expr) -> syn::Error {
     syn::Error::new_spanned(
         expr,
-        "unsupported nirvash expression; supported forms are `!`, unary `-`, `&&`, `||`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `+`, binary `-`, `*`, `if/else`, `matches!(..)`, field reads, function/method calls, and parentheses",
+        "unsupported nirvash expression; supported forms are `!`, unary `-`, `&&`, `||`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `+`, binary `-`, `*`, `if/else`, `matches!(..)`, field reads, struct update, function/method calls, and parentheses",
     )
 }
 

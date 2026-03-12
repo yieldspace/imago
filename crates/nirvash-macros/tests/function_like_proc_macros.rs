@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nirvash::{BoolExprAst, UpdateAst, UpdateOp, UpdateValueExprAst};
 use nirvash_macros::{nirvash_expr, nirvash_step_expr, nirvash_transition_program};
@@ -10,11 +10,20 @@ enum Phase {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct Config {
+    ready: bool,
+    items: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct State {
     ready: bool,
     count: u8,
     items: BTreeSet<u8>,
     phase: Phase,
+    queue: Vec<u8>,
+    counters: BTreeMap<u8, usize>,
+    config: Config,
 }
 
 impl State {
@@ -65,6 +74,13 @@ fn program() -> nirvash::TransitionProgram<State, Action> {
             set ready <= true;
             set count <= state.count + 1;
             insert items <= 1;
+            set config <= Config {
+                ready: true,
+                items: nirvash::sequence_update(state.config.items.clone(), 0, 1),
+                ..state.config.clone()
+            };
+            set queue <= nirvash::sequence_update(prev.queue.clone(), 1, 1);
+            set counters <= nirvash::function_update(prev.counters.clone(), 1, 2);
         }
         rule cleanup when prev.ready && matches!(action, Action::Remove(_)) => {
             remove items <= 1;
@@ -107,12 +123,24 @@ fn function_like_bool_macros_lower_to_ast() {
         count: 0,
         items: BTreeSet::new(),
         phase: Phase::Idle,
+        queue: vec![0, 0],
+        counters: BTreeMap::new(),
+        config: Config {
+            ready: false,
+            items: vec![0],
+        },
     };
     let next = State {
         ready: true,
         count: 1,
         items: BTreeSet::new(),
         phase: Phase::Busy,
+        queue: vec![0, 1],
+        counters: BTreeMap::from([(1, 2)]),
+        config: Config {
+            ready: true,
+            items: vec![1],
+        },
     };
 
     assert!(expr.is_ast_native());
@@ -133,6 +161,12 @@ fn transition_program_macro_builds_ast_rules() {
         count: 0,
         items: BTreeSet::from([2]),
         phase: Phase::Idle,
+        queue: vec![0, 0],
+        counters: BTreeMap::new(),
+        config: Config {
+            ready: false,
+            items: vec![0],
+        },
     };
     let next = program
         .evaluate(&initial, &Action::Add(7))
@@ -141,6 +175,10 @@ fn transition_program_macro_builds_ast_rules() {
     assert_eq!(next.ready, true);
     assert_eq!(next.count, 1);
     assert_eq!(next.items, BTreeSet::from([1, 2]));
+    assert_eq!(next.config.ready, true);
+    assert_eq!(next.config.items, vec![1]);
+    assert_eq!(next.queue, vec![0, 1]);
+    assert_eq!(next.counters, BTreeMap::from([(1, 2)]));
     assert!(program.rules()[0].is_ast_native());
     assert!(program.rules()[0].guard_ast().is_some());
     assert!(program.rules()[0].update_ast().is_some());
@@ -167,6 +205,68 @@ fn transition_program_macro_builds_ast_rules() {
                     ..
                 }
             ));
+            assert!(matches!(
+                &ops[3],
+                UpdateOp::Assign {
+                    value_ast: UpdateValueExprAst::RecordUpdate { .. },
+                    ..
+                }
+            ));
+            match &ops[3] {
+                UpdateOp::Assign {
+                    value_ast: UpdateValueExprAst::RecordUpdate { base, field, value },
+                    ..
+                } => {
+                    assert_eq!(*field, "items");
+                    assert!(matches!(
+                        value.as_ref(),
+                        UpdateValueExprAst::SequenceUpdate { .. }
+                    ));
+                    assert!(matches!(
+                        base.as_ref(),
+                        UpdateValueExprAst::RecordUpdate {
+                            field: "ready",
+                            value,
+                            ..
+                        } if matches!(value.as_ref(), UpdateValueExprAst::Literal { .. })
+                    ));
+                }
+                other => panic!("unexpected config update ast: {other:?}"),
+            }
+            assert!(matches!(
+                &ops[4],
+                UpdateOp::Assign {
+                    value_ast: UpdateValueExprAst::SequenceUpdate { .. },
+                    ..
+                }
+            ));
+            match &ops[4] {
+                UpdateOp::Assign {
+                    value_ast: UpdateValueExprAst::SequenceUpdate { index, value, .. },
+                    ..
+                } => {
+                    assert!(matches!(index.as_ref(), UpdateValueExprAst::Literal { .. }));
+                    assert!(matches!(value.as_ref(), UpdateValueExprAst::Literal { .. }));
+                }
+                other => panic!("unexpected queue update ast: {other:?}"),
+            }
+            assert!(matches!(
+                &ops[5],
+                UpdateOp::Assign {
+                    value_ast: UpdateValueExprAst::FunctionUpdate { .. },
+                    ..
+                }
+            ));
+            match &ops[5] {
+                UpdateOp::Assign {
+                    value_ast: UpdateValueExprAst::FunctionUpdate { key, value, .. },
+                    ..
+                } => {
+                    assert!(matches!(key.as_ref(), UpdateValueExprAst::Literal { .. }));
+                    assert!(matches!(value.as_ref(), UpdateValueExprAst::Literal { .. }));
+                }
+                other => panic!("unexpected counters update ast: {other:?}"),
+            }
         }
         UpdateAst::Choice(_) => panic!("fixture program should stay deterministic"),
     }
@@ -176,6 +276,12 @@ fn transition_program_macro_builds_ast_rules() {
         count: 1,
         items: BTreeSet::from([1, 2]),
         phase: Phase::Busy,
+        queue: vec![0, 1],
+        counters: BTreeMap::from([(1, 2)]),
+        config: Config {
+            ready: true,
+            items: vec![1],
+        },
     };
     let cleaned = program
         .evaluate(&cleanup_state, &Action::Remove(1))
