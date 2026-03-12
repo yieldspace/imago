@@ -40,8 +40,10 @@ pub use fairness::Fairness;
 pub use inventory;
 pub use ltl::Ltl;
 pub use model::{
-    Counterexample, CounterexampleKind, ExplorationMode, ModelBackend, ModelCheckConfig,
-    ModelCheckError, ModelCheckResult,
+    Counterexample, CounterexampleKind, ExplicitBoundedLassoStrategy, ExplicitModelCheckOptions,
+    ExplicitReachabilityStrategy, ExplicitStateStorage, ExplorationMode, ModelBackend,
+    ModelCheckConfig, ModelCheckError, ModelCheckResult, SymbolicBoundedLassoEncoding,
+    SymbolicModelCheckOptions, SymbolicSuccessorStrategy,
 };
 pub use predicate::{
     BoolExpr, BoolExprAst, GuardAst, GuardExpr, GuardValueExpr, QuantifierKind, StateExpr,
@@ -1111,13 +1113,10 @@ mod tests {
         #[test]
         fn full_reachable_graph_snapshot_ignores_doc_only_limits() {
             let model_case = ModelCase::default().with_doc_checker_config(ModelCheckConfig {
-                backend: None,
-                exploration: ExplorationMode::ReachableGraph,
-                bounded_depth: None,
                 max_states: Some(1),
                 max_transitions: Some(1),
-                check_deadlocks: true,
                 stop_on_first_violation: false,
+                ..ModelCheckConfig::reachable_graph()
             });
             let checker = ModelChecker::for_case(&TestSpec, model_case);
 

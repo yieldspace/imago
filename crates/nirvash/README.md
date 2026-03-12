@@ -14,14 +14,27 @@ bounded domain、relation kernel、transition DSL、LTL/fairness、conformance t
 
 通常の runtime crate は `nirvash` だけを通常依存に取り、formal / doc / test 側だけが `nirvash-check` を使います。`z3` は `nirvash-backends` の通常依存として formal stack に常設されますが、`imagod` の通常依存木には入れません。
 
-現状の symbolic backend は 2 系統ですが、どちらも candidate graph の事前全列挙には依存しません。
+現状の backend semantics は次のとおりです。
 
+- `ModelBackend::Explicit + ExplorationMode::ReachableGraph`
+  - `ExplicitModelCheckOptions::current()` に対応する exact in-memory BFS reachable graph
+- `ModelBackend::Explicit + ExplorationMode::BoundedLasso`
+  - `ExplicitModelCheckOptions::current()` に対応する explicit bounded prefix / lasso enumeration
 - `ModelBackend::Symbolic + ExplorationMode::ReachableGraph`
-  - `TransitionProgram` と `SymbolicStateSpec` / `SymbolicSortSpec` を使う relation-based safety path
+  - `TransitionProgram` と `SymbolicStateSpec` / `SymbolicSortSpec` を使い、transition relation を solver で解く successor enumeration safety path
 - `ModelBackend::Symbolic + ExplorationMode::BoundedLasso`
-  - relation-discovered graph 上の bounded trace / temporal path
+  - `SymbolicModelCheckOptions::current()` に対応する direct SMT bounded-lasso unrolling + loop selector
 
-どちらも AST-native DSL を要求し、legacy closure path や未登録 helper / effect は fail-closed します。schema validation は direct field read だけでなく pure call の receiver / argument read path、property、fairness にも掛かり、state schema には sort metadata も保持されます。
+symbolic backend は AST-native DSL を要求し、legacy closure path や未登録 helper / effect は fail-closed します。schema validation は direct field read だけでなく pure call の receiver / argument read path、property、fairness にも掛かり、state schema には sort metadata も保持されます。
+
+`ModelCheckConfig` は共通 knob に加えて backend-specific option を持ちます。
+
+- `explicit: ExplicitModelCheckOptions`
+  - 現時点では `state_storage = InMemoryExact`、`reachability = BreadthFirst`、`bounded_lasso = EnumeratedPaths`
+- `symbolic: SymbolicModelCheckOptions`
+  - 現時点では `successors = SolverEnumeration`、`bounded_lasso = DirectSmt`
+
+これらは current implementation を present tense で表す public contract で、Milestone 11/12 の explicit scaling / advanced symbolic work はこの surface に拡張していきます。
 
 ## What It Provides
 
