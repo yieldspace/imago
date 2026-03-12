@@ -699,6 +699,12 @@ mod tests {
                 left(state) => matches!(state, SymmetryState::Left)
             )))]
         }
+
+        fn fairness(&self) -> Vec<Fairness<Self::State, Self::Action>> {
+            vec![Fairness::weak(crate::step!(
+                swap(_prev, action, _next) => matches!(action, SymmetryAction::Swap)
+            ))]
+        }
     }
 
     impl ModelCaseSource for SymmetrySpec {
@@ -1226,10 +1232,19 @@ mod tests {
         }
 
         #[test]
-        fn symmetry_with_temporal_properties_fails_closed() {
+        fn symmetry_supports_temporal_properties_and_fairness_in_reachable_graph() {
             let spec = SymmetrySpec;
-            let err = ModelChecker::new(&spec).check_properties().unwrap_err();
-            assert!(matches!(err, ModelCheckError::UnsupportedConfiguration(_)));
+            let result = ModelChecker::new(&spec).check_properties().unwrap();
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn symmetry_supports_temporal_properties_and_fairness_in_bounded_lasso() {
+            let spec = SymmetrySpec;
+            let result = ModelChecker::with_config(&spec, ModelCheckConfig::bounded_lasso(3))
+                .check_properties()
+                .unwrap();
+            assert!(result.is_ok());
         }
     }
 

@@ -284,14 +284,6 @@ where
     fn check_properties_graph(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        if self.model_case.symmetry().is_some()
-            && (!self.spec.properties().is_empty() || !self.spec.fairness().is_empty())
-        {
-            return Err(ModelCheckError::UnsupportedConfiguration(
-                "symmetry reduction cannot be combined with temporal properties or fairness",
-            ));
-        }
-
         let graph = self.build_reachable_graph()?;
         self.ensure_untruncated(&graph)?;
         let traces = self.graph_lasso_traces(&graph);
@@ -342,14 +334,6 @@ where
     fn check_properties_lasso(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        if self.model_case.symmetry().is_some()
-            && (!self.spec.properties().is_empty() || !self.spec.fairness().is_empty())
-        {
-            return Err(ModelCheckError::UnsupportedConfiguration(
-                "symmetry reduction cannot be combined with temporal properties or fairness",
-            ));
-        }
-
         let traces = self.bounded_lasso_traces()?;
         let mut best = None;
         for property in self.spec.properties() {

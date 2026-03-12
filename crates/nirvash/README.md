@@ -26,6 +26,7 @@ bounded domain、relation kernel、transition DSL、LTL/fairness、conformance t
   - `SymbolicModelCheckOptions::current()` に対応する direct SMT bounded-lasso unrolling + loop selector
 
 symbolic backend は AST-native DSL を要求し、legacy closure path や未登録 helper / effect は fail-closed します。schema validation は direct field read だけでなく pure call の receiver / argument read path、property、fairness にも掛かり、state schema には sort metadata も保持されます。
+explicit backend は exact state equality ベースの symmetry canonicalization を使い、temporal property / fairness と併用できます。
 
 `ModelCheckConfig` は共通 knob に加えて backend-specific option を持ちます。
 
