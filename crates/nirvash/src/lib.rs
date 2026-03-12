@@ -14,6 +14,7 @@ mod symbolic_state;
 mod symmetry;
 mod system;
 mod trace;
+mod update_helpers;
 
 pub use conformance::{
     DynamicTestCase, NegativeWitness, PositiveWitness, ProtocolConformanceSpec,
@@ -68,6 +69,7 @@ pub use system::{
     TemporalSpec, TransitionSystem,
 };
 pub use trace::{Trace, TraceStep};
+pub use update_helpers::{function_update, sequence_update};
 
 #[cfg(test)]
 mod tests {

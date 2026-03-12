@@ -27,6 +27,7 @@ bounded domain、relation kernel、transition DSL、LTL/fairness、conformance t
 
 symbolic backend は AST-native DSL を要求し、legacy closure path や未登録 helper / effect は fail-closed します。schema validation は direct field read だけでなく pure call の receiver / argument read path、property、fairness にも掛かり、state schema には sort metadata も保持されます。
 explicit backend は exact state equality ベースの symmetry canonicalization を使い、temporal property / fairness と併用できます。
+AST-native surface には arithmetic minimum set、projection/payload access、set operator、structural quantification/comprehension、bounded choice、immutable aggregate update が入り、update 側では `nirvash::sequence_update` / `nirvash::function_update` と Rust の struct update syntax をそのまま使えます。
 
 `ModelCheckConfig` は共通 knob に加えて backend-specific option を持ちます。
 
