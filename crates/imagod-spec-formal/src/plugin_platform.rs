@@ -1,6 +1,4 @@
-use nirvash_core::{
-    BoolExpr, Fairness, Ltl, ModelCase, RelSet, Relation2, StepExpr, TransitionSystem,
-};
+use nirvash::{BoolExpr, Fairness, Ltl, ModelCase, RelSet, Relation2, StepExpr, TransitionSystem};
 use nirvash_macros::{
     ActionVocabulary, RelAtom, RelationalState, Signature as FormalSignature, fairness, invariant,
     nirvash_expr, nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
@@ -282,10 +280,25 @@ impl PluginPlatformSpec {
     }
 }
 
-nirvash_core::signature_spec!(
+nirvash::signature_spec!(
     PluginPlatformStateSignatureSpec for PluginPlatformState,
     representatives = crate::state_domain::reachable_state_domain(&PluginPlatformSpec::new())
 );
+
+nirvash::symbolic_state_spec!(for PluginPlatformState {
+    registered_plugins: RelSet<PluginAtom>,
+    plugin_kinds: Relation2<PluginAtom, PluginKindAtom>,
+    requires: Relation2<PluginAtom, ProviderAtom>,
+    provides: Relation2<ProviderAtom, InterfaceAtom>,
+    imports: Relation2<PluginAtom, InterfaceAtom>,
+    resolved_provider: Relation2<PluginAtom, ProviderAtom>,
+    missing_dependencies: Relation2<PluginAtom, ProviderAtom>,
+    cycle_edges: Relation2<ProviderAtom, ProviderAtom>,
+    allowed_dep_calls: Relation2<PluginAtom, ProviderAtom>,
+    allowed_wasi_calls: Relation2<PluginAtom, WasiCapabilityAtom>,
+    privileged_plugins: RelSet<PluginAtom>,
+    http_outbound: Relation2<PluginAtom, HttpTargetAtom>,
+});
 
 fn plugin_capability_model_cases() -> Vec<ModelCase<PluginPlatformState, PluginPlatformAction>> {
     vec![ModelCase::default().with_check_deadlocks(false)]
@@ -399,12 +412,12 @@ impl TransitionSystem for PluginPlatformSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule register_plugin when register_plugin_kind(action).is_some()
                 && prev.registered_plugins.no() => {
@@ -589,7 +602,7 @@ const _: () = ();
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nirvash_core::ModelChecker;
+    use nirvash_check::ModelChecker;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum LegacyDependencyGraphClass {

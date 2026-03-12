@@ -194,21 +194,21 @@ struct SpecDoc {
     model_cases: Option<String>,
     subsystems: Vec<String>,
     registrations: BTreeMap<RegistrationKind, Vec<String>>,
-    doc_graphs: Vec<nirvash_core::DocGraphCase>,
+    doc_graphs: Vec<nirvash::DocGraphCase>,
 }
 
 impl SpecDoc {
-    fn viz_bundle(&self) -> nirvash_core::SpecVizBundle {
-        let metadata = nirvash_core::SpecVizMetadata {
+    fn viz_bundle(&self) -> nirvash::SpecVizBundle {
+        let metadata = nirvash::SpecVizMetadata {
             kind: self.kind.map(|kind| match kind {
-                SpecKind::Subsystem => nirvash_core::SpecVizKind::Subsystem,
-                SpecKind::System => nirvash_core::SpecVizKind::System,
+                SpecKind::Subsystem => nirvash::SpecVizKind::Subsystem,
+                SpecKind::System => nirvash::SpecVizKind::System,
             }),
             state_ty: self.state_ty.clone(),
             action_ty: self.action_ty.clone(),
             model_cases: self.model_cases.clone(),
             subsystems: self.subsystems.clone(),
-            registrations: nirvash_core::SpecVizRegistrationSet {
+            registrations: nirvash::SpecVizRegistrationSet {
                 invariants: self
                     .registrations
                     .get(&RegistrationKind::Invariant)
@@ -240,10 +240,10 @@ impl SpecDoc {
                     .cloned()
                     .unwrap_or_default(),
             },
-            policy: nirvash_core::VizPolicy::default(),
+            policy: nirvash::VizPolicy::default(),
         };
 
-        nirvash_core::SpecVizBundle::from_doc_graph_spec(
+        nirvash::SpecVizBundle::from_doc_graph_spec(
             self.tail_ident.clone(),
             metadata,
             self.doc_graphs.clone(),
@@ -671,7 +671,7 @@ fn collect_runtime_graphs(
     manifest_dir: &Path,
     out_dir: &Path,
     spec_paths: &[Vec<String>],
-) -> Result<Vec<nirvash_core::SpecVizBundle>, DynError> {
+) -> Result<Vec<nirvash::SpecVizBundle>, DynError> {
     let manifest_path = manifest_dir.join("Cargo.toml");
     if !manifest_path.exists() {
         return Ok(Vec::new());
@@ -708,12 +708,12 @@ fn collect_runtime_graphs(
                 current_package.name
             ))
         })?;
-    let nirvash_core_manifest = metadata
+    let nirvash_manifest = metadata
         .packages
         .iter()
-        .find(|package| package.name == "nirvash-core")
+        .find(|package| package.name == "nirvash")
         .and_then(|package| package.manifest_path.parent().map(Path::to_path_buf))
-        .ok_or_else(|| err("failed to locate `nirvash-core` package in cargo metadata"))?;
+        .ok_or_else(|| err("failed to locate `nirvash` package in cargo metadata"))?;
 
     let runner_dir = out_dir.join("nirvash-doc-runner");
     let runner_src_dir = runner_dir.join("src");
@@ -728,7 +728,7 @@ fn collect_runtime_graphs(
     let runner_main = runner_src_dir.join("main.rs");
     fs::write(
         &runner_manifest,
-        render_runner_manifest(manifest_dir, &current_package.name, &nirvash_core_manifest),
+        render_runner_manifest(manifest_dir, &current_package.name, &nirvash_manifest),
     )
     .map_err(|error| {
         err(format!(
@@ -823,11 +823,11 @@ fn cargo_binary() -> String {
 fn render_runner_manifest(
     manifest_dir: &Path,
     current_package_name: &str,
-    nirvash_core_dir: &Path,
+    nirvash_dir: &Path,
 ) -> String {
     format!(
-        "[package]\nname = \"nirvash-doc-runner\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n[dependencies]\nserde_json = \"1\"\nnirvash_core = {{ package = \"nirvash-core\", path = \"{}\" }}\ndoc_target = {{ package = \"{}\", path = \"{}\" }}\n\n[profile.dev]\ndebug = 0\nincremental = false\n",
-        escape_toml_path(nirvash_core_dir),
+        "[package]\nname = \"nirvash-doc-runner\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n[dependencies]\nserde_json = \"1\"\nnirvash = {{ path = \"{}\" }}\ndoc_target = {{ package = \"{}\", path = \"{}\" }}\n\n[profile.dev]\ndebug = 0\nincremental = false\n",
+        escape_toml_path(nirvash_dir),
         escape_toml_str(current_package_name),
         escape_toml_path(manifest_dir),
     )
@@ -841,7 +841,7 @@ fn render_runner_main(spec_paths: &[Vec<String>]) -> String {
         output.push('\n');
     }
     output.push_str(
-        "    let specs = nirvash_core::collect_spec_viz_bundles();\n    println!(\"{}\", serde_json::to_string(&specs).expect(\"serialize doc graphs\"));\n}\n",
+        "    let specs = nirvash::collect_spec_viz_bundles();\n    println!(\"{}\", serde_json::to_string(&specs).expect(\"serialize doc graphs\"));\n}\n",
     );
     output
 }
@@ -1188,7 +1188,7 @@ fn render_fragment(spec: &SpecDoc) -> String {
     render_viz_fragment(&spec.viz_bundle())
 }
 
-fn render_viz_fragment(bundle: &nirvash_core::SpecVizBundle) -> String {
+fn render_viz_fragment(bundle: &nirvash::SpecVizBundle) -> String {
     let mut output = String::new();
     output.push_str(&render_overview_section(bundle));
     output.push_str("\n\n");
@@ -1204,18 +1204,18 @@ fn render_viz_fragment(bundle: &nirvash_core::SpecVizBundle) -> String {
     output
 }
 
-fn render_model_backend(backend: nirvash_core::ModelBackend) -> &'static str {
+fn render_model_backend(backend: nirvash::ModelBackend) -> &'static str {
     match backend {
-        nirvash_core::ModelBackend::Explicit => "explicit",
-        nirvash_core::ModelBackend::Symbolic => "symbolic",
+        nirvash::ModelBackend::Explicit => "explicit",
+        nirvash::ModelBackend::Symbolic => "symbolic",
     }
 }
 
-fn render_overview_section(bundle: &nirvash_core::SpecVizBundle) -> String {
+fn render_overview_section(bundle: &nirvash::SpecVizBundle) -> String {
     let mut output = String::from("## Overview\n\n");
     let kind = match bundle.metadata.kind {
-        Some(nirvash_core::SpecVizKind::Subsystem) => "subsystem_spec",
-        Some(nirvash_core::SpecVizKind::System) => "system_spec",
+        Some(nirvash::SpecVizKind::Subsystem) => "subsystem_spec",
+        Some(nirvash::SpecVizKind::System) => "system_spec",
         None => "unknown",
     };
     let model_cases = bundle.metadata.model_cases.as_deref().unwrap_or("default");
@@ -1260,7 +1260,7 @@ fn render_overview_section(bundle: &nirvash_core::SpecVizBundle) -> String {
     output
 }
 
-fn render_reachability_section(bundle: &nirvash_core::SpecVizBundle) -> String {
+fn render_reachability_section(bundle: &nirvash::SpecVizBundle) -> String {
     let mut output = String::from("## Reachability\n\n");
     for case in &bundle.cases {
         output.push_str(&format!("### {}\n\n", case.label));
@@ -1307,7 +1307,7 @@ fn render_reachability_section(bundle: &nirvash_core::SpecVizBundle) -> String {
     output
 }
 
-fn render_scenario_traces_section(bundle: &nirvash_core::SpecVizBundle) -> String {
+fn render_scenario_traces_section(bundle: &nirvash::SpecVizBundle) -> String {
     let mut output = String::from("## Scenario Traces\n\n");
     for case in &bundle.cases {
         output.push_str(&format!("### {}\n\n", case.label));
@@ -1341,7 +1341,7 @@ fn render_scenario_traces_section(bundle: &nirvash_core::SpecVizBundle) -> Strin
     output
 }
 
-fn render_process_view_section(bundle: &nirvash_core::SpecVizBundle) -> String {
+fn render_process_view_section(bundle: &nirvash::SpecVizBundle) -> String {
     let mut output = String::from("## Process View\n\n");
     for case in &bundle.cases {
         output.push_str(&format!("### {}\n\n", case.label));
@@ -1351,7 +1351,7 @@ fn render_process_view_section(bundle: &nirvash_core::SpecVizBundle) -> String {
     output
 }
 
-fn render_data_model_section(bundle: &nirvash_core::SpecVizBundle) -> String {
+fn render_data_model_section(bundle: &nirvash::SpecVizBundle) -> String {
     let mut output = String::from("## Data Model\n\n");
     output.push_str("### Types\n\n");
     output.push_str(&format!(
@@ -1445,10 +1445,10 @@ fn render_named_block(output: &mut String, title: &str, values: &[String]) {
 }
 
 fn render_viz_state_graph_mermaid(
-    bundle: &nirvash_core::SpecVizBundle,
-    case: &nirvash_core::SpecVizCase,
-    graph: &nirvash_core::ReducedDocGraph,
-    visible_edges: &[&nirvash_core::ReducedDocGraphEdge],
+    bundle: &nirvash::SpecVizBundle,
+    case: &nirvash::SpecVizCase,
+    graph: &nirvash::ReducedDocGraph,
+    visible_edges: &[&nirvash::ReducedDocGraphEdge],
 ) -> String {
     let mut output = String::from("stateDiagram-v2\n");
     output.push_str(&format!(
@@ -1496,9 +1496,9 @@ fn render_viz_state_graph_mermaid(
 }
 
 fn render_viz_sequence_diagram_mermaid(
-    bundle: &nirvash_core::SpecVizBundle,
-    case: &nirvash_core::SpecVizCase,
-    scenario: &nirvash_core::VizScenario,
+    bundle: &nirvash::SpecVizBundle,
+    case: &nirvash::SpecVizCase,
+    scenario: &nirvash::VizScenario,
 ) -> String {
     let actors = if scenario.actors.is_empty() {
         vec!["Spec".to_owned()]
@@ -1564,7 +1564,7 @@ fn render_viz_sequence_diagram_mermaid(
     output
 }
 
-fn render_viz_step_table(scenario: &nirvash_core::VizScenario) -> String {
+fn render_viz_step_table(scenario: &nirvash::VizScenario) -> String {
     let mut output = String::from("| # | transition | action |\n| --- | --- | --- |\n");
     for (index, step) in scenario.steps.iter().enumerate() {
         output.push_str(&format!(
@@ -1578,7 +1578,7 @@ fn render_viz_step_table(scenario: &nirvash_core::VizScenario) -> String {
     output
 }
 
-fn render_case_process_view(case: &nirvash_core::SpecVizCase) -> String {
+fn render_case_process_view(case: &nirvash::SpecVizCase) -> String {
     let mut output = String::new();
     output.push_str(&format!("case {}:\n", case.label));
     if !case.loop_groups.is_empty() {
@@ -1632,19 +1632,19 @@ fn render_case_process_view(case: &nirvash_core::SpecVizCase) -> String {
     output
 }
 
-fn viz_scenario_kind_label(kind: nirvash_core::VizScenarioKind) -> &'static str {
+fn viz_scenario_kind_label(kind: nirvash::VizScenarioKind) -> &'static str {
     match kind {
-        nirvash_core::VizScenarioKind::DeadlockPath => "deadlock_shortest_path",
-        nirvash_core::VizScenarioKind::FocusPath => "focus_predicate_shortest_path",
-        nirvash_core::VizScenarioKind::CycleWitness => "cycle_witness",
-        nirvash_core::VizScenarioKind::HappyPath => "happy_path",
+        nirvash::VizScenarioKind::DeadlockPath => "deadlock_shortest_path",
+        nirvash::VizScenarioKind::FocusPath => "focus_predicate_shortest_path",
+        nirvash::VizScenarioKind::CycleWitness => "cycle_witness",
+        nirvash::VizScenarioKind::HappyPath => "happy_path",
     }
 }
 
 fn render_state_graph_section(spec: &SpecDoc) -> String {
     let mut output = String::from("## State Graph\n\n");
     for case in &spec.doc_graphs {
-        let reduced_graph = ::nirvash_core::reduce_doc_graph(&case.graph);
+        let reduced_graph = ::nirvash::reduce_doc_graph(&case.graph);
         let visible_edges = visible_reduced_edges(&reduced_graph);
         output.push_str(&format!("### {}\n\n", case.label));
         if reduced_graph.truncated {
@@ -1750,8 +1750,8 @@ fn render_algorithm_view_section(spec: &SpecDoc) -> String {
 
 fn render_state_graph_mermaid(
     spec: &SpecDoc,
-    graph: &nirvash_core::ReducedDocGraph,
-    visible_edges: &[&nirvash_core::ReducedDocGraphEdge],
+    graph: &nirvash::ReducedDocGraph,
+    visible_edges: &[&nirvash::ReducedDocGraphEdge],
 ) -> String {
     let mut output = String::from("stateDiagram-v2\n");
     output.push_str(&format!(
@@ -1798,7 +1798,7 @@ fn render_state_graph_mermaid(
     output
 }
 
-fn render_sequence_diagram_mermaid(spec: &SpecDoc, case: &nirvash_core::DocGraphCase) -> String {
+fn render_sequence_diagram_mermaid(spec: &SpecDoc, case: &nirvash::DocGraphCase) -> String {
     let graph = &case.graph;
     let actors = sequence_case_actor_names(case);
     let mut output = String::from("sequenceDiagram\n");
@@ -1864,7 +1864,7 @@ fn render_sequence_participants(output: &mut String, actors: &[String]) {
 
 fn render_initial_state_note(
     output: &mut String,
-    graph: &nirvash_core::DocGraphSnapshot,
+    graph: &nirvash::DocGraphSnapshot,
     actors: &[String],
     state_index: usize,
     indent: usize,
@@ -1879,7 +1879,7 @@ fn render_initial_state_note(
 
 fn render_sequence_from_state(
     output: &mut String,
-    graph: &nirvash_core::DocGraphSnapshot,
+    graph: &nirvash::DocGraphSnapshot,
     actors: &[String],
     state_index: usize,
     path_stack: &mut Vec<usize>,
@@ -1941,9 +1941,9 @@ fn render_sequence_from_state(
 
 fn render_sequence_edge_branch(
     output: &mut String,
-    graph: &nirvash_core::DocGraphSnapshot,
+    graph: &nirvash::DocGraphSnapshot,
     actors: &[String],
-    edge: &nirvash_core::DocGraphEdge,
+    edge: &nirvash::DocGraphEdge,
     path_stack: &mut Vec<usize>,
     expanded_states: &mut HashSet<usize>,
     indent: usize,
@@ -1972,10 +1972,10 @@ fn render_sequence_edge_branch(
 
 fn render_sequence_loop(
     output: &mut String,
-    graph: &nirvash_core::DocGraphSnapshot,
+    graph: &nirvash::DocGraphSnapshot,
     actors: &[String],
     source: usize,
-    edge: &nirvash_core::DocGraphEdge,
+    edge: &nirvash::DocGraphEdge,
     indent: usize,
 ) {
     output.push_str(&format!(
@@ -1995,10 +1995,10 @@ fn render_sequence_loop(
 
 fn render_sequence_edge_step(
     output: &mut String,
-    graph: &nirvash_core::DocGraphSnapshot,
+    graph: &nirvash::DocGraphSnapshot,
     actors: &[String],
     source: usize,
-    edge: &nirvash_core::DocGraphEdge,
+    edge: &nirvash::DocGraphEdge,
     indent: usize,
 ) {
     if edge.interaction_steps.len() > 1 {
@@ -2018,7 +2018,7 @@ fn render_sequence_edge_step(
 fn render_parallel_sequence_steps(
     output: &mut String,
     actors: &[String],
-    edge: &nirvash_core::DocGraphEdge,
+    edge: &nirvash::DocGraphEdge,
     indent: usize,
 ) {
     for (index, step) in edge.interaction_steps.iter().enumerate() {
@@ -2037,7 +2037,7 @@ fn render_parallel_sequence_steps(
 fn render_sequence_messages(
     output: &mut String,
     actors: &[String],
-    steps: &[nirvash_core::DocGraphInteractionStep],
+    steps: &[nirvash::DocGraphInteractionStep],
     indent: usize,
 ) {
     for step in steps {
@@ -2067,7 +2067,7 @@ fn render_sequence_messages(
 
 fn render_sequence_terminal_note(
     output: &mut String,
-    graph: &nirvash_core::DocGraphSnapshot,
+    graph: &nirvash::DocGraphSnapshot,
     actors: &[String],
     state_index: usize,
     indent: usize,
@@ -2086,7 +2086,7 @@ fn render_sequence_terminal_note(
 }
 
 fn render_sequence_initial_note_label(
-    graph: &nirvash_core::DocGraphSnapshot,
+    graph: &nirvash::DocGraphSnapshot,
     state_index: usize,
 ) -> String {
     let mut lines = vec![format!("initial S{state_index}")];
@@ -2101,7 +2101,7 @@ fn render_sequence_initial_note_label(
 }
 
 fn render_sequence_transition_note(
-    graph: &nirvash_core::DocGraphSnapshot,
+    graph: &nirvash::DocGraphSnapshot,
     source: usize,
     target: usize,
 ) -> String {
@@ -2126,9 +2126,9 @@ fn render_sequence_transition_note(
 }
 
 fn sorted_doc_graph_edges(
-    graph: &nirvash_core::DocGraphSnapshot,
+    graph: &nirvash::DocGraphSnapshot,
     state_index: usize,
-) -> Vec<&nirvash_core::DocGraphEdge> {
+) -> Vec<&nirvash::DocGraphEdge> {
     let mut edges = graph.edges[state_index].iter().collect::<Vec<_>>();
     edges.sort_by(|left, right| {
         left.label
@@ -2138,7 +2138,7 @@ fn sorted_doc_graph_edges(
     edges
 }
 
-fn sequence_case_actor_names(case: &nirvash_core::DocGraphCase) -> Vec<String> {
+fn sequence_case_actor_names(case: &nirvash::DocGraphCase) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut ordered = Vec::new();
     for outgoing in &case.graph.edges {
@@ -2165,7 +2165,7 @@ fn sequence_note_scope(actors: &[String]) -> String {
     }
 }
 
-fn interaction_step_branch_label(step: &nirvash_core::DocGraphInteractionStep) -> String {
+fn interaction_step_branch_label(step: &nirvash::DocGraphInteractionStep) -> String {
     match (&step.from, &step.to) {
         (Some(from), Some(to)) => {
             format!(
@@ -2185,9 +2185,7 @@ fn sequence_indent(level: usize) -> String {
     "    ".repeat(level)
 }
 
-fn visible_reduced_edges(
-    graph: &nirvash_core::ReducedDocGraph,
-) -> Vec<&nirvash_core::ReducedDocGraphEdge> {
+fn visible_reduced_edges(graph: &nirvash::ReducedDocGraph) -> Vec<&nirvash::ReducedDocGraphEdge> {
     let non_self_outgoing = graph
         .edges
         .iter()
@@ -2203,8 +2201,8 @@ fn visible_reduced_edges(
 }
 
 fn render_state_node_label(
-    graph: &nirvash_core::ReducedDocGraph,
-    state: &nirvash_core::ReducedDocGraphNode,
+    graph: &nirvash::ReducedDocGraph,
+    state: &nirvash::ReducedDocGraphNode,
 ) -> String {
     let mut parts = Vec::new();
     if state.is_deadlock {
@@ -2216,8 +2214,8 @@ fn render_state_node_label(
 }
 
 fn state_display_lines(
-    graph: &nirvash_core::ReducedDocGraph,
-    state: &nirvash_core::ReducedDocGraphNode,
+    graph: &nirvash::ReducedDocGraph,
+    state: &nirvash::ReducedDocGraphNode,
 ) -> Vec<String> {
     if let Some(predecessor) = preferred_predecessor(graph, state.original_index)
         && let Some(previous_state) = graph
@@ -2236,7 +2234,7 @@ fn state_display_lines(
     )
 }
 
-fn render_algorithm_view(spec: &SpecDoc, case: &nirvash_core::DocGraphCase) -> String {
+fn render_algorithm_view(spec: &SpecDoc, case: &nirvash::DocGraphCase) -> String {
     let graph = &case.graph;
     let mut output = String::new();
     output.push_str(&format!("case {}:\n", case.label));
@@ -2289,7 +2287,7 @@ fn render_algorithm_view(spec: &SpecDoc, case: &nirvash_core::DocGraphCase) -> S
     output
 }
 
-fn process_case_actor_names(case: &nirvash_core::DocGraphCase) -> Vec<String> {
+fn process_case_actor_names(case: &nirvash::DocGraphCase) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut ordered = Vec::new();
     for outgoing in &case.graph.edges {
@@ -2310,7 +2308,7 @@ fn process_case_actor_names(case: &nirvash_core::DocGraphCase) -> Vec<String> {
 
 fn render_process_block(
     output: &mut String,
-    graph: &nirvash_core::DocGraphSnapshot,
+    graph: &nirvash::DocGraphSnapshot,
     actor_filter: Option<&str>,
     actor_label: &str,
     indent: usize,
@@ -2331,7 +2329,7 @@ fn render_process_block(
 
 fn render_process_entry_points(
     output: &mut String,
-    graph: &nirvash_core::DocGraphSnapshot,
+    graph: &nirvash::DocGraphSnapshot,
     actor_filter: Option<&str>,
     indent: usize,
 ) {
@@ -2373,7 +2371,7 @@ fn render_process_entry_points(
 
 fn render_process_from_state(
     output: &mut String,
-    graph: &nirvash_core::DocGraphSnapshot,
+    graph: &nirvash::DocGraphSnapshot,
     actor_filter: Option<&str>,
     state_index: usize,
     path_stack: &mut Vec<usize>,
@@ -2430,9 +2428,9 @@ fn render_process_from_state(
 
 fn render_process_edge_branch(
     output: &mut String,
-    graph: &nirvash_core::DocGraphSnapshot,
+    graph: &nirvash::DocGraphSnapshot,
     actor_filter: Option<&str>,
-    edge: &nirvash_core::DocGraphEdge,
+    edge: &nirvash::DocGraphEdge,
     path_stack: &mut Vec<usize>,
     expanded_states: &mut HashSet<usize>,
     indent: usize,
@@ -2463,7 +2461,7 @@ fn render_process_edge_branch(
 fn render_process_edge_steps(
     output: &mut String,
     actor_filter: Option<&str>,
-    edge: &nirvash_core::DocGraphEdge,
+    edge: &nirvash::DocGraphEdge,
     indent: usize,
 ) {
     let steps = edge
@@ -2485,20 +2483,20 @@ fn render_process_edge_steps(
     }
 }
 
-fn render_process_step(step: &nirvash_core::DocGraphProcessStep) -> String {
+fn render_process_step(step: &nirvash::DocGraphProcessStep) -> String {
     let verb = match step.kind {
-        nirvash_core::DocGraphProcessKind::Do => "do",
-        nirvash_core::DocGraphProcessKind::Send => "send",
-        nirvash_core::DocGraphProcessKind::Receive => "receive",
-        nirvash_core::DocGraphProcessKind::Wait => "wait",
-        nirvash_core::DocGraphProcessKind::Emit => "emit",
+        nirvash::DocGraphProcessKind::Do => "do",
+        nirvash::DocGraphProcessKind::Send => "send",
+        nirvash::DocGraphProcessKind::Receive => "receive",
+        nirvash::DocGraphProcessKind::Wait => "wait",
+        nirvash::DocGraphProcessKind::Emit => "emit",
     };
     format!("{verb} {}", step.label)
 }
 
-fn graph_has_cycle(graph: &nirvash_core::DocGraphSnapshot) -> bool {
+fn graph_has_cycle(graph: &nirvash::DocGraphSnapshot) -> bool {
     fn visit(
-        graph: &nirvash_core::DocGraphSnapshot,
+        graph: &nirvash::DocGraphSnapshot,
         state_index: usize,
         visiting: &mut HashSet<usize>,
         visited: &mut HashSet<usize>,
@@ -2550,7 +2548,7 @@ fn process_indent(level: usize) -> String {
     "  ".repeat(level)
 }
 
-fn preferred_predecessor(graph: &nirvash_core::ReducedDocGraph, target: usize) -> Option<usize> {
+fn preferred_predecessor(graph: &nirvash::ReducedDocGraph, target: usize) -> Option<usize> {
     let mut candidates = graph
         .edges
         .iter()
@@ -2562,8 +2560,8 @@ fn preferred_predecessor(graph: &nirvash_core::ReducedDocGraph, target: usize) -
 }
 
 fn render_collapsed_path_details(
-    case: &nirvash_core::DocGraphCase,
-    visible_edges: &[&nirvash_core::ReducedDocGraphEdge],
+    case: &nirvash::DocGraphCase,
+    visible_edges: &[&nirvash::ReducedDocGraphEdge],
 ) -> String {
     let collapsed_edges = visible_edges
         .iter()
@@ -2648,7 +2646,7 @@ fn is_structural_debug_line(line: &str) -> bool {
 fn compact_state_lines(
     full: &str,
     summary: &str,
-    relation_fields: &[nirvash_core::RelationFieldSummary],
+    relation_fields: &[nirvash::RelationFieldSummary],
 ) -> Vec<String> {
     const MAX_NODE_DETAIL_LINES: usize = 2;
 
@@ -2711,11 +2709,11 @@ fn render_relation_schema_section(spec: &SpecDoc) -> String {
 
     let set_relations = schemas
         .iter()
-        .filter(|schema| schema.kind == nirvash_core::RelationFieldKind::Set)
+        .filter(|schema| schema.kind == nirvash::RelationFieldKind::Set)
         .collect::<Vec<_>>();
     let binary_relations = schemas
         .iter()
-        .filter(|schema| schema.kind == nirvash_core::RelationFieldKind::Binary)
+        .filter(|schema| schema.kind == nirvash::RelationFieldKind::Binary)
         .collect::<Vec<_>>();
 
     let mut output = String::from("## Relation Schema\n\n");
@@ -2749,7 +2747,7 @@ fn render_relation_schema_section(spec: &SpecDoc) -> String {
     output
 }
 
-fn collect_relation_schemas(spec: &SpecDoc) -> Vec<nirvash_core::RelationFieldSchema> {
+fn collect_relation_schemas(spec: &SpecDoc) -> Vec<nirvash::RelationFieldSchema> {
     let mut seen = BTreeSet::new();
     let mut schemas = Vec::new();
     for case in &spec.doc_graphs {
@@ -2771,7 +2769,7 @@ fn collect_relation_schemas(spec: &SpecDoc) -> Vec<nirvash_core::RelationFieldSc
     schemas
 }
 
-fn render_relation_schema_mermaid(schemas: &[&nirvash_core::RelationFieldSchema]) -> String {
+fn render_relation_schema_mermaid(schemas: &[&nirvash::RelationFieldSchema]) -> String {
     let mut type_ids = BTreeMap::new();
     let mut output = String::from("erDiagram\n");
     for schema in schemas {
@@ -3016,14 +3014,14 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn demo_edge(label: &str, target: usize) -> nirvash_core::DocGraphEdge {
-        nirvash_core::DocGraphEdge {
+    fn demo_edge(label: &str, target: usize) -> nirvash::DocGraphEdge {
+        nirvash::DocGraphEdge {
             label: label.to_owned(),
             compact_label: None,
             scenario_priority: None,
             interaction_steps: Vec::new(),
-            process_steps: vec![nirvash_core::DocGraphProcessStep::new(
-                nirvash_core::DocGraphProcessKind::Do,
+            process_steps: vec![nirvash::DocGraphProcessStep::new(
+                nirvash::DocGraphProcessKind::Do,
                 label,
             )],
             target,
@@ -3036,23 +3034,23 @@ mod tests {
         to: &str,
         step_label: &str,
         target: usize,
-    ) -> nirvash_core::DocGraphEdge {
-        nirvash_core::DocGraphEdge {
+    ) -> nirvash::DocGraphEdge {
+        nirvash::DocGraphEdge {
             label: label.to_owned(),
             compact_label: None,
             scenario_priority: None,
-            interaction_steps: vec![nirvash_core::DocGraphInteractionStep::between(
+            interaction_steps: vec![nirvash::DocGraphInteractionStep::between(
                 from, to, step_label,
             )],
             process_steps: vec![
-                nirvash_core::DocGraphProcessStep::for_actor(
+                nirvash::DocGraphProcessStep::for_actor(
                     from,
-                    nirvash_core::DocGraphProcessKind::Send,
+                    nirvash::DocGraphProcessKind::Send,
                     format!("{step_label} to {to}"),
                 ),
-                nirvash_core::DocGraphProcessStep::for_actor(
+                nirvash::DocGraphProcessStep::for_actor(
                     to,
-                    nirvash_core::DocGraphProcessKind::Receive,
+                    nirvash::DocGraphProcessKind::Receive,
                     format!("{step_label} from {from}"),
                 ),
             ],
@@ -3064,29 +3062,29 @@ mod tests {
         label: &str,
         steps: &[(&str, &str, &str)],
         target: usize,
-    ) -> nirvash_core::DocGraphEdge {
-        nirvash_core::DocGraphEdge {
+    ) -> nirvash::DocGraphEdge {
+        nirvash::DocGraphEdge {
             label: label.to_owned(),
             compact_label: None,
             scenario_priority: None,
             interaction_steps: steps
                 .iter()
                 .map(|(from, to, step_label)| {
-                    nirvash_core::DocGraphInteractionStep::between(*from, *to, *step_label)
+                    nirvash::DocGraphInteractionStep::between(*from, *to, *step_label)
                 })
                 .collect(),
             process_steps: steps
                 .iter()
                 .flat_map(|(from, to, step_label)| {
                     [
-                        nirvash_core::DocGraphProcessStep::for_actor(
+                        nirvash::DocGraphProcessStep::for_actor(
                             *from,
-                            nirvash_core::DocGraphProcessKind::Send,
+                            nirvash::DocGraphProcessKind::Send,
                             format!("{step_label} to {to}"),
                         ),
-                        nirvash_core::DocGraphProcessStep::for_actor(
+                        nirvash::DocGraphProcessStep::for_actor(
                             *to,
-                            nirvash_core::DocGraphProcessKind::Receive,
+                            nirvash::DocGraphProcessKind::Receive,
                             format!("{step_label} from {from}"),
                         ),
                     ]
@@ -3111,7 +3109,7 @@ pub mod child;
 pub mod system;
 
 mod inline_parent {
-    use nirvash_core::{BoolExpr, Ltl, TransitionProgram, TransitionSystem};
+    use nirvash::{BoolExpr, Ltl, TransitionProgram, TransitionSystem};
     use nirvash_macros::{invariant, nirvash_expr, nirvash_transition_program, property, subsystem_spec};
 
     pub struct InlineState;
@@ -3134,14 +3132,14 @@ mod inline_parent {
         }
     }
 
-    nirvash_core::invariant!(self::InlineSpec, inline_invariant(state) => {
+    nirvash::invariant!(self::InlineSpec, inline_invariant(state) => {
         let _ = state;
         true
     });
 
     mod nested {
         use super::{InlineAction, InlineState};
-        use nirvash_core::{BoolExpr, Ltl};
+        use nirvash::{BoolExpr, Ltl};
         use nirvash_macros::{invariant, nirvash_expr, property};
 
         #[invariant(super::InlineSpec)]
@@ -3164,7 +3162,7 @@ mod inline_parent {
         fs::write(
             src_dir.join("child.rs"),
             r#"
-use nirvash_core::{BoolExpr, Fairness, Ltl, StepExpr, TransitionProgram, TransitionSystem};
+use nirvash::{BoolExpr, Fairness, Ltl, StepExpr, TransitionProgram, TransitionSystem};
 use nirvash_macros::{invariant, nirvash_expr, nirvash_transition_program, property, subsystem_spec};
 
 pub struct ChildState;
@@ -3187,17 +3185,17 @@ impl TransitionSystem for ChildSpec {
     }
 }
 
-nirvash_core::invariant!(ChildSpec, child_invariant(state) => {
+nirvash::invariant!(ChildSpec, child_invariant(state) => {
     let _ = state;
     true
 });
 
-nirvash_core::state_constraint!(ChildSpec, child_state_constraint(state) => {
+nirvash::state_constraint!(ChildSpec, child_state_constraint(state) => {
     let _ = state;
     true
 });
 
-nirvash_core::action_constraint!(ChildSpec, child_action_constraint(prev, action, next) => {
+nirvash::action_constraint!(ChildSpec, child_action_constraint(prev, action, next) => {
     let _ = (prev, action, next);
     true
 });
@@ -3210,7 +3208,7 @@ fn child_property() -> Ltl<ChildState, ChildAction> {
     )
 }
 
-nirvash_core::fairness!(weak ChildSpec, child_fairness(prev, action, next) => {
+nirvash::fairness!(weak ChildSpec, child_fairness(prev, action, next) => {
     let _ = (prev, action, next);
     true
 });
@@ -3221,7 +3219,7 @@ nirvash_core::fairness!(weak ChildSpec, child_fairness(prev, action, next) => {
         fs::write(
             src_dir.join("system.rs"),
             r#"
-use nirvash_core::{BoolExpr, Ltl, TransitionProgram, TransitionSystem};
+use nirvash::{BoolExpr, Ltl, TransitionProgram, TransitionSystem};
 use nirvash_macros::{invariant, nirvash_expr, nirvash_transition_program, property, system_spec};
 
 pub struct SystemState;
@@ -3340,7 +3338,7 @@ fn system_model_cases() {}
             fs::write(
                 src_dir.join(format!("{module}.rs")),
                 r#"
-use nirvash_core::{TransitionProgram, TransitionSystem};
+use nirvash::{TransitionProgram, TransitionSystem};
 use nirvash_macros::{nirvash_transition_program, subsystem_spec};
 
 pub struct State;
@@ -3393,18 +3391,18 @@ impl TransitionSystem for DuplicateSpec {
                 ),
                 (RegistrationKind::Property, vec!["demo_property".to_owned()]),
             ]),
-            doc_graphs: vec![nirvash_core::DocGraphCase {
+            doc_graphs: vec![nirvash::DocGraphCase {
                 label: "default".to_owned(),
-                backend: nirvash_core::ModelBackend::Explicit,
-                graph: nirvash_core::DocGraphSnapshot {
+                backend: nirvash::ModelBackend::Explicit,
+                graph: nirvash::DocGraphSnapshot {
                     states: vec![
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Idle".to_owned(),
                             full: "Idle".to_owned(),
                             relation_fields: Vec::new(),
                             relation_schema: Vec::new(),
                         },
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Busy".to_owned(),
                             full: "Busy".to_owned(),
                             relation_fields: Vec::new(),
@@ -3417,7 +3415,7 @@ impl TransitionSystem for DuplicateSpec {
                     truncated: false,
                     stutter_omitted: true,
                     focus_indices: Vec::new(),
-                    reduction: nirvash_core::DocGraphReductionMode::BoundaryPaths,
+                    reduction: nirvash::DocGraphReductionMode::BoundaryPaths,
                     max_edge_actions_in_label: 2,
                 },
             }],
@@ -3460,49 +3458,49 @@ impl TransitionSystem for DuplicateSpec {
             model_cases: None,
             subsystems: Vec::new(),
             registrations: BTreeMap::new(),
-            doc_graphs: vec![nirvash_core::DocGraphCase {
+            doc_graphs: vec![nirvash::DocGraphCase {
                 label: "default".to_owned(),
-                backend: nirvash_core::ModelBackend::Explicit,
-                graph: nirvash_core::DocGraphSnapshot {
+                backend: nirvash::ModelBackend::Explicit,
+                graph: nirvash::DocGraphSnapshot {
                     states: vec![
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "unused".to_owned(),
                             full: "unused".to_owned(),
                             relation_fields: vec![
-                                nirvash_core::RelationFieldSummary {
+                                nirvash::RelationFieldSummary {
                                     name: "requires".to_owned(),
                                     notation: "requires = Root->Dependency".to_owned(),
                                 },
-                                nirvash_core::RelationFieldSummary {
+                                nirvash::RelationFieldSummary {
                                     name: "allowed".to_owned(),
                                     notation: "allowed = Root".to_owned(),
                                 },
                             ],
                             relation_schema: vec![
-                                nirvash_core::RelationFieldSchema {
+                                nirvash::RelationFieldSchema {
                                     name: "requires".to_owned(),
-                                    kind: nirvash_core::RelationFieldKind::Binary,
+                                    kind: nirvash::RelationFieldKind::Binary,
                                     from_type: "PluginAtom".to_owned(),
                                     to_type: Some("PluginAtom".to_owned()),
                                 },
-                                nirvash_core::RelationFieldSchema {
+                                nirvash::RelationFieldSchema {
                                     name: "allowed".to_owned(),
-                                    kind: nirvash_core::RelationFieldKind::Set,
+                                    kind: nirvash::RelationFieldKind::Set,
                                     from_type: "PluginAtom".to_owned(),
                                     to_type: None,
                                 },
                             ],
                         },
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "unused-next".to_owned(),
                             full: "unused-next".to_owned(),
-                            relation_fields: vec![nirvash_core::RelationFieldSummary {
+                            relation_fields: vec![nirvash::RelationFieldSummary {
                                 name: "requires".to_owned(),
                                 notation: "requires = Root->Dependency".to_owned(),
                             }],
-                            relation_schema: vec![nirvash_core::RelationFieldSchema {
+                            relation_schema: vec![nirvash::RelationFieldSchema {
                                 name: "requires".to_owned(),
-                                kind: nirvash_core::RelationFieldKind::Binary,
+                                kind: nirvash::RelationFieldKind::Binary,
                                 from_type: "PluginAtom".to_owned(),
                                 to_type: Some("PluginAtom".to_owned()),
                             }],
@@ -3514,7 +3512,7 @@ impl TransitionSystem for DuplicateSpec {
                     truncated: false,
                     stutter_omitted: false,
                     focus_indices: Vec::new(),
-                    reduction: nirvash_core::DocGraphReductionMode::BoundaryPaths,
+                    reduction: nirvash::DocGraphReductionMode::BoundaryPaths,
                     max_edge_actions_in_label: 2,
                 },
             }],
@@ -3539,15 +3537,15 @@ impl TransitionSystem for DuplicateSpec {
             registrations: BTreeMap::new(),
             doc_graphs: Vec::new(),
         };
-        let graph = nirvash_core::reduce_doc_graph(&nirvash_core::DocGraphSnapshot {
+        let graph = nirvash::reduce_doc_graph(&nirvash::DocGraphSnapshot {
             states: vec![
-                nirvash_core::DocGraphState {
+                nirvash::DocGraphState {
                     summary: "Init".to_owned(),
                     full: "Init".to_owned(),
                     relation_fields: Vec::new(),
                     relation_schema: Vec::new(),
                 },
-                nirvash_core::DocGraphState {
+                nirvash::DocGraphState {
                     summary: "Next".to_owned(),
                     full: "Next".to_owned(),
                     relation_fields: Vec::new(),
@@ -3563,7 +3561,7 @@ impl TransitionSystem for DuplicateSpec {
             truncated: false,
             stutter_omitted: false,
             focus_indices: Vec::new(),
-            reduction: nirvash_core::DocGraphReductionMode::BoundaryPaths,
+            reduction: nirvash::DocGraphReductionMode::BoundaryPaths,
             max_edge_actions_in_label: 2,
         });
         let visible_edges = visible_reduced_edges(&graph);
@@ -3585,15 +3583,15 @@ impl TransitionSystem for DuplicateSpec {
             registrations: BTreeMap::new(),
             doc_graphs: Vec::new(),
         };
-        let graph = nirvash_core::reduce_doc_graph(&nirvash_core::DocGraphSnapshot {
+        let graph = nirvash::reduce_doc_graph(&nirvash::DocGraphSnapshot {
             states: vec![
-                nirvash_core::DocGraphState {
+                nirvash::DocGraphState {
                     summary: "Init".to_owned(),
                     full: "Init".to_owned(),
                     relation_fields: Vec::new(),
                     relation_schema: Vec::new(),
                 },
-                nirvash_core::DocGraphState {
+                nirvash::DocGraphState {
                     summary: "Next".to_owned(),
                     full: "Next".to_owned(),
                     relation_fields: Vec::new(),
@@ -3606,7 +3604,7 @@ impl TransitionSystem for DuplicateSpec {
             truncated: false,
             stutter_omitted: false,
             focus_indices: Vec::new(),
-            reduction: nirvash_core::DocGraphReductionMode::BoundaryPaths,
+            reduction: nirvash::DocGraphReductionMode::BoundaryPaths,
             max_edge_actions_in_label: 2,
         });
         let visible_edges = visible_reduced_edges(&graph);
@@ -3628,11 +3626,11 @@ impl TransitionSystem for DuplicateSpec {
             registrations: BTreeMap::new(),
             doc_graphs: Vec::new(),
         };
-        let graph = nirvash_core::ReducedDocGraph {
+        let graph = nirvash::ReducedDocGraph {
             states: vec![
-                nirvash_core::ReducedDocGraphNode {
+                nirvash::ReducedDocGraphNode {
                     original_index: 0,
-                    state: nirvash_core::DocGraphState {
+                    state: nirvash::DocGraphState {
                         summary: "Init".to_owned(),
                         full: "Init".to_owned(),
                         relation_fields: Vec::new(),
@@ -3641,9 +3639,9 @@ impl TransitionSystem for DuplicateSpec {
                     is_initial: true,
                     is_deadlock: false,
                 },
-                nirvash_core::ReducedDocGraphNode {
+                nirvash::ReducedDocGraphNode {
                     original_index: 1,
-                    state: nirvash_core::DocGraphState {
+                    state: nirvash::DocGraphState {
                         summary: "Stopped".to_owned(),
                         full: "Stopped".to_owned(),
                         relation_fields: Vec::new(),
@@ -3653,7 +3651,7 @@ impl TransitionSystem for DuplicateSpec {
                     is_deadlock: true,
                 },
             ],
-            edges: vec![nirvash_core::ReducedDocGraphEdge {
+            edges: vec![nirvash::ReducedDocGraphEdge {
                 source: 0,
                 target: 1,
                 label: "StartListening -> ... -> FinishShutdown (3 steps)".to_owned(),
@@ -3681,15 +3679,15 @@ impl TransitionSystem for DuplicateSpec {
             registrations: BTreeMap::new(),
             doc_graphs: Vec::new(),
         };
-        let graph = nirvash_core::reduce_doc_graph(&nirvash_core::DocGraphSnapshot {
+        let graph = nirvash::reduce_doc_graph(&nirvash::DocGraphSnapshot {
             states: vec![
-                nirvash_core::DocGraphState {
+                nirvash::DocGraphState {
                     summary: "Init".to_owned(),
                     full: "Init".to_owned(),
                     relation_fields: Vec::new(),
                     relation_schema: Vec::new(),
                 },
-                nirvash_core::DocGraphState {
+                nirvash::DocGraphState {
                     summary: "Ready".to_owned(),
                     full: "Ready".to_owned(),
                     relation_fields: Vec::new(),
@@ -3708,7 +3706,7 @@ impl TransitionSystem for DuplicateSpec {
             truncated: false,
             stutter_omitted: false,
             focus_indices: Vec::new(),
-            reduction: nirvash_core::DocGraphReductionMode::BoundaryPaths,
+            reduction: nirvash::DocGraphReductionMode::BoundaryPaths,
             max_edge_actions_in_label: 2,
         });
         let visible_edges = visible_reduced_edges(&graph);
@@ -3732,10 +3730,10 @@ impl TransitionSystem for DuplicateSpec {
             registrations: BTreeMap::new(),
             doc_graphs: Vec::new(),
         };
-        let graph = nirvash_core::ReducedDocGraph {
-            states: vec![nirvash_core::ReducedDocGraphNode {
+        let graph = nirvash::ReducedDocGraph {
+            states: vec![nirvash::ReducedDocGraphNode {
                 original_index: 3,
-                state: nirvash_core::DocGraphState {
+                state: nirvash::DocGraphState {
                     summary: "Stopped".to_owned(),
                     full: "Stopped".to_owned(),
                     relation_fields: Vec::new(),
@@ -3770,15 +3768,15 @@ impl TransitionSystem for DuplicateSpec {
             registrations: BTreeMap::new(),
             doc_graphs: Vec::new(),
         };
-        let graph = nirvash_core::reduce_doc_graph(&nirvash_core::DocGraphSnapshot {
+        let graph = nirvash::reduce_doc_graph(&nirvash::DocGraphSnapshot {
             states: vec![
-                nirvash_core::DocGraphState {
+                nirvash::DocGraphState {
                     summary: "State { phase: Booting, unchanged: false }".to_owned(),
                     full: "State {\n    phase: Booting,\n    unchanged: false,\n}\n".to_owned(),
                     relation_fields: Vec::new(),
                     relation_schema: Vec::new(),
                 },
-                nirvash_core::DocGraphState {
+                nirvash::DocGraphState {
                     summary: "State { phase: Listening, unchanged: false }".to_owned(),
                     full: "State {\n    phase: Listening,\n    unchanged: false,\n}\n".to_owned(),
                     relation_fields: Vec::new(),
@@ -3791,7 +3789,7 @@ impl TransitionSystem for DuplicateSpec {
             truncated: false,
             stutter_omitted: false,
             focus_indices: Vec::new(),
-            reduction: nirvash_core::DocGraphReductionMode::BoundaryPaths,
+            reduction: nirvash::DocGraphReductionMode::BoundaryPaths,
             max_edge_actions_in_label: 2,
         });
         let visible_edges = visible_reduced_edges(&graph);
@@ -3817,15 +3815,15 @@ impl TransitionSystem for DuplicateSpec {
             registrations: BTreeMap::new(),
             doc_graphs: Vec::new(),
         };
-        let graph = nirvash_core::reduce_doc_graph(&nirvash_core::DocGraphSnapshot {
+        let graph = nirvash::reduce_doc_graph(&nirvash::DocGraphSnapshot {
             states: vec![
-                nirvash_core::DocGraphState {
+                nirvash::DocGraphState {
                     summary: "Init".to_owned(),
                     full: "Init".to_owned(),
                     relation_fields: Vec::new(),
                     relation_schema: Vec::new(),
                 },
-                nirvash_core::DocGraphState {
+                nirvash::DocGraphState {
                     summary: "Running".to_owned(),
                     full: "Running".to_owned(),
                     relation_fields: Vec::new(),
@@ -3844,7 +3842,7 @@ impl TransitionSystem for DuplicateSpec {
             truncated: false,
             stutter_omitted: false,
             focus_indices: Vec::new(),
-            reduction: nirvash_core::DocGraphReductionMode::BoundaryPaths,
+            reduction: nirvash::DocGraphReductionMode::BoundaryPaths,
             max_edge_actions_in_label: 2,
         });
         let visible_edges = visible_reduced_edges(&graph);
@@ -3866,11 +3864,11 @@ impl TransitionSystem for DuplicateSpec {
             registrations: BTreeMap::new(),
             doc_graphs: Vec::new(),
         };
-        let graph = nirvash_core::ReducedDocGraph {
+        let graph = nirvash::ReducedDocGraph {
             states: vec![
-                nirvash_core::ReducedDocGraphNode {
+                nirvash::ReducedDocGraphNode {
                     original_index: 0,
-                    state: nirvash_core::DocGraphState {
+                    state: nirvash::DocGraphState {
                         summary: "S0".to_owned(),
                         full: "S0".to_owned(),
                         relation_fields: Vec::new(),
@@ -3879,9 +3877,9 @@ impl TransitionSystem for DuplicateSpec {
                     is_initial: true,
                     is_deadlock: false,
                 },
-                nirvash_core::ReducedDocGraphNode {
+                nirvash::ReducedDocGraphNode {
                     original_index: 1,
-                    state: nirvash_core::DocGraphState {
+                    state: nirvash::DocGraphState {
                         summary: "S1".to_owned(),
                         full: "S1".to_owned(),
                         relation_fields: Vec::new(),
@@ -3892,19 +3890,19 @@ impl TransitionSystem for DuplicateSpec {
                 },
             ],
             edges: vec![
-                nirvash_core::ReducedDocGraphEdge {
+                nirvash::ReducedDocGraphEdge {
                     source: 0,
                     target: 0,
                     label: "Retry".to_owned(),
                     collapsed_state_indices: Vec::new(),
                 },
-                nirvash_core::ReducedDocGraphEdge {
+                nirvash::ReducedDocGraphEdge {
                     source: 0,
                     target: 1,
                     label: "Advance".to_owned(),
                     collapsed_state_indices: Vec::new(),
                 },
-                nirvash_core::ReducedDocGraphEdge {
+                nirvash::ReducedDocGraphEdge {
                     source: 1,
                     target: 1,
                     label: "Loop".to_owned(),
@@ -3933,24 +3931,24 @@ impl TransitionSystem for DuplicateSpec {
             model_cases: None,
             subsystems: Vec::new(),
             registrations: BTreeMap::new(),
-            doc_graphs: vec![nirvash_core::DocGraphCase {
+            doc_graphs: vec![nirvash::DocGraphCase {
                 label: "default".to_owned(),
-                backend: nirvash_core::ModelBackend::Explicit,
-                graph: nirvash_core::DocGraphSnapshot {
+                backend: nirvash::ModelBackend::Explicit,
+                graph: nirvash::DocGraphSnapshot {
                     states: vec![
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Init".to_owned(),
                             full: "Init".to_owned(),
                             relation_fields: Vec::new(),
                             relation_schema: Vec::new(),
                         },
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Middle".to_owned(),
                             full: "Middle".to_owned(),
                             relation_fields: Vec::new(),
                             relation_schema: Vec::new(),
                         },
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Done".to_owned(),
                             full: "Done".to_owned(),
                             relation_fields: Vec::new(),
@@ -3967,7 +3965,7 @@ impl TransitionSystem for DuplicateSpec {
                     truncated: false,
                     stutter_omitted: false,
                     focus_indices: Vec::new(),
-                    reduction: nirvash_core::DocGraphReductionMode::BoundaryPaths,
+                    reduction: nirvash::DocGraphReductionMode::BoundaryPaths,
                     max_edge_actions_in_label: 2,
                 },
             }],
@@ -3981,7 +3979,7 @@ impl TransitionSystem for DuplicateSpec {
     #[test]
     fn render_state_graph_section_omits_large_graphs() {
         let states = (0..51)
-            .map(|index| nirvash_core::DocGraphState {
+            .map(|index| nirvash::DocGraphState {
                 summary: format!("S{index}"),
                 full: format!("S{index}"),
                 relation_fields: Vec::new(),
@@ -4002,10 +4000,10 @@ impl TransitionSystem for DuplicateSpec {
             model_cases: None,
             subsystems: Vec::new(),
             registrations: BTreeMap::new(),
-            doc_graphs: vec![nirvash_core::DocGraphCase {
+            doc_graphs: vec![nirvash::DocGraphCase {
                 label: "large".to_owned(),
-                backend: nirvash_core::ModelBackend::Explicit,
-                graph: nirvash_core::DocGraphSnapshot {
+                backend: nirvash::ModelBackend::Explicit,
+                graph: nirvash::DocGraphSnapshot {
                     states,
                     edges,
                     initial_indices: vec![0],
@@ -4013,7 +4011,7 @@ impl TransitionSystem for DuplicateSpec {
                     truncated: false,
                     stutter_omitted: false,
                     focus_indices: Vec::new(),
-                    reduction: nirvash_core::DocGraphReductionMode::Full,
+                    reduction: nirvash::DocGraphReductionMode::Full,
                     max_edge_actions_in_label: 2,
                 },
             }],
@@ -4035,30 +4033,30 @@ impl TransitionSystem for DuplicateSpec {
             model_cases: None,
             subsystems: Vec::new(),
             registrations: BTreeMap::new(),
-            doc_graphs: vec![nirvash_core::DocGraphCase {
+            doc_graphs: vec![nirvash::DocGraphCase {
                 label: "default".to_owned(),
-                backend: nirvash_core::ModelBackend::Explicit,
-                graph: nirvash_core::DocGraphSnapshot {
+                backend: nirvash::ModelBackend::Explicit,
+                graph: nirvash::DocGraphSnapshot {
                     states: vec![
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Init".to_owned(),
                             full: "Init".to_owned(),
                             relation_fields: Vec::new(),
                             relation_schema: Vec::new(),
                         },
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Middle".to_owned(),
                             full: "Middle".to_owned(),
                             relation_fields: Vec::new(),
                             relation_schema: Vec::new(),
                         },
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Done".to_owned(),
                             full: "Done".to_owned(),
                             relation_fields: Vec::new(),
                             relation_schema: Vec::new(),
                         },
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Retry".to_owned(),
                             full: "Retry".to_owned(),
                             relation_fields: Vec::new(),
@@ -4083,7 +4081,7 @@ impl TransitionSystem for DuplicateSpec {
                     truncated: false,
                     stutter_omitted: false,
                     focus_indices: Vec::new(),
-                    reduction: nirvash_core::DocGraphReductionMode::BoundaryPaths,
+                    reduction: nirvash::DocGraphReductionMode::BoundaryPaths,
                     max_edge_actions_in_label: 2,
                 },
             }],
@@ -4126,18 +4124,18 @@ impl TransitionSystem for DuplicateSpec {
             model_cases: None,
             subsystems: vec!["manager".to_owned(), "session_auth".to_owned()],
             registrations: BTreeMap::new(),
-            doc_graphs: vec![nirvash_core::DocGraphCase {
+            doc_graphs: vec![nirvash::DocGraphCase {
                 label: "all_paths".to_owned(),
-                backend: nirvash_core::ModelBackend::Explicit,
-                graph: nirvash_core::DocGraphSnapshot {
+                backend: nirvash::ModelBackend::Explicit,
+                graph: nirvash::DocGraphSnapshot {
                     states: vec![
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Idle".to_owned(),
                             full: "Idle".to_owned(),
                             relation_fields: Vec::new(),
                             relation_schema: Vec::new(),
                         },
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Ready".to_owned(),
                             full: "Ready".to_owned(),
                             relation_fields: Vec::new(),
@@ -4160,7 +4158,7 @@ impl TransitionSystem for DuplicateSpec {
                     truncated: false,
                     stutter_omitted: false,
                     focus_indices: Vec::new(),
-                    reduction: nirvash_core::DocGraphReductionMode::Full,
+                    reduction: nirvash::DocGraphReductionMode::Full,
                     max_edge_actions_in_label: 2,
                 },
             }],
@@ -4200,36 +4198,36 @@ impl TransitionSystem for DuplicateSpec {
             model_cases: None,
             subsystems: Vec::new(),
             registrations: BTreeMap::new(),
-            doc_graphs: vec![nirvash_core::DocGraphCase {
+            doc_graphs: vec![nirvash::DocGraphCase {
                 label: "shared_suffix".to_owned(),
-                backend: nirvash_core::ModelBackend::Explicit,
-                graph: nirvash_core::DocGraphSnapshot {
+                backend: nirvash::ModelBackend::Explicit,
+                graph: nirvash::DocGraphSnapshot {
                     states: vec![
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Init".to_owned(),
                             full: "Init".to_owned(),
                             relation_fields: Vec::new(),
                             relation_schema: Vec::new(),
                         },
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Left".to_owned(),
                             full: "Left".to_owned(),
                             relation_fields: Vec::new(),
                             relation_schema: Vec::new(),
                         },
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Right".to_owned(),
                             full: "Right".to_owned(),
                             relation_fields: Vec::new(),
                             relation_schema: Vec::new(),
                         },
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Joined".to_owned(),
                             full: "Joined".to_owned(),
                             relation_fields: Vec::new(),
                             relation_schema: Vec::new(),
                         },
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Done".to_owned(),
                             full: "Done".to_owned(),
                             relation_fields: Vec::new(),
@@ -4257,7 +4255,7 @@ impl TransitionSystem for DuplicateSpec {
                     truncated: false,
                     stutter_omitted: false,
                     focus_indices: Vec::new(),
-                    reduction: nirvash_core::DocGraphReductionMode::Full,
+                    reduction: nirvash::DocGraphReductionMode::Full,
                     max_edge_actions_in_label: 2,
                 },
             }],
@@ -4291,24 +4289,24 @@ impl TransitionSystem for DuplicateSpec {
                     vec!["system_state_constraint".to_owned()],
                 ),
             ]),
-            doc_graphs: vec![nirvash_core::DocGraphCase {
+            doc_graphs: vec![nirvash::DocGraphCase {
                 label: "all_paths".to_owned(),
-                backend: nirvash_core::ModelBackend::Explicit,
-                graph: nirvash_core::DocGraphSnapshot {
+                backend: nirvash::ModelBackend::Explicit,
+                graph: nirvash::DocGraphSnapshot {
                     states: vec![
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Idle".to_owned(),
                             full: "Idle".to_owned(),
                             relation_fields: Vec::new(),
                             relation_schema: Vec::new(),
                         },
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Busy".to_owned(),
                             full: "Busy".to_owned(),
                             relation_fields: Vec::new(),
                             relation_schema: Vec::new(),
                         },
-                        nirvash_core::DocGraphState {
+                        nirvash::DocGraphState {
                             summary: "Done".to_owned(),
                             full: "Done".to_owned(),
                             relation_fields: Vec::new(),
@@ -4346,7 +4344,7 @@ impl TransitionSystem for DuplicateSpec {
                     truncated: false,
                     stutter_omitted: false,
                     focus_indices: Vec::new(),
-                    reduction: nirvash_core::DocGraphReductionMode::Full,
+                    reduction: nirvash::DocGraphReductionMode::Full,
                     max_edge_actions_in_label: 2,
                 },
             }],

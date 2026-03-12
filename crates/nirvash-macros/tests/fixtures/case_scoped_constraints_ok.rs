@@ -1,4 +1,4 @@
-use nirvash_core::{
+use nirvash::{
     StepExpr, ModelCase, ModelCaseSource as _, BoolExpr, TransitionSystem,
 };
 use nirvash_macros::{
@@ -32,7 +32,7 @@ impl TransitionSystem for Spec {
         vec![Action::Start, Action::Stop]
     }
 
-    fn transition_program(&self) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    fn transition_program(&self) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule start when matches!(action, Action::Start) && !prev.busy => {
                 set busy <= true;

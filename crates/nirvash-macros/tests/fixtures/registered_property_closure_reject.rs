@@ -1,4 +1,4 @@
-use nirvash_core::TransitionSystem;
+use nirvash::TransitionSystem;
 use nirvash_macros::{Signature as FormalSignature, property, subsystem_spec};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
@@ -28,14 +28,14 @@ impl TransitionSystem for Spec {
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
-        Some(::nirvash_core::TransitionProgram::named("spec", vec![]))
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
+        Some(::nirvash::TransitionProgram::named("spec", vec![]))
     }
 }
 
 #[property(Spec)]
-fn bad_property() -> ::nirvash_core::Ltl<State, Action> {
-    ::nirvash_core::Ltl::pred(::nirvash_core::BoolExpr::new("bad_property", |_| true))
+fn bad_property() -> ::nirvash::Ltl<State, Action> {
+    ::nirvash::Ltl::pred(::nirvash::BoolExpr::new("bad_property", |_| true))
 }
 
 fn main() {}

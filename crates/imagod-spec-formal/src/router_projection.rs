@@ -1,7 +1,7 @@
 #[cfg(test)]
 use imagod_spec::{ContractEffectSummary, SummaryRequestKind, SummaryStreamId};
 use imagod_spec::{RouterOutputSummary, RouterProbeOutput, RouterProbeState, RouterStateSummary};
-use nirvash_core::{
+use nirvash::{
     BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };
@@ -186,7 +186,7 @@ impl TransitionSystem for RouterProjectionSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
@@ -262,12 +262,12 @@ impl ModelCaseSource for RouterProjectionSpec {
 }
 
 #[cfg(test)]
-fn router_probe_state_domain() -> nirvash_core::BoundedDomain<RouterProbeState> {
-    <RouterProbeState as nirvash_core::Signature>::bounded_domain()
+fn router_probe_state_domain() -> nirvash::BoundedDomain<RouterProbeState> {
+    <RouterProbeState as nirvash::Signature>::bounded_domain()
 }
 
 #[cfg(test)]
-fn router_summary_output_domain() -> nirvash_core::BoundedDomain<RouterOutputSummary> {
+fn router_summary_output_domain() -> nirvash::BoundedDomain<RouterOutputSummary> {
     let mut values = vec![RouterOutputSummary::default()];
     for kind in [
         SummaryRequestKind::HelloNegotiate,
@@ -293,7 +293,7 @@ fn router_summary_output_domain() -> nirvash_core::BoundedDomain<RouterOutputSum
             ],
         });
     }
-    nirvash_core::BoundedDomain::new(values)
+    nirvash::BoundedDomain::new(values)
 }
 
 nirvash_projection_model! {

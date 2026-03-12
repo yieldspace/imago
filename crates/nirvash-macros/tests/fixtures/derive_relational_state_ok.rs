@@ -1,4 +1,4 @@
-use nirvash_core::{Relation2, RelSet};
+use nirvash::{Relation2, RelSet};
 use nirvash_macros::{RelAtom, RelationalState, Signature};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Signature, RelAtom)]

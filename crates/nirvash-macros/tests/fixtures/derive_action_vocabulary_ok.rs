@@ -23,7 +23,7 @@ enum DemoAction {
 }
 
 fn main() {
-    let vocabulary = <DemoAction as nirvash_core::ActionVocabulary>::action_vocabulary();
+    let vocabulary = <DemoAction as nirvash::ActionVocabulary>::action_vocabulary();
     assert_eq!(
         vocabulary,
         vec![DemoAction::Tick, DemoAction::Wrap(Payload::First)]

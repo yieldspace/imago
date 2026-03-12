@@ -1,4 +1,4 @@
-use nirvash_core::{
+use nirvash::{
     BoolExpr, Fairness, Ltl, ModelCase, RelSet, Relation2, Signature as _, StepExpr,
     TransitionSystem,
 };
@@ -118,10 +118,21 @@ impl SupervisionSpec {
     }
 }
 
-nirvash_core::signature_spec!(
+nirvash::signature_spec!(
     SupervisionStateSignatureSpec for SupervisionState,
     representatives = crate::state_domain::reachable_state_domain(&SupervisionSpec::new())
 );
+
+nirvash::symbolic_state_spec!(for SupervisionState {
+    endpoint_prepared: RelSet<ServiceAtom>,
+    registered_services: RelSet<ServiceAtom>,
+    ready_services: RelSet<ServiceAtom>,
+    running_services: RelSet<ServiceAtom>,
+    stopping_services: RelSet<ServiceAtom>,
+    reaped_services: RelSet<ServiceAtom>,
+    service_runners: Relation2<ServiceAtom, RunnerAtom>,
+    service_apps: Relation2<ServiceAtom, ServiceAppAtom>,
+});
 
 fn supervision_model_cases() -> Vec<ModelCase<SupervisionState, SupervisionAction>> {
     vec![ModelCase::default().with_check_deadlocks(false)]
@@ -240,12 +251,12 @@ impl TransitionSystem for SupervisionSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule prepare_endpoint when prepare_endpoint_target(action).is_some()
                 && !prev.endpoint_prepared.contains(&prepare_endpoint_target(action)
@@ -415,7 +426,7 @@ fn reaped_service_apps(
 
 fn rel_set_changed<T>(left: &RelSet<T>, right: &RelSet<T>) -> bool
 where
-    T: nirvash_core::RelAtom + Clone + Eq + std::fmt::Debug + 'static,
+    T: nirvash::RelAtom + Clone + Eq + std::fmt::Debug + 'static,
 {
     left.items() != right.items()
 }

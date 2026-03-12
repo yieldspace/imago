@@ -13,7 +13,7 @@ enum Action {
 struct Spec;
 
 #[subsystem_spec(invariants(legacy_invariant))]
-impl nirvash_core::TransitionSystem for Spec {
+impl nirvash::TransitionSystem for Spec {
     type State = State;
     type Action = Action;
 
@@ -25,8 +25,8 @@ impl nirvash_core::TransitionSystem for Spec {
         vec![Action::Tick]
     }
 
-    fn transition_program(&self) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
-        Some(::nirvash_core::TransitionProgram::named("spec", vec![]))
+    fn transition_program(&self) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
+        Some(::nirvash::TransitionProgram::named("spec", vec![]))
     }
 }
 

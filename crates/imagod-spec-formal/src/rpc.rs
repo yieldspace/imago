@@ -1,4 +1,4 @@
-use nirvash_core::{
+use nirvash::{
     BoolExpr, Fairness, Ltl, ModelCase, RelSet, Relation2, Signature as _, StepExpr,
     TransitionSystem,
 };
@@ -143,10 +143,24 @@ impl RpcSpec {
     }
 }
 
-nirvash_core::signature_spec!(
+nirvash::signature_spec!(
     RpcStateSignatureSpec for RpcState,
     representatives = rpc_state_representatives()
 );
+
+nirvash::symbolic_state_spec!(for RpcState {
+    bindings: Relation2<ServiceAtom, BindingTargetAtom>,
+    local_call_owners: Relation2<RpcCallAtom, ServiceAtom>,
+    local_call_targets: Relation2<RpcCallAtom, BindingTargetAtom>,
+    denied_local_calls: Relation2<RpcCallAtom, ServiceAtom>,
+    remote_connection_owners: Relation2<RpcConnectionAtom, ServiceAtom>,
+    remote_connection_authorities: Relation2<RpcConnectionAtom, RemoteAuthorityAtom>,
+    remote_call_owners: Relation2<RpcCallAtom, ServiceAtom>,
+    remote_call_targets: Relation2<RpcCallAtom, BindingTargetAtom>,
+    remote_inflight_calls: Relation2<RpcCallAtom, RpcConnectionAtom>,
+    completed_remote_calls: RelSet<RpcCallAtom>,
+    denied_remote_calls: Relation2<RpcCallAtom, ServiceAtom>,
+});
 
 fn rpc_model_cases() -> Vec<ModelCase<RpcState, RpcAction>> {
     vec![local_rpc_model_case(), remote_rpc_model_case()]
@@ -198,7 +212,7 @@ fn remote_service0_only_state() -> BoolExpr<RpcState> {
     }
 }
 
-fn rpc_state_representatives() -> nirvash_core::BoundedDomain<RpcState> {
+fn rpc_state_representatives() -> nirvash::BoundedDomain<RpcState> {
     let spec = RpcSpec::new();
     let mut states = Vec::new();
 
@@ -217,7 +231,7 @@ fn rpc_state_representatives() -> nirvash_core::BoundedDomain<RpcState> {
         }
     }
 
-    nirvash_core::BoundedDomain::new(states)
+    nirvash::BoundedDomain::new(states)
 }
 
 fn is_local_service0_action(action: RpcAction) -> bool {
@@ -342,12 +356,12 @@ impl TransitionSystem for RpcSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule rpc_transition when transition_state(prev, action).is_some() => {
                 set self <= transition_state(prev, action)
@@ -542,15 +556,15 @@ fn authority_for(source: ServiceAtom) -> RemoteAuthorityAtom {
 
 fn rel_set_changed<T>(left: &RelSet<T>, right: &RelSet<T>) -> bool
 where
-    T: nirvash_core::RelAtom + Clone + Eq + std::fmt::Debug + 'static,
+    T: nirvash::RelAtom + Clone + Eq + std::fmt::Debug + 'static,
 {
     left.items() != right.items()
 }
 
 fn relation_changed<L, R>(left: &Relation2<L, R>, right: &Relation2<L, R>) -> bool
 where
-    L: nirvash_core::RelAtom + Clone + Eq + std::fmt::Debug + 'static,
-    R: nirvash_core::RelAtom + Clone + Eq + std::fmt::Debug + 'static,
+    L: nirvash::RelAtom + Clone + Eq + std::fmt::Debug + 'static,
+    R: nirvash::RelAtom + Clone + Eq + std::fmt::Debug + 'static,
 {
     left.pairs() != right.pairs()
 }

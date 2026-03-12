@@ -1758,7 +1758,7 @@ mod conformance_tests {
             .build()
             .expect("runtime should build")
             .block_on(async {
-                <RouterProjectionBinding as nirvash_core::conformance::ProtocolRuntimeBinding<
+                <RouterProjectionBinding as nirvash::conformance::ProtocolRuntimeBinding<
                     RouterProjectionSpec,
                 >>::fresh_runtime(&spec)
                 .await
@@ -1768,7 +1768,7 @@ mod conformance_tests {
             .build()
             .expect("runtime should build")
             .block_on(async {
-                <RouterRuntime as nirvash_core::conformance::ActionApplier>::execute_action(
+                <RouterRuntime as nirvash::conformance::ActionApplier>::execute_action(
                     &runtime,
                     &(),
                     &RouterProjectionAction::ServicesList,

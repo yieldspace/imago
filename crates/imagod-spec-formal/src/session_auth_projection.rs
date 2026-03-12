@@ -4,7 +4,7 @@ use imagod_spec::{
     SessionAuthOutputSummary, SessionAuthProbeOutput, SessionAuthProbeState,
     SessionAuthStateSummary,
 };
-use nirvash_core::{
+use nirvash::{
     BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };
@@ -130,7 +130,7 @@ impl TransitionSystem for SessionAuthProjectionSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
@@ -154,13 +154,13 @@ impl ModelCaseSource for SessionAuthProjectionSpec {
 }
 
 #[cfg(test)]
-fn session_auth_probe_state_domain() -> nirvash_core::BoundedDomain<SessionAuthProbeState> {
-    <SessionAuthProbeState as nirvash_core::Signature>::bounded_domain()
+fn session_auth_probe_state_domain() -> nirvash::BoundedDomain<SessionAuthProbeState> {
+    <SessionAuthProbeState as nirvash::Signature>::bounded_domain()
 }
 
 #[cfg(test)]
-fn session_auth_summary_output_domain() -> nirvash_core::BoundedDomain<SessionAuthOutputSummary> {
-    nirvash_core::BoundedDomain::new(vec![
+fn session_auth_summary_output_domain() -> nirvash::BoundedDomain<SessionAuthOutputSummary> {
+    nirvash::BoundedDomain::new(vec![
         SessionAuthOutputSummary::default(),
         SessionAuthOutputSummary {
             effects: vec![ContractEffectSummary::AuthorizationGranted(

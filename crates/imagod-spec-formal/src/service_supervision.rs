@@ -1,4 +1,4 @@
-use nirvash_core::{BoolExpr, Fairness, Ltl, RelSet, Signature as _, StepExpr, TransitionSystem};
+use nirvash::{BoolExpr, Fairness, Ltl, RelSet, Signature as _, StepExpr, TransitionSystem};
 use nirvash_macros::{
     ActionVocabulary, RelAtom, RelationalState, Signature, fairness, invariant, nirvash_expr,
     nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
@@ -86,10 +86,17 @@ impl ServiceSupervisionSpec {
     }
 }
 
-nirvash_core::signature_spec!(
+nirvash::signature_spec!(
     ServiceSupervisionStateSignatureSpec for ServiceSupervisionState,
     representatives = crate::state_domain::reachable_state_domain(&ServiceSupervisionSpec::new())
 );
+
+nirvash::symbolic_state_spec!(for ServiceSupervisionState {
+    active_services: RelSet<ServiceAtom>,
+    ready_services: RelSet<ServiceAtom>,
+    retained_logs: RelSet<ServiceAtom>,
+    phase: ServicePhase,
+});
 
 fn service_supervision_state_valid(state: &ServiceSupervisionState) -> bool {
     let active_matches_phase = match state.phase {
@@ -241,12 +248,12 @@ impl TransitionSystem for ServiceSupervisionSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule start_service when matches!(action, ServiceSupervisionAction::StartService)
                 && matches!(prev.phase, ServicePhase::Idle | ServicePhase::Reaped)

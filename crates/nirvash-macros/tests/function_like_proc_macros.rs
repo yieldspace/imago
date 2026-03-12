@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use nirvash::{BoolExprAst, UpdateAst, UpdateOp, UpdateValueExprAst};
 use nirvash_macros::{nirvash_expr, nirvash_step_expr, nirvash_transition_program};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,15 +34,32 @@ fn action_is_start(action: &Action) -> bool {
     matches!(action, Action::Start)
 }
 
-fn ready_or_idle() -> nirvash_core::BoolExpr<State> {
+nirvash::register_symbolic_pure_helpers!("target_phase");
+
+fn target_phase(action: &Action) -> Option<Phase> {
+    match action {
+        Action::Start => Some(Phase::Busy),
+        _ => None,
+    }
+}
+
+fn missing_target_phase(action: &Action) -> Option<Phase> {
+    target_phase(action)
+}
+
+fn ready_or_idle() -> nirvash::BoolExpr<State> {
     nirvash_expr!(ready_or_idle(state) => state.ready || state.is_idle() || matches!(state.phase, Phase::Idle))
 }
 
-fn start_step() -> nirvash_core::StepExpr<State, Action> {
+fn effective_count() -> nirvash::BoolExpr<State> {
+    nirvash_expr!(effective_count(state) => (if state.ready { state.count } else { 0 }) >= 1)
+}
+
+fn start_step() -> nirvash::StepExpr<State, Action> {
     nirvash_step_expr!(start_step(prev, action, next) => !prev.ready && action_is_start(action) && next.ready && prev.count < next.count)
 }
 
-fn program() -> nirvash_core::TransitionProgram<State, Action> {
+fn program() -> nirvash::TransitionProgram<State, Action> {
     nirvash_transition_program! {
         rule activate when !prev.ready && matches!(action, Action::Add(_)) => {
             set ready <= true;
@@ -54,9 +72,26 @@ fn program() -> nirvash_core::TransitionProgram<State, Action> {
     }
 }
 
+fn helper_wrapped_program() -> nirvash::TransitionProgram<State, Action> {
+    nirvash_transition_program! {
+        rule activate when target_phase(action).is_some() => {
+            set phase <= target_phase(action).expect("activate guard matched");
+        }
+    }
+}
+
+fn missing_helper_wrapped_program() -> nirvash::TransitionProgram<State, Action> {
+    nirvash_transition_program! {
+        rule activate when missing_target_phase(action).is_some() => {
+            set phase <= missing_target_phase(action).expect("activate guard matched");
+        }
+    }
+}
+
 #[test]
 fn function_like_bool_macros_lower_to_ast() {
     let expr = ready_or_idle();
+    let effective = effective_count();
     let step = start_step();
 
     let prev = State {
@@ -73,9 +108,12 @@ fn function_like_bool_macros_lower_to_ast() {
     };
 
     assert!(expr.is_ast_native());
+    assert!(effective.is_ast_native());
     assert!(step.is_ast_native());
     assert!(expr.eval(&prev));
+    assert!(effective.eval(&next));
     assert!(step.eval(&prev, &Action::Start, &next));
+    assert!(matches!(expr.ast(), Some(BoolExprAst::Or(_))));
 }
 
 #[test]
@@ -98,6 +136,31 @@ fn transition_program_macro_builds_ast_rules() {
     assert!(program.rules()[0].is_ast_native());
     assert!(program.rules()[0].guard_ast().is_some());
     assert!(program.rules()[0].update_ast().is_some());
+    match program.rules()[0].update_ast().expect("update ast") {
+        UpdateAst::Sequence(ops) => {
+            assert!(matches!(
+                &ops[0],
+                UpdateOp::Assign {
+                    value_ast: UpdateValueExprAst::Literal { .. },
+                    ..
+                }
+            ));
+            assert!(matches!(
+                &ops[1],
+                UpdateOp::Assign {
+                    value_ast: UpdateValueExprAst::Add { .. },
+                    ..
+                }
+            ));
+            assert!(matches!(
+                &ops[2],
+                UpdateOp::SetInsert {
+                    item_ast: UpdateValueExprAst::Literal { .. },
+                    ..
+                }
+            ));
+        }
+    }
 
     let cleanup_state = State {
         ready: true,
@@ -110,4 +173,16 @@ fn transition_program_macro_builds_ast_rules() {
         .expect("cleanup evaluation")
         .expect("matching cleanup rule");
     assert_eq!(cleaned.items, BTreeSet::from([2]));
+}
+
+#[test]
+fn transition_program_macro_tracks_wrapped_helper_registrations() {
+    let registered = helper_wrapped_program();
+    let missing = missing_helper_wrapped_program();
+
+    assert_eq!(registered.first_unencodable_symbolic_node(), None);
+    assert_eq!(
+        missing.first_unencodable_symbolic_node(),
+        Some("missing_target_phase")
+    );
 }

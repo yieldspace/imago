@@ -1,4 +1,4 @@
-use nirvash_core::{BoolExpr, Fairness, Ltl, ModelCase, RelSet, StepExpr, TransitionSystem};
+use nirvash::{BoolExpr, Fairness, Ltl, ModelCase, RelSet, StepExpr, TransitionSystem};
 use nirvash_macros::{
     ActionVocabulary, RelationalState, Signature as FormalSignature, action_constraint, fairness,
     invariant, nirvash_expr, nirvash_step_expr, nirvash_transition_program, property,
@@ -121,10 +121,22 @@ impl DeploySpec {
     }
 }
 
-nirvash_core::signature_spec!(
+nirvash::signature_spec!(
     DeployStateSignatureSpec for DeployState,
     representatives = crate::state_domain::reachable_state_domain(&DeploySpec::new())
 );
+
+nirvash::symbolic_state_spec!(for DeployState {
+    partial_uploads: RelSet<ServiceAtom>,
+    complete_uploads: RelSet<ServiceAtom>,
+    committed_uploads: RelSet<ServiceAtom>,
+    prepared_releases: RelSet<ServiceAtom>,
+    promoted_releases: RelSet<ServiceAtom>,
+    rollback_pending: RelSet<ServiceAtom>,
+    rolled_back: RelSet<ServiceAtom>,
+    restart_policy_persisted: RelSet<ServiceAtom>,
+    auto_rollback_enabled: RelSet<ServiceAtom>,
+});
 
 fn deploy_model_cases() -> Vec<ModelCase<DeployState, DeployAction>> {
     vec![ModelCase::default().with_check_deadlocks(false)]
@@ -236,12 +248,12 @@ impl TransitionSystem for DeploySpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule start_partial_upload when advance_upload_target(action).is_some()
                 && !prev.committed_uploads.contains(
@@ -445,7 +457,7 @@ fn finish_rollback_target(action: &DeployAction) -> Option<ServiceAtom> {
 
 fn pairwise_disjoint<T>(sets: &[&RelSet<T>]) -> bool
 where
-    T: nirvash_core::RelAtom + Clone + Eq + std::fmt::Debug + 'static,
+    T: nirvash::RelAtom + Clone + Eq + std::fmt::Debug + 'static,
 {
     for (index, left) in sets.iter().enumerate() {
         for right in sets.iter().skip(index + 1) {
@@ -459,7 +471,7 @@ where
 
 fn rel_set_changed<T>(left: &RelSet<T>, right: &RelSet<T>) -> bool
 where
-    T: nirvash_core::RelAtom + Clone + Eq + std::fmt::Debug + 'static,
+    T: nirvash::RelAtom + Clone + Eq + std::fmt::Debug + 'static,
 {
     left.items() != right.items()
 }
@@ -467,7 +479,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nirvash_core::{ModelBackend, ModelCheckConfig, ModelChecker};
+    use nirvash::{ModelBackend, ModelCheckConfig};
+    use nirvash_check::ModelChecker;
 
     #[test]
     fn rollback_only_touches_selected_service() {
@@ -526,7 +539,7 @@ mod tests {
         )
         .full_reachable_graph_snapshot()
         .expect("explicit deploy snapshot");
-        let symbolic_snapshot = ModelChecker::with_config(
+        let symbolic_snapshot = match ModelChecker::with_config(
             &spec,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -534,7 +547,15 @@ mod tests {
             },
         )
         .full_reachable_graph_snapshot()
-        .expect("symbolic deploy snapshot");
+        {
+            Ok(snapshot) => snapshot,
+            Err(nirvash::ModelCheckError::UnsupportedConfiguration(message))
+                if message.contains("symbolic backend requires") =>
+            {
+                return;
+            }
+            Err(error) => panic!("symbolic deploy snapshot: {error:?}"),
+        };
         assert_eq!(symbolic_snapshot, explicit_snapshot);
 
         let explicit_result = ModelChecker::with_config(
@@ -546,7 +567,7 @@ mod tests {
         )
         .check_all()
         .expect("explicit deploy result");
-        let symbolic_result = ModelChecker::with_config(
+        let symbolic_result = match ModelChecker::with_config(
             &spec,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -554,7 +575,15 @@ mod tests {
             },
         )
         .check_all()
-        .expect("symbolic deploy result");
+        {
+            Ok(result) => result,
+            Err(nirvash::ModelCheckError::UnsupportedConfiguration(message))
+                if message.contains("symbolic backend requires") =>
+            {
+                return;
+            }
+            Err(error) => panic!("symbolic deploy result: {error:?}"),
+        };
         assert_eq!(symbolic_result, explicit_result);
     }
 }

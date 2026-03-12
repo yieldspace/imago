@@ -17,7 +17,7 @@ imagod-spec = { workspace = true }
 imagod-common = { workspace = true }
 imagod-config = { workspace = true }
 imagod-ipc = { workspace = true }
-nirvash-core = { workspace = true }
+nirvash = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
@@ -35,6 +35,7 @@ wasmparser = { workspace = true }
 
 [dev-dependencies]
 imagod-spec-formal = { workspace = true }
+nirvash-check = { workspace = true }
 nirvash-macros = { workspace = true }
 wat = { workspace = true }
 

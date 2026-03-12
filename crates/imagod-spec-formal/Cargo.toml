@@ -10,7 +10,8 @@ doctest = false
 
 [dependencies]
 imagod-spec = { workspace = true }
-nirvash-core = { workspace = true }
+nirvash = { workspace = true }
+nirvash-check = { workspace = true }
 nirvash-macros = { workspace = true }
 
 [build-dependencies]

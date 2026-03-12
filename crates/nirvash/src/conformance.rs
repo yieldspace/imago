@@ -1,10 +1,10 @@
 use std::{fmt::Debug, panic::AssertUnwindSafe, process};
 
+pub use crate::ReachableGraphSnapshot;
 pub use crate::system::{
     ActionApplier, ModelCase, ModelCaseSource, StateObserver, TransitionSystem,
 };
 use crate::{IntoBoundedDomain, into_bounded_domain};
-pub use crate::{ModelChecker, ReachableGraphSnapshot};
 
 /// Spec-side contract for replaying runtime behavior against a transition system.
 pub trait ProtocolConformanceSpec: TransitionSystem {

@@ -1,6 +1,3 @@
-extern crate self as nirvash_core;
-
-mod checker;
 #[allow(dead_code)]
 mod concurrent;
 pub mod conformance;
@@ -9,18 +6,15 @@ mod domain;
 mod dsl_macros;
 mod fairness;
 mod ltl;
+mod model;
 mod predicate;
 pub mod registry;
 mod relation;
-mod symbolic;
+mod symbolic_state;
 mod symmetry;
 mod system;
 mod trace;
 
-pub use checker::{
-    Counterexample, CounterexampleKind, ExplorationMode, ModelBackend, ModelCheckConfig,
-    ModelCheckError, ModelCheckResult, ModelChecker,
-};
 pub use conformance::{
     DynamicTestCase, NegativeWitness, PositiveWitness, ProtocolConformanceSpec,
     ProtocolInputWitnessBinding, ProtocolInputWitnessCodec, ProtocolRuntimeBinding,
@@ -45,16 +39,25 @@ pub use domain::{
 pub use fairness::Fairness;
 pub use inventory;
 pub use ltl::Ltl;
+pub use model::{
+    Counterexample, CounterexampleKind, ExplorationMode, ModelBackend, ModelCheckConfig,
+    ModelCheckError, ModelCheckResult,
+};
 pub use predicate::{
-    BoolExpr, BoolExprAst, GuardAst, GuardExpr, QuantifierKind, StateExpr, StateExprAst, StepExpr,
-    StepExprAst, TransitionProgram, TransitionProgramError, TransitionRule, UpdateAst, UpdateOp,
-    UpdateProgram,
+    BoolExpr, BoolExprAst, GuardAst, GuardExpr, GuardValueExpr, QuantifierKind, StateExpr,
+    StateExprAst, StepExpr, StepExprAst, StepValueExpr, TransitionProgram, TransitionProgramError,
+    TransitionRule, TransitionSuccessor, UpdateAst, UpdateOp, UpdateProgram, UpdateValueExprAst,
 };
 pub use registry::{RegisteredActionDocLabel, RegisteredActionDocPresentation};
 pub use relation::{
     RegisteredRelationalState, RelAtom, RelSet, Relation2, RelationError, RelationField,
     RelationFieldKind, RelationFieldSchema, RelationFieldSummary, RelationalState,
     collect_relational_state_schema, collect_relational_state_summary,
+};
+pub use symbolic_state::{
+    SymbolicStateField, SymbolicStateSchema, SymbolicStateSpec, normalize_symbolic_state_path,
+    symbolic_leaf_field, symbolic_leaf_index, symbolic_leaf_value, symbolic_seed_value,
+    symbolic_state_fields,
 };
 pub use symmetry::SymmetryReducer;
 pub use system::{
@@ -74,6 +77,50 @@ mod tests {
 
     use super::*;
 
+    crate::register_symbolic_pure_helpers!(
+        "registered_transition_target",
+        "start",
+        "stop",
+        "start_a",
+        "start_b"
+    );
+
+    macro_rules! register_leaf_symbolic_state_spec {
+        ($module:ident, $ty:ty) => {
+            mod $module {
+                use super::*;
+
+                impl SymbolicStateSpec for $ty {
+                    fn symbolic_state_schema() -> SymbolicStateSchema<Self> {
+                        SymbolicStateSchema::new(
+                            vec![symbolic_leaf_field(
+                                "self",
+                                |state: &Self| state,
+                                |state: &mut Self, value: Self| *state = value,
+                            )],
+                            || symbolic_seed_value::<Self>(),
+                        )
+                    }
+                }
+
+                fn symbolic_state_type_id() -> std::any::TypeId {
+                    std::any::TypeId::of::<$ty>()
+                }
+
+                fn build_symbolic_state_schema() -> Box<dyn std::any::Any> {
+                    Box::new(<$ty as SymbolicStateSpec>::symbolic_state_schema())
+                }
+
+                crate::inventory::submit! {
+                    crate::registry::RegisteredSymbolicStateSchema {
+                        state_type_id: symbolic_state_type_id,
+                        build: build_symbolic_state_schema,
+                    }
+                }
+            }
+        };
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TestState {
         Idle,
@@ -85,6 +132,8 @@ mod tests {
             BoundedDomain::new(vec![Self::Idle, Self::Busy])
         }
     }
+
+    register_leaf_symbolic_state_spec!(test_state_symbolic_schema, TestState);
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TestAction {
@@ -131,20 +180,32 @@ mod tests {
         ))
     }
 
+    fn registered_transition_target(state: &TestState, action: &TestAction) -> Option<TestState> {
+        match (state, action) {
+            (TestState::Idle, TestAction::Start) => Some(TestState::Busy),
+            (TestState::Busy, TestAction::Stop) => Some(TestState::Idle),
+            _ => None,
+        }
+    }
+
+    fn missing_transition_target(state: &TestState, action: &TestAction) -> Option<TestState> {
+        registered_transition_target(state, action)
+    }
+
     fn test_transition_program() -> TransitionProgram<TestState, TestAction> {
         TransitionProgram::named(
             "test_spec",
             vec![
                 TransitionRule::ast(
                     "start",
-                    GuardExpr::pure_call("start", |state, action| {
+                    GuardExpr::registered_pure_call("start", "start", |state, action| {
                         matches!((state, action), (TestState::Idle, TestAction::Start))
                     }),
                     UpdateProgram::ast(
                         "start",
-                        vec![UpdateOp::assign(
+                        vec![UpdateOp::assign_ast(
                             "self",
-                            "TestState::Busy",
+                            UpdateValueExprAst::literal("TestState::Busy"),
                             |_prev: &TestState, state: &mut TestState, _action: &TestAction| {
                                 *state = TestState::Busy;
                             },
@@ -153,14 +214,14 @@ mod tests {
                 ),
                 TransitionRule::ast(
                     "stop",
-                    GuardExpr::pure_call("stop", |state, action| {
+                    GuardExpr::registered_pure_call("stop", "stop", |state, action| {
                         matches!((state, action), (TestState::Busy, TestAction::Stop))
                     }),
                     UpdateProgram::ast(
                         "stop",
-                        vec![UpdateOp::assign(
+                        vec![UpdateOp::assign_ast(
                             "self",
-                            "TestState::Idle",
+                            UpdateValueExprAst::literal("TestState::Idle"),
                             |_prev: &TestState, state: &mut TestState, _action: &TestAction| {
                                 *state = TestState::Idle;
                             },
@@ -286,6 +347,8 @@ mod tests {
         }
     }
 
+    register_leaf_symbolic_state_spec!(deadlock_state_symbolic_schema, DeadlockState);
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum DeadlockAction {
         Start,
@@ -339,6 +402,8 @@ mod tests {
             BoundedDomain::new(vec![Self::Cold, Self::Warm])
         }
     }
+
+    register_leaf_symbolic_state_spec!(stutter_state_symbolic_schema, StutterState);
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum StutterAction {
@@ -404,6 +469,8 @@ mod tests {
             BoundedDomain::new(vec![Self::Idle, Self::Busy, Self::Blocked])
         }
     }
+
+    register_leaf_symbolic_state_spec!(control_state_symbolic_schema, ControlState);
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ControlAction {
@@ -502,6 +569,8 @@ mod tests {
         }
     }
 
+    register_leaf_symbolic_state_spec!(filtered_graph_state_symbolic_schema, FilteredGraphState);
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum FilteredGraphAction {
         Start,
@@ -580,6 +649,8 @@ mod tests {
             BoundedDomain::new(vec![Self::Left, Self::Right])
         }
     }
+
+    register_leaf_symbolic_state_spec!(symmetry_state_symbolic_schema, SymmetryState);
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum SymmetryAction {
@@ -705,6 +776,110 @@ mod tests {
     impl ModelCaseSource for LegacyPropertySpec {}
 
     #[derive(Debug, Clone, Copy, Default)]
+    struct MissingRegisteredHelperSpec;
+
+    impl TransitionSystem for MissingRegisteredHelperSpec {
+        type State = TestState;
+        type Action = TestAction;
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![TestState::Idle]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![TestAction::Start, TestAction::Stop]
+        }
+
+        fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+            Some(TransitionProgram::named(
+                "missing_helper_spec",
+                vec![TransitionRule::ast(
+                    "helper_start",
+                    GuardExpr::registered_pure_call(
+                        "missing_transition_target(prev, action).is_some()",
+                        "missing_transition_target",
+                        |state, action| missing_transition_target(state, action).is_some(),
+                    ),
+                    UpdateProgram::ast(
+                        "helper_start",
+                        vec![UpdateOp::assign_ast(
+                            "self",
+                            UpdateValueExprAst::registered_pure_call(
+                                "missing_transition_target(prev, action).expect(\"helper_start guard matched\")",
+                                "missing_transition_target",
+                            ),
+                            |prev: &TestState, state: &mut TestState, action: &TestAction| {
+                                *state = missing_transition_target(prev, action)
+                                    .expect("helper_start guard matched");
+                            },
+                        )],
+                    ),
+                )],
+            ))
+        }
+    }
+
+    impl TemporalSpec for MissingRegisteredHelperSpec {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
+            Vec::new()
+        }
+    }
+
+    impl ModelCaseSource for MissingRegisteredHelperSpec {}
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct RegisteredHelperSpec;
+
+    impl TransitionSystem for RegisteredHelperSpec {
+        type State = TestState;
+        type Action = TestAction;
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![TestState::Idle]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![TestAction::Start, TestAction::Stop]
+        }
+
+        fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+            Some(TransitionProgram::named(
+                "registered_helper_spec",
+                vec![TransitionRule::ast(
+                    "helper_start",
+                    GuardExpr::registered_pure_call(
+                        "registered_transition_target(prev, action).is_some()",
+                        "registered_transition_target",
+                        |state, action| registered_transition_target(state, action).is_some(),
+                    ),
+                    UpdateProgram::ast(
+                        "helper_start",
+                        vec![UpdateOp::assign_ast(
+                            "self",
+                            UpdateValueExprAst::registered_pure_call(
+                                "registered_transition_target(prev, action).expect(\"helper_start guard matched\")",
+                                "registered_transition_target",
+                            ),
+                            |prev: &TestState, state: &mut TestState, action: &TestAction| {
+                                *state = registered_transition_target(prev, action)
+                                    .expect("helper_start guard matched");
+                            },
+                        )],
+                    ),
+                )],
+            ))
+        }
+    }
+
+    impl TemporalSpec for RegisteredHelperSpec {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
+            Vec::new()
+        }
+    }
+
+    impl ModelCaseSource for RegisteredHelperSpec {}
+
+    #[derive(Debug, Clone, Copy, Default)]
     struct AmbiguousTransitionSpec;
 
     impl TransitionSystem for AmbiguousTransitionSpec {
@@ -725,14 +900,14 @@ mod tests {
                 vec![
                     TransitionRule::ast(
                         "start_a",
-                        GuardExpr::pure_call("start_a", |state, action| {
+                        GuardExpr::registered_pure_call("start_a", "start_a", |state, action| {
                             matches!((state, action), (TestState::Idle, TestAction::Start))
                         }),
                         UpdateProgram::ast(
                             "start_a",
-                            vec![UpdateOp::assign(
+                            vec![UpdateOp::assign_ast(
                                 "self",
-                                "TestState::Busy",
+                                UpdateValueExprAst::literal("TestState::Busy"),
                                 |_prev: &TestState, state: &mut TestState, _action: &TestAction| {
                                     *state = TestState::Busy;
                                 },
@@ -741,14 +916,14 @@ mod tests {
                     ),
                     TransitionRule::ast(
                         "start_b",
-                        GuardExpr::pure_call("start_b", |state, action| {
+                        GuardExpr::registered_pure_call("start_b", "start_b", |state, action| {
                             matches!((state, action), (TestState::Idle, TestAction::Start))
                         }),
                         UpdateProgram::ast(
                             "start_b",
-                            vec![UpdateOp::assign(
+                            vec![UpdateOp::assign_ast(
                                 "self",
-                                "TestState::Busy",
+                                UpdateValueExprAst::literal("TestState::Busy"),
                                 |_prev: &TestState, state: &mut TestState, _action: &TestAction| {
                                     *state = TestState::Busy;
                                 },
@@ -836,214 +1011,220 @@ mod tests {
         assert!(formula.describe().contains("/\\"));
     }
 
-    #[test]
-    fn model_checker_accepts_simple_lasso_spec() {
-        let spec = TestSpec;
-        let checker = ModelChecker::with_config(&spec, ModelCheckConfig::bounded_lasso(3));
-        assert!(checker.check_invariants().unwrap().is_ok());
-        assert!(checker.check_deadlocks().unwrap().is_ok());
-        assert!(checker.check_properties().unwrap().is_ok());
-    }
+    #[cfg(feature = "checker-tests")]
+    mod checker_frontdoor_tests {
+        use super::*;
+        use nirvash_check::ModelChecker;
 
-    #[test]
-    fn model_checker_detects_deadlocks_and_respects_toggle() {
-        let spec = DeadlockSpec;
-        let deadlocks = ModelChecker::new(&spec).check_deadlocks().unwrap();
-        assert!(!deadlocks.is_ok());
-        assert!(matches!(
-            deadlocks.violations()[0].kind,
-            CounterexampleKind::Deadlock
-        ));
+        #[test]
+        fn model_checker_accepts_simple_lasso_spec() {
+            let spec = TestSpec;
+            let checker = ModelChecker::with_config(&spec, ModelCheckConfig::bounded_lasso(3));
+            assert!(checker.check_invariants().unwrap().is_ok());
+            assert!(checker.check_deadlocks().unwrap().is_ok());
+            assert!(checker.check_properties().unwrap().is_ok());
+        }
 
-        let checker = ModelChecker::with_config(
-            &spec,
-            ModelCheckConfig {
+        #[test]
+        fn model_checker_detects_deadlocks_and_respects_toggle() {
+            let spec = DeadlockSpec;
+            let deadlocks = ModelChecker::new(&spec).check_deadlocks().unwrap();
+            assert!(!deadlocks.is_ok());
+            assert!(matches!(
+                deadlocks.violations()[0].kind,
+                CounterexampleKind::Deadlock
+            ));
+
+            let checker = ModelChecker::with_config(
+                &spec,
+                ModelCheckConfig {
+                    check_deadlocks: false,
+                    ..ModelCheckConfig::default()
+                },
+            );
+            assert!(checker.check_deadlocks().unwrap().is_ok());
+        }
+
+        #[test]
+        fn stutter_state_can_drive_temporal_progress() {
+            let spec = StutterSpec;
+            let checker = ModelChecker::with_config(
+                &spec,
+                ModelCheckConfig {
+                    check_deadlocks: false,
+                    ..ModelCheckConfig::default()
+                },
+            );
+            assert!(checker.check_properties().unwrap().is_ok());
+        }
+
+        #[test]
+        fn reachable_graph_snapshot_exposes_states_edges_and_initials() {
+            let snapshot = ModelChecker::new(&TestSpec)
+                .reachable_graph_snapshot()
+                .expect("snapshot should build");
+
+            assert_eq!(snapshot.states, vec![TestState::Idle, TestState::Busy]);
+            assert_eq!(snapshot.initial_indices, vec![0]);
+            assert!(snapshot.deadlocks.is_empty());
+            assert!(!snapshot.truncated);
+            assert!(snapshot.stutter_omitted);
+            assert_eq!(
+                snapshot.edges[0],
+                vec![ReachableGraphEdge {
+                    action: TestAction::Start,
+                    target: 1,
+                }]
+            );
+            assert_eq!(
+                snapshot.edges[1],
+                vec![ReachableGraphEdge {
+                    action: TestAction::Stop,
+                    target: 0,
+                }]
+            );
+        }
+
+        #[test]
+        fn reachable_graph_snapshot_omits_stutter_edges_but_marks_deadlocks() {
+            let snapshot = ModelChecker::new(&StutterSpec)
+                .reachable_graph_snapshot()
+                .expect("snapshot should build");
+
+            assert_eq!(
+                snapshot.states,
+                vec![StutterState::Cold, StutterState::Warm]
+            );
+            assert!(snapshot.edges.iter().all(Vec::is_empty));
+            assert_eq!(snapshot.initial_indices, vec![0]);
+            assert_eq!(snapshot.deadlocks, vec![0, 1]);
+            assert!(snapshot.stutter_omitted);
+        }
+
+        #[test]
+        fn full_reachable_graph_snapshot_ignores_doc_only_limits() {
+            let model_case = ModelCase::default().with_doc_checker_config(ModelCheckConfig {
+                backend: None,
+                exploration: ExplorationMode::ReachableGraph,
+                bounded_depth: None,
+                max_states: Some(1),
+                max_transitions: Some(1),
+                check_deadlocks: true,
+                stop_on_first_violation: false,
+            });
+            let checker = ModelChecker::for_case(&TestSpec, model_case);
+
+            let doc_snapshot = checker
+                .reachable_graph_snapshot()
+                .expect("doc snapshot should build");
+            let full_snapshot = checker
+                .full_reachable_graph_snapshot()
+                .expect("full snapshot should build");
+
+            assert!(doc_snapshot.truncated);
+            assert_eq!(doc_snapshot.states.len(), 1);
+            assert!(!full_snapshot.truncated);
+            assert_eq!(full_snapshot.states, vec![TestState::Idle, TestState::Busy]);
+        }
+
+        #[test]
+        fn constraints_prune_problematic_edges_from_the_graph() {
+            let unconstrained = ConstraintSpec { constrained: false };
+            let constrained = ConstraintSpec { constrained: true };
+            let config = ModelCheckConfig {
                 check_deadlocks: false,
                 ..ModelCheckConfig::default()
-            },
-        );
-        assert!(checker.check_deadlocks().unwrap().is_ok());
-    }
+            };
 
-    #[test]
-    fn stutter_state_can_drive_temporal_progress() {
-        let spec = StutterSpec;
-        let checker = ModelChecker::with_config(
-            &spec,
-            ModelCheckConfig {
-                check_deadlocks: false,
-                ..ModelCheckConfig::default()
-            },
-        );
-        assert!(checker.check_properties().unwrap().is_ok());
-    }
+            assert!(
+                !ModelChecker::with_config(&unconstrained, config)
+                    .check_properties()
+                    .unwrap()
+                    .is_ok()
+            );
+            assert!(
+                ModelChecker::with_config(&constrained, config)
+                    .check_properties()
+                    .unwrap()
+                    .is_ok()
+            );
+        }
 
-    #[test]
-    fn reachable_graph_snapshot_exposes_states_edges_and_initials() {
-        let snapshot = ModelChecker::new(&TestSpec)
+        #[test]
+        fn reachable_graph_snapshot_respects_constraints_and_symmetry() {
+            let constrained = ConstraintSpec { constrained: true };
+            let constrained_snapshot = ModelChecker::with_config(
+                &constrained,
+                ModelCheckConfig {
+                    check_deadlocks: false,
+                    ..ModelCheckConfig::default()
+                },
+            )
             .reachable_graph_snapshot()
             .expect("snapshot should build");
+            assert_eq!(
+                constrained_snapshot.states,
+                vec![ControlState::Idle, ControlState::Busy]
+            );
+            assert_eq!(
+                constrained_snapshot.edges[0],
+                vec![ReachableGraphEdge {
+                    action: ControlAction::Start,
+                    target: 1,
+                }]
+            );
+            assert_eq!(
+                constrained_snapshot.edges[1],
+                vec![ReachableGraphEdge {
+                    action: ControlAction::Stop,
+                    target: 0,
+                }]
+            );
 
-        assert_eq!(snapshot.states, vec![TestState::Idle, TestState::Busy]);
-        assert_eq!(snapshot.initial_indices, vec![0]);
-        assert!(snapshot.deadlocks.is_empty());
-        assert!(!snapshot.truncated);
-        assert!(snapshot.stutter_omitted);
-        assert_eq!(
-            snapshot.edges[0],
-            vec![ReachableGraphEdge {
-                action: TestAction::Start,
-                target: 1,
-            }]
-        );
-        assert_eq!(
-            snapshot.edges[1],
-            vec![ReachableGraphEdge {
-                action: TestAction::Stop,
-                target: 0,
-            }]
-        );
-    }
-
-    #[test]
-    fn reachable_graph_snapshot_omits_stutter_edges_but_marks_deadlocks() {
-        let snapshot = ModelChecker::new(&StutterSpec)
+            let symmetry_snapshot = ModelChecker::with_config(
+                &SymmetrySpec,
+                ModelCheckConfig {
+                    check_deadlocks: false,
+                    ..ModelCheckConfig::default()
+                },
+            )
             .reachable_graph_snapshot()
             .expect("snapshot should build");
+            assert_eq!(symmetry_snapshot.states, vec![SymmetryState::Left]);
+            assert_eq!(symmetry_snapshot.initial_indices, vec![0]);
+            assert_eq!(
+                symmetry_snapshot.edges[0],
+                vec![ReachableGraphEdge {
+                    action: SymmetryAction::Swap,
+                    target: 0,
+                }]
+            );
+        }
 
-        assert_eq!(
-            snapshot.states,
-            vec![StutterState::Cold, StutterState::Warm]
-        );
-        assert!(snapshot.edges.iter().all(Vec::is_empty));
-        assert_eq!(snapshot.initial_indices, vec![0]);
-        assert_eq!(snapshot.deadlocks, vec![0, 1]);
-        assert!(snapshot.stutter_omitted);
-    }
+        #[test]
+        fn reachable_graph_uses_successors_constrained_for_filtered_exploration() {
+            let snapshot = ModelChecker::new(&FilteredGraphSpec)
+                .reachable_graph_snapshot()
+                .expect("snapshot should build via constrained successors");
+            assert_eq!(
+                snapshot.states,
+                vec![FilteredGraphState::Idle, FilteredGraphState::Busy]
+            );
+            assert_eq!(
+                snapshot.edges[0],
+                vec![ReachableGraphEdge {
+                    action: FilteredGraphAction::Start,
+                    target: 1,
+                }]
+            );
+        }
 
-    #[test]
-    fn full_reachable_graph_snapshot_ignores_doc_only_limits() {
-        let model_case = ModelCase::default().with_doc_checker_config(ModelCheckConfig {
-            backend: None,
-            exploration: ExplorationMode::ReachableGraph,
-            bounded_depth: None,
-            max_states: Some(1),
-            max_transitions: Some(1),
-            check_deadlocks: true,
-            stop_on_first_violation: false,
-        });
-        let checker = ModelChecker::for_case(&TestSpec, model_case);
-
-        let doc_snapshot = checker
-            .reachable_graph_snapshot()
-            .expect("doc snapshot should build");
-        let full_snapshot = checker
-            .full_reachable_graph_snapshot()
-            .expect("full snapshot should build");
-
-        assert!(doc_snapshot.truncated);
-        assert_eq!(doc_snapshot.states.len(), 1);
-        assert!(!full_snapshot.truncated);
-        assert_eq!(full_snapshot.states, vec![TestState::Idle, TestState::Busy]);
-    }
-
-    #[test]
-    fn constraints_prune_problematic_edges_from_the_graph() {
-        let unconstrained = ConstraintSpec { constrained: false };
-        let constrained = ConstraintSpec { constrained: true };
-        let config = ModelCheckConfig {
-            check_deadlocks: false,
-            ..ModelCheckConfig::default()
-        };
-
-        assert!(
-            !ModelChecker::with_config(&unconstrained, config)
-                .check_properties()
-                .unwrap()
-                .is_ok()
-        );
-        assert!(
-            ModelChecker::with_config(&constrained, config)
-                .check_properties()
-                .unwrap()
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn reachable_graph_snapshot_respects_constraints_and_symmetry() {
-        let constrained = ConstraintSpec { constrained: true };
-        let constrained_snapshot = ModelChecker::with_config(
-            &constrained,
-            ModelCheckConfig {
-                check_deadlocks: false,
-                ..ModelCheckConfig::default()
-            },
-        )
-        .reachable_graph_snapshot()
-        .expect("snapshot should build");
-        assert_eq!(
-            constrained_snapshot.states,
-            vec![ControlState::Idle, ControlState::Busy]
-        );
-        assert_eq!(
-            constrained_snapshot.edges[0],
-            vec![ReachableGraphEdge {
-                action: ControlAction::Start,
-                target: 1,
-            }]
-        );
-        assert_eq!(
-            constrained_snapshot.edges[1],
-            vec![ReachableGraphEdge {
-                action: ControlAction::Stop,
-                target: 0,
-            }]
-        );
-
-        let symmetry_snapshot = ModelChecker::with_config(
-            &SymmetrySpec,
-            ModelCheckConfig {
-                check_deadlocks: false,
-                ..ModelCheckConfig::default()
-            },
-        )
-        .reachable_graph_snapshot()
-        .expect("snapshot should build");
-        assert_eq!(symmetry_snapshot.states, vec![SymmetryState::Left]);
-        assert_eq!(symmetry_snapshot.initial_indices, vec![0]);
-        assert_eq!(
-            symmetry_snapshot.edges[0],
-            vec![ReachableGraphEdge {
-                action: SymmetryAction::Swap,
-                target: 0,
-            }]
-        );
-    }
-
-    #[test]
-    fn reachable_graph_uses_successors_constrained_for_filtered_exploration() {
-        let snapshot = ModelChecker::new(&FilteredGraphSpec)
-            .reachable_graph_snapshot()
-            .expect("snapshot should build via constrained successors");
-        assert_eq!(
-            snapshot.states,
-            vec![FilteredGraphState::Idle, FilteredGraphState::Busy]
-        );
-        assert_eq!(
-            snapshot.edges[0],
-            vec![ReachableGraphEdge {
-                action: FilteredGraphAction::Start,
-                target: 1,
-            }]
-        );
-    }
-
-    #[test]
-    fn symmetry_with_temporal_properties_fails_closed() {
-        let spec = SymmetrySpec;
-        let err = ModelChecker::new(&spec).check_properties().unwrap_err();
-        assert!(matches!(err, ModelCheckError::UnsupportedConfiguration(_)));
+        #[test]
+        fn symmetry_with_temporal_properties_fails_closed() {
+            let spec = SymmetrySpec;
+            let err = ModelChecker::new(&spec).check_properties().unwrap_err();
+            assert!(matches!(err, ModelCheckError::UnsupportedConfiguration(_)));
+        }
     }
 
     #[test]
@@ -1197,127 +1378,173 @@ mod tests {
         assert_eq!(idle, TestState::Idle);
     }
 
-    #[test]
-    fn symbolic_checker_matches_explicit_snapshot_and_results() {
-        let explicit_snapshot = ModelChecker::new(&TestSpec)
+    #[cfg(feature = "checker-tests")]
+    mod symbolic_checker_tests {
+        use super::*;
+        use nirvash_check::ModelChecker;
+
+        #[test]
+        fn symbolic_checker_matches_explicit_snapshot_and_results() {
+            let explicit_snapshot = ModelChecker::new(&TestSpec)
+                .full_reachable_graph_snapshot()
+                .expect("explicit snapshot should build");
+            let symbolic_snapshot = ModelChecker::with_config(
+                &TestSpec,
+                ModelCheckConfig {
+                    backend: Some(ModelBackend::Symbolic),
+                    ..ModelCheckConfig::reachable_graph()
+                },
+            )
             .full_reachable_graph_snapshot()
-            .expect("explicit snapshot should build");
-        let symbolic_snapshot = ModelChecker::with_config(
-            &TestSpec,
-            ModelCheckConfig {
-                backend: Some(ModelBackend::Symbolic),
-                ..ModelCheckConfig::reachable_graph()
-            },
-        )
-        .full_reachable_graph_snapshot()
-        .expect("symbolic snapshot should build");
-        assert_eq!(symbolic_snapshot, explicit_snapshot);
+            .expect("symbolic snapshot should build");
+            assert_eq!(symbolic_snapshot, explicit_snapshot);
 
-        let explicit_result = ModelChecker::new(&TestSpec)
+            let explicit_result = ModelChecker::new(&TestSpec)
+                .check_all()
+                .expect("explicit checker should run");
+            let symbolic_result = ModelChecker::with_config(
+                &TestSpec,
+                ModelCheckConfig {
+                    backend: Some(ModelBackend::Symbolic),
+                    ..ModelCheckConfig::reachable_graph()
+                },
+            )
             .check_all()
-            .expect("explicit checker should run");
-        let symbolic_result = ModelChecker::with_config(
-            &TestSpec,
-            ModelCheckConfig {
-                backend: Some(ModelBackend::Symbolic),
-                ..ModelCheckConfig::reachable_graph()
-            },
-        )
-        .check_all()
-        .expect("symbolic checker should run");
-        assert_eq!(symbolic_result, explicit_result);
-    }
+            .expect("symbolic checker should run");
+            assert_eq!(symbolic_result, explicit_result);
+        }
 
-    #[test]
-    fn symbolic_checker_reaches_stutter_only_states() {
-        let snapshot = ModelChecker::with_config(
-            &StutterSpec,
-            ModelCheckConfig {
-                backend: Some(ModelBackend::Symbolic),
-                ..ModelCheckConfig::reachable_graph()
-            },
-        )
-        .full_reachable_graph_snapshot()
-        .expect("symbolic snapshot should build");
+        #[test]
+        fn symbolic_checker_rejects_non_identity_stutter_states() {
+            let err = ModelChecker::with_config(
+                &StutterSpec,
+                ModelCheckConfig {
+                    backend: Some(ModelBackend::Symbolic),
+                    ..ModelCheckConfig::reachable_graph()
+                },
+            )
+            .full_reachable_graph_snapshot()
+            .unwrap_err();
+            match err {
+                ModelCheckError::UnsupportedConfiguration(message) => {
+                    assert!(message.contains("stutter_state"));
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
 
-        assert_eq!(
-            snapshot.states,
-            vec![StutterState::Cold, StutterState::Warm]
-        );
-        assert!(snapshot.edges.iter().all(Vec::is_empty));
-        assert_eq!(snapshot.deadlocks, vec![0, 1]);
-    }
+        #[test]
+        fn symbolic_checker_rejects_specs_without_transition_program() {
+            let err = ModelChecker::with_config(
+                &FilteredGraphSpec,
+                ModelCheckConfig {
+                    backend: Some(ModelBackend::Symbolic),
+                    ..ModelCheckConfig::reachable_graph()
+                },
+            )
+            .full_reachable_graph_snapshot()
+            .unwrap_err();
+            assert!(matches!(err, ModelCheckError::UnsupportedConfiguration(_)));
+        }
 
-    #[test]
-    fn symbolic_checker_rejects_specs_without_transition_program() {
-        let err = ModelChecker::with_config(
-            &FilteredGraphSpec,
-            ModelCheckConfig {
-                backend: Some(ModelBackend::Symbolic),
-                ..ModelCheckConfig::reachable_graph()
-            },
-        )
-        .full_reachable_graph_snapshot()
-        .unwrap_err();
-        assert!(matches!(err, ModelCheckError::UnsupportedConfiguration(_)));
-    }
+        #[test]
+        fn symbolic_checker_rejects_unregistered_transition_helpers() {
+            let err = ModelChecker::with_config(
+                &MissingRegisteredHelperSpec,
+                ModelCheckConfig {
+                    backend: Some(ModelBackend::Symbolic),
+                    ..ModelCheckConfig::reachable_graph()
+                },
+            )
+            .full_reachable_graph_snapshot()
+            .unwrap_err();
+            match err {
+                ModelCheckError::UnsupportedConfiguration(message) => {
+                    assert!(message.contains("missing_transition_target"));
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
 
-    #[test]
-    fn symbolic_checker_rejects_legacy_constraints_and_properties() {
-        let legacy_constraint_err = ModelChecker::with_config(
-            &LegacyConstraintSpec,
-            ModelCheckConfig {
-                backend: Some(ModelBackend::Symbolic),
-                ..ModelCheckConfig::reachable_graph()
-            },
-        )
-        .full_reachable_graph_snapshot()
-        .unwrap_err();
-        assert!(matches!(
-            legacy_constraint_err,
-            ModelCheckError::UnsupportedConfiguration(_)
-        ));
+        #[test]
+        fn symbolic_checker_accepts_registered_transition_helpers() {
+            let snapshot = ModelChecker::with_config(
+                &RegisteredHelperSpec,
+                ModelCheckConfig {
+                    backend: Some(ModelBackend::Symbolic),
+                    ..ModelCheckConfig::reachable_graph()
+                },
+            )
+            .full_reachable_graph_snapshot()
+            .expect("registered symbolic helper snapshot should build");
+            assert_eq!(snapshot.states, vec![TestState::Idle, TestState::Busy]);
+        }
 
-        let legacy_property_err = ModelChecker::with_config(
-            &LegacyPropertySpec,
-            ModelCheckConfig {
-                backend: Some(ModelBackend::Symbolic),
-                ..ModelCheckConfig::reachable_graph()
-            },
-        )
-        .check_properties()
-        .unwrap_err();
-        assert!(matches!(
-            legacy_property_err,
-            ModelCheckError::UnsupportedConfiguration(_)
-        ));
-    }
+        #[test]
+        fn symbolic_checker_rejects_legacy_constraints_and_properties() {
+            let legacy_constraint_err = ModelChecker::with_config(
+                &LegacyConstraintSpec,
+                ModelCheckConfig {
+                    backend: Some(ModelBackend::Symbolic),
+                    ..ModelCheckConfig::reachable_graph()
+                },
+            )
+            .full_reachable_graph_snapshot()
+            .unwrap_err();
+            assert!(matches!(
+                legacy_constraint_err,
+                ModelCheckError::UnsupportedConfiguration(_)
+            ));
 
-    #[test]
-    fn symbolic_checker_rejects_ambiguous_ast_transition_programs() {
-        let err = ModelChecker::with_config(
-            &AmbiguousTransitionSpec,
-            ModelCheckConfig {
-                backend: Some(ModelBackend::Symbolic),
-                ..ModelCheckConfig::reachable_graph()
-            },
-        )
-        .full_reachable_graph_snapshot()
-        .unwrap_err();
-        assert!(matches!(err, ModelCheckError::UnsupportedConfiguration(_)));
-    }
+            let legacy_property_err = ModelChecker::with_config(
+                &LegacyPropertySpec,
+                ModelCheckConfig {
+                    backend: Some(ModelBackend::Symbolic),
+                    ..ModelCheckConfig::reachable_graph()
+                },
+            )
+            .check_properties()
+            .unwrap_err();
+            assert!(matches!(
+                legacy_property_err,
+                ModelCheckError::UnsupportedConfiguration(_)
+            ));
+        }
 
-    #[test]
-    fn symbolic_checker_rejects_bounded_lasso_mode() {
-        let err = ModelChecker::with_config(
-            &TestSpec,
-            ModelCheckConfig {
-                backend: Some(ModelBackend::Symbolic),
-                ..ModelCheckConfig::bounded_lasso(3)
-            },
-        )
-        .check_all()
-        .unwrap_err();
-        assert!(matches!(err, ModelCheckError::UnsupportedConfiguration(_)));
+        #[test]
+        fn symbolic_checker_accepts_relation_ast_transition_programs() {
+            let snapshot = ModelChecker::with_config(
+                &AmbiguousTransitionSpec,
+                ModelCheckConfig {
+                    backend: Some(ModelBackend::Symbolic),
+                    ..ModelCheckConfig::reachable_graph()
+                },
+            )
+            .full_reachable_graph_snapshot()
+            .expect("symbolic relation snapshot should build");
+            assert_eq!(snapshot.states, vec![TestState::Idle, TestState::Busy]);
+        }
+
+        #[test]
+        fn symbolic_checker_matches_explicit_bounded_lasso_results() {
+            let explicit_result = ModelChecker::with_config(
+                &TestSpec,
+                ModelCheckConfig {
+                    ..ModelCheckConfig::bounded_lasso(3)
+                },
+            )
+            .check_all()
+            .expect("explicit bounded lasso should run");
+            let symbolic_result = ModelChecker::with_config(
+                &TestSpec,
+                ModelCheckConfig {
+                    backend: Some(ModelBackend::Symbolic),
+                    ..ModelCheckConfig::bounded_lasso(3)
+                },
+            )
+            .check_all()
+            .expect("symbolic bounded lasso should run");
+            assert_eq!(symbolic_result, explicit_result);
+        }
     }
 }

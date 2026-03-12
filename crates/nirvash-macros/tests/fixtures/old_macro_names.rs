@@ -15,7 +15,7 @@ enum Action {
 struct Spec;
 
 #[imago_subsystem_spec]
-impl nirvash_core::TransitionSystem for Spec {
+impl nirvash::TransitionSystem for Spec {
     type State = State;
     type Action = Action;
 
@@ -33,8 +33,8 @@ impl nirvash_core::TransitionSystem for Spec {
 }
 
 #[imago_invariant(Spec)]
-fn old_style_invariant() -> nirvash_core::BoolExpr<State> {
-    nirvash_core::BoolExpr::new("old_style_invariant", |_| true)
+fn old_style_invariant() -> nirvash::BoolExpr<State> {
+    nirvash::BoolExpr::new("old_style_invariant", |_| true)
 }
 
 #[imago_formal_tests(spec = Spec)]

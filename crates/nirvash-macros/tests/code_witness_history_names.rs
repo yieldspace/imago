@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use nirvash_core::{
+use nirvash::{
     BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
     conformance::{
         ActionApplier, NegativeWitness, PositiveWitness, ProtocolConformanceSpec,
@@ -259,7 +259,7 @@ impl StateObserver for Driver {
 }
 
 fn generated_test_names() -> Vec<String> {
-    let mut names = nirvash_core::inventory::iter::<RegisteredCodeWitnessTestProvider>
+    let mut names = nirvash::inventory::iter::<RegisteredCodeWitnessTestProvider>
         .into_iter()
         .flat_map(|provider| (provider.build)())
         .map(|test| test.name().to_owned())
@@ -302,5 +302,5 @@ pub fn __nirvash_code_witness_main_marker() {}
 
 fn main() {
     assert_history_sensitive_names_registered();
-    nirvash_core::conformance::run_registered_code_witness_tests();
+    nirvash::conformance::run_registered_code_witness_tests();
 }

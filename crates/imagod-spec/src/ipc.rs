@@ -1098,7 +1098,7 @@ impl Validate for InvocationTokenClaims {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nirvash_core::Signature;
+    use nirvash::Signature;
 
     #[test]
     fn runner_app_type_domain_matches_expected_order() {

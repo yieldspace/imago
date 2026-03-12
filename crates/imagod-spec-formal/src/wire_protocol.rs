@@ -1,4 +1,4 @@
-use nirvash_core::{
+use nirvash::{
     BoolExpr, Fairness, Ltl, ModelBackend, ModelCase, ModelCheckConfig, RelSet, Relation2,
     Signature as _, StepExpr, TransitionSystem,
 };
@@ -138,17 +138,26 @@ impl WireProtocolSpec {
     }
 }
 
-nirvash_core::signature_spec!(
+nirvash::signature_spec!(
     WireProtocolStateSignatureSpec for WireProtocolState,
     representatives = crate::state_domain::reachable_state_domain(&WireProtocolSpec::new())
 );
+
+nirvash::symbolic_state_spec!(for WireProtocolState {
+    requests: Relation2<StreamAtom, RequestKindAtom>,
+    responses: Relation2<StreamAtom, RequestKindAtom>,
+    command_events: Relation2<StreamAtom, CommandEventAtom>,
+    log_follow_streams: RelSet<StreamAtom>,
+    log_chunks: Relation2<StreamAtom, LogChunkAtom>,
+    log_ended: RelSet<StreamAtom>,
+});
 
 fn wire_protocol_model_cases() -> Vec<ModelCase<WireProtocolState, WireProtocolAction>> {
     vec![
         ModelCase::default()
             .with_checker_config(ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
-                exploration: nirvash_core::ExplorationMode::ReachableGraph,
+                exploration: nirvash::ExplorationMode::ReachableGraph,
                 bounded_depth: None,
                 max_states: Some(96),
                 max_transitions: Some(384),
@@ -157,7 +166,7 @@ fn wire_protocol_model_cases() -> Vec<ModelCase<WireProtocolState, WireProtocolA
             })
             .with_doc_checker_config(ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
-                exploration: nirvash_core::ExplorationMode::ReachableGraph,
+                exploration: nirvash::ExplorationMode::ReachableGraph,
                 bounded_depth: None,
                 max_states: Some(64),
                 max_transitions: Some(256),
@@ -295,12 +304,12 @@ impl TransitionSystem for WireProtocolSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule command_event when command_event_payload(action).is_some()
                 && prev.saw_request(

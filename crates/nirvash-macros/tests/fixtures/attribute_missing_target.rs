@@ -1,4 +1,4 @@
-use nirvash_core::BoolExpr;
+use nirvash::BoolExpr;
 use nirvash_macros::{Signature as FormalSignature, invariant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
@@ -13,7 +13,7 @@ enum Action {
 
 struct Spec;
 
-impl nirvash_core::TransitionSystem for Spec {
+impl nirvash::TransitionSystem for Spec {
     type State = State;
     type Action = Action;
 

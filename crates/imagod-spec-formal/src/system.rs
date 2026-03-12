@@ -1,7 +1,7 @@
 use std::any::{Any, TypeId};
 
 use imagod_spec::MessageType;
-use nirvash_core::{
+use nirvash::{
     BoolExpr, ModelCase, ModelCaseSource, ModelCheckConfig, Signature as _, StepExpr, TemporalSpec,
     TransitionSystem, conformance::ProtocolConformanceSpec,
 };
@@ -106,20 +106,18 @@ fn system_prefix(action: &SystemAtomicAction) -> &'static str {
     }
 }
 
-fn system_inner_presentation(
-    action: &SystemAtomicAction,
-) -> nirvash_core::DocGraphActionPresentation {
+fn system_inner_presentation(action: &SystemAtomicAction) -> nirvash::DocGraphActionPresentation {
     match action {
-        SystemAtomicAction::Manager(inner) => nirvash_core::describe_doc_graph_action(inner),
-        SystemAtomicAction::Session(inner) => nirvash_core::describe_doc_graph_action(inner),
-        SystemAtomicAction::SessionAuth(inner) => nirvash_core::describe_doc_graph_action(inner),
-        SystemAtomicAction::Wire(inner) => nirvash_core::describe_doc_graph_action(inner),
-        SystemAtomicAction::Command(inner) => nirvash_core::describe_doc_graph_action(inner),
-        SystemAtomicAction::Deploy(inner) => nirvash_core::describe_doc_graph_action(inner),
-        SystemAtomicAction::Supervision(inner) => nirvash_core::describe_doc_graph_action(inner),
-        SystemAtomicAction::Rpc(inner) => nirvash_core::describe_doc_graph_action(inner),
-        SystemAtomicAction::Plugin(inner) => nirvash_core::describe_doc_graph_action(inner),
-        SystemAtomicAction::Shutdown(inner) => nirvash_core::describe_doc_graph_action(inner),
+        SystemAtomicAction::Manager(inner) => nirvash::describe_doc_graph_action(inner),
+        SystemAtomicAction::Session(inner) => nirvash::describe_doc_graph_action(inner),
+        SystemAtomicAction::SessionAuth(inner) => nirvash::describe_doc_graph_action(inner),
+        SystemAtomicAction::Wire(inner) => nirvash::describe_doc_graph_action(inner),
+        SystemAtomicAction::Command(inner) => nirvash::describe_doc_graph_action(inner),
+        SystemAtomicAction::Deploy(inner) => nirvash::describe_doc_graph_action(inner),
+        SystemAtomicAction::Supervision(inner) => nirvash::describe_doc_graph_action(inner),
+        SystemAtomicAction::Rpc(inner) => nirvash::describe_doc_graph_action(inner),
+        SystemAtomicAction::Plugin(inner) => nirvash::describe_doc_graph_action(inner),
+        SystemAtomicAction::Shutdown(inner) => nirvash::describe_doc_graph_action(inner),
     }
 }
 
@@ -127,21 +125,21 @@ fn interaction(
     from: &'static str,
     to: &'static str,
     label: &'static str,
-) -> nirvash_core::DocGraphInteractionStep {
-    nirvash_core::DocGraphInteractionStep::between(from, to, label)
+) -> nirvash::DocGraphInteractionStep {
+    nirvash::DocGraphInteractionStep::between(from, to, label)
 }
 
 fn process(
     actor: &'static str,
-    kind: nirvash_core::DocGraphProcessKind,
+    kind: nirvash::DocGraphProcessKind,
     label: impl Into<String>,
-) -> nirvash_core::DocGraphProcessStep {
-    nirvash_core::DocGraphProcessStep::for_actor(actor, kind, label)
+) -> nirvash::DocGraphProcessStep {
+    nirvash::DocGraphProcessStep::for_actor(actor, kind, label)
 }
 
 fn system_atomic_interactions(
     action: &SystemAtomicAction,
-) -> Vec<nirvash_core::DocGraphInteractionStep> {
+) -> Vec<nirvash::DocGraphInteractionStep> {
     match action {
         SystemAtomicAction::Manager(_) | SystemAtomicAction::Deploy(_) => Vec::new(),
         SystemAtomicAction::Session(action) => match action {
@@ -323,49 +321,47 @@ fn system_atomic_interactions(
     }
 }
 
-fn system_atomic_process_steps(
-    action: &SystemAtomicAction,
-) -> Vec<nirvash_core::DocGraphProcessStep> {
+fn system_atomic_process_steps(action: &SystemAtomicAction) -> Vec<nirvash::DocGraphProcessStep> {
     let inner = system_inner_presentation(action);
     match action {
         SystemAtomicAction::Manager(_) | SystemAtomicAction::Deploy(_) => vec![process(
             "Manager",
-            nirvash_core::DocGraphProcessKind::Do,
+            nirvash::DocGraphProcessKind::Do,
             inner.label,
         )],
         SystemAtomicAction::Session(action) => match action {
             SessionTransportAction::AcceptSession => vec![
                 process(
                     "Client",
-                    nirvash_core::DocGraphProcessKind::Send,
+                    nirvash::DocGraphProcessKind::Send,
                     "open session to Manager",
                 ),
                 process(
                     "Manager",
-                    nirvash_core::DocGraphProcessKind::Receive,
+                    nirvash::DocGraphProcessKind::Receive,
                     "accept session from Client",
                 ),
             ],
             SessionTransportAction::RejectTooMany => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "reject session to Client",
             )],
             SessionTransportAction::JoinSession => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Do,
+                nirvash::DocGraphProcessKind::Do,
                 inner.label,
             )],
             SessionTransportAction::BeginShutdown => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "begin shutdown to Client",
             )],
         },
         SystemAtomicAction::SessionAuth(action) => match action {
             SessionAuthAction::AcceptSession(_) => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Do,
+                nirvash::DocGraphProcessKind::Do,
                 "accept session context",
             )],
             SessionAuthAction::AuthenticateAdmin(_)
@@ -373,12 +369,12 @@ fn system_atomic_process_steps(
             | SessionAuthAction::AuthenticateUnknown(_) => vec![
                 process(
                     "Client",
-                    nirvash_core::DocGraphProcessKind::Send,
+                    nirvash::DocGraphProcessKind::Send,
                     "credentials to Manager",
                 ),
                 process(
                     "Manager",
-                    nirvash_core::DocGraphProcessKind::Receive,
+                    nirvash::DocGraphProcessKind::Receive,
                     inner.label,
                 ),
             ],
@@ -386,74 +382,70 @@ fn system_atomic_process_steps(
                 vec![
                     process(
                         "Client",
-                        nirvash_core::DocGraphProcessKind::Send,
+                        nirvash::DocGraphProcessKind::Send,
                         "authorize request to Manager",
                     ),
-                    process(
-                        "Manager",
-                        nirvash_core::DocGraphProcessKind::Do,
-                        inner.label,
-                    ),
+                    process("Manager", nirvash::DocGraphProcessKind::Do, inner.label),
                 ]
             }
             SessionAuthAction::RejectUnauthorized(_, _) => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "reject unauthorized to Client",
             )],
             SessionAuthAction::ReadTimeout(_) => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Wait,
+                nirvash::DocGraphProcessKind::Wait,
                 "stream timeout",
             )],
             SessionAuthAction::CloseStream(_) => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Do,
+                nirvash::DocGraphProcessKind::Do,
                 "close stream",
             )],
             SessionAuthAction::UploadClientAuthority(_) => vec![process(
                 "Client",
-                nirvash_core::DocGraphProcessKind::Send,
+                nirvash::DocGraphProcessKind::Send,
                 "upload client authority to Manager",
             )],
         },
         SystemAtomicAction::Wire(action) => match action {
             WireProtocolAction::CommandEvent(_, _) => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "command.event to Client",
             )],
             WireProtocolAction::LogsChunk(_, _) => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "logs.chunk to Client",
             )],
             WireProtocolAction::LogsEnd(_) => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "logs.end to Client",
             )],
             WireProtocolAction::LogsRequest(_) => vec![
                 process(
                     "Client",
-                    nirvash_core::DocGraphProcessKind::Send,
+                    nirvash::DocGraphProcessKind::Send,
                     "logs.request to Manager",
                 ),
                 process(
                     "Manager",
-                    nirvash_core::DocGraphProcessKind::Receive,
+                    nirvash::DocGraphProcessKind::Receive,
                     "logs.request from Client",
                 ),
             ],
             _ => vec![
                 process(
                     "Client",
-                    nirvash_core::DocGraphProcessKind::Send,
+                    nirvash::DocGraphProcessKind::Send,
                     format!("{} to Manager", inner.label),
                 ),
                 process(
                     "Manager",
-                    nirvash_core::DocGraphProcessKind::Receive,
+                    nirvash::DocGraphProcessKind::Receive,
                     format!("{} from Client", inner.label),
                 ),
             ],
@@ -461,115 +453,115 @@ fn system_atomic_process_steps(
         SystemAtomicAction::Command(action) => match action {
             CommandProtocolAction::Start(_) => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Send,
+                nirvash::DocGraphProcessKind::Send,
                 "start command to Runner",
             )],
             CommandProtocolAction::SetRunning => vec![process(
                 "Runner",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "running to Manager",
             )],
             CommandProtocolAction::MarkSpawned => vec![process(
                 "Runner",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "spawned to Manager",
             )],
             CommandProtocolAction::FinishSucceeded
             | CommandProtocolAction::FinishFailed(_)
             | CommandProtocolAction::FinishCanceled => vec![process(
                 "Runner",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "finish command to Manager",
             )],
             CommandProtocolAction::SnapshotRunning => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Wait,
+                nirvash::DocGraphProcessKind::Wait,
                 "running snapshot",
             )],
             CommandProtocolAction::RequestCancel => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Send,
+                nirvash::DocGraphProcessKind::Send,
                 "cancel command to Runner",
             )],
             CommandProtocolAction::Remove => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Do,
+                nirvash::DocGraphProcessKind::Do,
                 "remove command",
             )],
         },
         SystemAtomicAction::Supervision(action) => match action {
             SupervisionAction::PrepareEndpoint(_) => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Send,
+                nirvash::DocGraphProcessKind::Send,
                 "prepare endpoint to Runner",
             )],
             SupervisionAction::AdvanceBootstrap(_) => vec![process(
                 "Runner",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "bootstrap progress to Manager",
             )],
             SupervisionAction::StartServing(_) => vec![process(
                 "Runner",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "start serving to Manager",
             )],
             SupervisionAction::RequestStop(_) => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Send,
+                nirvash::DocGraphProcessKind::Send,
                 "stop service to Runner",
             )],
             SupervisionAction::ReapService(_) => vec![process(
                 "Runner",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "service reaped to Manager",
             )],
         },
         SystemAtomicAction::Rpc(action) => match action {
             RpcAction::GrantBinding(_) => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Send,
+                nirvash::DocGraphProcessKind::Send,
                 "grant binding to Service",
             )],
             RpcAction::ResolveLocal(_) => vec![process(
                 "Service",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "resolve local RPC to Manager",
             )],
             RpcAction::RejectLocal(_) => vec![process(
                 "Service",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "reject local RPC to Manager",
             )],
             RpcAction::ConnectRemote(_) => vec![process(
                 "Service",
-                nirvash_core::DocGraphProcessKind::Send,
+                nirvash::DocGraphProcessKind::Send,
                 "connect remote RPC to RemotePeer",
             )],
             RpcAction::InvokeRemote(_) => vec![process(
                 "Service",
-                nirvash_core::DocGraphProcessKind::Send,
+                nirvash::DocGraphProcessKind::Send,
                 "invoke remote RPC to RemotePeer",
             )],
             RpcAction::RejectRemoteInvoke(_) => vec![process(
                 "RemotePeer",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "reject remote RPC to Service",
             )],
             RpcAction::CompleteRemoteCall(_) => vec![process(
                 "RemotePeer",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "complete remote RPC to Service",
             )],
             RpcAction::DisconnectRemote(_) => vec![process(
                 "RemotePeer",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "disconnect remote RPC from Service",
             )],
         },
         SystemAtomicAction::Plugin(action) => match action {
             PluginPlatformAction::RegisterPlugin(_) => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Send,
+                nirvash::DocGraphProcessKind::Send,
                 "register plugin to PluginResolver",
             )],
             PluginPlatformAction::ClassifyGraphAcyclic
@@ -579,7 +571,7 @@ fn system_atomic_process_steps(
             | PluginPlatformAction::ResolveProviderDependency
             | PluginPlatformAction::ResolveProviderMissing => vec![process(
                 "PluginResolver",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "plugin analysis to Manager",
             )],
             PluginPlatformAction::AllowCapability
@@ -587,39 +579,39 @@ fn system_atomic_process_steps(
             | PluginPlatformAction::AllowHttpHost
             | PluginPlatformAction::DenyHttpOutbound => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Do,
+                nirvash::DocGraphProcessKind::Do,
                 inner.label,
             )],
         },
         SystemAtomicAction::Shutdown(action) => match action {
             ShutdownFlowAction::ReceiveSignal => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Receive,
+                nirvash::DocGraphProcessKind::Receive,
                 "shutdown signal from Signal",
             )],
             ShutdownFlowAction::StopAccepting => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Emit,
+                nirvash::DocGraphProcessKind::Emit,
                 "stop accepting for Client",
             )],
             ShutdownFlowAction::DrainSessions => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Wait,
+                nirvash::DocGraphProcessKind::Wait,
                 "sessions drained",
             )],
             ShutdownFlowAction::StopServicesGraceful => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Send,
+                nirvash::DocGraphProcessKind::Send,
                 "graceful stop to Runner",
             )],
             ShutdownFlowAction::StopServicesForced => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Send,
+                nirvash::DocGraphProcessKind::Send,
                 "forced stop to Runner",
             )],
             ShutdownFlowAction::StopMaintenance | ShutdownFlowAction::Finalize => vec![process(
                 "Manager",
-                nirvash_core::DocGraphProcessKind::Do,
+                nirvash::DocGraphProcessKind::Do,
                 inner.label,
             )],
         },
@@ -628,10 +620,10 @@ fn system_atomic_process_steps(
 
 fn system_atomic_action_presentation(
     action: &SystemAtomicAction,
-) -> nirvash_core::DocGraphActionPresentation {
+) -> nirvash::DocGraphActionPresentation {
     let inner = system_inner_presentation(action);
     let label = format!("{}: {}", system_prefix(action), inner.label);
-    let mut presentation = nirvash_core::DocGraphActionPresentation::with_steps(
+    let mut presentation = nirvash::DocGraphActionPresentation::with_steps(
         label,
         system_atomic_interactions(action),
         system_atomic_process_steps(action),
@@ -645,17 +637,15 @@ fn system_atomic_action_presentation(
     presentation
 }
 
-fn system_action_doc_presentation(
-    value: &dyn Any,
-) -> Option<nirvash_core::DocGraphActionPresentation> {
+fn system_action_doc_presentation(value: &dyn Any) -> Option<nirvash::DocGraphActionPresentation> {
     let action = value
         .downcast_ref::<SystemAction>()
         .expect("registered system action downcast");
     Some(system_atomic_action_presentation(action))
 }
 
-nirvash_core::inventory::submit! {
-    nirvash_core::RegisteredActionDocPresentation {
+nirvash::inventory::submit! {
+    nirvash::RegisteredActionDocPresentation {
         value_type_id: system_action_type_id,
         format: system_action_doc_presentation,
     }
@@ -747,52 +737,52 @@ impl SystemSpec {
     fn atomic_actions(&self) -> Vec<SystemAtomicAction> {
         let mut actions = Vec::new();
         actions.extend(
-            <ManagerRuntimeAction as nirvash_core::ActionVocabulary>::action_vocabulary()
+            <ManagerRuntimeAction as nirvash::ActionVocabulary>::action_vocabulary()
                 .into_iter()
                 .map(SystemAtomicAction::Manager),
         );
         actions.extend(
-            <SessionTransportAction as nirvash_core::ActionVocabulary>::action_vocabulary()
+            <SessionTransportAction as nirvash::ActionVocabulary>::action_vocabulary()
                 .into_iter()
                 .map(SystemAtomicAction::Session),
         );
         actions.extend(
-            <SessionAuthAction as nirvash_core::ActionVocabulary>::action_vocabulary()
+            <SessionAuthAction as nirvash::ActionVocabulary>::action_vocabulary()
                 .into_iter()
                 .map(SystemAtomicAction::SessionAuth),
         );
         actions.extend(
-            <WireProtocolAction as nirvash_core::ActionVocabulary>::action_vocabulary()
+            <WireProtocolAction as nirvash::ActionVocabulary>::action_vocabulary()
                 .into_iter()
                 .map(SystemAtomicAction::Wire),
         );
         actions.extend(
-            <CommandProtocolAction as nirvash_core::ActionVocabulary>::action_vocabulary()
+            <CommandProtocolAction as nirvash::ActionVocabulary>::action_vocabulary()
                 .into_iter()
                 .map(SystemAtomicAction::Command),
         );
         actions.extend(
-            <DeployAction as nirvash_core::ActionVocabulary>::action_vocabulary()
+            <DeployAction as nirvash::ActionVocabulary>::action_vocabulary()
                 .into_iter()
                 .map(SystemAtomicAction::Deploy),
         );
         actions.extend(
-            <SupervisionAction as nirvash_core::ActionVocabulary>::action_vocabulary()
+            <SupervisionAction as nirvash::ActionVocabulary>::action_vocabulary()
                 .into_iter()
                 .map(SystemAtomicAction::Supervision),
         );
         actions.extend(
-            <RpcAction as nirvash_core::ActionVocabulary>::action_vocabulary()
+            <RpcAction as nirvash::ActionVocabulary>::action_vocabulary()
                 .into_iter()
                 .map(SystemAtomicAction::Rpc),
         );
         actions.extend(
-            <PluginPlatformAction as nirvash_core::ActionVocabulary>::action_vocabulary()
+            <PluginPlatformAction as nirvash::ActionVocabulary>::action_vocabulary()
                 .into_iter()
                 .map(SystemAtomicAction::Plugin),
         );
         actions.extend(
-            <ShutdownFlowAction as nirvash_core::ActionVocabulary>::action_vocabulary()
+            <ShutdownFlowAction as nirvash::ActionVocabulary>::action_vocabulary()
                 .into_iter()
                 .map(SystemAtomicAction::Shutdown),
         );
@@ -985,7 +975,7 @@ fn system_model_cases() -> Vec<ModelCase<SystemState, SystemAtomicAction>> {
 fn system_checker_config() -> ModelCheckConfig {
     ModelCheckConfig {
         backend: None,
-        exploration: nirvash_core::ExplorationMode::ReachableGraph,
+        exploration: nirvash::ExplorationMode::ReachableGraph,
         bounded_depth: Some(12),
         max_states: Some(2048),
         max_transitions: Some(8192),
@@ -997,7 +987,7 @@ fn system_checker_config() -> ModelCheckConfig {
 fn system_doc_checker_config() -> ModelCheckConfig {
     ModelCheckConfig {
         backend: None,
-        exploration: nirvash_core::ExplorationMode::ReachableGraph,
+        exploration: nirvash::ExplorationMode::ReachableGraph,
         bounded_depth: Some(10),
         max_states: Some(192),
         max_transitions: Some(768),
@@ -1009,7 +999,7 @@ fn system_doc_checker_config() -> ModelCheckConfig {
 fn focused_system_checker_config() -> ModelCheckConfig {
     ModelCheckConfig {
         backend: None,
-        exploration: nirvash_core::ExplorationMode::ReachableGraph,
+        exploration: nirvash::ExplorationMode::ReachableGraph,
         bounded_depth: Some(8),
         max_states: Some(512),
         max_transitions: Some(2048),
@@ -1021,7 +1011,7 @@ fn focused_system_checker_config() -> ModelCheckConfig {
 fn focused_system_doc_checker_config() -> ModelCheckConfig {
     ModelCheckConfig {
         backend: None,
-        exploration: nirvash_core::ExplorationMode::ReachableGraph,
+        exploration: nirvash::ExplorationMode::ReachableGraph,
         bounded_depth: Some(8),
         max_states: Some(96),
         max_transitions: Some(384),
@@ -1033,7 +1023,7 @@ fn focused_system_doc_checker_config() -> ModelCheckConfig {
 fn shutdown_system_checker_config() -> ModelCheckConfig {
     ModelCheckConfig {
         backend: None,
-        exploration: nirvash_core::ExplorationMode::ReachableGraph,
+        exploration: nirvash::ExplorationMode::ReachableGraph,
         bounded_depth: Some(10),
         max_states: Some(2048),
         max_transitions: Some(8192),
@@ -1814,7 +1804,7 @@ impl TransitionSystem for SystemSpec {
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule system_transition when SystemSpec::new().atomic_transition(prev, action).is_some() => {
                 set self <= SystemSpec::new()
@@ -3054,7 +3044,7 @@ fn maintenance_reap_and_idle_tick_atom_allowed(action: &SystemAtomicAction) -> b
 
 #[cfg(test)]
 mod tests {
-    use nirvash_core::ModelChecker;
+    use nirvash_check::ModelChecker;
 
     use super::*;
 
@@ -3068,7 +3058,7 @@ mod tests {
     fn reachable_snapshot_for_case(
         spec: &SystemSpec,
         label: &str,
-    ) -> nirvash_core::ReachableGraphSnapshot<SystemState, SystemAtomicAction> {
+    ) -> nirvash::ReachableGraphSnapshot<SystemState, SystemAtomicAction> {
         ModelChecker::for_case(spec, model_case(spec, label))
             .full_reachable_graph_snapshot()
             .expect("snapshot should build")
@@ -3079,7 +3069,7 @@ mod tests {
     }
 
     fn edge_target(
-        snapshot: &nirvash_core::ReachableGraphSnapshot<SystemState, SystemAtomicAction>,
+        snapshot: &nirvash::ReachableGraphSnapshot<SystemState, SystemAtomicAction>,
         source: usize,
         action: &SystemAtomicAction,
     ) -> Option<usize> {

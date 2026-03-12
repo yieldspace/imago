@@ -15,7 +15,7 @@ enum Action {
     Remove(u8),
 }
 
-fn program() -> nirvash_core::TransitionProgram<State, Action> {
+fn program() -> nirvash::TransitionProgram<State, Action> {
     nirvash_transition_program! {
         rule activate when !prev.ready && matches!(action, Action::Add(_)) => {
             set ready <= true;

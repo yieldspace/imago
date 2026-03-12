@@ -45,10 +45,33 @@ pub trait TransitionSystem {
         None
     }
 
+    fn transition_relation(&self, state: &Self::State, action: &Self::Action) -> Vec<Self::State> {
+        match self.transition_program() {
+            Some(program) => {
+                assert!(
+                    program.is_ast_native(),
+                    "transition program `{}` for spec `{}` must be AST-native; use nirvash_transition_program! instead of TransitionRule::new/UpdateProgram::new",
+                    program.name(),
+                    self.name()
+                );
+                program
+                    .successors(state, action)
+                    .into_iter()
+                    .map(|successor| successor.into_next())
+                    .collect()
+            }
+            None => self.transition(state, action).into_iter().collect(),
+        }
+    }
+
     fn successors(&self, state: &Self::State) -> Vec<(Self::Action, Self::State)> {
         self.actions()
             .into_iter()
-            .filter_map(|action| self.transition(state, &action).map(|next| (action, next)))
+            .flat_map(|action| {
+                self.transition_relation(state, &action)
+                    .into_iter()
+                    .map(move |next| (action.clone(), next))
+            })
             .collect()
     }
 
@@ -75,8 +98,9 @@ pub trait TransitionSystem {
         action: &Self::Action,
         next: &Self::State,
     ) -> bool {
-        self.transition(prev, action)
-            .is_some_and(|candidate_next| candidate_next == *next)
+        self.transition_relation(prev, action)
+            .into_iter()
+            .any(|candidate_next| candidate_next == *next)
     }
 
     fn allow_stutter(&self) -> bool {

@@ -1,4 +1,4 @@
-use nirvash_core::{BoundedDomain, TransitionSystem};
+use nirvash::{BoundedDomain, TransitionSystem};
 
 pub fn reachable_state_domain<T>(spec: &T) -> BoundedDomain<T::State>
 where

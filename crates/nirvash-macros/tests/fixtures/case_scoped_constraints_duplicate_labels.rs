@@ -1,4 +1,4 @@
-use nirvash_core::{ModelCase, StepExpr, TransitionSystem};
+use nirvash::{ModelCase, StepExpr, TransitionSystem};
 use nirvash_macros::{Signature as FormalSignature, action_constraint, subsystem_spec};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
@@ -26,14 +26,14 @@ impl TransitionSystem for Spec {
         vec![Action::Tick]
     }
 
-    fn transition_program(&self) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
-        Some(::nirvash_core::TransitionProgram::named("spec", vec![]))
+    fn transition_program(&self) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
+        Some(::nirvash::TransitionProgram::named("spec", vec![]))
     }
 }
 
 #[action_constraint(Spec, cases("case_a", "case_a"))]
 fn duplicate_case_labels() -> StepExpr<State, Action> {
-    nirvash_core::StepExpr::new("duplicate_case_labels", |_, _, _| true)
+    nirvash::StepExpr::new("duplicate_case_labels", |_, _, _| true)
 }
 
 fn spec_model_cases() -> Vec<ModelCase<State, Action>> {

@@ -1,4 +1,4 @@
-use nirvash_core::{ModelCase, ModelCaseSource, BoolExpr, TemporalSpec, TransitionSystem, conformance::ProtocolConformanceSpec};
+use nirvash::{ModelCase, ModelCaseSource, BoolExpr, TemporalSpec, TransitionSystem, conformance::ProtocolConformanceSpec};
 use nirvash_macros::{Signature as FormalSignature, nirvash_projection_model};
 
 #[derive(Clone, Copy, Debug, Default)]

@@ -1,15 +1,13 @@
 [package]
-name = "nirvash-core"
+name = "nirvash-backends"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-readme = "README.md"
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
-inventory = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
+nirvash = { workspace = true }
 z3 = { workspace = true }

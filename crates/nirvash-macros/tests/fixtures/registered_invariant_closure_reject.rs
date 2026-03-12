@@ -1,4 +1,4 @@
-use nirvash_core::TransitionSystem;
+use nirvash::TransitionSystem;
 use nirvash_macros::{Signature as FormalSignature, invariant, subsystem_spec};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
@@ -28,14 +28,14 @@ impl TransitionSystem for Spec {
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
-        Some(::nirvash_core::TransitionProgram::named("spec", vec![]))
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
+        Some(::nirvash::TransitionProgram::named("spec", vec![]))
     }
 }
 
 #[invariant(Spec)]
-fn bad_invariant() -> ::nirvash_core::BoolExpr<State> {
-    ::nirvash_core::BoolExpr::new("bad_invariant", |_| true)
+fn bad_invariant() -> ::nirvash::BoolExpr<State> {
+    ::nirvash::BoolExpr::new("bad_invariant", |_| true)
 }
 
 fn main() {}

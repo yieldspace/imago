@@ -1,5 +1,5 @@
 use imagod_spec::RunnerBootstrap;
-use nirvash_core::{
+use nirvash::{
     BoolExpr, Fairness, Ltl, ModelBackend, ModelCase, ModelCheckConfig, StepExpr, TransitionSystem,
 };
 use nirvash_macros::{
@@ -273,12 +273,12 @@ impl TransitionSystem for RunnerBootstrapSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule read_within_bounds when matches!(action, RunnerBootstrapAction::ReadWithinBounds)
                 && !prev.decoded => {

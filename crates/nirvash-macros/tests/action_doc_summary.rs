@@ -1,4 +1,4 @@
-use nirvash_core::{TransitionSystem, collect_doc_graph_specs, format_doc_graph_action};
+use nirvash::{TransitionSystem, collect_doc_graph_specs, format_doc_graph_action};
 use nirvash_macros::nirvash_transition_program;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, nirvash_macros::Signature)]
@@ -51,12 +51,12 @@ impl TransitionSystem for DemoSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule start when matches!(action, DemoAction::Start) && !prev.busy => {
                 set busy <= true;
@@ -75,7 +75,7 @@ const _: () = ();
 #[test]
 fn action_vocabulary_derive_uses_signature_domain() {
     assert_eq!(
-        <WrapperAction as nirvash_core::ActionVocabulary>::action_vocabulary(),
+        <WrapperAction as nirvash::ActionVocabulary>::action_vocabulary(),
         vec![
             WrapperAction::Explicit(InnerAction::Inner),
             WrapperAction::Delegated(InnerAction::Inner),

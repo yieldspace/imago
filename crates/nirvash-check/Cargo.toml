@@ -1,0 +1,16 @@
+[package]
+name = "nirvash-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+nirvash = { workspace = true }
+nirvash-backends = { workspace = true }
+
+[dev-dependencies]
+nirvash-macros = { workspace = true }

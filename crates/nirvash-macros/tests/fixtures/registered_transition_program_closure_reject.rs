@@ -14,7 +14,7 @@ enum Action {
 struct Spec;
 
 #[subsystem_spec]
-impl ::nirvash_core::TransitionSystem for Spec {
+impl ::nirvash::TransitionSystem for Spec {
     type State = State;
     type Action = Action;
 
@@ -28,13 +28,13 @@ impl ::nirvash_core::TransitionSystem for Spec {
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
-        Some(::nirvash_core::TransitionProgram::named(
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
+        Some(::nirvash::TransitionProgram::named(
             "spec",
-            vec![::nirvash_core::TransitionRule::new(
+            vec![::nirvash::TransitionRule::new(
                 "start",
                 |state, action| matches!((state, action), (State::Idle, Action::Start)),
-                ::nirvash_core::UpdateProgram::new("to_busy", |_, _| State::Busy),
+                ::nirvash::UpdateProgram::new("to_busy", |_, _| State::Busy),
             )],
         ))
     }

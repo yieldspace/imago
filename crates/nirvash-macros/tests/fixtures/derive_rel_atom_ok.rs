@@ -1,4 +1,4 @@
-use nirvash_core::{BoundedDomain, RelAtom, Signature};
+use nirvash::{BoundedDomain, RelAtom, Signature};
 use nirvash_macros::{RelAtom, Signature};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Signature, RelAtom)]

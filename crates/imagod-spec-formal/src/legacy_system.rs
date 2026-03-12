@@ -1,4 +1,4 @@
-use nirvash_core::{
+use nirvash::{
     BoolExpr, ModelCase, ModelCaseSource, ModelCheckConfig, StepExpr, TemporalSpec,
     TransitionSystem,
 };
@@ -316,7 +316,7 @@ fn system_checker_config() -> ModelCheckConfig {
 fn system_doc_checker_config() -> ModelCheckConfig {
     ModelCheckConfig {
         backend: None,
-        exploration: nirvash_core::ExplorationMode::ReachableGraph,
+        exploration: nirvash::ExplorationMode::ReachableGraph,
         bounded_depth: None,
         max_states: Some(128),
         max_transitions: Some(384),
@@ -653,12 +653,12 @@ impl TransitionSystem for ImagodSystemSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule imagod_system_transition when imagod_system_transition(prev, action).is_some() => {
                 set self <= imagod_system_transition(prev, action)
@@ -704,7 +704,8 @@ const _: () = ();
 
 #[cfg(test)]
 mod tests {
-    use nirvash_core::{ModelCaseSource, ModelChecker};
+    use nirvash::ModelCaseSource;
+    use nirvash_check::ModelChecker;
 
     use super::*;
     use crate::{
@@ -716,7 +717,7 @@ mod tests {
     #[test]
     fn derived_action_vocabulary_preserves_representative_subset() {
         assert_eq!(
-            <ImagodSystemAction as nirvash_core::ActionVocabulary>::action_vocabulary(),
+            <ImagodSystemAction as nirvash::ActionVocabulary>::action_vocabulary(),
             vec![
                 ImagodSystemAction::Manager(ManagerRuntimeAction::LoadExistingConfig),
                 ImagodSystemAction::Manager(ManagerRuntimeAction::CreateDefaultConfig),
@@ -787,7 +788,7 @@ mod tests {
     #[test]
     fn wrapper_action_labels_delegate_to_nested_action_docs() {
         assert_eq!(
-            nirvash_core::format_doc_graph_action(&ImagodSystemAction::Manager(
+            nirvash::format_doc_graph_action(&ImagodSystemAction::Manager(
                 ManagerRuntimeAction::LoadExistingConfig,
             )),
             "Load config"
@@ -807,7 +808,7 @@ mod tests {
     fn reachable_snapshot_for_case(
         spec: &ImagodSystemSpec,
         label: &str,
-    ) -> nirvash_core::ReachableGraphSnapshot<ImagodSystemState, ImagodSystemAction> {
+    ) -> nirvash::ReachableGraphSnapshot<ImagodSystemState, ImagodSystemAction> {
         ModelChecker::for_case(spec, model_case(spec, label))
             .full_reachable_graph_snapshot()
             .expect("reachable graph snapshot")

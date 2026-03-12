@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::Signature;
+use crate::{BoundedDomain, Signature};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationError {
@@ -182,6 +182,23 @@ where
         } else {
             f.write_str(&labels.join(" + "))
         }
+    }
+}
+
+impl<T> Signature for RelSet<T>
+where
+    T: RelAtom,
+{
+    fn bounded_domain() -> BoundedDomain<Self> {
+        let mut values = vec![Self::empty()];
+        for item in T::bounded_domain().into_vec() {
+            let mut with_item = values.clone();
+            for set in &mut with_item {
+                set.insert(item.clone());
+            }
+            values.extend(with_item);
+        }
+        BoundedDomain::new(values)
     }
 }
 
@@ -438,6 +455,35 @@ where
         } else {
             f.write_str(&pairs.join(" + "))
         }
+    }
+}
+
+impl<A, B> Signature for Relation2<A, B>
+where
+    A: RelAtom,
+    B: RelAtom,
+{
+    fn bounded_domain() -> BoundedDomain<Self> {
+        let pair_domain = A::bounded_domain()
+            .into_vec()
+            .into_iter()
+            .flat_map(|left| {
+                B::bounded_domain()
+                    .into_vec()
+                    .into_iter()
+                    .map(move |right| (left.clone(), right))
+            })
+            .collect::<Vec<_>>();
+
+        let mut values = vec![Self::empty()];
+        for (left, right) in pair_domain {
+            let mut with_pair = values.clone();
+            for relation in &mut with_pair {
+                relation.insert(left.clone(), right.clone());
+            }
+            values.extend(with_pair);
+        }
+        BoundedDomain::new(values)
     }
 }
 
@@ -710,5 +756,24 @@ mod tests {
 
         let set = RelSet::from_items([Node::A, Node::C]);
         assert_eq!(format!("{set:?}"), "A + C");
+    }
+
+    #[test]
+    fn rel_set_signature_domain_covers_all_subsets() {
+        let domain = RelSet::<Node>::bounded_domain().into_vec();
+        assert_eq!(domain.len(), 8);
+        assert!(domain.contains(&RelSet::empty()));
+        assert!(domain.contains(&RelSet::from_items([Node::A, Node::C])));
+    }
+
+    #[test]
+    fn relation2_signature_domain_covers_all_pair_subsets() {
+        let domain = Relation2::<Node, Color>::bounded_domain().into_vec();
+        assert_eq!(domain.len(), 64);
+        assert!(domain.contains(&Relation2::empty()));
+        assert!(domain.contains(&Relation2::from_pairs([
+            (Node::A, Color::Red),
+            (Node::C, Color::Blue),
+        ])));
     }
 }

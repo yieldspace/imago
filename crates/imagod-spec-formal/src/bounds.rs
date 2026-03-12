@@ -90,7 +90,7 @@ pub type TimeSteps = BoundedU8<MAX_TIME_STEPS>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nirvash_core::Signature;
+    use nirvash::Signature;
 
     #[test]
     fn bounded_u8_domain_matches_declared_max() {

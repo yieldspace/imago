@@ -19,7 +19,8 @@ quote = { workspace = true }
 syn = { workspace = true, features = ["full", "extra-traits"] }
 
 [dev-dependencies]
-nirvash-core = { workspace = true }
+nirvash = { workspace = true }
+nirvash-check = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 trybuild = { workspace = true }

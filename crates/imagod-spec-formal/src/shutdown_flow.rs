@@ -1,4 +1,4 @@
-use nirvash_core::{BoolExpr, Fairness, Ltl, ModelCase, StepExpr, TransitionSystem};
+use nirvash::{BoolExpr, Fairness, Ltl, ModelCase, StepExpr, TransitionSystem};
 use nirvash_macros::{
     ActionVocabulary, Signature, fairness, invariant, nirvash_expr, nirvash_step_expr,
     nirvash_transition_program, property, subsystem_spec,
@@ -262,12 +262,12 @@ impl TransitionSystem for ShutdownFlowSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule receive_signal when matches!(action, ShutdownFlowAction::ReceiveSignal)
                 && matches!(prev.phase, ShutdownPhase::Idle) => {

@@ -1,4 +1,4 @@
-use nirvash_core::{
+use nirvash::{
     BoundedDomain, ModelCase, ModelCaseSource, BoolExpr, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };
@@ -42,7 +42,7 @@ enum Effect {
 }
 
 fn probe_state_domain() -> BoundedDomain<State> {
-    <State as nirvash_core::Signature>::bounded_domain()
+    <State as nirvash::Signature>::bounded_domain()
 }
 
 fn summary_output_domain() -> BoundedDomain<OutputSummary> {

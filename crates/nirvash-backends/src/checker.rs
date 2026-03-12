@@ -1,122 +1,13 @@
 use std::collections::VecDeque;
 
-use crate::{
-    BoolExpr, Fairness, ModelCase, ModelCaseSource, ReachableGraphEdge, ReachableGraphSnapshot,
-    Signature, StepExpr, TemporalSpec, Trace, TraceStep, symbolic::SymbolicModelChecker,
+use nirvash::{
+    BoolExpr, Counterexample, CounterexampleKind, ExplorationMode, Fairness, Ltl, ModelBackend,
+    ModelCase, ModelCaseSource, ModelCheckConfig, ModelCheckError, ModelCheckResult,
+    ReachableGraphEdge, ReachableGraphSnapshot, Signature, StepExpr, TemporalSpec, Trace,
+    TraceStep,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExplorationMode {
-    ReachableGraph,
-    BoundedLasso,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ModelBackend {
-    Explicit,
-    Symbolic,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ModelCheckConfig {
-    pub backend: Option<ModelBackend>,
-    pub exploration: ExplorationMode,
-    pub bounded_depth: Option<usize>,
-    pub max_states: Option<usize>,
-    pub max_transitions: Option<usize>,
-    pub check_deadlocks: bool,
-    pub stop_on_first_violation: bool,
-}
-
-impl ModelCheckConfig {
-    pub const fn reachable_graph() -> Self {
-        Self {
-            backend: None,
-            exploration: ExplorationMode::ReachableGraph,
-            bounded_depth: None,
-            max_states: None,
-            max_transitions: None,
-            check_deadlocks: true,
-            stop_on_first_violation: true,
-        }
-    }
-
-    pub const fn bounded_lasso(depth: usize) -> Self {
-        Self {
-            backend: None,
-            exploration: ExplorationMode::BoundedLasso,
-            bounded_depth: Some(depth),
-            max_states: None,
-            max_transitions: None,
-            check_deadlocks: true,
-            stop_on_first_violation: true,
-        }
-    }
-}
-
-impl Default for ModelCheckConfig {
-    fn default() -> Self {
-        Self::reachable_graph()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModelCheckError {
-    UnsupportedConfiguration(&'static str),
-    ExplorationLimitReached { states: usize, transitions: usize },
-    NoInitialStates,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CounterexampleKind {
-    Invariant,
-    Deadlock,
-    StateConstraint,
-    ActionConstraint,
-    Property,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Counterexample<S, A> {
-    pub kind: CounterexampleKind,
-    pub name: String,
-    pub trace: Trace<S, A>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelCheckResult<S, A> {
-    violations: Vec<Counterexample<S, A>>,
-}
-
-impl<S, A> ModelCheckResult<S, A> {
-    pub fn ok() -> Self {
-        Self {
-            violations: Vec::new(),
-        }
-    }
-
-    pub fn with_violation(violation: Counterexample<S, A>) -> Self {
-        Self {
-            violations: vec![violation],
-        }
-    }
-
-    pub fn is_ok(&self) -> bool {
-        self.violations.is_empty()
-    }
-
-    pub fn violations(&self) -> &[Counterexample<S, A>] {
-        &self.violations
-    }
-
-    pub fn push(&mut self, violation: Counterexample<S, A>) {
-        self.violations.push(violation);
-    }
-
-    pub fn extend(&mut self, other: Self) {
-        self.violations.extend(other.violations);
-    }
-}
+use crate::symbolic::SymbolicModelChecker;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GraphEdge<A> {
@@ -153,13 +44,13 @@ impl<S, A> ReachableGraph<S, A> {
     }
 }
 
-pub struct ModelChecker<'a, T: TemporalSpec + ModelCaseSource> {
+pub struct BackendModelChecker<'a, T: TemporalSpec + ModelCaseSource> {
     spec: &'a T,
     model_case: ModelCase<T::State, T::Action>,
     config: ModelCheckConfig,
 }
 
-impl<'a, T> ModelChecker<'a, T>
+impl<'a, T> BackendModelChecker<'a, T>
 where
     T: TemporalSpec + ModelCaseSource,
     T::State: PartialEq + Signature,
@@ -207,10 +98,7 @@ where
                 let graph = self.build_reachable_graph_for_docs()?;
                 Ok(self.snapshot_from_graph(&graph))
             }
-            ModelBackend::Symbolic => {
-                SymbolicModelChecker::for_case(self.spec, self.model_case.clone())
-                    .reachable_graph_snapshot()
-            }
+            ModelBackend::Symbolic => self.symbolic_reachable_graph_snapshot(),
         }
     }
 
@@ -223,10 +111,7 @@ where
                 self.ensure_untruncated(&graph)?;
                 Ok(self.snapshot_from_graph(&graph))
             }
-            ModelBackend::Symbolic => {
-                SymbolicModelChecker::for_case(self.spec, self.model_case.clone())
-                    .full_reachable_graph_snapshot()
-            }
+            ModelBackend::Symbolic => self.symbolic_full_reachable_graph_snapshot(),
         }
     }
 
@@ -238,10 +123,7 @@ where
                 ExplorationMode::ReachableGraph => self.check_invariants_graph(),
                 ExplorationMode::BoundedLasso => self.check_invariants_lasso(),
             },
-            ModelBackend::Symbolic => {
-                SymbolicModelChecker::for_case(self.spec, self.model_case.clone())
-                    .check_invariants()
-            }
+            ModelBackend::Symbolic => self.symbolic_check_invariants(),
         }
     }
 
@@ -257,9 +139,7 @@ where
                 ExplorationMode::ReachableGraph => self.check_deadlocks_graph(),
                 ExplorationMode::BoundedLasso => self.check_deadlocks_lasso(),
             },
-            ModelBackend::Symbolic => {
-                SymbolicModelChecker::for_case(self.spec, self.model_case.clone()).check_deadlocks()
-            }
+            ModelBackend::Symbolic => self.symbolic_check_deadlocks(),
         }
     }
 
@@ -275,10 +155,7 @@ where
                 ExplorationMode::ReachableGraph => self.check_properties_graph(),
                 ExplorationMode::BoundedLasso => self.check_properties_lasso(),
             },
-            ModelBackend::Symbolic => {
-                SymbolicModelChecker::for_case(self.spec, self.model_case.clone())
-                    .check_properties()
-            }
+            ModelBackend::Symbolic => self.symbolic_check_properties(),
         }
     }
 
@@ -307,9 +184,7 @@ where
 
                 Ok(result)
             }
-            ModelBackend::Symbolic => {
-                SymbolicModelChecker::for_case(self.spec, self.model_case.clone()).check_all()
-            }
+            ModelBackend::Symbolic => self.symbolic_check_all(),
         }
     }
 
@@ -329,7 +204,45 @@ where
         self.model_case
             .doc_checker_config()
             .and_then(|config| config.backend)
-            .unwrap_or_else(|| self.resolved_backend())
+            .unwrap_or(ModelBackend::Explicit)
+    }
+
+    fn symbolic_checker(&self) -> SymbolicModelChecker<'a, T> {
+        SymbolicModelChecker::for_case(self.spec, self.model_case.clone())
+    }
+
+    fn symbolic_reachable_graph_snapshot(
+        &self,
+    ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
+        self.symbolic_checker().reachable_graph_snapshot()
+    }
+
+    fn symbolic_full_reachable_graph_snapshot(
+        &self,
+    ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
+        self.symbolic_checker().full_reachable_graph_snapshot()
+    }
+
+    fn symbolic_check_invariants(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        self.symbolic_checker().check_invariants()
+    }
+
+    fn symbolic_check_deadlocks(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        self.symbolic_checker().check_deadlocks()
+    }
+
+    fn symbolic_check_properties(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        self.symbolic_checker().check_properties()
+    }
+
+    fn symbolic_check_all(&self) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        self.symbolic_checker().check_all()
     }
 
     fn check_invariants_graph(
@@ -1069,18 +982,18 @@ where
     fn eval_formula(
         &self,
         trace: &Trace<T::State, T::Action>,
-        formula: &crate::Ltl<T::State, T::Action>,
+        formula: &Ltl<T::State, T::Action>,
     ) -> Vec<bool> {
         let len = trace.len();
         match formula {
-            crate::Ltl::True => vec![true; len],
-            crate::Ltl::False => vec![false; len],
-            crate::Ltl::Pred(predicate) => trace
+            Ltl::True => vec![true; len],
+            Ltl::False => vec![false; len],
+            Ltl::Pred(predicate) => trace
                 .states()
                 .iter()
                 .map(|state| predicate.eval(state))
                 .collect(),
-            crate::Ltl::StepPred(predicate) => (0..len)
+            Ltl::StepPred(predicate) => (0..len)
                 .map(|index| {
                     let next_index = trace.next_index(index);
                     match &trace.steps()[index] {
@@ -1093,45 +1006,43 @@ where
                     }
                 })
                 .collect(),
-            crate::Ltl::Not(inner) => self
+            Ltl::Not(inner) => self
                 .eval_formula(trace, inner)
                 .into_iter()
                 .map(|value| !value)
                 .collect(),
-            crate::Ltl::And(lhs, rhs) => self
+            Ltl::And(lhs, rhs) => self
                 .eval_formula(trace, lhs)
                 .into_iter()
                 .zip(self.eval_formula(trace, rhs))
                 .map(|(lhs, rhs)| lhs && rhs)
                 .collect(),
-            crate::Ltl::Or(lhs, rhs) => self
+            Ltl::Or(lhs, rhs) => self
                 .eval_formula(trace, lhs)
                 .into_iter()
                 .zip(self.eval_formula(trace, rhs))
                 .map(|(lhs, rhs)| lhs || rhs)
                 .collect(),
-            crate::Ltl::Implies(lhs, rhs) => self
+            Ltl::Implies(lhs, rhs) => self
                 .eval_formula(trace, lhs)
                 .into_iter()
                 .zip(self.eval_formula(trace, rhs))
                 .map(|(lhs, rhs)| !lhs || rhs)
                 .collect(),
-            crate::Ltl::Next(inner) => {
+            Ltl::Next(inner) => {
                 let inner = self.eval_formula(trace, inner);
                 (0..len)
                     .map(|index| inner[trace.next_index(index)])
                     .collect()
             }
-            crate::Ltl::Always(inner) => self.eval_always(trace, &self.eval_formula(trace, inner)),
-            crate::Ltl::Eventually(inner) => {
-                self.eval_eventually(trace, &self.eval_formula(trace, inner))
-            }
-            crate::Ltl::Until(lhs, rhs) => self.eval_until(
+            Ltl::Always(inner) => self.eval_always(trace, &self.eval_formula(trace, inner)),
+            Ltl::Eventually(inner) => self.eval_eventually(trace, &self.eval_formula(trace, inner)),
+            Ltl::Until(lhs, rhs) => self.eval_until(
                 trace,
                 &self.eval_formula(trace, lhs),
                 &self.eval_formula(trace, rhs),
             ),
-            crate::Ltl::Enabled(predicate) => trace
+            Ltl::Enabled(predicate) => trace
                 .states()
                 .iter()
                 .map(|state| {

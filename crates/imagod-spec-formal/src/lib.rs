@@ -22,11 +22,182 @@ pub mod shutdown_flow;
 mod state_domain;
 mod summary_mapping;
 pub mod supervision;
+mod symbolic_registration;
 pub mod system;
 pub mod wire_protocol;
 
 #[cfg(test)]
 mod toy_model_controls;
+
+#[cfg(test)]
+mod symbolic_registration_tests {
+    use std::collections::BTreeSet;
+
+    use nirvash::{
+        TransitionSystem,
+        registry::{registered_symbolic_effect_keys, registered_symbolic_pure_helper_keys},
+    };
+
+    use super::{
+        PluginPlatformSpec, RpcSpec, SupervisionSpec, SystemSpec,
+        artifact_deploy::ArtifactDeploySpec, command_protocol::CommandProtocolSpec,
+        deploy::DeploySpec, legacy_system::ImagodSystemSpec, manager_runtime::ManagerRuntimeSpec,
+        runner_bootstrap::RunnerBootstrapSpec, runner_runtime::RunnerRuntimeSpec,
+        service_supervision::ServiceSupervisionSpec, session_auth::SessionAuthSpec,
+        session_transport::SessionTransportSpec, shutdown_flow::ShutdownFlowSpec,
+        wire_protocol::WireProtocolSpec,
+    };
+
+    macro_rules! collect_program_keys {
+        ($used_pure:expr, $used_effects:expr, $missing_pure:expr, $missing_effects:expr, $spec:expr) => {{
+            let program = $spec
+                .transition_program()
+                .expect("production formal spec should expose transition_program()");
+            $used_pure.extend(program.symbolic_pure_helper_keys());
+            $used_effects.extend(program.symbolic_effect_keys());
+            $missing_pure.extend(program.unregistered_symbolic_pure_helper_keys());
+            $missing_effects.extend(program.unregistered_symbolic_effect_keys());
+        }};
+    }
+
+    #[test]
+    fn shared_symbolic_registration_matches_transition_program_usage() {
+        let mut used_pure = BTreeSet::new();
+        let mut used_effects = BTreeSet::new();
+        let mut missing_pure = BTreeSet::new();
+        let mut missing_effects = BTreeSet::new();
+
+        collect_program_keys!(
+            used_pure,
+            used_effects,
+            missing_pure,
+            missing_effects,
+            ArtifactDeploySpec::new()
+        );
+        collect_program_keys!(
+            used_pure,
+            used_effects,
+            missing_pure,
+            missing_effects,
+            CommandProtocolSpec::new()
+        );
+        collect_program_keys!(
+            used_pure,
+            used_effects,
+            missing_pure,
+            missing_effects,
+            DeploySpec::new()
+        );
+        collect_program_keys!(
+            used_pure,
+            used_effects,
+            missing_pure,
+            missing_effects,
+            ImagodSystemSpec::new()
+        );
+        collect_program_keys!(
+            used_pure,
+            used_effects,
+            missing_pure,
+            missing_effects,
+            ManagerRuntimeSpec::new()
+        );
+        collect_program_keys!(
+            used_pure,
+            used_effects,
+            missing_pure,
+            missing_effects,
+            PluginPlatformSpec::new()
+        );
+        collect_program_keys!(
+            used_pure,
+            used_effects,
+            missing_pure,
+            missing_effects,
+            RpcSpec::new()
+        );
+        collect_program_keys!(
+            used_pure,
+            used_effects,
+            missing_pure,
+            missing_effects,
+            RunnerBootstrapSpec::new()
+        );
+        collect_program_keys!(
+            used_pure,
+            used_effects,
+            missing_pure,
+            missing_effects,
+            RunnerRuntimeSpec::new()
+        );
+        collect_program_keys!(
+            used_pure,
+            used_effects,
+            missing_pure,
+            missing_effects,
+            ServiceSupervisionSpec::new()
+        );
+        collect_program_keys!(
+            used_pure,
+            used_effects,
+            missing_pure,
+            missing_effects,
+            SessionAuthSpec::new()
+        );
+        collect_program_keys!(
+            used_pure,
+            used_effects,
+            missing_pure,
+            missing_effects,
+            SessionTransportSpec::new()
+        );
+        collect_program_keys!(
+            used_pure,
+            used_effects,
+            missing_pure,
+            missing_effects,
+            ShutdownFlowSpec::new()
+        );
+        collect_program_keys!(
+            used_pure,
+            used_effects,
+            missing_pure,
+            missing_effects,
+            SupervisionSpec::new()
+        );
+        collect_program_keys!(
+            used_pure,
+            used_effects,
+            missing_pure,
+            missing_effects,
+            SystemSpec::new()
+        );
+        collect_program_keys!(
+            used_pure,
+            used_effects,
+            missing_pure,
+            missing_effects,
+            WireProtocolSpec::new()
+        );
+
+        assert!(
+            missing_pure.is_empty(),
+            "missing pure helper registrations: {missing_pure:?}"
+        );
+        assert!(
+            missing_effects.is_empty(),
+            "missing effect registrations: {missing_effects:?}"
+        );
+        assert_eq!(
+            used_pure.into_iter().collect::<Vec<_>>(),
+            registered_symbolic_pure_helper_keys()
+        );
+        assert_eq!(
+            used_effects.into_iter().collect::<Vec<_>>(),
+            registered_symbolic_effect_keys()
+        );
+    }
+}
 
 pub use command_projection::CommandProjectionSpec;
 pub use deploy::{DeployAction, DeploySpec, DeployState};

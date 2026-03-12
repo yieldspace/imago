@@ -153,6 +153,34 @@ macro_rules! fairness {
     };
 }
 
+/// Register pure helper keys that future symbolic encoders may accept.
+#[macro_export]
+macro_rules! register_symbolic_pure_helpers {
+    ($($key:expr),+ $(,)?) => {
+        $(
+            $crate::inventory::submit! {
+                $crate::registry::RegisteredSymbolicPureHelper {
+                    key: $key,
+                }
+            }
+        )+
+    };
+}
+
+/// Register effect keys that future symbolic encoders may accept.
+#[macro_export]
+macro_rules! register_symbolic_effects {
+    ($($key:expr),+ $(,)?) => {
+        $(
+            $crate::inventory::submit! {
+                $crate::registry::RegisteredSymbolicEffect {
+                    key: $key,
+                }
+            }
+        )+
+    };
+}
+
 /// Implement a generated companion signature trait with less boilerplate.
 ///
 /// This is a manual fallback for `#[derive(Signature)] #[signature(custom)]` cases
@@ -184,5 +212,52 @@ macro_rules! signature_spec {
                 )?
             }
         }
+    };
+}
+
+/// Implement symbolic state schema metadata for `#[derive(Signature)] #[signature(custom)]` states.
+#[macro_export]
+macro_rules! symbolic_state_spec {
+    (
+        for $ty:ty {
+            $($field:ident : $field_ty:ty),+ $(,)?
+        }
+    ) => {
+        const _: () = {
+            impl $crate::SymbolicStateSpec for $ty {
+                fn symbolic_state_schema() -> $crate::SymbolicStateSchema<Self> {
+                    let mut __nirvash_fields = ::std::vec::Vec::new();
+                    $(
+                        __nirvash_fields.extend($crate::symbolic_state_fields::<Self, $field_ty, _, _>(
+                            stringify!($field),
+                            |state: &Self| &state.$field,
+                            |state: &mut Self, value: $field_ty| {
+                                state.$field = value;
+                            },
+                        ));
+                    )+
+                    $crate::SymbolicStateSchema::new(__nirvash_fields, || Self {
+                        $(
+                            $field: $crate::symbolic_seed_value::<$field_ty>(),
+                        )+
+                    })
+                }
+            }
+
+            fn __nirvash_symbolic_state_type_id() -> ::std::any::TypeId {
+                ::std::any::TypeId::of::<$ty>()
+            }
+
+            fn __nirvash_build_symbolic_state_schema() -> ::std::boxed::Box<dyn ::std::any::Any> {
+                ::std::boxed::Box::new(<$ty as $crate::SymbolicStateSpec>::symbolic_state_schema())
+            }
+
+            $crate::inventory::submit! {
+                $crate::registry::RegisteredSymbolicStateSchema {
+                    state_type_id: __nirvash_symbolic_state_type_id,
+                    build: __nirvash_build_symbolic_state_schema,
+                }
+            }
+        };
     };
 }

@@ -1,4 +1,4 @@
-use nirvash_core::{BoolExpr, ModelCase, StepExpr, SymmetryReducer, TemporalSpec, TransitionSystem};
+use nirvash::{BoolExpr, ModelCase, StepExpr, SymmetryReducer, TemporalSpec, TransitionSystem};
 use nirvash_macros::{
     Signature as FormalSignature, action_constraint, formal_tests, invariant, nirvash_expr,
     nirvash_step_expr, nirvash_transition_program, property, state_constraint, subsystem_spec,
@@ -32,7 +32,7 @@ impl TransitionSystem for Spec {
         vec![Action::Start, Action::Stop]
     }
 
-    fn transition_program(&self) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    fn transition_program(&self) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule start when matches!(action, Action::Start) && !prev.busy => {
                 set busy <= true;
@@ -51,10 +51,10 @@ fn idle_is_valid() -> BoolExpr<State> {
 }
 
 #[property(Spec)]
-fn busy_leads_to_idle() -> nirvash_core::Ltl<State, Action> {
-    nirvash_core::Ltl::leads_to(
-        nirvash_core::Ltl::pred(nirvash_expr! { busy(state) => state.busy }),
-        nirvash_core::Ltl::pred(nirvash_expr! { idle(state) => !state.busy }),
+fn busy_leads_to_idle() -> nirvash::Ltl<State, Action> {
+    nirvash::Ltl::leads_to(
+        nirvash::Ltl::pred(nirvash_expr! { busy(state) => state.busy }),
+        nirvash::Ltl::pred(nirvash_expr! { idle(state) => !state.busy }),
     )
 }
 

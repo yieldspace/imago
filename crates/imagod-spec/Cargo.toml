@@ -9,7 +9,7 @@ publish.workspace = true
 doctest = false
 
 [dependencies]
-nirvash-core = { workspace = true }
+nirvash = { workspace = true }
 nirvash-macros = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = { workspace = true }

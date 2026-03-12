@@ -1,12 +1,16 @@
 use std::collections::VecDeque;
 
-use crate::{
-    BoolExpr, Counterexample, CounterexampleKind, Fairness, Ltl, ModelCase, ModelCaseSource,
-    ModelCheckConfig, ModelCheckError, ModelCheckResult, ReachableGraphEdge,
-    ReachableGraphSnapshot, Signature, StepExpr, TemporalSpec, Trace, TraceStep,
+use nirvash::{
+    BoolExpr, Counterexample, CounterexampleKind, ExplorationMode, Fairness, Ltl, ModelCase,
+    ModelCaseSource, ModelCheckConfig, ModelCheckError, ModelCheckResult, ReachableGraphEdge,
+    ReachableGraphSnapshot, Signature, StepExpr, SymbolicStateSchema, TemporalSpec, Trace,
+    TraceStep, TransitionProgram, UpdateAst, UpdateOp,
 };
 
-use z3::{SatResult, Solver, ast::Bool};
+use z3::{
+    SatResult, Solver,
+    ast::{Bool, Int},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GraphEdge<A> {
@@ -81,20 +85,14 @@ where
     pub fn reachable_graph_snapshot(
         &self,
     ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
-        let candidate = self.build_candidate_graph()?;
-        let reachable = self.solve_reachability(&candidate)?;
-        let graph = self.materialize_reachable_graph(
-            &candidate,
-            &reachable,
-            self.doc_reachable_graph_config(),
-        )?;
+        let graph = self.build_relation_reachable_graph(self.doc_reachable_graph_config())?;
         Ok(self.snapshot_from_graph(&graph))
     }
 
     pub fn full_reachable_graph_snapshot(
         &self,
     ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
-        let graph = self.build_reachable_graph()?;
+        let graph = self.build_relation_reachable_graph(self.config)?;
         self.ensure_untruncated(&graph)?;
         Ok(self.snapshot_from_graph(&graph))
     }
@@ -103,21 +101,10 @@ where
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
         self.ensure_symbolic_invariants_ast_native()?;
-        let graph = self.build_reachable_graph()?;
-        self.ensure_untruncated(&graph)?;
-        for (index, state) in graph.states.iter().enumerate() {
-            for predicate in self.spec.invariants() {
-                if !predicate.eval(state) {
-                    return Ok(ModelCheckResult::with_violation(Counterexample {
-                        kind: CounterexampleKind::Invariant,
-                        name: predicate.name().to_owned(),
-                        trace: self.trace_to_state(&graph, index),
-                    }));
-                }
-            }
+        match self.config.exploration {
+            ExplorationMode::ReachableGraph => self.check_invariants_graph(),
+            ExplorationMode::BoundedLasso => self.check_invariants_lasso(),
         }
-
-        Ok(ModelCheckResult::ok())
     }
 
     pub fn check_deadlocks(
@@ -126,18 +113,10 @@ where
         if !self.config.check_deadlocks {
             return Ok(ModelCheckResult::ok());
         }
-
-        let graph = self.build_reachable_graph()?;
-        self.ensure_untruncated(&graph)?;
-        if let Some(deadlock) = graph.deadlocks.first() {
-            return Ok(ModelCheckResult::with_violation(Counterexample {
-                kind: CounterexampleKind::Deadlock,
-                name: "deadlock".to_owned(),
-                trace: self.trace_to_state(&graph, *deadlock),
-            }));
+        match self.config.exploration {
+            ExplorationMode::ReachableGraph => self.check_deadlocks_graph(),
+            ExplorationMode::BoundedLasso => self.check_deadlocks_lasso(),
         }
-
-        Ok(ModelCheckResult::ok())
     }
 
     pub fn check_properties(
@@ -155,32 +134,10 @@ where
                 "symmetry reduction cannot be combined with temporal properties or fairness",
             ));
         }
-
-        let graph = self.build_reachable_graph()?;
-        self.ensure_untruncated(&graph)?;
-        let traces = self.graph_lasso_traces(&graph);
-        let mut best: Option<Counterexample<T::State, T::Action>> = None;
-
-        for property in self.spec.properties() {
-            let description = property.describe();
-            for trace in &traces {
-                if !self.trace_satisfies_fairness_graph(trace, &graph) {
-                    continue;
-                }
-                if !self.eval_formula(trace, &property)[0] {
-                    self.consider_violation(
-                        &mut best,
-                        Counterexample {
-                            kind: CounterexampleKind::Property,
-                            name: description.clone(),
-                            trace: trace.clone(),
-                        },
-                    );
-                }
-            }
+        match self.config.exploration {
+            ExplorationMode::ReachableGraph => self.check_properties_graph(),
+            ExplorationMode::BoundedLasso => self.check_properties_lasso(),
         }
-
-        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
     }
 
     pub fn check_all(&self) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
@@ -210,26 +167,221 @@ where
     fn build_reachable_graph(
         &self,
     ) -> Result<ReachableGraph<T::State, T::Action>, ModelCheckError> {
-        self.ensure_reachable_graph_mode(self.config)?;
         let candidate = self.build_candidate_graph()?;
         let reachable = self.solve_reachability(&candidate)?;
         self.materialize_reachable_graph(&candidate, &reachable, self.config)
     }
 
+    fn build_relation_reachable_graph(
+        &self,
+        config: ModelCheckConfig,
+    ) -> Result<ReachableGraph<T::State, T::Action>, ModelCheckError> {
+        self.ensure_symbolic_constraints_ast_native()?;
+        let program = self.symbolic_transition_program()?;
+        let schema = self.symbolic_state_schema()?;
+        self.ensure_symbolic_schema_covers_program(&schema, &program)?;
+        if self.model_case.symmetry().is_some() {
+            return Err(self.symbolic_ast_required_error(format!(
+                "symbolic reachable-graph backend does not support symmetry reduction for spec `{}`",
+                self.spec.name(),
+            )));
+        }
+
+        let mut graph = ReachableGraph {
+            states: Vec::new(),
+            edges: Vec::new(),
+            initial_indices: Vec::new(),
+            parents: Vec::new(),
+            depths: Vec::new(),
+            deadlocks: Vec::new(),
+            transitions: 0,
+            truncated: false,
+        };
+        let mut queue = VecDeque::new();
+
+        for state in self.initial_states_filtered()? {
+            let Some(index) = self.push_state(&mut graph, state, None, 0, &mut queue, config)?
+            else {
+                break;
+            };
+            if !graph.initial_indices.contains(&index) {
+                graph.initial_indices.push(index);
+            }
+        }
+
+        while let Some(index) = queue.pop_front() {
+            if graph.truncated {
+                break;
+            }
+
+            let current = graph.states[index].clone();
+            let next_depth = graph.depths[index] + 1;
+            let mut edges = Vec::new();
+
+            for (step, next_state) in self.relation_successors(&current)? {
+                let Some(next_index) = self.push_state(
+                    &mut graph,
+                    next_state,
+                    Some((index, step.clone())),
+                    next_depth,
+                    &mut queue,
+                    config,
+                )?
+                else {
+                    break;
+                };
+
+                let materialized = GraphEdge {
+                    step,
+                    target: next_index,
+                };
+                if !edges.contains(&materialized) {
+                    if !materialized.is_stutter() {
+                        if self.transition_limit_reached(&graph, config) {
+                            graph.truncated = true;
+                            break;
+                        }
+                        graph.transitions += 1;
+                    }
+                    edges.push(materialized);
+                }
+            }
+
+            if !graph.truncated && edges.iter().all(GraphEdge::is_stutter) {
+                graph.deadlocks.push(index);
+            }
+
+            graph.edges[index] = edges;
+        }
+
+        Ok(graph)
+    }
+
     fn doc_reachable_graph_config(&self) -> ModelCheckConfig {
         let mut config = self.model_case.doc_checker_config().unwrap_or(self.config);
-        config.exploration = crate::ExplorationMode::ReachableGraph;
+        config.exploration = ExplorationMode::ReachableGraph;
         config.stop_on_first_violation = false;
         config
     }
 
-    fn ensure_reachable_graph_mode(&self, config: ModelCheckConfig) -> Result<(), ModelCheckError> {
-        if !matches!(config.exploration, crate::ExplorationMode::ReachableGraph) {
-            return Err(ModelCheckError::UnsupportedConfiguration(
-                "symbolic backend currently only supports ReachableGraph exploration",
-            ));
+    fn check_invariants_graph(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let graph = self.build_relation_reachable_graph(self.config)?;
+        self.ensure_untruncated(&graph)?;
+        for (index, state) in graph.states.iter().enumerate() {
+            for predicate in self.spec.invariants() {
+                if !predicate.eval(state) {
+                    return Ok(ModelCheckResult::with_violation(Counterexample {
+                        kind: CounterexampleKind::Invariant,
+                        name: predicate.name().to_owned(),
+                        trace: self.trace_to_state(&graph, index),
+                    }));
+                }
+            }
         }
-        Ok(())
+
+        Ok(ModelCheckResult::ok())
+    }
+
+    fn check_deadlocks_graph(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let graph = self.build_relation_reachable_graph(self.config)?;
+        self.ensure_untruncated(&graph)?;
+        if let Some(deadlock) = graph.deadlocks.first() {
+            return Ok(ModelCheckResult::with_violation(Counterexample {
+                kind: CounterexampleKind::Deadlock,
+                name: "deadlock".to_owned(),
+                trace: self.trace_to_state(&graph, *deadlock),
+            }));
+        }
+
+        Ok(ModelCheckResult::ok())
+    }
+
+    fn check_properties_graph(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let graph = self.build_reachable_graph()?;
+        self.ensure_untruncated(&graph)?;
+        let traces = self.graph_lasso_traces(&graph);
+        let mut best: Option<Counterexample<T::State, T::Action>> = None;
+
+        for property in self.spec.properties() {
+            let description = property.describe();
+            for trace in &traces {
+                if !self.trace_satisfies_fairness_graph(trace, &graph) {
+                    continue;
+                }
+                if !self.eval_formula(trace, &property)[0] {
+                    self.consider_violation(
+                        &mut best,
+                        Counterexample {
+                            kind: CounterexampleKind::Property,
+                            name: description.clone(),
+                            trace: trace.clone(),
+                        },
+                    );
+                }
+            }
+        }
+
+        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
+    }
+
+    fn check_invariants_lasso(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let graph = self.build_reachable_graph()?;
+        self.ensure_untruncated(&graph)?;
+        let mut best = None;
+        for &initial in &graph.initial_indices {
+            self.search_invariants_lasso_graph(&graph, vec![initial], Vec::new(), &mut best);
+        }
+        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
+    }
+
+    fn check_deadlocks_lasso(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let graph = self.build_reachable_graph()?;
+        self.ensure_untruncated(&graph)?;
+        let mut best = None;
+        for &initial in &graph.initial_indices {
+            self.search_deadlocks_lasso_graph(&graph, vec![initial], Vec::new(), &mut best);
+        }
+        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
+    }
+
+    fn check_properties_lasso(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let graph = self.build_reachable_graph()?;
+        self.ensure_untruncated(&graph)?;
+        let traces = self.bounded_graph_lasso_traces(&graph);
+        let mut best: Option<Counterexample<T::State, T::Action>> = None;
+
+        for property in self.spec.properties() {
+            let description = property.describe();
+            for trace in &traces {
+                if !self.trace_satisfies_fairness_graph(trace, &graph) {
+                    continue;
+                }
+                if !self.eval_formula(trace, &property)[0] {
+                    self.consider_violation(
+                        &mut best,
+                        Counterexample {
+                            kind: CounterexampleKind::Property,
+                            name: description.clone(),
+                            trace: trace.clone(),
+                        },
+                    );
+                }
+            }
+        }
+
+        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
     }
 
     fn build_candidate_graph(
@@ -406,8 +558,6 @@ where
         reachable: &[bool],
         config: ModelCheckConfig,
     ) -> Result<ReachableGraph<T::State, T::Action>, ModelCheckError> {
-        self.ensure_reachable_graph_mode(config)?;
-
         let mut graph = ReachableGraph {
             states: Vec::new(),
             edges: Vec::new(),
@@ -612,30 +762,69 @@ where
             if values.iter().any(|(candidate, _)| candidate == &action) {
                 continue;
             }
-            match program.evaluate(state, &action) {
-                Ok(Some(next)) => {
-                    if !self.action_constraints_allow(state, &action, &next) {
-                        continue;
-                    }
-                    values.push((action, next));
+            for successor in program.successors(state, &action) {
+                let next = successor.into_next();
+                if !self.action_constraints_allow(state, &action, &next) {
+                    continue;
                 }
-                Ok(None) => {}
-                Err(error) => {
-                    return Err(self.symbolic_ast_required_error(format!(
-                        "symbolic backend requires deterministic AST-native transition programs; spec `{}` program `{}` failed to evaluate: {:?}",
-                        self.spec.name(),
-                        program.name(),
-                        error,
-                    )));
+                let edge = (action.clone(), next);
+                if !values.contains(&edge) {
+                    values.push(edge);
                 }
             }
         }
         Ok(values)
     }
 
+    fn relation_successors(
+        &self,
+        state: &T::State,
+    ) -> Result<Vec<(TraceStep<T::Action>, T::State)>, ModelCheckError> {
+        let schema = self.symbolic_state_schema()?;
+        let program = self.symbolic_transition_program()?;
+        let mut values = Vec::new();
+
+        for action in self.spec.actions() {
+            for successor in program.successors(state, &action) {
+                let next_concrete = successor.into_next();
+                if !self.action_constraints_allow(state, &action, &next_concrete) {
+                    continue;
+                }
+                let next =
+                    self.solve_concrete_successor(&schema, &next_concrete, program.name())?;
+                if !self.state_constraints_allow(&next) {
+                    continue;
+                }
+                let edge = (TraceStep::Action(action.clone()), next);
+                if !values.contains(&edge) {
+                    values.push(edge);
+                }
+            }
+        }
+
+        if self.spec.allow_stutter() {
+            let stutter = self.spec.stutter_state(state);
+            if stutter != *state {
+                return Err(self.symbolic_ast_required_error(format!(
+                    "symbolic reachable-graph backend requires spec `{}` stutter_state() to be identity",
+                    self.spec.name(),
+                )));
+            }
+            if self.state_constraints_allow(&stutter) {
+                let next = self.solve_concrete_successor(&schema, &stutter, "stutter")?;
+                let edge = (TraceStep::Stutter, next);
+                if !values.contains(&edge) {
+                    values.push(edge);
+                }
+            }
+        }
+
+        Ok(values)
+    }
+
     fn symbolic_transition_program(
         &self,
-    ) -> Result<crate::TransitionProgram<T::State, T::Action>, ModelCheckError> {
+    ) -> Result<TransitionProgram<T::State, T::Action>, ModelCheckError> {
         let Some(program) = self.spec.transition_program() else {
             return Err(self.symbolic_ast_required_error(format!(
                 "symbolic backend requires spec `{}` to implement transition_program() with AST-native rules",
@@ -649,7 +838,116 @@ where
                 program.name(),
             )));
         }
+        if let Some(node) = program.first_unencodable_symbolic_node() {
+            return Err(self.symbolic_ast_required_error(format!(
+                "symbolic backend requires transition program `{}` for spec `{}` to register helper/effect `{}` for symbolic use",
+                program.name(),
+                self.spec.name(),
+                node,
+            )));
+        }
         Ok(program)
+    }
+
+    fn symbolic_state_schema(&self) -> Result<SymbolicStateSchema<T::State>, ModelCheckError> {
+        nirvash::registry::lookup_symbolic_state_schema::<T::State>().ok_or_else(|| {
+            self.symbolic_ast_required_error(format!(
+                "symbolic backend requires state `{}` to implement SymbolicStateSpec",
+                std::any::type_name::<T::State>(),
+            ))
+        })
+    }
+
+    fn ensure_symbolic_schema_covers_program(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+        program: &TransitionProgram<T::State, T::Action>,
+    ) -> Result<(), ModelCheckError> {
+        for rule in program.rules() {
+            let Some(update) = rule.update_ast() else {
+                continue;
+            };
+            self.ensure_symbolic_schema_covers_update(schema, update)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_symbolic_schema_covers_update(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+        update: &UpdateAst<T::State, T::Action>,
+    ) -> Result<(), ModelCheckError> {
+        let UpdateAst::Sequence(ops) = update;
+        for op in ops {
+            let target = match op {
+                UpdateOp::Assign { target, .. }
+                | UpdateOp::SetInsert { target, .. }
+                | UpdateOp::SetRemove { target, .. } => *target,
+                UpdateOp::Effect { .. } => continue,
+            };
+            if target != "self" && !schema.has_path(target) {
+                return Err(self.symbolic_ast_required_error(format!(
+                    "symbolic backend requires state schema for `{}` to expose field `{}`",
+                    std::any::type_name::<T::State>(),
+                    target,
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn solve_concrete_successor(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+        concrete: &T::State,
+        relation_name: &'static str,
+    ) -> Result<T::State, ModelCheckError> {
+        let solver = Solver::new();
+        let indices = schema.read_indices(concrete);
+        let mut vars = Vec::with_capacity(schema.fields().len());
+
+        for (field_index, field) in schema.fields().iter().enumerate() {
+            let var = Int::new_const(format!("next_{}_{}", field_index, field.path()));
+            solver.assert(var.ge(Int::from_i64(0)));
+            solver.assert(var.lt(Int::from_i64(field.domain_size() as i64)));
+            solver.assert(var.eq(Int::from_i64(indices[field_index] as i64)));
+            vars.push(var);
+        }
+
+        match solver.check() {
+            SatResult::Sat => {}
+            SatResult::Unsat | SatResult::Unknown => {
+                return Err(self.symbolic_ast_required_error(format!(
+                    "symbolic reachable-graph backend could not encode relation `{}` for spec `{}`",
+                    relation_name,
+                    self.spec.name(),
+                )));
+            }
+        }
+
+        let Some(model) = solver.get_model() else {
+            return Err(self.symbolic_ast_required_error(format!(
+                "symbolic reachable-graph backend could not obtain a z3 model for relation `{}` in spec `{}`",
+                relation_name,
+                self.spec.name(),
+            )));
+        };
+
+        let mut rebuilt_indices = Vec::with_capacity(vars.len());
+        for (field, var) in schema.fields().iter().zip(&vars) {
+            let value = model
+                .eval(var, true)
+                .and_then(|ast| ast.as_i64())
+                .ok_or_else(|| {
+                    self.symbolic_ast_required_error(format!(
+                        "symbolic reachable-graph backend could not read field `{}` from z3 model",
+                        field.path(),
+                    ))
+                })?;
+            rebuilt_indices.push(value as usize);
+        }
+
+        Ok(schema.rebuild_from_indices(&rebuilt_indices))
     }
 
     fn ensure_symbolic_constraints_ast_native(&self) -> Result<(), ModelCheckError> {
@@ -806,6 +1104,89 @@ where
         Trace::new(states, trace_steps, loop_start)
     }
 
+    fn search_invariants_lasso_graph(
+        &self,
+        graph: &ReachableGraph<T::State, T::Action>,
+        path_states: Vec<usize>,
+        path_steps: Vec<TraceStep<T::Action>>,
+        best: &mut Option<Counterexample<T::State, T::Action>>,
+    ) {
+        let depth = path_steps.len();
+        let current = *path_states.last().expect("path has at least one state");
+
+        for predicate in self.spec.invariants() {
+            if !predicate.eval(&graph.states[current]) {
+                let states = path_states
+                    .iter()
+                    .map(|index| graph.states[*index].clone())
+                    .collect();
+                self.consider_violation(
+                    best,
+                    Counterexample {
+                        kind: CounterexampleKind::Invariant,
+                        name: predicate.name().to_owned(),
+                        trace: self.terminal_trace(states, path_steps.clone()),
+                    },
+                );
+                return;
+            }
+        }
+
+        if self.reached_bounded_depth(depth) {
+            return;
+        }
+
+        for edge in &graph.edges[current] {
+            let mut next_states = path_states.clone();
+            next_states.push(edge.target);
+            let mut next_steps = path_steps.clone();
+            next_steps.push(edge.step.clone());
+            self.search_invariants_lasso_graph(graph, next_states, next_steps, best);
+        }
+    }
+
+    fn search_deadlocks_lasso_graph(
+        &self,
+        graph: &ReachableGraph<T::State, T::Action>,
+        path_states: Vec<usize>,
+        path_steps: Vec<TraceStep<T::Action>>,
+        best: &mut Option<Counterexample<T::State, T::Action>>,
+    ) {
+        let depth = path_steps.len();
+        let current = *path_states.last().expect("path has at least one state");
+
+        let has_non_stutter = graph.edges[current]
+            .iter()
+            .any(|edge| matches!(edge.step, TraceStep::Action(_)));
+        if !has_non_stutter {
+            let states = path_states
+                .iter()
+                .map(|index| graph.states[*index].clone())
+                .collect();
+            self.consider_violation(
+                best,
+                Counterexample {
+                    kind: CounterexampleKind::Deadlock,
+                    name: "deadlock".to_owned(),
+                    trace: self.terminal_trace(states, path_steps.clone()),
+                },
+            );
+            return;
+        }
+
+        if self.reached_bounded_depth(depth) {
+            return;
+        }
+
+        for edge in &graph.edges[current] {
+            let mut next_states = path_states.clone();
+            next_states.push(edge.target);
+            let mut next_steps = path_steps.clone();
+            next_steps.push(edge.step.clone());
+            self.search_deadlocks_lasso_graph(graph, next_states, next_steps, best);
+        }
+    }
+
     fn graph_lasso_traces(
         &self,
         graph: &ReachableGraph<T::State, T::Action>,
@@ -813,6 +1194,17 @@ where
         let mut traces = Vec::new();
         for &initial in &graph.initial_indices {
             self.enumerate_graph_lassos(graph, vec![initial], Vec::new(), &mut traces);
+        }
+        traces
+    }
+
+    fn bounded_graph_lasso_traces(
+        &self,
+        graph: &ReachableGraph<T::State, T::Action>,
+    ) -> Vec<Trace<T::State, T::Action>> {
+        let mut traces = Vec::new();
+        for &initial in &graph.initial_indices {
+            self.enumerate_bounded_graph_lassos(graph, vec![initial], Vec::new(), &mut traces);
         }
         traces
     }
@@ -843,6 +1235,52 @@ where
             next_steps.push(edge.step.clone());
             self.enumerate_graph_lassos(graph, next_states, next_steps, traces);
         }
+    }
+
+    fn enumerate_bounded_graph_lassos(
+        &self,
+        graph: &ReachableGraph<T::State, T::Action>,
+        path_states: Vec<usize>,
+        path_steps: Vec<TraceStep<T::Action>>,
+        traces: &mut Vec<Trace<T::State, T::Action>>,
+    ) {
+        let states = path_states
+            .iter()
+            .map(|index| graph.states[*index].clone())
+            .collect();
+        traces.push(self.terminal_trace(states, path_steps.clone()));
+
+        if self.reached_bounded_depth(path_steps.len()) {
+            return;
+        }
+
+        let current = *path_states.last().expect("path has at least one state");
+        for edge in &graph.edges[current] {
+            if let Some(loop_start) = path_states.iter().position(|state| *state == edge.target) {
+                let states = path_states
+                    .iter()
+                    .map(|index| graph.states[*index].clone())
+                    .collect();
+                let mut steps = path_steps.clone();
+                steps.push(edge.step.clone());
+                traces.push(Trace::new(states, steps, loop_start));
+                continue;
+            }
+
+            let mut next_states = path_states.clone();
+            next_states.push(edge.target);
+            let mut next_steps = path_steps.clone();
+            next_steps.push(edge.step.clone());
+            self.enumerate_bounded_graph_lassos(graph, next_states, next_steps, traces);
+        }
+    }
+
+    fn reached_bounded_depth(&self, depth: usize) -> bool {
+        matches!(self.config.exploration, ExplorationMode::BoundedLasso)
+            && self
+                .config
+                .bounded_depth
+                .is_some_and(|bounded_depth| depth >= bounded_depth)
     }
 
     fn consider_violation(

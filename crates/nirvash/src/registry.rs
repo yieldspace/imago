@@ -3,7 +3,9 @@ use std::{
     collections::BTreeSet,
 };
 
-use crate::{BoolExpr, Fairness, Ltl, StepExpr, SymmetryReducer, TransitionSystem};
+use crate::{
+    BoolExpr, Fairness, Ltl, StepExpr, SymbolicStateSchema, SymmetryReducer, TransitionSystem,
+};
 
 pub use inventory;
 
@@ -53,6 +55,19 @@ pub struct RegisteredActionDocLabel {
 pub struct RegisteredActionDocPresentation {
     pub value_type_id: fn() -> TypeId,
     pub format: fn(&dyn Any) -> Option<crate::DocGraphActionPresentation>,
+}
+
+pub struct RegisteredSymbolicPureHelper {
+    pub key: &'static str,
+}
+
+pub struct RegisteredSymbolicEffect {
+    pub key: &'static str,
+}
+
+pub struct RegisteredSymbolicStateSchema {
+    pub state_type_id: fn() -> TypeId,
+    pub build: fn() -> Box<dyn Any>,
 }
 
 type ErasedBuilder = fn() -> Box<dyn Any>;
@@ -118,6 +133,9 @@ inventory::collect!(RegisteredActionConstraint);
 inventory::collect!(RegisteredSymmetry);
 inventory::collect!(RegisteredActionDocLabel);
 inventory::collect!(RegisteredActionDocPresentation);
+inventory::collect!(RegisteredSymbolicPureHelper);
+inventory::collect!(RegisteredSymbolicEffect);
+inventory::collect!(RegisteredSymbolicStateSchema);
 
 pub fn lookup_action_doc_label(value: &dyn Any) -> Option<String> {
     let value_type_id = value.type_id();
@@ -137,6 +155,65 @@ pub fn lookup_action_doc_presentation(
         .filter(|entry| (entry.value_type_id)() == value_type_id)
         .find_map(|entry| (entry.format)(value))
         .filter(|presentation| !presentation.label.trim().is_empty())
+}
+
+pub fn has_registered_symbolic_pure_helper(key: &str) -> bool {
+    inventory::iter::<RegisteredSymbolicPureHelper>
+        .into_iter()
+        .any(|entry| entry.key == key)
+}
+
+pub fn registered_symbolic_pure_helper_keys() -> Vec<&'static str> {
+    let mut keys: Vec<_> = inventory::iter::<RegisteredSymbolicPureHelper>
+        .into_iter()
+        .map(|entry| entry.key)
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    keys
+}
+
+pub fn has_registered_symbolic_effect(key: &str) -> bool {
+    inventory::iter::<RegisteredSymbolicEffect>
+        .into_iter()
+        .any(|entry| entry.key == key)
+}
+
+pub fn registered_symbolic_effect_keys() -> Vec<&'static str> {
+    let mut keys: Vec<_> = inventory::iter::<RegisteredSymbolicEffect>
+        .into_iter()
+        .map(|entry| entry.key)
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    keys
+}
+
+pub fn lookup_symbolic_state_schema<S>() -> Option<SymbolicStateSchema<S>>
+where
+    S: 'static,
+{
+    let state_type_id = TypeId::of::<S>();
+    let mut matched = inventory::iter::<RegisteredSymbolicStateSchema>
+        .into_iter()
+        .filter(|entry| (entry.state_type_id)() == state_type_id);
+    let entry = matched.next()?;
+    assert!(
+        matched.next().is_none(),
+        "duplicate symbolic state schema registration for `{}`",
+        type_name::<S>()
+    );
+    let value = (entry.build)();
+    Some(
+        *value
+            .downcast::<SymbolicStateSchema<S>>()
+            .unwrap_or_else(|_| {
+                panic!(
+                    "registered symbolic state schema for `{}` has an unexpected type",
+                    type_name::<S>()
+                )
+            }),
+    )
 }
 
 fn sorted_builders<'a, T, I>(entries: I, kind: &'static str) -> Vec<NamedBuilder>
@@ -772,6 +849,22 @@ mod tests {
             .map(|predicate| predicate.name().to_owned())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["alpha_invariant", "zeta_invariant"]);
+    }
+
+    #[test]
+    fn symbolic_registration_keys_are_sorted_and_unique() {
+        let pure = registered_symbolic_pure_helper_keys();
+        let effects = registered_symbolic_effect_keys();
+
+        let mut sorted_pure = pure.clone();
+        sorted_pure.sort_unstable();
+        sorted_pure.dedup();
+        assert_eq!(pure, sorted_pure);
+
+        let mut sorted_effects = effects.clone();
+        sorted_effects.sort_unstable();
+        sorted_effects.dedup();
+        assert_eq!(effects, sorted_effects);
     }
 
     #[test]

@@ -175,7 +175,7 @@ fn finish_failed_error_domain() -> Vec<CommandErrorKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nirvash_core::{ActionVocabulary, Signature};
+    use nirvash::{ActionVocabulary, Signature};
 
     #[test]
     fn command_signature_domains_match_expected_order() {

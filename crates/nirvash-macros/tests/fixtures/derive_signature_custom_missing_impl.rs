@@ -1,4 +1,4 @@
-use nirvash_core::Signature as _;
+use nirvash::Signature as _;
 use nirvash_macros::Signature;
 
 #[derive(Clone, Debug, PartialEq, Eq, Signature)]

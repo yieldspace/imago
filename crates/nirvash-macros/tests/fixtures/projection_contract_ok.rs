@@ -1,4 +1,4 @@
-use nirvash_core::{
+use nirvash::{
     ModelCase, ModelCaseSource, BoolExpr, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };

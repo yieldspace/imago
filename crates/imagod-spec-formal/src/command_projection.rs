@@ -3,7 +3,7 @@ use imagod_spec::{
     CommandProbeOutput as RuntimeCommandProbeOutput, CommandProbeState as RuntimeCommandProbeState,
     CommandStateSummary as RuntimeCommandStateSummary,
 };
-use nirvash_core::{
+use nirvash::{
     ActionVocabulary, BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };

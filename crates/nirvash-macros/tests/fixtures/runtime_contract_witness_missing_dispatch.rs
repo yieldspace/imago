@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use nirvash_core::{ActionVocabulary, TransitionSystem, conformance::ProtocolConformanceSpec};
+use nirvash::{ActionVocabulary, TransitionSystem, conformance::ProtocolConformanceSpec};
 use nirvash_macros::{
     ActionVocabulary as FormalActionVocabulary, Signature as FormalSignature,
     code_witness_test_main, nirvash_runtime_contract,

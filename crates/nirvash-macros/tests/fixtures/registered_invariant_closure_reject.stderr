@@ -1,8 +1,8 @@
 error: registered state predicates must be AST-native; use nirvash_expr! instead of BoolExpr::new(...)
-  --> tests/fixtures/registered_invariant_closure_reject.rs:37:55
+  --> tests/fixtures/registered_invariant_closure_reject.rs:37:50
    |
-37 |   fn bad_invariant() -> ::nirvash_core::BoolExpr<State> {
-   |  _______________________________________________________^
-38 | |     ::nirvash_core::BoolExpr::new("bad_invariant", |_| true)
+37 |   fn bad_invariant() -> ::nirvash::BoolExpr<State> {
+   |  __________________________________________________^
+38 | |     ::nirvash::BoolExpr::new("bad_invariant", |_| true)
 39 | | }
    | |_^

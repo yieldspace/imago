@@ -1,4 +1,4 @@
-use nirvash_core::{TransitionSystem, conformance::ProtocolConformanceSpec};
+use nirvash::{TransitionSystem, conformance::ProtocolConformanceSpec};
 use nirvash_macros::nirvash_runtime_contract;
 
 #[derive(Clone, Copy, Debug, Default)]

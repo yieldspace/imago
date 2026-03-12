@@ -1,11 +1,11 @@
 error: #[system_spec]/#[subsystem_spec] transition_program() must be AST-native; use nirvash_transition_program! instead of TransitionRule::new/UpdateProgram::new
-  --> tests/fixtures/registered_transition_program_closure_reject.rs:31:79
+  --> tests/fixtures/registered_transition_program_closure_reject.rs:31:74
    |
-31 |       ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
-   |  _______________________________________________________________________________^
-32 | |         Some(::nirvash_core::TransitionProgram::named(
+31 |       ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
+   |  __________________________________________________________________________^
+32 | |         Some(::nirvash::TransitionProgram::named(
 33 | |             "spec",
-34 | |             vec![::nirvash_core::TransitionRule::new(
+34 | |             vec![::nirvash::TransitionRule::new(
 ...  |
 39 | |         ))
 40 | |     }

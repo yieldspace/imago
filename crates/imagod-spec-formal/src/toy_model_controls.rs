@@ -1,5 +1,5 @@
-use nirvash_core::OpaqueModelValue;
-use nirvash_core::TransitionSystem;
+use nirvash::OpaqueModelValue;
+use nirvash::TransitionSystem;
 use nirvash_macros::{
     ActionVocabulary, Signature, action_constraint, fairness, formal_tests, invariant,
     nirvash_expr, nirvash_step_expr, nirvash_transition_program, property, state_constraint,
@@ -81,41 +81,41 @@ fn model_cases() -> Vec<ToyModelControlSpec> {
 }
 
 #[invariant(ToyModelControlSpec)]
-fn blocked_states_remain_excluded() -> nirvash_core::BoolExpr<ToyState> {
+fn blocked_states_remain_excluded() -> nirvash::BoolExpr<ToyState> {
     nirvash_expr! { blocked_states_remain_excluded(state) =>
         !matches!(state.phase, ToyPhase::Blocked)
     }
 }
 
 #[state_constraint(ToyModelControlSpec)]
-fn exclude_blocked_states() -> nirvash_core::BoolExpr<ToyState> {
+fn exclude_blocked_states() -> nirvash::BoolExpr<ToyState> {
     nirvash_expr! { exclude_blocked_states(state) =>
         !matches!(state.phase, ToyPhase::Blocked)
     }
 }
 
 #[action_constraint(ToyModelControlSpec)]
-fn disallow_block_transitions() -> nirvash_core::StepExpr<ToyState, ToyAction> {
+fn disallow_block_transitions() -> nirvash::StepExpr<ToyState, ToyAction> {
     nirvash_step_expr! { disallow_block_transitions(_prev, action, _next) =>
         !matches!(action, ToyAction::Block)
     }
 }
 
 #[property(ToyModelControlSpec)]
-fn busy_leads_back_to_idle() -> nirvash_core::Ltl<ToyState, ToyAction> {
-    nirvash_core::Ltl::leads_to(
-        nirvash_core::Ltl::pred(nirvash_expr! { busy(state) =>
+fn busy_leads_back_to_idle() -> nirvash::Ltl<ToyState, ToyAction> {
+    nirvash::Ltl::leads_to(
+        nirvash::Ltl::pred(nirvash_expr! { busy(state) =>
             matches!(state.phase, ToyPhase::Busy)
         }),
-        nirvash_core::Ltl::pred(nirvash_expr! { idle(state) =>
+        nirvash::Ltl::pred(nirvash_expr! { idle(state) =>
             matches!(state.phase, ToyPhase::Idle)
         }),
     )
 }
 
 #[fairness(ToyModelControlSpec)]
-fn finish_progress() -> nirvash_core::Fairness<ToyState, ToyAction> {
-    nirvash_core::Fairness::weak(nirvash_step_expr! { finish_progress(prev, action, next) =>
+fn finish_progress() -> nirvash::Fairness<ToyState, ToyAction> {
+    nirvash::Fairness::weak(nirvash_step_expr! { finish_progress(prev, action, next) =>
         matches!(prev.phase, ToyPhase::Busy)
             && matches!(action, ToyAction::Finish)
             && matches!(next.phase, ToyPhase::Idle)
@@ -136,12 +136,12 @@ impl TransitionSystem for ToyModelControlSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule start when matches!(action, ToyAction::Start)
                 && matches!(prev.phase, ToyPhase::Idle) => {

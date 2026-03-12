@@ -4,7 +4,7 @@ use imagod_spec::{
     ManagerRuntimeOutputSummary, ManagerRuntimeProbeOutput, ManagerRuntimeProbeState,
     ManagerRuntimeStateSummary,
 };
-use nirvash_core::{
+use nirvash::{
     BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };
@@ -198,7 +198,7 @@ impl TransitionSystem for ManagerRuntimeProjectionSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
@@ -257,14 +257,13 @@ impl ModelCaseSource for ManagerRuntimeProjectionSpec {
 }
 
 #[cfg(test)]
-fn manager_runtime_probe_state_domain() -> nirvash_core::BoundedDomain<ManagerRuntimeProbeState> {
-    <ManagerRuntimeProbeState as nirvash_core::Signature>::bounded_domain()
+fn manager_runtime_probe_state_domain() -> nirvash::BoundedDomain<ManagerRuntimeProbeState> {
+    <ManagerRuntimeProbeState as nirvash::Signature>::bounded_domain()
 }
 
 #[cfg(test)]
-fn manager_runtime_summary_output_domain()
--> nirvash_core::BoundedDomain<ManagerRuntimeOutputSummary> {
-    nirvash_core::BoundedDomain::new(vec![
+fn manager_runtime_summary_output_domain() -> nirvash::BoundedDomain<ManagerRuntimeOutputSummary> {
+    nirvash::BoundedDomain::new(vec![
         ManagerRuntimeOutputSummary::default(),
         ManagerRuntimeOutputSummary {
             effects: vec![ContractEffectSummary::TaskMilestone(

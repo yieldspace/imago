@@ -1,4 +1,4 @@
-use nirvash_core::conformance::{ProtocolInputWitnessCodec, WitnessKind};
+use nirvash::conformance::{ProtocolInputWitnessCodec, WitnessKind};
 use nirvash_macros::{ActionVocabulary as FormalActionVocabulary, ProtocolInputWitness, Signature as FormalSignature};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature, FormalActionVocabulary, Default)]

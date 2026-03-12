@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use nirvash_core::{
+use nirvash::{
     ActionVocabulary, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };

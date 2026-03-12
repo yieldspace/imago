@@ -1,4 +1,4 @@
-use nirvash_core::{
+use nirvash::{
     BoolExpr, Fairness, Ltl, ModelBackend, ModelCase, ModelCheckConfig, RelSet, Relation2,
     StepExpr, TransitionSystem,
 };
@@ -166,10 +166,18 @@ impl SessionAuthSpec {
     }
 }
 
-nirvash_core::signature_spec!(
+nirvash::signature_spec!(
     SessionAuthStateSignatureSpec for SessionAuthState,
     representatives = crate::state_domain::reachable_state_domain(&SessionAuthSpec::new())
 );
+
+nirvash::symbolic_state_spec!(for SessionAuthState {
+    accepted_sessions: RelSet<SessionAtom>,
+    authenticated_roles: Relation2<SessionAtom, SessionRoleAtom>,
+    timed_out_streams: RelSet<StreamAtom>,
+    closed_streams: RelSet<StreamAtom>,
+    uploaded_authorities: RelSet<RemoteAuthorityAtom>,
+});
 
 fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthAction>> {
     vec![
@@ -177,7 +185,7 @@ fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthActi
             .with_label("client_rpc_surface")
             .with_checker_config(ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
-                exploration: nirvash_core::ExplorationMode::ReachableGraph,
+                exploration: nirvash::ExplorationMode::ReachableGraph,
                 bounded_depth: None,
                 max_states: Some(1024),
                 max_transitions: Some(3072),
@@ -186,7 +194,7 @@ fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthActi
             })
             .with_doc_checker_config(ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
-                exploration: nirvash_core::ExplorationMode::ReachableGraph,
+                exploration: nirvash::ExplorationMode::ReachableGraph,
                 bounded_depth: None,
                 max_states: Some(128),
                 max_transitions: Some(384),
@@ -197,7 +205,7 @@ fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthActi
         ModelCase::new("timeout_and_reject_surface")
             .with_checker_config(ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
-                exploration: nirvash_core::ExplorationMode::ReachableGraph,
+                exploration: nirvash::ExplorationMode::ReachableGraph,
                 bounded_depth: None,
                 max_states: Some(1024),
                 max_transitions: Some(3072),
@@ -206,7 +214,7 @@ fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthActi
             })
             .with_doc_checker_config(ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
-                exploration: nirvash_core::ExplorationMode::ReachableGraph,
+                exploration: nirvash::ExplorationMode::ReachableGraph,
                 bounded_depth: None,
                 max_states: Some(128),
                 max_transitions: Some(384),
@@ -304,12 +312,12 @@ impl TransitionSystem for SessionAuthSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule accept_session when accept_session_from_action(action).is_some()
                 && !prev.accepted_sessions.contains(&accept_session_from_action(action)

@@ -1,7 +1,7 @@
 #[cfg(test)]
 use imagod_spec::{ContractEffectSummary, SummaryLogChunk, SummaryRequestKind, SummaryStreamId};
 use imagod_spec::{LogsOutputSummary, LogsProbeOutput, LogsProbeState, LogsStateSummary};
-use nirvash_core::{
+use nirvash::{
     BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };
@@ -146,7 +146,7 @@ impl TransitionSystem for LogsProjectionSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
@@ -194,13 +194,13 @@ impl ModelCaseSource for LogsProjectionSpec {
 }
 
 #[cfg(test)]
-fn logs_probe_state_domain() -> nirvash_core::BoundedDomain<LogsProbeState> {
-    <LogsProbeState as nirvash_core::Signature>::bounded_domain()
+fn logs_probe_state_domain() -> nirvash::BoundedDomain<LogsProbeState> {
+    <LogsProbeState as nirvash::Signature>::bounded_domain()
 }
 
 #[cfg(test)]
-fn logs_summary_output_domain() -> nirvash_core::BoundedDomain<LogsOutputSummary> {
-    nirvash_core::BoundedDomain::new(vec![
+fn logs_summary_output_domain() -> nirvash::BoundedDomain<LogsOutputSummary> {
+    nirvash::BoundedDomain::new(vec![
         LogsOutputSummary {
             effects: vec![
                 ContractEffectSummary::RequestObserved(

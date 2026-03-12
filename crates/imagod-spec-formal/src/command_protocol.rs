@@ -2,7 +2,7 @@ use imagod_spec::{
     CommandOutputSummary as RuntimeCommandOutputSummary,
     CommandStateSummary as RuntimeCommandStateSummary,
 };
-use nirvash_core::{
+use nirvash::{
     BoolExpr, DocGraphPolicy, ModelCase, TransitionSystem, conformance::ProtocolConformanceSpec,
 };
 use nirvash_macros::{
@@ -392,12 +392,12 @@ impl TransitionSystem for CommandProtocolSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule start when matches!(action, CommandProtocolAction::Start(_)) && !prev.tracked => {
                 set tracked <= true;
@@ -562,7 +562,8 @@ pub fn initial_state() -> CommandProtocolState {
 
 #[cfg(test)]
 mod tests {
-    use nirvash_core::{ModelCaseSource, ModelChecker, reduce_doc_graph};
+    use nirvash::{ModelCaseSource, reduce_doc_graph};
+    use nirvash_check::ModelChecker;
 
     use super::*;
 
@@ -579,7 +580,7 @@ mod tests {
     #[test]
     fn derived_action_vocabulary_preserves_representative_subset() {
         assert_eq!(
-            <CommandProtocolAction as nirvash_core::ActionVocabulary>::action_vocabulary(),
+            <CommandProtocolAction as nirvash::ActionVocabulary>::action_vocabulary(),
             vec![
                 CommandProtocolAction::Start(CommandKind::Deploy),
                 CommandProtocolAction::Start(CommandKind::Run),
@@ -618,11 +619,11 @@ mod tests {
                     .then_some(index)
             })
             .collect::<Vec<_>>();
-        let reduced = reduce_doc_graph(&nirvash_core::DocGraphSnapshot {
+        let reduced = reduce_doc_graph(&nirvash::DocGraphSnapshot {
             states: snapshot
                 .states
                 .iter()
-                .map(nirvash_core::summarize_doc_graph_state)
+                .map(nirvash::summarize_doc_graph_state)
                 .collect(),
             edges: snapshot
                 .edges
@@ -631,9 +632,8 @@ mod tests {
                     outgoing
                         .iter()
                         .map(|edge| {
-                            let presentation =
-                                nirvash_core::describe_doc_graph_action(&edge.action);
-                            nirvash_core::DocGraphEdge {
+                            let presentation = nirvash::describe_doc_graph_action(&edge.action);
+                            nirvash::DocGraphEdge {
                                 label: presentation.label,
                                 compact_label: presentation.compact_label,
                                 scenario_priority: presentation.scenario_priority,

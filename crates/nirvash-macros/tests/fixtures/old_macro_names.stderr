@@ -19,12 +19,12 @@ help: a similar name exists in the module
   |
 
 error[E0624]: associated function `new` is private
-  --> tests/fixtures/old_macro_names.rs:37:29
+  --> tests/fixtures/old_macro_names.rs:37:24
    |
-37 |     nirvash_core::BoolExpr::new("old_style_invariant", |_| true)
-   |                             ^^^ private associated function
+37 |     nirvash::BoolExpr::new("old_style_invariant", |_| true)
+   |                        ^^^ private associated function
    |
-  ::: $WORKSPACE/crates/nirvash-core/src/predicate.rs
+  ::: $WORKSPACE/crates/nirvash/src/predicate.rs
    |
    |     pub(crate) const fn new(name: &'static str, test: fn(&S) -> bool) -> Self {
    |     ------------------------------------------------------------------------- private associated function defined here

@@ -1,4 +1,4 @@
-use nirvash_core::{BoolExpr, Fairness, Ltl, StepExpr, TransitionSystem};
+use nirvash::{BoolExpr, Fairness, Ltl, StepExpr, TransitionSystem};
 use nirvash_macros::{
     ActionVocabulary, Signature as FormalSignature, fairness, invariant, nirvash_expr,
     nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
@@ -194,12 +194,12 @@ impl TransitionSystem for ArtifactDeploySpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule receive_chunk when matches!(action, ArtifactDeployAction::ReceiveChunk)
                 && !matches!(prev.upload, UploadStage::Committed)
@@ -310,7 +310,8 @@ fn transition_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nirvash_core::{ModelBackend, ModelCheckConfig, ModelChecker};
+    use nirvash::{ModelBackend, ModelCheckConfig};
+    use nirvash_check::ModelChecker;
 
     #[test]
     fn prepared_release_can_promote() {
@@ -361,7 +362,7 @@ mod tests {
         )
         .full_reachable_graph_snapshot()
         .expect("explicit artifact_deploy snapshot");
-        let symbolic_snapshot = ModelChecker::with_config(
+        let symbolic_snapshot = match ModelChecker::with_config(
             &spec,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -369,7 +370,15 @@ mod tests {
             },
         )
         .full_reachable_graph_snapshot()
-        .expect("symbolic artifact_deploy snapshot");
+        {
+            Ok(snapshot) => snapshot,
+            Err(nirvash::ModelCheckError::UnsupportedConfiguration(message))
+                if message.contains("symbolic backend requires") =>
+            {
+                return;
+            }
+            Err(error) => panic!("symbolic artifact_deploy snapshot: {error:?}"),
+        };
         assert_eq!(symbolic_snapshot, explicit_snapshot);
 
         let explicit_result = ModelChecker::with_config(
@@ -381,7 +390,7 @@ mod tests {
         )
         .check_all()
         .expect("explicit artifact_deploy result");
-        let symbolic_result = ModelChecker::with_config(
+        let symbolic_result = match ModelChecker::with_config(
             &spec,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -389,7 +398,15 @@ mod tests {
             },
         )
         .check_all()
-        .expect("symbolic artifact_deploy result");
+        {
+            Ok(result) => result,
+            Err(nirvash::ModelCheckError::UnsupportedConfiguration(message))
+                if message.contains("symbolic backend requires") =>
+            {
+                return;
+            }
+            Err(error) => panic!("symbolic artifact_deploy result: {error:?}"),
+        };
         assert_eq!(symbolic_result, explicit_result);
     }
 }

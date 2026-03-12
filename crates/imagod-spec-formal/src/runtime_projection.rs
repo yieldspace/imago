@@ -3,7 +3,7 @@ use imagod_spec::{ContractEffectSummary, SummaryServiceId};
 use imagod_spec::{
     RuntimeOutputSummary, RuntimeProbeOutput, RuntimeProbeState, RuntimeStateSummary,
 };
-use nirvash_core::{
+use nirvash::{
     BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
     conformance::ProtocolConformanceSpec,
 };
@@ -230,7 +230,7 @@ impl TransitionSystem for RuntimeProjectionSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
@@ -395,13 +395,13 @@ impl ModelCaseSource for RuntimeProjectionSpec {
 }
 
 #[cfg(test)]
-fn runtime_probe_state_domain() -> nirvash_core::BoundedDomain<RuntimeProbeState> {
-    <RuntimeProbeState as nirvash_core::Signature>::bounded_domain()
+fn runtime_probe_state_domain() -> nirvash::BoundedDomain<RuntimeProbeState> {
+    <RuntimeProbeState as nirvash::Signature>::bounded_domain()
 }
 
 #[cfg(test)]
-fn runtime_summary_output_domain() -> nirvash_core::BoundedDomain<RuntimeOutputSummary> {
-    nirvash_core::BoundedDomain::new(vec![
+fn runtime_summary_output_domain() -> nirvash::BoundedDomain<RuntimeOutputSummary> {
+    nirvash::BoundedDomain::new(vec![
         RuntimeOutputSummary::default(),
         RuntimeOutputSummary {
             effects: vec![ContractEffectSummary::LocalRpcResolved(

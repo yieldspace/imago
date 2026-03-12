@@ -1,4 +1,4 @@
-use nirvash_core::{
+use nirvash::{
     BoolExpr, Fairness, Ltl, ModelCase, RelAtom as _, RelSet, Signature as _, StepExpr,
     TransitionSystem,
 };
@@ -228,10 +228,19 @@ impl RunnerRuntimeSpec {
     }
 }
 
-nirvash_core::signature_spec!(
+nirvash::signature_spec!(
     RunnerRuntimeStateSignatureSpec for RunnerRuntimeState,
     representatives = crate::state_domain::reachable_state_domain(&RunnerRuntimeSpec::new())
 );
+
+nirvash::symbolic_state_spec!(for RunnerRuntimeState {
+    listening_endpoints: RelSet<RuntimeEndpointAtom>,
+    queued_http_requests: RelSet<HttpRequestAtom>,
+    mode: Option<RunnerAppType>,
+    phase: RuntimePhase,
+    component: ComponentLoadClass,
+    tuning: WasmTuningClass,
+});
 
 fn runner_runtime_model_cases() -> Vec<ModelCase<RunnerRuntimeState, RunnerRuntimeAction>> {
     vec![ModelCase::default().with_check_deadlocks(false)]
@@ -352,12 +361,12 @@ impl TransitionSystem for RunnerRuntimeSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule select_mode when select_mode_value(action).is_some()
                 && prev.mode.is_none()

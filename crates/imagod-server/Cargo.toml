@@ -30,7 +30,8 @@ web-transport-quinn = { workspace = true }
 
 [dev-dependencies]
 imagod-spec-formal = { workspace = true }
-nirvash-core = { workspace = true }
+nirvash = { workspace = true }
+nirvash-check = { workspace = true }
 nirvash-macros = { workspace = true }
 
 [[bench]]

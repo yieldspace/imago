@@ -1,4 +1,4 @@
-use nirvash_core::{ModelCase, TransitionSystem};
+use nirvash::{ModelCase, TransitionSystem};
 use nirvash_macros::{
     ActionVocabulary, Signature, fairness, invariant, nirvash_expr, nirvash_step_expr,
     nirvash_transition_program, property, subsystem_spec,
@@ -72,7 +72,7 @@ fn manager_runtime_model_cases() -> Vec<ModelCase<ManagerRuntimeState, ManagerRu
 }
 
 #[invariant(ManagerRuntimeSpec)]
-fn listening_requires_config() -> nirvash_core::BoolExpr<ManagerRuntimeState> {
+fn listening_requires_config() -> nirvash::BoolExpr<ManagerRuntimeState> {
     nirvash_expr! { listening_requires_config(state) =>
         !matches!(
             state.phase,
@@ -84,46 +84,45 @@ fn listening_requires_config() -> nirvash_core::BoolExpr<ManagerRuntimeState> {
 }
 
 #[property(ManagerRuntimeSpec)]
-fn booting_leads_to_config_ready() -> nirvash_core::Ltl<ManagerRuntimeState, ManagerRuntimeAction> {
-    nirvash_core::Ltl::leads_to(
-        nirvash_core::Ltl::pred(nirvash_expr! { booting(state) =>
+fn booting_leads_to_config_ready() -> nirvash::Ltl<ManagerRuntimeState, ManagerRuntimeAction> {
+    nirvash::Ltl::leads_to(
+        nirvash::Ltl::pred(nirvash_expr! { booting(state) =>
             matches!(state.phase, ManagerRuntimePhase::Booting)
         }),
-        nirvash_core::Ltl::pred(nirvash_expr! { config_ready_or_beyond(state) =>
+        nirvash::Ltl::pred(nirvash_expr! { config_ready_or_beyond(state) =>
             !matches!(state.phase, ManagerRuntimePhase::Booting)
         }),
     )
 }
 
 #[property(ManagerRuntimeSpec)]
-fn config_ready_leads_to_listening() -> nirvash_core::Ltl<ManagerRuntimeState, ManagerRuntimeAction>
-{
-    nirvash_core::Ltl::leads_to(
-        nirvash_core::Ltl::pred(nirvash_expr! { config_ready(state) =>
+fn config_ready_leads_to_listening() -> nirvash::Ltl<ManagerRuntimeState, ManagerRuntimeAction> {
+    nirvash::Ltl::leads_to(
+        nirvash::Ltl::pred(nirvash_expr! { config_ready(state) =>
             matches!(state.phase, ManagerRuntimePhase::ConfigReady)
         }),
-        nirvash_core::Ltl::pred(nirvash_expr! { listening(state) =>
+        nirvash::Ltl::pred(nirvash_expr! { listening(state) =>
             matches!(state.phase, ManagerRuntimePhase::Listening)
         }),
     )
 }
 
 #[property(ManagerRuntimeSpec)]
-fn shutdown_requested_leads_to_stopped()
--> nirvash_core::Ltl<ManagerRuntimeState, ManagerRuntimeAction> {
-    nirvash_core::Ltl::leads_to(
-        nirvash_core::Ltl::pred(nirvash_expr! { shutdown_requested(state) =>
+fn shutdown_requested_leads_to_stopped() -> nirvash::Ltl<ManagerRuntimeState, ManagerRuntimeAction>
+{
+    nirvash::Ltl::leads_to(
+        nirvash::Ltl::pred(nirvash_expr! { shutdown_requested(state) =>
             matches!(state.phase, ManagerRuntimePhase::ShutdownRequested)
         }),
-        nirvash_core::Ltl::pred(nirvash_expr! { stopped(state) =>
+        nirvash::Ltl::pred(nirvash_expr! { stopped(state) =>
             matches!(state.phase, ManagerRuntimePhase::Stopped)
         }),
     )
 }
 
 #[fairness(ManagerRuntimeSpec)]
-fn boot_config_progress() -> nirvash_core::Fairness<ManagerRuntimeState, ManagerRuntimeAction> {
-    nirvash_core::Fairness::weak(
+fn boot_config_progress() -> nirvash::Fairness<ManagerRuntimeState, ManagerRuntimeAction> {
+    nirvash::Fairness::weak(
         nirvash_step_expr! { boot_config_progress(prev, action, next) =>
             matches!(prev.phase, ManagerRuntimePhase::Booting)
                 && matches!(
@@ -137,8 +136,8 @@ fn boot_config_progress() -> nirvash_core::Fairness<ManagerRuntimeState, Manager
 }
 
 #[fairness(ManagerRuntimeSpec)]
-fn config_ready_progress() -> nirvash_core::Fairness<ManagerRuntimeState, ManagerRuntimeAction> {
-    nirvash_core::Fairness::weak(
+fn config_ready_progress() -> nirvash::Fairness<ManagerRuntimeState, ManagerRuntimeAction> {
+    nirvash::Fairness::weak(
         nirvash_step_expr! { config_ready_progress(prev, action, next) =>
             matches!(prev.phase, ManagerRuntimePhase::ConfigReady)
                 && matches!(
@@ -156,9 +155,8 @@ fn config_ready_progress() -> nirvash_core::Fairness<ManagerRuntimeState, Manage
 }
 
 #[fairness(ManagerRuntimeSpec)]
-fn shutdown_completion_progress()
--> nirvash_core::Fairness<ManagerRuntimeState, ManagerRuntimeAction> {
-    nirvash_core::Fairness::weak(
+fn shutdown_completion_progress() -> nirvash::Fairness<ManagerRuntimeState, ManagerRuntimeAction> {
+    nirvash::Fairness::weak(
         nirvash_step_expr! { shutdown_completion_progress(prev, action, next) =>
             matches!(prev.phase, ManagerRuntimePhase::ShutdownRequested)
                 && matches!(action, ManagerRuntimeAction::FinishShutdown)
@@ -168,8 +166,8 @@ fn shutdown_completion_progress()
 }
 
 #[fairness(ManagerRuntimeSpec)]
-fn restore_progress() -> nirvash_core::Fairness<ManagerRuntimeState, ManagerRuntimeAction> {
-    nirvash_core::Fairness::weak(nirvash_step_expr! { restore_progress(prev, action, next) =>
+fn restore_progress() -> nirvash::Fairness<ManagerRuntimeState, ManagerRuntimeAction> {
+    nirvash::Fairness::weak(nirvash_step_expr! { restore_progress(prev, action, next) =>
         matches!(prev.phase, ManagerRuntimePhase::Restoring)
             && matches!(
                 action,
@@ -194,12 +192,12 @@ impl TransitionSystem for ManagerRuntimeSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        <Self::Action as nirvash_core::ActionVocabulary>::action_vocabulary()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition_program(
         &self,
-    ) -> Option<::nirvash_core::TransitionProgram<Self::State, Self::Action>> {
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule load_existing_config when matches!(action, ManagerRuntimeAction::LoadExistingConfig)
                 && matches!(prev.phase, ManagerRuntimePhase::Booting) => {
