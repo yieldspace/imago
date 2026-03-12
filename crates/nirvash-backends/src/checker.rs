@@ -1,4 +1,9 @@
-use std::collections::VecDeque;
+use std::{
+    collections::{HashMap, hash_map::DefaultHasher},
+    fs,
+    hash::{Hash, Hasher},
+    path::Path,
+};
 
 use nirvash::{
     BoolExpr, Counterexample, CounterexampleKind, ExplorationMode, Fairness, Ltl, ModelBackend,
@@ -6,6 +11,7 @@ use nirvash::{
     ReachableGraphEdge, ReachableGraphSnapshot, Signature, StepExpr, TemporalSpec, Trace,
     TraceStep,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::symbolic::SymbolicModelChecker;
 
@@ -19,6 +25,103 @@ impl<A> GraphEdge<A> {
     fn is_stutter(&self) -> bool {
         matches!(self.step, TraceStep::Stutter)
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CheckpointGraphEdge {
+    step: CheckpointStep,
+    target: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CheckpointGraphParent {
+    source: usize,
+    step: CheckpointStep,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum CheckpointStep {
+    Action(usize),
+    Stutter,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReachableGraphCheckpoint {
+    spec_name: String,
+    exploration: ExplorationMode,
+    state_storage: nirvash::ExplicitStateStorage,
+    states: Vec<usize>,
+    edges: Vec<Vec<CheckpointGraphEdge>>,
+    initial_indices: Vec<usize>,
+    parents: Vec<Option<CheckpointGraphParent>>,
+    depths: Vec<usize>,
+    deadlocks: Vec<usize>,
+    transitions: usize,
+    truncated: bool,
+    frontier: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+enum ExplicitStateIndex {
+    Exact,
+    Fingerprinted { buckets: HashMap<u64, Vec<usize>> },
+}
+
+impl ExplicitStateIndex {
+    fn new(storage: nirvash::ExplicitStateStorage) -> Self {
+        match storage {
+            nirvash::ExplicitStateStorage::InMemoryExact => Self::Exact,
+            nirvash::ExplicitStateStorage::InMemoryFingerprinted => Self::Fingerprinted {
+                buckets: HashMap::new(),
+            },
+        }
+    }
+
+    fn from_states<S>(storage: nirvash::ExplicitStateStorage, states: &[S]) -> Self
+    where
+        S: std::fmt::Debug,
+    {
+        let mut index = Self::new(storage);
+        for state_index in 0..states.len() {
+            index.record_state(states, state_index);
+        }
+        index
+    }
+
+    fn state_index<S>(&self, states: &[S], state: &S) -> Option<usize>
+    where
+        S: PartialEq + std::fmt::Debug,
+    {
+        match self {
+            Self::Exact => states.iter().position(|candidate| candidate == state),
+            Self::Fingerprinted { buckets } => {
+                let fingerprint = fingerprint_debug(state);
+                buckets.get(&fingerprint).and_then(|candidates| {
+                    candidates
+                        .iter()
+                        .copied()
+                        .find(|index| states[*index] == *state)
+                })
+            }
+        }
+    }
+
+    fn record_state<S>(&mut self, states: &[S], state_index: usize)
+    where
+        S: std::fmt::Debug,
+    {
+        let Self::Fingerprinted { buckets } = self else {
+            return;
+        };
+        let fingerprint = fingerprint_debug(&states[state_index]);
+        buckets.entry(fingerprint).or_default().push(state_index);
+    }
+}
+
+fn fingerprint_debug<T: std::fmt::Debug>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    format!("{value:?}").hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -416,13 +519,16 @@ where
     fn build_reachable_graph(
         &self,
     ) -> Result<ReachableGraph<T::State, T::Action>, ModelCheckError> {
-        self.build_reachable_graph_with_config(self.config)
+        self.build_reachable_graph_with_config(self.config.clone())
     }
 
     fn build_reachable_graph_for_docs(
         &self,
     ) -> Result<ReachableGraph<T::State, T::Action>, ModelCheckError> {
-        let mut config = self.model_case.doc_checker_config().unwrap_or(self.config);
+        let mut config = self
+            .model_case
+            .doc_checker_config()
+            .unwrap_or_else(|| self.config.clone());
         config.exploration = ExplorationMode::ReachableGraph;
         config.stop_on_first_violation = false;
         self.build_reachable_graph_with_config(config)
@@ -433,117 +539,361 @@ where
         config: ModelCheckConfig,
     ) -> Result<ReachableGraph<T::State, T::Action>, ModelCheckError> {
         let initial_states = self.initial_states_filtered()?;
-        let mut graph = ReachableGraph {
-            states: Vec::new(),
-            edges: Vec::new(),
-            initial_indices: Vec::new(),
-            parents: Vec::new(),
-            depths: Vec::new(),
-            deadlocks: Vec::new(),
-            transitions: 0,
-            truncated: false,
-        };
-        let mut queue = VecDeque::new();
+        let (mut graph, mut state_index, mut frontier) = self
+            .load_reachable_graph_checkpoint(&config)?
+            .unwrap_or_else(|| {
+                (
+                    ReachableGraph {
+                        states: Vec::new(),
+                        edges: Vec::new(),
+                        initial_indices: Vec::new(),
+                        parents: Vec::new(),
+                        depths: Vec::new(),
+                        deadlocks: Vec::new(),
+                        transitions: 0,
+                        truncated: false,
+                    },
+                    ExplicitStateIndex::new(config.explicit.state_storage),
+                    Vec::new(),
+                )
+            });
 
-        for state in initial_states {
-            let Some(index) = self.push_state(&mut graph, state, None, 0, &mut queue, config)?
-            else {
-                break;
-            };
-            if !graph.initial_indices.contains(&index) {
-                graph.initial_indices.push(index);
-            }
-            if graph.truncated {
-                break;
-            }
-        }
-
-        while let Some(index) = queue.pop_front() {
-            if graph.truncated {
-                break;
-            }
-            let current = graph.states[index].clone();
-            let next_depth = graph.depths[index] + 1;
-            let mut edges = Vec::new();
-
-            for (action, next_raw) in self.spec.successors_constrained(&current, &|action, next| {
-                self.action_constraints_allow(&current, action, next)
-            }) {
-                let next = self.canonicalize_state(&next_raw);
-                if !self.state_constraints_allow(&next) {
-                    continue;
-                }
-
-                let Some(next_index) = self.push_state(
+        if frontier.is_empty() && graph.states.is_empty() {
+            for state in initial_states {
+                let Some(index) = self.push_state(
                     &mut graph,
-                    next,
-                    Some((index, TraceStep::Action(action.clone()))),
-                    next_depth,
-                    &mut queue,
-                    config,
+                    &mut state_index,
+                    state,
+                    None,
+                    0,
+                    &mut frontier,
+                    &config,
                 )?
                 else {
                     break;
                 };
-                let edge = GraphEdge {
-                    step: TraceStep::Action(action),
-                    target: next_index,
-                };
-                if !edges.contains(&edge) {
-                    if self.transition_limit_reached(&graph, config) {
-                        graph.truncated = true;
-                        break;
-                    }
-                    edges.push(edge);
-                    graph.transitions += 1;
+                if !graph.initial_indices.contains(&index) {
+                    graph.initial_indices.push(index);
+                }
+                if graph.truncated {
+                    break;
                 }
             }
+            self.save_reachable_graph_checkpoint(&graph, &frontier, &config, 0)?;
+        }
 
-            if !graph.truncated && self.spec.allow_stutter() {
-                let stutter = self.canonicalize_state(&self.spec.stutter_state(&current));
-                if self.state_constraints_allow(&stutter) {
+        let mut completed_frontiers = 0usize;
+        while !frontier.is_empty() {
+            if graph.truncated {
+                break;
+            }
+            let current_frontier = std::mem::take(&mut frontier);
+            let mut next_frontier = Vec::new();
+
+            for index in current_frontier {
+                if graph.truncated {
+                    break;
+                }
+                let current = graph.states[index].clone();
+                let next_depth = graph.depths[index] + 1;
+                let mut edges = Vec::new();
+
+                for (action, next_raw) in
+                    self.spec.successors_constrained(&current, &|action, next| {
+                        self.action_constraints_allow(&current, action, next)
+                    })
+                {
+                    let next = self.canonicalize_state(&next_raw);
+                    if !self.state_constraints_allow(&next) {
+                        continue;
+                    }
+
                     let Some(next_index) = self.push_state(
                         &mut graph,
-                        stutter,
-                        Some((index, TraceStep::Stutter)),
+                        &mut state_index,
+                        next,
+                        Some((index, TraceStep::Action(action.clone()))),
                         next_depth,
-                        &mut queue,
-                        config,
+                        &mut next_frontier,
+                        &config,
                     )?
                     else {
-                        graph.truncated = true;
                         break;
                     };
                     let edge = GraphEdge {
-                        step: TraceStep::Stutter,
+                        step: TraceStep::Action(action),
                         target: next_index,
                     };
                     if !edges.contains(&edge) {
+                        if self.transition_limit_reached(&graph, &config) {
+                            graph.truncated = true;
+                            break;
+                        }
                         edges.push(edge);
+                        graph.transitions += 1;
                     }
                 }
+
+                if !graph.truncated && self.spec.allow_stutter() {
+                    let stutter = self.canonicalize_state(&self.spec.stutter_state(&current));
+                    if self.state_constraints_allow(&stutter) {
+                        let Some(next_index) = self.push_state(
+                            &mut graph,
+                            &mut state_index,
+                            stutter,
+                            Some((index, TraceStep::Stutter)),
+                            next_depth,
+                            &mut next_frontier,
+                            &config,
+                        )?
+                        else {
+                            graph.truncated = true;
+                            break;
+                        };
+                        let edge = GraphEdge {
+                            step: TraceStep::Stutter,
+                            target: next_index,
+                        };
+                        if !edges.contains(&edge) {
+                            edges.push(edge);
+                        }
+                    }
+                }
+
+                if edges.iter().all(GraphEdge::is_stutter) {
+                    graph.deadlocks.push(index);
+                }
+
+                graph.edges[index] = edges;
             }
 
-            if edges.iter().all(GraphEdge::is_stutter) {
-                graph.deadlocks.push(index);
-            }
-
-            graph.edges[index] = edges;
+            completed_frontiers += 1;
+            frontier = next_frontier;
+            self.save_reachable_graph_checkpoint(&graph, &frontier, &config, completed_frontiers)?;
         }
 
         Ok(graph)
     }
 
+    fn load_reachable_graph_checkpoint(
+        &self,
+        config: &ModelCheckConfig,
+    ) -> Result<
+        Option<(
+            ReachableGraph<T::State, T::Action>,
+            ExplicitStateIndex,
+            Vec<usize>,
+        )>,
+        ModelCheckError,
+    > {
+        let checkpoint = &config.explicit.checkpoint;
+        let Some(path) = checkpoint.path.as_deref() else {
+            return Ok(None);
+        };
+        if !checkpoint.resume || !Path::new(path).exists() {
+            return Ok(None);
+        }
+
+        let bytes =
+            fs::read(path).map_err(|error| ModelCheckError::CheckpointIo(error.to_string()))?;
+        let saved: ReachableGraphCheckpoint = serde_json::from_slice(&bytes)
+            .map_err(|error| ModelCheckError::CheckpointIo(error.to_string()))?;
+        if saved.spec_name != self.spec.name()
+            || saved.exploration != config.exploration
+            || saved.state_storage != config.explicit.state_storage
+        {
+            return Err(ModelCheckError::CheckpointIo(format!(
+                "checkpoint at `{path}` does not match the current explicit exploration config"
+            )));
+        }
+
+        let state_domain = T::State::bounded_domain().into_vec();
+        let actions = self.spec.actions();
+        let states = saved
+            .states
+            .iter()
+            .map(|index| {
+                state_domain.get(*index).cloned().ok_or_else(|| {
+                    ModelCheckError::CheckpointIo(format!(
+                        "checkpoint state index {index} is outside the bounded domain"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let edges = saved
+            .edges
+            .iter()
+            .map(|edges| {
+                edges
+                    .iter()
+                    .map(|edge| {
+                        Ok(GraphEdge {
+                            step: self.decode_checkpoint_step(&edge.step, &actions)?,
+                            target: edge.target,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let parents = saved
+            .parents
+            .iter()
+            .map(|parent| {
+                parent
+                    .as_ref()
+                    .map(|parent| {
+                        Ok((
+                            parent.source,
+                            self.decode_checkpoint_step(&parent.step, &actions)?,
+                        ))
+                    })
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let graph = ReachableGraph {
+            states,
+            edges,
+            initial_indices: saved.initial_indices,
+            parents,
+            depths: saved.depths,
+            deadlocks: saved.deadlocks,
+            transitions: saved.transitions,
+            truncated: saved.truncated,
+        };
+        let state_index =
+            ExplicitStateIndex::from_states(config.explicit.state_storage, &graph.states);
+
+        Ok(Some((graph, state_index, saved.frontier)))
+    }
+
+    fn save_reachable_graph_checkpoint(
+        &self,
+        graph: &ReachableGraph<T::State, T::Action>,
+        frontier: &[usize],
+        config: &ModelCheckConfig,
+        completed_frontiers: usize,
+    ) -> Result<(), ModelCheckError> {
+        let checkpoint = &config.explicit.checkpoint;
+        let Some(path) = checkpoint.path.as_deref() else {
+            return Ok(());
+        };
+        if completed_frontiers % checkpoint.save_every_frontiers != 0 {
+            return Ok(());
+        }
+
+        let state_domain = T::State::bounded_domain().into_vec();
+        let actions = self.spec.actions();
+        let snapshot = ReachableGraphCheckpoint {
+            spec_name: self.spec.name().to_owned(),
+            exploration: config.exploration,
+            state_storage: config.explicit.state_storage,
+            states: graph
+                .states
+                .iter()
+                .map(|state| self.state_domain_index(&state_domain, state))
+                .collect::<Result<Vec<_>, _>>()?,
+            edges: graph
+                .edges
+                .iter()
+                .map(|edges| {
+                    edges
+                        .iter()
+                        .map(|edge| {
+                            Ok(CheckpointGraphEdge {
+                                step: self.encode_checkpoint_step(&actions, &edge.step)?,
+                                target: edge.target,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            initial_indices: graph.initial_indices.clone(),
+            parents: graph
+                .parents
+                .iter()
+                .map(|parent| {
+                    parent
+                        .as_ref()
+                        .map(|(source, step)| {
+                            Ok(CheckpointGraphParent {
+                                source: *source,
+                                step: self.encode_checkpoint_step(&actions, step)?,
+                            })
+                        })
+                        .transpose()
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            depths: graph.depths.clone(),
+            deadlocks: graph.deadlocks.clone(),
+            transitions: graph.transitions,
+            truncated: graph.truncated,
+            frontier: frontier.to_vec(),
+        };
+        let bytes = serde_json::to_vec_pretty(&snapshot)
+            .map_err(|error| ModelCheckError::CheckpointIo(error.to_string()))?;
+        fs::write(path, bytes).map_err(|error| ModelCheckError::CheckpointIo(error.to_string()))
+    }
+
+    fn state_domain_index(
+        &self,
+        state_domain: &[T::State],
+        state: &T::State,
+    ) -> Result<usize, ModelCheckError> {
+        state_domain
+            .iter()
+            .position(|candidate| candidate == state)
+            .ok_or(ModelCheckError::UnsupportedConfiguration(
+                "checkpoint requires every reachable state to appear in T::State::bounded_domain()",
+            ))
+    }
+
+    fn encode_checkpoint_step(
+        &self,
+        actions: &[T::Action],
+        step: &TraceStep<T::Action>,
+    ) -> Result<CheckpointStep, ModelCheckError> {
+        match step {
+            TraceStep::Action(action) => actions
+                .iter()
+                .position(|candidate| candidate == action)
+                .map(CheckpointStep::Action)
+                .ok_or(ModelCheckError::UnsupportedConfiguration(
+                    "checkpoint requires every explicit action to appear in spec.actions()",
+                )),
+            TraceStep::Stutter => Ok(CheckpointStep::Stutter),
+        }
+    }
+
+    fn decode_checkpoint_step(
+        &self,
+        step: &CheckpointStep,
+        actions: &[T::Action],
+    ) -> Result<TraceStep<T::Action>, ModelCheckError> {
+        match step {
+            CheckpointStep::Action(index) => actions
+                .get(*index)
+                .cloned()
+                .map(TraceStep::Action)
+                .ok_or_else(|| {
+                    ModelCheckError::CheckpointIo(format!(
+                        "checkpoint action index {index} is outside spec.actions()"
+                    ))
+                }),
+            CheckpointStep::Stutter => Ok(TraceStep::Stutter),
+        }
+    }
+
     fn push_state(
         &self,
         graph: &mut ReachableGraph<T::State, T::Action>,
+        state_index: &mut ExplicitStateIndex,
         state: T::State,
         parent: Option<(usize, TraceStep<T::Action>)>,
         depth: usize,
-        queue: &mut VecDeque<usize>,
-        config: ModelCheckConfig,
+        frontier: &mut Vec<usize>,
+        config: &ModelCheckConfig,
     ) -> Result<Option<usize>, ModelCheckError> {
-        if let Some(existing) = graph.state_index(&state) {
+        if let Some(existing) = state_index.state_index(&graph.states, &state) {
             return Ok(Some(existing));
         }
 
@@ -557,14 +907,15 @@ where
         graph.parents.push(parent);
         graph.depths.push(depth);
         let index = graph.states.len() - 1;
-        queue.push_back(index);
+        state_index.record_state(&graph.states, index);
+        frontier.push(index);
         Ok(Some(index))
     }
 
     fn state_limit_reached(
         &self,
         graph: &ReachableGraph<T::State, T::Action>,
-        config: ModelCheckConfig,
+        config: &ModelCheckConfig,
     ) -> bool {
         config
             .max_states
@@ -574,7 +925,7 @@ where
     fn transition_limit_reached(
         &self,
         graph: &ReachableGraph<T::State, T::Action>,
-        config: ModelCheckConfig,
+        config: &ModelCheckConfig,
     ) -> bool {
         config
             .max_transitions

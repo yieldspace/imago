@@ -232,8 +232,8 @@ impl<S, A> ModelCase<S, A> {
         self.symmetry
     }
 
-    pub const fn checker_config(&self) -> ModelCheckConfig {
-        self.checker_config
+    pub fn checker_config(&self) -> ModelCheckConfig {
+        self.checker_config.clone()
     }
 
     pub const fn check_deadlocks(&self) -> bool {
@@ -241,13 +241,13 @@ impl<S, A> ModelCase<S, A> {
     }
 
     pub fn effective_checker_config(&self) -> ModelCheckConfig {
-        let mut config = self.checker_config;
+        let mut config = self.checker_config.clone();
         config.check_deadlocks = self.check_deadlocks;
         config
     }
 
-    pub const fn doc_checker_config(&self) -> Option<ModelCheckConfig> {
-        self.doc_checker_config
+    pub fn doc_checker_config(&self) -> Option<ModelCheckConfig> {
+        self.doc_checker_config.clone()
     }
 
     pub fn doc_graph_policy(&self) -> &DocGraphPolicy<S> {

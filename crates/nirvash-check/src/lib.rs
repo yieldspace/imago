@@ -79,12 +79,19 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use super::ModelChecker;
     use nirvash::{
-        BoolExpr, ExplicitSimulationOptions, ExplorationMode, ExprDomain, GuardExpr, ModelBackend,
-        ModelCase, ModelCheckConfig, Signature, StepExpr, SymbolicSort, SymbolicSortSpec,
-        SymbolicStateSchema, SymbolicStateSpec, TemporalSpec, TraceStep, TransitionProgram,
-        TransitionRule, TransitionSystem, UpdateOp, UpdateProgram, UpdateValueExprAst, inventory,
+        BoolExpr, ExplicitCheckpointOptions, ExplicitSimulationOptions, ExplicitStateStorage,
+        ExplorationMode, ExprDomain, GuardExpr, ModelBackend, ModelCase, ModelCheckConfig,
+        Signature, StepExpr, SymbolicSort, SymbolicSortSpec, SymbolicStateSchema,
+        SymbolicStateSpec, TemporalSpec, TraceStep, TransitionProgram, TransitionRule,
+        TransitionSystem, UpdateOp, UpdateProgram, UpdateValueExprAst, inventory,
         registry::RegisteredSymbolicStateSchema, symbolic_leaf_field,
     };
 
@@ -383,6 +390,17 @@ mod tests {
 
     impl nirvash::ModelCaseSource for SimulationSpec {}
 
+    fn checkpoint_path(label: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic enough for tests")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "nirvash-check-{label}-{}-{stamp}.json",
+            std::process::id()
+        ))
+    }
+
     #[test]
     fn explicit_simulation_is_seed_reproducible() {
         let spec = SimulationSpec;
@@ -390,7 +408,7 @@ mod tests {
             .with_simulation(ExplicitSimulationOptions::new(2, 4, 1));
         let config = ModelCheckConfig::reachable_graph().with_explicit_options(explicit);
 
-        let left_run = ModelChecker::with_config(&spec, config)
+        let left_run = ModelChecker::with_config(&spec, config.clone())
             .simulate()
             .expect("explicit simulation should run");
         let left_run_again = ModelChecker::with_config(&spec, config)
@@ -414,6 +432,46 @@ mod tests {
             left_run[0].steps().last(),
             Some(TraceStep::Stutter)
         ));
+    }
+
+    #[test]
+    fn explicit_reachable_graph_matches_fingerprinted_storage() {
+        let spec = SimulationSpec;
+        let exact = ModelChecker::with_config(&spec, ModelCheckConfig::reachable_graph())
+            .full_reachable_graph_snapshot()
+            .expect("exact storage snapshot");
+        let fingerprinted = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig::reachable_graph().with_explicit_options(
+                nirvash::ExplicitModelCheckOptions::current()
+                    .with_state_storage(ExplicitStateStorage::InMemoryFingerprinted),
+            ),
+        )
+        .full_reachable_graph_snapshot()
+        .expect("fingerprinted storage snapshot");
+
+        assert_eq!(fingerprinted, exact);
+    }
+
+    #[test]
+    fn explicit_reachable_graph_roundtrips_checkpoint_file() {
+        let spec = SimulationSpec;
+        let path = checkpoint_path("reachable-graph");
+        let explicit = nirvash::ExplicitModelCheckOptions::current().with_checkpoint(
+            ExplicitCheckpointOptions::at_path(path.display().to_string()),
+        );
+        let config = ModelCheckConfig::reachable_graph().with_explicit_options(explicit);
+
+        let first = ModelChecker::with_config(&spec, config.clone())
+            .full_reachable_graph_snapshot()
+            .expect("checkpointed snapshot");
+        let second = ModelChecker::with_config(&spec, config)
+            .full_reachable_graph_snapshot()
+            .expect("resumed checkpointed snapshot");
+
+        assert_eq!(second, first);
+        assert!(path.exists());
+        fs::remove_file(path).expect("cleanup checkpoint file");
     }
 
     #[test]

@@ -32,7 +32,8 @@ AST-native surface には arithmetic minimum set、projection/payload access、s
 `ModelCheckConfig` は共通 knob に加えて backend-specific option を持ちます。
 
 - `explicit: ExplicitModelCheckOptions`
-  - 現時点では `state_storage = InMemoryExact`、`reachability = BreadthFirst`、`bounded_lasso = EnumeratedPaths`
+  - 現時点では `state_storage = InMemoryExact | InMemoryFingerprinted`、`reachability = BreadthFirst`、`bounded_lasso = EnumeratedPaths`
+  - `checkpoint = ExplicitCheckpointOptions { path, save_every_frontiers, resume }` で reachable-graph frontier checkpoint/save-resume を設定
   - `simulation = ExplicitSimulationOptions { runs: 1, max_depth: 32, seed: 0 }` で `ModelChecker::simulate()` の deterministic random walk を設定
 - `symbolic: SymbolicModelCheckOptions`
   - 現時点では `successors = SolverEnumeration`、`bounded_lasso = DirectSmt`

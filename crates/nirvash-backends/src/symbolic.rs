@@ -207,7 +207,7 @@ where
     pub fn full_reachable_graph_snapshot(
         &self,
     ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
-        let graph = self.build_relation_reachable_graph(self.config)?;
+        let graph = self.build_relation_reachable_graph(self.config.clone())?;
         self.ensure_untruncated(&graph)?;
         Ok(self.snapshot_from_graph(&graph))
     }
@@ -308,7 +308,7 @@ where
         let mut queue = VecDeque::new();
 
         for state in self.initial_states_filtered()? {
-            let Some(index) = self.push_state(&mut graph, state, None, 0, &mut queue, config)?
+            let Some(index) = self.push_state(&mut graph, state, None, 0, &mut queue, &config)?
             else {
                 break;
             };
@@ -333,7 +333,7 @@ where
                     Some((index, step.clone())),
                     next_depth,
                     &mut queue,
-                    config,
+                    &config,
                 )?
                 else {
                     break;
@@ -345,7 +345,7 @@ where
                 };
                 if !edges.contains(&materialized) {
                     if !materialized.is_stutter() {
-                        if self.transition_limit_reached(&graph, config) {
+                        if self.transition_limit_reached(&graph, &config) {
                             graph.truncated = true;
                             break;
                         }
@@ -366,7 +366,10 @@ where
     }
 
     fn doc_reachable_graph_config(&self) -> ModelCheckConfig {
-        let mut config = self.model_case.doc_checker_config().unwrap_or(self.config);
+        let mut config = self
+            .model_case
+            .doc_checker_config()
+            .unwrap_or_else(|| self.config.clone());
         config.exploration = ExplorationMode::ReachableGraph;
         config.stop_on_first_violation = false;
         config
@@ -377,7 +380,7 @@ where
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
         let schema = self.symbolic_state_schema()?;
         self.ensure_symbolic_schema_covers_invariants(&schema)?;
-        let graph = self.build_relation_reachable_graph(self.config)?;
+        let graph = self.build_relation_reachable_graph(self.config.clone())?;
         self.ensure_untruncated(&graph)?;
         for (index, state) in graph.states.iter().enumerate() {
             for predicate in self.spec.invariants() {
@@ -397,7 +400,7 @@ where
     fn check_deadlocks_graph(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let graph = self.build_relation_reachable_graph(self.config)?;
+        let graph = self.build_relation_reachable_graph(self.config.clone())?;
         self.ensure_untruncated(&graph)?;
         if let Some(deadlock) = graph.deadlocks.first() {
             return Ok(ModelCheckResult::with_violation(Counterexample {
@@ -415,7 +418,7 @@ where
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
         let schema = self.symbolic_state_schema()?;
         self.ensure_symbolic_schema_covers_temporal(&schema)?;
-        let graph = self.build_relation_reachable_graph(self.config)?;
+        let graph = self.build_relation_reachable_graph(self.config.clone())?;
         self.ensure_untruncated(&graph)?;
         let traces = self.graph_lasso_traces(&graph);
         let mut best: Option<Counterexample<T::State, T::Action>> = None;
@@ -539,7 +542,7 @@ where
         parent: Option<(usize, TraceStep<T::Action>)>,
         depth: usize,
         queue: &mut VecDeque<usize>,
-        config: ModelCheckConfig,
+        config: &ModelCheckConfig,
     ) -> Result<Option<usize>, ModelCheckError> {
         if let Some(existing) = graph.state_index(&state) {
             return Ok(Some(existing));
@@ -562,7 +565,7 @@ where
     fn state_limit_reached(
         &self,
         graph: &ReachableGraph<T::State, T::Action>,
-        config: ModelCheckConfig,
+        config: &ModelCheckConfig,
     ) -> bool {
         config
             .max_states
@@ -572,7 +575,7 @@ where
     fn transition_limit_reached(
         &self,
         graph: &ReachableGraph<T::State, T::Action>,
-        config: ModelCheckConfig,
+        config: &ModelCheckConfig,
     ) -> bool {
         config
             .max_transitions

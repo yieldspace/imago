@@ -17,6 +17,8 @@ pub enum ModelBackend {
 pub enum ExplicitStateStorage {
     /// Exact in-memory state storage keyed by full state equality.
     InMemoryExact,
+    /// In-memory storage indexed by a stable fingerprint with equality fallback on collisions.
+    InMemoryFingerprinted,
 }
 
 /// Current explicit-backend reachable-graph exploration strategy.
@@ -31,6 +33,48 @@ pub enum ExplicitReachabilityStrategy {
 pub enum ExplicitBoundedLassoStrategy {
     /// Enumerate bounded prefixes and close lassos by exact state revisit.
     EnumeratedPaths,
+}
+
+/// Checkpoint configuration for explicit reachable-graph exploration.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExplicitCheckpointOptions {
+    pub path: Option<String>,
+    pub save_every_frontiers: usize,
+    pub resume: bool,
+}
+
+impl ExplicitCheckpointOptions {
+    pub const fn disabled() -> Self {
+        Self {
+            path: None,
+            save_every_frontiers: 1,
+            resume: false,
+        }
+    }
+
+    pub fn at_path(path: impl Into<String>) -> Self {
+        Self {
+            path: Some(path.into()),
+            save_every_frontiers: 1,
+            resume: true,
+        }
+    }
+
+    pub fn with_save_every_frontiers(mut self, save_every_frontiers: usize) -> Self {
+        self.save_every_frontiers = save_every_frontiers.max(1);
+        self
+    }
+
+    pub const fn with_resume(mut self, resume: bool) -> Self {
+        self.resume = resume;
+        self
+    }
+}
+
+impl Default for ExplicitCheckpointOptions {
+    fn default() -> Self {
+        Self::disabled()
+    }
 }
 
 /// Configuration for explicit simulation runs.
@@ -66,11 +110,12 @@ impl Default for ExplicitSimulationOptions {
 }
 
 /// Backend-specific knobs for the explicit model checker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExplicitModelCheckOptions {
     pub state_storage: ExplicitStateStorage,
     pub reachability: ExplicitReachabilityStrategy,
     pub bounded_lasso: ExplicitBoundedLassoStrategy,
+    pub checkpoint: ExplicitCheckpointOptions,
     pub simulation: ExplicitSimulationOptions,
 }
 
@@ -80,8 +125,19 @@ impl ExplicitModelCheckOptions {
             state_storage: ExplicitStateStorage::InMemoryExact,
             reachability: ExplicitReachabilityStrategy::BreadthFirst,
             bounded_lasso: ExplicitBoundedLassoStrategy::EnumeratedPaths,
+            checkpoint: ExplicitCheckpointOptions::disabled(),
             simulation: ExplicitSimulationOptions::current(),
         }
+    }
+
+    pub const fn with_state_storage(mut self, state_storage: ExplicitStateStorage) -> Self {
+        self.state_storage = state_storage;
+        self
+    }
+
+    pub fn with_checkpoint(mut self, checkpoint: ExplicitCheckpointOptions) -> Self {
+        self.checkpoint = checkpoint;
+        self
     }
 
     pub const fn with_simulation(mut self, simulation: ExplicitSimulationOptions) -> Self {
@@ -132,7 +188,7 @@ impl Default for SymbolicModelCheckOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModelCheckConfig {
     pub backend: Option<ModelBackend>,
     pub exploration: ExplorationMode,
@@ -174,7 +230,7 @@ impl ModelCheckConfig {
         }
     }
 
-    pub const fn with_explicit_options(mut self, explicit: ExplicitModelCheckOptions) -> Self {
+    pub fn with_explicit_options(mut self, explicit: ExplicitModelCheckOptions) -> Self {
         self.explicit = explicit;
         self
     }
@@ -196,6 +252,7 @@ pub enum ModelCheckError {
     UnsupportedConfiguration(&'static str),
     ExplorationLimitReached { states: usize, transitions: usize },
     NoInitialStates,
+    CheckpointIo(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,9 +332,11 @@ mod tests {
     #[test]
     fn backend_specific_options_can_be_overridden_independently() {
         let explicit = ExplicitModelCheckOptions {
-            state_storage: ExplicitStateStorage::InMemoryExact,
+            state_storage: ExplicitStateStorage::InMemoryFingerprinted,
             reachability: ExplicitReachabilityStrategy::BreadthFirst,
             bounded_lasso: ExplicitBoundedLassoStrategy::EnumeratedPaths,
+            checkpoint: ExplicitCheckpointOptions::at_path("tmp/nirvash-checkpoint.json")
+                .with_save_every_frontiers(2),
             simulation: ExplicitSimulationOptions::new(4, 12, 7),
         };
         let symbolic = SymbolicModelCheckOptions {
@@ -286,10 +345,22 @@ mod tests {
         };
 
         let config = ModelCheckConfig::reachable_graph()
-            .with_explicit_options(explicit)
+            .with_explicit_options(explicit.clone())
             .with_symbolic_options(symbolic);
 
         assert_eq!(config.explicit, explicit);
         assert_eq!(config.symbolic, symbolic);
+    }
+
+    #[test]
+    fn explicit_checkpoint_options_default_to_disabled() {
+        assert_eq!(
+            ExplicitCheckpointOptions::default(),
+            ExplicitCheckpointOptions {
+                path: None,
+                save_every_frontiers: 1,
+                resume: false,
+            }
+        );
     }
 }
