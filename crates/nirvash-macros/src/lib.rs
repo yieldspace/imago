@@ -2,15 +2,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2, TokenTree};
-use quote::{format_ident, quote, ToTokens};
+use quote::{ToTokens, format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
-    parse_macro_input, Attribute, BinOp, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprBinary,
-    ExprCall, ExprField, ExprIf, ExprLit, ExprMacro, ExprMethodCall, ExprParen, ExprPath,
-    ExprRange, ExprReference, ExprStruct, ExprUnary, Field, Fields, Ident, ImplItem, ImplItemFn,
-    ItemConst, ItemFn, ItemImpl, Lit, LitStr, Member, Pat, Path, RangeLimits, Stmt, Token, Type,
-    UnOp,
+    Attribute, BinOp, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprBinary, ExprCall,
+    ExprField, ExprIf, ExprLit, ExprMacro, ExprMethodCall, ExprParen, ExprPath, ExprRange,
+    ExprReference, ExprStruct, ExprUnary, Field, Fields, Ident, ImplItem, ImplItemFn, ItemConst,
+    ItemFn, ItemImpl, Lit, LitStr, Member, Pat, Path, PathArguments, RangeLimits, Stmt, Token,
+    Type, UnOp, parse_macro_input,
 };
 
 #[proc_macro_derive(Signature, attributes(signature, sig, signature_invariant, viz))]
@@ -1738,7 +1738,7 @@ fn parse_self_expr_meta(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<Ex
 
 struct SpecArgs {
     model_cases: Option<Path>,
-    subsystems: Vec<LitStr>,
+    subsystems: Vec<Path>,
 }
 
 impl syn::parse::Parse for SpecArgs {
@@ -1760,7 +1760,7 @@ impl syn::parse::Parse for SpecArgs {
                         "checker_config/doc_graph_policy は廃止されました。#[subsystem_spec(model_cases(...))] へ移行してください",
                     ));
                 }
-                "subsystems" => args.subsystems = parse_string_list(&content)?,
+                "subsystems" => args.subsystems = parse_path_list(&content)?,
                 "invariants" | "state_constraints" | "action_constraints" | "properties"
                 | "fairness" | "symmetry" => {
                     return Err(syn::Error::new(
@@ -2386,7 +2386,7 @@ impl Parse for ContractCaseArgs {
     }
 }
 
-fn parse_string_list(input: &syn::parse::ParseBuffer<'_>) -> syn::Result<Vec<LitStr>> {
+fn parse_path_list(input: &syn::parse::ParseBuffer<'_>) -> syn::Result<Vec<Path>> {
     let mut values = Vec::new();
     while !input.is_empty() {
         values.push(input.parse()?);
@@ -4271,12 +4271,29 @@ fn expand_temporal_spec(
     };
 
     let composition_impl = if emit_composition {
-        let subsystem_calls = subsystems.iter().map(|name| {
+        let subsystem_calls = subsystems.iter().map(|path| {
+            let spec_id = path_to_string_syn(path).expect("subsystem path should stringify");
+            let label = path_tail_ident(path)
+                .expect("subsystem path should have a tail ident")
+                .to_string();
+            let spec_id = LitStr::new(&spec_id, path.span());
+            let label = LitStr::new(&label, path.span());
             quote! {
-                composition = composition.with_subsystem(#name);
+                composition = composition.with_subsystem(::nirvash::RegisteredSubsystemSpec::new(
+                    #spec_id,
+                    #label,
+                ));
             }
         });
-        let subsystem_values = subsystems.iter();
+        let subsystem_values = subsystems.iter().map(|path| {
+            let spec_id = path_to_string_syn(path).expect("subsystem path should stringify");
+            let label = path_tail_ident(path)
+                .expect("subsystem path should have a tail ident")
+                .to_string();
+            let spec_id = LitStr::new(&spec_id, path.span());
+            let label = LitStr::new(&label, path.span());
+            quote! { ::nirvash::RegisteredSubsystemSpec::new(#spec_id, #label) }
+        });
         quote! {
             impl #self_ty {
                 pub const fn spec_kind() -> ::nirvash::SpecVizKind {
@@ -4287,8 +4304,11 @@ fn expand_temporal_spec(
                     #model_cases_name_expr
                 }
 
-                pub const fn registered_subsystems() -> &'static [&'static str] {
-                    &[#(#subsystem_values),*]
+                pub const REGISTERED_SUBSYSTEMS: &'static [::nirvash::RegisteredSubsystemSpec] =
+                    &[#(#subsystem_values),*];
+
+                pub const fn registered_subsystems() -> &'static [::nirvash::RegisteredSubsystemSpec] {
+                    Self::REGISTERED_SUBSYSTEMS
                 }
 
                 pub fn composition(&self) -> ::nirvash::SystemComposition<#state_ty, #action_ty> {
@@ -4321,8 +4341,10 @@ fn expand_temporal_spec(
                     #model_cases_name_expr
                 }
 
-                pub const fn registered_subsystems() -> &'static [&'static str] {
-                    &[]
+                pub const REGISTERED_SUBSYSTEMS: &'static [::nirvash::RegisteredSubsystemSpec] = &[];
+
+                pub const fn registered_subsystems() -> &'static [::nirvash::RegisteredSubsystemSpec] {
+                    Self::REGISTERED_SUBSYSTEMS
                 }
             }
         }
@@ -4377,13 +4399,14 @@ fn expand_temporal_spec(
 
             fn bundle(&self) -> ::nirvash::SpecVizBundle {
                 let metadata = ::nirvash::SpecVizMetadata {
+                    spec_id: ::core::stringify!(#self_ty).to_owned(),
                     kind: ::std::option::Option::Some(<#self_ty>::spec_kind()),
                     state_ty: ::std::any::type_name::<#state_ty>().to_owned(),
                     action_ty: ::std::any::type_name::<#action_ty>().to_owned(),
                     model_cases: <#self_ty>::model_cases_name().map(|name| name.to_owned()),
                     subsystems: <#self_ty>::registered_subsystems()
                         .iter()
-                        .map(|name| (*name).to_owned())
+                        .map(|subsystem| ::nirvash::SpecVizSubsystem::from_registered(*subsystem))
                         .collect::<::std::vec::Vec<_>>(),
                     registrations: ::nirvash::registry::collect_spec_viz_registrations::<#self_ty>(),
                     policy: ::nirvash::VizPolicy::default(),
@@ -4630,13 +4653,14 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                 let doc_cases =
                     <#doc_provider_ident as ::nirvash::DocGraphProvider>::cases(&#doc_provider_ident);
                 let metadata = ::nirvash::SpecVizMetadata {
+                    spec_id: ::core::stringify!(#spec_ty).to_owned(),
                     kind: ::std::option::Option::Some(<#spec_ty>::spec_kind()),
                     state_ty: ::std::any::type_name::<<#spec_ty as ::nirvash::TransitionSystem>::State>().to_owned(),
                     action_ty: ::std::any::type_name::<<#spec_ty as ::nirvash::TransitionSystem>::Action>().to_owned(),
                     model_cases: <#spec_ty>::model_cases_name().map(|name| name.to_owned()),
                     subsystems: <#spec_ty>::registered_subsystems()
                         .iter()
-                        .map(|name| (*name).to_owned())
+                        .map(|subsystem| ::nirvash::SpecVizSubsystem::from_registered(*subsystem))
                         .collect::<::std::vec::Vec<_>>(),
                     registrations: ::nirvash::registry::collect_spec_viz_registrations::<#spec_ty>(),
                     policy: ::nirvash::VizPolicy::default(),
@@ -7080,6 +7104,23 @@ fn path_tail_ident(path: &Path) -> syn::Result<&Ident> {
         .last()
         .map(|segment| &segment.ident)
         .ok_or_else(|| syn::Error::new(path.span(), "path cannot be empty"))
+}
+
+fn path_to_string_syn(path: &Path) -> syn::Result<String> {
+    for segment in &path.segments {
+        if !matches!(segment.arguments, PathArguments::None) {
+            return Err(syn::Error::new(
+                segment.ident.span(),
+                format!("unsupported path argument in `{}`", segment.ident),
+            ));
+        }
+    }
+    Ok(path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::"))
 }
 
 fn doc_fragment_attrs(self_ty: &Type) -> syn::Result<Vec<proc_macro2::TokenStream>> {

@@ -1779,16 +1779,16 @@ fn cert_upload_updates_dynamic_authority() -> BoolExpr<SystemState> {
 #[system_spec(
     model_cases(system_model_cases),
     subsystems(
-        "manager_runtime",
-        "session_transport",
-        "session_auth",
-        "wire_protocol",
-        "command_protocol",
-        "deploy",
-        "supervision",
-        "rpc",
-        "plugin_platform",
-        "shutdown_flow"
+        crate::manager_runtime::ManagerRuntimeSpec,
+        crate::session_transport::SessionTransportSpec,
+        crate::session_auth::SessionAuthSpec,
+        crate::wire_protocol::WireProtocolSpec,
+        crate::command_protocol::CommandProtocolSpec,
+        crate::deploy::DeploySpec,
+        crate::supervision::SupervisionSpec,
+        crate::rpc::RpcSpec,
+        crate::plugin_platform::PluginPlatformSpec,
+        crate::shutdown_flow::ShutdownFlowSpec
     )
 )]
 impl TransitionSystem for SystemSpec {

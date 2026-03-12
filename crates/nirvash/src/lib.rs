@@ -29,11 +29,12 @@ pub use doc_graph::{
     DocGraphPolicy, DocGraphProcessKind, DocGraphProcessStep, DocGraphProvider,
     DocGraphReductionMode, DocGraphSnapshot, DocGraphSpec, DocGraphState, ReachableGraphEdge,
     ReachableGraphSnapshot, ReducedDocGraph, ReducedDocGraphEdge, ReducedDocGraphNode,
-    RegisteredDocGraphProvider, RegisteredSpecVizProvider, SpecVizActionDescriptor, SpecVizBundle,
-    SpecVizCase, SpecVizCaseStats, SpecVizKind, SpecVizMetadata, SpecVizProvider,
-    SpecVizRegistrationSet, VizPolicy, VizScenario, VizScenarioKind, VizScenarioStep,
-    collect_doc_graph_specs, collect_spec_viz_bundles, describe_doc_graph_action,
-    format_doc_graph_action, reduce_doc_graph, summarize_doc_graph_state, summarize_doc_graph_text,
+    RegisteredDocGraphProvider, RegisteredSpecVizProvider, RegisteredSubsystemSpec,
+    SpecVizActionDescriptor, SpecVizBundle, SpecVizCase, SpecVizCaseStats, SpecVizKind,
+    SpecVizMetadata, SpecVizProvider, SpecVizRegistrationSet, SpecVizSubsystem, VizPolicy,
+    VizScenario, VizScenarioKind, VizScenarioStep, collect_doc_graph_specs,
+    collect_spec_viz_bundles, describe_doc_graph_action, format_doc_graph_action, reduce_doc_graph,
+    summarize_doc_graph_state, summarize_doc_graph_text,
 };
 pub use domain::{
     BoundedDomain, ExprDomain, IntoBoundedDomain, OpaqueModelValue, Signature, bounded_vec_domain,
@@ -1004,15 +1005,27 @@ mod tests {
         let model_case = ModelCase::<TestState, TestAction>::default()
             .with_checker_config(ModelCheckConfig::bounded_lasso(5));
         let composition = SystemComposition::new("test-system")
-            .with_subsystem("manager")
-            .with_subsystem("runtime")
+            .with_subsystem(RegisteredSubsystemSpec::new(
+                "crate::manager::ManagerSpec",
+                "ManagerSpec",
+            ))
+            .with_subsystem(RegisteredSubsystemSpec::new(
+                "crate::runtime::RuntimeSpec",
+                "RuntimeSpec",
+            ))
             .with_invariant(idle_predicate())
             .with_property(Ltl::eventually(Ltl::pred(idle_predicate())))
             .with_fairness(Fairness::weak(start_step_predicate()))
             .with_model_case(model_case.clone());
 
         assert_eq!(composition.name(), "test-system");
-        assert_eq!(composition.subsystems(), ["manager", "runtime"]);
+        assert_eq!(
+            composition.subsystems(),
+            [
+                RegisteredSubsystemSpec::new("crate::manager::ManagerSpec", "ManagerSpec"),
+                RegisteredSubsystemSpec::new("crate::runtime::RuntimeSpec", "RuntimeSpec"),
+            ]
+        );
         assert_eq!(composition.invariants().len(), 1);
         assert_eq!(composition.properties().len(), 1);
         assert_eq!(composition.fairness().len(), 1);

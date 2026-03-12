@@ -208,18 +208,51 @@ pub struct SpecVizRegistrationSet {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpecVizMetadata {
+    pub spec_id: String,
     pub kind: Option<SpecVizKind>,
     pub state_ty: String,
     pub action_ty: String,
     pub model_cases: Option<String>,
-    pub subsystems: Vec<String>,
+    pub subsystems: Vec<SpecVizSubsystem>,
     pub registrations: SpecVizRegistrationSet,
     pub policy: VizPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RegisteredSubsystemSpec {
+    pub spec_id: &'static str,
+    pub label: &'static str,
+}
+
+impl RegisteredSubsystemSpec {
+    pub const fn new(spec_id: &'static str, label: &'static str) -> Self {
+        Self { spec_id, label }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SpecVizSubsystem {
+    pub spec_id: String,
+    pub label: String,
+}
+
+impl SpecVizSubsystem {
+    pub fn new(spec_id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            spec_id: spec_id.into(),
+            label: label.into(),
+        }
+    }
+
+    pub fn from_registered(value: RegisteredSubsystemSpec) -> Self {
+        Self::new(value.spec_id, value.label)
+    }
 }
 
 impl Default for SpecVizMetadata {
     fn default() -> Self {
         Self {
+            spec_id: String::new(),
             kind: None,
             state_ty: String::new(),
             action_ty: String::new(),
@@ -563,6 +596,9 @@ pub fn collect_spec_viz_bundles() -> Vec<SpecVizBundle> {
 fn merge_spec_viz_bundle(target: &mut SpecVizBundle, candidate: SpecVizBundle) {
     if target.cases.len() < candidate.cases.len() {
         target.cases = candidate.cases;
+    }
+    if target.metadata.spec_id.is_empty() {
+        target.metadata.spec_id = candidate.metadata.spec_id.clone();
     }
     if target.metadata.kind.is_none() {
         target.metadata.kind = candidate.metadata.kind;

@@ -1,6 +1,7 @@
 use crate::{
     BoolExpr, DocGraphPolicy, Fairness, Ltl, ModelBackend, ModelCheckConfig, PartialOrderReducer,
-    StepExpr, SymmetryReducer, TransitionProgram, ViewProjector, VizPolicy,
+    RegisteredSubsystemSpec, StepExpr, SymmetryReducer, TransitionProgram, ViewProjector,
+    VizPolicy,
 };
 
 pub trait ActionVocabulary: Sized {
@@ -307,7 +308,7 @@ pub trait StateObserver {
 #[derive(Debug, Clone)]
 pub struct SystemComposition<S, A> {
     name: &'static str,
-    subsystems: Vec<&'static str>,
+    subsystems: Vec<RegisteredSubsystemSpec>,
     invariants: Vec<BoolExpr<S>>,
     properties: Vec<Ltl<S, A>>,
     fairness: Vec<Fairness<S, A>>,
@@ -326,7 +327,7 @@ impl<S, A> SystemComposition<S, A> {
         }
     }
 
-    pub fn with_subsystem(mut self, subsystem: &'static str) -> Self {
+    pub fn with_subsystem(mut self, subsystem: RegisteredSubsystemSpec) -> Self {
         self.subsystems.push(subsystem);
         self
     }
@@ -355,7 +356,7 @@ impl<S, A> SystemComposition<S, A> {
         self.name
     }
 
-    pub fn subsystems(&self) -> &[&'static str] {
+    pub fn subsystems(&self) -> &[RegisteredSubsystemSpec] {
         &self.subsystems
     }
 
