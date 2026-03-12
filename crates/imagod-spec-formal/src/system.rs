@@ -981,6 +981,7 @@ fn system_checker_config() -> ModelCheckConfig {
         max_transitions: Some(8192),
         check_deadlocks: false,
         stop_on_first_violation: false,
+        ..ModelCheckConfig::default()
     }
 }
 
@@ -993,6 +994,7 @@ fn system_doc_checker_config() -> ModelCheckConfig {
         max_transitions: Some(768),
         check_deadlocks: false,
         stop_on_first_violation: false,
+        ..ModelCheckConfig::default()
     }
 }
 
@@ -1005,6 +1007,7 @@ fn focused_system_checker_config() -> ModelCheckConfig {
         max_transitions: Some(2048),
         check_deadlocks: false,
         stop_on_first_violation: false,
+        ..ModelCheckConfig::default()
     }
 }
 
@@ -1017,6 +1020,7 @@ fn focused_system_doc_checker_config() -> ModelCheckConfig {
         max_transitions: Some(384),
         check_deadlocks: false,
         stop_on_first_violation: false,
+        ..ModelCheckConfig::default()
     }
 }
 
@@ -1029,6 +1033,7 @@ fn shutdown_system_checker_config() -> ModelCheckConfig {
         max_transitions: Some(8192),
         check_deadlocks: false,
         stop_on_first_violation: false,
+        ..ModelCheckConfig::default()
     }
 }
 

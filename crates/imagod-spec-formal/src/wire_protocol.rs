@@ -163,6 +163,7 @@ fn wire_protocol_model_cases() -> Vec<ModelCase<WireProtocolState, WireProtocolA
                 max_transitions: Some(384),
                 check_deadlocks: false,
                 stop_on_first_violation: false,
+                ..ModelCheckConfig::default()
             })
             .with_doc_checker_config(ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
@@ -172,6 +173,7 @@ fn wire_protocol_model_cases() -> Vec<ModelCase<WireProtocolState, WireProtocolA
                 max_transitions: Some(256),
                 check_deadlocks: false,
                 stop_on_first_violation: false,
+                ..ModelCheckConfig::default()
             })
             .with_check_deadlocks(false),
     ]

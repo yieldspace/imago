@@ -191,6 +191,7 @@ fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthActi
                 max_transitions: Some(3072),
                 check_deadlocks: false,
                 stop_on_first_violation: false,
+                ..ModelCheckConfig::default()
             })
             .with_doc_checker_config(ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
@@ -200,6 +201,7 @@ fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthActi
                 max_transitions: Some(384),
                 check_deadlocks: false,
                 stop_on_first_violation: false,
+                ..ModelCheckConfig::default()
             })
             .with_check_deadlocks(false),
         ModelCase::new("timeout_and_reject_surface")
@@ -211,6 +213,7 @@ fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthActi
                 max_transitions: Some(3072),
                 check_deadlocks: false,
                 stop_on_first_violation: false,
+                ..ModelCheckConfig::default()
             })
             .with_doc_checker_config(ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
@@ -220,6 +223,7 @@ fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthActi
                 max_transitions: Some(384),
                 check_deadlocks: false,
                 stop_on_first_violation: false,
+                ..ModelCheckConfig::default()
             })
             .with_check_deadlocks(false),
     ]
