@@ -48,7 +48,8 @@ pub use model::{
     ExplicitParallelOptions, ExplicitReachabilityStrategy, ExplicitSimulationOptions,
     ExplicitStateCompression, ExplicitStateStorage, ExplorationMode, ModelBackend,
     ModelCheckConfig, ModelCheckError, ModelCheckResult, SymbolicBoundedLassoEncoding,
-    SymbolicModelCheckOptions, SymbolicSuccessorStrategy,
+    SymbolicKInductionOptions, SymbolicModelCheckOptions, SymbolicPdrOptions, SymbolicSafetyEngine,
+    SymbolicSuccessorStrategy,
 };
 pub use partial_order::PartialOrderReducer;
 pub use predicate::{

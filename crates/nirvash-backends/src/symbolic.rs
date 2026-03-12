@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use z3::{
-    Solver,
+    Model, Solver,
     ast::{Bool, Int},
 };
 
@@ -81,12 +81,15 @@ impl StateVars {
         }
     }
 
-    fn decode<S: Clone>(&self, model: &z3::Model, schema: &SymbolicStateSchema<S>) -> Option<S> {
-        let indices = self
-            .fields
+    fn decode_indices(&self, model: &Model) -> Option<Vec<usize>> {
+        self.fields
             .iter()
             .map(|value| decode_int(model, value))
-            .collect::<Option<Vec<_>>>()?;
+            .collect::<Option<Vec<_>>>()
+    }
+
+    fn decode<S: Clone>(&self, model: &Model, schema: &SymbolicStateSchema<S>) -> Option<S> {
+        let indices = self.decode_indices(model)?;
         Some(schema.rebuild_from_indices(&indices))
     }
 
@@ -220,7 +223,11 @@ where
         self.ensure_no_explicit_only_reducers()?;
         self.ensure_symbolic_invariants_ast_native()?;
         match self.config.exploration {
-            ExplorationMode::ReachableGraph => self.check_invariants_graph(),
+            ExplorationMode::ReachableGraph => match self.config.symbolic.safety {
+                nirvash::SymbolicSafetyEngine::ReachableGraph => self.check_invariants_graph(),
+                nirvash::SymbolicSafetyEngine::KInduction => self.check_invariants_kinduction(),
+                nirvash::SymbolicSafetyEngine::PdrIc3 => self.check_invariants_pdr(),
+            },
             ExplorationMode::BoundedLasso => self.check_invariants_lasso(),
         }
     }
@@ -396,6 +403,105 @@ where
                         trace: self.trace_to_state(&graph, index),
                     }));
                 }
+            }
+        }
+
+        Ok(ModelCheckResult::ok())
+    }
+
+    fn check_invariants_kinduction(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let schema = self.symbolic_state_schema()?;
+        let program = self.symbolic_transition_program()?;
+        let actions = self.action_domain();
+        self.ensure_symbolic_stutter_is_identity()?;
+        self.ensure_symbolic_schema_covers_program(&schema, &program)?;
+        self.ensure_symbolic_schema_covers_model_case_constraints(&schema)?;
+        self.ensure_symbolic_schema_covers_invariants(&schema)?;
+        let max_depth = self.kinduction_max_depth(&schema);
+
+        for predicate in self.spec.invariants() {
+            if let Some(trace) = self.find_kinduction_counterexample(
+                &schema, &program, &actions, &predicate, max_depth,
+            )? {
+                return Ok(ModelCheckResult::with_violation(Counterexample {
+                    kind: CounterexampleKind::Invariant,
+                    name: predicate.name().to_owned(),
+                    trace,
+                }));
+            }
+            if self.invariant_is_kinductive(&schema, &program, &actions, &predicate, max_depth)? {
+                continue;
+            }
+            return Err(self.symbolic_ast_required_error(format!(
+                "symbolic k-induction did not converge for invariant `{}` in spec `{}` within depth {}",
+                predicate.name(),
+                self.spec.name(),
+                max_depth,
+            )));
+        }
+
+        Ok(ModelCheckResult::ok())
+    }
+
+    fn check_invariants_pdr(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let schema = self.symbolic_state_schema()?;
+        let program = self.symbolic_transition_program()?;
+        let actions = self.action_domain();
+        self.ensure_symbolic_stutter_is_identity()?;
+        self.ensure_symbolic_schema_covers_program(&schema, &program)?;
+        self.ensure_symbolic_schema_covers_model_case_constraints(&schema)?;
+        self.ensure_symbolic_schema_covers_invariants(&schema)?;
+        let max_frames = self.pdr_max_frames(&schema);
+
+        for predicate in self.spec.invariants() {
+            let mut frames: Vec<Vec<Vec<usize>>> = vec![Vec::new(), Vec::new()];
+            let mut proved = false;
+
+            for level in 1..=max_frames.max(1) {
+                while let Some(target) =
+                    self.find_pdr_bad_state(&schema, &predicate, &frames, level)?
+                {
+                    if let Some((state_keys, steps)) = self.block_pdr_state(
+                        &schema,
+                        &program,
+                        &actions,
+                        &mut frames,
+                        level,
+                        &target,
+                    )? {
+                        let states = state_keys
+                            .iter()
+                            .map(|key| schema.rebuild_from_indices(key))
+                            .collect::<Vec<_>>();
+                        return Ok(ModelCheckResult::with_violation(Counterexample {
+                            kind: CounterexampleKind::Invariant,
+                            name: predicate.name().to_owned(),
+                            trace: self.terminal_trace(states, steps),
+                        }));
+                    }
+                }
+
+                if frames.len() == level + 1 {
+                    frames.push(Vec::new());
+                }
+                self.propagate_pdr_frames(&schema, &program, &actions, &mut frames, level)?;
+                if self.frame_sets_equal(&frames[level], &frames[level + 1]) {
+                    proved = true;
+                    break;
+                }
+            }
+
+            if !proved {
+                return Err(self.symbolic_ast_required_error(format!(
+                    "symbolic PDR/IC3 did not converge for invariant `{}` in spec `{}` within {} frames",
+                    predicate.name(),
+                    self.spec.name(),
+                    max_frames.max(1),
+                )));
             }
         }
 
@@ -717,6 +823,382 @@ where
                 .any(|path| matches!(*path, "prev" | "next")),
             |prev, action, next| predicate.eval(prev, action, next),
         )
+    }
+
+    fn symbolic_state_space_bound(&self, schema: &SymbolicStateSchema<T::State>) -> usize {
+        schema
+            .fields()
+            .iter()
+            .fold(1usize, |acc, field| {
+                acc.saturating_mul(field.domain_size().max(1))
+            })
+            .max(1)
+    }
+
+    fn kinduction_max_depth(&self, schema: &SymbolicStateSchema<T::State>) -> usize {
+        let configured = self.config.symbolic.k_induction.max_depth;
+        if configured != 0 {
+            return configured;
+        }
+        self.symbolic_state_space_bound(schema).saturating_sub(1)
+    }
+
+    fn pdr_max_frames(&self, schema: &SymbolicStateSchema<T::State>) -> usize {
+        let configured = self.config.symbolic.pdr.max_frames;
+        if configured != 0 {
+            return configured;
+        }
+        self.symbolic_state_space_bound(schema)
+    }
+
+    fn encode_state_key_eq(&self, state: &StateVars, key: &[usize]) -> Bool {
+        bool_and(
+            &state
+                .fields
+                .iter()
+                .zip(key.iter().copied())
+                .map(|(field, index)| field.eq(Int::from_u64(index as u64)))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn encode_state_key_neq(&self, state: &StateVars, key: &[usize]) -> Bool {
+        bool_or(
+            &state
+                .fields
+                .iter()
+                .zip(key.iter().copied())
+                .map(|(field, index)| field.eq(Int::from_u64(index as u64)).not())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn encode_states_not_equal(&self, lhs: &StateVars, rhs: &StateVars) -> Bool {
+        bool_or(
+            &lhs.fields
+                .iter()
+                .zip(rhs.fields.iter())
+                .map(|(lhs, rhs)| lhs.eq(rhs).not())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn decode_path_trace(
+        &self,
+        model: &Model,
+        schema: &SymbolicStateSchema<T::State>,
+        states: &[StateVars],
+        steps: &[Int],
+        actions: &[T::Action],
+    ) -> Option<Trace<T::State, T::Action>> {
+        let states = states
+            .iter()
+            .map(|state| state.decode(model, schema))
+            .collect::<Option<Vec<_>>>()?;
+        let mut trace_steps = Vec::with_capacity(steps.len());
+        for step in steps {
+            let step_code = decode_int(model, step)?;
+            if step_code == 0 {
+                trace_steps.push(TraceStep::Stutter);
+                continue;
+            }
+            trace_steps.push(TraceStep::Action(actions.get(step_code - 1)?.clone()));
+        }
+        Some(self.terminal_trace(states, trace_steps))
+    }
+
+    fn find_kinduction_counterexample(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+        program: &TransitionProgram<T::State, T::Action>,
+        actions: &[T::Action],
+        predicate: &BoolExpr<T::State>,
+        max_depth: usize,
+    ) -> Result<Option<Trace<T::State, T::Action>>, ModelCheckError> {
+        for depth in 0..=max_depth {
+            let states = (0..=depth)
+                .map(|index| {
+                    StateVars::new(&format!("kinduction_base_state_{depth}_{index}"), schema)
+                })
+                .collect::<Vec<_>>();
+            let steps = (0..depth)
+                .map(|index| Int::new_const(format!("kinduction_base_step_{depth}_{index}")))
+                .collect::<Vec<_>>();
+            let solver = Solver::new();
+
+            for state in &states {
+                state.assert_domains(&solver, schema);
+                self.assert_state_constraints(&solver, schema, state);
+            }
+            for step in &steps {
+                assert_in_domain(&solver, step, self.step_domain_size());
+            }
+            solver.assert(&self.encode_initial_state_formula(schema, &states[0])?);
+            for index in 0..depth {
+                solver.assert(&self.encode_transition_formula(
+                    schema,
+                    &states[index],
+                    &steps[index],
+                    &states[index + 1],
+                    program,
+                    actions,
+                ));
+                self.assert_action_constraints(
+                    &solver,
+                    schema,
+                    &states[index],
+                    &steps[index],
+                    &states[index + 1],
+                    actions,
+                );
+            }
+            for state in states.iter().take(depth) {
+                solver.assert(&self.encode_state_predicate(schema, state, predicate));
+            }
+            solver.assert(
+                &self
+                    .encode_state_predicate(schema, &states[depth], predicate)
+                    .not(),
+            );
+
+            if !solver_is_sat(&solver) {
+                continue;
+            }
+            let Some(model) = solver.get_model() else {
+                continue;
+            };
+            let Some(trace) = self.decode_path_trace(&model, schema, &states, &steps, actions)
+            else {
+                continue;
+            };
+            return Ok(Some(trace));
+        }
+        Ok(None)
+    }
+
+    fn invariant_is_kinductive(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+        program: &TransitionProgram<T::State, T::Action>,
+        actions: &[T::Action],
+        predicate: &BoolExpr<T::State>,
+        max_depth: usize,
+    ) -> Result<bool, ModelCheckError> {
+        for depth in 0..=max_depth {
+            let states = (0..=(depth + 1))
+                .map(|index| {
+                    StateVars::new(&format!("kinduction_step_state_{depth}_{index}"), schema)
+                })
+                .collect::<Vec<_>>();
+            let steps = (0..=depth)
+                .map(|index| Int::new_const(format!("kinduction_step_{depth}_{index}")))
+                .collect::<Vec<_>>();
+            let solver = Solver::new();
+
+            for state in &states {
+                state.assert_domains(&solver, schema);
+                self.assert_state_constraints(&solver, schema, state);
+            }
+            for step in &steps {
+                assert_in_domain(&solver, step, self.step_domain_size());
+            }
+            for index in 0..=depth {
+                solver.assert(&self.encode_transition_formula(
+                    schema,
+                    &states[index],
+                    &steps[index],
+                    &states[index + 1],
+                    program,
+                    actions,
+                ));
+                self.assert_action_constraints(
+                    &solver,
+                    schema,
+                    &states[index],
+                    &steps[index],
+                    &states[index + 1],
+                    actions,
+                );
+                solver.assert(&self.encode_state_predicate(schema, &states[index], predicate));
+            }
+            solver.assert(
+                &self
+                    .encode_state_predicate(schema, &states[depth + 1], predicate)
+                    .not(),
+            );
+            for lhs in 0..=depth {
+                for rhs in (lhs + 1)..=depth {
+                    solver.assert(&self.encode_states_not_equal(&states[lhs], &states[rhs]));
+                }
+            }
+
+            if !solver_is_sat(&solver) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn frame_contains_key(&self, frame: &[Vec<usize>], key: &[usize]) -> bool {
+        frame.iter().any(|candidate| candidate.as_slice() == key)
+    }
+
+    fn add_frame_key(&self, frame: &mut Vec<Vec<usize>>, key: &[usize]) {
+        if !self.frame_contains_key(frame, key) {
+            frame.push(key.to_vec());
+        }
+    }
+
+    fn frame_sets_equal(&self, lhs: &[Vec<usize>], rhs: &[Vec<usize>]) -> bool {
+        lhs.len() == rhs.len()
+            && lhs
+                .iter()
+                .all(|candidate| self.frame_contains_key(rhs, candidate))
+    }
+
+    fn assert_pdr_frame(
+        &self,
+        solver: &Solver,
+        schema: &SymbolicStateSchema<T::State>,
+        state: &StateVars,
+        frames: &[Vec<Vec<usize>>],
+        level: usize,
+    ) -> Result<(), ModelCheckError> {
+        if level == 0 {
+            solver.assert(&self.encode_initial_state_formula(schema, state)?);
+        } else {
+            for key in &frames[level] {
+                solver.assert(&self.encode_state_key_neq(state, key));
+            }
+        }
+        self.assert_state_constraints(solver, schema, state);
+        Ok(())
+    }
+
+    fn find_pdr_bad_state(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+        predicate: &BoolExpr<T::State>,
+        frames: &[Vec<Vec<usize>>],
+        level: usize,
+    ) -> Result<Option<Vec<usize>>, ModelCheckError> {
+        let state = StateVars::new(&format!("pdr_bad_state_{level}"), schema);
+        let solver = Solver::new();
+        state.assert_domains(&solver, schema);
+        self.assert_pdr_frame(&solver, schema, &state, frames, level)?;
+        solver.assert(&self.encode_state_predicate(schema, &state, predicate).not());
+        if !solver_is_sat(&solver) {
+            return Ok(None);
+        }
+        let Some(model) = solver.get_model() else {
+            return Ok(None);
+        };
+        Ok(state.decode_indices(&model))
+    }
+
+    fn find_pdr_predecessor(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+        program: &TransitionProgram<T::State, T::Action>,
+        actions: &[T::Action],
+        frames: &[Vec<Vec<usize>>],
+        level: usize,
+        target: &[usize],
+    ) -> Result<Option<(Vec<usize>, TraceStep<T::Action>)>, ModelCheckError> {
+        let prev = StateVars::new(&format!("pdr_prev_{level}"), schema);
+        let next = StateVars::new(&format!("pdr_next_{level}"), schema);
+        let step = Int::new_const(format!("pdr_step_{level}"));
+        let solver = Solver::new();
+
+        prev.assert_domains(&solver, schema);
+        next.assert_domains(&solver, schema);
+        assert_in_domain(&solver, &step, self.step_domain_size());
+        self.assert_pdr_frame(&solver, schema, &prev, frames, level)?;
+        solver.assert(&self.encode_state_key_eq(&next, target));
+        self.assert_state_constraints(&solver, schema, &next);
+        solver
+            .assert(&self.encode_transition_formula(schema, &prev, &step, &next, program, actions));
+        self.assert_action_constraints(&solver, schema, &prev, &step, &next, actions);
+
+        if !solver_is_sat(&solver) {
+            return Ok(None);
+        }
+        let Some(model) = solver.get_model() else {
+            return Ok(None);
+        };
+        let Some(prev_key) = prev.decode_indices(&model) else {
+            return Ok(None);
+        };
+        let Some(step_code) = decode_int(&model, &step) else {
+            return Ok(None);
+        };
+        let step_value = if step_code == 0 {
+            TraceStep::Stutter
+        } else {
+            TraceStep::Action(
+                actions
+                    .get(step_code - 1)
+                    .cloned()
+                    .expect("step code in action domain"),
+            )
+        };
+        Ok(Some((prev_key, step_value)))
+    }
+
+    fn block_pdr_state(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+        program: &TransitionProgram<T::State, T::Action>,
+        actions: &[T::Action],
+        frames: &mut [Vec<Vec<usize>>],
+        level: usize,
+        target: &[usize],
+    ) -> Result<Option<(Vec<Vec<usize>>, Vec<TraceStep<T::Action>>)>, ModelCheckError> {
+        if level == 0 {
+            return Ok(Some((vec![target.to_vec()], Vec::new())));
+        }
+
+        while let Some((predecessor, step)) =
+            self.find_pdr_predecessor(schema, program, actions, frames, level - 1, target)?
+        {
+            if let Some((mut states, mut steps)) =
+                self.block_pdr_state(schema, program, actions, frames, level - 1, &predecessor)?
+            {
+                states.push(target.to_vec());
+                steps.push(step);
+                return Ok(Some((states, steps)));
+            }
+        }
+
+        for frame in frames.iter_mut().take(level + 1).skip(1) {
+            self.add_frame_key(frame, target);
+        }
+        Ok(None)
+    }
+
+    fn propagate_pdr_frames(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+        program: &TransitionProgram<T::State, T::Action>,
+        actions: &[T::Action],
+        frames: &mut [Vec<Vec<usize>>],
+        level: usize,
+    ) -> Result<(), ModelCheckError> {
+        for frame_index in 1..=level {
+            let blocked = frames[frame_index].clone();
+            for key in blocked {
+                if self.frame_contains_key(&frames[frame_index + 1], &key) {
+                    continue;
+                }
+                if self
+                    .find_pdr_predecessor(schema, program, actions, frames, frame_index, &key)?
+                    .is_none()
+                {
+                    self.add_frame_key(&mut frames[frame_index + 1], &key);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn encode_initial_state_formula(

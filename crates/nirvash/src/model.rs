@@ -263,11 +263,73 @@ pub enum SymbolicBoundedLassoEncoding {
     DirectSmt,
 }
 
+/// Current symbolic-backend safety engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SymbolicSafetyEngine {
+    /// Build a reachable graph by solving the transition relation successor-by-successor.
+    ReachableGraph,
+    /// Prove invariants with bounded base cases plus inductive step checks.
+    KInduction,
+    /// Prove invariants with property-directed blocking over symbolic predecessor queries.
+    PdrIc3,
+}
+
+/// Settings for symbolic k-induction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SymbolicKInductionOptions {
+    /// Maximum induction depth. `0` means auto from the symbolic state-space bound.
+    pub max_depth: usize,
+}
+
+impl SymbolicKInductionOptions {
+    pub const fn current() -> Self {
+        Self { max_depth: 0 }
+    }
+
+    pub const fn with_max_depth(mut self, max_depth: usize) -> Self {
+        self.max_depth = max_depth;
+        self
+    }
+}
+
+impl Default for SymbolicKInductionOptions {
+    fn default() -> Self {
+        Self::current()
+    }
+}
+
+/// Settings for symbolic PDR/IC3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SymbolicPdrOptions {
+    /// Maximum number of frames to build. `0` means auto from the symbolic state-space bound.
+    pub max_frames: usize,
+}
+
+impl SymbolicPdrOptions {
+    pub const fn current() -> Self {
+        Self { max_frames: 0 }
+    }
+
+    pub const fn with_max_frames(mut self, max_frames: usize) -> Self {
+        self.max_frames = max_frames;
+        self
+    }
+}
+
+impl Default for SymbolicPdrOptions {
+    fn default() -> Self {
+        Self::current()
+    }
+}
+
 /// Backend-specific knobs for the symbolic model checker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SymbolicModelCheckOptions {
     pub successors: SymbolicSuccessorStrategy,
     pub bounded_lasso: SymbolicBoundedLassoEncoding,
+    pub safety: SymbolicSafetyEngine,
+    pub k_induction: SymbolicKInductionOptions,
+    pub pdr: SymbolicPdrOptions,
 }
 
 impl SymbolicModelCheckOptions {
@@ -275,7 +337,25 @@ impl SymbolicModelCheckOptions {
         Self {
             successors: SymbolicSuccessorStrategy::SolverEnumeration,
             bounded_lasso: SymbolicBoundedLassoEncoding::DirectSmt,
+            safety: SymbolicSafetyEngine::ReachableGraph,
+            k_induction: SymbolicKInductionOptions::current(),
+            pdr: SymbolicPdrOptions::current(),
         }
+    }
+
+    pub const fn with_safety(mut self, safety: SymbolicSafetyEngine) -> Self {
+        self.safety = safety;
+        self
+    }
+
+    pub const fn with_k_induction(mut self, k_induction: SymbolicKInductionOptions) -> Self {
+        self.k_induction = k_induction;
+        self
+    }
+
+    pub const fn with_pdr(mut self, pdr: SymbolicPdrOptions) -> Self {
+        self.pdr = pdr;
+        self
     }
 }
 
@@ -457,6 +537,9 @@ mod tests {
         let symbolic = SymbolicModelCheckOptions {
             successors: SymbolicSuccessorStrategy::SolverEnumeration,
             bounded_lasso: SymbolicBoundedLassoEncoding::DirectSmt,
+            safety: SymbolicSafetyEngine::PdrIc3,
+            k_induction: SymbolicKInductionOptions::current().with_max_depth(6),
+            pdr: SymbolicPdrOptions::current().with_max_frames(9),
         };
 
         let config = ModelCheckConfig::reachable_graph()

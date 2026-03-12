@@ -91,10 +91,11 @@ mod tests {
         ExplicitDistributedOptions, ExplicitParallelOptions, ExplicitReachabilityStrategy,
         ExplicitSimulationOptions, ExplicitStateCompression, ExplicitStateStorage, ExplorationMode,
         ExprDomain, GuardExpr, Ltl, ModelBackend, ModelCase, ModelCheckConfig, PartialOrderReducer,
-        Signature, StepExpr, SymbolicSort, SymbolicSortSpec, SymbolicStateSchema,
-        SymbolicStateSpec, TemporalSpec, TraceStep, TransitionProgram, TransitionRule,
-        TransitionSystem, UpdateOp, UpdateProgram, UpdateValueExprAst, ViewProjector, inventory,
-        registry::RegisteredSymbolicStateSchema, symbolic_leaf_field,
+        Signature, StepExpr, SymbolicKInductionOptions, SymbolicModelCheckOptions,
+        SymbolicPdrOptions, SymbolicSafetyEngine, SymbolicSort, SymbolicSortSpec,
+        SymbolicStateSchema, SymbolicStateSpec, TemporalSpec, TraceStep, TransitionProgram,
+        TransitionRule, TransitionSystem, UpdateOp, UpdateProgram, UpdateValueExprAst,
+        ViewProjector, inventory, registry::RegisteredSymbolicStateSchema, symbolic_leaf_field,
     };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -307,6 +308,66 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, Copy, Default)]
+    struct UnsafeInvariantSpec;
+
+    impl TransitionSystem for UnsafeInvariantSpec {
+        type State = QuantState;
+        type Action = QuantAction;
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![QuantState {
+                ready: true,
+                slot: Slot::Zero,
+            }]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![QuantAction::Advance, QuantAction::Reset]
+        }
+
+        fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+            Some(TransitionProgram::named(
+                "unsafe_invariant",
+                vec![TransitionRule::ast(
+                    "advance",
+                    GuardExpr::builtin_pure_call(
+                        "is_advance",
+                        |_prev: &QuantState, action: &QuantAction| {
+                            matches!(action, QuantAction::Advance)
+                        },
+                    ),
+                    UpdateProgram::ast(
+                        "advance",
+                        vec![UpdateOp::assign_ast(
+                            "ready",
+                            UpdateValueExprAst::literal("false"),
+                            |_prev: &QuantState, state: &mut QuantState, _action: &QuantAction| {
+                                state.ready = false;
+                            },
+                        )],
+                    ),
+                )],
+            ))
+        }
+    }
+
+    impl TemporalSpec for UnsafeInvariantSpec {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
+            vec![BoolExpr::builtin_pure_call_with_paths(
+                "ready_is_true",
+                &["ready"],
+                |state: &QuantState| state.ready,
+            )]
+        }
+    }
+
+    impl nirvash::ModelCaseSource for UnsafeInvariantSpec {
+        fn default_model_backend(&self) -> Option<ModelBackend> {
+            Some(ModelBackend::Symbolic)
+        }
+    }
+
     #[test]
     fn symbolic_backend_accepts_structural_quantifiers() {
         let spec = StructuralQuantifierSpec;
@@ -330,6 +391,100 @@ mod tests {
         assert!(!snapshot.truncated);
         assert_eq!(snapshot.states.len(), 3);
         assert!(invariants.is_ok());
+    }
+
+    #[test]
+    fn symbolic_k_induction_proves_invariant_without_graph_exploration() {
+        let spec = StructuralQuantifierSpec;
+        let result = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                exploration: ExplorationMode::ReachableGraph,
+                max_states: Some(1),
+                symbolic: SymbolicModelCheckOptions::current()
+                    .with_safety(SymbolicSafetyEngine::KInduction)
+                    .with_k_induction(SymbolicKInductionOptions::current().with_max_depth(2)),
+                ..ModelCheckConfig::default()
+            },
+        )
+        .check_invariants()
+        .expect("k-induction should prove the invariant without graph exploration");
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn symbolic_pdr_proves_invariant_without_graph_exploration() {
+        let spec = StructuralQuantifierSpec;
+        let result = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                exploration: ExplorationMode::ReachableGraph,
+                max_states: Some(1),
+                symbolic: SymbolicModelCheckOptions::current()
+                    .with_safety(SymbolicSafetyEngine::PdrIc3)
+                    .with_pdr(SymbolicPdrOptions::current().with_max_frames(3)),
+                ..ModelCheckConfig::default()
+            },
+        )
+        .check_invariants()
+        .expect("PDR should prove the invariant without graph exploration");
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn symbolic_k_induction_finds_invariant_counterexample() {
+        let spec = UnsafeInvariantSpec;
+        let result = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                exploration: ExplorationMode::ReachableGraph,
+                symbolic: SymbolicModelCheckOptions::current()
+                    .with_safety(SymbolicSafetyEngine::KInduction)
+                    .with_k_induction(SymbolicKInductionOptions::current().with_max_depth(2)),
+                ..ModelCheckConfig::default()
+            },
+        )
+        .check_invariants()
+        .expect("k-induction should return a counterexample");
+
+        let violation = &result.violations()[0];
+        assert_eq!(violation.trace.states().len(), 2);
+        assert_eq!(
+            violation.trace.steps()[0],
+            TraceStep::Action(QuantAction::Advance)
+        );
+        assert!(!violation.trace.states()[1].ready);
+    }
+
+    #[test]
+    fn symbolic_pdr_finds_invariant_counterexample() {
+        let spec = UnsafeInvariantSpec;
+        let result = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                exploration: ExplorationMode::ReachableGraph,
+                symbolic: SymbolicModelCheckOptions::current()
+                    .with_safety(SymbolicSafetyEngine::PdrIc3)
+                    .with_pdr(SymbolicPdrOptions::current().with_max_frames(3)),
+                ..ModelCheckConfig::default()
+            },
+        )
+        .check_invariants()
+        .expect("PDR should return a counterexample");
+
+        let violation = &result.violations()[0];
+        assert_eq!(violation.trace.states().len(), 2);
+        assert_eq!(
+            violation.trace.steps()[0],
+            TraceStep::Action(QuantAction::Advance)
+        );
+        assert!(!violation.trace.states()[1].ready);
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
