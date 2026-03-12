@@ -32,6 +32,7 @@ explicit backend は exact state equality ベースの symmetry canonicalization
 
 - `explicit: ExplicitModelCheckOptions`
   - 現時点では `state_storage = InMemoryExact`、`reachability = BreadthFirst`、`bounded_lasso = EnumeratedPaths`
+  - `simulation = ExplicitSimulationOptions { runs: 1, max_depth: 32, seed: 0 }` で `ModelChecker::simulate()` の deterministic random walk を設定
 - `symbolic: SymbolicModelCheckOptions`
   - 現時点では `successors = SolverEnumeration`、`bounded_lasso = DirectSmt`
 

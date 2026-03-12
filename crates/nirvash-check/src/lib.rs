@@ -1,6 +1,7 @@
 pub use nirvash::{
     Counterexample, CounterexampleKind, ExplorationMode, ModelBackend, ModelCase, ModelCaseSource,
     ModelCheckConfig, ModelCheckError, ModelCheckResult, ReachableGraphSnapshot, TemporalSpec,
+    Trace,
 };
 
 pub struct ModelChecker<'a, T: TemporalSpec + ModelCaseSource>(
@@ -63,6 +64,10 @@ where
         self.0.check_all()
     }
 
+    pub fn simulate(&self) -> Result<Vec<Trace<T::State, T::Action>>, ModelCheckError> {
+        self.0.simulate()
+    }
+
     pub fn backend(&self) -> ModelBackend {
         self.0.backend()
     }
@@ -76,10 +81,10 @@ where
 mod tests {
     use super::ModelChecker;
     use nirvash::{
-        BoolExpr, ExplorationMode, ExprDomain, GuardExpr, ModelBackend, ModelCase,
-        ModelCheckConfig, Signature, StepExpr, SymbolicSort, SymbolicSortSpec, SymbolicStateSchema,
-        SymbolicStateSpec, TemporalSpec, TransitionProgram, TransitionRule, TransitionSystem,
-        UpdateOp, UpdateProgram, UpdateValueExprAst, inventory,
+        BoolExpr, ExplicitSimulationOptions, ExplorationMode, ExprDomain, GuardExpr, ModelBackend,
+        ModelCase, ModelCheckConfig, Signature, StepExpr, SymbolicSort, SymbolicSortSpec,
+        SymbolicStateSchema, SymbolicStateSpec, TemporalSpec, TraceStep, TransitionProgram,
+        TransitionRule, TransitionSystem, UpdateOp, UpdateProgram, UpdateValueExprAst, inventory,
         registry::RegisteredSymbolicStateSchema, symbolic_leaf_field,
     };
 
@@ -316,5 +321,118 @@ mod tests {
         assert!(!snapshot.truncated);
         assert_eq!(snapshot.states.len(), 3);
         assert!(invariants.is_ok());
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SimulationState {
+        Left,
+        Right,
+        Done,
+    }
+
+    impl Signature for SimulationState {
+        fn bounded_domain() -> nirvash::BoundedDomain<Self> {
+            nirvash::BoundedDomain::new(vec![Self::Left, Self::Right, Self::Done])
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SimulationAction {
+        Finish,
+    }
+
+    impl Signature for SimulationAction {
+        fn bounded_domain() -> nirvash::BoundedDomain<Self> {
+            nirvash::BoundedDomain::new(vec![Self::Finish])
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct SimulationSpec;
+
+    impl TransitionSystem for SimulationSpec {
+        type State = SimulationState;
+        type Action = SimulationAction;
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![SimulationState::Left, SimulationState::Right]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![SimulationAction::Finish]
+        }
+
+        fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+            match (state, action) {
+                (SimulationState::Left, SimulationAction::Finish)
+                | (SimulationState::Right, SimulationAction::Finish) => Some(SimulationState::Done),
+                (SimulationState::Done, SimulationAction::Finish) => None,
+            }
+        }
+
+        fn allow_stutter(&self) -> bool {
+            false
+        }
+    }
+
+    impl TemporalSpec for SimulationSpec {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
+            Vec::new()
+        }
+    }
+
+    impl nirvash::ModelCaseSource for SimulationSpec {}
+
+    #[test]
+    fn explicit_simulation_is_seed_reproducible() {
+        let spec = SimulationSpec;
+        let explicit = nirvash::ExplicitModelCheckOptions::current()
+            .with_simulation(ExplicitSimulationOptions::new(2, 4, 1));
+        let config = ModelCheckConfig::reachable_graph().with_explicit_options(explicit);
+
+        let left_run = ModelChecker::with_config(&spec, config)
+            .simulate()
+            .expect("explicit simulation should run");
+        let left_run_again = ModelChecker::with_config(&spec, config)
+            .simulate()
+            .expect("explicit simulation should be reproducible");
+        let right_run = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig::reachable_graph().with_explicit_options(
+                nirvash::ExplicitModelCheckOptions::current()
+                    .with_simulation(ExplicitSimulationOptions::new(2, 4, 2)),
+            ),
+        )
+        .simulate()
+        .expect("different seed should still run");
+
+        assert_eq!(left_run, left_run_again);
+        assert_eq!(left_run.len(), 2);
+        assert_eq!(left_run[0].states()[0], SimulationState::Left);
+        assert_eq!(right_run[0].states()[0], SimulationState::Right);
+        assert!(matches!(
+            left_run[0].steps().last(),
+            Some(TraceStep::Stutter)
+        ));
+    }
+
+    #[test]
+    fn symbolic_backend_rejects_simulation_mode() {
+        let spec = StructuralQuantifierSpec;
+        let err = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .simulate()
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            nirvash::ModelCheckError::UnsupportedConfiguration(message)
+                if message.contains("simulation")
+        ));
     }
 }

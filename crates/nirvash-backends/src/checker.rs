@@ -21,6 +21,32 @@ impl<A> GraphEdge<A> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SimulationRng {
+    state: u64,
+}
+
+impl SimulationRng {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.state
+    }
+
+    fn pick_index(&mut self, len: usize) -> Option<usize> {
+        if len == 0 {
+            return None;
+        }
+        Some((self.next_u64() as usize) % len)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ReachableGraph<S, A> {
     states: Vec<S>,
@@ -188,6 +214,15 @@ where
         }
     }
 
+    pub fn simulate(&self) -> Result<Vec<Trace<T::State, T::Action>>, ModelCheckError> {
+        match self.resolved_backend() {
+            ModelBackend::Explicit => self.simulate_explicit(),
+            ModelBackend::Symbolic => Err(ModelCheckError::UnsupportedConfiguration(
+                "simulation is only supported by the explicit backend",
+            )),
+        }
+    }
+
     pub fn backend(&self) -> ModelBackend {
         self.resolved_backend()
     }
@@ -243,6 +278,26 @@ where
 
     fn symbolic_check_all(&self) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
         self.symbolic_checker().check_all()
+    }
+
+    fn simulate_explicit(&self) -> Result<Vec<Trace<T::State, T::Action>>, ModelCheckError> {
+        let initial_states = self.initial_states_filtered()?;
+        let simulation = self.config.explicit.simulation;
+        let mut rng = SimulationRng::new(simulation.seed);
+        let mut traces = Vec::with_capacity(simulation.runs);
+
+        for _ in 0..simulation.runs {
+            let initial_index = rng
+                .pick_index(initial_states.len())
+                .expect("initial state list is non-empty");
+            traces.push(self.simulate_trace_from(
+                initial_states[initial_index].clone(),
+                simulation.max_depth,
+                &mut rng,
+            ));
+        }
+
+        Ok(traces)
     }
 
     fn check_invariants_graph(
@@ -717,6 +772,35 @@ where
             self.enumerate_lasso(vec![init], Vec::new(), &mut traces);
         }
         Ok(traces)
+    }
+
+    fn simulate_trace_from(
+        &self,
+        initial: T::State,
+        max_depth: usize,
+        rng: &mut SimulationRng,
+    ) -> Trace<T::State, T::Action> {
+        let mut states = vec![initial];
+        let mut steps = Vec::new();
+
+        while steps.len() < max_depth {
+            let current = states.last().expect("states always non-empty");
+            let successors = self.constrained_successors(current);
+            let Some(successor_index) = rng.pick_index(successors.len()) else {
+                return self.terminal_trace(states, steps);
+            };
+            let (step, next) = successors[successor_index].clone();
+
+            if let Some(loop_start) = states.iter().position(|state| state == &next) {
+                steps.push(step);
+                return Trace::new(states, steps, loop_start);
+            }
+
+            states.push(next);
+            steps.push(step);
+        }
+
+        self.terminal_trace(states, steps)
     }
 
     fn enumerate_lasso(

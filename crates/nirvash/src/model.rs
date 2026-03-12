@@ -33,12 +33,45 @@ pub enum ExplicitBoundedLassoStrategy {
     EnumeratedPaths,
 }
 
+/// Configuration for explicit simulation runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExplicitSimulationOptions {
+    pub runs: usize,
+    pub max_depth: usize,
+    pub seed: u64,
+}
+
+impl ExplicitSimulationOptions {
+    pub const fn current() -> Self {
+        Self {
+            runs: 1,
+            max_depth: 32,
+            seed: 0,
+        }
+    }
+
+    pub const fn new(runs: usize, max_depth: usize, seed: u64) -> Self {
+        Self {
+            runs,
+            max_depth,
+            seed,
+        }
+    }
+}
+
+impl Default for ExplicitSimulationOptions {
+    fn default() -> Self {
+        Self::current()
+    }
+}
+
 /// Backend-specific knobs for the explicit model checker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExplicitModelCheckOptions {
     pub state_storage: ExplicitStateStorage,
     pub reachability: ExplicitReachabilityStrategy,
     pub bounded_lasso: ExplicitBoundedLassoStrategy,
+    pub simulation: ExplicitSimulationOptions,
 }
 
 impl ExplicitModelCheckOptions {
@@ -47,7 +80,13 @@ impl ExplicitModelCheckOptions {
             state_storage: ExplicitStateStorage::InMemoryExact,
             reachability: ExplicitReachabilityStrategy::BreadthFirst,
             bounded_lasso: ExplicitBoundedLassoStrategy::EnumeratedPaths,
+            simulation: ExplicitSimulationOptions::current(),
         }
+    }
+
+    pub const fn with_simulation(mut self, simulation: ExplicitSimulationOptions) -> Self {
+        self.simulation = simulation;
+        self
     }
 }
 
@@ -239,6 +278,7 @@ mod tests {
             state_storage: ExplicitStateStorage::InMemoryExact,
             reachability: ExplicitReachabilityStrategy::BreadthFirst,
             bounded_lasso: ExplicitBoundedLassoStrategy::EnumeratedPaths,
+            simulation: ExplicitSimulationOptions::new(4, 12, 7),
         };
         let symbolic = SymbolicModelCheckOptions {
             successors: SymbolicSuccessorStrategy::SolverEnumeration,

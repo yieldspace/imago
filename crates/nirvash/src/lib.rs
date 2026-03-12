@@ -41,9 +41,9 @@ pub use inventory;
 pub use ltl::Ltl;
 pub use model::{
     Counterexample, CounterexampleKind, ExplicitBoundedLassoStrategy, ExplicitModelCheckOptions,
-    ExplicitReachabilityStrategy, ExplicitStateStorage, ExplorationMode, ModelBackend,
-    ModelCheckConfig, ModelCheckError, ModelCheckResult, SymbolicBoundedLassoEncoding,
-    SymbolicModelCheckOptions, SymbolicSuccessorStrategy,
+    ExplicitReachabilityStrategy, ExplicitSimulationOptions, ExplicitStateStorage, ExplorationMode,
+    ModelBackend, ModelCheckConfig, ModelCheckError, ModelCheckResult,
+    SymbolicBoundedLassoEncoding, SymbolicModelCheckOptions, SymbolicSuccessorStrategy,
 };
 pub use predicate::{
     BoolExpr, BoolExprAst, GuardAst, GuardExpr, GuardValueExpr, QuantifierKind, StateExpr,
