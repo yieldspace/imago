@@ -504,6 +504,8 @@ fn supervision_valid(state: &SupervisionState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nirvash::{ModelBackend, ModelCheckConfig};
+    use nirvash_check::ModelChecker;
 
     #[test]
     fn service_lifecycle_is_scoped_per_service() {
@@ -561,5 +563,65 @@ mod tests {
                 &SupervisionAction::StartServing(ServiceAtom::Service0),
             )
         );
+    }
+
+    #[test]
+    fn explicit_and_symbolic_backends_agree() {
+        let spec = SupervisionSpec::new();
+        let explicit_snapshot = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Explicit),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .full_reachable_graph_snapshot()
+        .expect("explicit supervision snapshot");
+        let symbolic_snapshot = match ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .full_reachable_graph_snapshot()
+        {
+            Ok(snapshot) => snapshot,
+            Err(nirvash::ModelCheckError::UnsupportedConfiguration(message))
+                if message.contains("symbolic backend requires") =>
+            {
+                return;
+            }
+            Err(error) => panic!("symbolic supervision snapshot: {error:?}"),
+        };
+        assert_eq!(symbolic_snapshot, explicit_snapshot);
+
+        let explicit_result = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Explicit),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .check_all()
+        .expect("explicit supervision result");
+        let symbolic_result = match ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .check_all()
+        {
+            Ok(result) => result,
+            Err(nirvash::ModelCheckError::UnsupportedConfiguration(message))
+                if message.contains("symbolic backend requires") =>
+            {
+                return;
+            }
+            Err(error) => panic!("symbolic supervision result: {error:?}"),
+        };
+        assert_eq!(symbolic_result, explicit_result);
     }
 }

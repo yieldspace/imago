@@ -4,7 +4,6 @@ pub mod bounds;
 pub mod command_projection;
 pub mod command_protocol;
 pub mod deploy;
-pub mod legacy_system;
 pub mod logs_projection;
 pub mod manager_runtime;
 pub mod manager_runtime_projection;
@@ -41,7 +40,7 @@ mod symbolic_registration_tests {
     use super::{
         PluginPlatformSpec, RpcSpec, SupervisionSpec, SystemSpec,
         artifact_deploy::ArtifactDeploySpec, command_protocol::CommandProtocolSpec,
-        deploy::DeploySpec, legacy_system::ImagodSystemSpec, manager_runtime::ManagerRuntimeSpec,
+        deploy::DeploySpec, manager_runtime::ManagerRuntimeSpec,
         runner_bootstrap::RunnerBootstrapSpec, runner_runtime::RunnerRuntimeSpec,
         service_supervision::ServiceSupervisionSpec, session_auth::SessionAuthSpec,
         session_transport::SessionTransportSpec, shutdown_flow::ShutdownFlowSpec,
@@ -87,13 +86,6 @@ mod symbolic_registration_tests {
             missing_pure,
             missing_effects,
             DeploySpec::new()
-        );
-        collect_program_keys!(
-            used_pure,
-            used_effects,
-            missing_pure,
-            missing_effects,
-            ImagodSystemSpec::new()
         );
         collect_program_keys!(
             used_pure,

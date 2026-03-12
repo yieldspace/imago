@@ -224,6 +224,19 @@ macro_rules! symbolic_state_spec {
         }
     ) => {
         const _: () = {
+            impl $crate::SymbolicSortSpec for $ty {
+                fn symbolic_sort() -> $crate::SymbolicSort {
+                    $crate::SymbolicSort::composite::<Self>(vec![
+                        $(
+                            $crate::SymbolicSortField::new(
+                                stringify!($field),
+                                <$field_ty as $crate::SymbolicSortSpec>::symbolic_sort(),
+                            ),
+                        )+
+                    ])
+                }
+            }
+
             impl $crate::SymbolicStateSpec for $ty {
                 fn symbolic_state_schema() -> $crate::SymbolicStateSchema<Self> {
                     let mut __nirvash_fields = ::std::vec::Vec::new();

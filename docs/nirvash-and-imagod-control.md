@@ -51,7 +51,6 @@ flowchart LR
   - `imagod` 全体の formal spec 記述
   - `command_protocol` では intended contract の projection つき conformance spec を実装
   - `system` は boot / session / wire / deploy / supervision / service RPC / plugin / shutdown を footprint-based concurrency で束ねる unified composition で、top-level では cross-link invariant と scenario model case を主に持つ
-  - `legacy_system` は single-service 前提の旧 baseline として残す
 - `crates/imagod-control/tests`
   - `command_protocol` の `OperationManager` runtime binding と `code_tests` 実行
 
@@ -188,7 +187,7 @@ flowchart LR
 - 実コードの output summary を抽象化した結果が `expected_output` と一致する
 
 `system` spec は、boot / session / wire / deploy / supervision / service RPC / plugin / shutdown を manager/session/trust/shutdown と束ねる unified top-level の正本です。  
-full implementation の private state をそのまま複製するのではなく、daemon-visible contract と cross-link invariant を `system` に集約し、boundary ごとの runtime conformance は `*_projection` spec へ射影して接続します。`legacy_system` は boot / command / plugin を含む旧 synchronized baseline として残しています。
+full implementation の private state をそのまま複製するのではなく、daemon-visible contract と cross-link invariant を `system` に集約し、boundary ごとの runtime conformance は `*_projection` spec へ射影して接続します。
 
 ## Source References
 

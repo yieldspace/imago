@@ -4369,7 +4369,7 @@ impl TransitionSystem for DuplicateSpec {
 
     #[test]
     fn upper_snake_names_match_fragment_keys() {
-        assert_eq!(to_upper_snake("ImagodSystemSpec"), "IMAGOD_SYSTEM_SPEC");
+        assert_eq!(to_upper_snake("SystemSpec"), "SYSTEM_SPEC");
         assert_eq!(to_upper_snake("HTTPState"), "HTTPSTATE");
     }
 

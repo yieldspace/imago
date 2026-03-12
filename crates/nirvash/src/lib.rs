@@ -55,9 +55,9 @@ pub use relation::{
     collect_relational_state_schema, collect_relational_state_summary,
 };
 pub use symbolic_state::{
-    SymbolicStateField, SymbolicStateSchema, SymbolicStateSpec, normalize_symbolic_state_path,
-    symbolic_leaf_field, symbolic_leaf_index, symbolic_leaf_value, symbolic_seed_value,
-    symbolic_state_fields,
+    SymbolicSort, SymbolicSortField, SymbolicSortSpec, SymbolicStateField, SymbolicStateSchema,
+    SymbolicStateSpec, normalize_symbolic_state_path, symbolic_leaf_field, symbolic_leaf_index,
+    symbolic_leaf_value, symbolic_seed_value, symbolic_state_fields,
 };
 pub use symmetry::SymmetryReducer;
 pub use system::{
@@ -89,6 +89,12 @@ mod tests {
         ($module:ident, $ty:ty) => {
             mod $module {
                 use super::*;
+
+                impl SymbolicSortSpec for $ty {
+                    fn symbolic_sort() -> SymbolicSort {
+                        SymbolicSort::finite::<Self>()
+                    }
+                }
 
                 impl SymbolicStateSpec for $ty {
                     fn symbolic_state_schema() -> SymbolicStateSchema<Self> {

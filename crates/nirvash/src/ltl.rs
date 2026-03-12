@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::{BoolExpr, Signature, StepExpr};
 
 #[derive(Debug, Clone)]
@@ -129,6 +131,59 @@ impl<S: 'static, A: 'static> Ltl<S, A> {
             | Self::Or(lhs, rhs)
             | Self::Implies(lhs, rhs)
             | Self::Until(lhs, rhs) => lhs.is_ast_native() && rhs.is_ast_native(),
+        }
+    }
+
+    pub fn first_unencodable_symbolic_node(&self) -> Option<&'static str> {
+        match self {
+            Self::True | Self::False => None,
+            Self::Pred(predicate) => predicate.first_unencodable_symbolic_node(),
+            Self::StepPred(predicate) | Self::Enabled(predicate) => {
+                predicate.first_unencodable_symbolic_node()
+            }
+            Self::Not(inner)
+            | Self::Next(inner)
+            | Self::Always(inner)
+            | Self::Eventually(inner) => inner.first_unencodable_symbolic_node(),
+            Self::And(lhs, rhs)
+            | Self::Or(lhs, rhs)
+            | Self::Implies(lhs, rhs)
+            | Self::Until(lhs, rhs) => lhs
+                .first_unencodable_symbolic_node()
+                .or_else(|| rhs.first_unencodable_symbolic_node()),
+        }
+    }
+
+    pub fn symbolic_state_paths(&self) -> Vec<&'static str> {
+        let mut paths = BTreeSet::new();
+        self.collect_symbolic_state_paths(&mut paths);
+        paths.into_iter().collect()
+    }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::True | Self::False => {}
+            Self::Pred(predicate) => {
+                for path in predicate.symbolic_state_paths() {
+                    paths.insert(path);
+                }
+            }
+            Self::StepPred(predicate) | Self::Enabled(predicate) => {
+                for path in predicate.symbolic_state_paths() {
+                    paths.insert(path);
+                }
+            }
+            Self::Not(inner)
+            | Self::Next(inner)
+            | Self::Always(inner)
+            | Self::Eventually(inner) => inner.collect_symbolic_state_paths(paths),
+            Self::And(lhs, rhs)
+            | Self::Or(lhs, rhs)
+            | Self::Implies(lhs, rhs)
+            | Self::Until(lhs, rhs) => {
+                lhs.collect_symbolic_state_paths(paths);
+                rhs.collect_symbolic_state_paths(paths);
+            }
         }
     }
 }

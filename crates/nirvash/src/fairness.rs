@@ -28,4 +28,12 @@ impl<S: 'static, A: 'static> Fairness<S, A> {
     pub fn is_ast_native(&self) -> bool {
         self.predicate().is_ast_native()
     }
+
+    pub fn first_unencodable_symbolic_node(&self) -> Option<&'static str> {
+        self.predicate().first_unencodable_symbolic_node()
+    }
+
+    pub fn symbolic_state_paths(&self) -> Vec<&'static str> {
+        self.predicate().symbolic_state_paths()
+    }
 }

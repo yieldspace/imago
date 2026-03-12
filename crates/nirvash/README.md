@@ -14,14 +14,14 @@ bounded domain、relation kernel、transition DSL、LTL/fairness、conformance t
 
 通常の runtime crate は `nirvash` だけを通常依存に取り、formal / doc / test 側だけが `nirvash-check` を使います。`z3` は `nirvash-backends` の通常依存として formal stack に常設されますが、`imagod` の通常依存木には入れません。
 
-現状の symbolic backend は 2 系統です。
+現状の symbolic backend は 2 系統ですが、どちらも candidate graph の事前全列挙には依存しません。
 
 - `ModelBackend::Symbolic + ExplorationMode::ReachableGraph`
-  - `TransitionProgram` と `SymbolicStateSpec` を使う relation-based safety path
+  - `TransitionProgram` と `SymbolicStateSpec` / `SymbolicSortSpec` を使う relation-based safety path
 - `ModelBackend::Symbolic + ExplorationMode::BoundedLasso`
-  - 既存の candidate-graph bounded trace path
+  - relation-discovered graph 上の bounded trace / temporal path
 
-どちらも AST-native DSL を要求し、legacy closure path や未登録 helper / effect は fail-closed します。
+どちらも AST-native DSL を要求し、legacy closure path や未登録 helper / effect は fail-closed します。schema validation は direct field read だけでなく pure call の receiver / argument read path、property、fairness にも掛かり、state schema には sort metadata も保持されます。
 
 ## What It Provides
 

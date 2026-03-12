@@ -582,6 +582,23 @@ struct BoolDslContext {
 }
 
 impl BoolDslContext {
+    fn canonical_root_name(&self, binder_index: usize) -> &'static str {
+        match self.kind {
+            BoolDslKind::State => "state",
+            BoolDslKind::Step => match binder_index {
+                0 => "prev",
+                1 => "action",
+                2 => "next",
+                _ => unreachable!("step expressions always bind prev, action, next"),
+            },
+            BoolDslKind::Guard => match binder_index {
+                0 => "prev",
+                1 => "action",
+                _ => unreachable!("guard expressions always bind prev, action"),
+            },
+        }
+    }
+
     fn builder_path(&self) -> TokenStream2 {
         match self.kind {
             BoolDslKind::State => quote!(::nirvash::BoolExpr),
@@ -620,14 +637,81 @@ impl BoolDslContext {
 
     fn bound_field_path(&self, expr: &Expr) -> Option<LitStr> {
         let segments = expr_field_segments(expr)?;
-        let roots = self
-            .binders
-            .iter()
-            .map(ToString::to_string)
+        let first = segments.first()?;
+        let binder_index = self.binders.iter().position(|binder| binder == first)?;
+        let mut canonical = vec![self.canonical_root_name(binder_index).to_owned()];
+        canonical.extend(segments.into_iter().skip(1));
+        Some(LitStr::new(&canonical.join("."), expr.span()))
+    }
+
+    fn canonical_expr_source(&self, expr: &Expr) -> LitStr {
+        self.bound_field_path(expr)
+            .unwrap_or_else(|| expr_source_lit(expr))
+    }
+
+    fn collect_bound_field_paths(&self, expr: &Expr, paths: &mut BTreeSet<String>) {
+        if let Some(path) = self.bound_field_path(expr) {
+            paths.insert(path.value());
+            return;
+        }
+        match expr {
+            Expr::Paren(ExprParen { expr: inner, .. })
+            | Expr::Reference(ExprReference { expr: inner, .. })
+            | Expr::Unary(ExprUnary { expr: inner, .. }) => {
+                self.collect_bound_field_paths(inner, paths);
+            }
+            Expr::Binary(ExprBinary { left, right, .. }) => {
+                self.collect_bound_field_paths(left, paths);
+                self.collect_bound_field_paths(right, paths);
+            }
+            Expr::Field(ExprField { base, .. }) => {
+                self.collect_bound_field_paths(base, paths);
+            }
+            Expr::If(expr_if) => {
+                self.collect_bound_field_paths(&expr_if.cond, paths);
+                if let Some(then_expr) = block_terminal_expr(&expr_if.then_branch) {
+                    self.collect_bound_field_paths(then_expr, paths);
+                }
+                if let Some((_, else_expr)) = &expr_if.else_branch {
+                    match else_expr.as_ref() {
+                        Expr::Block(block) => {
+                            if let Some(else_expr) = block_terminal_expr(&block.block) {
+                                self.collect_bound_field_paths(else_expr, paths);
+                            }
+                        }
+                        other => self.collect_bound_field_paths(other, paths),
+                    }
+                }
+            }
+            Expr::Macro(expr_macro) if expr_macro.mac.path.is_ident("matches") => {
+                if let Ok(args) = syn::parse2::<MatchesMacroArgs>(expr_macro.mac.tokens.clone()) {
+                    self.collect_bound_field_paths(&args.value, paths);
+                }
+            }
+            Expr::Call(ExprCall { func, args, .. }) => {
+                self.collect_bound_field_paths(func, paths);
+                for arg in args {
+                    self.collect_bound_field_paths(arg, paths);
+                }
+            }
+            Expr::MethodCall(ExprMethodCall { receiver, args, .. }) => {
+                self.collect_bound_field_paths(receiver, paths);
+                for arg in args {
+                    self.collect_bound_field_paths(arg, paths);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn pure_call_read_paths(&self, expr: &Expr) -> TokenStream2 {
+        let mut paths = BTreeSet::new();
+        self.collect_bound_field_paths(expr, &mut paths);
+        let paths = paths
+            .into_iter()
+            .map(|path| LitStr::new(&path, expr.span()))
             .collect::<Vec<_>>();
-        roots
-            .contains(segments.first()?)
-            .then(|| LitStr::new(&segments.join("."), expr.span()))
+        quote! { &[#(#paths),*] }
     }
 
     fn lower_pure_call(
@@ -637,18 +721,19 @@ impl BoolDslContext {
         expr: &Expr,
         eval: TokenStream2,
     ) -> TokenStream2 {
+        let read_paths = self.pure_call_read_paths(expr);
         match pure_call_kind(expr) {
             Some(PureCallKind::Builtin) => {
                 if let Some(registration) = nested_registered_helper(expr) {
-                    quote! { #builder::registered_pure_call(#name, #registration, #eval) }
+                    quote! { #builder::registered_pure_call_with_paths(#name, #registration, #read_paths, #eval) }
                 } else {
-                    quote! { #builder::builtin_pure_call(#name, #eval) }
+                    quote! { #builder::builtin_pure_call_with_paths(#name, #read_paths, #eval) }
                 }
             }
             Some(PureCallKind::Registered(registration)) => {
-                quote! { #builder::registered_pure_call(#name, #registration, #eval) }
+                quote! { #builder::registered_pure_call_with_paths(#name, #registration, #read_paths, #eval) }
             }
-            None => quote! { #builder::pure_call(#name, #eval) },
+            None => quote! { #builder::pure_call_with_paths(#name, #read_paths, #eval) },
         }
     }
 
@@ -832,7 +917,7 @@ impl BoolDslContext {
         let builder = self.builder_path();
         let name = explicit_name.unwrap_or_else(|| expr_source_lit(whole_expr));
         let args: MatchesMacroArgs = syn::parse2(expr_macro.mac.tokens.clone())?;
-        let value = expr_source_lit(&args.value);
+        let value = self.canonical_expr_source(&args.value);
         let pattern = token_stream_source_lit(&args.pattern, whole_expr.span());
         let eval = self.matches_closure_tokens(&args.value, &args.pattern);
         Ok(quote! { #builder::matches_variant(#name, #value, #pattern, #eval) })
@@ -904,6 +989,71 @@ fn bound_update_field_path(expr: &Expr) -> Option<LitStr> {
     .then(|| LitStr::new(&segments.join("."), expr.span()))
 }
 
+fn collect_bound_update_field_paths(expr: &Expr, paths: &mut BTreeSet<String>) {
+    if let Some(path) = bound_update_field_path(expr) {
+        paths.insert(path.value());
+        return;
+    }
+    match expr {
+        Expr::Paren(ExprParen { expr: inner, .. })
+        | Expr::Reference(ExprReference { expr: inner, .. })
+        | Expr::Unary(ExprUnary { expr: inner, .. }) => {
+            collect_bound_update_field_paths(inner, paths);
+        }
+        Expr::Binary(ExprBinary { left, right, .. }) => {
+            collect_bound_update_field_paths(left, paths);
+            collect_bound_update_field_paths(right, paths);
+        }
+        Expr::Field(ExprField { base, .. }) => {
+            collect_bound_update_field_paths(base, paths);
+        }
+        Expr::If(expr_if) => {
+            collect_bound_update_field_paths(&expr_if.cond, paths);
+            if let Some(then_expr) = block_terminal_expr(&expr_if.then_branch) {
+                collect_bound_update_field_paths(then_expr, paths);
+            }
+            if let Some((_, else_expr)) = &expr_if.else_branch {
+                match else_expr.as_ref() {
+                    Expr::Block(block) => {
+                        if let Some(else_expr) = block_terminal_expr(&block.block) {
+                            collect_bound_update_field_paths(else_expr, paths);
+                        }
+                    }
+                    other => collect_bound_update_field_paths(other, paths),
+                }
+            }
+        }
+        Expr::Macro(expr_macro) if expr_macro.mac.path.is_ident("matches") => {
+            if let Ok(args) = syn::parse2::<MatchesMacroArgs>(expr_macro.mac.tokens.clone()) {
+                collect_bound_update_field_paths(&args.value, paths);
+            }
+        }
+        Expr::Call(ExprCall { func, args, .. }) => {
+            collect_bound_update_field_paths(func, paths);
+            for arg in args {
+                collect_bound_update_field_paths(arg, paths);
+            }
+        }
+        Expr::MethodCall(ExprMethodCall { receiver, args, .. }) => {
+            collect_bound_update_field_paths(receiver, paths);
+            for arg in args {
+                collect_bound_update_field_paths(arg, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn update_pure_call_read_paths(expr: &Expr) -> TokenStream2 {
+    let mut paths = BTreeSet::new();
+    collect_bound_update_field_paths(expr, &mut paths);
+    let paths = paths
+        .into_iter()
+        .map(|path| LitStr::new(&path, expr.span()))
+        .collect::<Vec<_>>();
+    quote! { &[#(#paths),*] }
+}
+
 fn lower_update_value_expr(expr: &Expr) -> syn::Result<TokenStream2> {
     match expr {
         Expr::Paren(ExprParen { expr: inner, .. }) => lower_update_value_expr(inner),
@@ -938,21 +1088,24 @@ fn lower_update_value_expr(expr: &Expr) -> syn::Result<TokenStream2> {
             Ok(quote! { ::nirvash::UpdateValueExprAst::add(#lhs, #rhs) })
         }
         Expr::Call(ExprCall { .. }) | Expr::MethodCall(ExprMethodCall { .. }) => {
+            let read_paths = update_pure_call_read_paths(expr);
             match pure_call_kind(expr) {
                 Some(PureCallKind::Builtin) => {
                     let name = expr_source_lit(expr);
                     if let Some(registration) = nested_registered_helper(expr) {
                         Ok(quote! {
-                            ::nirvash::UpdateValueExprAst::registered_pure_call(#name, #registration)
+                            ::nirvash::UpdateValueExprAst::registered_pure_call_with_paths(#name, #registration, #read_paths)
                         })
                     } else {
-                        Ok(quote! { ::nirvash::UpdateValueExprAst::builtin_pure_call(#name) })
+                        Ok(
+                            quote! { ::nirvash::UpdateValueExprAst::builtin_pure_call_with_paths(#name, #read_paths) },
+                        )
                     }
                 }
                 Some(PureCallKind::Registered(registration)) => {
                     let name = expr_source_lit(expr);
                     Ok(quote! {
-                        ::nirvash::UpdateValueExprAst::registered_pure_call(#name, #registration)
+                        ::nirvash::UpdateValueExprAst::registered_pure_call_with_paths(#name, #registration, #read_paths)
                     })
                 }
                 None => {
@@ -2386,6 +2539,7 @@ fn signature_symbolic_state_registration(
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let schema_body = signature_symbolic_state_schema_body(ident, data)?;
+    let sort_body = signature_symbolic_sort_body(ident, data)?;
     let registration = if generics.params.is_empty() {
         let ident_snake = to_upper_snake(&ident.to_string()).to_lowercase();
         let type_id_fn_ident = format_ident!("__nirvash_symbolic_state_type_id_{}", ident_snake);
@@ -2415,6 +2569,12 @@ fn signature_symbolic_state_registration(
     };
 
     Ok(quote! {
+        impl #impl_generics ::nirvash::SymbolicSortSpec for #ident #ty_generics #where_clause {
+            fn symbolic_sort() -> ::nirvash::SymbolicSort {
+                #sort_body
+            }
+        }
+
         impl #impl_generics ::nirvash::SymbolicStateSpec for #ident #ty_generics #where_clause {
             fn symbolic_state_schema() -> ::nirvash::SymbolicStateSchema<Self> {
                 #schema_body
@@ -2524,6 +2684,66 @@ fn signature_symbolic_state_schema_body(
             data.union_token.span(),
             "Signature derive does not support unions",
         )),
+    }
+}
+
+fn signature_symbolic_sort_body(
+    ident: &Ident,
+    data: &Data,
+) -> syn::Result<proc_macro2::TokenStream> {
+    match data {
+        Data::Enum(_) => Ok(quote! {
+            ::nirvash::SymbolicSort::finite::<Self>()
+        }),
+        Data::Struct(data) => signature_struct_symbolic_sort_body(ident, data),
+        Data::Union(data) => Err(syn::Error::new(
+            data.union_token.span(),
+            "Signature derive does not support unions",
+        )),
+    }
+}
+
+fn signature_struct_symbolic_sort_body(
+    _ident: &Ident,
+    data: &syn::DataStruct,
+) -> syn::Result<proc_macro2::TokenStream> {
+    match &data.fields {
+        Fields::Named(fields) => {
+            let field_sorts = fields.named.iter().map(|field| {
+                let field_ident = field
+                    .ident
+                    .as_ref()
+                    .expect("named struct fields should have identifiers");
+                let field_ty = &field.ty;
+                quote! {
+                    ::nirvash::SymbolicSortField::new(
+                        stringify!(#field_ident),
+                        <#field_ty as ::nirvash::SymbolicSortSpec>::symbolic_sort(),
+                    )
+                }
+            });
+            Ok(quote! {
+                ::nirvash::SymbolicSort::composite::<Self>(vec![#(#field_sorts),*])
+            })
+        }
+        Fields::Unnamed(fields) => {
+            let field_sorts = fields.unnamed.iter().enumerate().map(|(index, field)| {
+                let field_index = LitStr::new(&index.to_string(), field.span());
+                let field_ty = &field.ty;
+                quote! {
+                    ::nirvash::SymbolicSortField::new(
+                        #field_index,
+                        <#field_ty as ::nirvash::SymbolicSortSpec>::symbolic_sort(),
+                    )
+                }
+            });
+            Ok(quote! {
+                ::nirvash::SymbolicSort::composite::<Self>(vec![#(#field_sorts),*])
+            })
+        }
+        Fields::Unit => Ok(quote! {
+            ::nirvash::SymbolicSort::composite::<Self>(vec![])
+        }),
     }
 }
 

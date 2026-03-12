@@ -32,7 +32,6 @@ nirvash::register_symbolic_pure_helpers!(
     "first_active_session",
     "first_queued_http_request",
     "http_outbound_host",
-    "imagod_system_transition",
     "log_chunks_with_chunk",
     "logs_chunk_payload",
     "logs_chunk_stream",

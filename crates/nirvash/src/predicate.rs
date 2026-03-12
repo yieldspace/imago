@@ -3,7 +3,10 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::registry::{has_registered_symbolic_effect, has_registered_symbolic_pure_helper};
+use crate::{
+    normalize_symbolic_state_path,
+    registry::{has_registered_symbolic_effect, has_registered_symbolic_pure_helper},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuantifierKind {
@@ -88,6 +91,23 @@ fn symbolic_effect_registration(key: &'static str) -> SymbolicRegistration {
     }
 }
 
+fn collect_symbolic_state_path(paths: &mut BTreeSet<&'static str>, path: &'static str) {
+    if let Some(normalized) = normalize_symbolic_state_path(path) {
+        if !normalized.is_empty() {
+            paths.insert(normalized);
+        }
+    }
+}
+
+fn collect_symbolic_state_paths_from_hints(
+    paths: &mut BTreeSet<&'static str>,
+    read_paths: &'static [&'static str],
+) {
+    for path in read_paths {
+        collect_symbolic_state_path(paths, path);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ErasedStateExprAst<S> {
     Opaque {
@@ -102,6 +122,7 @@ pub enum ErasedStateExprAst<S> {
     PureCall {
         name: &'static str,
         symbolic: SymbolicRegistration,
+        read_paths: &'static [&'static str],
     },
     Add {
         lhs: Box<Self>,
@@ -126,7 +147,7 @@ impl<S: 'static> ErasedStateExprAst<S> {
                 then_branch,
                 else_branch,
             } => condition
-                .first_unencodable()
+                .first_unencodable_symbolic_node()
                 .or_else(|| then_branch.first_unencodable())
                 .or_else(|| else_branch.first_unencodable()),
         }
@@ -171,6 +192,29 @@ impl<S: 'static> ErasedStateExprAst<S> {
             }
         }
     }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Opaque { .. } | Self::Literal { .. } => {}
+            Self::FieldRead { path } => collect_symbolic_state_path(paths, path),
+            Self::PureCall { read_paths, .. } => {
+                collect_symbolic_state_paths_from_hints(paths, read_paths);
+            }
+            Self::Add { lhs, rhs } => {
+                lhs.collect_symbolic_state_paths(paths);
+                rhs.collect_symbolic_state_paths(paths);
+            }
+            Self::IfElse {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                condition.collect_symbolic_state_paths(paths);
+                then_branch.collect_symbolic_state_paths(paths);
+                else_branch.collect_symbolic_state_paths(paths);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +234,7 @@ pub enum StateExprAst<S, T> {
     PureCall {
         name: &'static str,
         symbolic: SymbolicRegistration,
+        read_paths: &'static [&'static str],
         _marker: PhantomData<fn() -> T>,
     },
     Add {
@@ -209,9 +254,15 @@ impl<S: Clone, T> StateExprAst<S, T> {
             Self::Opaque { repr, .. } => ErasedStateExprAst::Opaque { repr },
             Self::Literal { repr, .. } => ErasedStateExprAst::Literal { repr },
             Self::FieldRead { path, .. } => ErasedStateExprAst::FieldRead { path },
-            Self::PureCall { name, symbolic, .. } => ErasedStateExprAst::PureCall {
+            Self::PureCall {
+                name,
+                symbolic,
+                read_paths,
+                ..
+            } => ErasedStateExprAst::PureCall {
                 name,
                 symbolic: *symbolic,
+                read_paths,
             },
             Self::Add { lhs, rhs } => ErasedStateExprAst::Add {
                 lhs: Box::new(lhs.erase()),
@@ -311,12 +362,21 @@ where
     }
 
     pub fn pure_call(name: &'static str, eval: fn(&S) -> T) -> Self {
+        Self::pure_call_with_paths(name, &[], eval)
+    }
+
+    pub fn pure_call_with_paths(
+        name: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S) -> T,
+    ) -> Self {
         Self {
             name,
             body: StateExprBody::Ast {
                 ast: StateExprAst::PureCall {
                     name,
                     symbolic: SymbolicRegistration::Unregistered(name),
+                    read_paths,
                     _marker: PhantomData,
                 },
                 eval: Arc::new(move |state| eval(state)),
@@ -325,12 +385,21 @@ where
     }
 
     pub fn builtin_pure_call(name: &'static str, eval: fn(&S) -> T) -> Self {
+        Self::builtin_pure_call_with_paths(name, &[], eval)
+    }
+
+    pub fn builtin_pure_call_with_paths(
+        name: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S) -> T,
+    ) -> Self {
         Self {
             name,
             body: StateExprBody::Ast {
                 ast: StateExprAst::PureCall {
                     name,
                     symbolic: SymbolicRegistration::Builtin,
+                    read_paths,
                     _marker: PhantomData,
                 },
                 eval: Arc::new(move |state| eval(state)),
@@ -343,12 +412,22 @@ where
         registration: &'static str,
         eval: fn(&S) -> T,
     ) -> Self {
+        Self::registered_pure_call_with_paths(name, registration, &[], eval)
+    }
+
+    pub fn registered_pure_call_with_paths(
+        name: &'static str,
+        registration: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S) -> T,
+    ) -> Self {
         Self {
             name,
             body: StateExprBody::Ast {
                 ast: StateExprAst::PureCall {
                     name,
                     symbolic: symbolic_pure_registration(registration),
+                    read_paths,
                     _marker: PhantomData,
                 },
                 eval: Arc::new(move |state| eval(state)),
@@ -570,6 +649,11 @@ impl<S: 'static> StateComparison<S> {
         self.lhs_ast.collect_unregistered_symbolic_pure_keys(keys);
         self.rhs_ast.collect_unregistered_symbolic_pure_keys(keys);
     }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_symbolic_state_paths(paths);
+        self.rhs_ast.collect_symbolic_state_paths(paths);
+    }
 }
 
 impl<S> fmt::Debug for StateComparison<S> {
@@ -609,12 +693,17 @@ impl<S> StateMatch<S> {
     fn eval(&self, state: &S) -> bool {
         (self.eval)(state)
     }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        collect_symbolic_state_path(paths, self.value);
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct StateBoolLeaf<S> {
     label: &'static str,
     symbolic: SymbolicRegistration,
+    read_paths: &'static [&'static str],
     eval: fn(&S) -> bool,
 }
 
@@ -622,11 +711,13 @@ impl<S> StateBoolLeaf<S> {
     pub const fn new(
         label: &'static str,
         symbolic: SymbolicRegistration,
+        read_paths: &'static [&'static str],
         eval: fn(&S) -> bool,
     ) -> Self {
         Self {
             label,
             symbolic,
+            read_paths,
             eval,
         }
     }
@@ -649,6 +740,10 @@ impl<S> StateBoolLeaf<S> {
 
     fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         self.symbolic.collect_unregistered_key(keys);
+    }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        collect_symbolic_state_paths_from_hints(paths, self.read_paths);
     }
 }
 
@@ -740,10 +835,10 @@ impl<S: 'static> BoolExprAst<S> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.first_unencodable(),
-            Self::Not(inner) => inner.first_unencodable(),
-            Self::And(parts) | Self::Or(parts) => {
-                parts.iter().find_map(BoolExpr::first_unencodable)
-            }
+            Self::Not(inner) => inner.first_unencodable_symbolic_node(),
+            Self::And(parts) | Self::Or(parts) => parts
+                .iter()
+                .find_map(BoolExpr::first_unencodable_symbolic_node),
         }
     }
 
@@ -788,6 +883,28 @@ impl<S: 'static> BoolExprAst<S> {
             }
         }
     }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Literal(_) | Self::ForAll(_) | Self::Exists(_) => {}
+            Self::FieldRead(field) | Self::PureCall(field) => {
+                field.collect_symbolic_state_paths(paths)
+            }
+            Self::Eq(compare)
+            | Self::Ne(compare)
+            | Self::Lt(compare)
+            | Self::Le(compare)
+            | Self::Gt(compare)
+            | Self::Ge(compare) => compare.collect_symbolic_state_paths(paths),
+            Self::Match(matcher) => matcher.collect_symbolic_state_paths(paths),
+            Self::Not(inner) => inner.collect_symbolic_state_paths(paths),
+            Self::And(parts) | Self::Or(parts) => {
+                for part in parts {
+                    part.collect_symbolic_state_paths(paths);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -822,28 +939,47 @@ impl<S: 'static> BoolExpr<S> {
             body: BoolExprBody::Ast(BoolExprAst::FieldRead(StateBoolLeaf::new(
                 path,
                 SymbolicRegistration::Builtin,
+                &[],
                 read,
             ))),
         }
     }
 
     pub const fn pure_call(name: &'static str, eval: fn(&S) -> bool) -> Self {
+        Self::pure_call_with_paths(name, &[], eval)
+    }
+
+    pub const fn pure_call_with_paths(
+        name: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S) -> bool,
+    ) -> Self {
         Self {
             name,
             body: BoolExprBody::Ast(BoolExprAst::PureCall(StateBoolLeaf::new(
                 name,
                 SymbolicRegistration::Unregistered(name),
+                read_paths,
                 eval,
             ))),
         }
     }
 
     pub const fn builtin_pure_call(name: &'static str, eval: fn(&S) -> bool) -> Self {
+        Self::builtin_pure_call_with_paths(name, &[], eval)
+    }
+
+    pub const fn builtin_pure_call_with_paths(
+        name: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S) -> bool,
+    ) -> Self {
         Self {
             name,
             body: BoolExprBody::Ast(BoolExprAst::PureCall(StateBoolLeaf::new(
                 name,
                 SymbolicRegistration::Builtin,
+                read_paths,
                 eval,
             ))),
         }
@@ -854,11 +990,21 @@ impl<S: 'static> BoolExpr<S> {
         registration: &'static str,
         eval: fn(&S) -> bool,
     ) -> Self {
+        Self::registered_pure_call_with_paths(name, registration, &[], eval)
+    }
+
+    pub fn registered_pure_call_with_paths(
+        name: &'static str,
+        registration: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S) -> bool,
+    ) -> Self {
         Self {
             name,
             body: BoolExprBody::Ast(BoolExprAst::PureCall(StateBoolLeaf::new(
                 name,
                 symbolic_pure_registration(registration),
+                read_paths,
                 eval,
             ))),
         }
@@ -1162,7 +1308,7 @@ impl<S: 'static> BoolExpr<S> {
         matches!(self.body, BoolExprBody::Ast(_))
     }
 
-    pub(crate) fn first_unencodable(&self) -> Option<&'static str> {
+    pub fn first_unencodable_symbolic_node(&self) -> Option<&'static str> {
         self.ast().and_then(BoolExprAst::first_unencodable)
     }
 
@@ -1176,6 +1322,18 @@ impl<S: 'static> BoolExpr<S> {
         if let Some(ast) = self.ast() {
             ast.collect_unregistered_symbolic_pure_keys(keys);
         }
+    }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        if let Some(ast) = self.ast() {
+            ast.collect_symbolic_state_paths(paths);
+        }
+    }
+
+    pub fn symbolic_state_paths(&self) -> Vec<&'static str> {
+        let mut paths = BTreeSet::new();
+        self.collect_symbolic_state_paths(&mut paths);
+        paths.into_iter().collect()
     }
 
     pub fn eval(&self, state: &S) -> bool {
@@ -1221,6 +1379,7 @@ pub enum ErasedStepValueExprAst<S, A> {
     PureCall {
         name: &'static str,
         symbolic: SymbolicRegistration,
+        read_paths: &'static [&'static str],
     },
     Add {
         lhs: Box<Self>,
@@ -1245,7 +1404,7 @@ impl<S: 'static, A: 'static> ErasedStepValueExprAst<S, A> {
                 then_branch,
                 else_branch,
             } => condition
-                .first_unencodable()
+                .first_unencodable_symbolic_node()
                 .or_else(|| then_branch.first_unencodable())
                 .or_else(|| else_branch.first_unencodable()),
         }
@@ -1290,6 +1449,29 @@ impl<S: 'static, A: 'static> ErasedStepValueExprAst<S, A> {
             }
         }
     }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Opaque { .. } | Self::Literal { .. } => {}
+            Self::FieldRead { path } => collect_symbolic_state_path(paths, path),
+            Self::PureCall { read_paths, .. } => {
+                collect_symbolic_state_paths_from_hints(paths, read_paths);
+            }
+            Self::Add { lhs, rhs } => {
+                lhs.collect_symbolic_state_paths(paths);
+                rhs.collect_symbolic_state_paths(paths);
+            }
+            Self::IfElse {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                condition.collect_symbolic_state_paths(paths);
+                then_branch.collect_symbolic_state_paths(paths);
+                else_branch.collect_symbolic_state_paths(paths);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1309,6 +1491,7 @@ pub enum StepValueExprAst<S, A, T> {
     PureCall {
         name: &'static str,
         symbolic: SymbolicRegistration,
+        read_paths: &'static [&'static str],
         _marker: PhantomData<fn() -> T>,
     },
     Add {
@@ -1328,9 +1511,15 @@ impl<S: Clone, A: Clone, T> StepValueExprAst<S, A, T> {
             Self::Opaque { repr, .. } => ErasedStepValueExprAst::Opaque { repr },
             Self::Literal { repr, .. } => ErasedStepValueExprAst::Literal { repr },
             Self::FieldRead { path, .. } => ErasedStepValueExprAst::FieldRead { path },
-            Self::PureCall { name, symbolic, .. } => ErasedStepValueExprAst::PureCall {
+            Self::PureCall {
+                name,
+                symbolic,
+                read_paths,
+                ..
+            } => ErasedStepValueExprAst::PureCall {
                 name,
                 symbolic: *symbolic,
+                read_paths,
             },
             Self::Add { lhs, rhs } => ErasedStepValueExprAst::Add {
                 lhs: Box::new(lhs.erase()),
@@ -1421,12 +1610,21 @@ where
     }
 
     pub fn pure_call(name: &'static str, eval: fn(&S, &A, &S) -> T) -> Self {
+        Self::pure_call_with_paths(name, &[], eval)
+    }
+
+    pub fn pure_call_with_paths(
+        name: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S, &A, &S) -> T,
+    ) -> Self {
         Self {
             name,
             body: StepValueExprBody::Ast {
                 ast: StepValueExprAst::PureCall {
                     name,
                     symbolic: SymbolicRegistration::Unregistered(name),
+                    read_paths,
                     _marker: PhantomData,
                 },
                 eval: Arc::new(move |prev, action, next| eval(prev, action, next)),
@@ -1435,12 +1633,21 @@ where
     }
 
     pub fn builtin_pure_call(name: &'static str, eval: fn(&S, &A, &S) -> T) -> Self {
+        Self::builtin_pure_call_with_paths(name, &[], eval)
+    }
+
+    pub fn builtin_pure_call_with_paths(
+        name: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S, &A, &S) -> T,
+    ) -> Self {
         Self {
             name,
             body: StepValueExprBody::Ast {
                 ast: StepValueExprAst::PureCall {
                     name,
                     symbolic: SymbolicRegistration::Builtin,
+                    read_paths,
                     _marker: PhantomData,
                 },
                 eval: Arc::new(move |prev, action, next| eval(prev, action, next)),
@@ -1453,12 +1660,22 @@ where
         registration: &'static str,
         eval: fn(&S, &A, &S) -> T,
     ) -> Self {
+        Self::registered_pure_call_with_paths(name, registration, &[], eval)
+    }
+
+    pub fn registered_pure_call_with_paths(
+        name: &'static str,
+        registration: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S, &A, &S) -> T,
+    ) -> Self {
         Self {
             name,
             body: StepValueExprBody::Ast {
                 ast: StepValueExprAst::PureCall {
                     name,
                     symbolic: symbolic_pure_registration(registration),
+                    read_paths,
                     _marker: PhantomData,
                 },
                 eval: Arc::new(move |prev, action, next| eval(prev, action, next)),
@@ -1657,6 +1874,11 @@ impl<S: 'static, A: 'static> StepComparison<S, A> {
         self.lhs_ast.collect_unregistered_symbolic_pure_keys(keys);
         self.rhs_ast.collect_unregistered_symbolic_pure_keys(keys);
     }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_symbolic_state_paths(paths);
+        self.rhs_ast.collect_symbolic_state_paths(paths);
+    }
 }
 
 impl<S, A> fmt::Debug for StepComparison<S, A> {
@@ -1700,12 +1922,17 @@ impl<S, A> StepMatch<S, A> {
     fn eval(&self, prev: &S, action: &A, next: &S) -> bool {
         (self.eval)(prev, action, next)
     }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        collect_symbolic_state_path(paths, self.value);
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct StepBoolLeaf<S, A> {
     label: &'static str,
     symbolic: SymbolicRegistration,
+    read_paths: &'static [&'static str],
     eval: fn(&S, &A, &S) -> bool,
 }
 
@@ -1713,11 +1940,13 @@ impl<S, A> StepBoolLeaf<S, A> {
     pub const fn new(
         label: &'static str,
         symbolic: SymbolicRegistration,
+        read_paths: &'static [&'static str],
         eval: fn(&S, &A, &S) -> bool,
     ) -> Self {
         Self {
             label,
             symbolic,
+            read_paths,
             eval,
         }
     }
@@ -1740,6 +1969,10 @@ impl<S, A> StepBoolLeaf<S, A> {
 
     fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         self.symbolic.collect_unregistered_key(keys);
+    }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        collect_symbolic_state_paths_from_hints(paths, self.read_paths);
     }
 }
 
@@ -1833,10 +2066,10 @@ impl<S: 'static, A: 'static> StepExprAst<S, A> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.first_unencodable(),
-            Self::Not(inner) => inner.first_unencodable(),
-            Self::And(parts) | Self::Or(parts) => {
-                parts.iter().find_map(StepExpr::first_unencodable)
-            }
+            Self::Not(inner) => inner.first_unencodable_symbolic_node(),
+            Self::And(parts) | Self::Or(parts) => parts
+                .iter()
+                .find_map(StepExpr::first_unencodable_symbolic_node),
         }
     }
 
@@ -1881,6 +2114,27 @@ impl<S: 'static, A: 'static> StepExprAst<S, A> {
             }
         }
     }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Literal(_) | Self::ForAll(_) | Self::Exists(_) => {}
+            Self::FieldRead(field) => collect_symbolic_state_path(paths, field.label()),
+            Self::PureCall(field) => field.collect_symbolic_state_paths(paths),
+            Self::Eq(compare)
+            | Self::Ne(compare)
+            | Self::Lt(compare)
+            | Self::Le(compare)
+            | Self::Gt(compare)
+            | Self::Ge(compare) => compare.collect_symbolic_state_paths(paths),
+            Self::Match(matcher) => matcher.collect_symbolic_state_paths(paths),
+            Self::Not(inner) => inner.collect_symbolic_state_paths(paths),
+            Self::And(parts) | Self::Or(parts) => {
+                for part in parts {
+                    part.collect_symbolic_state_paths(paths);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1919,28 +2173,47 @@ impl<S: 'static, A: 'static> StepExpr<S, A> {
             body: StepExprBody::Ast(StepExprAst::FieldRead(StepBoolLeaf::new(
                 path,
                 SymbolicRegistration::Builtin,
+                &[],
                 read,
             ))),
         }
     }
 
     pub const fn pure_call(name: &'static str, eval: fn(&S, &A, &S) -> bool) -> Self {
+        Self::pure_call_with_paths(name, &[], eval)
+    }
+
+    pub const fn pure_call_with_paths(
+        name: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S, &A, &S) -> bool,
+    ) -> Self {
         Self {
             name,
             body: StepExprBody::Ast(StepExprAst::PureCall(StepBoolLeaf::new(
                 name,
                 SymbolicRegistration::Unregistered(name),
+                read_paths,
                 eval,
             ))),
         }
     }
 
     pub const fn builtin_pure_call(name: &'static str, eval: fn(&S, &A, &S) -> bool) -> Self {
+        Self::builtin_pure_call_with_paths(name, &[], eval)
+    }
+
+    pub const fn builtin_pure_call_with_paths(
+        name: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S, &A, &S) -> bool,
+    ) -> Self {
         Self {
             name,
             body: StepExprBody::Ast(StepExprAst::PureCall(StepBoolLeaf::new(
                 name,
                 SymbolicRegistration::Builtin,
+                read_paths,
                 eval,
             ))),
         }
@@ -1951,11 +2224,21 @@ impl<S: 'static, A: 'static> StepExpr<S, A> {
         registration: &'static str,
         eval: fn(&S, &A, &S) -> bool,
     ) -> Self {
+        Self::registered_pure_call_with_paths(name, registration, &[], eval)
+    }
+
+    pub fn registered_pure_call_with_paths(
+        name: &'static str,
+        registration: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S, &A, &S) -> bool,
+    ) -> Self {
         Self {
             name,
             body: StepExprBody::Ast(StepExprAst::PureCall(StepBoolLeaf::new(
                 name,
                 symbolic_pure_registration(registration),
+                read_paths,
                 eval,
             ))),
         }
@@ -2307,7 +2590,7 @@ impl<S: 'static, A: 'static> StepExpr<S, A> {
         matches!(self.body, StepExprBody::Ast(_))
     }
 
-    fn first_unencodable(&self) -> Option<&'static str> {
+    pub fn first_unencodable_symbolic_node(&self) -> Option<&'static str> {
         self.ast().and_then(StepExprAst::first_unencodable)
     }
 
@@ -2321,6 +2604,18 @@ impl<S: 'static, A: 'static> StepExpr<S, A> {
         if let Some(ast) = self.ast() {
             ast.collect_unregistered_symbolic_pure_keys(keys);
         }
+    }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        if let Some(ast) = self.ast() {
+            ast.collect_symbolic_state_paths(paths);
+        }
+    }
+
+    pub fn symbolic_state_paths(&self) -> Vec<&'static str> {
+        let mut paths = BTreeSet::new();
+        self.collect_symbolic_state_paths(&mut paths);
+        paths.into_iter().collect()
     }
 
     pub fn eval(&self, prev: &S, action: &A, next: &S) -> bool {
@@ -2369,6 +2664,7 @@ pub enum ErasedGuardValueExprAst<S, A> {
     PureCall {
         name: &'static str,
         symbolic: SymbolicRegistration,
+        read_paths: &'static [&'static str],
     },
     Add {
         lhs: Box<Self>,
@@ -2393,7 +2689,7 @@ impl<S: 'static, A: 'static> ErasedGuardValueExprAst<S, A> {
                 then_branch,
                 else_branch,
             } => condition
-                .first_unencodable()
+                .first_unencodable_symbolic_node()
                 .or_else(|| then_branch.first_unencodable())
                 .or_else(|| else_branch.first_unencodable()),
         }
@@ -2438,6 +2734,29 @@ impl<S: 'static, A: 'static> ErasedGuardValueExprAst<S, A> {
             }
         }
     }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Opaque { .. } | Self::Literal { .. } => {}
+            Self::FieldRead { path } => collect_symbolic_state_path(paths, path),
+            Self::PureCall { read_paths, .. } => {
+                collect_symbolic_state_paths_from_hints(paths, read_paths);
+            }
+            Self::Add { lhs, rhs } => {
+                lhs.collect_symbolic_state_paths(paths);
+                rhs.collect_symbolic_state_paths(paths);
+            }
+            Self::IfElse {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                condition.collect_symbolic_state_paths(paths);
+                then_branch.collect_symbolic_state_paths(paths);
+                else_branch.collect_symbolic_state_paths(paths);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2457,6 +2776,7 @@ pub enum GuardValueExprAst<S, A, T> {
     PureCall {
         name: &'static str,
         symbolic: SymbolicRegistration,
+        read_paths: &'static [&'static str],
         _marker: PhantomData<fn() -> T>,
     },
     Add {
@@ -2476,9 +2796,15 @@ impl<S: Clone, A: Clone, T> GuardValueExprAst<S, A, T> {
             Self::Opaque { repr, .. } => ErasedGuardValueExprAst::Opaque { repr },
             Self::Literal { repr, .. } => ErasedGuardValueExprAst::Literal { repr },
             Self::FieldRead { path, .. } => ErasedGuardValueExprAst::FieldRead { path },
-            Self::PureCall { name, symbolic, .. } => ErasedGuardValueExprAst::PureCall {
+            Self::PureCall {
+                name,
+                symbolic,
+                read_paths,
+                ..
+            } => ErasedGuardValueExprAst::PureCall {
                 name,
                 symbolic: *symbolic,
+                read_paths,
             },
             Self::Add { lhs, rhs } => ErasedGuardValueExprAst::Add {
                 lhs: Box::new(lhs.erase()),
@@ -2569,12 +2895,21 @@ where
     }
 
     pub fn pure_call(name: &'static str, eval: fn(&S, &A) -> T) -> Self {
+        Self::pure_call_with_paths(name, &[], eval)
+    }
+
+    pub fn pure_call_with_paths(
+        name: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S, &A) -> T,
+    ) -> Self {
         Self {
             name,
             body: GuardValueExprBody::Ast {
                 ast: GuardValueExprAst::PureCall {
                     name,
                     symbolic: SymbolicRegistration::Unregistered(name),
+                    read_paths,
                     _marker: PhantomData,
                 },
                 eval: Arc::new(move |prev, action| eval(prev, action)),
@@ -2583,12 +2918,21 @@ where
     }
 
     pub fn builtin_pure_call(name: &'static str, eval: fn(&S, &A) -> T) -> Self {
+        Self::builtin_pure_call_with_paths(name, &[], eval)
+    }
+
+    pub fn builtin_pure_call_with_paths(
+        name: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S, &A) -> T,
+    ) -> Self {
         Self {
             name,
             body: GuardValueExprBody::Ast {
                 ast: GuardValueExprAst::PureCall {
                     name,
                     symbolic: SymbolicRegistration::Builtin,
+                    read_paths,
                     _marker: PhantomData,
                 },
                 eval: Arc::new(move |prev, action| eval(prev, action)),
@@ -2601,12 +2945,22 @@ where
         registration: &'static str,
         eval: fn(&S, &A) -> T,
     ) -> Self {
+        Self::registered_pure_call_with_paths(name, registration, &[], eval)
+    }
+
+    pub fn registered_pure_call_with_paths(
+        name: &'static str,
+        registration: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S, &A) -> T,
+    ) -> Self {
         Self {
             name,
             body: GuardValueExprBody::Ast {
                 ast: GuardValueExprAst::PureCall {
                     name,
                     symbolic: symbolic_pure_registration(registration),
+                    read_paths,
                     _marker: PhantomData,
                 },
                 eval: Arc::new(move |prev, action| eval(prev, action)),
@@ -2805,6 +3159,11 @@ impl<S: 'static, A: 'static> GuardComparison<S, A> {
         self.lhs_ast.collect_unregistered_symbolic_pure_keys(keys);
         self.rhs_ast.collect_unregistered_symbolic_pure_keys(keys);
     }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_symbolic_state_paths(paths);
+        self.rhs_ast.collect_symbolic_state_paths(paths);
+    }
 }
 
 impl<S, A> fmt::Debug for GuardComparison<S, A> {
@@ -2844,12 +3203,17 @@ impl<S, A> GuardMatch<S, A> {
     fn eval(&self, prev: &S, action: &A) -> bool {
         (self.eval)(prev, action)
     }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        collect_symbolic_state_path(paths, self.value);
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct GuardBoolLeaf<S, A> {
     label: &'static str,
     symbolic: SymbolicRegistration,
+    read_paths: &'static [&'static str],
     eval: fn(&S, &A) -> bool,
 }
 
@@ -2857,11 +3221,13 @@ impl<S, A> GuardBoolLeaf<S, A> {
     pub const fn new(
         label: &'static str,
         symbolic: SymbolicRegistration,
+        read_paths: &'static [&'static str],
         eval: fn(&S, &A) -> bool,
     ) -> Self {
         Self {
             label,
             symbolic,
+            read_paths,
             eval,
         }
     }
@@ -2884,6 +3250,10 @@ impl<S, A> GuardBoolLeaf<S, A> {
 
     fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         self.symbolic.collect_unregistered_key(keys);
+    }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        collect_symbolic_state_paths_from_hints(paths, self.read_paths);
     }
 }
 
@@ -2975,10 +3345,10 @@ impl<S: 'static, A: 'static> GuardAst<S, A> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.first_unencodable(),
-            Self::Not(inner) => inner.first_unencodable(),
-            Self::And(parts) | Self::Or(parts) => {
-                parts.iter().find_map(GuardExpr::first_unencodable)
-            }
+            Self::Not(inner) => inner.first_unencodable_symbolic_node(),
+            Self::And(parts) | Self::Or(parts) => parts
+                .iter()
+                .find_map(GuardExpr::first_unencodable_symbolic_node),
         }
     }
 
@@ -3023,6 +3393,28 @@ impl<S: 'static, A: 'static> GuardAst<S, A> {
             }
         }
     }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Literal(_) | Self::ForAll(_) | Self::Exists(_) => {}
+            Self::FieldRead(field) | Self::PureCall(field) => {
+                field.collect_symbolic_state_paths(paths)
+            }
+            Self::Eq(compare)
+            | Self::Ne(compare)
+            | Self::Lt(compare)
+            | Self::Le(compare)
+            | Self::Gt(compare)
+            | Self::Ge(compare) => compare.collect_symbolic_state_paths(paths),
+            Self::Match(matcher) => matcher.collect_symbolic_state_paths(paths),
+            Self::Not(inner) => inner.collect_symbolic_state_paths(paths),
+            Self::And(parts) | Self::Or(parts) => {
+                for part in parts {
+                    part.collect_symbolic_state_paths(paths);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -3057,28 +3449,47 @@ impl<S: 'static, A: 'static> GuardExpr<S, A> {
             body: GuardExprBody::Ast(GuardAst::FieldRead(GuardBoolLeaf::new(
                 path,
                 SymbolicRegistration::Builtin,
+                &[],
                 read,
             ))),
         }
     }
 
     pub const fn pure_call(name: &'static str, eval: fn(&S, &A) -> bool) -> Self {
+        Self::pure_call_with_paths(name, &[], eval)
+    }
+
+    pub const fn pure_call_with_paths(
+        name: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S, &A) -> bool,
+    ) -> Self {
         Self {
             name,
             body: GuardExprBody::Ast(GuardAst::PureCall(GuardBoolLeaf::new(
                 name,
                 SymbolicRegistration::Unregistered(name),
+                read_paths,
                 eval,
             ))),
         }
     }
 
     pub const fn builtin_pure_call(name: &'static str, eval: fn(&S, &A) -> bool) -> Self {
+        Self::builtin_pure_call_with_paths(name, &[], eval)
+    }
+
+    pub const fn builtin_pure_call_with_paths(
+        name: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S, &A) -> bool,
+    ) -> Self {
         Self {
             name,
             body: GuardExprBody::Ast(GuardAst::PureCall(GuardBoolLeaf::new(
                 name,
                 SymbolicRegistration::Builtin,
+                read_paths,
                 eval,
             ))),
         }
@@ -3089,11 +3500,21 @@ impl<S: 'static, A: 'static> GuardExpr<S, A> {
         registration: &'static str,
         eval: fn(&S, &A) -> bool,
     ) -> Self {
+        Self::registered_pure_call_with_paths(name, registration, &[], eval)
+    }
+
+    pub fn registered_pure_call_with_paths(
+        name: &'static str,
+        registration: &'static str,
+        read_paths: &'static [&'static str],
+        eval: fn(&S, &A) -> bool,
+    ) -> Self {
         Self {
             name,
             body: GuardExprBody::Ast(GuardAst::PureCall(GuardBoolLeaf::new(
                 name,
                 symbolic_pure_registration(registration),
+                read_paths,
                 eval,
             ))),
         }
@@ -3433,7 +3854,7 @@ impl<S: 'static, A: 'static> GuardExpr<S, A> {
         matches!(self.body, GuardExprBody::Ast(_))
     }
 
-    fn first_unencodable(&self) -> Option<&'static str> {
+    pub fn first_unencodable_symbolic_node(&self) -> Option<&'static str> {
         self.ast().and_then(GuardAst::first_unencodable)
     }
 
@@ -3447,6 +3868,18 @@ impl<S: 'static, A: 'static> GuardExpr<S, A> {
         if let Some(ast) = self.ast() {
             ast.collect_unregistered_symbolic_pure_keys(keys);
         }
+    }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        if let Some(ast) = self.ast() {
+            ast.collect_symbolic_state_paths(paths);
+        }
+    }
+
+    pub fn symbolic_state_paths(&self) -> Vec<&'static str> {
+        let mut paths = BTreeSet::new();
+        self.collect_symbolic_state_paths(&mut paths);
+        paths.into_iter().collect()
     }
 
     pub fn eval(&self, prev: &S, action: &A) -> bool {
@@ -3495,6 +3928,7 @@ pub enum UpdateValueExprAst<S, A> {
     PureCall {
         name: &'static str,
         symbolic: SymbolicRegistration,
+        read_paths: &'static [&'static str],
     },
     Add {
         lhs: Box<Self>,
@@ -3517,16 +3951,33 @@ impl<S, A> UpdateValueExprAst<S, A> {
     }
 
     pub const fn builtin_pure_call(name: &'static str) -> Self {
+        Self::builtin_pure_call_with_paths(name, &[])
+    }
+
+    pub const fn builtin_pure_call_with_paths(
+        name: &'static str,
+        read_paths: &'static [&'static str],
+    ) -> Self {
         Self::PureCall {
             name,
             symbolic: SymbolicRegistration::Builtin,
+            read_paths,
         }
     }
 
     pub fn registered_pure_call(name: &'static str, registration: &'static str) -> Self {
+        Self::registered_pure_call_with_paths(name, registration, &[])
+    }
+
+    pub fn registered_pure_call_with_paths(
+        name: &'static str,
+        registration: &'static str,
+        read_paths: &'static [&'static str],
+    ) -> Self {
         Self::PureCall {
             name,
             symbolic: symbolic_pure_registration(registration),
+            read_paths,
         }
     }
 
@@ -3570,6 +4021,20 @@ impl<S, A> UpdateValueExprAst<S, A> {
             Self::Add { lhs, rhs } => {
                 lhs.collect_unregistered_symbolic_pure_keys(keys);
                 rhs.collect_unregistered_symbolic_pure_keys(keys);
+            }
+        }
+    }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Opaque { .. } | Self::Literal { .. } | Self::_Phantom(_) => {}
+            Self::FieldRead { path } => collect_symbolic_state_path(paths, path),
+            Self::PureCall { read_paths, .. } => {
+                collect_symbolic_state_paths_from_hints(paths, read_paths);
+            }
+            Self::Add { lhs, rhs } => {
+                lhs.collect_symbolic_state_paths(paths);
+                rhs.collect_symbolic_state_paths(paths);
             }
         }
     }
@@ -3732,6 +4197,23 @@ impl<S, A> UpdateOp<S, A> {
             symbolic.collect_unregistered_key(keys);
         }
     }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Assign { value_ast, .. } => value_ast.collect_symbolic_state_paths(paths),
+            Self::SetInsert { item_ast, .. } | Self::SetRemove { item_ast, .. } => {
+                item_ast.collect_symbolic_state_paths(paths);
+            }
+            Self::Effect { .. } => {}
+        }
+    }
+
+    fn effect_name(&self) -> Option<&'static str> {
+        match self {
+            Self::Effect { name, .. } => Some(name),
+            Self::Assign { .. } | Self::SetInsert { .. } | Self::SetRemove { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -3794,6 +4276,40 @@ impl<S, A> UpdateAst<S, A> {
                 }
             }
         }
+    }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Sequence(ops) => {
+                for op in ops {
+                    op.collect_symbolic_state_paths(paths);
+                }
+            }
+        }
+    }
+
+    fn collect_effect_names(&self, names: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Sequence(ops) => {
+                for op in ops {
+                    if let Some(name) = op.effect_name() {
+                        names.insert(name);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn symbolic_state_paths(&self) -> Vec<&'static str> {
+        let mut paths = BTreeSet::new();
+        self.collect_symbolic_state_paths(&mut paths);
+        paths.into_iter().collect()
+    }
+
+    pub fn effect_names(&self) -> Vec<&'static str> {
+        let mut names = BTreeSet::new();
+        self.collect_effect_names(&mut names);
+        names.into_iter().collect()
     }
 }
 
@@ -3971,9 +4487,26 @@ impl<S: 'static, A: 'static> TransitionRule<S, A> {
     pub fn first_unencodable_symbolic_node(&self) -> Option<&'static str> {
         match &self.body {
             TransitionRuleBody::Guarded { guard, update } => guard
-                .first_unencodable()
+                .first_unencodable_symbolic_node()
                 .or_else(|| update.ast_body().and_then(UpdateAst::first_unencodable)),
         }
+    }
+
+    pub fn symbolic_state_paths(&self) -> Vec<&'static str> {
+        let mut paths = BTreeSet::new();
+        if let Some(ast) = self.guard_ast() {
+            ast.collect_symbolic_state_paths(&mut paths);
+        }
+        if let Some(ast) = self.update_ast() {
+            ast.collect_symbolic_state_paths(&mut paths);
+        }
+        paths.into_iter().collect()
+    }
+
+    pub fn effect_names(&self) -> Vec<&'static str> {
+        self.update_ast()
+            .map(UpdateAst::effect_names)
+            .unwrap_or_default()
     }
 
     fn collect_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
@@ -4115,6 +4648,26 @@ impl<S: 'static, A: 'static> TransitionProgram<S, A> {
             rule.collect_unregistered_symbolic_effect_keys(&mut keys);
         }
         keys.into_iter().collect()
+    }
+
+    pub fn symbolic_state_paths(&self) -> Vec<&'static str> {
+        let mut paths = BTreeSet::new();
+        for rule in &self.rules {
+            for path in rule.symbolic_state_paths() {
+                paths.insert(path);
+            }
+        }
+        paths.into_iter().collect()
+    }
+
+    pub fn effect_names(&self) -> Vec<&'static str> {
+        let mut names = BTreeSet::new();
+        for rule in &self.rules {
+            for name in rule.effect_names() {
+                names.insert(name);
+            }
+        }
+        names.into_iter().collect()
     }
 
     pub fn successors(&self, prev: &S, action: &A) -> Vec<TransitionSuccessor<S>>
@@ -4719,6 +5272,36 @@ mod tests {
         );
         assert!(program.unregistered_symbolic_pure_helper_keys().is_empty());
         assert!(program.unregistered_symbolic_effect_keys().is_empty());
+    }
+
+    #[test]
+    fn transition_program_collects_pure_call_read_paths() {
+        let program = TransitionProgram::named(
+            "pure_call_paths",
+            vec![TransitionRule::ast(
+                "pure_rule",
+                GuardExpr::builtin_pure_call_with_paths(
+                    "ready.clone()",
+                    &["prev.ready"],
+                    |state: &Worker, _action: &Action| state.ready,
+                ),
+                UpdateProgram::ast(
+                    "copy_phase",
+                    vec![UpdateOp::assign_ast(
+                        "state",
+                        UpdateValueExprAst::builtin_pure_call_with_paths(
+                            "prev.state.clone()",
+                            &["prev.state"],
+                        ),
+                        |prev: &Worker, state: &mut Worker, _action: &Action| {
+                            state.state = prev.state;
+                        },
+                    )],
+                ),
+            )],
+        );
+
+        assert_eq!(program.symbolic_state_paths(), vec!["ready", "state"]);
     }
 
     #[test]

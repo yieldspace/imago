@@ -88,6 +88,14 @@ fn missing_helper_wrapped_program() -> nirvash::TransitionProgram<State, Action>
     }
 }
 
+fn pure_call_path_program() -> nirvash::TransitionProgram<State, Action> {
+    nirvash_transition_program! {
+        rule activate when prev.ready.clone() && target_phase(action).is_some() => {
+            set phase <= prev.phase.clone();
+        }
+    }
+}
+
 #[test]
 fn function_like_bool_macros_lower_to_ast() {
     let expr = ready_or_idle();
@@ -185,4 +193,11 @@ fn transition_program_macro_tracks_wrapped_helper_registrations() {
         missing.first_unencodable_symbolic_node(),
         Some("missing_target_phase")
     );
+}
+
+#[test]
+fn transition_program_macro_tracks_pure_call_read_paths() {
+    let program = pure_call_path_program();
+
+    assert_eq!(program.symbolic_state_paths(), vec!["phase", "ready"]);
 }

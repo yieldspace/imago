@@ -78,6 +78,12 @@ impl<const MAX: u8> BoundedU8<MAX> {
     }
 }
 
+impl<const MAX: u8> nirvash::SymbolicSortSpec for BoundedU8<MAX> {
+    fn symbolic_sort() -> nirvash::SymbolicSort {
+        nirvash::SymbolicSort::finite::<Self>()
+    }
+}
+
 pub type ServiceSlots = BoundedU8<MAX_SERVICES>;
 pub type SessionSlots = BoundedU8<MAX_SESSIONS>;
 pub type RunnerSlots = BoundedU8<MAX_RUNNERS>;

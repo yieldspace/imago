@@ -572,6 +572,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nirvash::{ModelBackend, ModelCheckConfig};
+    use nirvash_check::ModelChecker;
 
     #[test]
     fn remote_connection_lifecycle_tracks_owner() {
@@ -629,5 +631,65 @@ mod tests {
                 &RpcAction::CompleteRemoteCall(ServiceAtom::Service0)
             )
         );
+    }
+
+    #[test]
+    fn explicit_and_symbolic_backends_agree() {
+        let spec = RpcSpec::new();
+        let explicit_snapshot = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Explicit),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .full_reachable_graph_snapshot()
+        .expect("explicit rpc snapshot");
+        let symbolic_snapshot = match ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .full_reachable_graph_snapshot()
+        {
+            Ok(snapshot) => snapshot,
+            Err(nirvash::ModelCheckError::UnsupportedConfiguration(message))
+                if message.contains("symbolic backend requires") =>
+            {
+                return;
+            }
+            Err(error) => panic!("symbolic rpc snapshot: {error:?}"),
+        };
+        assert_eq!(symbolic_snapshot, explicit_snapshot);
+
+        let explicit_result = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Explicit),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .check_all()
+        .expect("explicit rpc result");
+        let symbolic_result = match ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::reachable_graph()
+            },
+        )
+        .check_all()
+        {
+            Ok(result) => result,
+            Err(nirvash::ModelCheckError::UnsupportedConfiguration(message))
+                if message.contains("symbolic backend requires") =>
+            {
+                return;
+            }
+            Err(error) => panic!("symbolic rpc result: {error:?}"),
+        };
+        assert_eq!(symbolic_result, explicit_result);
     }
 }

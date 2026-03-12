@@ -7,11 +7,6 @@ use nirvash::{
     TraceStep, TransitionProgram, UpdateAst, UpdateOp,
 };
 
-use z3::{
-    SatResult, Solver,
-    ast::{Bool, Int},
-};
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GraphEdge<A> {
     step: TraceStep<A>,
@@ -45,22 +40,6 @@ impl<S, A> ReachableGraph<S, A> {
     }
 }
 
-#[derive(Debug, Clone)]
-struct CandidateGraph<S, A> {
-    states: Vec<S>,
-    edges: Vec<Vec<GraphEdge<A>>>,
-    initial_indices: Vec<usize>,
-}
-
-impl<S, A> CandidateGraph<S, A> {
-    fn state_index(&self, state: &S) -> Option<usize>
-    where
-        S: PartialEq,
-    {
-        self.states.iter().position(|candidate| candidate == state)
-    }
-}
-
 pub struct SymbolicModelChecker<'a, T: TemporalSpec + ModelCaseSource> {
     spec: &'a T,
     model_case: ModelCase<T::State, T::Action>,
@@ -70,8 +49,8 @@ pub struct SymbolicModelChecker<'a, T: TemporalSpec + ModelCaseSource> {
 impl<'a, T> SymbolicModelChecker<'a, T>
 where
     T: TemporalSpec + ModelCaseSource,
-    T::State: PartialEq + Signature,
-    T::Action: PartialEq,
+    T::State: PartialEq + Signature + 'static,
+    T::Action: PartialEq + 'static,
 {
     pub fn for_case(spec: &'a T, model_case: ModelCase<T::State, T::Action>) -> Self {
         let config = model_case.effective_checker_config();
@@ -164,14 +143,6 @@ where
         Ok(result)
     }
 
-    fn build_reachable_graph(
-        &self,
-    ) -> Result<ReachableGraph<T::State, T::Action>, ModelCheckError> {
-        let candidate = self.build_candidate_graph()?;
-        let reachable = self.solve_reachability(&candidate)?;
-        self.materialize_reachable_graph(&candidate, &reachable, self.config)
-    }
-
     fn build_relation_reachable_graph(
         &self,
         config: ModelCheckConfig,
@@ -180,6 +151,7 @@ where
         let program = self.symbolic_transition_program()?;
         let schema = self.symbolic_state_schema()?;
         self.ensure_symbolic_schema_covers_program(&schema, &program)?;
+        self.ensure_symbolic_schema_covers_model_case_constraints(&schema)?;
         if self.model_case.symmetry().is_some() {
             return Err(self.symbolic_ast_required_error(format!(
                 "symbolic reachable-graph backend does not support symmetry reduction for spec `{}`",
@@ -267,6 +239,8 @@ where
     fn check_invariants_graph(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let schema = self.symbolic_state_schema()?;
+        self.ensure_symbolic_schema_covers_invariants(&schema)?;
         let graph = self.build_relation_reachable_graph(self.config)?;
         self.ensure_untruncated(&graph)?;
         for (index, state) in graph.states.iter().enumerate() {
@@ -303,7 +277,9 @@ where
     fn check_properties_graph(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let graph = self.build_reachable_graph()?;
+        let schema = self.symbolic_state_schema()?;
+        self.ensure_symbolic_schema_covers_temporal(&schema)?;
+        let graph = self.build_relation_reachable_graph(self.config)?;
         self.ensure_untruncated(&graph)?;
         let traces = self.graph_lasso_traces(&graph);
         let mut best: Option<Counterexample<T::State, T::Action>> = None;
@@ -333,7 +309,9 @@ where
     fn check_invariants_lasso(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let graph = self.build_reachable_graph()?;
+        let schema = self.symbolic_state_schema()?;
+        self.ensure_symbolic_schema_covers_invariants(&schema)?;
+        let graph = self.build_relation_reachable_graph(self.config)?;
         self.ensure_untruncated(&graph)?;
         let mut best = None;
         for &initial in &graph.initial_indices {
@@ -345,7 +323,7 @@ where
     fn check_deadlocks_lasso(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let graph = self.build_reachable_graph()?;
+        let graph = self.build_relation_reachable_graph(self.config)?;
         self.ensure_untruncated(&graph)?;
         let mut best = None;
         for &initial in &graph.initial_indices {
@@ -357,7 +335,9 @@ where
     fn check_properties_lasso(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let graph = self.build_reachable_graph()?;
+        let schema = self.symbolic_state_schema()?;
+        self.ensure_symbolic_schema_covers_temporal(&schema)?;
+        let graph = self.build_relation_reachable_graph(self.config)?;
         self.ensure_untruncated(&graph)?;
         let traces = self.bounded_graph_lasso_traces(&graph);
         let mut best: Option<Counterexample<T::State, T::Action>> = None;
@@ -382,264 +362,6 @@ where
         }
 
         Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
-    }
-
-    fn build_candidate_graph(
-        &self,
-    ) -> Result<CandidateGraph<T::State, T::Action>, ModelCheckError> {
-        self.ensure_symbolic_constraints_ast_native()?;
-        let _ = self.symbolic_transition_program()?;
-        let mut states = Vec::new();
-        for state in T::State::bounded_domain().into_vec() {
-            let canonical = self.canonicalize_state(&state);
-            if !self.state_constraints_allow(&canonical) || states.contains(&canonical) {
-                continue;
-            }
-            states.push(canonical);
-        }
-
-        let initial_states = self.initial_states_filtered()?;
-        let mut initial_indices = Vec::new();
-        for state in initial_states {
-            let Some(index) = states.iter().position(|candidate| candidate == &state) else {
-                return Err(self.symbolic_missing_initial_error(&state));
-            };
-            if !initial_indices.contains(&index) {
-                initial_indices.push(index);
-            }
-        }
-
-        let mut edges = Vec::with_capacity(states.len());
-        for state in &states {
-            edges.push(self.candidate_edges_for_state(state, &states)?);
-        }
-
-        Ok(CandidateGraph {
-            states,
-            edges,
-            initial_indices,
-        })
-    }
-
-    fn candidate_edges_for_state(
-        &self,
-        state: &T::State,
-        domain_states: &[T::State],
-    ) -> Result<Vec<GraphEdge<T::Action>>, ModelCheckError> {
-        let mut edges = Vec::new();
-        for (action, next_raw) in self.ast_transition_successors(state)? {
-            let next = self.canonicalize_state(&next_raw);
-            if !self.state_constraints_allow(&next) {
-                continue;
-            }
-            let Some(target) = domain_states
-                .iter()
-                .position(|candidate| candidate == &next)
-            else {
-                return Err(self.symbolic_missing_successor_error(state, &action, &next));
-            };
-            let edge = GraphEdge {
-                step: TraceStep::Action(action),
-                target,
-            };
-            if !edges.contains(&edge) {
-                edges.push(edge);
-            }
-        }
-
-        if self.spec.allow_stutter() {
-            let stutter = self.canonicalize_state(&self.spec.stutter_state(state));
-            if self.state_constraints_allow(&stutter) {
-                let Some(target) = domain_states
-                    .iter()
-                    .position(|candidate| candidate == &stutter)
-                else {
-                    return Err(self.symbolic_missing_stutter_error(state, &stutter));
-                };
-                let edge = GraphEdge {
-                    step: TraceStep::Stutter,
-                    target,
-                };
-                if !edges.contains(&edge) {
-                    edges.push(edge);
-                }
-            }
-        }
-
-        Ok(edges)
-    }
-
-    fn solve_reachability(
-        &self,
-        candidate: &CandidateGraph<T::State, T::Action>,
-    ) -> Result<Vec<bool>, ModelCheckError> {
-        if candidate.initial_indices.is_empty() {
-            return Err(ModelCheckError::NoInitialStates);
-        }
-
-        let state_count = candidate.states.len();
-        let depth_bound = state_count.saturating_sub(1);
-        let predecessors = self.predecessor_indices(candidate);
-        let solver = Solver::new();
-        let mut reach = Vec::with_capacity(depth_bound + 1);
-
-        for depth in 0..=depth_bound {
-            let mut layer = Vec::with_capacity(state_count);
-            for index in 0..state_count {
-                layer.push(Bool::new_const(format!("reachable_{depth}_{index}")));
-            }
-            reach.push(layer);
-        }
-
-        for index in 0..state_count {
-            let initial = Bool::from_bool(candidate.initial_indices.contains(&index));
-            let formula = reach[0][index].eq(&initial);
-            solver.assert(&formula);
-        }
-
-        for depth in 1..=depth_bound {
-            for index in 0..state_count {
-                let mut disjuncts = Vec::with_capacity(predecessors[index].len() + 1);
-                disjuncts.push(reach[depth - 1][index].clone());
-                for &predecessor in &predecessors[index] {
-                    disjuncts.push(reach[depth - 1][predecessor].clone());
-                }
-                let rhs = bool_or(&disjuncts);
-                let formula = reach[depth][index].eq(&rhs);
-                solver.assert(&formula);
-            }
-        }
-
-        match solver.check() {
-            SatResult::Sat => {}
-            SatResult::Unsat | SatResult::Unknown => {
-                return Err(ModelCheckError::UnsupportedConfiguration(
-                    "symbolic reachability encoding did not yield a satisfiable model",
-                ));
-            }
-        }
-
-        let Some(model) = solver.get_model() else {
-            return Err(ModelCheckError::UnsupportedConfiguration(
-                "symbolic backend could not obtain a model from z3",
-            ));
-        };
-
-        let final_layer = &reach[depth_bound];
-        let mut reachable = Vec::with_capacity(state_count);
-        for formula in final_layer {
-            let value = model
-                .eval(formula, true)
-                .and_then(|ast| ast.as_bool())
-                .unwrap_or(false);
-            reachable.push(value);
-        }
-        Ok(reachable)
-    }
-
-    fn predecessor_indices(
-        &self,
-        candidate: &CandidateGraph<T::State, T::Action>,
-    ) -> Vec<Vec<usize>> {
-        let mut predecessors = vec![Vec::new(); candidate.states.len()];
-        for (source, edges) in candidate.edges.iter().enumerate() {
-            for edge in edges {
-                if !predecessors[edge.target].contains(&source) {
-                    predecessors[edge.target].push(source);
-                }
-            }
-        }
-        predecessors
-    }
-
-    fn materialize_reachable_graph(
-        &self,
-        candidate: &CandidateGraph<T::State, T::Action>,
-        reachable: &[bool],
-        config: ModelCheckConfig,
-    ) -> Result<ReachableGraph<T::State, T::Action>, ModelCheckError> {
-        let mut graph = ReachableGraph {
-            states: Vec::new(),
-            edges: Vec::new(),
-            initial_indices: Vec::new(),
-            parents: Vec::new(),
-            depths: Vec::new(),
-            deadlocks: Vec::new(),
-            transitions: 0,
-            truncated: false,
-        };
-        let mut queue = VecDeque::new();
-
-        for &candidate_index in &candidate.initial_indices {
-            if !reachable[candidate_index] {
-                continue;
-            }
-            let state = candidate.states[candidate_index].clone();
-            let Some(index) = self.push_state(&mut graph, state, None, 0, &mut queue, config)?
-            else {
-                break;
-            };
-            if !graph.initial_indices.contains(&index) {
-                graph.initial_indices.push(index);
-            }
-            if graph.truncated {
-                break;
-            }
-        }
-
-        while let Some(index) = queue.pop_front() {
-            if graph.truncated {
-                break;
-            }
-            let current = graph.states[index].clone();
-            let next_depth = graph.depths[index] + 1;
-            let current_candidate_index = candidate
-                .state_index(&current)
-                .expect("materialized graph state must exist in candidate graph");
-            let mut edges = Vec::new();
-
-            for edge in &candidate.edges[current_candidate_index] {
-                if !reachable[edge.target] {
-                    continue;
-                }
-
-                let next_state = candidate.states[edge.target].clone();
-                let Some(next_index) = self.push_state(
-                    &mut graph,
-                    next_state,
-                    Some((index, edge.step.clone())),
-                    next_depth,
-                    &mut queue,
-                    config,
-                )?
-                else {
-                    break;
-                };
-
-                let materialized = GraphEdge {
-                    step: edge.step.clone(),
-                    target: next_index,
-                };
-                if !edges.contains(&materialized) {
-                    if !materialized.is_stutter() {
-                        if self.transition_limit_reached(&graph, config) {
-                            graph.truncated = true;
-                            break;
-                        }
-                        graph.transitions += 1;
-                    }
-                    edges.push(materialized);
-                }
-            }
-
-            if !graph.truncated && edges.iter().all(GraphEdge::is_stutter) {
-                graph.deadlocks.push(index);
-            }
-
-            graph.edges[index] = edges;
-        }
-
-        Ok(graph)
     }
 
     fn push_state(
@@ -752,35 +474,10 @@ where
         Ok(states)
     }
 
-    fn ast_transition_successors(
-        &self,
-        state: &T::State,
-    ) -> Result<Vec<(T::Action, T::State)>, ModelCheckError> {
-        let program = self.symbolic_transition_program()?;
-        let mut values = Vec::new();
-        for action in self.spec.actions() {
-            if values.iter().any(|(candidate, _)| candidate == &action) {
-                continue;
-            }
-            for successor in program.successors(state, &action) {
-                let next = successor.into_next();
-                if !self.action_constraints_allow(state, &action, &next) {
-                    continue;
-                }
-                let edge = (action.clone(), next);
-                if !values.contains(&edge) {
-                    values.push(edge);
-                }
-            }
-        }
-        Ok(values)
-    }
-
     fn relation_successors(
         &self,
         state: &T::State,
     ) -> Result<Vec<(TraceStep<T::Action>, T::State)>, ModelCheckError> {
-        let schema = self.symbolic_state_schema()?;
         let program = self.symbolic_transition_program()?;
         let mut values = Vec::new();
 
@@ -790,12 +487,10 @@ where
                 if !self.action_constraints_allow(state, &action, &next_concrete) {
                     continue;
                 }
-                let next =
-                    self.solve_concrete_successor(&schema, &next_concrete, program.name())?;
-                if !self.state_constraints_allow(&next) {
+                if !self.state_constraints_allow(&next_concrete) {
                     continue;
                 }
-                let edge = (TraceStep::Action(action.clone()), next);
+                let edge = (TraceStep::Action(action.clone()), next_concrete);
                 if !values.contains(&edge) {
                     values.push(edge);
                 }
@@ -811,8 +506,7 @@ where
                 )));
             }
             if self.state_constraints_allow(&stutter) {
-                let next = self.solve_concrete_successor(&schema, &stutter, "stutter")?;
-                let edge = (TraceStep::Stutter, next);
+                let edge = (TraceStep::Stutter, stutter);
                 if !values.contains(&edge) {
                     values.push(edge);
                 }
@@ -863,11 +557,120 @@ where
         schema: &SymbolicStateSchema<T::State>,
         program: &TransitionProgram<T::State, T::Action>,
     ) -> Result<(), ModelCheckError> {
+        if let Some(effect_name) = program.effect_names().first() {
+            return Err(self.symbolic_ast_required_error(format!(
+                "symbolic reachable-graph backend does not encode update effect `{}` in transition program `{}` for spec `{}`",
+                effect_name,
+                program.name(),
+                self.spec.name(),
+            )));
+        }
+        self.ensure_symbolic_schema_covers_paths(
+            schema,
+            format!("transition program `{}`", program.name()),
+            program.symbolic_state_paths(),
+        )?;
         for rule in program.rules() {
             let Some(update) = rule.update_ast() else {
                 continue;
             };
             self.ensure_symbolic_schema_covers_update(schema, update)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_symbolic_schema_covers_model_case_constraints(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+    ) -> Result<(), ModelCheckError> {
+        for constraint in self.model_case.state_constraints() {
+            if let Some(node) = constraint.first_unencodable_symbolic_node() {
+                return Err(self.symbolic_ast_required_error(format!(
+                    "symbolic reachable-graph backend requires state constraint `{}` for spec `{}` to register helper `{}` for symbolic use",
+                    constraint.name(),
+                    self.spec.name(),
+                    node,
+                )));
+            }
+            self.ensure_symbolic_schema_covers_paths(
+                schema,
+                format!("state constraint `{}`", constraint.name()),
+                constraint.symbolic_state_paths(),
+            )?;
+        }
+        for constraint in self.model_case.action_constraints() {
+            if let Some(node) = constraint.first_unencodable_symbolic_node() {
+                return Err(self.symbolic_ast_required_error(format!(
+                    "symbolic reachable-graph backend requires action constraint `{}` for spec `{}` to register helper `{}` for symbolic use",
+                    constraint.name(),
+                    self.spec.name(),
+                    node,
+                )));
+            }
+            self.ensure_symbolic_schema_covers_paths(
+                schema,
+                format!("action constraint `{}`", constraint.name()),
+                constraint.symbolic_state_paths(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn ensure_symbolic_schema_covers_invariants(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+    ) -> Result<(), ModelCheckError> {
+        for invariant in self.spec.invariants() {
+            if let Some(node) = invariant.first_unencodable_symbolic_node() {
+                return Err(self.symbolic_ast_required_error(format!(
+                    "symbolic reachable-graph backend requires invariant `{}` for spec `{}` to register helper `{}` for symbolic use",
+                    invariant.name(),
+                    self.spec.name(),
+                    node,
+                )));
+            }
+            self.ensure_symbolic_schema_covers_paths(
+                schema,
+                format!("invariant `{}`", invariant.name()),
+                invariant.symbolic_state_paths(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn ensure_symbolic_schema_covers_temporal(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+    ) -> Result<(), ModelCheckError> {
+        for property in self.spec.properties() {
+            if let Some(node) = property.first_unencodable_symbolic_node() {
+                return Err(self.symbolic_ast_required_error(format!(
+                    "symbolic backend requires property `{}` for spec `{}` to register helper `{}` for symbolic use",
+                    property.describe(),
+                    self.spec.name(),
+                    node,
+                )));
+            }
+            self.ensure_symbolic_schema_covers_paths(
+                schema,
+                format!("property `{}`", property.describe()),
+                property.symbolic_state_paths(),
+            )?;
+        }
+        for fairness in self.spec.fairness() {
+            if let Some(node) = fairness.first_unencodable_symbolic_node() {
+                return Err(self.symbolic_ast_required_error(format!(
+                    "symbolic backend requires fairness `{}` for spec `{}` to register helper `{}` for symbolic use",
+                    fairness.name(),
+                    self.spec.name(),
+                    node,
+                )));
+            }
+            self.ensure_symbolic_schema_covers_paths(
+                schema,
+                format!("fairness `{}`", fairness.name()),
+                fairness.symbolic_state_paths(),
+            )?;
         }
         Ok(())
     }
@@ -896,58 +699,26 @@ where
         Ok(())
     }
 
-    fn solve_concrete_successor(
+    fn ensure_symbolic_schema_covers_paths<I>(
         &self,
         schema: &SymbolicStateSchema<T::State>,
-        concrete: &T::State,
-        relation_name: &'static str,
-    ) -> Result<T::State, ModelCheckError> {
-        let solver = Solver::new();
-        let indices = schema.read_indices(concrete);
-        let mut vars = Vec::with_capacity(schema.fields().len());
-
-        for (field_index, field) in schema.fields().iter().enumerate() {
-            let var = Int::new_const(format!("next_{}_{}", field_index, field.path()));
-            solver.assert(var.ge(Int::from_i64(0)));
-            solver.assert(var.lt(Int::from_i64(field.domain_size() as i64)));
-            solver.assert(var.eq(Int::from_i64(indices[field_index] as i64)));
-            vars.push(var);
-        }
-
-        match solver.check() {
-            SatResult::Sat => {}
-            SatResult::Unsat | SatResult::Unknown => {
+        context: String,
+        paths: I,
+    ) -> Result<(), ModelCheckError>
+    where
+        I: IntoIterator<Item = &'static str>,
+    {
+        for path in paths {
+            if !schema.has_path(path) {
                 return Err(self.symbolic_ast_required_error(format!(
-                    "symbolic reachable-graph backend could not encode relation `{}` for spec `{}`",
-                    relation_name,
-                    self.spec.name(),
+                    "symbolic backend requires state schema for `{}` to expose field `{}` referenced by {}",
+                    std::any::type_name::<T::State>(),
+                    path,
+                    context,
                 )));
             }
         }
-
-        let Some(model) = solver.get_model() else {
-            return Err(self.symbolic_ast_required_error(format!(
-                "symbolic reachable-graph backend could not obtain a z3 model for relation `{}` in spec `{}`",
-                relation_name,
-                self.spec.name(),
-            )));
-        };
-
-        let mut rebuilt_indices = Vec::with_capacity(vars.len());
-        for (field, var) in schema.fields().iter().zip(&vars) {
-            let value = model
-                .eval(var, true)
-                .and_then(|ast| ast.as_i64())
-                .ok_or_else(|| {
-                    self.symbolic_ast_required_error(format!(
-                        "symbolic reachable-graph backend could not read field `{}` from z3 model",
-                        field.path(),
-                    ))
-                })?;
-            rebuilt_indices.push(value as usize);
-        }
-
-        Ok(schema.rebuild_from_indices(&rebuilt_indices))
+        Ok(())
     }
 
     fn ensure_symbolic_constraints_ast_native(&self) -> Result<(), ModelCheckError> {
@@ -959,6 +730,14 @@ where
                     self.spec.name(),
                 )));
             }
+            if let Some(node) = constraint.first_unencodable_symbolic_node() {
+                return Err(self.symbolic_ast_required_error(format!(
+                    "symbolic backend requires state constraint `{}` for spec `{}` to register helper `{}` for symbolic use",
+                    constraint.name(),
+                    self.spec.name(),
+                    node,
+                )));
+            }
         }
         for constraint in self.model_case.action_constraints() {
             if !constraint.is_ast_native() {
@@ -966,6 +745,14 @@ where
                     "symbolic backend requires action constraint `{}` for spec `{}` to be AST-native",
                     constraint.name(),
                     self.spec.name(),
+                )));
+            }
+            if let Some(node) = constraint.first_unencodable_symbolic_node() {
+                return Err(self.symbolic_ast_required_error(format!(
+                    "symbolic backend requires action constraint `{}` for spec `{}` to register helper `{}` for symbolic use",
+                    constraint.name(),
+                    self.spec.name(),
+                    node,
                 )));
             }
         }
@@ -981,6 +768,14 @@ where
                     self.spec.name(),
                 )));
             }
+            if let Some(node) = invariant.first_unencodable_symbolic_node() {
+                return Err(self.symbolic_ast_required_error(format!(
+                    "symbolic backend requires invariant `{}` for spec `{}` to register helper `{}` for symbolic use",
+                    invariant.name(),
+                    self.spec.name(),
+                    node,
+                )));
+            }
         }
         Ok(())
     }
@@ -994,6 +789,14 @@ where
                     self.spec.name(),
                 )));
             }
+            if let Some(node) = property.first_unencodable_symbolic_node() {
+                return Err(self.symbolic_ast_required_error(format!(
+                    "symbolic backend requires property `{}` for spec `{}` to register helper `{}` for symbolic use",
+                    property.describe(),
+                    self.spec.name(),
+                    node,
+                )));
+            }
         }
         for fairness in self.spec.fairness() {
             if !fairness.is_ast_native() {
@@ -1001,6 +804,14 @@ where
                     "symbolic backend requires fairness `{}` for spec `{}` to be AST-native",
                     fairness.name(),
                     self.spec.name(),
+                )));
+            }
+            if let Some(node) = fairness.first_unencodable_symbolic_node() {
+                return Err(self.symbolic_ast_required_error(format!(
+                    "symbolic backend requires fairness `{}` for spec `{}` to register helper `{}` for symbolic use",
+                    fairness.name(),
+                    self.spec.name(),
+                    node,
                 )));
             }
         }
@@ -1035,31 +846,6 @@ where
             .action_constraints()
             .iter()
             .all(|constraint: &StepExpr<T::State, T::Action>| constraint.eval(prev, action, next))
-    }
-
-    fn constrained_successors(&self, state: &T::State) -> Vec<(TraceStep<T::Action>, T::State)> {
-        let mut values = Vec::new();
-        let successors = self
-            .ast_transition_successors(state)
-            .unwrap_or_else(|error| {
-                panic!("symbolic constrained successor enumeration failed: {error:?}")
-            });
-        for (action, next_raw) in successors {
-            let next = self.canonicalize_state(&next_raw);
-            if !self.state_constraints_allow(&next) {
-                continue;
-            }
-            values.push((TraceStep::Action(action), next));
-        }
-
-        if self.spec.allow_stutter() {
-            let stutter = self.canonicalize_state(&self.spec.stutter_state(state));
-            if self.state_constraints_allow(&stutter) {
-                values.push((TraceStep::Stutter, stutter));
-            }
-        }
-
-        values
     }
 
     fn trace_to_state(
@@ -1423,7 +1209,10 @@ where
                 .states()
                 .iter()
                 .map(|state| {
-                    self.constrained_successors(state)
+                    self.relation_successors(state)
+                        .unwrap_or_else(|error| {
+                            panic!("symbolic graph successor enumeration failed: {error:?}")
+                        })
                         .into_iter()
                         .filter_map(|(step, next)| match step {
                             TraceStep::Action(action) => Some((action, next)),
@@ -1489,48 +1278,5 @@ where
             }
         }
         result
-    }
-
-    fn symbolic_missing_initial_error(&self, state: &T::State) -> ModelCheckError {
-        ModelCheckError::UnsupportedConfiguration(Box::leak(
-            format!(
-                "symbolic backend requires Signature::bounded_domain() to contain all constrained initial, successor, and stutter states; missing initial state: {:?}",
-                state
-            )
-            .into_boxed_str(),
-        ))
-    }
-
-    fn symbolic_missing_successor_error(
-        &self,
-        prev: &T::State,
-        action: &T::Action,
-        next: &T::State,
-    ) -> ModelCheckError {
-        ModelCheckError::UnsupportedConfiguration(Box::leak(
-            format!(
-                "symbolic backend requires Signature::bounded_domain() to contain all constrained initial, successor, and stutter states; missing successor: {:?} -- {:?} --> {:?}",
-                prev, action, next
-            )
-            .into_boxed_str(),
-        ))
-    }
-
-    fn symbolic_missing_stutter_error(&self, prev: &T::State, next: &T::State) -> ModelCheckError {
-        ModelCheckError::UnsupportedConfiguration(Box::leak(
-            format!(
-                "symbolic backend requires Signature::bounded_domain() to contain all constrained initial, successor, and stutter states; missing stutter successor: {:?} -> {:?}",
-                prev, next
-            )
-            .into_boxed_str(),
-        ))
-    }
-}
-
-fn bool_or(values: &[Bool]) -> Bool {
-    match values {
-        [] => Bool::from_bool(false),
-        [single] => single.clone(),
-        _ => Bool::or(values),
     }
 }
