@@ -4699,11 +4699,13 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                 model_case: GeneratedModelCase,
             ) -> GeneratedModelCase {
                 let checker_config = model_case.effective_checker_config();
-                let doc_checker_config = model_case.doc_checker_config().unwrap_or(checker_config);
+                let doc_checker_config = model_case
+                    .doc_checker_config()
+                    .unwrap_or_else(|| checker_config.clone());
                 model_case
                     .with_checker_config(::nirvash::ModelCheckConfig {
                         backend: ::core::option::Option::Some(::nirvash::ModelBackend::Explicit),
-                        ..checker_config
+                        ..checker_config.clone()
                     })
                     .with_doc_checker_config(::nirvash::ModelCheckConfig {
                         backend: ::core::option::Option::Some(::nirvash::ModelBackend::Explicit),
