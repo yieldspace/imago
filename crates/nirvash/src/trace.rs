@@ -54,4 +54,19 @@ impl<S, A> Trace<S, A> {
     pub fn cycle_indices(&self) -> impl Iterator<Item = usize> + '_ {
         self.loop_start..self.states.len()
     }
+
+    pub fn cycle_len(&self) -> usize {
+        self.states.len() - self.loop_start
+    }
+
+    pub fn stutter_count(&self) -> usize {
+        self.steps
+            .iter()
+            .filter(|step| matches!(step, TraceStep::Stutter))
+            .count()
+    }
+
+    pub fn minimization_key(&self) -> (usize, usize, usize) {
+        (self.len(), self.cycle_len(), self.stutter_count())
+    }
 }

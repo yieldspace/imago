@@ -12,6 +12,12 @@ pub enum ModelBackend {
     Symbolic,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CounterexampleMinimization {
+    None,
+    ShortestTrace,
+}
+
 /// Current explicit-backend state storage strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExplicitStateStorage {
@@ -266,6 +272,7 @@ pub struct ModelCheckConfig {
     pub max_transitions: Option<usize>,
     pub check_deadlocks: bool,
     pub stop_on_first_violation: bool,
+    pub counterexample_minimization: CounterexampleMinimization,
     pub explicit: ExplicitModelCheckOptions,
     pub symbolic: SymbolicModelCheckOptions,
 }
@@ -280,6 +287,7 @@ impl ModelCheckConfig {
             max_transitions: None,
             check_deadlocks: true,
             stop_on_first_violation: true,
+            counterexample_minimization: CounterexampleMinimization::ShortestTrace,
             explicit: ExplicitModelCheckOptions::current(),
             symbolic: SymbolicModelCheckOptions::current(),
         }
@@ -294,6 +302,7 @@ impl ModelCheckConfig {
             max_transitions: None,
             check_deadlocks: true,
             stop_on_first_violation: true,
+            counterexample_minimization: CounterexampleMinimization::ShortestTrace,
             explicit: ExplicitModelCheckOptions::current(),
             symbolic: SymbolicModelCheckOptions::current(),
         }
@@ -306,6 +315,14 @@ impl ModelCheckConfig {
 
     pub const fn with_symbolic_options(mut self, symbolic: SymbolicModelCheckOptions) -> Self {
         self.symbolic = symbolic;
+        self
+    }
+
+    pub const fn with_counterexample_minimization(
+        mut self,
+        counterexample_minimization: CounterexampleMinimization,
+    ) -> Self {
+        self.counterexample_minimization = counterexample_minimization;
         self
     }
 }
@@ -387,6 +404,10 @@ mod tests {
         assert_eq!(config.symbolic, SymbolicModelCheckOptions::current());
         assert_eq!(config.exploration, ExplorationMode::ReachableGraph);
         assert_eq!(config.bounded_depth, None);
+        assert_eq!(
+            config.counterexample_minimization,
+            CounterexampleMinimization::ShortestTrace
+        );
     }
 
     #[test]
@@ -444,6 +465,17 @@ mod tests {
         assert_eq!(
             ExplicitDistributedOptions::current().with_shards(0),
             ExplicitDistributedOptions { shards: 1 }
+        );
+    }
+
+    #[test]
+    fn counterexample_minimization_can_be_disabled() {
+        let config = ModelCheckConfig::reachable_graph()
+            .with_counterexample_minimization(CounterexampleMinimization::None);
+
+        assert_eq!(
+            config.counterexample_minimization,
+            CounterexampleMinimization::None
         );
     }
 }

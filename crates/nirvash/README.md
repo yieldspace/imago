@@ -31,6 +31,8 @@ AST-native surface には arithmetic minimum set、projection/payload access、s
 
 `ModelCheckConfig` は共通 knob に加えて backend-specific option を持ちます。
 
+- 共通 knob
+  - `counterexample_minimization = None | ShortestTrace` で first-hit と shortest-trace 優先を切り替えます
 - `explicit: ExplicitModelCheckOptions`
   - 現時点では `state_storage = InMemoryExact | InMemoryFingerprinted`、`reachability = BreadthFirst | ParallelFrontier | DistributedFrontier`、`bounded_lasso = EnumeratedPaths`
   - `checkpoint = ExplicitCheckpointOptions { path, save_every_frontiers, resume }` で reachable-graph frontier checkpoint/save-resume を設定

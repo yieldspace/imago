@@ -1420,9 +1420,14 @@ where
         best: &mut Option<Counterexample<T::State, T::Action>>,
         candidate: Counterexample<T::State, T::Action>,
     ) {
-        let replace = best
-            .as_ref()
-            .is_none_or(|current| candidate.trace.len() < current.trace.len());
+        let replace =
+            best.as_ref()
+                .is_none_or(|current| match self.config.counterexample_minimization {
+                    nirvash::CounterexampleMinimization::None => false,
+                    nirvash::CounterexampleMinimization::ShortestTrace => {
+                        candidate.trace.minimization_key() < current.trace.minimization_key()
+                    }
+                });
         if replace {
             *best = Some(candidate);
         }

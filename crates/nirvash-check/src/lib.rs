@@ -87,13 +87,14 @@ mod tests {
 
     use super::ModelChecker;
     use nirvash::{
-        BoolExpr, ExplicitCheckpointOptions, ExplicitDistributedOptions, ExplicitParallelOptions,
-        ExplicitReachabilityStrategy, ExplicitSimulationOptions, ExplicitStateStorage,
-        ExplorationMode, ExprDomain, GuardExpr, ModelBackend, ModelCase, ModelCheckConfig,
-        Signature, StepExpr, SymbolicSort, SymbolicSortSpec, SymbolicStateSchema,
-        SymbolicStateSpec, TemporalSpec, TraceStep, TransitionProgram, TransitionRule,
-        TransitionSystem, UpdateOp, UpdateProgram, UpdateValueExprAst, inventory,
-        registry::RegisteredSymbolicStateSchema, symbolic_leaf_field,
+        BoolExpr, CounterexampleMinimization, ExplicitCheckpointOptions,
+        ExplicitDistributedOptions, ExplicitParallelOptions, ExplicitReachabilityStrategy,
+        ExplicitSimulationOptions, ExplicitStateStorage, ExplorationMode, ExprDomain, GuardExpr,
+        Ltl, ModelBackend, ModelCase, ModelCheckConfig, Signature, StepExpr, SymbolicSort,
+        SymbolicSortSpec, SymbolicStateSchema, SymbolicStateSpec, TemporalSpec, TraceStep,
+        TransitionProgram, TransitionRule, TransitionSystem, UpdateOp, UpdateProgram,
+        UpdateValueExprAst, inventory, registry::RegisteredSymbolicStateSchema,
+        symbolic_leaf_field,
     };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -349,6 +350,93 @@ mod tests {
         Finish,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CounterexampleAction {
+        TakeLong,
+        TakeShort,
+        Advance,
+        Finish,
+    }
+
+    impl Signature for CounterexampleAction {
+        fn bounded_domain() -> nirvash::BoundedDomain<Self> {
+            nirvash::BoundedDomain::new(vec![
+                Self::TakeLong,
+                Self::TakeShort,
+                Self::Advance,
+                Self::Finish,
+            ])
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CounterexampleState {
+        Start,
+        Long1,
+        Long2,
+        Done,
+    }
+
+    impl Signature for CounterexampleState {
+        fn bounded_domain() -> nirvash::BoundedDomain<Self> {
+            nirvash::BoundedDomain::new(vec![Self::Start, Self::Long1, Self::Long2, Self::Done])
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct CounterexampleSpec;
+
+    impl TransitionSystem for CounterexampleSpec {
+        type State = CounterexampleState;
+        type Action = CounterexampleAction;
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![CounterexampleState::Start]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![
+                CounterexampleAction::TakeLong,
+                CounterexampleAction::TakeShort,
+                CounterexampleAction::Advance,
+                CounterexampleAction::Finish,
+            ]
+        }
+
+        fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+            match (state, action) {
+                (CounterexampleState::Start, CounterexampleAction::TakeLong) => {
+                    Some(CounterexampleState::Long1)
+                }
+                (CounterexampleState::Start, CounterexampleAction::TakeShort) => {
+                    Some(CounterexampleState::Done)
+                }
+                (CounterexampleState::Long1, CounterexampleAction::Advance) => {
+                    Some(CounterexampleState::Long2)
+                }
+                (CounterexampleState::Long2, CounterexampleAction::Finish) => {
+                    Some(CounterexampleState::Done)
+                }
+                _ => None,
+            }
+        }
+    }
+
+    impl TemporalSpec for CounterexampleSpec {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
+            Vec::new()
+        }
+
+        fn properties(&self) -> Vec<Ltl<Self::State, Self::Action>> {
+            vec![Ltl::Always(Box::new(Ltl::Pred(BoolExpr::pure_call(
+                "not_done",
+                |state: &CounterexampleState| !matches!(state, CounterexampleState::Done),
+            ))))]
+        }
+    }
+
+    impl nirvash::ModelCaseSource for CounterexampleSpec {}
+
     impl Signature for SimulationAction {
         fn bounded_domain() -> nirvash::BoundedDomain<Self> {
             nirvash::BoundedDomain::new(vec![Self::Finish])
@@ -540,6 +628,38 @@ mod tests {
             nirvash::ModelCheckError::UnsupportedConfiguration(message)
                 if message.contains("parallel frontier exploration")
         ));
+    }
+
+    #[test]
+    fn counterexample_minimization_prefers_shorter_property_trace() {
+        let spec = CounterexampleSpec;
+        let without = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig::reachable_graph()
+                .with_counterexample_minimization(CounterexampleMinimization::None),
+        )
+        .check_properties()
+        .expect("property check should run");
+        let with = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig::reachable_graph()
+                .with_counterexample_minimization(CounterexampleMinimization::ShortestTrace),
+        )
+        .check_properties()
+        .expect("property check should run");
+
+        let without_trace = &without.violations()[0].trace;
+        let with_trace = &with.violations()[0].trace;
+
+        assert!(without_trace.len() > with_trace.len());
+        assert_eq!(
+            without_trace.steps()[0],
+            TraceStep::Action(CounterexampleAction::TakeLong)
+        );
+        assert_eq!(
+            with_trace.steps()[0],
+            TraceStep::Action(CounterexampleAction::TakeShort)
+        );
     }
 
     #[test]
