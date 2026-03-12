@@ -89,12 +89,12 @@ mod tests {
     use nirvash::{
         BoolExpr, CounterexampleMinimization, ExplicitCheckpointOptions,
         ExplicitDistributedOptions, ExplicitParallelOptions, ExplicitReachabilityStrategy,
-        ExplicitSimulationOptions, ExplicitStateStorage, ExplorationMode, ExprDomain, GuardExpr,
-        Ltl, ModelBackend, ModelCase, ModelCheckConfig, PartialOrderReducer, Signature, StepExpr,
-        SymbolicSort, SymbolicSortSpec, SymbolicStateSchema, SymbolicStateSpec, TemporalSpec,
-        TraceStep, TransitionProgram, TransitionRule, TransitionSystem, UpdateOp, UpdateProgram,
-        UpdateValueExprAst, ViewProjector, inventory, registry::RegisteredSymbolicStateSchema,
-        symbolic_leaf_field,
+        ExplicitSimulationOptions, ExplicitStateCompression, ExplicitStateStorage, ExplorationMode,
+        ExprDomain, GuardExpr, Ltl, ModelBackend, ModelCase, ModelCheckConfig, PartialOrderReducer,
+        Signature, StepExpr, SymbolicSort, SymbolicSortSpec, SymbolicStateSchema,
+        SymbolicStateSpec, TemporalSpec, TraceStep, TransitionProgram, TransitionRule,
+        TransitionSystem, UpdateOp, UpdateProgram, UpdateValueExprAst, ViewProjector, inventory,
+        registry::RegisteredSymbolicStateSchema, symbolic_leaf_field,
     };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -543,6 +543,25 @@ mod tests {
     }
 
     #[test]
+    fn explicit_reachable_graph_matches_domain_index_compression() {
+        let spec = SimulationSpec;
+        let exact = ModelChecker::with_config(&spec, ModelCheckConfig::reachable_graph())
+            .full_reachable_graph_snapshot()
+            .expect("exact storage snapshot");
+        let compressed = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig::reachable_graph().with_explicit_options(
+                nirvash::ExplicitModelCheckOptions::current()
+                    .with_compression(ExplicitStateCompression::DomainIndex),
+            ),
+        )
+        .full_reachable_graph_snapshot()
+        .expect("compressed storage snapshot");
+
+        assert_eq!(compressed, exact);
+    }
+
+    #[test]
     fn explicit_reachable_graph_roundtrips_checkpoint_file() {
         let spec = SimulationSpec;
         let path = checkpoint_path("reachable-graph");
@@ -557,6 +576,29 @@ mod tests {
         let second = ModelChecker::with_config(&spec, config)
             .full_reachable_graph_snapshot()
             .expect("resumed checkpointed snapshot");
+
+        assert_eq!(second, first);
+        assert!(path.exists());
+        fs::remove_file(path).expect("cleanup checkpoint file");
+    }
+
+    #[test]
+    fn explicit_reachable_graph_roundtrips_checkpoint_file_with_domain_index_compression() {
+        let spec = SimulationSpec;
+        let path = checkpoint_path("reachable-graph-compressed");
+        let explicit = nirvash::ExplicitModelCheckOptions::current()
+            .with_compression(ExplicitStateCompression::DomainIndex)
+            .with_checkpoint(ExplicitCheckpointOptions::at_path(
+                path.display().to_string(),
+            ));
+        let config = ModelCheckConfig::reachable_graph().with_explicit_options(explicit);
+
+        let first = ModelChecker::with_config(&spec, config.clone())
+            .full_reachable_graph_snapshot()
+            .expect("checkpointed compressed snapshot");
+        let second = ModelChecker::with_config(&spec, config)
+            .full_reachable_graph_snapshot()
+            .expect("resumed checkpointed compressed snapshot");
 
         assert_eq!(second, first);
         assert!(path.exists());

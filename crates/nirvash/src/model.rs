@@ -27,6 +27,21 @@ pub enum ExplicitStateStorage {
     InMemoryFingerprinted,
 }
 
+/// Current explicit-backend state compression strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ExplicitStateCompression {
+    /// Keep explicit states in memory as full values.
+    None,
+    /// Store explicit states as stable indices into `T::State::bounded_domain()`.
+    DomainIndex,
+}
+
+impl Default for ExplicitStateCompression {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 /// Current explicit-backend reachable-graph exploration strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExplicitReachabilityStrategy {
@@ -169,6 +184,7 @@ impl Default for ExplicitSimulationOptions {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExplicitModelCheckOptions {
     pub state_storage: ExplicitStateStorage,
+    pub compression: ExplicitStateCompression,
     pub reachability: ExplicitReachabilityStrategy,
     pub bounded_lasso: ExplicitBoundedLassoStrategy,
     pub checkpoint: ExplicitCheckpointOptions,
@@ -181,6 +197,7 @@ impl ExplicitModelCheckOptions {
     pub const fn current() -> Self {
         Self {
             state_storage: ExplicitStateStorage::InMemoryExact,
+            compression: ExplicitStateCompression::None,
             reachability: ExplicitReachabilityStrategy::BreadthFirst,
             bounded_lasso: ExplicitBoundedLassoStrategy::EnumeratedPaths,
             checkpoint: ExplicitCheckpointOptions::disabled(),
@@ -192,6 +209,11 @@ impl ExplicitModelCheckOptions {
 
     pub const fn with_state_storage(mut self, state_storage: ExplicitStateStorage) -> Self {
         self.state_storage = state_storage;
+        self
+    }
+
+    pub const fn with_compression(mut self, compression: ExplicitStateCompression) -> Self {
+        self.compression = compression;
         self
     }
 
@@ -423,6 +445,7 @@ mod tests {
     fn backend_specific_options_can_be_overridden_independently() {
         let explicit = ExplicitModelCheckOptions {
             state_storage: ExplicitStateStorage::InMemoryFingerprinted,
+            compression: ExplicitStateCompression::DomainIndex,
             reachability: ExplicitReachabilityStrategy::BreadthFirst,
             bounded_lasso: ExplicitBoundedLassoStrategy::EnumeratedPaths,
             checkpoint: ExplicitCheckpointOptions::at_path("tmp/nirvash-checkpoint.json")
@@ -465,6 +488,20 @@ mod tests {
         assert_eq!(
             ExplicitDistributedOptions::current().with_shards(0),
             ExplicitDistributedOptions { shards: 1 }
+        );
+    }
+
+    #[test]
+    fn explicit_state_compression_defaults_to_none_and_can_be_overridden() {
+        assert_eq!(
+            ExplicitModelCheckOptions::current().compression,
+            ExplicitStateCompression::None
+        );
+        assert_eq!(
+            ExplicitModelCheckOptions::current()
+                .with_compression(ExplicitStateCompression::DomainIndex)
+                .compression,
+            ExplicitStateCompression::DomainIndex
         );
     }
 

@@ -56,6 +56,8 @@ struct ReachableGraphCheckpoint {
     spec_name: String,
     exploration: ExplorationMode,
     state_storage: nirvash::ExplicitStateStorage,
+    #[serde(default)]
+    compression: nirvash::ExplicitStateCompression,
     states: Vec<usize>,
     edges: Vec<Vec<CheckpointGraphEdge>>,
     initial_indices: Vec<usize>,
@@ -85,11 +87,11 @@ impl ExplicitStateIndex {
 
     fn from_states<S>(
         storage: nirvash::ExplicitStateStorage,
-        states: &[S],
+        states: &ExplicitStateStore<S>,
         view: Option<nirvash::ViewProjector<S>>,
     ) -> Self
     where
-        S: std::fmt::Debug,
+        S: Signature + std::fmt::Debug,
     {
         let mut index = Self::new(storage);
         for state_index in 0..states.len() {
@@ -100,12 +102,12 @@ impl ExplicitStateIndex {
 
     fn state_index<S>(
         &self,
-        states: &[S],
+        states: &ExplicitStateStore<S>,
         state: &S,
         view: Option<nirvash::ViewProjector<S>>,
     ) -> Option<usize>
     where
-        S: PartialEq + std::fmt::Debug,
+        S: PartialEq + Signature + std::fmt::Debug,
     {
         match self {
             Self::Exact => states
@@ -125,11 +127,11 @@ impl ExplicitStateIndex {
 
     fn record_state<S>(
         &mut self,
-        states: &[S],
+        states: &ExplicitStateStore<S>,
         state_index: usize,
         view: Option<nirvash::ViewProjector<S>>,
     ) where
-        S: std::fmt::Debug,
+        S: Signature + std::fmt::Debug,
     {
         let Self::Fingerprinted { buckets } = self else {
             return;
@@ -170,6 +172,136 @@ fn fingerprint_state<S: std::fmt::Debug>(
     }
 }
 
+#[derive(Debug, Clone)]
+enum ExplicitStateStore<S> {
+    Inline(Vec<S>),
+    DomainCompressed { domain: Vec<S>, indices: Vec<usize> },
+}
+
+impl<S> ExplicitStateStore<S>
+where
+    S: Signature + PartialEq + Clone,
+{
+    fn new(compression: nirvash::ExplicitStateCompression) -> Self {
+        match compression {
+            nirvash::ExplicitStateCompression::None => Self::Inline(Vec::new()),
+            nirvash::ExplicitStateCompression::DomainIndex => Self::DomainCompressed {
+                domain: S::bounded_domain().into_vec(),
+                indices: Vec::new(),
+            },
+        }
+    }
+
+    fn from_domain_indices(
+        compression: nirvash::ExplicitStateCompression,
+        domain: Vec<S>,
+        indices: Vec<usize>,
+    ) -> Result<Self, ModelCheckError> {
+        for index in &indices {
+            if *index >= domain.len() {
+                return Err(ModelCheckError::CheckpointIo(format!(
+                    "checkpoint state index {index} is outside the bounded domain"
+                )));
+            }
+        }
+
+        Ok(match compression {
+            nirvash::ExplicitStateCompression::None => Self::Inline(
+                indices
+                    .into_iter()
+                    .map(|index| domain[index].clone())
+                    .collect::<Vec<_>>(),
+            ),
+            nirvash::ExplicitStateCompression::DomainIndex => {
+                Self::DomainCompressed { domain, indices }
+            }
+        })
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Inline(states) => states.len(),
+            Self::DomainCompressed { indices, .. } => indices.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn iter(&self) -> Box<dyn Iterator<Item = &S> + '_> {
+        match self {
+            Self::Inline(states) => Box::new(states.iter()),
+            Self::DomainCompressed { domain, indices } => {
+                Box::new(indices.iter().map(move |index| &domain[*index]))
+            }
+        }
+    }
+
+    fn push(&mut self, state: S) -> Result<usize, ModelCheckError> {
+        match self {
+            Self::Inline(states) => {
+                states.push(state);
+                Ok(states.len() - 1)
+            }
+            Self::DomainCompressed { domain, indices } => {
+                let Some(domain_index) = domain.iter().position(|candidate| candidate == &state)
+                else {
+                    return Err(ModelCheckError::UnsupportedConfiguration(
+                        "state compression requires every reachable state to appear in T::State::bounded_domain()",
+                    ));
+                };
+                indices.push(domain_index);
+                Ok(indices.len() - 1)
+            }
+        }
+    }
+
+    fn to_vec(&self) -> Vec<S> {
+        self.iter().cloned().collect()
+    }
+
+    fn domain_index(&self, index: usize) -> Result<usize, ModelCheckError> {
+        match self {
+            Self::Inline(states) => {
+                let state = states.get(index).ok_or_else(|| {
+                    ModelCheckError::CheckpointIo(format!(
+                        "checkpoint state index {index} is outside the reachable graph"
+                    ))
+                })?;
+                S::bounded_domain()
+                    .into_vec()
+                    .iter()
+                    .position(|candidate| candidate == state)
+                    .ok_or(ModelCheckError::UnsupportedConfiguration(
+                        "checkpoint requires every reachable state to appear in T::State::bounded_domain()",
+                    ))
+            }
+            Self::DomainCompressed { indices, .. } => {
+                indices.get(index).copied().ok_or_else(|| {
+                    ModelCheckError::CheckpointIo(format!(
+                        "checkpoint state index {index} is outside the reachable graph"
+                    ))
+                })
+            }
+        }
+    }
+}
+
+impl<S> std::ops::Index<usize> for ExplicitStateStore<S>
+where
+    S: Signature + PartialEq + Clone,
+{
+    type Output = S;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        match self {
+            Self::Inline(states) => &states[index],
+            Self::DomainCompressed { domain, indices } => &domain[indices[index]],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct SimulationRng {
     state: u64,
@@ -198,7 +330,7 @@ impl SimulationRng {
 
 #[derive(Debug, Clone)]
 struct ReachableGraph<S, A> {
-    states: Vec<S>,
+    states: ExplicitStateStore<S>,
     edges: Vec<Vec<GraphEdge<A>>>,
     initial_indices: Vec<usize>,
     parents: Vec<Option<(usize, TraceStep<A>)>>,
@@ -213,7 +345,7 @@ type TraceList<S, A> = Vec<Trace<S, A>>;
 impl<S, A> ReachableGraph<S, A> {
     fn state_index(&self, state: &S) -> Option<usize>
     where
-        S: PartialEq,
+        S: Signature + PartialEq + Clone,
     {
         self.states.iter().position(|candidate| candidate == state)
     }
@@ -590,7 +722,7 @@ where
             .unwrap_or_else(|| {
                 (
                     ReachableGraph {
-                        states: Vec::new(),
+                        states: ExplicitStateStore::new(config.explicit.compression),
                         edges: Vec::new(),
                         initial_indices: Vec::new(),
                         parents: Vec::new(),
@@ -733,6 +865,7 @@ where
         if saved.spec_name != self.spec.name()
             || saved.exploration != config.exploration
             || saved.state_storage != config.explicit.state_storage
+            || saved.compression != config.explicit.compression
         {
             return Err(ModelCheckError::CheckpointIo(format!(
                 "checkpoint at `{path}` does not match the current explicit exploration config"
@@ -741,17 +874,11 @@ where
 
         let state_domain = T::State::bounded_domain().into_vec();
         let actions = self.spec.actions();
-        let states = saved
-            .states
-            .iter()
-            .map(|index| {
-                state_domain.get(*index).cloned().ok_or_else(|| {
-                    ModelCheckError::CheckpointIo(format!(
-                        "checkpoint state index {index} is outside the bounded domain"
-                    ))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let states = ExplicitStateStore::from_domain_indices(
+            config.explicit.compression,
+            state_domain,
+            saved.states.clone(),
+        )?;
         let edges = saved
             .edges
             .iter()
@@ -816,16 +943,14 @@ where
             return Ok(());
         }
 
-        let state_domain = T::State::bounded_domain().into_vec();
         let actions = self.spec.actions();
         let snapshot = ReachableGraphCheckpoint {
             spec_name: self.spec.name().to_owned(),
             exploration: config.exploration,
             state_storage: config.explicit.state_storage,
-            states: graph
-                .states
-                .iter()
-                .map(|state| self.state_domain_index(&state_domain, state))
+            compression: config.explicit.compression,
+            states: (0..graph.states.len())
+                .map(|index| graph.states.domain_index(index))
                 .collect::<Result<Vec<_>, _>>()?,
             edges: graph
                 .edges
@@ -867,19 +992,6 @@ where
         let bytes = serde_json::to_vec_pretty(&snapshot)
             .map_err(|error| ModelCheckError::CheckpointIo(error.to_string()))?;
         fs::write(path, bytes).map_err(|error| ModelCheckError::CheckpointIo(error.to_string()))
-    }
-
-    fn state_domain_index(
-        &self,
-        state_domain: &[T::State],
-        state: &T::State,
-    ) -> Result<usize, ModelCheckError> {
-        state_domain
-            .iter()
-            .position(|candidate| candidate == state)
-            .ok_or(ModelCheckError::UnsupportedConfiguration(
-                "checkpoint requires every reachable state to appear in T::State::bounded_domain()",
-            ))
     }
 
     fn encode_checkpoint_step(
@@ -1180,11 +1292,10 @@ where
             return Ok(None);
         }
 
-        graph.states.push(state);
+        let index = graph.states.push(state)?;
         graph.edges.push(Vec::new());
         graph.parents.push(parent);
         graph.depths.push(depth);
-        let index = graph.states.len() - 1;
         state_index.record_state(&graph.states, index, self.model_case.view());
         push_frontier(index, &graph.states[index]);
         Ok(Some(index))
@@ -1304,7 +1415,7 @@ where
         graph: &ReachableGraph<T::State, T::Action>,
     ) -> ReachableGraphSnapshot<T::State, T::Action> {
         ReachableGraphSnapshot {
-            states: graph.states.clone(),
+            states: graph.states.to_vec(),
             edges: graph
                 .edges
                 .iter()

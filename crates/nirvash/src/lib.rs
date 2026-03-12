@@ -46,9 +46,9 @@ pub use model::{
     Counterexample, CounterexampleKind, CounterexampleMinimization, ExplicitBoundedLassoStrategy,
     ExplicitCheckpointOptions, ExplicitDistributedOptions, ExplicitModelCheckOptions,
     ExplicitParallelOptions, ExplicitReachabilityStrategy, ExplicitSimulationOptions,
-    ExplicitStateStorage, ExplorationMode, ModelBackend, ModelCheckConfig, ModelCheckError,
-    ModelCheckResult, SymbolicBoundedLassoEncoding, SymbolicModelCheckOptions,
-    SymbolicSuccessorStrategy,
+    ExplicitStateCompression, ExplicitStateStorage, ExplorationMode, ModelBackend,
+    ModelCheckConfig, ModelCheckError, ModelCheckResult, SymbolicBoundedLassoEncoding,
+    SymbolicModelCheckOptions, SymbolicSuccessorStrategy,
 };
 pub use partial_order::PartialOrderReducer;
 pub use predicate::{
