@@ -1,4 +1,4 @@
-error: unsupported nirvash expression; supported forms are `!`, `&&`, `||`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `+`, `if/else`, `matches!(..)`, field reads, function/method calls, and parentheses
+error: unsupported nirvash expression; supported forms are `!`, unary `-`, `&&`, `||`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `+`, binary `-`, `*`, `if/else`, `matches!(..)`, field reads, function/method calls, and parentheses
  --> tests/fixtures/function_like_bool_macros_invalid.rs:9:41
   |
 9 |     let _ = nirvash_expr!(bad(state) => state.ready ^ state.ready);

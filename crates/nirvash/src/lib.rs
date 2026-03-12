@@ -33,7 +33,7 @@ pub use doc_graph::{
     format_doc_graph_action, reduce_doc_graph, summarize_doc_graph_state, summarize_doc_graph_text,
 };
 pub use domain::{
-    BoundedDomain, IntoBoundedDomain, OpaqueModelValue, Signature, bounded_vec_domain,
+    BoundedDomain, ExprDomain, IntoBoundedDomain, OpaqueModelValue, Signature, bounded_vec_domain,
     into_bounded_domain,
 };
 pub use fairness::Fairness;
@@ -46,7 +46,8 @@ pub use model::{
 pub use predicate::{
     BoolExpr, BoolExprAst, GuardAst, GuardExpr, GuardValueExpr, QuantifierKind, StateExpr,
     StateExprAst, StepExpr, StepExprAst, StepValueExpr, TransitionProgram, TransitionProgramError,
-    TransitionRule, TransitionSuccessor, UpdateAst, UpdateOp, UpdateProgram, UpdateValueExprAst,
+    TransitionRule, TransitionSuccessor, UpdateAst, UpdateChoice, UpdateOp, UpdateProgram,
+    UpdateValueExprAst,
 };
 pub use registry::{RegisteredActionDocLabel, RegisteredActionDocPresentation};
 pub use relation::{

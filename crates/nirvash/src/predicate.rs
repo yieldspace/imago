@@ -4,8 +4,10 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::{
+    domain::ExprDomain,
     normalize_symbolic_state_path,
     registry::{has_registered_symbolic_effect, has_registered_symbolic_pure_helper},
+    relation::{RelAtom, RelSet, Relation2},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +24,12 @@ pub enum ComparisonOp {
     Le,
     Gt,
     Ge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinPredicateOp {
+    Contains,
+    SubsetOf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +99,13 @@ fn symbolic_effect_registration(key: &'static str) -> SymbolicRegistration {
     }
 }
 
+const fn symbolic_quantifier_node(kind: QuantifierKind) -> &'static str {
+    match kind {
+        QuantifierKind::ForAll => "forall",
+        QuantifierKind::Exists => "exists",
+    }
+}
+
 fn collect_symbolic_state_path(paths: &mut BTreeSet<&'static str>, path: &'static str) {
     if let Some(normalized) = normalize_symbolic_state_path(path) {
         if !normalized.is_empty() {
@@ -105,6 +120,21 @@ fn collect_symbolic_state_paths_from_hints(
 ) {
     for path in read_paths {
         collect_symbolic_state_path(paths, path);
+    }
+}
+
+fn collect_symbolic_full_read_path(paths: &mut BTreeSet<&'static str>, path: &'static str) {
+    if !path.is_empty() {
+        paths.insert(path);
+    }
+}
+
+fn collect_symbolic_full_read_paths_from_hints(
+    paths: &mut BTreeSet<&'static str>,
+    read_paths: &'static [&'static str],
+) {
+    for path in read_paths {
+        collect_symbolic_full_read_path(paths, path);
     }
 }
 
@@ -128,6 +158,34 @@ pub enum ErasedStateExprAst<S> {
         lhs: Box<Self>,
         rhs: Box<Self>,
     },
+    Sub {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Mul {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Neg {
+        expr: Box<Self>,
+    },
+    Union {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Intersection {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Difference {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Comprehension {
+        domain: &'static str,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+    },
     IfElse {
         condition: Box<BoolExpr<S>>,
         then_branch: Box<Self>,
@@ -139,9 +197,17 @@ impl<S: 'static> ErasedStateExprAst<S> {
     pub(crate) fn first_unencodable(&self) -> Option<&'static str> {
         match self {
             Self::Opaque { repr } => Some(repr),
-            Self::Literal { .. } | Self::FieldRead { .. } => None,
+            Self::Literal { .. } | Self::FieldRead { .. } | Self::Comprehension { .. } => None,
             Self::PureCall { symbolic, .. } => symbolic.first_unencodable(),
-            Self::Add { lhs, rhs } => lhs.first_unencodable().or_else(|| rhs.first_unencodable()),
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
+                lhs.first_unencodable().or_else(|| rhs.first_unencodable())
+            }
+            Self::Neg { expr } => expr.first_unencodable(),
             Self::IfElse {
                 condition,
                 then_branch,
@@ -156,11 +222,18 @@ impl<S: 'static> ErasedStateExprAst<S> {
     fn collect_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         match self {
             Self::Opaque { .. } | Self::Literal { .. } | Self::FieldRead { .. } => {}
+            Self::Comprehension { .. } => {}
             Self::PureCall { symbolic, .. } => symbolic.collect_key(keys),
-            Self::Add { lhs, rhs } => {
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
                 lhs.collect_symbolic_pure_keys(keys);
                 rhs.collect_symbolic_pure_keys(keys);
             }
+            Self::Neg { expr } => expr.collect_symbolic_pure_keys(keys),
             Self::IfElse {
                 condition,
                 then_branch,
@@ -176,11 +249,18 @@ impl<S: 'static> ErasedStateExprAst<S> {
     fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         match self {
             Self::Opaque { .. } | Self::Literal { .. } | Self::FieldRead { .. } => {}
+            Self::Comprehension { .. } => {}
             Self::PureCall { symbolic, .. } => symbolic.collect_unregistered_key(keys),
-            Self::Add { lhs, rhs } => {
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
                 lhs.collect_unregistered_symbolic_pure_keys(keys);
                 rhs.collect_unregistered_symbolic_pure_keys(keys);
             }
+            Self::Neg { expr } => expr.collect_unregistered_symbolic_pure_keys(keys),
             Self::IfElse {
                 condition,
                 then_branch,
@@ -197,13 +277,22 @@ impl<S: 'static> ErasedStateExprAst<S> {
         match self {
             Self::Opaque { .. } | Self::Literal { .. } => {}
             Self::FieldRead { path } => collect_symbolic_state_path(paths, path),
+            Self::Comprehension { read_paths, .. } => {
+                collect_symbolic_state_paths_from_hints(paths, read_paths);
+            }
             Self::PureCall { read_paths, .. } => {
                 collect_symbolic_state_paths_from_hints(paths, read_paths);
             }
-            Self::Add { lhs, rhs } => {
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
                 lhs.collect_symbolic_state_paths(paths);
                 rhs.collect_symbolic_state_paths(paths);
             }
+            Self::Neg { expr } => expr.collect_symbolic_state_paths(paths),
             Self::IfElse {
                 condition,
                 then_branch,
@@ -212,6 +301,38 @@ impl<S: 'static> ErasedStateExprAst<S> {
                 condition.collect_symbolic_state_paths(paths);
                 then_branch.collect_symbolic_state_paths(paths);
                 else_branch.collect_symbolic_state_paths(paths);
+            }
+        }
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Opaque { .. } | Self::Literal { .. } => {}
+            Self::FieldRead { path } => collect_symbolic_full_read_path(paths, path),
+            Self::Comprehension { read_paths, .. } => {
+                collect_symbolic_full_read_paths_from_hints(paths, read_paths);
+            }
+            Self::PureCall { read_paths, .. } => {
+                collect_symbolic_full_read_paths_from_hints(paths, read_paths);
+            }
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
+                lhs.collect_symbolic_full_read_paths(paths);
+                rhs.collect_symbolic_full_read_paths(paths);
+            }
+            Self::Neg { expr } => expr.collect_symbolic_full_read_paths(paths),
+            Self::IfElse {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                condition.collect_symbolic_full_read_paths(paths);
+                then_branch.collect_symbolic_full_read_paths(paths);
+                else_branch.collect_symbolic_full_read_paths(paths);
             }
         }
     }
@@ -241,6 +362,35 @@ pub enum StateExprAst<S, T> {
         lhs: Box<Self>,
         rhs: Box<Self>,
     },
+    Sub {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Mul {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Neg {
+        expr: Box<Self>,
+    },
+    Union {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Intersection {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Difference {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Comprehension {
+        domain: &'static str,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        _marker: PhantomData<fn() -> T>,
+    },
     IfElse {
         condition: Box<BoolExpr<S>>,
         then_branch: Box<Self>,
@@ -267,6 +417,39 @@ impl<S: Clone, T> StateExprAst<S, T> {
             Self::Add { lhs, rhs } => ErasedStateExprAst::Add {
                 lhs: Box::new(lhs.erase()),
                 rhs: Box::new(rhs.erase()),
+            },
+            Self::Sub { lhs, rhs } => ErasedStateExprAst::Sub {
+                lhs: Box::new(lhs.erase()),
+                rhs: Box::new(rhs.erase()),
+            },
+            Self::Mul { lhs, rhs } => ErasedStateExprAst::Mul {
+                lhs: Box::new(lhs.erase()),
+                rhs: Box::new(rhs.erase()),
+            },
+            Self::Neg { expr } => ErasedStateExprAst::Neg {
+                expr: Box::new(expr.erase()),
+            },
+            Self::Union { lhs, rhs } => ErasedStateExprAst::Union {
+                lhs: Box::new(lhs.erase()),
+                rhs: Box::new(rhs.erase()),
+            },
+            Self::Intersection { lhs, rhs } => ErasedStateExprAst::Intersection {
+                lhs: Box::new(lhs.erase()),
+                rhs: Box::new(rhs.erase()),
+            },
+            Self::Difference { lhs, rhs } => ErasedStateExprAst::Difference {
+                lhs: Box::new(lhs.erase()),
+                rhs: Box::new(rhs.erase()),
+            },
+            Self::Comprehension {
+                domain,
+                body,
+                read_paths,
+                ..
+            } => ErasedStateExprAst::Comprehension {
+                domain,
+                body,
+                read_paths,
             },
             Self::IfElse {
                 condition,
@@ -462,6 +645,230 @@ where
         }
     }
 
+    pub fn sub(name: &'static str, lhs: Self, rhs: Self) -> Self
+    where
+        S: Clone,
+        T: std::ops::Sub<Output = T> + 'static,
+    {
+        let lhs_eval = lhs.clone();
+        let rhs_eval = rhs.clone();
+        let lhs_ast = lhs.ast().cloned().unwrap_or_else(|| StateExprAst::Opaque {
+            repr: lhs.name(),
+            _marker: PhantomData,
+        });
+        let rhs_ast = rhs.ast().cloned().unwrap_or_else(|| StateExprAst::Opaque {
+            repr: rhs.name(),
+            _marker: PhantomData,
+        });
+        Self {
+            name,
+            body: StateExprBody::Ast {
+                ast: StateExprAst::Sub {
+                    lhs: Box::new(lhs_ast),
+                    rhs: Box::new(rhs_ast),
+                },
+                eval: Arc::new(move |state| lhs_eval.eval(state) - rhs_eval.eval(state)),
+            },
+        }
+    }
+
+    pub fn mul(name: &'static str, lhs: Self, rhs: Self) -> Self
+    where
+        S: Clone,
+        T: std::ops::Mul<Output = T> + 'static,
+    {
+        let lhs_eval = lhs.clone();
+        let rhs_eval = rhs.clone();
+        let lhs_ast = lhs.ast().cloned().unwrap_or_else(|| StateExprAst::Opaque {
+            repr: lhs.name(),
+            _marker: PhantomData,
+        });
+        let rhs_ast = rhs.ast().cloned().unwrap_or_else(|| StateExprAst::Opaque {
+            repr: rhs.name(),
+            _marker: PhantomData,
+        });
+        Self {
+            name,
+            body: StateExprBody::Ast {
+                ast: StateExprAst::Mul {
+                    lhs: Box::new(lhs_ast),
+                    rhs: Box::new(rhs_ast),
+                },
+                eval: Arc::new(move |state| lhs_eval.eval(state) * rhs_eval.eval(state)),
+            },
+        }
+    }
+
+    pub fn neg(name: &'static str, expr: Self) -> Self
+    where
+        S: Clone,
+        T: std::ops::Neg<Output = T> + 'static,
+    {
+        let eval_expr = expr.clone();
+        let expr_ast = expr.ast().cloned().unwrap_or_else(|| StateExprAst::Opaque {
+            repr: expr.name(),
+            _marker: PhantomData,
+        });
+        Self {
+            name,
+            body: StateExprBody::Ast {
+                ast: StateExprAst::Neg {
+                    expr: Box::new(expr_ast),
+                },
+                eval: Arc::new(move |state| -eval_expr.eval(state)),
+            },
+        }
+    }
+
+    pub fn union_expr(name: &'static str, lhs: Self, rhs: Self, eval: fn(&S) -> T) -> Self
+    where
+        S: Clone,
+    {
+        let lhs_ast = lhs.ast().cloned().unwrap_or_else(|| StateExprAst::Opaque {
+            repr: lhs.name(),
+            _marker: PhantomData,
+        });
+        let rhs_ast = rhs.ast().cloned().unwrap_or_else(|| StateExprAst::Opaque {
+            repr: rhs.name(),
+            _marker: PhantomData,
+        });
+        Self {
+            name,
+            body: StateExprBody::Ast {
+                ast: StateExprAst::Union {
+                    lhs: Box::new(lhs_ast),
+                    rhs: Box::new(rhs_ast),
+                },
+                eval: Arc::new(move |state| eval(state)),
+            },
+        }
+    }
+
+    pub fn intersection_expr(name: &'static str, lhs: Self, rhs: Self, eval: fn(&S) -> T) -> Self
+    where
+        S: Clone,
+    {
+        let lhs_ast = lhs.ast().cloned().unwrap_or_else(|| StateExprAst::Opaque {
+            repr: lhs.name(),
+            _marker: PhantomData,
+        });
+        let rhs_ast = rhs.ast().cloned().unwrap_or_else(|| StateExprAst::Opaque {
+            repr: rhs.name(),
+            _marker: PhantomData,
+        });
+        Self {
+            name,
+            body: StateExprBody::Ast {
+                ast: StateExprAst::Intersection {
+                    lhs: Box::new(lhs_ast),
+                    rhs: Box::new(rhs_ast),
+                },
+                eval: Arc::new(move |state| eval(state)),
+            },
+        }
+    }
+
+    pub fn difference_expr(name: &'static str, lhs: Self, rhs: Self, eval: fn(&S) -> T) -> Self
+    where
+        S: Clone,
+    {
+        let lhs_ast = lhs.ast().cloned().unwrap_or_else(|| StateExprAst::Opaque {
+            repr: lhs.name(),
+            _marker: PhantomData,
+        });
+        let rhs_ast = rhs.ast().cloned().unwrap_or_else(|| StateExprAst::Opaque {
+            repr: rhs.name(),
+            _marker: PhantomData,
+        });
+        Self {
+            name,
+            body: StateExprBody::Ast {
+                ast: StateExprAst::Difference {
+                    lhs: Box::new(lhs_ast),
+                    rhs: Box::new(rhs_ast),
+                },
+                eval: Arc::new(move |state| eval(state)),
+            },
+        }
+    }
+
+    pub fn set_comprehension<U>(
+        name: &'static str,
+        domain: ExprDomain<U>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        predicate: impl Fn(&S, &U) -> bool + 'static,
+    ) -> StateExpr<S, RelSet<U>>
+    where
+        S: Clone,
+        U: RelAtom + Clone + 'static,
+    {
+        let domain_label = domain.label();
+        let domain_values = domain.into_bounded_domain().into_vec();
+        StateExpr {
+            name,
+            body: StateExprBody::Ast {
+                ast: StateExprAst::Comprehension {
+                    domain: domain_label,
+                    body,
+                    read_paths,
+                    _marker: PhantomData,
+                },
+                eval: Arc::new(move |state| {
+                    RelSet::from_items(
+                        domain_values
+                            .iter()
+                            .filter(|value| predicate(state, value))
+                            .cloned(),
+                    )
+                }),
+            },
+        }
+    }
+
+    pub fn relation_comprehension<L, R>(
+        name: &'static str,
+        domain: ExprDomain<(L, R)>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        predicate: impl Fn(&S, &(L, R)) -> bool + 'static,
+    ) -> StateExpr<S, Relation2<L, R>>
+    where
+        S: Clone,
+        L: RelAtom + Clone + 'static,
+        R: RelAtom + Clone + 'static,
+    {
+        let domain_label = domain.label();
+        let domain_values = domain.into_bounded_domain().into_vec();
+        StateExpr {
+            name,
+            body: StateExprBody::Ast {
+                ast: StateExprAst::Comprehension {
+                    domain: domain_label,
+                    body,
+                    read_paths,
+                    _marker: PhantomData,
+                },
+                eval: Arc::new(move |state| {
+                    Relation2::from_pairs(
+                        domain_values
+                            .iter()
+                            .filter(|value| predicate(state, value))
+                            .cloned(),
+                    )
+                }),
+            },
+        }
+    }
+
+    pub fn projection(name: &'static str, path: &'static str, read: fn(&S) -> T) -> Self {
+        Self::field(name, path, read)
+    }
+
+    pub fn payload(name: &'static str, path: &'static str, read: fn(&S) -> T) -> Self {
+        Self::field(name, path, read)
+    }
+
     pub fn if_else(
         name: &'static str,
         condition: BoolExpr<S>,
@@ -654,11 +1061,112 @@ impl<S: 'static> StateComparison<S> {
         self.lhs_ast.collect_symbolic_state_paths(paths);
         self.rhs_ast.collect_symbolic_state_paths(paths);
     }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_symbolic_full_read_paths(paths);
+        self.rhs_ast.collect_symbolic_full_read_paths(paths);
+    }
 }
 
 impl<S> fmt::Debug for StateComparison<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StateComparison")
+            .field("op", &self.op)
+            .field("lhs", &self.lhs)
+            .field("rhs", &self.rhs)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct StateBinaryPredicate<S> {
+    op: BuiltinPredicateOp,
+    lhs: &'static str,
+    rhs: &'static str,
+    lhs_ast: ErasedStateExprAst<S>,
+    rhs_ast: ErasedStateExprAst<S>,
+    eval: Arc<dyn Fn(&S) -> bool + 'static>,
+}
+
+impl<S: 'static> StateBinaryPredicate<S> {
+    pub fn new(
+        op: BuiltinPredicateOp,
+        lhs: &'static str,
+        lhs_ast: ErasedStateExprAst<S>,
+        rhs: &'static str,
+        rhs_ast: ErasedStateExprAst<S>,
+        eval: impl Fn(&S) -> bool + 'static,
+    ) -> Self {
+        Self {
+            op,
+            lhs,
+            rhs,
+            lhs_ast,
+            rhs_ast,
+            eval: Arc::new(eval),
+        }
+    }
+
+    pub fn from_exprs<L, R>(
+        op: BuiltinPredicateOp,
+        lhs: StateExpr<S, L>,
+        rhs: StateExpr<S, R>,
+        eval: impl Fn(&S) -> bool + 'static,
+    ) -> Self
+    where
+        S: Clone,
+        L: Clone + 'static,
+        R: Clone + 'static,
+    {
+        let lhs_name = lhs.name();
+        let rhs_name = rhs.name();
+        let lhs_ast = lhs
+            .erased_ast()
+            .unwrap_or(ErasedStateExprAst::Opaque { repr: lhs_name });
+        let rhs_ast = rhs
+            .erased_ast()
+            .unwrap_or(ErasedStateExprAst::Opaque { repr: rhs_name });
+        Self::new(op, lhs_name, lhs_ast, rhs_name, rhs_ast, eval)
+    }
+
+    pub const fn op(&self) -> BuiltinPredicateOp {
+        self.op
+    }
+
+    fn eval(&self, state: &S) -> bool {
+        (self.eval)(state)
+    }
+
+    pub(crate) fn first_unencodable(&self) -> Option<&'static str> {
+        self.lhs_ast
+            .first_unencodable()
+            .or_else(|| self.rhs_ast.first_unencodable())
+    }
+
+    fn collect_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_symbolic_pure_keys(keys);
+        self.rhs_ast.collect_symbolic_pure_keys(keys);
+    }
+
+    fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_unregistered_symbolic_pure_keys(keys);
+        self.rhs_ast.collect_unregistered_symbolic_pure_keys(keys);
+    }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_symbolic_state_paths(paths);
+        self.rhs_ast.collect_symbolic_state_paths(paths);
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_symbolic_full_read_paths(paths);
+        self.rhs_ast.collect_symbolic_full_read_paths(paths);
+    }
+}
+
+impl<S> fmt::Debug for StateBinaryPredicate<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StateBinaryPredicate")
             .field("op", &self.op)
             .field("lhs", &self.lhs)
             .field("rhs", &self.rhs)
@@ -696,6 +1204,10 @@ impl<S> StateMatch<S> {
 
     fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
         collect_symbolic_state_path(paths, self.value);
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        collect_symbolic_full_read_path(paths, self.value);
     }
 }
 
@@ -745,14 +1257,35 @@ impl<S> StateBoolLeaf<S> {
     fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
         collect_symbolic_state_paths_from_hints(paths, self.read_paths);
     }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        collect_symbolic_full_read_paths_from_hints(paths, self.read_paths);
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
+enum StateQuantifierEval<S> {
+    Legacy(fn(&S) -> bool),
+    Structural(Arc<dyn Fn(&S) -> bool + 'static>),
+}
+
+impl<S> StateQuantifierEval<S> {
+    fn eval(&self, state: &S) -> bool {
+        match self {
+            Self::Legacy(eval) => eval(state),
+            Self::Structural(eval) => eval(state),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct StateQuantifier<S> {
     kind: QuantifierKind,
     domain: &'static str,
     body: &'static str,
-    eval: fn(&S) -> bool,
+    read_paths: &'static [&'static str],
+    symbolic_supported: bool,
+    eval: StateQuantifierEval<S>,
 }
 
 impl<S> StateQuantifier<S> {
@@ -766,7 +1299,34 @@ impl<S> StateQuantifier<S> {
             kind,
             domain,
             body,
-            eval,
+            read_paths: &[],
+            symbolic_supported: false,
+            eval: StateQuantifierEval::Legacy(eval),
+        }
+    }
+
+    pub fn structural<T>(
+        kind: QuantifierKind,
+        domain: ExprDomain<T>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        eval: impl Fn(&S, &T) -> bool + 'static,
+    ) -> Self
+    where
+        T: Clone + 'static,
+    {
+        let domain_label = domain.label();
+        let domain_values = domain.into_bounded_domain().into_vec();
+        Self {
+            kind,
+            domain: domain_label,
+            body,
+            read_paths,
+            symbolic_supported: true,
+            eval: StateQuantifierEval::Structural(Arc::new(move |state| match kind {
+                QuantifierKind::ForAll => domain_values.iter().all(|value| eval(state, value)),
+                QuantifierKind::Exists => domain_values.iter().any(|value| eval(state, value)),
+            })),
         }
     }
 
@@ -782,8 +1342,40 @@ impl<S> StateQuantifier<S> {
         self.body
     }
 
+    pub const fn is_symbolic_supported(&self) -> bool {
+        self.symbolic_supported
+    }
+
     fn eval(&self, state: &S) -> bool {
-        (self.eval)(state)
+        self.eval.eval(state)
+    }
+
+    fn first_unencodable(&self) -> Option<&'static str> {
+        (!self.symbolic_supported).then_some(symbolic_quantifier_node(self.kind))
+    }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        if self.symbolic_supported {
+            collect_symbolic_state_paths_from_hints(paths, self.read_paths);
+        }
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        if self.symbolic_supported {
+            collect_symbolic_full_read_paths_from_hints(paths, self.read_paths);
+        }
+    }
+}
+
+impl<S> fmt::Debug for StateQuantifier<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StateQuantifier")
+            .field("kind", &self.kind)
+            .field("domain", &self.domain)
+            .field("body", &self.body)
+            .field("read_paths", &self.read_paths)
+            .field("symbolic_supported", &self.symbolic_supported)
+            .finish()
     }
 }
 
@@ -798,6 +1390,8 @@ pub enum BoolExprAst<S> {
     Le(StateComparison<S>),
     Gt(StateComparison<S>),
     Ge(StateComparison<S>),
+    Contains(StateBinaryPredicate<S>),
+    SubsetOf(StateBinaryPredicate<S>),
     Match(StateMatch<S>),
     ForAll(StateQuantifier<S>),
     Exists(StateQuantifier<S>),
@@ -817,6 +1411,7 @@ impl<S: 'static> BoolExprAst<S> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.eval(state),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => predicate.eval(state),
             Self::Match(matcher) => matcher.eval(state),
             Self::ForAll(quantifier) | Self::Exists(quantifier) => quantifier.eval(state),
             Self::Not(inner) => !inner.eval(state),
@@ -827,7 +1422,8 @@ impl<S: 'static> BoolExprAst<S> {
 
     pub(crate) fn first_unencodable(&self) -> Option<&'static str> {
         match self {
-            Self::Literal(_) | Self::Match(_) | Self::ForAll(_) | Self::Exists(_) => None,
+            Self::Literal(_) | Self::Match(_) => None,
+            Self::ForAll(quantifier) | Self::Exists(quantifier) => quantifier.first_unencodable(),
             Self::FieldRead(field) | Self::PureCall(field) => field.first_unencodable(),
             Self::Eq(compare)
             | Self::Ne(compare)
@@ -835,6 +1431,7 @@ impl<S: 'static> BoolExprAst<S> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.first_unencodable(),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => predicate.first_unencodable(),
             Self::Not(inner) => inner.first_unencodable_symbolic_node(),
             Self::And(parts) | Self::Or(parts) => parts
                 .iter()
@@ -854,6 +1451,9 @@ impl<S: 'static> BoolExprAst<S> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.collect_symbolic_pure_keys(keys),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => {
+                predicate.collect_symbolic_pure_keys(keys)
+            }
             Self::Not(inner) => inner.collect_symbolic_pure_keys(keys),
             Self::And(parts) | Self::Or(parts) => {
                 for part in parts {
@@ -875,6 +1475,9 @@ impl<S: 'static> BoolExprAst<S> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.collect_unregistered_symbolic_pure_keys(keys),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => {
+                predicate.collect_unregistered_symbolic_pure_keys(keys)
+            }
             Self::Not(inner) => inner.collect_unregistered_symbolic_pure_keys(keys),
             Self::And(parts) | Self::Or(parts) => {
                 for part in parts {
@@ -886,7 +1489,10 @@ impl<S: 'static> BoolExprAst<S> {
 
     fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
         match self {
-            Self::Literal(_) | Self::ForAll(_) | Self::Exists(_) => {}
+            Self::Literal(_) => {}
+            Self::ForAll(quantifier) | Self::Exists(quantifier) => {
+                quantifier.collect_symbolic_state_paths(paths);
+            }
             Self::FieldRead(field) | Self::PureCall(field) => {
                 field.collect_symbolic_state_paths(paths)
             }
@@ -896,11 +1502,41 @@ impl<S: 'static> BoolExprAst<S> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.collect_symbolic_state_paths(paths),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => {
+                predicate.collect_symbolic_state_paths(paths)
+            }
             Self::Match(matcher) => matcher.collect_symbolic_state_paths(paths),
             Self::Not(inner) => inner.collect_symbolic_state_paths(paths),
             Self::And(parts) | Self::Or(parts) => {
                 for part in parts {
                     part.collect_symbolic_state_paths(paths);
+                }
+            }
+        }
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Literal(_) => {}
+            Self::ForAll(quantifier) | Self::Exists(quantifier) => {
+                quantifier.collect_symbolic_full_read_paths(paths);
+            }
+            Self::FieldRead(field) => collect_symbolic_full_read_path(paths, field.label()),
+            Self::PureCall(field) => field.collect_symbolic_full_read_paths(paths),
+            Self::Eq(compare)
+            | Self::Ne(compare)
+            | Self::Lt(compare)
+            | Self::Le(compare)
+            | Self::Gt(compare)
+            | Self::Ge(compare) => compare.collect_symbolic_full_read_paths(paths),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => {
+                predicate.collect_symbolic_full_read_paths(paths)
+            }
+            Self::Match(matcher) => matcher.collect_symbolic_full_read_paths(paths),
+            Self::Not(inner) => inner.collect_symbolic_full_read_paths(paths),
+            Self::And(parts) | Self::Or(parts) => {
+                for part in parts {
+                    part.collect_symbolic_full_read_paths(paths);
                 }
             }
         }
@@ -1226,6 +1862,50 @@ impl<S: 'static> BoolExpr<S> {
         )
     }
 
+    pub fn contains_expr<L, R>(
+        name: &'static str,
+        lhs: StateExpr<S, L>,
+        rhs: StateExpr<S, R>,
+        eval: fn(&S) -> bool,
+    ) -> Self
+    where
+        S: Clone,
+        L: Clone + 'static,
+        R: Clone + 'static,
+    {
+        Self {
+            name,
+            body: BoolExprBody::Ast(BoolExprAst::Contains(StateBinaryPredicate::from_exprs(
+                BuiltinPredicateOp::Contains,
+                lhs,
+                rhs,
+                eval,
+            ))),
+        }
+    }
+
+    pub fn subset_of_expr<L, R>(
+        name: &'static str,
+        lhs: StateExpr<S, L>,
+        rhs: StateExpr<S, R>,
+        eval: fn(&S) -> bool,
+    ) -> Self
+    where
+        S: Clone,
+        L: Clone + 'static,
+        R: Clone + 'static,
+    {
+        Self {
+            name,
+            body: BoolExprBody::Ast(BoolExprAst::SubsetOf(StateBinaryPredicate::from_exprs(
+                BuiltinPredicateOp::SubsetOf,
+                lhs,
+                rhs,
+                eval,
+            ))),
+        }
+    }
+
     pub const fn matches_variant(
         name: &'static str,
         value: &'static str,
@@ -1293,6 +1973,50 @@ impl<S: 'static> BoolExpr<S> {
         }
     }
 
+    pub fn forall_in<T>(
+        name: &'static str,
+        domain: ExprDomain<T>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        eval: impl Fn(&S, &T) -> bool + 'static,
+    ) -> Self
+    where
+        T: Clone + 'static,
+    {
+        Self {
+            name,
+            body: BoolExprBody::Ast(BoolExprAst::ForAll(StateQuantifier::structural(
+                QuantifierKind::ForAll,
+                domain,
+                body,
+                read_paths,
+                eval,
+            ))),
+        }
+    }
+
+    pub fn exists_in<T>(
+        name: &'static str,
+        domain: ExprDomain<T>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        eval: impl Fn(&S, &T) -> bool + 'static,
+    ) -> Self
+    where
+        T: Clone + 'static,
+    {
+        Self {
+            name,
+            body: BoolExprBody::Ast(BoolExprAst::Exists(StateQuantifier::structural(
+                QuantifierKind::Exists,
+                domain,
+                body,
+                read_paths,
+                eval,
+            ))),
+        }
+    }
+
     pub const fn name(&self) -> &'static str {
         self.name
     }
@@ -1330,9 +2054,21 @@ impl<S: 'static> BoolExpr<S> {
         }
     }
 
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        if let Some(ast) = self.ast() {
+            ast.collect_symbolic_full_read_paths(paths);
+        }
+    }
+
     pub fn symbolic_state_paths(&self) -> Vec<&'static str> {
         let mut paths = BTreeSet::new();
         self.collect_symbolic_state_paths(&mut paths);
+        paths.into_iter().collect()
+    }
+
+    pub fn symbolic_full_read_paths(&self) -> Vec<&'static str> {
+        let mut paths = BTreeSet::new();
+        self.collect_symbolic_full_read_paths(&mut paths);
         paths.into_iter().collect()
     }
 
@@ -1385,6 +2121,34 @@ pub enum ErasedStepValueExprAst<S, A> {
         lhs: Box<Self>,
         rhs: Box<Self>,
     },
+    Sub {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Mul {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Neg {
+        expr: Box<Self>,
+    },
+    Union {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Intersection {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Difference {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Comprehension {
+        domain: &'static str,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+    },
     IfElse {
         condition: Box<StepExpr<S, A>>,
         then_branch: Box<Self>,
@@ -1396,9 +2160,17 @@ impl<S: 'static, A: 'static> ErasedStepValueExprAst<S, A> {
     pub(crate) fn first_unencodable(&self) -> Option<&'static str> {
         match self {
             Self::Opaque { repr } => Some(repr),
-            Self::Literal { .. } | Self::FieldRead { .. } => None,
+            Self::Literal { .. } | Self::FieldRead { .. } | Self::Comprehension { .. } => None,
             Self::PureCall { symbolic, .. } => symbolic.first_unencodable(),
-            Self::Add { lhs, rhs } => lhs.first_unencodable().or_else(|| rhs.first_unencodable()),
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
+                lhs.first_unencodable().or_else(|| rhs.first_unencodable())
+            }
+            Self::Neg { expr } => expr.first_unencodable(),
             Self::IfElse {
                 condition,
                 then_branch,
@@ -1413,11 +2185,18 @@ impl<S: 'static, A: 'static> ErasedStepValueExprAst<S, A> {
     fn collect_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         match self {
             Self::Opaque { .. } | Self::Literal { .. } | Self::FieldRead { .. } => {}
+            Self::Comprehension { .. } => {}
             Self::PureCall { symbolic, .. } => symbolic.collect_key(keys),
-            Self::Add { lhs, rhs } => {
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
                 lhs.collect_symbolic_pure_keys(keys);
                 rhs.collect_symbolic_pure_keys(keys);
             }
+            Self::Neg { expr } => expr.collect_symbolic_pure_keys(keys),
             Self::IfElse {
                 condition,
                 then_branch,
@@ -1433,11 +2212,18 @@ impl<S: 'static, A: 'static> ErasedStepValueExprAst<S, A> {
     fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         match self {
             Self::Opaque { .. } | Self::Literal { .. } | Self::FieldRead { .. } => {}
+            Self::Comprehension { .. } => {}
             Self::PureCall { symbolic, .. } => symbolic.collect_unregistered_key(keys),
-            Self::Add { lhs, rhs } => {
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
                 lhs.collect_unregistered_symbolic_pure_keys(keys);
                 rhs.collect_unregistered_symbolic_pure_keys(keys);
             }
+            Self::Neg { expr } => expr.collect_unregistered_symbolic_pure_keys(keys),
             Self::IfElse {
                 condition,
                 then_branch,
@@ -1454,13 +2240,22 @@ impl<S: 'static, A: 'static> ErasedStepValueExprAst<S, A> {
         match self {
             Self::Opaque { .. } | Self::Literal { .. } => {}
             Self::FieldRead { path } => collect_symbolic_state_path(paths, path),
+            Self::Comprehension { read_paths, .. } => {
+                collect_symbolic_state_paths_from_hints(paths, read_paths);
+            }
             Self::PureCall { read_paths, .. } => {
                 collect_symbolic_state_paths_from_hints(paths, read_paths);
             }
-            Self::Add { lhs, rhs } => {
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
                 lhs.collect_symbolic_state_paths(paths);
                 rhs.collect_symbolic_state_paths(paths);
             }
+            Self::Neg { expr } => expr.collect_symbolic_state_paths(paths),
             Self::IfElse {
                 condition,
                 then_branch,
@@ -1469,6 +2264,38 @@ impl<S: 'static, A: 'static> ErasedStepValueExprAst<S, A> {
                 condition.collect_symbolic_state_paths(paths);
                 then_branch.collect_symbolic_state_paths(paths);
                 else_branch.collect_symbolic_state_paths(paths);
+            }
+        }
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Opaque { .. } | Self::Literal { .. } => {}
+            Self::FieldRead { path } => collect_symbolic_full_read_path(paths, path),
+            Self::Comprehension { read_paths, .. } => {
+                collect_symbolic_full_read_paths_from_hints(paths, read_paths);
+            }
+            Self::PureCall { read_paths, .. } => {
+                collect_symbolic_full_read_paths_from_hints(paths, read_paths);
+            }
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
+                lhs.collect_symbolic_full_read_paths(paths);
+                rhs.collect_symbolic_full_read_paths(paths);
+            }
+            Self::Neg { expr } => expr.collect_symbolic_full_read_paths(paths),
+            Self::IfElse {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                condition.collect_symbolic_full_read_paths(paths);
+                then_branch.collect_symbolic_full_read_paths(paths);
+                else_branch.collect_symbolic_full_read_paths(paths);
             }
         }
     }
@@ -1498,6 +2325,35 @@ pub enum StepValueExprAst<S, A, T> {
         lhs: Box<Self>,
         rhs: Box<Self>,
     },
+    Sub {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Mul {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Neg {
+        expr: Box<Self>,
+    },
+    Union {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Intersection {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Difference {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Comprehension {
+        domain: &'static str,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        _marker: PhantomData<fn() -> T>,
+    },
     IfElse {
         condition: Box<StepExpr<S, A>>,
         then_branch: Box<Self>,
@@ -1524,6 +2380,39 @@ impl<S: Clone, A: Clone, T> StepValueExprAst<S, A, T> {
             Self::Add { lhs, rhs } => ErasedStepValueExprAst::Add {
                 lhs: Box::new(lhs.erase()),
                 rhs: Box::new(rhs.erase()),
+            },
+            Self::Sub { lhs, rhs } => ErasedStepValueExprAst::Sub {
+                lhs: Box::new(lhs.erase()),
+                rhs: Box::new(rhs.erase()),
+            },
+            Self::Mul { lhs, rhs } => ErasedStepValueExprAst::Mul {
+                lhs: Box::new(lhs.erase()),
+                rhs: Box::new(rhs.erase()),
+            },
+            Self::Neg { expr } => ErasedStepValueExprAst::Neg {
+                expr: Box::new(expr.erase()),
+            },
+            Self::Union { lhs, rhs } => ErasedStepValueExprAst::Union {
+                lhs: Box::new(lhs.erase()),
+                rhs: Box::new(rhs.erase()),
+            },
+            Self::Intersection { lhs, rhs } => ErasedStepValueExprAst::Intersection {
+                lhs: Box::new(lhs.erase()),
+                rhs: Box::new(rhs.erase()),
+            },
+            Self::Difference { lhs, rhs } => ErasedStepValueExprAst::Difference {
+                lhs: Box::new(lhs.erase()),
+                rhs: Box::new(rhs.erase()),
+            },
+            Self::Comprehension {
+                domain,
+                body,
+                read_paths,
+                ..
+            } => ErasedStepValueExprAst::Comprehension {
+                domain,
+                body,
+                read_paths,
             },
             Self::IfElse {
                 condition,
@@ -1719,6 +2608,285 @@ where
         }
     }
 
+    pub fn sub(name: &'static str, lhs: Self, rhs: Self) -> Self
+    where
+        S: Clone,
+        A: Clone,
+        T: std::ops::Sub<Output = T> + 'static,
+    {
+        let lhs_eval = lhs.clone();
+        let rhs_eval = rhs.clone();
+        let lhs_ast = lhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| StepValueExprAst::Opaque {
+                repr: lhs.name(),
+                _marker: PhantomData,
+            });
+        let rhs_ast = rhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| StepValueExprAst::Opaque {
+                repr: rhs.name(),
+                _marker: PhantomData,
+            });
+        Self {
+            name,
+            body: StepValueExprBody::Ast {
+                ast: StepValueExprAst::Sub {
+                    lhs: Box::new(lhs_ast),
+                    rhs: Box::new(rhs_ast),
+                },
+                eval: Arc::new(move |prev, action, next| {
+                    lhs_eval.eval(prev, action, next) - rhs_eval.eval(prev, action, next)
+                }),
+            },
+        }
+    }
+
+    pub fn mul(name: &'static str, lhs: Self, rhs: Self) -> Self
+    where
+        S: Clone,
+        A: Clone,
+        T: std::ops::Mul<Output = T> + 'static,
+    {
+        let lhs_eval = lhs.clone();
+        let rhs_eval = rhs.clone();
+        let lhs_ast = lhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| StepValueExprAst::Opaque {
+                repr: lhs.name(),
+                _marker: PhantomData,
+            });
+        let rhs_ast = rhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| StepValueExprAst::Opaque {
+                repr: rhs.name(),
+                _marker: PhantomData,
+            });
+        Self {
+            name,
+            body: StepValueExprBody::Ast {
+                ast: StepValueExprAst::Mul {
+                    lhs: Box::new(lhs_ast),
+                    rhs: Box::new(rhs_ast),
+                },
+                eval: Arc::new(move |prev, action, next| {
+                    lhs_eval.eval(prev, action, next) * rhs_eval.eval(prev, action, next)
+                }),
+            },
+        }
+    }
+
+    pub fn neg(name: &'static str, expr: Self) -> Self
+    where
+        S: Clone,
+        A: Clone,
+        T: std::ops::Neg<Output = T> + 'static,
+    {
+        let eval_expr = expr.clone();
+        let expr_ast = expr
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| StepValueExprAst::Opaque {
+                repr: expr.name(),
+                _marker: PhantomData,
+            });
+        Self {
+            name,
+            body: StepValueExprBody::Ast {
+                ast: StepValueExprAst::Neg {
+                    expr: Box::new(expr_ast),
+                },
+                eval: Arc::new(move |prev, action, next| -eval_expr.eval(prev, action, next)),
+            },
+        }
+    }
+
+    pub fn union_expr(name: &'static str, lhs: Self, rhs: Self, eval: fn(&S, &A, &S) -> T) -> Self
+    where
+        S: Clone,
+        A: Clone,
+    {
+        let lhs_ast = lhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| StepValueExprAst::Opaque {
+                repr: lhs.name(),
+                _marker: PhantomData,
+            });
+        let rhs_ast = rhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| StepValueExprAst::Opaque {
+                repr: rhs.name(),
+                _marker: PhantomData,
+            });
+        Self {
+            name,
+            body: StepValueExprBody::Ast {
+                ast: StepValueExprAst::Union {
+                    lhs: Box::new(lhs_ast),
+                    rhs: Box::new(rhs_ast),
+                },
+                eval: Arc::new(move |prev, action, next| eval(prev, action, next)),
+            },
+        }
+    }
+
+    pub fn intersection_expr(
+        name: &'static str,
+        lhs: Self,
+        rhs: Self,
+        eval: fn(&S, &A, &S) -> T,
+    ) -> Self
+    where
+        S: Clone,
+        A: Clone,
+    {
+        let lhs_ast = lhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| StepValueExprAst::Opaque {
+                repr: lhs.name(),
+                _marker: PhantomData,
+            });
+        let rhs_ast = rhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| StepValueExprAst::Opaque {
+                repr: rhs.name(),
+                _marker: PhantomData,
+            });
+        Self {
+            name,
+            body: StepValueExprBody::Ast {
+                ast: StepValueExprAst::Intersection {
+                    lhs: Box::new(lhs_ast),
+                    rhs: Box::new(rhs_ast),
+                },
+                eval: Arc::new(move |prev, action, next| eval(prev, action, next)),
+            },
+        }
+    }
+
+    pub fn difference_expr(
+        name: &'static str,
+        lhs: Self,
+        rhs: Self,
+        eval: fn(&S, &A, &S) -> T,
+    ) -> Self
+    where
+        S: Clone,
+        A: Clone,
+    {
+        let lhs_ast = lhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| StepValueExprAst::Opaque {
+                repr: lhs.name(),
+                _marker: PhantomData,
+            });
+        let rhs_ast = rhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| StepValueExprAst::Opaque {
+                repr: rhs.name(),
+                _marker: PhantomData,
+            });
+        Self {
+            name,
+            body: StepValueExprBody::Ast {
+                ast: StepValueExprAst::Difference {
+                    lhs: Box::new(lhs_ast),
+                    rhs: Box::new(rhs_ast),
+                },
+                eval: Arc::new(move |prev, action, next| eval(prev, action, next)),
+            },
+        }
+    }
+
+    pub fn set_comprehension<U>(
+        name: &'static str,
+        domain: ExprDomain<U>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        predicate: impl Fn(&S, &A, &S, &U) -> bool + 'static,
+    ) -> StepValueExpr<S, A, RelSet<U>>
+    where
+        S: Clone,
+        A: Clone,
+        U: RelAtom + Clone + 'static,
+    {
+        let domain_label = domain.label();
+        let domain_values = domain.into_bounded_domain().into_vec();
+        StepValueExpr {
+            name,
+            body: StepValueExprBody::Ast {
+                ast: StepValueExprAst::Comprehension {
+                    domain: domain_label,
+                    body,
+                    read_paths,
+                    _marker: PhantomData,
+                },
+                eval: Arc::new(move |prev, action, next| {
+                    RelSet::from_items(
+                        domain_values
+                            .iter()
+                            .filter(|value| predicate(prev, action, next, value))
+                            .cloned(),
+                    )
+                }),
+            },
+        }
+    }
+
+    pub fn relation_comprehension<L, R>(
+        name: &'static str,
+        domain: ExprDomain<(L, R)>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        predicate: impl Fn(&S, &A, &S, &(L, R)) -> bool + 'static,
+    ) -> StepValueExpr<S, A, Relation2<L, R>>
+    where
+        S: Clone,
+        A: Clone,
+        L: RelAtom + Clone + 'static,
+        R: RelAtom + Clone + 'static,
+    {
+        let domain_label = domain.label();
+        let domain_values = domain.into_bounded_domain().into_vec();
+        StepValueExpr {
+            name,
+            body: StepValueExprBody::Ast {
+                ast: StepValueExprAst::Comprehension {
+                    domain: domain_label,
+                    body,
+                    read_paths,
+                    _marker: PhantomData,
+                },
+                eval: Arc::new(move |prev, action, next| {
+                    Relation2::from_pairs(
+                        domain_values
+                            .iter()
+                            .filter(|value| predicate(prev, action, next, value))
+                            .cloned(),
+                    )
+                }),
+            },
+        }
+    }
+
+    pub fn projection(name: &'static str, path: &'static str, read: fn(&S, &A, &S) -> T) -> Self {
+        Self::field(name, path, read)
+    }
+
+    pub fn payload(name: &'static str, path: &'static str, read: fn(&S, &A, &S) -> T) -> Self {
+        Self::field(name, path, read)
+    }
+
     pub fn if_else(
         name: &'static str,
         condition: StepExpr<S, A>,
@@ -1879,11 +3047,113 @@ impl<S: 'static, A: 'static> StepComparison<S, A> {
         self.lhs_ast.collect_symbolic_state_paths(paths);
         self.rhs_ast.collect_symbolic_state_paths(paths);
     }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_symbolic_full_read_paths(paths);
+        self.rhs_ast.collect_symbolic_full_read_paths(paths);
+    }
 }
 
 impl<S, A> fmt::Debug for StepComparison<S, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StepComparison")
+            .field("op", &self.op)
+            .field("lhs", &self.lhs)
+            .field("rhs", &self.rhs)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct StepBinaryPredicate<S, A> {
+    op: BuiltinPredicateOp,
+    lhs: &'static str,
+    rhs: &'static str,
+    lhs_ast: ErasedStepValueExprAst<S, A>,
+    rhs_ast: ErasedStepValueExprAst<S, A>,
+    eval: Arc<dyn Fn(&S, &A, &S) -> bool + 'static>,
+}
+
+impl<S: 'static, A: 'static> StepBinaryPredicate<S, A> {
+    pub fn new(
+        op: BuiltinPredicateOp,
+        lhs: &'static str,
+        lhs_ast: ErasedStepValueExprAst<S, A>,
+        rhs: &'static str,
+        rhs_ast: ErasedStepValueExprAst<S, A>,
+        eval: impl Fn(&S, &A, &S) -> bool + 'static,
+    ) -> Self {
+        Self {
+            op,
+            lhs,
+            rhs,
+            lhs_ast,
+            rhs_ast,
+            eval: Arc::new(eval),
+        }
+    }
+
+    pub fn from_exprs<L, R>(
+        op: BuiltinPredicateOp,
+        lhs: StepValueExpr<S, A, L>,
+        rhs: StepValueExpr<S, A, R>,
+        eval: impl Fn(&S, &A, &S) -> bool + 'static,
+    ) -> Self
+    where
+        S: Clone,
+        A: Clone,
+        L: Clone + 'static,
+        R: Clone + 'static,
+    {
+        let lhs_name = lhs.name();
+        let rhs_name = rhs.name();
+        let lhs_ast = lhs
+            .erased_ast()
+            .unwrap_or(ErasedStepValueExprAst::Opaque { repr: lhs_name });
+        let rhs_ast = rhs
+            .erased_ast()
+            .unwrap_or(ErasedStepValueExprAst::Opaque { repr: rhs_name });
+        Self::new(op, lhs_name, lhs_ast, rhs_name, rhs_ast, eval)
+    }
+
+    pub const fn op(&self) -> BuiltinPredicateOp {
+        self.op
+    }
+
+    fn eval(&self, prev: &S, action: &A, next: &S) -> bool {
+        (self.eval)(prev, action, next)
+    }
+
+    fn first_unencodable(&self) -> Option<&'static str> {
+        self.lhs_ast
+            .first_unencodable()
+            .or_else(|| self.rhs_ast.first_unencodable())
+    }
+
+    fn collect_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_symbolic_pure_keys(keys);
+        self.rhs_ast.collect_symbolic_pure_keys(keys);
+    }
+
+    fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_unregistered_symbolic_pure_keys(keys);
+        self.rhs_ast.collect_unregistered_symbolic_pure_keys(keys);
+    }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_symbolic_state_paths(paths);
+        self.rhs_ast.collect_symbolic_state_paths(paths);
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_symbolic_full_read_paths(paths);
+        self.rhs_ast.collect_symbolic_full_read_paths(paths);
+    }
+}
+
+impl<S, A> fmt::Debug for StepBinaryPredicate<S, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StepBinaryPredicate")
             .field("op", &self.op)
             .field("lhs", &self.lhs)
             .field("rhs", &self.rhs)
@@ -1925,6 +3195,10 @@ impl<S, A> StepMatch<S, A> {
 
     fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
         collect_symbolic_state_path(paths, self.value);
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        collect_symbolic_full_read_path(paths, self.value);
     }
 }
 
@@ -1974,14 +3248,35 @@ impl<S, A> StepBoolLeaf<S, A> {
     fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
         collect_symbolic_state_paths_from_hints(paths, self.read_paths);
     }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        collect_symbolic_full_read_paths_from_hints(paths, self.read_paths);
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
+enum StepQuantifierEval<S, A> {
+    Legacy(fn(&S, &A, &S) -> bool),
+    Structural(Arc<dyn Fn(&S, &A, &S) -> bool + 'static>),
+}
+
+impl<S, A> StepQuantifierEval<S, A> {
+    fn eval(&self, prev: &S, action: &A, next: &S) -> bool {
+        match self {
+            Self::Legacy(eval) => eval(prev, action, next),
+            Self::Structural(eval) => eval(prev, action, next),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct StepQuantifier<S, A> {
     kind: QuantifierKind,
     domain: &'static str,
     body: &'static str,
-    eval: fn(&S, &A, &S) -> bool,
+    read_paths: &'static [&'static str],
+    symbolic_supported: bool,
+    eval: StepQuantifierEval<S, A>,
 }
 
 impl<S, A> StepQuantifier<S, A> {
@@ -1995,7 +3290,38 @@ impl<S, A> StepQuantifier<S, A> {
             kind,
             domain,
             body,
-            eval,
+            read_paths: &[],
+            symbolic_supported: false,
+            eval: StepQuantifierEval::Legacy(eval),
+        }
+    }
+
+    pub fn structural<T>(
+        kind: QuantifierKind,
+        domain: ExprDomain<T>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        eval: impl Fn(&S, &A, &S, &T) -> bool + 'static,
+    ) -> Self
+    where
+        T: Clone + 'static,
+    {
+        let domain_label = domain.label();
+        let domain_values = domain.into_bounded_domain().into_vec();
+        Self {
+            kind,
+            domain: domain_label,
+            body,
+            read_paths,
+            symbolic_supported: true,
+            eval: StepQuantifierEval::Structural(Arc::new(move |prev, action, next| match kind {
+                QuantifierKind::ForAll => domain_values
+                    .iter()
+                    .all(|value| eval(prev, action, next, value)),
+                QuantifierKind::Exists => domain_values
+                    .iter()
+                    .any(|value| eval(prev, action, next, value)),
+            })),
         }
     }
 
@@ -2011,8 +3337,40 @@ impl<S, A> StepQuantifier<S, A> {
         self.body
     }
 
+    pub const fn is_symbolic_supported(&self) -> bool {
+        self.symbolic_supported
+    }
+
     fn eval(&self, prev: &S, action: &A, next: &S) -> bool {
-        (self.eval)(prev, action, next)
+        self.eval.eval(prev, action, next)
+    }
+
+    fn first_unencodable(&self) -> Option<&'static str> {
+        (!self.symbolic_supported).then_some(symbolic_quantifier_node(self.kind))
+    }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        if self.symbolic_supported {
+            collect_symbolic_state_paths_from_hints(paths, self.read_paths);
+        }
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        if self.symbolic_supported {
+            collect_symbolic_full_read_paths_from_hints(paths, self.read_paths);
+        }
+    }
+}
+
+impl<S, A> fmt::Debug for StepQuantifier<S, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StepQuantifier")
+            .field("kind", &self.kind)
+            .field("domain", &self.domain)
+            .field("body", &self.body)
+            .field("read_paths", &self.read_paths)
+            .field("symbolic_supported", &self.symbolic_supported)
+            .finish()
     }
 }
 
@@ -2027,6 +3385,8 @@ pub enum StepExprAst<S, A> {
     Le(StepComparison<S, A>),
     Gt(StepComparison<S, A>),
     Ge(StepComparison<S, A>),
+    Contains(StepBinaryPredicate<S, A>),
+    SubsetOf(StepBinaryPredicate<S, A>),
     Match(StepMatch<S, A>),
     ForAll(StepQuantifier<S, A>),
     Exists(StepQuantifier<S, A>),
@@ -2046,6 +3406,9 @@ impl<S: 'static, A: 'static> StepExprAst<S, A> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.eval(prev, action, next),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => {
+                predicate.eval(prev, action, next)
+            }
             Self::Match(matcher) => matcher.eval(prev, action, next),
             Self::ForAll(quantifier) | Self::Exists(quantifier) => {
                 quantifier.eval(prev, action, next)
@@ -2058,7 +3421,8 @@ impl<S: 'static, A: 'static> StepExprAst<S, A> {
 
     fn first_unencodable(&self) -> Option<&'static str> {
         match self {
-            Self::Literal(_) | Self::Match(_) | Self::ForAll(_) | Self::Exists(_) => None,
+            Self::Literal(_) | Self::Match(_) => None,
+            Self::ForAll(quantifier) | Self::Exists(quantifier) => quantifier.first_unencodable(),
             Self::FieldRead(field) | Self::PureCall(field) => field.first_unencodable(),
             Self::Eq(compare)
             | Self::Ne(compare)
@@ -2066,6 +3430,7 @@ impl<S: 'static, A: 'static> StepExprAst<S, A> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.first_unencodable(),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => predicate.first_unencodable(),
             Self::Not(inner) => inner.first_unencodable_symbolic_node(),
             Self::And(parts) | Self::Or(parts) => parts
                 .iter()
@@ -2085,6 +3450,9 @@ impl<S: 'static, A: 'static> StepExprAst<S, A> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.collect_symbolic_pure_keys(keys),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => {
+                predicate.collect_symbolic_pure_keys(keys)
+            }
             Self::Not(inner) => inner.collect_symbolic_pure_keys(keys),
             Self::And(parts) | Self::Or(parts) => {
                 for part in parts {
@@ -2106,6 +3474,9 @@ impl<S: 'static, A: 'static> StepExprAst<S, A> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.collect_unregistered_symbolic_pure_keys(keys),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => {
+                predicate.collect_unregistered_symbolic_pure_keys(keys)
+            }
             Self::Not(inner) => inner.collect_unregistered_symbolic_pure_keys(keys),
             Self::And(parts) | Self::Or(parts) => {
                 for part in parts {
@@ -2117,7 +3488,10 @@ impl<S: 'static, A: 'static> StepExprAst<S, A> {
 
     fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
         match self {
-            Self::Literal(_) | Self::ForAll(_) | Self::Exists(_) => {}
+            Self::Literal(_) => {}
+            Self::ForAll(quantifier) | Self::Exists(quantifier) => {
+                quantifier.collect_symbolic_state_paths(paths);
+            }
             Self::FieldRead(field) => collect_symbolic_state_path(paths, field.label()),
             Self::PureCall(field) => field.collect_symbolic_state_paths(paths),
             Self::Eq(compare)
@@ -2126,11 +3500,41 @@ impl<S: 'static, A: 'static> StepExprAst<S, A> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.collect_symbolic_state_paths(paths),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => {
+                predicate.collect_symbolic_state_paths(paths)
+            }
             Self::Match(matcher) => matcher.collect_symbolic_state_paths(paths),
             Self::Not(inner) => inner.collect_symbolic_state_paths(paths),
             Self::And(parts) | Self::Or(parts) => {
                 for part in parts {
                     part.collect_symbolic_state_paths(paths);
+                }
+            }
+        }
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Literal(_) => {}
+            Self::ForAll(quantifier) | Self::Exists(quantifier) => {
+                quantifier.collect_symbolic_full_read_paths(paths);
+            }
+            Self::FieldRead(field) => collect_symbolic_full_read_path(paths, field.label()),
+            Self::PureCall(field) => field.collect_symbolic_full_read_paths(paths),
+            Self::Eq(compare)
+            | Self::Ne(compare)
+            | Self::Lt(compare)
+            | Self::Le(compare)
+            | Self::Gt(compare)
+            | Self::Ge(compare) => compare.collect_symbolic_full_read_paths(paths),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => {
+                predicate.collect_symbolic_full_read_paths(paths)
+            }
+            Self::Match(matcher) => matcher.collect_symbolic_full_read_paths(paths),
+            Self::Not(inner) => inner.collect_symbolic_full_read_paths(paths),
+            Self::And(parts) | Self::Or(parts) => {
+                for part in parts {
+                    part.collect_symbolic_full_read_paths(paths);
                 }
             }
         }
@@ -2508,6 +3912,52 @@ impl<S: 'static, A: 'static> StepExpr<S, A> {
         )
     }
 
+    pub fn contains_expr<L, R>(
+        name: &'static str,
+        lhs: StepValueExpr<S, A, L>,
+        rhs: StepValueExpr<S, A, R>,
+        eval: fn(&S, &A, &S) -> bool,
+    ) -> Self
+    where
+        S: Clone,
+        A: Clone,
+        L: Clone + 'static,
+        R: Clone + 'static,
+    {
+        Self {
+            name,
+            body: StepExprBody::Ast(StepExprAst::Contains(StepBinaryPredicate::from_exprs(
+                BuiltinPredicateOp::Contains,
+                lhs,
+                rhs,
+                eval,
+            ))),
+        }
+    }
+
+    pub fn subset_of_expr<L, R>(
+        name: &'static str,
+        lhs: StepValueExpr<S, A, L>,
+        rhs: StepValueExpr<S, A, R>,
+        eval: fn(&S, &A, &S) -> bool,
+    ) -> Self
+    where
+        S: Clone,
+        A: Clone,
+        L: Clone + 'static,
+        R: Clone + 'static,
+    {
+        Self {
+            name,
+            body: StepExprBody::Ast(StepExprAst::SubsetOf(StepBinaryPredicate::from_exprs(
+                BuiltinPredicateOp::SubsetOf,
+                lhs,
+                rhs,
+                eval,
+            ))),
+        }
+    }
+
     pub const fn matches_variant(
         name: &'static str,
         value: &'static str,
@@ -2575,6 +4025,50 @@ impl<S: 'static, A: 'static> StepExpr<S, A> {
         }
     }
 
+    pub fn forall_in<T>(
+        name: &'static str,
+        domain: ExprDomain<T>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        eval: impl Fn(&S, &A, &S, &T) -> bool + 'static,
+    ) -> Self
+    where
+        T: Clone + 'static,
+    {
+        Self {
+            name,
+            body: StepExprBody::Ast(StepExprAst::ForAll(StepQuantifier::structural(
+                QuantifierKind::ForAll,
+                domain,
+                body,
+                read_paths,
+                eval,
+            ))),
+        }
+    }
+
+    pub fn exists_in<T>(
+        name: &'static str,
+        domain: ExprDomain<T>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        eval: impl Fn(&S, &A, &S, &T) -> bool + 'static,
+    ) -> Self
+    where
+        T: Clone + 'static,
+    {
+        Self {
+            name,
+            body: StepExprBody::Ast(StepExprAst::Exists(StepQuantifier::structural(
+                QuantifierKind::Exists,
+                domain,
+                body,
+                read_paths,
+                eval,
+            ))),
+        }
+    }
+
     pub const fn name(&self) -> &'static str {
         self.name
     }
@@ -2612,9 +4106,21 @@ impl<S: 'static, A: 'static> StepExpr<S, A> {
         }
     }
 
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        if let Some(ast) = self.ast() {
+            ast.collect_symbolic_full_read_paths(paths);
+        }
+    }
+
     pub fn symbolic_state_paths(&self) -> Vec<&'static str> {
         let mut paths = BTreeSet::new();
         self.collect_symbolic_state_paths(&mut paths);
+        paths.into_iter().collect()
+    }
+
+    pub fn symbolic_full_read_paths(&self) -> Vec<&'static str> {
+        let mut paths = BTreeSet::new();
+        self.collect_symbolic_full_read_paths(&mut paths);
         paths.into_iter().collect()
     }
 
@@ -2670,6 +4176,34 @@ pub enum ErasedGuardValueExprAst<S, A> {
         lhs: Box<Self>,
         rhs: Box<Self>,
     },
+    Sub {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Mul {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Neg {
+        expr: Box<Self>,
+    },
+    Union {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Intersection {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Difference {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Comprehension {
+        domain: &'static str,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+    },
     IfElse {
         condition: Box<GuardExpr<S, A>>,
         then_branch: Box<Self>,
@@ -2681,9 +4215,17 @@ impl<S: 'static, A: 'static> ErasedGuardValueExprAst<S, A> {
     fn first_unencodable(&self) -> Option<&'static str> {
         match self {
             Self::Opaque { repr } => Some(repr),
-            Self::Literal { .. } | Self::FieldRead { .. } => None,
+            Self::Literal { .. } | Self::FieldRead { .. } | Self::Comprehension { .. } => None,
             Self::PureCall { symbolic, .. } => symbolic.first_unencodable(),
-            Self::Add { lhs, rhs } => lhs.first_unencodable().or_else(|| rhs.first_unencodable()),
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
+                lhs.first_unencodable().or_else(|| rhs.first_unencodable())
+            }
+            Self::Neg { expr } => expr.first_unencodable(),
             Self::IfElse {
                 condition,
                 then_branch,
@@ -2698,11 +4240,18 @@ impl<S: 'static, A: 'static> ErasedGuardValueExprAst<S, A> {
     fn collect_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         match self {
             Self::Opaque { .. } | Self::Literal { .. } | Self::FieldRead { .. } => {}
+            Self::Comprehension { .. } => {}
             Self::PureCall { symbolic, .. } => symbolic.collect_key(keys),
-            Self::Add { lhs, rhs } => {
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
                 lhs.collect_symbolic_pure_keys(keys);
                 rhs.collect_symbolic_pure_keys(keys);
             }
+            Self::Neg { expr } => expr.collect_symbolic_pure_keys(keys),
             Self::IfElse {
                 condition,
                 then_branch,
@@ -2718,11 +4267,18 @@ impl<S: 'static, A: 'static> ErasedGuardValueExprAst<S, A> {
     fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         match self {
             Self::Opaque { .. } | Self::Literal { .. } | Self::FieldRead { .. } => {}
+            Self::Comprehension { .. } => {}
             Self::PureCall { symbolic, .. } => symbolic.collect_unregistered_key(keys),
-            Self::Add { lhs, rhs } => {
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
                 lhs.collect_unregistered_symbolic_pure_keys(keys);
                 rhs.collect_unregistered_symbolic_pure_keys(keys);
             }
+            Self::Neg { expr } => expr.collect_unregistered_symbolic_pure_keys(keys),
             Self::IfElse {
                 condition,
                 then_branch,
@@ -2739,13 +4295,22 @@ impl<S: 'static, A: 'static> ErasedGuardValueExprAst<S, A> {
         match self {
             Self::Opaque { .. } | Self::Literal { .. } => {}
             Self::FieldRead { path } => collect_symbolic_state_path(paths, path),
+            Self::Comprehension { read_paths, .. } => {
+                collect_symbolic_state_paths_from_hints(paths, read_paths);
+            }
             Self::PureCall { read_paths, .. } => {
                 collect_symbolic_state_paths_from_hints(paths, read_paths);
             }
-            Self::Add { lhs, rhs } => {
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
                 lhs.collect_symbolic_state_paths(paths);
                 rhs.collect_symbolic_state_paths(paths);
             }
+            Self::Neg { expr } => expr.collect_symbolic_state_paths(paths),
             Self::IfElse {
                 condition,
                 then_branch,
@@ -2754,6 +4319,38 @@ impl<S: 'static, A: 'static> ErasedGuardValueExprAst<S, A> {
                 condition.collect_symbolic_state_paths(paths);
                 then_branch.collect_symbolic_state_paths(paths);
                 else_branch.collect_symbolic_state_paths(paths);
+            }
+        }
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Opaque { .. } | Self::Literal { .. } => {}
+            Self::FieldRead { path } => collect_symbolic_full_read_path(paths, path),
+            Self::Comprehension { read_paths, .. } => {
+                collect_symbolic_full_read_paths_from_hints(paths, read_paths);
+            }
+            Self::PureCall { read_paths, .. } => {
+                collect_symbolic_full_read_paths_from_hints(paths, read_paths);
+            }
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
+                lhs.collect_symbolic_full_read_paths(paths);
+                rhs.collect_symbolic_full_read_paths(paths);
+            }
+            Self::Neg { expr } => expr.collect_symbolic_full_read_paths(paths),
+            Self::IfElse {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                condition.collect_symbolic_full_read_paths(paths);
+                then_branch.collect_symbolic_full_read_paths(paths);
+                else_branch.collect_symbolic_full_read_paths(paths);
             }
         }
     }
@@ -2783,6 +4380,35 @@ pub enum GuardValueExprAst<S, A, T> {
         lhs: Box<Self>,
         rhs: Box<Self>,
     },
+    Sub {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Mul {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Neg {
+        expr: Box<Self>,
+    },
+    Union {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Intersection {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Difference {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Comprehension {
+        domain: &'static str,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        _marker: PhantomData<fn() -> T>,
+    },
     IfElse {
         condition: Box<GuardExpr<S, A>>,
         then_branch: Box<Self>,
@@ -2809,6 +4435,39 @@ impl<S: Clone, A: Clone, T> GuardValueExprAst<S, A, T> {
             Self::Add { lhs, rhs } => ErasedGuardValueExprAst::Add {
                 lhs: Box::new(lhs.erase()),
                 rhs: Box::new(rhs.erase()),
+            },
+            Self::Sub { lhs, rhs } => ErasedGuardValueExprAst::Sub {
+                lhs: Box::new(lhs.erase()),
+                rhs: Box::new(rhs.erase()),
+            },
+            Self::Mul { lhs, rhs } => ErasedGuardValueExprAst::Mul {
+                lhs: Box::new(lhs.erase()),
+                rhs: Box::new(rhs.erase()),
+            },
+            Self::Neg { expr } => ErasedGuardValueExprAst::Neg {
+                expr: Box::new(expr.erase()),
+            },
+            Self::Union { lhs, rhs } => ErasedGuardValueExprAst::Union {
+                lhs: Box::new(lhs.erase()),
+                rhs: Box::new(rhs.erase()),
+            },
+            Self::Intersection { lhs, rhs } => ErasedGuardValueExprAst::Intersection {
+                lhs: Box::new(lhs.erase()),
+                rhs: Box::new(rhs.erase()),
+            },
+            Self::Difference { lhs, rhs } => ErasedGuardValueExprAst::Difference {
+                lhs: Box::new(lhs.erase()),
+                rhs: Box::new(rhs.erase()),
+            },
+            Self::Comprehension {
+                domain,
+                body,
+                read_paths,
+                ..
+            } => ErasedGuardValueExprAst::Comprehension {
+                domain,
+                body,
+                read_paths,
             },
             Self::IfElse {
                 condition,
@@ -3004,6 +4663,280 @@ where
         }
     }
 
+    pub fn sub(name: &'static str, lhs: Self, rhs: Self) -> Self
+    where
+        S: Clone,
+        A: Clone,
+        T: std::ops::Sub<Output = T> + 'static,
+    {
+        let lhs_eval = lhs.clone();
+        let rhs_eval = rhs.clone();
+        let lhs_ast = lhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| GuardValueExprAst::Opaque {
+                repr: lhs.name(),
+                _marker: PhantomData,
+            });
+        let rhs_ast = rhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| GuardValueExprAst::Opaque {
+                repr: rhs.name(),
+                _marker: PhantomData,
+            });
+        Self {
+            name,
+            body: GuardValueExprBody::Ast {
+                ast: GuardValueExprAst::Sub {
+                    lhs: Box::new(lhs_ast),
+                    rhs: Box::new(rhs_ast),
+                },
+                eval: Arc::new(move |prev, action| {
+                    lhs_eval.eval(prev, action) - rhs_eval.eval(prev, action)
+                }),
+            },
+        }
+    }
+
+    pub fn mul(name: &'static str, lhs: Self, rhs: Self) -> Self
+    where
+        S: Clone,
+        A: Clone,
+        T: std::ops::Mul<Output = T> + 'static,
+    {
+        let lhs_eval = lhs.clone();
+        let rhs_eval = rhs.clone();
+        let lhs_ast = lhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| GuardValueExprAst::Opaque {
+                repr: lhs.name(),
+                _marker: PhantomData,
+            });
+        let rhs_ast = rhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| GuardValueExprAst::Opaque {
+                repr: rhs.name(),
+                _marker: PhantomData,
+            });
+        Self {
+            name,
+            body: GuardValueExprBody::Ast {
+                ast: GuardValueExprAst::Mul {
+                    lhs: Box::new(lhs_ast),
+                    rhs: Box::new(rhs_ast),
+                },
+                eval: Arc::new(move |prev, action| {
+                    lhs_eval.eval(prev, action) * rhs_eval.eval(prev, action)
+                }),
+            },
+        }
+    }
+
+    pub fn neg(name: &'static str, expr: Self) -> Self
+    where
+        S: Clone,
+        A: Clone,
+        T: std::ops::Neg<Output = T> + 'static,
+    {
+        let eval_expr = expr.clone();
+        let expr_ast = expr
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| GuardValueExprAst::Opaque {
+                repr: expr.name(),
+                _marker: PhantomData,
+            });
+        Self {
+            name,
+            body: GuardValueExprBody::Ast {
+                ast: GuardValueExprAst::Neg {
+                    expr: Box::new(expr_ast),
+                },
+                eval: Arc::new(move |prev, action| -eval_expr.eval(prev, action)),
+            },
+        }
+    }
+
+    pub fn union_expr(name: &'static str, lhs: Self, rhs: Self, eval: fn(&S, &A) -> T) -> Self
+    where
+        S: Clone,
+        A: Clone,
+    {
+        let lhs_ast = lhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| GuardValueExprAst::Opaque {
+                repr: lhs.name(),
+                _marker: PhantomData,
+            });
+        let rhs_ast = rhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| GuardValueExprAst::Opaque {
+                repr: rhs.name(),
+                _marker: PhantomData,
+            });
+        Self {
+            name,
+            body: GuardValueExprBody::Ast {
+                ast: GuardValueExprAst::Union {
+                    lhs: Box::new(lhs_ast),
+                    rhs: Box::new(rhs_ast),
+                },
+                eval: Arc::new(move |prev, action| eval(prev, action)),
+            },
+        }
+    }
+
+    pub fn intersection_expr(
+        name: &'static str,
+        lhs: Self,
+        rhs: Self,
+        eval: fn(&S, &A) -> T,
+    ) -> Self
+    where
+        S: Clone,
+        A: Clone,
+    {
+        let lhs_ast = lhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| GuardValueExprAst::Opaque {
+                repr: lhs.name(),
+                _marker: PhantomData,
+            });
+        let rhs_ast = rhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| GuardValueExprAst::Opaque {
+                repr: rhs.name(),
+                _marker: PhantomData,
+            });
+        Self {
+            name,
+            body: GuardValueExprBody::Ast {
+                ast: GuardValueExprAst::Intersection {
+                    lhs: Box::new(lhs_ast),
+                    rhs: Box::new(rhs_ast),
+                },
+                eval: Arc::new(move |prev, action| eval(prev, action)),
+            },
+        }
+    }
+
+    pub fn difference_expr(name: &'static str, lhs: Self, rhs: Self, eval: fn(&S, &A) -> T) -> Self
+    where
+        S: Clone,
+        A: Clone,
+    {
+        let lhs_ast = lhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| GuardValueExprAst::Opaque {
+                repr: lhs.name(),
+                _marker: PhantomData,
+            });
+        let rhs_ast = rhs
+            .ast()
+            .cloned()
+            .unwrap_or_else(|| GuardValueExprAst::Opaque {
+                repr: rhs.name(),
+                _marker: PhantomData,
+            });
+        Self {
+            name,
+            body: GuardValueExprBody::Ast {
+                ast: GuardValueExprAst::Difference {
+                    lhs: Box::new(lhs_ast),
+                    rhs: Box::new(rhs_ast),
+                },
+                eval: Arc::new(move |prev, action| eval(prev, action)),
+            },
+        }
+    }
+
+    pub fn set_comprehension<U>(
+        name: &'static str,
+        domain: ExprDomain<U>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        predicate: impl Fn(&S, &A, &U) -> bool + 'static,
+    ) -> GuardValueExpr<S, A, RelSet<U>>
+    where
+        S: Clone,
+        A: Clone,
+        U: RelAtom + Clone + 'static,
+    {
+        let domain_label = domain.label();
+        let domain_values = domain.into_bounded_domain().into_vec();
+        GuardValueExpr {
+            name,
+            body: GuardValueExprBody::Ast {
+                ast: GuardValueExprAst::Comprehension {
+                    domain: domain_label,
+                    body,
+                    read_paths,
+                    _marker: PhantomData,
+                },
+                eval: Arc::new(move |prev, action| {
+                    RelSet::from_items(
+                        domain_values
+                            .iter()
+                            .filter(|value| predicate(prev, action, value))
+                            .cloned(),
+                    )
+                }),
+            },
+        }
+    }
+
+    pub fn relation_comprehension<L, R>(
+        name: &'static str,
+        domain: ExprDomain<(L, R)>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        predicate: impl Fn(&S, &A, &(L, R)) -> bool + 'static,
+    ) -> GuardValueExpr<S, A, Relation2<L, R>>
+    where
+        S: Clone,
+        A: Clone,
+        L: RelAtom + Clone + 'static,
+        R: RelAtom + Clone + 'static,
+    {
+        let domain_label = domain.label();
+        let domain_values = domain.into_bounded_domain().into_vec();
+        GuardValueExpr {
+            name,
+            body: GuardValueExprBody::Ast {
+                ast: GuardValueExprAst::Comprehension {
+                    domain: domain_label,
+                    body,
+                    read_paths,
+                    _marker: PhantomData,
+                },
+                eval: Arc::new(move |prev, action| {
+                    Relation2::from_pairs(
+                        domain_values
+                            .iter()
+                            .filter(|value| predicate(prev, action, value))
+                            .cloned(),
+                    )
+                }),
+            },
+        }
+    }
+
+    pub fn projection(name: &'static str, path: &'static str, read: fn(&S, &A) -> T) -> Self {
+        Self::field(name, path, read)
+    }
+
+    pub fn payload(name: &'static str, path: &'static str, read: fn(&S, &A) -> T) -> Self {
+        Self::field(name, path, read)
+    }
+
     pub fn if_else(
         name: &'static str,
         condition: GuardExpr<S, A>,
@@ -3164,11 +5097,113 @@ impl<S: 'static, A: 'static> GuardComparison<S, A> {
         self.lhs_ast.collect_symbolic_state_paths(paths);
         self.rhs_ast.collect_symbolic_state_paths(paths);
     }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_symbolic_full_read_paths(paths);
+        self.rhs_ast.collect_symbolic_full_read_paths(paths);
+    }
 }
 
 impl<S, A> fmt::Debug for GuardComparison<S, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GuardComparison")
+            .field("op", &self.op)
+            .field("lhs", &self.lhs)
+            .field("rhs", &self.rhs)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct GuardBinaryPredicate<S, A> {
+    op: BuiltinPredicateOp,
+    lhs: &'static str,
+    rhs: &'static str,
+    lhs_ast: ErasedGuardValueExprAst<S, A>,
+    rhs_ast: ErasedGuardValueExprAst<S, A>,
+    eval: Arc<dyn Fn(&S, &A) -> bool + 'static>,
+}
+
+impl<S: 'static, A: 'static> GuardBinaryPredicate<S, A> {
+    pub fn new(
+        op: BuiltinPredicateOp,
+        lhs: &'static str,
+        lhs_ast: ErasedGuardValueExprAst<S, A>,
+        rhs: &'static str,
+        rhs_ast: ErasedGuardValueExprAst<S, A>,
+        eval: impl Fn(&S, &A) -> bool + 'static,
+    ) -> Self {
+        Self {
+            op,
+            lhs,
+            rhs,
+            lhs_ast,
+            rhs_ast,
+            eval: Arc::new(eval),
+        }
+    }
+
+    pub fn from_exprs<L, R>(
+        op: BuiltinPredicateOp,
+        lhs: GuardValueExpr<S, A, L>,
+        rhs: GuardValueExpr<S, A, R>,
+        eval: impl Fn(&S, &A) -> bool + 'static,
+    ) -> Self
+    where
+        S: Clone,
+        A: Clone,
+        L: Clone + 'static,
+        R: Clone + 'static,
+    {
+        let lhs_name = lhs.name();
+        let rhs_name = rhs.name();
+        let lhs_ast = lhs
+            .erased_ast()
+            .unwrap_or(ErasedGuardValueExprAst::Opaque { repr: lhs_name });
+        let rhs_ast = rhs
+            .erased_ast()
+            .unwrap_or(ErasedGuardValueExprAst::Opaque { repr: rhs_name });
+        Self::new(op, lhs_name, lhs_ast, rhs_name, rhs_ast, eval)
+    }
+
+    pub const fn op(&self) -> BuiltinPredicateOp {
+        self.op
+    }
+
+    fn eval(&self, prev: &S, action: &A) -> bool {
+        (self.eval)(prev, action)
+    }
+
+    fn first_unencodable(&self) -> Option<&'static str> {
+        self.lhs_ast
+            .first_unencodable()
+            .or_else(|| self.rhs_ast.first_unencodable())
+    }
+
+    fn collect_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_symbolic_pure_keys(keys);
+        self.rhs_ast.collect_symbolic_pure_keys(keys);
+    }
+
+    fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_unregistered_symbolic_pure_keys(keys);
+        self.rhs_ast.collect_unregistered_symbolic_pure_keys(keys);
+    }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_symbolic_state_paths(paths);
+        self.rhs_ast.collect_symbolic_state_paths(paths);
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        self.lhs_ast.collect_symbolic_full_read_paths(paths);
+        self.rhs_ast.collect_symbolic_full_read_paths(paths);
+    }
+}
+
+impl<S, A> fmt::Debug for GuardBinaryPredicate<S, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GuardBinaryPredicate")
             .field("op", &self.op)
             .field("lhs", &self.lhs)
             .field("rhs", &self.rhs)
@@ -3206,6 +5241,10 @@ impl<S, A> GuardMatch<S, A> {
 
     fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
         collect_symbolic_state_path(paths, self.value);
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        collect_symbolic_full_read_path(paths, self.value);
     }
 }
 
@@ -3255,14 +5294,35 @@ impl<S, A> GuardBoolLeaf<S, A> {
     fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
         collect_symbolic_state_paths_from_hints(paths, self.read_paths);
     }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        collect_symbolic_full_read_paths_from_hints(paths, self.read_paths);
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
+enum GuardQuantifierEval<S, A> {
+    Legacy(fn(&S, &A) -> bool),
+    Structural(Arc<dyn Fn(&S, &A) -> bool + 'static>),
+}
+
+impl<S, A> GuardQuantifierEval<S, A> {
+    fn eval(&self, prev: &S, action: &A) -> bool {
+        match self {
+            Self::Legacy(eval) => eval(prev, action),
+            Self::Structural(eval) => eval(prev, action),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct GuardQuantifier<S, A> {
     kind: QuantifierKind,
     domain: &'static str,
     body: &'static str,
-    eval: fn(&S, &A) -> bool,
+    read_paths: &'static [&'static str],
+    symbolic_supported: bool,
+    eval: GuardQuantifierEval<S, A>,
 }
 
 impl<S, A> GuardQuantifier<S, A> {
@@ -3276,7 +5336,38 @@ impl<S, A> GuardQuantifier<S, A> {
             kind,
             domain,
             body,
-            eval,
+            read_paths: &[],
+            symbolic_supported: false,
+            eval: GuardQuantifierEval::Legacy(eval),
+        }
+    }
+
+    pub fn structural<T>(
+        kind: QuantifierKind,
+        domain: ExprDomain<T>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        eval: impl Fn(&S, &A, &T) -> bool + 'static,
+    ) -> Self
+    where
+        T: Clone + 'static,
+    {
+        let domain_label = domain.label();
+        let domain_values = domain.into_bounded_domain().into_vec();
+        Self {
+            kind,
+            domain: domain_label,
+            body,
+            read_paths,
+            symbolic_supported: true,
+            eval: GuardQuantifierEval::Structural(Arc::new(move |prev, action| match kind {
+                QuantifierKind::ForAll => {
+                    domain_values.iter().all(|value| eval(prev, action, value))
+                }
+                QuantifierKind::Exists => {
+                    domain_values.iter().any(|value| eval(prev, action, value))
+                }
+            })),
         }
     }
 
@@ -3292,8 +5383,40 @@ impl<S, A> GuardQuantifier<S, A> {
         self.body
     }
 
+    pub const fn is_symbolic_supported(&self) -> bool {
+        self.symbolic_supported
+    }
+
     fn eval(&self, prev: &S, action: &A) -> bool {
-        (self.eval)(prev, action)
+        self.eval.eval(prev, action)
+    }
+
+    fn first_unencodable(&self) -> Option<&'static str> {
+        (!self.symbolic_supported).then_some(symbolic_quantifier_node(self.kind))
+    }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        if self.symbolic_supported {
+            collect_symbolic_state_paths_from_hints(paths, self.read_paths);
+        }
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        if self.symbolic_supported {
+            collect_symbolic_full_read_paths_from_hints(paths, self.read_paths);
+        }
+    }
+}
+
+impl<S, A> fmt::Debug for GuardQuantifier<S, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GuardQuantifier")
+            .field("kind", &self.kind)
+            .field("domain", &self.domain)
+            .field("body", &self.body)
+            .field("read_paths", &self.read_paths)
+            .field("symbolic_supported", &self.symbolic_supported)
+            .finish()
     }
 }
 
@@ -3308,6 +5431,8 @@ pub enum GuardAst<S, A> {
     Le(GuardComparison<S, A>),
     Gt(GuardComparison<S, A>),
     Ge(GuardComparison<S, A>),
+    Contains(GuardBinaryPredicate<S, A>),
+    SubsetOf(GuardBinaryPredicate<S, A>),
     Match(GuardMatch<S, A>),
     ForAll(GuardQuantifier<S, A>),
     Exists(GuardQuantifier<S, A>),
@@ -3327,6 +5452,7 @@ impl<S: 'static, A: 'static> GuardAst<S, A> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.eval(prev, action),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => predicate.eval(prev, action),
             Self::Match(matcher) => matcher.eval(prev, action),
             Self::ForAll(quantifier) | Self::Exists(quantifier) => quantifier.eval(prev, action),
             Self::Not(inner) => !inner.eval(prev, action),
@@ -3337,7 +5463,8 @@ impl<S: 'static, A: 'static> GuardAst<S, A> {
 
     fn first_unencodable(&self) -> Option<&'static str> {
         match self {
-            Self::Literal(_) | Self::Match(_) | Self::ForAll(_) | Self::Exists(_) => None,
+            Self::Literal(_) | Self::Match(_) => None,
+            Self::ForAll(quantifier) | Self::Exists(quantifier) => quantifier.first_unencodable(),
             Self::FieldRead(field) | Self::PureCall(field) => field.first_unencodable(),
             Self::Eq(compare)
             | Self::Ne(compare)
@@ -3345,6 +5472,7 @@ impl<S: 'static, A: 'static> GuardAst<S, A> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.first_unencodable(),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => predicate.first_unencodable(),
             Self::Not(inner) => inner.first_unencodable_symbolic_node(),
             Self::And(parts) | Self::Or(parts) => parts
                 .iter()
@@ -3364,6 +5492,9 @@ impl<S: 'static, A: 'static> GuardAst<S, A> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.collect_symbolic_pure_keys(keys),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => {
+                predicate.collect_symbolic_pure_keys(keys)
+            }
             Self::Not(inner) => inner.collect_symbolic_pure_keys(keys),
             Self::And(parts) | Self::Or(parts) => {
                 for part in parts {
@@ -3385,6 +5516,9 @@ impl<S: 'static, A: 'static> GuardAst<S, A> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.collect_unregistered_symbolic_pure_keys(keys),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => {
+                predicate.collect_unregistered_symbolic_pure_keys(keys)
+            }
             Self::Not(inner) => inner.collect_unregistered_symbolic_pure_keys(keys),
             Self::And(parts) | Self::Or(parts) => {
                 for part in parts {
@@ -3396,7 +5530,10 @@ impl<S: 'static, A: 'static> GuardAst<S, A> {
 
     fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
         match self {
-            Self::Literal(_) | Self::ForAll(_) | Self::Exists(_) => {}
+            Self::Literal(_) => {}
+            Self::ForAll(quantifier) | Self::Exists(quantifier) => {
+                quantifier.collect_symbolic_state_paths(paths);
+            }
             Self::FieldRead(field) | Self::PureCall(field) => {
                 field.collect_symbolic_state_paths(paths)
             }
@@ -3406,11 +5543,41 @@ impl<S: 'static, A: 'static> GuardAst<S, A> {
             | Self::Le(compare)
             | Self::Gt(compare)
             | Self::Ge(compare) => compare.collect_symbolic_state_paths(paths),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => {
+                predicate.collect_symbolic_state_paths(paths)
+            }
             Self::Match(matcher) => matcher.collect_symbolic_state_paths(paths),
             Self::Not(inner) => inner.collect_symbolic_state_paths(paths),
             Self::And(parts) | Self::Or(parts) => {
                 for part in parts {
                     part.collect_symbolic_state_paths(paths);
+                }
+            }
+        }
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Literal(_) => {}
+            Self::ForAll(quantifier) | Self::Exists(quantifier) => {
+                quantifier.collect_symbolic_full_read_paths(paths);
+            }
+            Self::FieldRead(field) => collect_symbolic_full_read_path(paths, field.label()),
+            Self::PureCall(field) => field.collect_symbolic_full_read_paths(paths),
+            Self::Eq(compare)
+            | Self::Ne(compare)
+            | Self::Lt(compare)
+            | Self::Le(compare)
+            | Self::Gt(compare)
+            | Self::Ge(compare) => compare.collect_symbolic_full_read_paths(paths),
+            Self::Contains(predicate) | Self::SubsetOf(predicate) => {
+                predicate.collect_symbolic_full_read_paths(paths)
+            }
+            Self::Match(matcher) => matcher.collect_symbolic_full_read_paths(paths),
+            Self::Not(inner) => inner.collect_symbolic_full_read_paths(paths),
+            Self::And(parts) | Self::Or(parts) => {
+                for part in parts {
+                    part.collect_symbolic_full_read_paths(paths);
                 }
             }
         }
@@ -3772,6 +5939,52 @@ impl<S: 'static, A: 'static> GuardExpr<S, A> {
         )
     }
 
+    pub fn contains_expr<L, R>(
+        name: &'static str,
+        lhs: GuardValueExpr<S, A, L>,
+        rhs: GuardValueExpr<S, A, R>,
+        eval: fn(&S, &A) -> bool,
+    ) -> Self
+    where
+        S: Clone,
+        A: Clone,
+        L: Clone + 'static,
+        R: Clone + 'static,
+    {
+        Self {
+            name,
+            body: GuardExprBody::Ast(GuardAst::Contains(GuardBinaryPredicate::from_exprs(
+                BuiltinPredicateOp::Contains,
+                lhs,
+                rhs,
+                eval,
+            ))),
+        }
+    }
+
+    pub fn subset_of_expr<L, R>(
+        name: &'static str,
+        lhs: GuardValueExpr<S, A, L>,
+        rhs: GuardValueExpr<S, A, R>,
+        eval: fn(&S, &A) -> bool,
+    ) -> Self
+    where
+        S: Clone,
+        A: Clone,
+        L: Clone + 'static,
+        R: Clone + 'static,
+    {
+        Self {
+            name,
+            body: GuardExprBody::Ast(GuardAst::SubsetOf(GuardBinaryPredicate::from_exprs(
+                BuiltinPredicateOp::SubsetOf,
+                lhs,
+                rhs,
+                eval,
+            ))),
+        }
+    }
+
     pub const fn matches_variant(
         name: &'static str,
         value: &'static str,
@@ -3839,6 +6052,50 @@ impl<S: 'static, A: 'static> GuardExpr<S, A> {
         }
     }
 
+    pub fn forall_in<T>(
+        name: &'static str,
+        domain: ExprDomain<T>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        eval: impl Fn(&S, &A, &T) -> bool + 'static,
+    ) -> Self
+    where
+        T: Clone + 'static,
+    {
+        Self {
+            name,
+            body: GuardExprBody::Ast(GuardAst::ForAll(GuardQuantifier::structural(
+                QuantifierKind::ForAll,
+                domain,
+                body,
+                read_paths,
+                eval,
+            ))),
+        }
+    }
+
+    pub fn exists_in<T>(
+        name: &'static str,
+        domain: ExprDomain<T>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        eval: impl Fn(&S, &A, &T) -> bool + 'static,
+    ) -> Self
+    where
+        T: Clone + 'static,
+    {
+        Self {
+            name,
+            body: GuardExprBody::Ast(GuardAst::Exists(GuardQuantifier::structural(
+                QuantifierKind::Exists,
+                domain,
+                body,
+                read_paths,
+                eval,
+            ))),
+        }
+    }
+
     pub const fn name(&self) -> &'static str {
         self.name
     }
@@ -3876,9 +6133,21 @@ impl<S: 'static, A: 'static> GuardExpr<S, A> {
         }
     }
 
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        if let Some(ast) = self.ast() {
+            ast.collect_symbolic_full_read_paths(paths);
+        }
+    }
+
     pub fn symbolic_state_paths(&self) -> Vec<&'static str> {
         let mut paths = BTreeSet::new();
         self.collect_symbolic_state_paths(&mut paths);
+        paths.into_iter().collect()
+    }
+
+    pub fn symbolic_full_read_paths(&self) -> Vec<&'static str> {
+        let mut paths = BTreeSet::new();
+        self.collect_symbolic_full_read_paths(&mut paths);
         paths.into_iter().collect()
     }
 
@@ -3934,10 +6203,43 @@ pub enum UpdateValueExprAst<S, A> {
         lhs: Box<Self>,
         rhs: Box<Self>,
     },
+    Sub {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Mul {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Neg {
+        expr: Box<Self>,
+    },
+    Union {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Intersection {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Difference {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+    },
+    Comprehension {
+        domain: &'static str,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+    },
+    IfElse {
+        condition: Box<GuardExpr<S, A>>,
+        then_branch: Box<Self>,
+        else_branch: Box<Self>,
+    },
     _Phantom(PhantomData<fn(&S, &A)>),
 }
 
-impl<S, A> UpdateValueExprAst<S, A> {
+impl<S: 'static, A: 'static> UpdateValueExprAst<S, A> {
     pub const fn opaque(repr: &'static str) -> Self {
         Self::Opaque { repr }
     }
@@ -3948,6 +6250,14 @@ impl<S, A> UpdateValueExprAst<S, A> {
 
     pub const fn field(path: &'static str) -> Self {
         Self::FieldRead { path }
+    }
+
+    pub const fn projection(path: &'static str) -> Self {
+        Self::field(path)
+    }
+
+    pub const fn payload(path: &'static str) -> Self {
+        Self::field(path)
     }
 
     pub const fn builtin_pure_call(name: &'static str) -> Self {
@@ -3988,12 +6298,92 @@ impl<S, A> UpdateValueExprAst<S, A> {
         }
     }
 
+    pub fn sub(lhs: Self, rhs: Self) -> Self {
+        Self::Sub {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
+    }
+
+    pub fn mul(lhs: Self, rhs: Self) -> Self {
+        Self::Mul {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
+    }
+
+    pub fn neg(expr: Self) -> Self {
+        Self::Neg {
+            expr: Box::new(expr),
+        }
+    }
+
+    pub fn union(lhs: Self, rhs: Self) -> Self {
+        Self::Union {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
+    }
+
+    pub fn intersection(lhs: Self, rhs: Self) -> Self {
+        Self::Intersection {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
+    }
+
+    pub fn difference(lhs: Self, rhs: Self) -> Self {
+        Self::Difference {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
+    }
+
+    pub fn comprehension<T>(
+        domain: ExprDomain<T>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+    ) -> Self {
+        Self::Comprehension {
+            domain: domain.label(),
+            body,
+            read_paths,
+        }
+    }
+
+    pub fn if_else(condition: GuardExpr<S, A>, then_branch: Self, else_branch: Self) -> Self {
+        Self::IfElse {
+            condition: Box::new(condition),
+            then_branch: Box::new(then_branch),
+            else_branch: Box::new(else_branch),
+        }
+    }
+
     fn first_unencodable(&self) -> Option<&'static str> {
         match self {
             Self::Opaque { repr } => Some(repr),
-            Self::Literal { .. } | Self::FieldRead { .. } | Self::_Phantom(_) => None,
+            Self::Literal { .. }
+            | Self::FieldRead { .. }
+            | Self::Comprehension { .. }
+            | Self::_Phantom(_) => None,
             Self::PureCall { symbolic, .. } => symbolic.first_unencodable(),
-            Self::Add { lhs, rhs } => lhs.first_unencodable().or_else(|| rhs.first_unencodable()),
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
+                lhs.first_unencodable().or_else(|| rhs.first_unencodable())
+            }
+            Self::Neg { expr } => expr.first_unencodable(),
+            Self::IfElse {
+                condition,
+                then_branch,
+                else_branch,
+            } => condition
+                .first_unencodable_symbolic_node()
+                .or_else(|| then_branch.first_unencodable())
+                .or_else(|| else_branch.first_unencodable()),
         }
     }
 
@@ -4003,10 +6393,26 @@ impl<S, A> UpdateValueExprAst<S, A> {
             | Self::Literal { .. }
             | Self::FieldRead { .. }
             | Self::_Phantom(_) => {}
+            Self::Comprehension { .. } => {}
             Self::PureCall { symbolic, .. } => symbolic.collect_key(keys),
-            Self::Add { lhs, rhs } => {
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
                 lhs.collect_symbolic_pure_keys(keys);
                 rhs.collect_symbolic_pure_keys(keys);
+            }
+            Self::Neg { expr } => expr.collect_symbolic_pure_keys(keys),
+            Self::IfElse {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                condition.collect_symbolic_pure_keys(keys);
+                then_branch.collect_symbolic_pure_keys(keys);
+                else_branch.collect_symbolic_pure_keys(keys);
             }
         }
     }
@@ -4017,10 +6423,26 @@ impl<S, A> UpdateValueExprAst<S, A> {
             | Self::Literal { .. }
             | Self::FieldRead { .. }
             | Self::_Phantom(_) => {}
+            Self::Comprehension { .. } => {}
             Self::PureCall { symbolic, .. } => symbolic.collect_unregistered_key(keys),
-            Self::Add { lhs, rhs } => {
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
                 lhs.collect_unregistered_symbolic_pure_keys(keys);
                 rhs.collect_unregistered_symbolic_pure_keys(keys);
+            }
+            Self::Neg { expr } => expr.collect_unregistered_symbolic_pure_keys(keys),
+            Self::IfElse {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                condition.collect_unregistered_symbolic_pure_keys(keys);
+                then_branch.collect_unregistered_symbolic_pure_keys(keys);
+                else_branch.collect_unregistered_symbolic_pure_keys(keys);
             }
         }
     }
@@ -4029,12 +6451,62 @@ impl<S, A> UpdateValueExprAst<S, A> {
         match self {
             Self::Opaque { .. } | Self::Literal { .. } | Self::_Phantom(_) => {}
             Self::FieldRead { path } => collect_symbolic_state_path(paths, path),
+            Self::Comprehension { read_paths, .. } => {
+                collect_symbolic_state_paths_from_hints(paths, read_paths);
+            }
             Self::PureCall { read_paths, .. } => {
                 collect_symbolic_state_paths_from_hints(paths, read_paths);
             }
-            Self::Add { lhs, rhs } => {
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
                 lhs.collect_symbolic_state_paths(paths);
                 rhs.collect_symbolic_state_paths(paths);
+            }
+            Self::Neg { expr } => expr.collect_symbolic_state_paths(paths),
+            Self::IfElse {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                condition.collect_symbolic_state_paths(paths);
+                then_branch.collect_symbolic_state_paths(paths);
+                else_branch.collect_symbolic_state_paths(paths);
+            }
+        }
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Opaque { .. } | Self::Literal { .. } | Self::_Phantom(_) => {}
+            Self::FieldRead { path } => collect_symbolic_full_read_path(paths, path),
+            Self::Comprehension { read_paths, .. } => {
+                collect_symbolic_full_read_paths_from_hints(paths, read_paths);
+            }
+            Self::PureCall { read_paths, .. } => {
+                collect_symbolic_full_read_paths_from_hints(paths, read_paths);
+            }
+            Self::Add { lhs, rhs }
+            | Self::Sub { lhs, rhs }
+            | Self::Mul { lhs, rhs }
+            | Self::Union { lhs, rhs }
+            | Self::Intersection { lhs, rhs }
+            | Self::Difference { lhs, rhs } => {
+                lhs.collect_symbolic_full_read_paths(paths);
+                rhs.collect_symbolic_full_read_paths(paths);
+            }
+            Self::Neg { expr } => expr.collect_symbolic_full_read_paths(paths),
+            Self::IfElse {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                condition.collect_symbolic_full_read_paths(paths);
+                then_branch.collect_symbolic_full_read_paths(paths);
+                else_branch.collect_symbolic_full_read_paths(paths);
             }
         }
     }
@@ -4064,7 +6536,7 @@ pub enum UpdateOp<S, A> {
     },
 }
 
-impl<S, A> UpdateOp<S, A> {
+impl<S: 'static, A: 'static> UpdateOp<S, A> {
     pub const fn assign(
         target: &'static str,
         value: &'static str,
@@ -4208,6 +6680,16 @@ impl<S, A> UpdateOp<S, A> {
         }
     }
 
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Assign { value_ast, .. } => value_ast.collect_symbolic_full_read_paths(paths),
+            Self::SetInsert { item_ast, .. } | Self::SetRemove { item_ast, .. } => {
+                item_ast.collect_symbolic_full_read_paths(paths);
+            }
+            Self::Effect { .. } => {}
+        }
+    }
+
     fn effect_name(&self) -> Option<&'static str> {
         match self {
             Self::Effect { name, .. } => Some(name),
@@ -4216,12 +6698,85 @@ impl<S, A> UpdateOp<S, A> {
     }
 }
 
+#[derive(Clone)]
+pub struct UpdateChoice<S, A> {
+    domain: &'static str,
+    body: &'static str,
+    read_paths: &'static [&'static str],
+    write_paths: &'static [&'static str],
+    eval: Arc<dyn Fn(&S, &A) -> Vec<S> + 'static>,
+}
+
+impl<S: 'static, A: 'static> UpdateChoice<S, A> {
+    pub fn new<T>(
+        domain: ExprDomain<T>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        write_paths: &'static [&'static str],
+        eval: impl Fn(&S, &A, &T) -> S + 'static,
+    ) -> Self
+    where
+        T: Clone + 'static,
+    {
+        let domain_label = domain.label();
+        let domain_values = domain.into_bounded_domain().into_vec();
+        Self {
+            domain: domain_label,
+            body,
+            read_paths,
+            write_paths,
+            eval: Arc::new(move |prev, action| {
+                domain_values
+                    .iter()
+                    .map(|value| eval(prev, action, value))
+                    .collect()
+            }),
+        }
+    }
+
+    pub const fn domain(&self) -> &'static str {
+        self.domain
+    }
+
+    pub const fn body(&self) -> &'static str {
+        self.body
+    }
+
+    pub const fn write_paths(&self) -> &'static [&'static str] {
+        self.write_paths
+    }
+
+    fn successors(&self, prev: &S, action: &A) -> Vec<S> {
+        (self.eval)(prev, action)
+    }
+
+    fn collect_symbolic_state_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        collect_symbolic_state_paths_from_hints(paths, self.read_paths);
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        collect_symbolic_full_read_paths_from_hints(paths, self.read_paths);
+    }
+}
+
+impl<S, A> fmt::Debug for UpdateChoice<S, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UpdateChoice")
+            .field("domain", &self.domain)
+            .field("body", &self.body)
+            .field("read_paths", &self.read_paths)
+            .field("write_paths", &self.write_paths)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum UpdateAst<S, A> {
     Sequence(Vec<UpdateOp<S, A>>),
+    Choice(UpdateChoice<S, A>),
 }
 
-impl<S, A> UpdateAst<S, A> {
+impl<S: 'static, A: 'static> UpdateAst<S, A> {
     fn apply(&self, prev: &S, state: &mut S, action: &A) {
         match self {
             Self::Sequence(ops) => {
@@ -4229,12 +6784,32 @@ impl<S, A> UpdateAst<S, A> {
                     op.apply(prev, state, action);
                 }
             }
+            Self::Choice(_) => {
+                panic!(
+                    "UpdateAst::apply requires a deterministic update; use successors() for choice updates"
+                )
+            }
+        }
+    }
+
+    fn successors(&self, prev: &S, action: &A) -> Vec<S>
+    where
+        S: Clone,
+    {
+        match self {
+            Self::Sequence(_) => {
+                let mut next = prev.clone();
+                self.apply(prev, &mut next, action);
+                vec![next]
+            }
+            Self::Choice(choice) => choice.successors(prev, action),
         }
     }
 
     fn first_unencodable(&self) -> Option<&'static str> {
         match self {
             Self::Sequence(ops) => ops.iter().find_map(UpdateOp::first_unencodable),
+            Self::Choice(_) => None,
         }
     }
 
@@ -4245,6 +6820,7 @@ impl<S, A> UpdateAst<S, A> {
                     op.collect_symbolic_pure_keys(keys);
                 }
             }
+            Self::Choice(_) => {}
         }
     }
 
@@ -4255,6 +6831,7 @@ impl<S, A> UpdateAst<S, A> {
                     op.collect_unregistered_symbolic_pure_keys(keys);
                 }
             }
+            Self::Choice(_) => {}
         }
     }
 
@@ -4265,6 +6842,7 @@ impl<S, A> UpdateAst<S, A> {
                     op.collect_symbolic_effect_keys(keys);
                 }
             }
+            Self::Choice(_) => {}
         }
     }
 
@@ -4275,6 +6853,7 @@ impl<S, A> UpdateAst<S, A> {
                     op.collect_unregistered_symbolic_effect_keys(keys);
                 }
             }
+            Self::Choice(_) => {}
         }
     }
 
@@ -4285,6 +6864,18 @@ impl<S, A> UpdateAst<S, A> {
                     op.collect_symbolic_state_paths(paths);
                 }
             }
+            Self::Choice(choice) => choice.collect_symbolic_state_paths(paths),
+        }
+    }
+
+    fn collect_symbolic_full_read_paths(&self, paths: &mut BTreeSet<&'static str>) {
+        match self {
+            Self::Sequence(ops) => {
+                for op in ops {
+                    op.collect_symbolic_full_read_paths(paths);
+                }
+            }
+            Self::Choice(choice) => choice.collect_symbolic_full_read_paths(paths),
         }
     }
 
@@ -4297,12 +6888,19 @@ impl<S, A> UpdateAst<S, A> {
                     }
                 }
             }
+            Self::Choice(_) => {}
         }
     }
 
     pub fn symbolic_state_paths(&self) -> Vec<&'static str> {
         let mut paths = BTreeSet::new();
         self.collect_symbolic_state_paths(&mut paths);
+        paths.into_iter().collect()
+    }
+
+    pub fn symbolic_full_read_paths(&self) -> Vec<&'static str> {
+        let mut paths = BTreeSet::new();
+        self.collect_symbolic_full_read_paths(&mut paths);
         paths.into_iter().collect()
     }
 
@@ -4326,7 +6924,7 @@ pub struct UpdateProgram<S, A = ()> {
     body: UpdateProgramBody<S, A>,
 }
 
-impl<S, A> UpdateProgram<S, A> {
+impl<S: 'static, A: 'static> UpdateProgram<S, A> {
     #[allow(dead_code)]
     pub(crate) const fn new(name: &'static str, update: fn(&S, &A) -> S) -> Self {
         legacy_update_program(name, update)
@@ -4336,6 +6934,29 @@ impl<S, A> UpdateProgram<S, A> {
         Self {
             name,
             body: UpdateProgramBody::Ast(UpdateAst::Sequence(ops)),
+        }
+    }
+
+    pub fn choose_in<T>(
+        name: &'static str,
+        domain: ExprDomain<T>,
+        body: &'static str,
+        read_paths: &'static [&'static str],
+        write_paths: &'static [&'static str],
+        eval: impl Fn(&S, &A, &T) -> S + 'static,
+    ) -> Self
+    where
+        T: Clone + 'static,
+    {
+        Self {
+            name,
+            body: UpdateProgramBody::Ast(UpdateAst::Choice(UpdateChoice::new(
+                domain,
+                body,
+                read_paths,
+                write_paths,
+                eval,
+            ))),
         }
     }
 
@@ -4354,17 +6975,27 @@ impl<S, A> UpdateProgram<S, A> {
         matches!(self.body, UpdateProgramBody::Ast(_))
     }
 
-    pub fn apply(&self, state: &S, action: &A) -> S
+    pub fn successors(&self, state: &S, action: &A) -> Vec<S>
     where
         S: Clone,
     {
         match &self.body {
-            UpdateProgramBody::RustFn(update) => update(state, action),
-            UpdateProgramBody::Ast(ast) => {
-                let mut next = state.clone();
-                ast.apply(state, &mut next, action);
-                next
-            }
+            UpdateProgramBody::RustFn(update) => vec![update(state, action)],
+            UpdateProgramBody::Ast(ast) => ast.successors(state, action),
+        }
+    }
+
+    pub fn apply(&self, state: &S, action: &A) -> S
+    where
+        S: Clone,
+    {
+        let successors = self.successors(state, action);
+        match successors.as_slice() {
+            [next] => next.clone(),
+            _ => panic!(
+                "UpdateProgram::apply requires a deterministic update program `{}`",
+                self.name
+            ),
         }
     }
 }
@@ -4503,6 +7134,17 @@ impl<S: 'static, A: 'static> TransitionRule<S, A> {
         paths.into_iter().collect()
     }
 
+    pub fn symbolic_full_read_paths(&self) -> Vec<&'static str> {
+        let mut paths = BTreeSet::new();
+        if let Some(ast) = self.guard_ast() {
+            ast.collect_symbolic_full_read_paths(&mut paths);
+        }
+        if let Some(ast) = self.update_ast() {
+            ast.collect_symbolic_full_read_paths(&mut paths);
+        }
+        paths.into_iter().collect()
+    }
+
     pub fn effect_names(&self) -> Vec<&'static str> {
         self.update_ast()
             .map(UpdateAst::effect_names)
@@ -4557,6 +7199,19 @@ impl<S: 'static, A: 'static> TransitionRule<S, A> {
     {
         match &self.body {
             TransitionRuleBody::Guarded { update, .. } => update.apply(prev, action),
+        }
+    }
+
+    pub fn successors(&self, prev: &S, action: &A) -> Vec<TransitionSuccessor<S>>
+    where
+        S: Clone,
+    {
+        match &self.body {
+            TransitionRuleBody::Guarded { update, .. } => update
+                .successors(prev, action)
+                .into_iter()
+                .map(|next| TransitionSuccessor::new(self.name, next))
+                .collect(),
         }
     }
 }
@@ -4660,6 +7315,16 @@ impl<S: 'static, A: 'static> TransitionProgram<S, A> {
         paths.into_iter().collect()
     }
 
+    pub fn symbolic_full_read_paths(&self) -> Vec<&'static str> {
+        let mut paths = BTreeSet::new();
+        for rule in &self.rules {
+            for path in rule.symbolic_full_read_paths() {
+                paths.insert(path);
+            }
+        }
+        paths.into_iter().collect()
+    }
+
     pub fn effect_names(&self) -> Vec<&'static str> {
         let mut names = BTreeSet::new();
         for rule in &self.rules {
@@ -4677,7 +7342,7 @@ impl<S: 'static, A: 'static> TransitionProgram<S, A> {
         self.rules
             .iter()
             .filter(|rule| rule.matches(prev, action))
-            .map(|rule| TransitionSuccessor::new(rule.name(), rule.apply(prev, action)))
+            .flat_map(|rule| rule.successors(prev, action))
             .collect()
     }
 
@@ -4709,11 +7374,15 @@ impl<S: 'static, A: 'static> Default for TransitionProgram<S, A> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::{
-        BoolExpr, GuardAst, GuardExpr, QuantifierKind, StateExpr, StateExprAst, StepExpr,
-        TransitionProgram, TransitionProgramError, TransitionRule, UpdateOp, UpdateProgram,
+        BoolExpr, GuardAst, GuardExpr, GuardValueExpr, GuardValueExprAst, QuantifierKind,
+        StateExpr, StateExprAst, StepExpr, StepValueExpr, StepValueExprAst, TransitionProgram,
+        TransitionProgramError, TransitionRule, TransitionSuccessor, UpdateOp, UpdateProgram,
         UpdateValueExprAst,
     };
+    use crate::{BoundedDomain, ExprDomain, RelAtom, RelSet, Relation2, Signature};
 
     crate::register_symbolic_pure_helpers!("predicate_tests::registered_helper");
     crate::register_symbolic_effects!("predicate_tests::registered_effect");
@@ -4736,6 +7405,33 @@ mod tests {
         count: usize,
         state: State,
         next_state: State,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct SignedWorker {
+        delta: isize,
+        factor: isize,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Item {
+        Alpha,
+        Beta,
+        Gamma,
+    }
+
+    impl Signature for Item {
+        fn bounded_domain() -> BoundedDomain<Self> {
+            BoundedDomain::new(vec![Self::Alpha, Self::Beta, Self::Gamma])
+        }
+    }
+
+    impl RelAtom for Item {}
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct SetWorker {
+        active: RelSet<Item>,
+        pending: RelSet<Item>,
     }
 
     #[test]
@@ -4796,6 +7492,195 @@ mod tests {
             other => panic!("unexpected ast: {other:?}"),
         }
         assert_eq!(expr.eval(&worker), State::Busy);
+    }
+
+    #[test]
+    fn state_expr_exposes_arithmetic_ast() {
+        let delta = StateExpr::field("delta", "state.delta", |state: &SignedWorker| state.delta);
+        let factor = StateExpr::field("factor", "state.factor", |state: &SignedWorker| {
+            state.factor
+        });
+        let sub = StateExpr::sub("delta_minus_factor", delta.clone(), factor.clone());
+        let mul = StateExpr::mul(
+            "scaled_delta",
+            sub.clone(),
+            StateExpr::literal_with_repr("two", "2", 2_isize),
+        );
+        let neg = StateExpr::neg("neg_scaled_delta", mul.clone());
+        let worker = SignedWorker {
+            delta: 5,
+            factor: 2,
+        };
+
+        assert!(matches!(sub.ast(), Some(StateExprAst::Sub { .. })));
+        assert!(matches!(mul.ast(), Some(StateExprAst::Mul { .. })));
+        assert!(matches!(neg.ast(), Some(StateExprAst::Neg { .. })));
+        assert_eq!(sub.eval(&worker), 3);
+        assert_eq!(mul.eval(&worker), 6);
+        assert_eq!(neg.eval(&worker), -6);
+    }
+
+    #[test]
+    fn step_and_guard_value_expr_expose_arithmetic_ast() {
+        let prev_delta = StepValueExpr::field(
+            "prev_delta",
+            "prev.delta",
+            |prev: &SignedWorker, _action: &Action, _next: &SignedWorker| prev.delta,
+        );
+        let next_factor = StepValueExpr::field(
+            "next_factor",
+            "next.factor",
+            |_prev: &SignedWorker, _action: &Action, next: &SignedWorker| next.factor,
+        );
+        let step_expr = StepValueExpr::mul(
+            "step_product",
+            StepValueExpr::sub("step_diff", prev_delta, next_factor),
+            StepValueExpr::literal_with_repr("two", "2", 2_isize),
+        );
+        let guard_expr = GuardValueExpr::neg(
+            "neg_prev_delta",
+            GuardValueExpr::field(
+                "prev_delta",
+                "prev.delta",
+                |prev: &SignedWorker, _action: &Action| prev.delta,
+            ),
+        );
+        let prev = SignedWorker {
+            delta: 4,
+            factor: 1,
+        };
+        let next = SignedWorker {
+            delta: 7,
+            factor: 2,
+        };
+
+        assert!(matches!(
+            step_expr.ast(),
+            Some(StepValueExprAst::Mul { .. })
+        ));
+        assert!(matches!(
+            guard_expr.ast(),
+            Some(GuardValueExprAst::Neg { .. })
+        ));
+        assert_eq!(step_expr.eval(&prev, &Action::Start, &next), 4);
+        assert_eq!(guard_expr.eval(&prev, &Action::Start), -4);
+    }
+
+    #[test]
+    fn set_value_exprs_expose_ast_and_eval() {
+        let active = StateExpr::field("active", "state.active", |state: &SetWorker| {
+            state.active.clone()
+        });
+        let pending = StateExpr::field("pending", "state.pending", |state: &SetWorker| {
+            state.pending.clone()
+        });
+        let union = StateExpr::union_expr(
+            "active_or_pending",
+            active.clone(),
+            pending.clone(),
+            |state: &SetWorker| state.active.union(&state.pending),
+        );
+        let overlap = StateExpr::intersection_expr(
+            "active_and_pending",
+            active.clone(),
+            pending.clone(),
+            |state: &SetWorker| state.active.intersection(&state.pending),
+        );
+        let pending_only = StateExpr::difference_expr(
+            "pending_only",
+            pending.clone(),
+            active.clone(),
+            |state: &SetWorker| state.pending.difference(&state.active),
+        );
+        let worker = SetWorker {
+            active: RelSet::from_items([Item::Alpha, Item::Beta]),
+            pending: RelSet::from_items([Item::Beta, Item::Gamma]),
+        };
+
+        assert!(matches!(union.ast(), Some(StateExprAst::Union { .. })));
+        assert!(matches!(
+            overlap.ast(),
+            Some(StateExprAst::Intersection { .. })
+        ));
+        assert!(matches!(
+            pending_only.ast(),
+            Some(StateExprAst::Difference { .. })
+        ));
+        assert_eq!(
+            union.eval(&worker),
+            RelSet::from_items([Item::Alpha, Item::Beta, Item::Gamma])
+        );
+        assert_eq!(overlap.eval(&worker), RelSet::from_items([Item::Beta]));
+        assert_eq!(
+            pending_only.eval(&worker),
+            RelSet::from_items([Item::Gamma])
+        );
+    }
+
+    #[test]
+    fn step_guard_and_update_set_ops_collect_full_read_paths() {
+        let step_union = StepValueExpr::union_expr(
+            "step_union",
+            StepValueExpr::field(
+                "prev_active",
+                "prev.active",
+                |prev: &SetWorker, _action: &Action, _next: &SetWorker| prev.active.clone(),
+            ),
+            StepValueExpr::field(
+                "next_pending",
+                "next.pending",
+                |_prev: &SetWorker, _action: &Action, next: &SetWorker| next.pending.clone(),
+            ),
+            |prev: &SetWorker, _action: &Action, next: &SetWorker| prev.active.union(&next.pending),
+        );
+        let guard_difference = GuardValueExpr::difference_expr(
+            "guard_difference",
+            GuardValueExpr::field(
+                "prev_pending",
+                "prev.pending",
+                |prev: &SetWorker, _action: &Action| prev.pending.clone(),
+            ),
+            GuardValueExpr::field(
+                "prev_active",
+                "prev.active",
+                |prev: &SetWorker, _action: &Action| prev.active.clone(),
+            ),
+            |prev: &SetWorker, _action: &Action| prev.pending.difference(&prev.active),
+        );
+        let update_ast = super::UpdateAst::Sequence(vec![UpdateOp::assign_ast(
+            "self.pending",
+            UpdateValueExprAst::difference(
+                UpdateValueExprAst::union(
+                    UpdateValueExprAst::field("state.pending"),
+                    UpdateValueExprAst::field("prev.active"),
+                ),
+                UpdateValueExprAst::field("prev.pending"),
+            ),
+            |prev: &SetWorker, state: &mut SetWorker, _action: &Action| {
+                state.pending = state.pending.union(&prev.active).difference(&prev.pending);
+            },
+        )]);
+
+        assert!(matches!(
+            step_union.ast(),
+            Some(StepValueExprAst::Union { .. })
+        ));
+        assert!(matches!(
+            guard_difference.ast(),
+            Some(GuardValueExprAst::Difference { .. })
+        ));
+        assert_eq!(
+            step_union
+                .ast()
+                .expect("step value ast")
+                .erase()
+                .first_unencodable(),
+            None
+        );
+        assert_eq!(
+            update_ast.symbolic_full_read_paths(),
+            vec!["prev.active", "prev.pending", "state.pending"]
+        );
     }
 
     #[test]
@@ -4898,6 +7783,328 @@ mod tests {
             Some(super::BoolExprAst::Exists(quantifier))
                 if quantifier.kind() == QuantifierKind::Exists
         ));
+    }
+
+    #[test]
+    fn symbolic_quantifiers_fail_closed_for_symbolic_backend() {
+        let bool_forall = BoolExpr::forall("all_small", "0..=2", "count <= 2", |state: &Worker| {
+            (0..=2).all(|value| state.count >= value)
+        });
+        let step_exists = StepExpr::exists(
+            "next_busy",
+            "0..=1",
+            "next.state == busy",
+            |_prev: &Worker, _action: &Action, next: &Worker| matches!(next.state, State::Busy),
+        );
+        let guard_exists = GuardExpr::exists(
+            "ready_action",
+            "0..=1",
+            "prev.ready",
+            |prev: &Worker, _action: &Action| prev.ready,
+        );
+        let program = TransitionProgram::named(
+            "quantified_rule",
+            vec![TransitionRule::ast(
+                "quantified",
+                guard_exists.clone(),
+                UpdateProgram::ast("noop", vec![]),
+            )],
+        );
+
+        assert_eq!(
+            bool_forall.first_unencodable_symbolic_node(),
+            Some("forall")
+        );
+        assert_eq!(
+            step_exists.first_unencodable_symbolic_node(),
+            Some("exists")
+        );
+        assert_eq!(
+            guard_exists.first_unencodable_symbolic_node(),
+            Some("exists")
+        );
+        assert_eq!(program.first_unencodable_symbolic_node(), Some("exists"));
+    }
+
+    #[test]
+    fn structural_quantifiers_are_symbolically_encodable() {
+        let numbers = ExprDomain::new("small_numbers", [0_usize, 1, 2]);
+        let flags = ExprDomain::new("flags", [false, true]);
+        let bool_forall = BoolExpr::forall_in(
+            "all_small",
+            numbers.clone(),
+            "value <= count",
+            &["state.count"],
+            |state: &Worker, value: &usize| *value <= state.count,
+        );
+        let step_exists = StepExpr::exists_in(
+            "reachable_busy",
+            flags.clone(),
+            "flag && next.state == busy",
+            &["next.state"],
+            |_prev: &Worker, _action: &Action, next: &Worker, flag: &bool| {
+                *flag && matches!(next.state, State::Busy)
+            },
+        );
+        let guard_exists = GuardExpr::exists_in(
+            "flagged_ready",
+            flags,
+            "flag && prev.ready",
+            &["prev.ready"],
+            |prev: &Worker, _action: &Action, flag: &bool| *flag && prev.ready,
+        );
+        let prev = Worker {
+            ready: true,
+            count: 2,
+            state: State::Idle,
+            next_state: State::Busy,
+        };
+        let next = Worker {
+            ready: true,
+            count: 3,
+            state: State::Busy,
+            next_state: State::Busy,
+        };
+        let program = TransitionProgram::named(
+            "structural_quantified_rule",
+            vec![TransitionRule::ast(
+                "quantified",
+                guard_exists.clone(),
+                UpdateProgram::ast("noop", vec![]),
+            )],
+        );
+
+        assert!(bool_forall.eval(&prev));
+        assert!(step_exists.eval(&prev, &Action::Start, &next));
+        assert!(guard_exists.eval(&prev, &Action::Start));
+        assert!(matches!(
+            bool_forall.ast(),
+            Some(super::BoolExprAst::ForAll(quantifier))
+                if quantifier.is_symbolic_supported() && quantifier.domain() == "small_numbers"
+        ));
+        assert!(matches!(
+            step_exists.ast(),
+            Some(super::StepExprAst::Exists(quantifier))
+                if quantifier.is_symbolic_supported() && quantifier.domain() == "flags"
+        ));
+        assert!(matches!(
+            guard_exists.ast(),
+            Some(super::GuardAst::Exists(quantifier))
+                if quantifier.is_symbolic_supported() && quantifier.domain() == "flags"
+        ));
+        assert_eq!(bool_forall.first_unencodable_symbolic_node(), None);
+        assert_eq!(step_exists.first_unencodable_symbolic_node(), None);
+        assert_eq!(guard_exists.first_unencodable_symbolic_node(), None);
+        assert_eq!(bool_forall.symbolic_full_read_paths(), vec!["state.count"]);
+        assert_eq!(step_exists.symbolic_full_read_paths(), vec!["next.state"]);
+        assert_eq!(guard_exists.symbolic_full_read_paths(), vec!["prev.ready"]);
+        assert_eq!(program.first_unencodable_symbolic_node(), None);
+    }
+
+    #[test]
+    fn structural_comprehensions_eval_and_collect_read_paths() {
+        let worker = Worker {
+            ready: true,
+            count: 2,
+            state: State::Idle,
+            next_state: State::Busy,
+        };
+        let state_set: StateExpr<Worker, RelSet<Item>> =
+            StateExpr::<Worker, RelSet<Item>>::set_comprehension(
+                "selected_items",
+                ExprDomain::<Item>::of_signature("items"),
+                "state.count >= 2 && item != gamma",
+                &["state.count"],
+                |state: &Worker, item: &Item| state.count >= 2 && !matches!(item, Item::Gamma),
+            );
+        let pair_domain = ExprDomain::<Item>::of_signature("left")
+            .product("item_pairs", &ExprDomain::<Item>::of_signature("right"))
+            .filter("distinct_pairs", |(left, right)| left != right)
+            .unique();
+        let relation_expr: StateExpr<Worker, Relation2<Item, Item>> =
+            StateExpr::<Worker, Relation2<Item, Item>>::relation_comprehension(
+                "alpha_links",
+                pair_domain,
+                "left == alpha && state.ready",
+                &["state.ready"],
+                |state: &Worker, (left, _right): &(Item, Item)| {
+                    state.ready && matches!(left, Item::Alpha)
+                },
+            );
+        let prev = SetWorker {
+            active: RelSet::from_items([Item::Alpha, Item::Beta]),
+            pending: RelSet::from_items([Item::Beta]),
+        };
+        let next = SetWorker {
+            active: RelSet::from_items([Item::Alpha]),
+            pending: RelSet::from_items([Item::Gamma]),
+        };
+        let step_set: StepValueExpr<SetWorker, Action, RelSet<Item>> =
+            StepValueExpr::<SetWorker, Action, RelSet<Item>>::set_comprehension(
+                "mentioned_items",
+                ExprDomain::<Item>::of_signature("items"),
+                "prev.active.contains(item) || next.pending.contains(item)",
+                &["next.pending", "prev.active"],
+                |prev: &SetWorker, _action: &Action, next: &SetWorker, item: &Item| {
+                    prev.active.contains(item) || next.pending.contains(item)
+                },
+            );
+        let guard_set: GuardValueExpr<SetWorker, Action, RelSet<Item>> =
+            GuardValueExpr::<SetWorker, Action, RelSet<Item>>::set_comprehension(
+                "guard_items",
+                ExprDomain::<Item>::of_signature("items"),
+                "prev.pending.contains(item) || item == alpha",
+                &["prev.pending"],
+                |prev: &SetWorker, _action: &Action, item: &Item| {
+                    prev.pending.contains(item) || matches!(item, Item::Alpha)
+                },
+            );
+        let update_ast = super::UpdateAst::Sequence(vec![UpdateOp::assign_ast(
+            "self.pending",
+            UpdateValueExprAst::comprehension(
+                ExprDomain::<Item>::of_signature("items"),
+                "prev.active.contains(item)",
+                &["prev.active"],
+            ),
+            |prev: &SetWorker, state: &mut SetWorker, _action: &Action| {
+                state.pending = RelSet::from_items(
+                    Item::bounded_domain()
+                        .into_vec()
+                        .into_iter()
+                        .filter(|item| prev.active.contains(item)),
+                );
+            },
+        )]);
+        let mut state_paths = BTreeSet::new();
+        let mut relation_paths = BTreeSet::new();
+        let mut step_paths = BTreeSet::new();
+        let mut guard_paths = BTreeSet::new();
+
+        state_set
+            .erased_ast()
+            .expect("state comprehension ast")
+            .collect_symbolic_full_read_paths(&mut state_paths);
+        relation_expr
+            .erased_ast()
+            .expect("relation comprehension ast")
+            .collect_symbolic_full_read_paths(&mut relation_paths);
+        step_set
+            .ast()
+            .expect("step comprehension ast")
+            .erase()
+            .collect_symbolic_full_read_paths(&mut step_paths);
+        guard_set
+            .ast()
+            .expect("guard comprehension ast")
+            .erase()
+            .collect_symbolic_full_read_paths(&mut guard_paths);
+
+        assert!(matches!(
+            state_set.ast(),
+            Some(StateExprAst::Comprehension {
+                domain: "items",
+                ..
+            })
+        ));
+        assert!(matches!(
+            relation_expr.ast(),
+            Some(StateExprAst::Comprehension {
+                domain: "distinct_pairs",
+                ..
+            })
+        ));
+        assert!(matches!(
+            step_set.ast(),
+            Some(StepValueExprAst::Comprehension {
+                domain: "items",
+                ..
+            })
+        ));
+        assert!(matches!(
+            guard_set.ast(),
+            Some(GuardValueExprAst::Comprehension {
+                domain: "items",
+                ..
+            })
+        ));
+        assert_eq!(
+            state_set.eval(&worker),
+            RelSet::from_items([Item::Alpha, Item::Beta])
+        );
+        assert_eq!(
+            relation_expr.eval(&worker),
+            Relation2::from_pairs([(Item::Alpha, Item::Beta), (Item::Alpha, Item::Gamma)])
+        );
+        assert_eq!(
+            step_set.eval(&prev, &Action::Start, &next),
+            RelSet::from_items([Item::Alpha, Item::Beta, Item::Gamma])
+        );
+        assert_eq!(
+            guard_set.eval(&prev, &Action::Start),
+            RelSet::from_items([Item::Alpha, Item::Beta])
+        );
+        assert_eq!(
+            state_paths.into_iter().collect::<Vec<_>>(),
+            vec!["state.count"]
+        );
+        assert_eq!(
+            relation_paths.into_iter().collect::<Vec<_>>(),
+            vec!["state.ready"]
+        );
+        assert_eq!(
+            step_paths.into_iter().collect::<Vec<_>>(),
+            vec!["next.pending", "prev.active"]
+        );
+        assert_eq!(
+            guard_paths.into_iter().collect::<Vec<_>>(),
+            vec!["prev.pending"]
+        );
+        assert_eq!(update_ast.symbolic_full_read_paths(), vec!["prev.active"]);
+        assert_eq!(update_ast.first_unencodable(), None);
+    }
+
+    #[test]
+    fn symbolic_full_read_paths_preserve_bound_prefixes() {
+        let bool_expr = BoolExpr::and(
+            "worker_inputs",
+            vec![
+                BoolExpr::field("ready", "state.ready", |state: &Worker| state.ready),
+                BoolExpr::builtin_pure_call_with_paths(
+                    "count_ok(state.count)",
+                    &["state.count"],
+                    |state: &Worker| state.count <= 3,
+                ),
+                BoolExpr::matches_variant(
+                    "state_busy",
+                    "state.state",
+                    "State::Busy",
+                    |state: &Worker| matches!(state.state, State::Busy),
+                ),
+            ],
+        );
+        let step_expr = StepExpr::builtin_pure_call_with_paths(
+            "step_ok(prev, action, next)",
+            &["action.kind", "next.state", "prev.ready"],
+            |prev: &Worker, _action: &Action, next: &Worker| prev.ready && next.state == prev.state,
+        );
+        let guard_expr = GuardExpr::builtin_pure_call_with_paths(
+            "guard_ok(prev, action)",
+            &["action.kind", "prev.ready"],
+            |prev: &Worker, _action: &Action| prev.ready,
+        );
+
+        assert_eq!(
+            bool_expr.symbolic_full_read_paths(),
+            vec!["state.count", "state.ready", "state.state"]
+        );
+        assert_eq!(
+            step_expr.symbolic_full_read_paths(),
+            vec!["action.kind", "next.state", "prev.ready"]
+        );
+        assert_eq!(
+            guard_expr.symbolic_full_read_paths(),
+            vec!["action.kind", "prev.ready"]
+        );
     }
 
     #[test]
@@ -5065,6 +8272,66 @@ mod tests {
     }
 
     #[test]
+    fn update_program_choice_exposes_successors_and_paths() {
+        let update = UpdateProgram::choose_in(
+            "choose_state",
+            ExprDomain::new("phases", [State::Idle, State::Busy]),
+            "next.phase = choice",
+            &["prev.ready"],
+            &["self.state"],
+            |prev: &Worker, _action: &Action, phase: &State| Worker {
+                ready: prev.ready,
+                count: prev.count,
+                state: *phase,
+                next_state: *phase,
+            },
+        );
+        let initial = Worker {
+            ready: true,
+            count: 0,
+            state: State::Idle,
+            next_state: State::Idle,
+        };
+        let successors = update.successors(&initial, &Action::Start);
+
+        assert!(matches!(
+            update.ast_body(),
+            Some(super::UpdateAst::Choice(choice))
+                if choice.domain() == "phases" && choice.body() == "next.phase = choice"
+        ));
+        assert_eq!(
+            update
+                .ast_body()
+                .expect("choice update ast")
+                .symbolic_full_read_paths(),
+            vec!["prev.ready"]
+        );
+        assert_eq!(
+            successors,
+            vec![
+                Worker {
+                    ready: true,
+                    count: 0,
+                    state: State::Idle,
+                    next_state: State::Idle,
+                },
+                Worker {
+                    ready: true,
+                    count: 0,
+                    state: State::Busy,
+                    next_state: State::Busy,
+                },
+            ]
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                update.apply(&initial, &Action::Start)
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn transition_program_applies_single_matching_rule() {
         let program = TransitionProgram::named(
             "worker",
@@ -5164,6 +8431,51 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![State::Busy, State::Idle]
         );
+    }
+
+    #[test]
+    fn transition_program_exposes_choice_successors() {
+        let program = TransitionProgram::named(
+            "choice_worker",
+            vec![TransitionRule::ast(
+                "choose_phase",
+                GuardExpr::matches_variant(
+                    "start",
+                    "action",
+                    "Action::Start",
+                    |_state: &State, action: &Action| matches!(action, Action::Start),
+                ),
+                UpdateProgram::choose_in(
+                    "choose_phase",
+                    ExprDomain::new("phases", [State::Idle, State::Busy]),
+                    "state <- phase",
+                    &[],
+                    &["self"],
+                    |_prev: &State, _action: &Action, phase: &State| *phase,
+                ),
+            )],
+        );
+
+        let successors = program.successors(&State::Idle, &Action::Start);
+        assert_eq!(
+            successors
+                .iter()
+                .map(TransitionSuccessor::rule_name)
+                .collect::<Vec<_>>(),
+            vec!["choose_phase", "choose_phase"]
+        );
+        assert_eq!(
+            successors
+                .into_iter()
+                .map(TransitionSuccessor::into_next)
+                .collect::<Vec<_>>(),
+            vec![State::Idle, State::Busy]
+        );
+        assert!(matches!(
+            program.evaluate(&State::Idle, &Action::Start),
+            Err(TransitionProgramError::AmbiguousRuleMatch { rule_names, .. })
+                if rule_names == vec!["choose_phase", "choose_phase"]
+        ));
     }
 
     #[test]
@@ -5302,6 +8614,96 @@ mod tests {
         );
 
         assert_eq!(program.symbolic_state_paths(), vec!["ready", "state"]);
+    }
+
+    #[test]
+    fn update_and_transition_collect_full_bound_read_paths() {
+        let ops = vec![UpdateOp::assign_ast(
+            "self.state",
+            UpdateValueExprAst::if_else(
+                GuardExpr::builtin_pure_call_with_paths(
+                    "should_keep_self(prev, action)",
+                    &["action.kind", "prev.ready"],
+                    |prev: &Worker, _action: &Action| prev.ready,
+                ),
+                UpdateValueExprAst::field("self.state"),
+                UpdateValueExprAst::builtin_pure_call_with_paths(
+                    "prev.next_state.clone()",
+                    &["prev.next_state"],
+                ),
+            ),
+            |prev: &Worker, state: &mut Worker, _action: &Action| {
+                if prev.ready {
+                    state.state = prev.state;
+                } else {
+                    state.state = prev.next_state;
+                }
+            },
+        )];
+        let update_ast = super::UpdateAst::Sequence(ops.clone());
+        let rule = TransitionRule::ast(
+            "full_paths_rule",
+            GuardExpr::builtin_pure_call_with_paths(
+                "guard_reads(prev.count)",
+                &["prev.count"],
+                |prev: &Worker, _action: &Action| prev.count <= 3,
+            ),
+            UpdateProgram::ast("conditional_update", ops),
+        );
+        let program = TransitionProgram::named("full_paths_program", vec![rule.clone()]);
+
+        assert_eq!(
+            update_ast.symbolic_full_read_paths(),
+            vec!["action.kind", "prev.next_state", "prev.ready", "self.state"]
+        );
+        assert_eq!(
+            rule.symbolic_full_read_paths(),
+            vec![
+                "action.kind",
+                "prev.count",
+                "prev.next_state",
+                "prev.ready",
+                "self.state",
+            ]
+        );
+        assert_eq!(
+            program.symbolic_full_read_paths(),
+            rule.symbolic_full_read_paths()
+        );
+    }
+
+    #[test]
+    fn update_arithmetic_nodes_collect_full_read_paths() {
+        let update_ast = super::UpdateAst::Sequence(vec![UpdateOp::assign_ast(
+            "self.count",
+            UpdateValueExprAst::if_else(
+                GuardExpr::builtin_pure_call_with_paths(
+                    "prev.ready && matches!(action, Action::Start)",
+                    &["action", "prev.ready"],
+                    |prev: &Worker, action: &Action| prev.ready && matches!(action, Action::Start),
+                ),
+                UpdateValueExprAst::mul(
+                    UpdateValueExprAst::field("state.count"),
+                    UpdateValueExprAst::literal("2"),
+                ),
+                UpdateValueExprAst::sub(
+                    UpdateValueExprAst::field("prev.count"),
+                    UpdateValueExprAst::neg(UpdateValueExprAst::literal("1")),
+                ),
+            ),
+            |prev: &Worker, state: &mut Worker, action: &Action| {
+                if prev.ready && matches!(action, Action::Start) {
+                    state.count *= 2;
+                } else {
+                    state.count = prev.count + 1;
+                }
+            },
+        )]);
+
+        assert_eq!(
+            update_ast.symbolic_full_read_paths(),
+            vec!["action", "prev.count", "prev.ready", "state.count"]
+        );
     }
 
     #[test]

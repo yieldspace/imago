@@ -576,6 +576,20 @@ fn block_terminal_expr(block: &syn::Block) -> Option<&Expr> {
     }
 }
 
+fn unary_method_arg<'a>(
+    whole_expr: &Expr,
+    args: &'a syn::punctuated::Punctuated<Expr, Token![,]>,
+) -> syn::Result<&'a Expr> {
+    let mut args = args.iter();
+    let Some(arg) = args.next() else {
+        return Err(unsupported_nirvash_expr(whole_expr));
+    };
+    if args.next().is_some() {
+        return Err(unsupported_nirvash_expr(whole_expr));
+    }
+    Ok(arg)
+}
+
 struct BoolDslContext {
     kind: BoolDslKind,
     binders: Vec<Ident>,
@@ -621,6 +635,16 @@ impl BoolDslContext {
             |#(#binders),*| {
                 #(let _ = &#binders;)*
                 #expr
+            }
+        }
+    }
+
+    fn cloned_closure_tokens(&self, expr: &Expr) -> TokenStream2 {
+        let binders = &self.binders;
+        quote! {
+            |#(#binders),*| {
+                #(let _ = &#binders;)*
+                (#expr).clone()
             }
         }
     }
@@ -746,6 +770,16 @@ impl BoolDslContext {
             Expr::Paren(ExprParen { expr: inner, .. }) => {
                 self.lower_value_expr(inner, explicit_name)
             }
+            Expr::Unary(ExprUnary {
+                op: UnOp::Neg(_),
+                expr: inner,
+                ..
+            }) => {
+                let builder = self.value_builder_path();
+                let name = explicit_name.unwrap_or_else(|| expr_source_lit(expr));
+                let inner = self.lower_value_expr(inner, None)?;
+                Ok(quote! { #builder::neg(#name, #inner) })
+            }
             Expr::Lit(_) => {
                 let builder = self.value_builder_path();
                 let name = explicit_name.unwrap_or_else(|| expr_source_lit(expr));
@@ -756,7 +790,7 @@ impl BoolDslContext {
                 let builder = self.value_builder_path();
                 let name = explicit_name.unwrap_or_else(|| expr_source_lit(expr));
                 if let Some(path) = self.bound_field_path(expr) {
-                    let eval = self.closure_tokens(expr);
+                    let eval = self.cloned_closure_tokens(expr);
                     Ok(quote! { #builder::field(#name, #path, #eval) })
                 } else {
                     let repr = expr_source_lit(expr);
@@ -766,10 +800,11 @@ impl BoolDslContext {
             Expr::Field(ExprField { .. }) => {
                 let builder = self.value_builder_path();
                 let name = explicit_name.unwrap_or_else(|| expr_source_lit(expr));
-                let eval = self.closure_tokens(expr);
                 if let Some(path) = self.bound_field_path(expr) {
+                    let eval = self.cloned_closure_tokens(expr);
                     Ok(quote! { #builder::field(#name, #path, #eval) })
                 } else {
+                    let eval = self.closure_tokens(expr);
                     let repr = expr_source_lit(expr);
                     Ok(quote! { #builder::opaque(#name, #repr, #eval) })
                 }
@@ -786,8 +821,43 @@ impl BoolDslContext {
                 let rhs = self.lower_value_expr(right, None)?;
                 Ok(quote! { #builder::add(#name, #lhs, #rhs) })
             }
+            Expr::Binary(ExprBinary {
+                op: BinOp::Sub(_),
+                left,
+                right,
+                ..
+            }) => {
+                let builder = self.value_builder_path();
+                let name = explicit_name.unwrap_or_else(|| expr_source_lit(expr));
+                let lhs = self.lower_value_expr(left, None)?;
+                let rhs = self.lower_value_expr(right, None)?;
+                Ok(quote! { #builder::sub(#name, #lhs, #rhs) })
+            }
+            Expr::Binary(ExprBinary {
+                op: BinOp::Mul(_),
+                left,
+                right,
+                ..
+            }) => {
+                let builder = self.value_builder_path();
+                let name = explicit_name.unwrap_or_else(|| expr_source_lit(expr));
+                let lhs = self.lower_value_expr(left, None)?;
+                let rhs = self.lower_value_expr(right, None)?;
+                Ok(quote! { #builder::mul(#name, #lhs, #rhs) })
+            }
             Expr::If(expr_if) => self.lower_if_value_expr(expr, expr_if, explicit_name),
-            Expr::Call(ExprCall { .. }) | Expr::MethodCall(ExprMethodCall { .. }) => {
+            Expr::MethodCall(method_call) => {
+                if let Some(lowered) =
+                    self.lower_builtin_value_method(expr, method_call, explicit_name.clone())
+                {
+                    return lowered;
+                }
+                let builder = self.value_builder_path();
+                let name = explicit_name.unwrap_or_else(|| expr_source_lit(expr));
+                let eval = self.closure_tokens(expr);
+                Ok(self.lower_pure_call(&builder, name, expr, eval))
+            }
+            Expr::Call(ExprCall { .. }) => {
                 let builder = self.value_builder_path();
                 let name = explicit_name.unwrap_or_else(|| expr_source_lit(expr));
                 let eval = self.closure_tokens(expr);
@@ -820,6 +890,45 @@ impl BoolDslContext {
         let then_branch = self.lower_value_expr(then_expr, None)?;
         let else_branch = self.lower_value_expr(else_expr, None)?;
         Ok(quote! { #builder::if_else(#name, #condition, #then_branch, #else_branch) })
+    }
+
+    fn lower_builtin_value_method(
+        &self,
+        whole_expr: &Expr,
+        method_call: &ExprMethodCall,
+        explicit_name: Option<LitStr>,
+    ) -> Option<syn::Result<TokenStream2>> {
+        let method = method_call.method.to_string();
+        let builder = self.value_builder_path();
+        let name = explicit_name.unwrap_or_else(|| expr_source_lit(whole_expr));
+        let eval = self.closure_tokens(whole_expr);
+        let receiver = strip_expr_wrappers(&method_call.receiver);
+        let arg = match method.as_str() {
+            "union" | "intersection" | "difference" => {
+                match unary_method_arg(whole_expr, &method_call.args) {
+                    Ok(arg) => strip_expr_wrappers(arg),
+                    Err(err) => return Some(Err(err)),
+                }
+            }
+            _ => return None,
+        };
+        let lhs = match self.lower_value_expr(receiver, None) {
+            Ok(lhs) => lhs,
+            Err(err) => return Some(Err(err)),
+        };
+        let rhs = match self.lower_value_expr(arg, None) {
+            Ok(rhs) => rhs,
+            Err(err) => return Some(Err(err)),
+        };
+        let lowered = match method.as_str() {
+            "union" => quote! { #builder::union_expr(#name, #lhs, #rhs, #eval) },
+            "intersection" => {
+                quote! { #builder::intersection_expr(#name, #lhs, #rhs, #eval) }
+            }
+            "difference" => quote! { #builder::difference_expr(#name, #lhs, #rhs, #eval) },
+            _ => unreachable!("checked above"),
+        };
+        Some(Ok(lowered))
     }
 
     fn lower_expr(&self, expr: &Expr, explicit_name: Option<LitStr>) -> syn::Result<TokenStream2> {
@@ -855,7 +964,18 @@ impl BoolDslContext {
                 let eval = self.closure_tokens(expr);
                 Ok(quote! { #builder::field(#name, #path, #eval) })
             }
-            Expr::Call(ExprCall { .. }) | Expr::MethodCall(ExprMethodCall { .. }) => {
+            Expr::MethodCall(method_call) => {
+                if let Some(lowered) =
+                    self.lower_builtin_predicate_method(expr, method_call, explicit_name.clone())
+                {
+                    return lowered;
+                }
+                let builder = self.builder_path();
+                let name = explicit_name.unwrap_or_else(|| expr_source_lit(expr));
+                let eval = self.closure_tokens(expr);
+                Ok(self.lower_pure_call(&builder, name, expr, eval))
+            }
+            Expr::Call(ExprCall { .. }) => {
                 let builder = self.builder_path();
                 let name = explicit_name.unwrap_or_else(|| expr_source_lit(expr));
                 let eval = self.closure_tokens(expr);
@@ -921,6 +1041,40 @@ impl BoolDslContext {
         let pattern = token_stream_source_lit(&args.pattern, whole_expr.span());
         let eval = self.matches_closure_tokens(&args.value, &args.pattern);
         Ok(quote! { #builder::matches_variant(#name, #value, #pattern, #eval) })
+    }
+
+    fn lower_builtin_predicate_method(
+        &self,
+        whole_expr: &Expr,
+        method_call: &ExprMethodCall,
+        explicit_name: Option<LitStr>,
+    ) -> Option<syn::Result<TokenStream2>> {
+        let method = method_call.method.to_string();
+        let builder = self.builder_path();
+        let name = explicit_name.unwrap_or_else(|| expr_source_lit(whole_expr));
+        let eval = self.closure_tokens(whole_expr);
+        let receiver = strip_expr_wrappers(&method_call.receiver);
+        let arg = match method.as_str() {
+            "contains" | "subset_of" => match unary_method_arg(whole_expr, &method_call.args) {
+                Ok(arg) => strip_expr_wrappers(arg),
+                Err(err) => return Some(Err(err)),
+            },
+            _ => return None,
+        };
+        let lhs = match self.lower_value_expr(receiver, None) {
+            Ok(lhs) => lhs,
+            Err(err) => return Some(Err(err)),
+        };
+        let rhs = match self.lower_value_expr(arg, None) {
+            Ok(rhs) => rhs,
+            Err(err) => return Some(Err(err)),
+        };
+        let lowered = match method.as_str() {
+            "contains" => quote! { #builder::contains_expr(#name, #lhs, #rhs, #eval) },
+            "subset_of" => quote! { #builder::subset_of_expr(#name, #lhs, #rhs, #eval) },
+            _ => unreachable!("checked above"),
+        };
+        Some(Ok(lowered))
     }
 }
 
@@ -1057,6 +1211,14 @@ fn update_pure_call_read_paths(expr: &Expr) -> TokenStream2 {
 fn lower_update_value_expr(expr: &Expr) -> syn::Result<TokenStream2> {
     match expr {
         Expr::Paren(ExprParen { expr: inner, .. }) => lower_update_value_expr(inner),
+        Expr::Unary(ExprUnary {
+            op: UnOp::Neg(_),
+            expr: inner,
+            ..
+        }) => {
+            let inner = lower_update_value_expr(inner)?;
+            Ok(quote! { ::nirvash::UpdateValueExprAst::neg(#inner) })
+        }
         Expr::Lit(_) => {
             let repr = expr_source_lit(expr);
             Ok(quote! { ::nirvash::UpdateValueExprAst::literal(#repr) })
@@ -1087,7 +1249,83 @@ fn lower_update_value_expr(expr: &Expr) -> syn::Result<TokenStream2> {
             let rhs = lower_update_value_expr(right)?;
             Ok(quote! { ::nirvash::UpdateValueExprAst::add(#lhs, #rhs) })
         }
-        Expr::Call(ExprCall { .. }) | Expr::MethodCall(ExprMethodCall { .. }) => {
+        Expr::Binary(ExprBinary {
+            op: BinOp::Sub(_),
+            left,
+            right,
+            ..
+        }) => {
+            let lhs = lower_update_value_expr(left)?;
+            let rhs = lower_update_value_expr(right)?;
+            Ok(quote! { ::nirvash::UpdateValueExprAst::sub(#lhs, #rhs) })
+        }
+        Expr::Binary(ExprBinary {
+            op: BinOp::Mul(_),
+            left,
+            right,
+            ..
+        }) => {
+            let lhs = lower_update_value_expr(left)?;
+            let rhs = lower_update_value_expr(right)?;
+            Ok(quote! { ::nirvash::UpdateValueExprAst::mul(#lhs, #rhs) })
+        }
+        Expr::If(expr_if) => {
+            let Some(then_expr) = block_terminal_expr(&expr_if.then_branch) else {
+                return Err(unsupported_nirvash_expr(expr));
+            };
+            let Some((_, else_expr)) = &expr_if.else_branch else {
+                return Err(unsupported_nirvash_expr(expr));
+            };
+            let else_expr = match else_expr.as_ref() {
+                Expr::Block(block) => block_terminal_expr(&block.block)
+                    .ok_or_else(|| unsupported_nirvash_expr(expr))?,
+                other => other,
+            };
+            let guard_context = BoolDslContext {
+                kind: BoolDslKind::Guard,
+                binders: vec![
+                    Ident::new("prev", Span::call_site()),
+                    Ident::new("action", Span::call_site()),
+                ],
+            };
+            let condition = guard_context.lower_expr(&expr_if.cond, None)?;
+            let then_branch = lower_update_value_expr(then_expr)?;
+            let else_branch = lower_update_value_expr(else_expr)?;
+            Ok(
+                quote! { ::nirvash::UpdateValueExprAst::if_else(#condition, #then_branch, #else_branch) },
+            )
+        }
+        Expr::MethodCall(method_call) => {
+            if let Some(lowered) = lower_builtin_update_method(expr, method_call) {
+                return lowered;
+            }
+            let read_paths = update_pure_call_read_paths(expr);
+            match pure_call_kind(expr) {
+                Some(PureCallKind::Builtin) => {
+                    let name = expr_source_lit(expr);
+                    if let Some(registration) = nested_registered_helper(expr) {
+                        Ok(quote! {
+                            ::nirvash::UpdateValueExprAst::registered_pure_call_with_paths(#name, #registration, #read_paths)
+                        })
+                    } else {
+                        Ok(
+                            quote! { ::nirvash::UpdateValueExprAst::builtin_pure_call_with_paths(#name, #read_paths) },
+                        )
+                    }
+                }
+                Some(PureCallKind::Registered(registration)) => {
+                    let name = expr_source_lit(expr);
+                    Ok(quote! {
+                        ::nirvash::UpdateValueExprAst::registered_pure_call_with_paths(#name, #registration, #read_paths)
+                    })
+                }
+                None => {
+                    let repr = expr_source_lit(expr);
+                    Ok(quote! { ::nirvash::UpdateValueExprAst::opaque(#repr) })
+                }
+            }
+        }
+        Expr::Call(ExprCall { .. }) => {
             let read_paths = update_pure_call_read_paths(expr);
             match pure_call_kind(expr) {
                 Some(PureCallKind::Builtin) => {
@@ -1116,6 +1354,36 @@ fn lower_update_value_expr(expr: &Expr) -> syn::Result<TokenStream2> {
         }
         _ => Err(unsupported_nirvash_expr(expr)),
     }
+}
+
+fn lower_builtin_update_method(
+    whole_expr: &Expr,
+    method_call: &ExprMethodCall,
+) -> Option<syn::Result<TokenStream2>> {
+    let arg = match method_call.method.to_string().as_str() {
+        "union" | "intersection" | "difference" => {
+            match unary_method_arg(whole_expr, &method_call.args) {
+                Ok(arg) => strip_expr_wrappers(arg),
+                Err(err) => return Some(Err(err)),
+            }
+        }
+        _ => return None,
+    };
+    let lhs = match lower_update_value_expr(strip_expr_wrappers(&method_call.receiver)) {
+        Ok(lhs) => lhs,
+        Err(err) => return Some(Err(err)),
+    };
+    let rhs = match lower_update_value_expr(arg) {
+        Ok(rhs) => rhs,
+        Err(err) => return Some(Err(err)),
+    };
+    let lowered = match method_call.method.to_string().as_str() {
+        "union" => quote! { ::nirvash::UpdateValueExprAst::union(#lhs, #rhs) },
+        "intersection" => quote! { ::nirvash::UpdateValueExprAst::intersection(#lhs, #rhs) },
+        "difference" => quote! { ::nirvash::UpdateValueExprAst::difference(#lhs, #rhs) },
+        _ => unreachable!("checked above"),
+    };
+    Some(Ok(lowered))
 }
 
 fn lower_transition_update(update: TransitionUpdateDsl) -> syn::Result<TokenStream2> {
@@ -1157,10 +1425,18 @@ fn token_stream_source_lit(tokens: &TokenStream2, span: Span) -> LitStr {
     LitStr::new(&tokens.to_string(), span)
 }
 
+fn strip_expr_wrappers(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Paren(ExprParen { expr: inner, .. })
+        | Expr::Reference(ExprReference { expr: inner, .. }) => strip_expr_wrappers(inner),
+        _ => expr,
+    }
+}
+
 fn unsupported_nirvash_expr(expr: &Expr) -> syn::Error {
     syn::Error::new_spanned(
         expr,
-        "unsupported nirvash expression; supported forms are `!`, `&&`, `||`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `+`, `if/else`, `matches!(..)`, field reads, function/method calls, and parentheses",
+        "unsupported nirvash expression; supported forms are `!`, unary `-`, `&&`, `||`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `+`, binary `-`, `*`, `if/else`, `matches!(..)`, field reads, function/method calls, and parentheses",
     )
 }
 

@@ -1,9 +1,13 @@
 use nirvash::{
-    BoundedDomain, CounterexampleKind, ModelBackend, ModelCase, ModelCheckConfig, ModelCheckError,
-    Signature, SymbolicSort, SymbolicSortSpec, SymbolicStateSpec, TemporalSpec, TransitionSystem,
+    BoundedDomain, CounterexampleKind, ExprDomain, GuardExpr, ModelBackend, ModelCase,
+    ModelCheckConfig, ModelCheckError, Signature, SymbolicSort, SymbolicSortSpec,
+    SymbolicStateSpec, TemporalSpec, TransitionProgram, TransitionRule, TransitionSystem,
+    UpdateProgram,
 };
 use nirvash_check::ModelChecker;
-use nirvash_macros::{Signature as FormalSignature, nirvash_transition_program};
+use nirvash_macros::{
+    Signature as FormalSignature, nirvash_expr, nirvash_step_expr, nirvash_transition_program,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -276,6 +280,144 @@ impl TemporalSpec for ManualSchemaSpec {
 }
 
 impl nirvash::ModelCaseSource for ManualSchemaSpec {}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ChoiceSchemaSpec;
+
+fn choice_transition_program() -> TransitionProgram<ManualSchemaState, ToggleAction> {
+    TransitionProgram::named(
+        "choice_schema",
+        vec![TransitionRule::ast(
+            "choose_phase",
+            GuardExpr::matches_variant(
+                "flip",
+                "action",
+                "ToggleAction::Flip",
+                |_prev: &ManualSchemaState, action: &ToggleAction| {
+                    matches!(action, ToggleAction::Flip)
+                },
+            ),
+            UpdateProgram::choose_in(
+                "choose_phase",
+                ExprDomain::new("phase_domain", [Phase::Idle, Phase::Busy]),
+                "phase <- choice",
+                &[],
+                &["phase"],
+                |_prev: &ManualSchemaState, _action: &ToggleAction, phase: &Phase| {
+                    ManualSchemaState { phase: *phase }
+                },
+            ),
+        )],
+    )
+}
+
+fn choice_reaches_busy() -> nirvash::BoolExpr<ManualSchemaState> {
+    nirvash_expr!(choice_reaches_busy(state) => matches!(state.phase, Phase::Busy))
+}
+
+fn choice_busy_step() -> nirvash::StepExpr<ManualSchemaState, ToggleAction> {
+    nirvash_step_expr!(choice_busy_step(prev, action, next) =>
+        matches!(action, ToggleAction::Flip) && matches!(next.phase, Phase::Busy) && (matches!(prev.phase, Phase::Idle) || matches!(prev.phase, Phase::Busy))
+    )
+}
+
+impl TransitionSystem for ChoiceSchemaSpec {
+    type State = ManualSchemaState;
+    type Action = ToggleAction;
+
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![ManualSchemaState { phase: Phase::Idle }]
+    }
+
+    fn actions(&self) -> Vec<Self::Action> {
+        vec![ToggleAction::Flip]
+    }
+
+    fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+        Some(choice_transition_program())
+    }
+}
+
+impl TemporalSpec for ChoiceSchemaSpec {
+    fn invariants(&self) -> Vec<nirvash::BoolExpr<Self::State>> {
+        Vec::new()
+    }
+}
+
+impl nirvash::ModelCaseSource for ChoiceSchemaSpec {}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ChoicePropertySpec;
+
+impl TransitionSystem for ChoicePropertySpec {
+    type State = ManualSchemaState;
+    type Action = ToggleAction;
+
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![ManualSchemaState { phase: Phase::Idle }]
+    }
+
+    fn actions(&self) -> Vec<Self::Action> {
+        vec![ToggleAction::Flip]
+    }
+
+    fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+        Some(choice_transition_program())
+    }
+}
+
+impl TemporalSpec for ChoicePropertySpec {
+    fn invariants(&self) -> Vec<nirvash::BoolExpr<Self::State>> {
+        Vec::new()
+    }
+
+    fn properties(&self) -> Vec<nirvash::Ltl<Self::State, Self::Action>> {
+        vec![nirvash::Ltl::eventually(nirvash::Ltl::pred(
+            choice_reaches_busy(),
+        ))]
+    }
+}
+
+impl nirvash::ModelCaseSource for ChoicePropertySpec {}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ChoiceFairnessSpec;
+
+impl TransitionSystem for ChoiceFairnessSpec {
+    type State = ManualSchemaState;
+    type Action = ToggleAction;
+
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![ManualSchemaState { phase: Phase::Idle }]
+    }
+
+    fn actions(&self) -> Vec<Self::Action> {
+        vec![ToggleAction::Flip]
+    }
+
+    fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+        Some(choice_transition_program())
+    }
+}
+
+impl TemporalSpec for ChoiceFairnessSpec {
+    fn invariants(&self) -> Vec<nirvash::BoolExpr<Self::State>> {
+        Vec::new()
+    }
+
+    fn properties(&self) -> Vec<nirvash::Ltl<Self::State, Self::Action>> {
+        vec![
+            nirvash::Ltl::always(nirvash::Ltl::enabled(choice_busy_step())),
+            nirvash::Ltl::eventually(nirvash::Ltl::pred(choice_reaches_busy())),
+        ]
+    }
+
+    fn fairness(&self) -> Vec<nirvash::Fairness<Self::State, Self::Action>> {
+        vec![nirvash::Fairness::weak(choice_busy_step())]
+    }
+}
+
+impl nirvash::ModelCaseSource for ChoiceFairnessSpec {}
 
 #[derive(Debug, Default, Clone, Copy)]
 struct NoProgramSchemaSpec;
@@ -832,6 +974,65 @@ fn symbolic_backend_matches_explicit_snapshot_for_manual_whole_state_updates() {
     .expect("symbolic snapshot should build");
 
     assert_eq!(symbolic, explicit);
+}
+
+#[test]
+fn symbolic_backend_matches_explicit_snapshot_for_choice_updates() {
+    let explicit = ModelChecker::new(&ChoiceSchemaSpec)
+        .full_reachable_graph_snapshot()
+        .expect("explicit snapshot should build");
+    let symbolic = ModelChecker::with_config(
+        &ChoiceSchemaSpec,
+        ModelCheckConfig {
+            backend: Some(ModelBackend::Symbolic),
+            ..ModelCheckConfig::default()
+        },
+    )
+    .full_reachable_graph_snapshot()
+    .expect("symbolic snapshot should build");
+
+    assert_eq!(symbolic, explicit);
+}
+
+#[test]
+fn symbolic_bounded_lasso_matches_explicit_for_choice_property_violation() {
+    let explicit =
+        ModelChecker::with_config(&ChoicePropertySpec, ModelCheckConfig::bounded_lasso(3))
+            .check_properties()
+            .expect("explicit bounded lasso should run");
+    let symbolic = ModelChecker::with_config(
+        &ChoicePropertySpec,
+        ModelCheckConfig {
+            backend: Some(ModelBackend::Symbolic),
+            ..ModelCheckConfig::bounded_lasso(3)
+        },
+    )
+    .check_properties()
+    .expect("symbolic bounded lasso should run");
+
+    assert_eq!(symbolic, explicit);
+    assert!(!symbolic.is_ok());
+    assert_eq!(symbolic.violations()[0].kind, CounterexampleKind::Property);
+}
+
+#[test]
+fn symbolic_bounded_lasso_matches_explicit_for_choice_fairness_and_enabled() {
+    let explicit =
+        ModelChecker::with_config(&ChoiceFairnessSpec, ModelCheckConfig::bounded_lasso(3))
+            .check_properties()
+            .expect("explicit bounded lasso should run");
+    let symbolic = ModelChecker::with_config(
+        &ChoiceFairnessSpec,
+        ModelCheckConfig {
+            backend: Some(ModelBackend::Symbolic),
+            ..ModelCheckConfig::bounded_lasso(3)
+        },
+    )
+    .check_properties()
+    .expect("symbolic bounded lasso should run");
+
+    assert_eq!(symbolic, explicit);
+    assert!(symbolic.is_ok());
 }
 
 #[test]

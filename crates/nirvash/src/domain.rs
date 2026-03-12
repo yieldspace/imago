@@ -102,6 +102,102 @@ impl<T> From<Vec<T>> for BoundedDomain<T> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ExprDomain<T> {
+    label: &'static str,
+    values: BoundedDomain<T>,
+}
+
+impl<T> ExprDomain<T> {
+    pub fn new<D>(label: &'static str, values: D) -> Self
+    where
+        D: IntoBoundedDomain<T>,
+    {
+        Self {
+            label,
+            values: values.into_bounded_domain(),
+        }
+    }
+
+    pub fn of_signature(label: &'static str) -> Self
+    where
+        T: Signature,
+    {
+        Self {
+            label,
+            values: T::bounded_domain(),
+        }
+    }
+
+    pub const fn label(&self) -> &'static str {
+        self.label
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.values.iter()
+    }
+
+    pub fn as_bounded_domain(&self) -> &BoundedDomain<T> {
+        &self.values
+    }
+
+    pub fn into_bounded_domain(self) -> BoundedDomain<T> {
+        self.values
+    }
+
+    pub fn map<U, F>(&self, label: &'static str, f: F) -> ExprDomain<U>
+    where
+        F: FnMut(&T) -> U,
+    {
+        ExprDomain {
+            label,
+            values: self.values.map(f),
+        }
+    }
+
+    pub fn flat_map<U, F>(&self, label: &'static str, f: F) -> ExprDomain<U>
+    where
+        F: FnMut(&T) -> BoundedDomain<U>,
+    {
+        ExprDomain {
+            label,
+            values: self.values.flat_map(f),
+        }
+    }
+
+    pub fn product<U>(&self, label: &'static str, other: &ExprDomain<U>) -> ExprDomain<(T, U)>
+    where
+        T: Clone,
+        U: Clone,
+    {
+        ExprDomain {
+            label,
+            values: self.values.product(&other.values),
+        }
+    }
+
+    pub fn filter<F>(&self, label: &'static str, predicate: F) -> Self
+    where
+        T: Clone,
+        F: FnMut(&T) -> bool,
+    {
+        ExprDomain {
+            label,
+            values: self.values.filter(predicate),
+        }
+    }
+
+    pub fn unique(self) -> Self
+    where
+        T: PartialEq,
+    {
+        Self {
+            label: self.label,
+            values: self.values.unique(),
+        }
+    }
+}
+
 impl<T, const N: usize> From<[T; N]> for BoundedDomain<T> {
     fn from(values: [T; N]) -> Self {
         Self::new(values.into_iter().collect())
@@ -279,5 +375,51 @@ impl<Tag: 'static, const N: usize> Signature for OpaqueModelValue<Tag, N> {
                 })
                 .collect(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BoundedDomain, ExprDomain, Signature};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Atom {
+        A,
+        B,
+    }
+
+    impl Signature for Atom {
+        fn bounded_domain() -> BoundedDomain<Self> {
+            BoundedDomain::new(vec![Self::A, Self::B])
+        }
+    }
+
+    #[test]
+    fn expr_domain_combinators_preserve_label_and_values() {
+        let atoms = ExprDomain::of_signature("atoms");
+        let flags = ExprDomain::new("flags", [false, true]);
+        let pairs = atoms.product("atom_flag_pairs", &flags);
+        let filtered = pairs.filter("only_true", |(_, flag)| *flag).unique();
+        let duplicated =
+            atoms.flat_map("duplicated", |atom| BoundedDomain::new(vec![*atom, *atom]));
+        let mapped = atoms.map("labels", |atom| match atom {
+            Atom::A => "a",
+            Atom::B => "b",
+        });
+
+        assert_eq!(atoms.label(), "atoms");
+        assert_eq!(pairs.label(), "atom_flag_pairs");
+        assert_eq!(filtered.label(), "only_true");
+        assert_eq!(
+            filtered.into_bounded_domain().into_vec(),
+            vec![(Atom::A, true), (Atom::B, true)]
+        );
+        assert_eq!(duplicated.label(), "duplicated");
+        assert_eq!(
+            duplicated.into_bounded_domain().into_vec(),
+            vec![Atom::A, Atom::A, Atom::B, Atom::B]
+        );
+        assert_eq!(mapped.label(), "labels");
+        assert_eq!(mapped.into_bounded_domain().into_vec(), vec!["a", "b"]);
     }
 }

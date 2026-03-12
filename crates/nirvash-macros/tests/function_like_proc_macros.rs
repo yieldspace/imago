@@ -168,6 +168,7 @@ fn transition_program_macro_builds_ast_rules() {
                 }
             ));
         }
+        UpdateAst::Choice(_) => panic!("fixture program should stay deterministic"),
     }
 
     let cleanup_state = State {

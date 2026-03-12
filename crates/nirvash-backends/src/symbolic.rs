@@ -1,10 +1,20 @@
 use std::collections::VecDeque;
 
+use z3::{
+    Solver,
+    ast::{Bool, Int},
+};
+
 use nirvash::{
     BoolExpr, Counterexample, CounterexampleKind, ExplorationMode, Fairness, Ltl, ModelCase,
     ModelCaseSource, ModelCheckConfig, ModelCheckError, ModelCheckResult, ReachableGraphEdge,
     ReachableGraphSnapshot, Signature, StepExpr, SymbolicStateSchema, TemporalSpec, Trace,
     TraceStep, TransitionProgram, UpdateAst, UpdateOp,
+};
+
+use crate::smt::{
+    assert_in_domain, block_current_model, bool_and, bool_or, decode_int, encode_rule_transition,
+    encode_state_bool, encode_step_bool, solver_is_sat,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,12 +41,138 @@ struct ReachableGraph<S, A> {
     truncated: bool,
 }
 
+type TraceList<S, A> = Vec<Trace<S, A>>;
+
 impl<S, A> ReachableGraph<S, A> {
     fn state_index(&self, state: &S) -> Option<usize>
     where
         S: PartialEq,
     {
         self.states.iter().position(|candidate| candidate == state)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StateVars {
+    fields: Vec<Int>,
+}
+
+impl StateVars {
+    fn new<S>(prefix: &str, schema: &SymbolicStateSchema<S>) -> Self {
+        Self {
+            fields: schema
+                .fields()
+                .iter()
+                .enumerate()
+                .map(|(index, _)| Int::new_const(format!("{prefix}_{index}")))
+                .collect(),
+        }
+    }
+
+    fn assert_domains<S>(&self, solver: &Solver, schema: &SymbolicStateSchema<S>) {
+        for (value, field) in self.fields.iter().zip(schema.fields()) {
+            assert_in_domain(solver, value, field.domain_size());
+        }
+    }
+
+    fn fix_to_state<S>(&self, solver: &Solver, schema: &SymbolicStateSchema<S>, state: &S) {
+        for (value, field) in self.fields.iter().zip(schema.fields()) {
+            solver.assert(&value.eq(Int::from_u64(field.read_index(state) as u64)));
+        }
+    }
+
+    fn decode<S: Clone>(&self, model: &z3::Model, schema: &SymbolicStateSchema<S>) -> Option<S> {
+        let indices = self
+            .fields
+            .iter()
+            .map(|value| decode_int(model, value))
+            .collect::<Option<Vec<_>>>()?;
+        Some(schema.rebuild_from_indices(&indices))
+    }
+
+    fn all_values(&self) -> Vec<Int> {
+        self.fields.clone()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LassoVars {
+    states: Vec<StateVars>,
+    steps: Vec<Int>,
+    loop_start: Int,
+    terminal: Int,
+}
+
+impl LassoVars {
+    fn new<S>(prefix: &str, len: usize, schema: &SymbolicStateSchema<S>) -> Self {
+        Self {
+            states: (0..len)
+                .map(|index| StateVars::new(&format!("{prefix}_state_{index}"), schema))
+                .collect(),
+            steps: (0..len)
+                .map(|index| Int::new_const(format!("{prefix}_step_{index}")))
+                .collect(),
+            loop_start: Int::new_const(format!("{prefix}_loop_start")),
+            terminal: Int::new_const(format!("{prefix}_terminal")),
+        }
+    }
+
+    fn assert_domains<S>(
+        &self,
+        solver: &Solver,
+        schema: &SymbolicStateSchema<S>,
+        step_domain_size: usize,
+    ) {
+        for state in &self.states {
+            state.assert_domains(solver, schema);
+        }
+        for step in &self.steps {
+            assert_in_domain(solver, step, step_domain_size);
+        }
+        assert_in_domain(solver, &self.loop_start, self.states.len());
+        assert_in_domain(solver, &self.terminal, 2);
+    }
+
+    fn decode<S: Clone, A: Clone>(
+        &self,
+        model: &z3::Model,
+        schema: &SymbolicStateSchema<S>,
+        actions: &[A],
+    ) -> Option<Trace<S, A>> {
+        let states = self
+            .states
+            .iter()
+            .map(|state| state.decode(model, schema))
+            .collect::<Option<Vec<_>>>()?;
+        let loop_start = decode_int(model, &self.loop_start)?;
+        let terminal = decode_int(model, &self.terminal)? != 0;
+        let last_index = self.steps.len() - 1;
+        let mut steps = Vec::with_capacity(self.steps.len());
+        for (index, step) in self.steps.iter().enumerate() {
+            let step_code = decode_int(model, step)?;
+            if terminal && index == last_index {
+                steps.push(TraceStep::Stutter);
+                continue;
+            }
+            if step_code == 0 {
+                steps.push(TraceStep::Stutter);
+                continue;
+            }
+            let action = actions.get(step_code - 1)?.clone();
+            steps.push(TraceStep::Action(action));
+        }
+        Some(Trace::new(states, steps, loop_start))
+    }
+
+    fn all_values(&self) -> Vec<Int> {
+        let mut values = Vec::new();
+        for state in &self.states {
+            values.extend(state.all_values());
+        }
+        values.extend(self.steps.clone());
+        values.push(self.loop_start.clone());
+        values.push(self.terminal.clone());
+        values
     }
 }
 
@@ -311,11 +447,26 @@ where
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
         let schema = self.symbolic_state_schema()?;
         self.ensure_symbolic_schema_covers_invariants(&schema)?;
-        let graph = self.build_relation_reachable_graph(self.config)?;
-        self.ensure_untruncated(&graph)?;
         let mut best = None;
-        for &initial in &graph.initial_indices {
-            self.search_invariants_lasso_graph(&graph, vec![initial], Vec::new(), &mut best);
+        for trace in self.collect_symbolic_lasso_traces()? {
+            for (index, state) in trace.states().iter().enumerate() {
+                for predicate in self.spec.invariants() {
+                    if predicate.eval(state) {
+                        continue;
+                    }
+                    self.consider_violation(
+                        &mut best,
+                        Counterexample {
+                            kind: CounterexampleKind::Invariant,
+                            name: predicate.name().to_owned(),
+                            trace: self.terminal_trace(
+                                trace.states()[..=index].to_vec(),
+                                trace.steps()[..index].to_vec(),
+                            ),
+                        },
+                    );
+                }
+            }
         }
         Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
     }
@@ -323,11 +474,30 @@ where
     fn check_deadlocks_lasso(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let graph = self.build_relation_reachable_graph(self.config)?;
-        self.ensure_untruncated(&graph)?;
         let mut best = None;
-        for &initial in &graph.initial_indices {
-            self.search_deadlocks_lasso_graph(&graph, vec![initial], Vec::new(), &mut best);
+        for trace in self.collect_symbolic_lasso_traces()? {
+            let state = trace
+                .states()
+                .last()
+                .expect("trace always has at least one state");
+            let has_non_stutter = self
+                .relation_successors(state)?
+                .into_iter()
+                .any(|(step, _)| matches!(step, TraceStep::Action(_)));
+            if has_non_stutter {
+                continue;
+            }
+            self.consider_violation(
+                &mut best,
+                Counterexample {
+                    kind: CounterexampleKind::Deadlock,
+                    name: "deadlock".to_owned(),
+                    trace: self.terminal_trace(
+                        trace.states().to_vec(),
+                        trace.steps()[..trace.len() - 1].to_vec(),
+                    ),
+                },
+            );
         }
         Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
     }
@@ -337,15 +507,13 @@ where
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
         let schema = self.symbolic_state_schema()?;
         self.ensure_symbolic_schema_covers_temporal(&schema)?;
-        let graph = self.build_relation_reachable_graph(self.config)?;
-        self.ensure_untruncated(&graph)?;
-        let traces = self.bounded_graph_lasso_traces(&graph);
+        let traces = self.collect_symbolic_lasso_traces()?;
         let mut best: Option<Counterexample<T::State, T::Action>> = None;
 
         for property in self.spec.properties() {
             let description = property.describe();
             for trace in &traces {
-                if !self.trace_satisfies_fairness_graph(trace, &graph) {
+                if !self.trace_satisfies_fairness_lasso(trace) {
                     continue;
                 }
                 if !self.eval_formula(trace, &property)[0] {
@@ -474,46 +642,359 @@ where
         Ok(states)
     }
 
+    fn action_domain(&self) -> Vec<T::Action> {
+        self.spec.actions()
+    }
+
+    fn step_domain_size(&self) -> usize {
+        self.action_domain().len() + 1
+    }
+
+    fn bounded_depth(&self) -> usize {
+        self.config.bounded_depth.unwrap_or_default()
+    }
+
+    fn ensure_symbolic_stutter_is_identity(&self) -> Result<(), ModelCheckError> {
+        if !self.spec.allow_stutter() {
+            return Ok(());
+        }
+
+        for state in self.initial_states_filtered()? {
+            if self.spec.stutter_state(&state) != state {
+                return Err(self.symbolic_ast_required_error(format!(
+                    "symbolic backend requires spec `{}` stutter_state() to be identity",
+                    self.spec.name(),
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn encode_state_predicate(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+        state: &StateVars,
+        predicate: &BoolExpr<T::State>,
+    ) -> Bool {
+        let full_paths = predicate.symbolic_full_read_paths();
+        encode_state_bool(
+            schema,
+            &state.fields,
+            predicate.symbolic_state_paths().as_slice(),
+            full_paths.iter().any(|path| *path == "state"),
+            |value| predicate.eval(value),
+        )
+    }
+
+    fn encode_step_predicate(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+        prev: &StateVars,
+        step: &Int,
+        next: &StateVars,
+        predicate: &StepExpr<T::State, T::Action>,
+        actions: &[T::Action],
+    ) -> Bool {
+        let full_paths = predicate.symbolic_full_read_paths();
+        encode_step_bool(
+            schema,
+            &prev.fields,
+            step,
+            &next.fields,
+            actions,
+            predicate.symbolic_state_paths().as_slice(),
+            full_paths
+                .iter()
+                .any(|path| matches!(*path, "prev" | "next")),
+            |prev, action, next| predicate.eval(prev, action, next),
+        )
+    }
+
+    fn encode_initial_state_formula(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+        state: &StateVars,
+    ) -> Result<Bool, ModelCheckError> {
+        let clauses = self
+            .initial_states_filtered()?
+            .into_iter()
+            .map(|initial| {
+                let equalities = schema
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, field)| {
+                        state.fields[index].eq(Int::from_u64(field.read_index(&initial) as u64))
+                    })
+                    .collect::<Vec<_>>();
+                bool_and(&equalities)
+            })
+            .collect::<Vec<_>>();
+        Ok(bool_or(&clauses))
+    }
+
+    fn encode_transition_formula(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+        prev: &StateVars,
+        step: &Int,
+        next: &StateVars,
+        program: &TransitionProgram<T::State, T::Action>,
+        actions: &[T::Action],
+    ) -> Bool {
+        let mut clauses = Vec::new();
+
+        if self.spec.allow_stutter() {
+            let mut stutter = prev
+                .fields
+                .iter()
+                .zip(next.fields.iter())
+                .map(|(prev, next)| next.eq(prev))
+                .collect::<Vec<_>>();
+            stutter.push(step.eq(Int::from_u64(0)));
+            clauses.push(bool_and(&stutter));
+        }
+
+        clauses.extend(program.rules().iter().map(|rule| {
+            encode_rule_transition(schema, &prev.fields, step, &next.fields, actions, rule)
+        }));
+
+        bool_or(&clauses)
+    }
+
+    fn assert_state_constraints(
+        &self,
+        solver: &Solver,
+        schema: &SymbolicStateSchema<T::State>,
+        state: &StateVars,
+    ) {
+        for constraint in self.model_case.state_constraints() {
+            solver.assert(&self.encode_state_predicate(schema, state, constraint));
+        }
+    }
+
+    fn encode_action_constraints_formula(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+        prev: &StateVars,
+        step: &Int,
+        next: &StateVars,
+        actions: &[T::Action],
+    ) -> Bool {
+        let mut clauses = Vec::new();
+        for constraint in self.model_case.action_constraints() {
+            let allowed = self.encode_step_predicate(schema, prev, step, next, constraint, actions);
+            clauses.push(bool_or(&[step.eq(Int::from_u64(0)), allowed]));
+        }
+        bool_and(&clauses)
+    }
+
+    fn assert_action_constraints(
+        &self,
+        solver: &Solver,
+        schema: &SymbolicStateSchema<T::State>,
+        prev: &StateVars,
+        step: &Int,
+        next: &StateVars,
+        actions: &[T::Action],
+    ) {
+        solver.assert(&self.encode_action_constraints_formula(schema, prev, step, next, actions));
+    }
+
+    fn collect_symbolic_successors(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+        state: &T::State,
+        program: &TransitionProgram<T::State, T::Action>,
+    ) -> Result<Vec<(TraceStep<T::Action>, T::State)>, ModelCheckError> {
+        let actions = self.action_domain();
+        let prev = StateVars::new("prev", schema);
+        let next = StateVars::new("next", schema);
+        let step = Int::new_const("step");
+        let solver = Solver::new();
+
+        prev.assert_domains(&solver, schema);
+        next.assert_domains(&solver, schema);
+        assert_in_domain(&solver, &step, self.step_domain_size());
+        prev.fix_to_state(&solver, schema, state);
+        solver.assert(
+            &self.encode_transition_formula(schema, &prev, &step, &next, program, &actions),
+        );
+        self.assert_state_constraints(&solver, schema, &next);
+        self.assert_action_constraints(&solver, schema, &prev, &step, &next, &actions);
+
+        let mut values = Vec::new();
+        while solver_is_sat(&solver) {
+            let Some(model) = solver.get_model() else {
+                break;
+            };
+            let Some(step_code) = decode_int(&model, &step) else {
+                break;
+            };
+            let Some(next_state) = next.decode(&model, schema) else {
+                break;
+            };
+            let edge = if step_code == 0 {
+                (TraceStep::Stutter, next_state)
+            } else {
+                let action = actions
+                    .get(step_code - 1)
+                    .cloned()
+                    .expect("step code in action domain");
+                (TraceStep::Action(action), next_state)
+            };
+            if !values.iter().any(|(_, candidate)| candidate == &edge) {
+                values.push((step_code, edge));
+            }
+            let mut block = prev.all_values();
+            block.extend(next.all_values());
+            block.push(step.clone());
+            block_current_model(&solver, &model, &block);
+        }
+
+        values.sort_by(|(lhs_code, (_, lhs_state)), (rhs_code, (_, rhs_state))| {
+            let lhs_rank = if *lhs_code == 0 {
+                actions.len() + 1
+            } else {
+                *lhs_code
+            };
+            let rhs_rank = if *rhs_code == 0 {
+                actions.len() + 1
+            } else {
+                *rhs_code
+            };
+            lhs_rank.cmp(&rhs_rank).then_with(|| {
+                schema
+                    .read_indices(lhs_state)
+                    .cmp(&schema.read_indices(rhs_state))
+            })
+        });
+
+        Ok(values.into_iter().map(|(_, edge)| edge).collect())
+    }
+
     fn relation_successors(
         &self,
         state: &T::State,
     ) -> Result<Vec<(TraceStep<T::Action>, T::State)>, ModelCheckError> {
         let program = self.symbolic_transition_program()?;
-        let mut values = Vec::new();
-
-        for action in self.spec.actions() {
-            for successor in program.successors(state, &action) {
-                let next_concrete = successor.into_next();
-                if !self.action_constraints_allow(state, &action, &next_concrete) {
-                    continue;
-                }
-                if !self.state_constraints_allow(&next_concrete) {
-                    continue;
-                }
-                let edge = (TraceStep::Action(action.clone()), next_concrete);
-                if !values.contains(&edge) {
-                    values.push(edge);
-                }
-            }
-        }
+        let schema = self.symbolic_state_schema()?;
 
         if self.spec.allow_stutter() {
-            let stutter = self.spec.stutter_state(state);
+            let stutter = self.canonicalize_state(&self.spec.stutter_state(state));
             if stutter != *state {
                 return Err(self.symbolic_ast_required_error(format!(
-                    "symbolic reachable-graph backend requires spec `{}` stutter_state() to be identity",
+                    "symbolic backend requires spec `{}` stutter_state() to be identity",
                     self.spec.name(),
                 )));
             }
-            if self.state_constraints_allow(&stutter) {
-                let edge = (TraceStep::Stutter, stutter);
-                if !values.contains(&edge) {
-                    values.push(edge);
-                }
-            }
         }
 
-        Ok(values)
+        self.collect_symbolic_successors(&schema, state, &program)
+    }
+
+    fn collect_symbolic_lasso_traces(
+        &self,
+    ) -> Result<TraceList<T::State, T::Action>, ModelCheckError> {
+        self.ensure_symbolic_constraints_ast_native()?;
+        self.ensure_symbolic_stutter_is_identity()?;
+        let program = self.symbolic_transition_program()?;
+        let schema = self.symbolic_state_schema()?;
+        self.ensure_symbolic_schema_covers_program(&schema, &program)?;
+        self.ensure_symbolic_schema_covers_model_case_constraints(&schema)?;
+        let actions = self.action_domain();
+        let mut traces = Vec::new();
+
+        for len in 1..=self.bounded_depth() + 1 {
+            traces.extend(
+                self.collect_symbolic_lasso_traces_of_length(&schema, &program, &actions, len)?,
+            );
+        }
+
+        Ok(traces)
+    }
+
+    fn collect_symbolic_lasso_traces_of_length(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+        program: &TransitionProgram<T::State, T::Action>,
+        actions: &[T::Action],
+        len: usize,
+    ) -> Result<TraceList<T::State, T::Action>, ModelCheckError> {
+        let vars = LassoVars::new("trace", len, schema);
+        let solver = Solver::new();
+        vars.assert_domains(&solver, schema, self.step_domain_size());
+        solver.assert(&self.encode_initial_state_formula(schema, &vars.states[0])?);
+
+        for state in &vars.states {
+            self.assert_state_constraints(&solver, schema, state);
+        }
+
+        for index in 0..len.saturating_sub(1) {
+            solver.assert(&self.encode_transition_formula(
+                schema,
+                &vars.states[index],
+                &vars.steps[index],
+                &vars.states[index + 1],
+                program,
+                actions,
+            ));
+            solver.assert(&self.encode_action_constraints_formula(
+                schema,
+                &vars.states[index],
+                &vars.steps[index],
+                &vars.states[index + 1],
+                actions,
+            ));
+        }
+
+        let last = len - 1;
+        let mut loop_cases = vec![bool_and(&[
+            vars.terminal.eq(Int::from_u64(1)),
+            vars.loop_start.eq(Int::from_u64(last as u64)),
+            vars.steps[last].eq(Int::from_u64(0)),
+        ])];
+
+        for target in 0..len {
+            loop_cases.push(bool_and(&[
+                vars.terminal.eq(Int::from_u64(0)),
+                vars.loop_start.eq(Int::from_u64(target as u64)),
+                self.encode_transition_formula(
+                    schema,
+                    &vars.states[last],
+                    &vars.steps[last],
+                    &vars.states[target],
+                    program,
+                    actions,
+                ),
+                self.encode_action_constraints_formula(
+                    schema,
+                    &vars.states[last],
+                    &vars.steps[last],
+                    &vars.states[target],
+                    actions,
+                ),
+            ]));
+        }
+
+        solver.assert(&bool_or(&loop_cases));
+
+        let mut traces = Vec::new();
+        while solver_is_sat(&solver) {
+            let Some(model) = solver.get_model() else {
+                break;
+            };
+            let Some(trace) = vars.decode(&model, schema, actions) else {
+                break;
+            };
+            if !traces.contains(&trace) {
+                traces.push(trace);
+            }
+            block_current_model(&solver, &model, &vars.all_values());
+        }
+
+        Ok(traces)
     }
 
     fn symbolic_transition_program(
@@ -680,20 +1161,34 @@ where
         schema: &SymbolicStateSchema<T::State>,
         update: &UpdateAst<T::State, T::Action>,
     ) -> Result<(), ModelCheckError> {
-        let UpdateAst::Sequence(ops) = update;
-        for op in ops {
-            let target = match op {
-                UpdateOp::Assign { target, .. }
-                | UpdateOp::SetInsert { target, .. }
-                | UpdateOp::SetRemove { target, .. } => *target,
-                UpdateOp::Effect { .. } => continue,
-            };
-            if target != "self" && !schema.has_path(target) {
-                return Err(self.symbolic_ast_required_error(format!(
-                    "symbolic backend requires state schema for `{}` to expose field `{}`",
-                    std::any::type_name::<T::State>(),
-                    target,
-                )));
+        match update {
+            UpdateAst::Sequence(ops) => {
+                for op in ops {
+                    let target = match op {
+                        UpdateOp::Assign { target, .. }
+                        | UpdateOp::SetInsert { target, .. }
+                        | UpdateOp::SetRemove { target, .. } => *target,
+                        UpdateOp::Effect { .. } => continue,
+                    };
+                    if target != "self" && !schema.has_path(target) {
+                        return Err(self.symbolic_ast_required_error(format!(
+                            "symbolic backend requires state schema for `{}` to expose field `{}`",
+                            std::any::type_name::<T::State>(),
+                            target,
+                        )));
+                    }
+                }
+            }
+            UpdateAst::Choice(choice) => {
+                for target in choice.write_paths() {
+                    if *target != "self" && !schema.has_path(target) {
+                        return Err(self.symbolic_ast_required_error(format!(
+                            "symbolic backend requires state schema for `{}` to expose field `{}`",
+                            std::any::type_name::<T::State>(),
+                            target,
+                        )));
+                    }
+                }
             }
         }
         Ok(())
@@ -836,18 +1331,6 @@ where
             .all(|constraint: &BoolExpr<T::State>| constraint.eval(state))
     }
 
-    fn action_constraints_allow(
-        &self,
-        prev: &T::State,
-        action: &T::Action,
-        next: &T::State,
-    ) -> bool {
-        self.model_case
-            .action_constraints()
-            .iter()
-            .all(|constraint: &StepExpr<T::State, T::Action>| constraint.eval(prev, action, next))
-    }
-
     fn trace_to_state(
         &self,
         graph: &ReachableGraph<T::State, T::Action>,
@@ -890,89 +1373,6 @@ where
         Trace::new(states, trace_steps, loop_start)
     }
 
-    fn search_invariants_lasso_graph(
-        &self,
-        graph: &ReachableGraph<T::State, T::Action>,
-        path_states: Vec<usize>,
-        path_steps: Vec<TraceStep<T::Action>>,
-        best: &mut Option<Counterexample<T::State, T::Action>>,
-    ) {
-        let depth = path_steps.len();
-        let current = *path_states.last().expect("path has at least one state");
-
-        for predicate in self.spec.invariants() {
-            if !predicate.eval(&graph.states[current]) {
-                let states = path_states
-                    .iter()
-                    .map(|index| graph.states[*index].clone())
-                    .collect();
-                self.consider_violation(
-                    best,
-                    Counterexample {
-                        kind: CounterexampleKind::Invariant,
-                        name: predicate.name().to_owned(),
-                        trace: self.terminal_trace(states, path_steps.clone()),
-                    },
-                );
-                return;
-            }
-        }
-
-        if self.reached_bounded_depth(depth) {
-            return;
-        }
-
-        for edge in &graph.edges[current] {
-            let mut next_states = path_states.clone();
-            next_states.push(edge.target);
-            let mut next_steps = path_steps.clone();
-            next_steps.push(edge.step.clone());
-            self.search_invariants_lasso_graph(graph, next_states, next_steps, best);
-        }
-    }
-
-    fn search_deadlocks_lasso_graph(
-        &self,
-        graph: &ReachableGraph<T::State, T::Action>,
-        path_states: Vec<usize>,
-        path_steps: Vec<TraceStep<T::Action>>,
-        best: &mut Option<Counterexample<T::State, T::Action>>,
-    ) {
-        let depth = path_steps.len();
-        let current = *path_states.last().expect("path has at least one state");
-
-        let has_non_stutter = graph.edges[current]
-            .iter()
-            .any(|edge| matches!(edge.step, TraceStep::Action(_)));
-        if !has_non_stutter {
-            let states = path_states
-                .iter()
-                .map(|index| graph.states[*index].clone())
-                .collect();
-            self.consider_violation(
-                best,
-                Counterexample {
-                    kind: CounterexampleKind::Deadlock,
-                    name: "deadlock".to_owned(),
-                    trace: self.terminal_trace(states, path_steps.clone()),
-                },
-            );
-            return;
-        }
-
-        if self.reached_bounded_depth(depth) {
-            return;
-        }
-
-        for edge in &graph.edges[current] {
-            let mut next_states = path_states.clone();
-            next_states.push(edge.target);
-            let mut next_steps = path_steps.clone();
-            next_steps.push(edge.step.clone());
-            self.search_deadlocks_lasso_graph(graph, next_states, next_steps, best);
-        }
-    }
-
     fn graph_lasso_traces(
         &self,
         graph: &ReachableGraph<T::State, T::Action>,
@@ -980,17 +1380,6 @@ where
         let mut traces = Vec::new();
         for &initial in &graph.initial_indices {
             self.enumerate_graph_lassos(graph, vec![initial], Vec::new(), &mut traces);
-        }
-        traces
-    }
-
-    fn bounded_graph_lasso_traces(
-        &self,
-        graph: &ReachableGraph<T::State, T::Action>,
-    ) -> Vec<Trace<T::State, T::Action>> {
-        let mut traces = Vec::new();
-        for &initial in &graph.initial_indices {
-            self.enumerate_bounded_graph_lassos(graph, vec![initial], Vec::new(), &mut traces);
         }
         traces
     }
@@ -1021,52 +1410,6 @@ where
             next_steps.push(edge.step.clone());
             self.enumerate_graph_lassos(graph, next_states, next_steps, traces);
         }
-    }
-
-    fn enumerate_bounded_graph_lassos(
-        &self,
-        graph: &ReachableGraph<T::State, T::Action>,
-        path_states: Vec<usize>,
-        path_steps: Vec<TraceStep<T::Action>>,
-        traces: &mut Vec<Trace<T::State, T::Action>>,
-    ) {
-        let states = path_states
-            .iter()
-            .map(|index| graph.states[*index].clone())
-            .collect();
-        traces.push(self.terminal_trace(states, path_steps.clone()));
-
-        if self.reached_bounded_depth(path_steps.len()) {
-            return;
-        }
-
-        let current = *path_states.last().expect("path has at least one state");
-        for edge in &graph.edges[current] {
-            if let Some(loop_start) = path_states.iter().position(|state| *state == edge.target) {
-                let states = path_states
-                    .iter()
-                    .map(|index| graph.states[*index].clone())
-                    .collect();
-                let mut steps = path_steps.clone();
-                steps.push(edge.step.clone());
-                traces.push(Trace::new(states, steps, loop_start));
-                continue;
-            }
-
-            let mut next_states = path_states.clone();
-            next_states.push(edge.target);
-            let mut next_steps = path_steps.clone();
-            next_steps.push(edge.step.clone());
-            self.enumerate_bounded_graph_lassos(graph, next_states, next_steps, traces);
-        }
-    }
-
-    fn reached_bounded_depth(&self, depth: usize) -> bool {
-        matches!(self.config.exploration, ExplorationMode::BoundedLasso)
-            && self
-                .config
-                .bounded_depth
-                .is_some_and(|bounded_depth| depth >= bounded_depth)
     }
 
     fn consider_violation(
@@ -1134,6 +1477,59 @@ where
                 .any(|(action, target)| {
                     predicate.eval(&trace.states()[index], action, &graph.states[target])
                 })
+        });
+
+        match fairness {
+            Fairness::Weak(_) => !enabled_all || occurs,
+            Fairness::Strong(_) => !enabled_any || occurs,
+        }
+    }
+
+    fn trace_satisfies_fairness_lasso(&self, trace: &Trace<T::State, T::Action>) -> bool {
+        self.spec
+            .fairness()
+            .into_iter()
+            .all(|fairness| self.eval_fairness_lasso(trace, fairness))
+    }
+
+    fn eval_fairness_lasso(
+        &self,
+        trace: &Trace<T::State, T::Action>,
+        fairness: Fairness<T::State, T::Action>,
+    ) -> bool {
+        let predicate = fairness.predicate();
+        let occurs = trace.cycle_indices().any(|index| {
+            let next_index = trace.next_index(index);
+            match &trace.steps()[index] {
+                TraceStep::Action(action) => {
+                    predicate.eval(&trace.states()[index], action, &trace.states()[next_index])
+                }
+                TraceStep::Stutter => false,
+            }
+        });
+        let enabled_any = trace.cycle_indices().any(|index| {
+            self.relation_successors(&trace.states()[index])
+                .unwrap_or_else(|error| {
+                    panic!("symbolic lasso successor enumeration failed: {error:?}")
+                })
+                .into_iter()
+                .filter_map(|(step, next)| match step {
+                    TraceStep::Action(action) => Some((action, next)),
+                    TraceStep::Stutter => None,
+                })
+                .any(|(action, next)| predicate.eval(&trace.states()[index], &action, &next))
+        });
+        let enabled_all = trace.cycle_indices().all(|index| {
+            self.relation_successors(&trace.states()[index])
+                .unwrap_or_else(|error| {
+                    panic!("symbolic lasso successor enumeration failed: {error:?}")
+                })
+                .into_iter()
+                .filter_map(|(step, next)| match step {
+                    TraceStep::Action(action) => Some((action, next)),
+                    TraceStep::Stutter => None,
+                })
+                .any(|(action, next)| predicate.eval(&trace.states()[index], &action, &next))
         });
 
         match fairness {
