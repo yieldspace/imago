@@ -6226,6 +6226,21 @@ pub enum UpdateValueExprAst<S, A> {
         lhs: Box<Self>,
         rhs: Box<Self>,
     },
+    SequenceUpdate {
+        base: Box<Self>,
+        index: Box<Self>,
+        value: Box<Self>,
+    },
+    FunctionUpdate {
+        base: Box<Self>,
+        key: Box<Self>,
+        value: Box<Self>,
+    },
+    RecordUpdate {
+        base: Box<Self>,
+        field: &'static str,
+        value: Box<Self>,
+    },
     Comprehension {
         domain: &'static str,
         body: &'static str,
@@ -6339,6 +6354,30 @@ impl<S: 'static, A: 'static> UpdateValueExprAst<S, A> {
         }
     }
 
+    pub fn sequence_update(base: Self, index: Self, value: Self) -> Self {
+        Self::SequenceUpdate {
+            base: Box::new(base),
+            index: Box::new(index),
+            value: Box::new(value),
+        }
+    }
+
+    pub fn function_update(base: Self, key: Self, value: Self) -> Self {
+        Self::FunctionUpdate {
+            base: Box::new(base),
+            key: Box::new(key),
+            value: Box::new(value),
+        }
+    }
+
+    pub fn record_update(base: Self, field: &'static str, value: Self) -> Self {
+        Self::RecordUpdate {
+            base: Box::new(base),
+            field,
+            value: Box::new(value),
+        }
+    }
+
     pub fn comprehension<T>(
         domain: ExprDomain<T>,
         body: &'static str,
@@ -6375,6 +6414,17 @@ impl<S: 'static, A: 'static> UpdateValueExprAst<S, A> {
             | Self::Difference { lhs, rhs } => {
                 lhs.first_unencodable().or_else(|| rhs.first_unencodable())
             }
+            Self::SequenceUpdate { base, index, value } => base
+                .first_unencodable()
+                .or_else(|| index.first_unencodable())
+                .or_else(|| value.first_unencodable()),
+            Self::FunctionUpdate { base, key, value } => base
+                .first_unencodable()
+                .or_else(|| key.first_unencodable())
+                .or_else(|| value.first_unencodable()),
+            Self::RecordUpdate { base, value, .. } => base
+                .first_unencodable()
+                .or_else(|| value.first_unencodable()),
             Self::Neg { expr } => expr.first_unencodable(),
             Self::IfElse {
                 condition,
@@ -6403,6 +6453,20 @@ impl<S: 'static, A: 'static> UpdateValueExprAst<S, A> {
             | Self::Difference { lhs, rhs } => {
                 lhs.collect_symbolic_pure_keys(keys);
                 rhs.collect_symbolic_pure_keys(keys);
+            }
+            Self::SequenceUpdate { base, index, value } => {
+                base.collect_symbolic_pure_keys(keys);
+                index.collect_symbolic_pure_keys(keys);
+                value.collect_symbolic_pure_keys(keys);
+            }
+            Self::FunctionUpdate { base, key, value } => {
+                base.collect_symbolic_pure_keys(keys);
+                key.collect_symbolic_pure_keys(keys);
+                value.collect_symbolic_pure_keys(keys);
+            }
+            Self::RecordUpdate { base, value, .. } => {
+                base.collect_symbolic_pure_keys(keys);
+                value.collect_symbolic_pure_keys(keys);
             }
             Self::Neg { expr } => expr.collect_symbolic_pure_keys(keys),
             Self::IfElse {
@@ -6433,6 +6497,20 @@ impl<S: 'static, A: 'static> UpdateValueExprAst<S, A> {
             | Self::Difference { lhs, rhs } => {
                 lhs.collect_unregistered_symbolic_pure_keys(keys);
                 rhs.collect_unregistered_symbolic_pure_keys(keys);
+            }
+            Self::SequenceUpdate { base, index, value } => {
+                base.collect_unregistered_symbolic_pure_keys(keys);
+                index.collect_unregistered_symbolic_pure_keys(keys);
+                value.collect_unregistered_symbolic_pure_keys(keys);
+            }
+            Self::FunctionUpdate { base, key, value } => {
+                base.collect_unregistered_symbolic_pure_keys(keys);
+                key.collect_unregistered_symbolic_pure_keys(keys);
+                value.collect_unregistered_symbolic_pure_keys(keys);
+            }
+            Self::RecordUpdate { base, value, .. } => {
+                base.collect_unregistered_symbolic_pure_keys(keys);
+                value.collect_unregistered_symbolic_pure_keys(keys);
             }
             Self::Neg { expr } => expr.collect_unregistered_symbolic_pure_keys(keys),
             Self::IfElse {
@@ -6466,6 +6544,20 @@ impl<S: 'static, A: 'static> UpdateValueExprAst<S, A> {
                 lhs.collect_symbolic_state_paths(paths);
                 rhs.collect_symbolic_state_paths(paths);
             }
+            Self::SequenceUpdate { base, index, value } => {
+                base.collect_symbolic_state_paths(paths);
+                index.collect_symbolic_state_paths(paths);
+                value.collect_symbolic_state_paths(paths);
+            }
+            Self::FunctionUpdate { base, key, value } => {
+                base.collect_symbolic_state_paths(paths);
+                key.collect_symbolic_state_paths(paths);
+                value.collect_symbolic_state_paths(paths);
+            }
+            Self::RecordUpdate { base, value, .. } => {
+                base.collect_symbolic_state_paths(paths);
+                value.collect_symbolic_state_paths(paths);
+            }
             Self::Neg { expr } => expr.collect_symbolic_state_paths(paths),
             Self::IfElse {
                 condition,
@@ -6497,6 +6589,20 @@ impl<S: 'static, A: 'static> UpdateValueExprAst<S, A> {
             | Self::Difference { lhs, rhs } => {
                 lhs.collect_symbolic_full_read_paths(paths);
                 rhs.collect_symbolic_full_read_paths(paths);
+            }
+            Self::SequenceUpdate { base, index, value } => {
+                base.collect_symbolic_full_read_paths(paths);
+                index.collect_symbolic_full_read_paths(paths);
+                value.collect_symbolic_full_read_paths(paths);
+            }
+            Self::FunctionUpdate { base, key, value } => {
+                base.collect_symbolic_full_read_paths(paths);
+                key.collect_symbolic_full_read_paths(paths);
+                value.collect_symbolic_full_read_paths(paths);
+            }
+            Self::RecordUpdate { base, value, .. } => {
+                base.collect_symbolic_full_read_paths(paths);
+                value.collect_symbolic_full_read_paths(paths);
             }
             Self::Neg { expr } => expr.collect_symbolic_full_read_paths(paths),
             Self::IfElse {
@@ -7374,7 +7480,7 @@ impl<S: 'static, A: 'static> Default for TransitionProgram<S, A> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::{
         BoolExpr, GuardAst, GuardExpr, GuardValueExpr, GuardValueExprAst, QuantifierKind,
@@ -7413,7 +7519,7 @@ mod tests {
         factor: isize,
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     enum Item {
         Alpha,
         Beta,
@@ -7432,6 +7538,38 @@ mod tests {
     struct SetWorker {
         active: RelSet<Item>,
         pending: RelSet<Item>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct ConfigRecord {
+        ready: bool,
+        items: Vec<Item>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct AggregateWorker {
+        config: ConfigRecord,
+        counts: BTreeMap<Item, usize>,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct AggregateAction {
+        index: usize,
+        item: Item,
+    }
+
+    fn apply_sequence_update<T>(mut base: Vec<T>, index: usize, value: T) -> Vec<T> {
+        base[index] = value;
+        base
+    }
+
+    fn apply_function_update<K: Ord, V>(
+        mut base: BTreeMap<K, V>,
+        key: K,
+        value: V,
+    ) -> BTreeMap<K, V> {
+        base.insert(key, value);
+        base
     }
 
     #[test]
@@ -8225,6 +8363,204 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_update_ast_tracks_read_paths_and_state_so_far_semantics() {
+        let update = UpdateProgram::ast(
+            "aggregate_update",
+            vec![
+                UpdateOp::assign_ast(
+                    "config",
+                    UpdateValueExprAst::record_update(
+                        UpdateValueExprAst::field("prev.config"),
+                        "ready",
+                        UpdateValueExprAst::literal("true"),
+                    ),
+                    |prev: &AggregateWorker,
+                     state: &mut AggregateWorker,
+                     _action: &AggregateAction| {
+                        state.config = ConfigRecord {
+                            ready: true,
+                            ..prev.config.clone()
+                        };
+                    },
+                ),
+                UpdateOp::assign_ast(
+                    "config",
+                    UpdateValueExprAst::record_update(
+                        UpdateValueExprAst::field("state.config"),
+                        "items",
+                        UpdateValueExprAst::sequence_update(
+                            UpdateValueExprAst::field("state.config.items"),
+                            UpdateValueExprAst::field("action.index"),
+                            UpdateValueExprAst::field("action.item"),
+                        ),
+                    ),
+                    |_prev: &AggregateWorker,
+                     state: &mut AggregateWorker,
+                     action: &AggregateAction| {
+                        state.config = ConfigRecord {
+                            items: apply_sequence_update(
+                                state.config.items.clone(),
+                                action.index,
+                                action.item,
+                            ),
+                            ..state.config.clone()
+                        };
+                    },
+                ),
+                UpdateOp::assign_ast(
+                    "counts",
+                    UpdateValueExprAst::function_update(
+                        UpdateValueExprAst::field("prev.counts"),
+                        UpdateValueExprAst::field("action.item"),
+                        UpdateValueExprAst::literal("2"),
+                    ),
+                    |prev: &AggregateWorker,
+                     state: &mut AggregateWorker,
+                     action: &AggregateAction| {
+                        state.counts = apply_function_update(prev.counts.clone(), action.item, 2);
+                    },
+                ),
+            ],
+        );
+        let initial = AggregateWorker {
+            config: ConfigRecord {
+                ready: false,
+                items: vec![Item::Alpha, Item::Beta],
+            },
+            counts: BTreeMap::from([(Item::Alpha, 1)]),
+        };
+        let action = AggregateAction {
+            index: 1,
+            item: Item::Gamma,
+        };
+
+        let next = update.apply(&initial, &action);
+        let update_ast = update.ast_body().expect("aggregate update ast");
+
+        assert_eq!(
+            next,
+            AggregateWorker {
+                config: ConfigRecord {
+                    ready: true,
+                    items: vec![Item::Alpha, Item::Gamma],
+                },
+                counts: BTreeMap::from([(Item::Alpha, 1), (Item::Gamma, 2)]),
+            }
+        );
+        assert_eq!(
+            update_ast.symbolic_full_read_paths(),
+            vec![
+                "action.index",
+                "action.item",
+                "prev.config",
+                "prev.counts",
+                "state.config",
+                "state.config.items",
+            ]
+        );
+        assert_eq!(
+            update_ast.symbolic_state_paths(),
+            vec!["config", "config.items", "counts"]
+        );
+        assert_eq!(update_ast.first_unencodable(), None);
+    }
+
+    #[test]
+    fn aggregate_update_ast_recurses_for_helper_keys_and_unencodable_nodes() {
+        let program = TransitionProgram::named(
+            "aggregate_update_helpers",
+            vec![TransitionRule::ast(
+                "aggregate_update_helpers_rule",
+                GuardExpr::literal("always", true),
+                UpdateProgram::ast(
+                    "aggregate_update_helpers_update",
+                    vec![
+                        UpdateOp::assign_ast(
+                            "config",
+                            UpdateValueExprAst::record_update(
+                                UpdateValueExprAst::field("state.config"),
+                                "items",
+                                UpdateValueExprAst::sequence_update(
+                                    UpdateValueExprAst::field("state.config.items"),
+                                    UpdateValueExprAst::registered_pure_call_with_paths(
+                                        "registered_index(action.item)",
+                                        "predicate_tests::registered_helper",
+                                        &["action.item"],
+                                    ),
+                                    UpdateValueExprAst::field("action.item"),
+                                ),
+                            ),
+                            |_prev: &AggregateWorker,
+                             state: &mut AggregateWorker,
+                             action: &AggregateAction| {
+                                state.config.items = apply_sequence_update(
+                                    state.config.items.clone(),
+                                    0,
+                                    action.item,
+                                );
+                            },
+                        ),
+                        UpdateOp::assign_ast(
+                            "counts",
+                            UpdateValueExprAst::function_update(
+                                UpdateValueExprAst::field("prev.counts"),
+                                UpdateValueExprAst::registered_pure_call_with_paths(
+                                    "registered_key(action.item)",
+                                    "predicate_tests::registered_helper",
+                                    &["action.item"],
+                                ),
+                                UpdateValueExprAst::PureCall {
+                                    name: "missing_value(prev.config.ready)",
+                                    symbolic: super::SymbolicRegistration::unregistered(
+                                        "predicate_tests::missing_helper",
+                                    ),
+                                    read_paths: &["prev.config.ready"],
+                                },
+                            ),
+                            |prev: &AggregateWorker,
+                             state: &mut AggregateWorker,
+                             action: &AggregateAction| {
+                                state.counts =
+                                    apply_function_update(prev.counts.clone(), action.item, 1);
+                            },
+                        ),
+                    ],
+                ),
+            )],
+        );
+
+        assert_eq!(
+            program.symbolic_pure_helper_keys(),
+            vec![
+                "predicate_tests::missing_helper",
+                "predicate_tests::registered_helper"
+            ]
+        );
+        assert_eq!(
+            program.unregistered_symbolic_pure_helper_keys(),
+            vec!["predicate_tests::missing_helper"]
+        );
+        assert_eq!(
+            program.symbolic_state_paths(),
+            vec!["config", "config.items", "config.ready", "counts"]
+        );
+        assert_eq!(
+            program.symbolic_full_read_paths(),
+            vec![
+                "action.item",
+                "prev.config.ready",
+                "prev.counts",
+                "state.config",
+                "state.config.items",
+            ]
+        );
+        assert_eq!(
+            program.first_unencodable_symbolic_node(),
+            Some("predicate_tests::missing_helper")
+        );
+    }
+
+    #[test]
     fn update_program_applies_structured_ops() {
         let update = UpdateProgram::ast(
             "promote",
@@ -8323,12 +8659,10 @@ mod tests {
                 },
             ]
         );
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                update.apply(&initial, &Action::Start)
-            }))
-            .is_err()
-        );
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            update.apply(&initial, &Action::Start)
+        }))
+        .is_err());
     }
 
     #[test]
