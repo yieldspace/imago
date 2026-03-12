@@ -90,10 +90,10 @@ mod tests {
         BoolExpr, CounterexampleMinimization, ExplicitCheckpointOptions,
         ExplicitDistributedOptions, ExplicitParallelOptions, ExplicitReachabilityStrategy,
         ExplicitSimulationOptions, ExplicitStateStorage, ExplorationMode, ExprDomain, GuardExpr,
-        Ltl, ModelBackend, ModelCase, ModelCheckConfig, Signature, StepExpr, SymbolicSort,
-        SymbolicSortSpec, SymbolicStateSchema, SymbolicStateSpec, TemporalSpec, TraceStep,
-        TransitionProgram, TransitionRule, TransitionSystem, UpdateOp, UpdateProgram,
-        UpdateValueExprAst, inventory, registry::RegisteredSymbolicStateSchema,
+        Ltl, ModelBackend, ModelCase, ModelCheckConfig, PartialOrderReducer, Signature, StepExpr,
+        SymbolicSort, SymbolicSortSpec, SymbolicStateSchema, SymbolicStateSpec, TemporalSpec,
+        TraceStep, TransitionProgram, TransitionRule, TransitionSystem, UpdateOp, UpdateProgram,
+        UpdateValueExprAst, ViewProjector, inventory, registry::RegisteredSymbolicStateSchema,
         symbolic_leaf_field,
     };
 
@@ -604,6 +604,72 @@ mod tests {
     }
 
     #[test]
+    fn explicit_view_abstraction_collapses_equivalent_states() {
+        let spec = SimulationSpec;
+        let exact = ModelChecker::with_config(&spec, ModelCheckConfig::reachable_graph())
+            .full_reachable_graph_snapshot()
+            .expect("exact storage snapshot");
+        let reduced = ModelChecker::for_case(
+            &spec,
+            ModelCase::new("collapse_pending").with_view(ViewProjector::new(
+                "collapse_pending",
+                |state: &SimulationState| match state {
+                    SimulationState::Left | SimulationState::Right => "pending".to_owned(),
+                    SimulationState::Done => "done".to_owned(),
+                },
+            )),
+        )
+        .full_reachable_graph_snapshot()
+        .expect("view-abstracted snapshot");
+
+        assert_eq!(exact.states.len(), 3);
+        assert_eq!(reduced.states.len(), 2);
+        assert_eq!(reduced.initial_indices, vec![0]);
+        assert_eq!(reduced.edges.len(), 2);
+        assert_eq!(reduced.edges[0].len(), 1);
+        assert_eq!(reduced.edges[0][0].action, SimulationAction::Finish);
+        assert_eq!(reduced.edges[0][0].target, 1);
+    }
+
+    #[test]
+    fn explicit_partial_order_reduction_prunes_action_branches() {
+        let spec = CounterexampleSpec;
+        let exact = ModelChecker::with_config(&spec, ModelCheckConfig::reachable_graph())
+            .full_reachable_graph_snapshot()
+            .expect("exact storage snapshot");
+        let reduced = ModelChecker::for_case(
+            &spec,
+            ModelCase::new("prefer_short_path").with_partial_order(PartialOrderReducer::new(
+                "prefer_short_path",
+                |state: &CounterexampleState, action: &CounterexampleAction| match state {
+                    CounterexampleState::Start => {
+                        matches!(action, CounterexampleAction::TakeShort)
+                    }
+                    CounterexampleState::Long1 => {
+                        matches!(action, CounterexampleAction::Advance)
+                    }
+                    CounterexampleState::Long2 => {
+                        matches!(action, CounterexampleAction::Finish)
+                    }
+                    CounterexampleState::Done => false,
+                },
+            )),
+        )
+        .full_reachable_graph_snapshot()
+        .expect("partial-order reduced snapshot");
+
+        assert_eq!(exact.states.len(), 4);
+        assert_eq!(
+            reduced.states,
+            vec![CounterexampleState::Start, CounterexampleState::Done]
+        );
+        assert_eq!(reduced.edges.len(), 2);
+        assert_eq!(reduced.edges[0].len(), 1);
+        assert_eq!(reduced.edges[0][0].action, CounterexampleAction::TakeShort);
+        assert_eq!(reduced.edges[0][0].target, 1);
+    }
+
+    #[test]
     fn parallel_frontier_rejects_model_case_constraints() {
         let spec = SimulationSpec;
         let model_case = ModelCase::new("parallel_constraints")
@@ -627,6 +693,59 @@ mod tests {
             err,
             nirvash::ModelCheckError::UnsupportedConfiguration(message)
                 if message.contains("parallel frontier exploration")
+        ));
+    }
+
+    #[test]
+    fn symbolic_backend_rejects_view_abstraction() {
+        let spec = StructuralQuantifierSpec;
+        let err = ModelChecker::for_case(
+            &spec,
+            ModelCase::new("symbolic_view")
+                .with_checker_config(ModelCheckConfig {
+                    backend: Some(ModelBackend::Symbolic),
+                    exploration: ExplorationMode::ReachableGraph,
+                    ..ModelCheckConfig::default()
+                })
+                .with_view(ViewProjector::new("ready_only", |state: &QuantState| {
+                    format!("ready={}", state.ready)
+                })),
+        )
+        .full_reachable_graph_snapshot()
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            nirvash::ModelCheckError::UnsupportedConfiguration(message)
+                if message.contains("view abstraction")
+        ));
+    }
+
+    #[test]
+    fn symbolic_backend_rejects_partial_order_reduction() {
+        let spec = StructuralQuantifierSpec;
+        let err = ModelChecker::for_case(
+            &spec,
+            ModelCase::new("symbolic_por")
+                .with_checker_config(ModelCheckConfig {
+                    backend: Some(ModelBackend::Symbolic),
+                    exploration: ExplorationMode::ReachableGraph,
+                    ..ModelCheckConfig::default()
+                })
+                .with_partial_order(PartialOrderReducer::new(
+                    "advance_only",
+                    |_state: &QuantState, action: &QuantAction| {
+                        matches!(action, QuantAction::Advance)
+                    },
+                )),
+        )
+        .full_reachable_graph_snapshot()
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            nirvash::ModelCheckError::UnsupportedConfiguration(message)
+                if message.contains("partial-order reduction")
         ));
     }
 

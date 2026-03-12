@@ -200,6 +200,7 @@ where
     pub fn reachable_graph_snapshot(
         &self,
     ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
+        self.ensure_no_explicit_only_reducers()?;
         let graph = self.build_relation_reachable_graph(self.doc_reachable_graph_config())?;
         Ok(self.snapshot_from_graph(&graph))
     }
@@ -207,6 +208,7 @@ where
     pub fn full_reachable_graph_snapshot(
         &self,
     ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
+        self.ensure_no_explicit_only_reducers()?;
         let graph = self.build_relation_reachable_graph(self.config.clone())?;
         self.ensure_untruncated(&graph)?;
         Ok(self.snapshot_from_graph(&graph))
@@ -215,6 +217,7 @@ where
     pub fn check_invariants(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        self.ensure_no_explicit_only_reducers()?;
         self.ensure_symbolic_invariants_ast_native()?;
         match self.config.exploration {
             ExplorationMode::ReachableGraph => self.check_invariants_graph(),
@@ -225,6 +228,7 @@ where
     pub fn check_deadlocks(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        self.ensure_no_explicit_only_reducers()?;
         if !self.config.check_deadlocks {
             return Ok(ModelCheckResult::ok());
         }
@@ -237,6 +241,7 @@ where
     pub fn check_properties(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        self.ensure_no_explicit_only_reducers()?;
         self.ensure_symbolic_properties_ast_native()?;
         if self.spec.properties().is_empty() {
             return Ok(ModelCheckResult::ok());
@@ -1312,6 +1317,24 @@ where
                     node,
                 )));
             }
+        }
+        Ok(())
+    }
+
+    fn ensure_no_explicit_only_reducers(&self) -> Result<(), ModelCheckError> {
+        if self.model_case.view().is_some() {
+            return Err(self.symbolic_ast_required_error(format!(
+                "symbolic backend does not support view abstraction for model case `{}` in spec `{}`",
+                self.model_case.label(),
+                self.spec.name(),
+            )));
+        }
+        if self.model_case.partial_order().is_some() {
+            return Err(self.symbolic_ast_required_error(format!(
+                "symbolic backend does not support partial-order reduction for model case `{}` in spec `{}`",
+                self.model_case.label(),
+                self.spec.name(),
+            )));
         }
         Ok(())
     }

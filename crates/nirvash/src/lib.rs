@@ -7,6 +7,7 @@ mod dsl_macros;
 mod fairness;
 mod ltl;
 mod model;
+mod partial_order;
 mod predicate;
 pub mod registry;
 mod relation;
@@ -15,6 +16,7 @@ mod symmetry;
 mod system;
 mod trace;
 mod update_helpers;
+mod view;
 
 pub use conformance::{
     DynamicTestCase, NegativeWitness, PositiveWitness, ProtocolConformanceSpec,
@@ -48,6 +50,7 @@ pub use model::{
     ModelCheckResult, SymbolicBoundedLassoEncoding, SymbolicModelCheckOptions,
     SymbolicSuccessorStrategy,
 };
+pub use partial_order::PartialOrderReducer;
 pub use predicate::{
     BoolExpr, BoolExprAst, GuardAst, GuardExpr, GuardValueExpr, QuantifierKind, StateExpr,
     StateExprAst, StepExpr, StepExprAst, StepValueExpr, TransitionProgram, TransitionProgramError,
@@ -72,6 +75,7 @@ pub use system::{
 };
 pub use trace::{Trace, TraceStep};
 pub use update_helpers::{function_update, sequence_update};
+pub use view::ViewProjector;
 
 #[cfg(test)]
 mod tests {

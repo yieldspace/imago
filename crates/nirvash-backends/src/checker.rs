@@ -83,51 +83,91 @@ impl ExplicitStateIndex {
         }
     }
 
-    fn from_states<S>(storage: nirvash::ExplicitStateStorage, states: &[S]) -> Self
+    fn from_states<S>(
+        storage: nirvash::ExplicitStateStorage,
+        states: &[S],
+        view: Option<nirvash::ViewProjector<S>>,
+    ) -> Self
     where
         S: std::fmt::Debug,
     {
         let mut index = Self::new(storage);
         for state_index in 0..states.len() {
-            index.record_state(states, state_index);
+            index.record_state(states, state_index, view);
         }
         index
     }
 
-    fn state_index<S>(&self, states: &[S], state: &S) -> Option<usize>
+    fn state_index<S>(
+        &self,
+        states: &[S],
+        state: &S,
+        view: Option<nirvash::ViewProjector<S>>,
+    ) -> Option<usize>
     where
         S: PartialEq + std::fmt::Debug,
     {
         match self {
-            Self::Exact => states.iter().position(|candidate| candidate == state),
+            Self::Exact => states
+                .iter()
+                .position(|candidate| states_share_key(candidate, state, view)),
             Self::Fingerprinted { buckets } => {
-                let fingerprint = fingerprint_debug(state);
+                let fingerprint = fingerprint_state(state, view);
                 buckets.get(&fingerprint).and_then(|candidates| {
                     candidates
                         .iter()
                         .copied()
-                        .find(|index| states[*index] == *state)
+                        .find(|index| states_share_key(&states[*index], state, view))
                 })
             }
         }
     }
 
-    fn record_state<S>(&mut self, states: &[S], state_index: usize)
-    where
+    fn record_state<S>(
+        &mut self,
+        states: &[S],
+        state_index: usize,
+        view: Option<nirvash::ViewProjector<S>>,
+    ) where
         S: std::fmt::Debug,
     {
         let Self::Fingerprinted { buckets } = self else {
             return;
         };
-        let fingerprint = fingerprint_debug(&states[state_index]);
+        let fingerprint = fingerprint_state(&states[state_index], view);
         buckets.entry(fingerprint).or_default().push(state_index);
     }
 }
 
 fn fingerprint_debug<T: std::fmt::Debug>(value: &T) -> u64 {
+    fingerprint_hash(&format!("{value:?}"))
+}
+
+fn fingerprint_hash<T: Hash>(value: &T) -> u64 {
     let mut hasher = DefaultHasher::new();
-    format!("{value:?}").hash(&mut hasher);
+    value.hash(&mut hasher);
     hasher.finish()
+}
+
+fn states_share_key<S: PartialEq>(
+    lhs: &S,
+    rhs: &S,
+    view: Option<nirvash::ViewProjector<S>>,
+) -> bool {
+    match view {
+        Some(view) => view.project(lhs) == view.project(rhs),
+        None => lhs == rhs,
+    }
+}
+
+fn fingerprint_state<S: std::fmt::Debug>(
+    state: &S,
+    view: Option<nirvash::ViewProjector<S>>,
+) -> u64 {
+    match view {
+        Some(view) => fingerprint_hash(&view.project(state)),
+        None => fingerprint_debug(state),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -752,8 +792,11 @@ where
             transitions: saved.transitions,
             truncated: saved.truncated,
         };
-        let state_index =
-            ExplicitStateIndex::from_states(config.explicit.state_storage, &graph.states);
+        let state_index = ExplicitStateIndex::from_states(
+            config.explicit.state_storage,
+            &graph.states,
+            self.model_case.view(),
+        );
 
         Ok(Some((graph, state_index, saved.frontier)))
     }
@@ -888,9 +931,11 @@ where
             if !self.model_case.state_constraints().is_empty()
                 || !self.model_case.action_constraints().is_empty()
                 || self.model_case.symmetry().is_some()
+                || self.model_case.view().is_some()
+                || self.model_case.partial_order().is_some()
             {
                 return Err(ModelCheckError::UnsupportedConfiguration(
-                    "parallel frontier exploration does not support state/action constraints or symmetry reduction",
+                    "parallel frontier exploration does not support state/action constraints, symmetry reduction, view abstraction, or partial-order reduction",
                 ));
             }
             return Ok(self.expand_frontier_parallel(
@@ -1124,7 +1169,9 @@ where
         push_frontier: &mut dyn FnMut(usize, &T::State),
         config: &ModelCheckConfig,
     ) -> Result<Option<usize>, ModelCheckError> {
-        if let Some(existing) = state_index.state_index(&graph.states, &state) {
+        if let Some(existing) =
+            state_index.state_index(&graph.states, &state, self.model_case.view())
+        {
             return Ok(Some(existing));
         }
 
@@ -1138,7 +1185,7 @@ where
         graph.parents.push(parent);
         graph.depths.push(depth);
         let index = graph.states.len() - 1;
-        state_index.record_state(&graph.states, index);
+        state_index.record_state(&graph.states, index, self.model_case.view());
         push_frontier(index, &graph.states[index]);
         Ok(Some(index))
     }
@@ -1212,14 +1259,21 @@ where
 
     fn constrained_successors(&self, state: &T::State) -> Vec<(TraceStep<T::Action>, T::State)> {
         let mut values = Vec::new();
-        for (action, next_raw) in self.spec.successors_constrained(state, &|action, next| {
-            self.action_constraints_allow(state, action, next)
-        }) {
-            let next = self.canonicalize_state(&next_raw);
-            if !self.state_constraints_allow(&next) {
-                continue;
+        let mut actions = self.spec.actions();
+        if let Some(reducer) = self.model_case.partial_order() {
+            actions.retain(|action| reducer.allow_action(state, action));
+        }
+
+        for action in actions {
+            for next_raw in self.spec.transition_relation(state, &action) {
+                let next = self.canonicalize_state(&next_raw);
+                if !self.action_constraints_allow(state, &action, &next)
+                    || !self.state_constraints_allow(&next)
+                {
+                    continue;
+                }
+                values.push((TraceStep::Action(action.clone()), next));
             }
-            values.push((TraceStep::Action(action), next));
         }
 
         if self.spec.allow_stutter() {

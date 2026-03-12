@@ -1,6 +1,6 @@
 use crate::{
-    BoolExpr, DocGraphPolicy, Fairness, Ltl, ModelBackend, ModelCheckConfig, StepExpr,
-    SymmetryReducer, TransitionProgram, VizPolicy,
+    BoolExpr, DocGraphPolicy, Fairness, Ltl, ModelBackend, ModelCheckConfig, PartialOrderReducer,
+    StepExpr, SymmetryReducer, TransitionProgram, ViewProjector, VizPolicy,
 };
 
 pub trait ActionVocabulary: Sized {
@@ -140,6 +140,8 @@ pub struct ModelCase<S, A> {
     state_constraints: Vec<BoolExpr<S>>,
     action_constraints: Vec<StepExpr<S, A>>,
     symmetry: Option<SymmetryReducer<S>>,
+    view: Option<ViewProjector<S>>,
+    partial_order: Option<PartialOrderReducer<S, A>>,
     checker_config: ModelCheckConfig,
     check_deadlocks: bool,
     doc_checker_config: Option<ModelCheckConfig>,
@@ -154,6 +156,8 @@ impl<S, A> ModelCase<S, A> {
             state_constraints: Vec::new(),
             action_constraints: Vec::new(),
             symmetry: None,
+            view: None,
+            partial_order: None,
             checker_config: ModelCheckConfig::default(),
             check_deadlocks: true,
             doc_checker_config: None,
@@ -183,6 +187,16 @@ impl<S, A> ModelCase<S, A> {
 
     pub fn with_symmetry(mut self, symmetry: SymmetryReducer<S>) -> Self {
         self.symmetry = Some(symmetry);
+        self
+    }
+
+    pub fn with_view(mut self, view: ViewProjector<S>) -> Self {
+        self.view = Some(view);
+        self
+    }
+
+    pub fn with_partial_order(mut self, partial_order: PartialOrderReducer<S, A>) -> Self {
+        self.partial_order = Some(partial_order);
         self
     }
 
@@ -230,6 +244,14 @@ impl<S, A> ModelCase<S, A> {
 
     pub fn symmetry(&self) -> Option<SymmetryReducer<S>> {
         self.symmetry
+    }
+
+    pub fn view(&self) -> Option<ViewProjector<S>> {
+        self.view
+    }
+
+    pub fn partial_order(&self) -> Option<PartialOrderReducer<S, A>> {
+        self.partial_order
     }
 
     pub fn checker_config(&self) -> ModelCheckConfig {
