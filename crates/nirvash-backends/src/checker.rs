@@ -27,6 +27,12 @@ impl<A> GraphEdge<A> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct FrontierExpansion<S, A> {
+    source: usize,
+    successors: Vec<(TraceStep<A>, S)>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CheckpointGraphEdge {
     step: CheckpointStep,
@@ -181,9 +187,9 @@ pub struct BackendModelChecker<'a, T: TemporalSpec + ModelCaseSource> {
 
 impl<'a, T> BackendModelChecker<'a, T>
 where
-    T: TemporalSpec + ModelCaseSource,
-    T::State: PartialEq + Signature,
-    T::Action: PartialEq,
+    T: TemporalSpec + ModelCaseSource + Sync,
+    T::State: PartialEq + Signature + Send + Sync,
+    T::Action: PartialEq + Send + Sync,
 {
     pub fn new(spec: &'a T) -> Self {
         let model_case = spec.model_cases().into_iter().next().unwrap_or_default();
@@ -557,10 +563,11 @@ where
                     Vec::new(),
                 )
             });
+        let distributed_shards = config.explicit.distributed.shards.max(1);
 
         if frontier.is_empty() && graph.states.is_empty() {
             for state in initial_states {
-                let Some(index) = self.push_state(
+                let Some(index) = self.push_state_flat(
                     &mut graph,
                     &mut state_index,
                     state,
@@ -583,93 +590,78 @@ where
         }
 
         let mut completed_frontiers = 0usize;
-        while !frontier.is_empty() {
-            if graph.truncated {
-                break;
-            }
-            let current_frontier = std::mem::take(&mut frontier);
-            let mut next_frontier = Vec::new();
-
-            for index in current_frontier {
-                if graph.truncated {
-                    break;
-                }
-                let current = graph.states[index].clone();
-                let next_depth = graph.depths[index] + 1;
-                let mut edges = Vec::new();
-
-                for (action, next_raw) in
-                    self.spec.successors_constrained(&current, &|action, next| {
-                        self.action_constraints_allow(&current, action, next)
-                    })
-                {
-                    let next = self.canonicalize_state(&next_raw);
-                    if !self.state_constraints_allow(&next) {
-                        continue;
+        match config.explicit.reachability {
+            nirvash::ExplicitReachabilityStrategy::BreadthFirst
+            | nirvash::ExplicitReachabilityStrategy::ParallelFrontier => {
+                while !frontier.is_empty() {
+                    if graph.truncated {
+                        break;
                     }
-
-                    let Some(next_index) = self.push_state(
+                    let current_frontier = std::mem::take(&mut frontier);
+                    let expansions =
+                        self.expand_frontier_batch(&graph, &current_frontier, &config)?;
+                    let mut next_frontier = Vec::new();
+                    self.merge_expansions_flat(
                         &mut graph,
                         &mut state_index,
-                        next,
-                        Some((index, TraceStep::Action(action.clone()))),
-                        next_depth,
+                        expansions,
                         &mut next_frontier,
                         &config,
-                    )?
-                    else {
+                    )?;
+
+                    completed_frontiers += 1;
+                    frontier = next_frontier;
+                    self.save_reachable_graph_checkpoint(
+                        &graph,
+                        &frontier,
+                        &config,
+                        completed_frontiers,
+                    )?;
+                }
+            }
+            nirvash::ExplicitReachabilityStrategy::DistributedFrontier => {
+                let mut frontier_shards = self.partition_frontier(
+                    &graph,
+                    std::mem::take(&mut frontier),
+                    distributed_shards,
+                );
+                while frontier_shards.iter().any(|shard| !shard.is_empty()) {
+                    if graph.truncated {
                         break;
-                    };
-                    let edge = GraphEdge {
-                        step: TraceStep::Action(action),
-                        target: next_index,
-                    };
-                    if !edges.contains(&edge) {
-                        if self.transition_limit_reached(&graph, &config) {
-                            graph.truncated = true;
+                    }
+                    for shard_index in 0..frontier_shards.len() {
+                        if graph.truncated {
                             break;
                         }
-                        edges.push(edge);
-                        graph.transitions += 1;
-                    }
-                }
-
-                if !graph.truncated && self.spec.allow_stutter() {
-                    let stutter = self.canonicalize_state(&self.spec.stutter_state(&current));
-                    if self.state_constraints_allow(&stutter) {
-                        let Some(next_index) = self.push_state(
+                        let current_frontier = std::mem::take(&mut frontier_shards[shard_index]);
+                        if current_frontier.is_empty() {
+                            continue;
+                        }
+                        let expansions =
+                            self.expand_frontier_batch(&graph, &current_frontier, &config)?;
+                        self.merge_expansions_sharded(
                             &mut graph,
                             &mut state_index,
-                            stutter,
-                            Some((index, TraceStep::Stutter)),
-                            next_depth,
-                            &mut next_frontier,
+                            expansions,
+                            &mut frontier_shards,
+                            distributed_shards,
                             &config,
-                        )?
-                        else {
-                            graph.truncated = true;
-                            break;
-                        };
-                        let edge = GraphEdge {
-                            step: TraceStep::Stutter,
-                            target: next_index,
-                        };
-                        if !edges.contains(&edge) {
-                            edges.push(edge);
-                        }
+                        )?;
                     }
-                }
 
-                if edges.iter().all(GraphEdge::is_stutter) {
-                    graph.deadlocks.push(index);
+                    completed_frontiers += 1;
+                    frontier = frontier_shards
+                        .iter()
+                        .flat_map(|shard| shard.iter().copied())
+                        .collect();
+                    self.save_reachable_graph_checkpoint(
+                        &graph,
+                        &frontier,
+                        &config,
+                        completed_frontiers,
+                    )?;
                 }
-
-                graph.edges[index] = edges;
             }
-
-            completed_frontiers += 1;
-            frontier = next_frontier;
-            self.save_reachable_graph_checkpoint(&graph, &frontier, &config, completed_frontiers)?;
         }
 
         Ok(graph)
@@ -883,7 +875,225 @@ where
         }
     }
 
-    fn push_state(
+    fn expand_frontier_batch(
+        &self,
+        graph: &ReachableGraph<T::State, T::Action>,
+        frontier: &[usize],
+        config: &ModelCheckConfig,
+    ) -> Result<Vec<FrontierExpansion<T::State, T::Action>>, ModelCheckError> {
+        if matches!(
+            config.explicit.reachability,
+            nirvash::ExplicitReachabilityStrategy::ParallelFrontier
+        ) {
+            if !self.model_case.state_constraints().is_empty()
+                || !self.model_case.action_constraints().is_empty()
+                || self.model_case.symmetry().is_some()
+            {
+                return Err(ModelCheckError::UnsupportedConfiguration(
+                    "parallel frontier exploration does not support state/action constraints or symmetry reduction",
+                ));
+            }
+            return Ok(self.expand_frontier_parallel(
+                graph,
+                frontier,
+                config.explicit.parallel.workers,
+            ));
+        }
+
+        Ok(frontier
+            .iter()
+            .copied()
+            .map(|index| self.expand_frontier_state(index, graph.states[index].clone()))
+            .collect())
+    }
+
+    fn expand_frontier_parallel(
+        &self,
+        graph: &ReachableGraph<T::State, T::Action>,
+        frontier: &[usize],
+        workers: usize,
+    ) -> Vec<FrontierExpansion<T::State, T::Action>> {
+        if workers <= 1 || frontier.len() <= 1 {
+            return frontier
+                .iter()
+                .copied()
+                .map(|index| self.expand_frontier_state(index, graph.states[index].clone()))
+                .collect();
+        }
+
+        let tasks = frontier
+            .iter()
+            .copied()
+            .map(|index| (index, graph.states[index].clone()))
+            .collect::<Vec<_>>();
+        let chunk_size = tasks.len().div_ceil(workers);
+        let spec = self.spec;
+        let allow_stutter = spec.allow_stutter();
+        let mut expansions = Vec::with_capacity(tasks.len());
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for chunk in tasks.chunks(chunk_size.max(1)) {
+                let owned = chunk.to_vec();
+                handles.push(scope.spawn(move || {
+                    owned
+                        .into_iter()
+                        .map(|(index, state)| {
+                            let mut successors = spec
+                                .successors(&state)
+                                .into_iter()
+                                .map(|(action, next)| (TraceStep::Action(action), next))
+                                .collect::<Vec<_>>();
+                            if allow_stutter {
+                                successors.push((TraceStep::Stutter, spec.stutter_state(&state)));
+                            }
+                            FrontierExpansion {
+                                source: index,
+                                successors,
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                }));
+            }
+            for handle in handles {
+                expansions.extend(
+                    handle
+                        .join()
+                        .expect("parallel frontier worker should not panic"),
+                );
+            }
+        });
+        expansions.sort_by_key(|expansion| expansion.source);
+        expansions
+    }
+
+    fn expand_frontier_state(
+        &self,
+        index: usize,
+        state: T::State,
+    ) -> FrontierExpansion<T::State, T::Action> {
+        FrontierExpansion {
+            source: index,
+            successors: self.constrained_successors(&state),
+        }
+    }
+
+    fn merge_expansions_flat(
+        &self,
+        graph: &mut ReachableGraph<T::State, T::Action>,
+        state_index: &mut ExplicitStateIndex,
+        expansions: Vec<FrontierExpansion<T::State, T::Action>>,
+        frontier: &mut Vec<usize>,
+        config: &ModelCheckConfig,
+    ) -> Result<(), ModelCheckError> {
+        for expansion in expansions {
+            if graph.truncated {
+                break;
+            }
+            self.merge_expansion(
+                graph,
+                state_index,
+                expansion,
+                &mut |next_index, _| frontier.push(next_index),
+                config,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn merge_expansions_sharded(
+        &self,
+        graph: &mut ReachableGraph<T::State, T::Action>,
+        state_index: &mut ExplicitStateIndex,
+        expansions: Vec<FrontierExpansion<T::State, T::Action>>,
+        frontier_shards: &mut [Vec<usize>],
+        shards: usize,
+        config: &ModelCheckConfig,
+    ) -> Result<(), ModelCheckError> {
+        for expansion in expansions {
+            if graph.truncated {
+                break;
+            }
+            self.merge_expansion(
+                graph,
+                state_index,
+                expansion,
+                &mut |next_index, next_state| {
+                    let shard = self.state_shard(next_state, shards);
+                    frontier_shards[shard].push(next_index);
+                },
+                config,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn merge_expansion(
+        &self,
+        graph: &mut ReachableGraph<T::State, T::Action>,
+        state_index: &mut ExplicitStateIndex,
+        expansion: FrontierExpansion<T::State, T::Action>,
+        push_frontier: &mut dyn FnMut(usize, &T::State),
+        config: &ModelCheckConfig,
+    ) -> Result<(), ModelCheckError> {
+        let next_depth = graph.depths[expansion.source] + 1;
+        let mut edges = Vec::new();
+        for (step, next_state) in expansion.successors {
+            let Some(next_index) = self.push_state_with(
+                graph,
+                state_index,
+                next_state,
+                Some((expansion.source, step.clone())),
+                next_depth,
+                push_frontier,
+                config,
+            )?
+            else {
+                graph.truncated = true;
+                break;
+            };
+
+            let edge = GraphEdge {
+                step,
+                target: next_index,
+            };
+            if !edges.contains(&edge) {
+                if !edge.is_stutter() {
+                    if self.transition_limit_reached(graph, config) {
+                        graph.truncated = true;
+                        break;
+                    }
+                    graph.transitions += 1;
+                }
+                edges.push(edge);
+            }
+        }
+
+        if edges.iter().all(GraphEdge::is_stutter) {
+            graph.deadlocks.push(expansion.source);
+        }
+        graph.edges[expansion.source] = edges;
+        Ok(())
+    }
+
+    fn partition_frontier(
+        &self,
+        graph: &ReachableGraph<T::State, T::Action>,
+        frontier: Vec<usize>,
+        shards: usize,
+    ) -> Vec<Vec<usize>> {
+        let mut frontier_shards = vec![Vec::new(); shards.max(1)];
+        for index in frontier {
+            let shard = self.state_shard(&graph.states[index], shards);
+            frontier_shards[shard].push(index);
+        }
+        frontier_shards
+    }
+
+    fn state_shard(&self, state: &T::State, shards: usize) -> usize {
+        (fingerprint_debug(state) as usize) % shards.max(1)
+    }
+
+    fn push_state_flat(
         &self,
         graph: &mut ReachableGraph<T::State, T::Action>,
         state_index: &mut ExplicitStateIndex,
@@ -891,6 +1101,27 @@ where
         parent: Option<(usize, TraceStep<T::Action>)>,
         depth: usize,
         frontier: &mut Vec<usize>,
+        config: &ModelCheckConfig,
+    ) -> Result<Option<usize>, ModelCheckError> {
+        self.push_state_with(
+            graph,
+            state_index,
+            state,
+            parent,
+            depth,
+            &mut |index, _| frontier.push(index),
+            config,
+        )
+    }
+
+    fn push_state_with(
+        &self,
+        graph: &mut ReachableGraph<T::State, T::Action>,
+        state_index: &mut ExplicitStateIndex,
+        state: T::State,
+        parent: Option<(usize, TraceStep<T::Action>)>,
+        depth: usize,
+        push_frontier: &mut dyn FnMut(usize, &T::State),
         config: &ModelCheckConfig,
     ) -> Result<Option<usize>, ModelCheckError> {
         if let Some(existing) = state_index.state_index(&graph.states, &state) {
@@ -908,7 +1139,7 @@ where
         graph.depths.push(depth);
         let index = graph.states.len() - 1;
         state_index.record_state(&graph.states, index);
-        frontier.push(index);
+        push_frontier(index, &graph.states[index]);
         Ok(Some(index))
     }
 

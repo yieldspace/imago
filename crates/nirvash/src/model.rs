@@ -26,6 +26,10 @@ pub enum ExplicitStateStorage {
 pub enum ExplicitReachabilityStrategy {
     /// Single-process breadth-first graph exploration.
     BreadthFirst,
+    /// Multi-threaded breadth-first exploration that expands each frontier in parallel.
+    ParallelFrontier,
+    /// Shard-assigned breadth-first exploration that merges frontiers by deterministic shard owner.
+    DistributedFrontier,
 }
 
 /// Current explicit-backend bounded-lasso search strategy.
@@ -33,6 +37,52 @@ pub enum ExplicitReachabilityStrategy {
 pub enum ExplicitBoundedLassoStrategy {
     /// Enumerate bounded prefixes and close lassos by exact state revisit.
     EnumeratedPaths,
+}
+
+/// Parallel frontier exploration settings for the explicit reachable-graph backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExplicitParallelOptions {
+    pub workers: usize,
+}
+
+impl ExplicitParallelOptions {
+    pub const fn current() -> Self {
+        Self { workers: 1 }
+    }
+
+    pub const fn with_workers(mut self, workers: usize) -> Self {
+        self.workers = if workers == 0 { 1 } else { workers };
+        self
+    }
+}
+
+impl Default for ExplicitParallelOptions {
+    fn default() -> Self {
+        Self::current()
+    }
+}
+
+/// Distributed frontier exploration settings for the explicit reachable-graph backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExplicitDistributedOptions {
+    pub shards: usize,
+}
+
+impl ExplicitDistributedOptions {
+    pub const fn current() -> Self {
+        Self { shards: 1 }
+    }
+
+    pub const fn with_shards(mut self, shards: usize) -> Self {
+        self.shards = if shards == 0 { 1 } else { shards };
+        self
+    }
+}
+
+impl Default for ExplicitDistributedOptions {
+    fn default() -> Self {
+        Self::current()
+    }
 }
 
 /// Checkpoint configuration for explicit reachable-graph exploration.
@@ -116,6 +166,8 @@ pub struct ExplicitModelCheckOptions {
     pub reachability: ExplicitReachabilityStrategy,
     pub bounded_lasso: ExplicitBoundedLassoStrategy,
     pub checkpoint: ExplicitCheckpointOptions,
+    pub parallel: ExplicitParallelOptions,
+    pub distributed: ExplicitDistributedOptions,
     pub simulation: ExplicitSimulationOptions,
 }
 
@@ -126,6 +178,8 @@ impl ExplicitModelCheckOptions {
             reachability: ExplicitReachabilityStrategy::BreadthFirst,
             bounded_lasso: ExplicitBoundedLassoStrategy::EnumeratedPaths,
             checkpoint: ExplicitCheckpointOptions::disabled(),
+            parallel: ExplicitParallelOptions::current(),
+            distributed: ExplicitDistributedOptions::current(),
             simulation: ExplicitSimulationOptions::current(),
         }
     }
@@ -137,6 +191,21 @@ impl ExplicitModelCheckOptions {
 
     pub fn with_checkpoint(mut self, checkpoint: ExplicitCheckpointOptions) -> Self {
         self.checkpoint = checkpoint;
+        self
+    }
+
+    pub const fn with_reachability(mut self, reachability: ExplicitReachabilityStrategy) -> Self {
+        self.reachability = reachability;
+        self
+    }
+
+    pub const fn with_parallel(mut self, parallel: ExplicitParallelOptions) -> Self {
+        self.parallel = parallel;
+        self
+    }
+
+    pub const fn with_distributed(mut self, distributed: ExplicitDistributedOptions) -> Self {
+        self.distributed = distributed;
         self
     }
 
@@ -337,6 +406,8 @@ mod tests {
             bounded_lasso: ExplicitBoundedLassoStrategy::EnumeratedPaths,
             checkpoint: ExplicitCheckpointOptions::at_path("tmp/nirvash-checkpoint.json")
                 .with_save_every_frontiers(2),
+            parallel: ExplicitParallelOptions::current().with_workers(4),
+            distributed: ExplicitDistributedOptions::current().with_shards(3),
             simulation: ExplicitSimulationOptions::new(4, 12, 7),
         };
         let symbolic = SymbolicModelCheckOptions {
@@ -361,6 +432,18 @@ mod tests {
                 save_every_frontiers: 1,
                 resume: false,
             }
+        );
+    }
+
+    #[test]
+    fn explicit_parallel_and_distributed_options_clamp_to_positive_sizes() {
+        assert_eq!(
+            ExplicitParallelOptions::current().with_workers(0),
+            ExplicitParallelOptions { workers: 1 }
+        );
+        assert_eq!(
+            ExplicitDistributedOptions::current().with_shards(0),
+            ExplicitDistributedOptions { shards: 1 }
         );
     }
 }

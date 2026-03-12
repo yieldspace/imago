@@ -10,9 +10,9 @@ pub struct ModelChecker<'a, T: TemporalSpec + ModelCaseSource>(
 
 impl<'a, T> ModelChecker<'a, T>
 where
-    T: TemporalSpec + ModelCaseSource,
-    T::State: PartialEq + nirvash::Signature,
-    T::Action: PartialEq,
+    T: TemporalSpec + ModelCaseSource + Sync,
+    T::State: PartialEq + nirvash::Signature + Send + Sync,
+    T::Action: PartialEq + Send + Sync,
 {
     pub fn new(spec: &'a T) -> Self {
         Self(nirvash_backends::BackendModelChecker::new(spec))
@@ -87,7 +87,8 @@ mod tests {
 
     use super::ModelChecker;
     use nirvash::{
-        BoolExpr, ExplicitCheckpointOptions, ExplicitSimulationOptions, ExplicitStateStorage,
+        BoolExpr, ExplicitCheckpointOptions, ExplicitDistributedOptions, ExplicitParallelOptions,
+        ExplicitReachabilityStrategy, ExplicitSimulationOptions, ExplicitStateStorage,
         ExplorationMode, ExprDomain, GuardExpr, ModelBackend, ModelCase, ModelCheckConfig,
         Signature, StepExpr, SymbolicSort, SymbolicSortSpec, SymbolicStateSchema,
         SymbolicStateSpec, TemporalSpec, TraceStep, TransitionProgram, TransitionRule,
@@ -472,6 +473,73 @@ mod tests {
         assert_eq!(second, first);
         assert!(path.exists());
         fs::remove_file(path).expect("cleanup checkpoint file");
+    }
+
+    #[test]
+    fn explicit_reachable_graph_matches_parallel_frontier_strategy() {
+        let spec = SimulationSpec;
+        let exact = ModelChecker::with_config(&spec, ModelCheckConfig::reachable_graph())
+            .full_reachable_graph_snapshot()
+            .expect("exact storage snapshot");
+        let parallel = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig::reachable_graph().with_explicit_options(
+                nirvash::ExplicitModelCheckOptions::current()
+                    .with_reachability(ExplicitReachabilityStrategy::ParallelFrontier)
+                    .with_parallel(ExplicitParallelOptions::current().with_workers(2)),
+            ),
+        )
+        .full_reachable_graph_snapshot()
+        .expect("parallel frontier snapshot");
+
+        assert_eq!(parallel, exact);
+    }
+
+    #[test]
+    fn explicit_reachable_graph_matches_distributed_frontier_strategy() {
+        let spec = SimulationSpec;
+        let exact = ModelChecker::with_config(&spec, ModelCheckConfig::reachable_graph())
+            .full_reachable_graph_snapshot()
+            .expect("exact storage snapshot");
+        let distributed = ModelChecker::with_config(
+            &spec,
+            ModelCheckConfig::reachable_graph().with_explicit_options(
+                nirvash::ExplicitModelCheckOptions::current()
+                    .with_reachability(ExplicitReachabilityStrategy::DistributedFrontier)
+                    .with_distributed(ExplicitDistributedOptions::current().with_shards(3)),
+            ),
+        )
+        .full_reachable_graph_snapshot()
+        .expect("distributed frontier snapshot");
+
+        assert_eq!(distributed, exact);
+    }
+
+    #[test]
+    fn parallel_frontier_rejects_model_case_constraints() {
+        let spec = SimulationSpec;
+        let model_case = ModelCase::new("parallel_constraints")
+            .with_checker_config(
+                ModelCheckConfig::reachable_graph().with_explicit_options(
+                    nirvash::ExplicitModelCheckOptions::current()
+                        .with_reachability(ExplicitReachabilityStrategy::ParallelFrontier)
+                        .with_parallel(ExplicitParallelOptions::current().with_workers(2)),
+                ),
+            )
+            .with_state_constraint(BoolExpr::pure_call(
+                "always_true_constraint",
+                |_state: &SimulationState| true,
+            ));
+
+        let err = ModelChecker::for_case(&spec, model_case)
+            .full_reachable_graph_snapshot()
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            nirvash::ModelCheckError::UnsupportedConfiguration(message)
+                if message.contains("parallel frontier exploration")
+        ));
     }
 
     #[test]
