@@ -34,14 +34,16 @@ AST-native surface には arithmetic minimum set、projection/payload access、s
 - 共通 knob
   - `counterexample_minimization = None | ShortestTrace` で first-hit と shortest-trace 優先を切り替えます
 - `explicit: ExplicitModelCheckOptions`
-  - 現時点では `state_storage = InMemoryExact | InMemoryFingerprinted`、`reachability = BreadthFirst | ParallelFrontier | DistributedFrontier`、`bounded_lasso = EnumeratedPaths`
+  - 現時点では `state_storage = InMemoryExact | InMemoryFingerprinted`、`compression = None | DomainIndex`、`reachability = BreadthFirst | ParallelFrontier | DistributedFrontier`、`bounded_lasso = EnumeratedPaths`
   - `checkpoint = ExplicitCheckpointOptions { path, save_every_frontiers, resume }` で reachable-graph frontier checkpoint/save-resume を設定
   - `parallel = ExplicitParallelOptions { workers }` と `distributed = ExplicitDistributedOptions { shards }` で explicit reachable-graph frontier の local/distributed wave を設定
   - `simulation = ExplicitSimulationOptions { runs: 1, max_depth: 32, seed: 0 }` で `ModelChecker::simulate()` の deterministic random walk を設定
+  - `ModelCase::with_view(ViewProjector)` と `ModelCase::with_partial_order(PartialOrderReducer)` で explicit reachable-graph dedup / branch pruning reducer を付ける
 - `symbolic: SymbolicModelCheckOptions`
-  - 現時点では `successors = SolverEnumeration`、`bounded_lasso = DirectSmt`
+  - 現時点では `successors = SolverEnumeration`、`bounded_lasso = DirectSmt`、`safety = ReachableGraph | KInduction | PdrIc3`
+  - `k_induction = SymbolicKInductionOptions { max_depth }` と `pdr = SymbolicPdrOptions { max_frames }` で invariant proof engine の bound を設定
 
-これらは current implementation を present tense で表す public contract で、Milestone 11/12 の explicit scaling / advanced symbolic work はこの surface に拡張していきます。
+これらは current implementation を present tense で表す public contract です。symbolic backend は explicit-only reducer (`with_view` / `with_partial_order`) を fail-closed し、explicit backend は checkpoint / parallel / distributed / simulation / compression を同じ config surface で切り替えます。
 
 ## What It Provides
 
