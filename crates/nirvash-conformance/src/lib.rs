@@ -60,6 +60,82 @@ where
     fn context(spec: &Spec) -> Self::Context;
 }
 
+/// Maps concrete runtime observations into abstract states and actions for relation-based refinement.
+pub trait RefinementMap<Spec: FrontendSpec> {
+    type ImplState;
+    type ImplInput;
+    type ImplOutput;
+    type AuxState;
+
+    fn abstract_state(&self, state: &Self::ImplState, aux: &Self::AuxState) -> Spec::State;
+
+    fn candidate_actions(
+        &self,
+        before: &Self::ImplState,
+        input: &Self::ImplInput,
+        output: &Self::ImplOutput,
+        after: &Self::ImplState,
+        aux: &Self::AuxState,
+    ) -> Vec<Spec::Action>;
+}
+
+/// Successful relation-based refinement step witness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepRefinementWitness<S, A> {
+    pub abstract_before: S,
+    pub chosen_action: A,
+    pub abstract_after: S,
+}
+
+/// Relation-based step refinement failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepRefinementError<S, A> {
+    NoCandidateActions {
+        abstract_before: S,
+        abstract_after: S,
+    },
+    NoMatchingAbstractSuccessor {
+        abstract_before: S,
+        abstract_after: S,
+        candidate_actions: Vec<A>,
+    },
+}
+
+impl<S, A> std::fmt::Display for StepRefinementError<S, A>
+where
+    S: Debug,
+    A: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoCandidateActions {
+                abstract_before,
+                abstract_after,
+            } => write!(
+                f,
+                "no candidate abstract actions for concrete transition {:?} -> {:?}",
+                abstract_before, abstract_after
+            ),
+            Self::NoMatchingAbstractSuccessor {
+                abstract_before,
+                abstract_after,
+                candidate_actions,
+            } => write!(
+                f,
+                "abstract state {:?} does not reach {:?} under candidate actions {:?}",
+                abstract_before, abstract_after, candidate_actions
+            ),
+        }
+    }
+}
+
+impl<S, A> std::error::Error for StepRefinementError<S, A>
+where
+    S: Debug,
+    A: Debug,
+{
+}
+
 /// Concrete input that should follow a valid abstract transition.
 #[derive(Debug, Clone)]
 pub struct PositiveWitness<Context, Input> {
@@ -286,6 +362,82 @@ where
     <Spec as FrontendSpec>::transition(spec, &projected, action).is_some()
 }
 
+struct SummaryRefinementMap<'a, Spec>(&'a Spec);
+
+impl<Spec> RefinementMap<Spec> for SummaryRefinementMap<'_, Spec>
+where
+    Spec: ProtocolConformanceSpec,
+{
+    type ImplState = Spec::SummaryState;
+    type ImplInput = Spec::Action;
+    type ImplOutput = ();
+    type AuxState = ();
+
+    fn abstract_state(&self, state: &Self::ImplState, _aux: &Self::AuxState) -> Spec::State {
+        self.0.abstract_state(state)
+    }
+
+    fn candidate_actions(
+        &self,
+        _before: &Self::ImplState,
+        input: &Self::ImplInput,
+        _output: &Self::ImplOutput,
+        _after: &Self::ImplState,
+        _aux: &Self::AuxState,
+    ) -> Vec<Spec::Action> {
+        vec![input.clone()]
+    }
+}
+
+pub fn step_refines_relation<Spec, R>(
+    spec: &Spec,
+    map: &R,
+    before: &R::ImplState,
+    input: &R::ImplInput,
+    output: &R::ImplOutput,
+    after: &R::ImplState,
+    aux: &R::AuxState,
+) -> Result<
+    StepRefinementWitness<Spec::State, Spec::Action>,
+    StepRefinementError<Spec::State, Spec::Action>,
+>
+where
+    Spec: FrontendSpec,
+    R: RefinementMap<Spec>,
+{
+    let abstract_before = map.abstract_state(before, aux);
+    let abstract_after = map.abstract_state(after, aux);
+    let candidate_actions = map.candidate_actions(before, input, output, after, aux);
+
+    if candidate_actions.is_empty() {
+        return Err(StepRefinementError::NoCandidateActions {
+            abstract_before,
+            abstract_after,
+        });
+    }
+
+    for action in &candidate_actions {
+        if <Spec as FrontendSpec>::contains_transition(
+            spec,
+            &abstract_before,
+            action,
+            &abstract_after,
+        ) {
+            return Ok(StepRefinementWitness {
+                abstract_before,
+                chosen_action: action.clone(),
+                abstract_after,
+            });
+        }
+    }
+
+    Err(StepRefinementError::NoMatchingAbstractSuccessor {
+        abstract_before,
+        abstract_after,
+        candidate_actions,
+    })
+}
+
 pub fn assert_initial_refinement<Spec>(spec: &Spec, summary: &Spec::SummaryState)
 where
     Spec: ProtocolConformanceSpec,
@@ -311,15 +463,12 @@ where
     Spec: ProtocolConformanceSpec,
     Spec::State: PartialEq,
 {
-    let before = spec.abstract_state(before_summary);
-    let expected_next = <Spec as FrontendSpec>::transition(spec, &before, action)
-        .expect("step refinement requires an allowed abstract transition");
-    let projected_after = spec.abstract_state(after_summary);
-    assert_eq!(
-        projected_after, expected_next,
-        "summary/state next mismatch for {action:?} from {before_summary:?}",
-    );
-    expected_next
+    let map = SummaryRefinementMap(spec);
+    step_refines_relation(spec, &map, before_summary, action, &(), after_summary, &())
+        .unwrap_or_else(|error| {
+            panic!("step refinement failed for {action:?} from {before_summary:?}: {error}")
+        })
+        .abstract_after
 }
 
 pub fn assert_output_refinement<Spec>(
@@ -516,4 +665,211 @@ pub fn run_registered_code_witness_tests() {
         failures.len()
     );
     process::exit(101);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum DemoAction {
+        Advance,
+        Branch,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum DemoState {
+        Start,
+        Next,
+        Left,
+        Right,
+        Invalid,
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct DeterministicDemoSpec;
+
+    impl FrontendSpec for DeterministicDemoSpec {
+        type State = DemoState;
+        type Action = DemoAction;
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![DemoState::Start]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![DemoAction::Advance]
+        }
+
+        fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+            match (state, action) {
+                (DemoState::Start, DemoAction::Advance) => Some(DemoState::Next),
+                _ => None,
+            }
+        }
+    }
+
+    impl ProtocolConformanceSpec for DeterministicDemoSpec {
+        type ExpectedOutput = ();
+        type ProbeState = DemoState;
+        type ProbeOutput = ();
+        type SummaryState = DemoState;
+        type SummaryOutput = ();
+
+        fn expected_output(
+            &self,
+            _prev: &Self::State,
+            _action: &Self::Action,
+            _next: Option<&Self::State>,
+        ) -> Self::ExpectedOutput {
+        }
+
+        fn summarize_state(&self, probe: &Self::ProbeState) -> Self::SummaryState {
+            probe.clone()
+        }
+
+        fn summarize_output(&self, probe: &Self::ProbeOutput) -> Self::SummaryOutput {
+            *probe
+        }
+
+        fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State {
+            summary.clone()
+        }
+
+        fn abstract_output(&self, summary: &Self::SummaryOutput) -> Self::ExpectedOutput {
+            *summary
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct RelationDemoSpec;
+
+    impl FrontendSpec for RelationDemoSpec {
+        type State = DemoState;
+        type Action = DemoAction;
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![DemoState::Start]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![DemoAction::Branch]
+        }
+
+        fn transition_relation(
+            &self,
+            state: &Self::State,
+            action: &Self::Action,
+        ) -> Vec<Self::State> {
+            match (state, action) {
+                (DemoState::Start, DemoAction::Branch) => vec![DemoState::Left, DemoState::Right],
+                _ => Vec::new(),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct IdentityRefinementMap;
+
+    impl RefinementMap<RelationDemoSpec> for IdentityRefinementMap {
+        type ImplState = DemoState;
+        type ImplInput = DemoAction;
+        type ImplOutput = ();
+        type AuxState = ();
+
+        fn abstract_state(&self, state: &Self::ImplState, _aux: &Self::AuxState) -> DemoState {
+            state.clone()
+        }
+
+        fn candidate_actions(
+            &self,
+            _before: &Self::ImplState,
+            input: &Self::ImplInput,
+            _output: &Self::ImplOutput,
+            _after: &Self::ImplState,
+            _aux: &Self::AuxState,
+        ) -> Vec<DemoAction> {
+            vec![input.clone()]
+        }
+    }
+
+    #[test]
+    fn step_refines_relation_succeeds_for_deterministic_summary_projection() {
+        let spec = DeterministicDemoSpec;
+        let map = SummaryRefinementMap(&spec);
+        let witness = step_refines_relation(
+            &spec,
+            &map,
+            &DemoState::Start,
+            &DemoAction::Advance,
+            &(),
+            &DemoState::Next,
+            &(),
+        )
+        .expect("deterministic step should refine");
+
+        assert_eq!(
+            witness,
+            StepRefinementWitness {
+                abstract_before: DemoState::Start,
+                chosen_action: DemoAction::Advance,
+                abstract_after: DemoState::Next,
+            }
+        );
+        assert_eq!(
+            assert_step_refinement(
+                &spec,
+                &DemoState::Start,
+                &DemoAction::Advance,
+                &DemoState::Next,
+            ),
+            DemoState::Next
+        );
+    }
+
+    #[test]
+    fn step_refines_relation_accepts_multi_successor_transition() {
+        let witness = step_refines_relation(
+            &RelationDemoSpec,
+            &IdentityRefinementMap,
+            &DemoState::Start,
+            &DemoAction::Branch,
+            &(),
+            &DemoState::Right,
+            &(),
+        )
+        .expect("relation-based refinement should accept allowed successor");
+
+        assert_eq!(
+            witness,
+            StepRefinementWitness {
+                abstract_before: DemoState::Start,
+                chosen_action: DemoAction::Branch,
+                abstract_after: DemoState::Right,
+            }
+        );
+    }
+
+    #[test]
+    fn step_refines_relation_reports_abstract_successor_mismatch() {
+        let error = step_refines_relation(
+            &RelationDemoSpec,
+            &IdentityRefinementMap,
+            &DemoState::Start,
+            &DemoAction::Branch,
+            &(),
+            &DemoState::Invalid,
+            &(),
+        )
+        .expect_err("invalid abstract successor should be rejected");
+
+        assert_eq!(
+            error,
+            StepRefinementError::NoMatchingAbstractSuccessor {
+                abstract_before: DemoState::Start,
+                abstract_after: DemoState::Invalid,
+                candidate_actions: vec![DemoAction::Branch],
+            }
+        );
+    }
 }
